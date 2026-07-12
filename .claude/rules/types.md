@@ -1,5 +1,6 @@
 ---
 paths:
+  - "src/**"
   - "crates/**"
   - "tests/**"
 ---
@@ -54,7 +55,8 @@ types live in `crates/ironclaw_common/src/identity.rs`:
 
 Never cast between them or recompute one from the other by string manipulation.
 Carry the typed identity from the owning manifest, installation, or credential
-contract.
+contract. When only credential identity is available, route conversion through
+`AuthManager::resolve_extension_name_for_auth_flow`; never cast or re-derive it.
 
 ## Canonical newtype template
 
@@ -185,11 +187,12 @@ rollout.
 A boolean or enum exposed to the web UI has exactly one canonical snake_case
 name on the wire and one canonical frontend accessor. Do not copy the same
 setting into ad-hoc response fields or bootstrap aliases; duplicated wire names
-will diverge. Frontend code reads the value from the contract that owns it.
+will diverge. Frontend flags are read from their canonical bootstrap globals,
+never response fields, ad-hoc response bodies, or bootstrap aliases.
 
 ## Applies to
 
-`crates/**` and `tests/**`. Any code inside the Reborn workspace. The rule
+`src/**`, `crates/**`, and `tests/**`. Any code inside the IronClaw workspace. The rule
 doesn't apply to wire payloads (which are `String`
 by virtue of JSON), log lines, or error messages — those *are* the
 boundary.

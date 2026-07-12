@@ -25,13 +25,17 @@ These lifecycle stages are distinct:
 Discovery must not connect sockets, start pollers, register hooks, request
 credentials, or mutate installation state. Activation must be idempotent and
 must expose failure rather than leaving a half-active record.
+Authentication rejection is a terminal activation failure: transition to an
+explicit failed state and stop reconnect attempts until the credential revision
+changes.
 
 Composition owns startup and shutdown orchestration. Descriptor crates remain
 declarative; runtime lanes execute; product adapters translate product ingress
 and delivery. Do not combine those responsibilities in an extension registry.
 
 Test repeated activation, failed activation rollback, restart reconstruction,
-deactivation, and removal through the production caller.
+deactivation, and removal through the production caller. Authentication-failure
+tests must also prove reconnect does not resume without updated credentials.
 
 ## Lifecycle ownership rules
 
@@ -45,9 +49,9 @@ deactivation, and removal through the production caller.
 - Background tasks have one lifecycle owner, cancellation, and bounded restart.
 - Removal cannot race active execution silently. Define whether it denies,
   drains, cancels, or waits, and test that choice.
-- Authentication/configuration rejection stops reconnect or retry loops until a
-  credential/config revision changes or an explicit bounded retry policy allows
-  another attempt. Never hot-loop invalid credentials.
+- Authentication rejection enters a terminal failure state and stops reconnect
+  or retry loops until the credential revision changes. Never resume merely
+  because a timer fired, and never hot-loop invalid credentials.
 - Installed, configured, and active are distinct query/status states. Listing an
   installation must not imply a registered or healthy runtime surface.
 - Restart rehydration reconstructs state through validated constructors and

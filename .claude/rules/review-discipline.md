@@ -40,7 +40,8 @@ regression-check exemption rather than silently omitting coverage.
   `LlmProvider`, start with `rg -n "impl LlmProvider for" crates` and test
   through the full wrapper chain.
 - **Production panics:** search changed production files for `.unwrap()` and
-  `.expect()` and justify only genuinely infallible invariants.
+  `.expect()`; they are prohibited outside tests. Propagate an explicit error
+  instead.
 - **Imports:** prefer `crate::` for cross-module imports. `super::` is acceptable
   inside tightly coupled submodules and tests.
 - **Pattern fixes:** search all of `crates/` for sibling instances of the bug.
@@ -51,7 +52,7 @@ Run the narrowest crate tests and clippy first. Add:
 
 ```bash
 cargo test -p ironclaw_architecture
-cargo clippy -p <crate> --all-targets --all-features -- -D warnings
+cargo clippy -p OWNING_CRATE --all-targets --all-features -- -D warnings
 scripts/pre-commit-safety.sh
 ```
 

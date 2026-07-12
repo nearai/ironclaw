@@ -1,6 +1,9 @@
 ---
 paths:
   - "crates/**/*.rs"
+  - "src/db/**"
+  - "src/history/**"
+  - "migrations/**"
 ---
 # Reborn persistence rules
 
@@ -38,8 +41,9 @@ it is persisted.
    PostgreSQL, libSQL, or local-filesystem configuration.
 5. Use `cas_update` for versioned filesystem mutation. Use a backend transaction
    for a backend-native multi-statement invariant.
-6. Add contract tests at the public store seam, then a production-composition
-   test when mount selection, restart, or cross-domain behavior is involved.
+6. Add contract tests at the public domain-operation or typed-wrapper seam, then
+   a production-composition test when mount selection, restart, or cross-domain
+   behavior is involved.
 
 Review flags:
 
@@ -63,7 +67,8 @@ PostgreSQL and libSQL implementations exist, test the same commit/rollback and
 concurrency behavior through a shared conformance suite.
 
 Persisted state must remain reconstructible after interruption. Test conflict,
-retry exhaustion, restart, and partial-failure behavior at the public store seam.
+retry exhaustion, restart, and partial-failure behavior at the public
+domain-operation or typed-wrapper seam.
 
 ## Backend parity
 

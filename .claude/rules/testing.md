@@ -24,10 +24,10 @@ Read `.claude/skills/ironclaw-reborn-testing/SKILL.md` and
 ## Test tiers
 
 1. **Unit/contract:** pure logic and local public contracts —
-   `cargo test -p <crate>`.
+   `cargo test -p OWNING_CRATE`.
 2. **In-process Reborn integration:** whole deterministic turns with the real
    product workflow, runner, loop, decorator chain, and in-memory filesystem —
-   `cargo test --test reborn_integration_<name>`.
+   `cargo test --test reborn_integration_SCENARIO`.
 3. **Architecture:** dependency and composition boundaries —
    `cargo test -p ironclaw_architecture`.
 4. **Backend/runtime integration:** DB-, Docker-, or runtime-shaped behavior —
@@ -65,7 +65,8 @@ delegation, redaction, retry, or policy behavior survives every wrapper.
   is an explicit, review-visible escape hatch for genuinely infeasible cases;
   never use it to avoid a reproducible caller-path test.
 - Extend an existing suite when it owns the same seam.
-- Use `tempfile` for test files and directories. Never hardcode `/tmp/...`.
+- Use `tempfile` for test files and directories. Never hardcode system
+  temporary-directory paths.
 - Avoid ignored or TODO-pinned tests; landed tests run in CI.
 - Prefer real in-memory implementations, deterministic fakes, or recording
   adapters over mocks that duplicate internal behavior.

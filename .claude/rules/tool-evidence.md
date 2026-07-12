@@ -6,6 +6,9 @@ paths:
   - "crates/ironclaw_product_workflow/**"
   - "crates/ironclaw_first_party_extensions/**"
   - "crates/ironclaw_webui_v2/**"
+  - "crates/ironclaw_reborn_composition/**"
+  - "crates/ironclaw_agent_loop/**"
+  - "crates/ironclaw_runner/**"
 ---
 # Capability evidence and side-effect verification
 
@@ -63,6 +66,8 @@ Cover missing evidence, malformed provider responses, read-back mismatch,
 accepted-but-not-completed states, duplicate/idempotent retry, and success where
 the UI or model-visible result accidentally drops the evidence.
 
-Tests must drive the production caller and assert the evidence value, durable
-state, emitted event, and sanitized model/user result. A test that only checks
-the leaf helper does not protect the effect claim.
+Tests must drive the production caller and always assert the evidence value and
+sanitized model/user result. Assert durable state and emitted events when those
+effects are part of the capability contract; do not invent either requirement
+for a capability that provides neither. A test that only checks the leaf helper
+does not protect the effect claim.

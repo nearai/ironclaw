@@ -9,6 +9,9 @@ paths:
   - "crates/ironclaw_mcp/**"
   - "crates/ironclaw_wasm/**"
   - "tools-src/**"
+  - "src/tools/**"
+  - "src/channels/**"
+  - "src/cli/**"
 ---
 # Reborn capability architecture
 
@@ -30,7 +33,7 @@ Verify the current call path with targeted symbol search before editing it:
 
 ```bash
 rg -n "CapabilityHost|RuntimeAdapter|dispatch|invoke|resume|Obligation" \
-  crates/ironclaw_capabilities crates/ironclaw_host_runtime crates/ironclaw_dispatcher
+  crates
 ```
 
 ## Rules
@@ -45,7 +48,9 @@ rg -n "CapabilityHost|RuntimeAdapter|dispatch|invoke|resume|Obligation" \
 - Credentials and HTTP remain host-mediated.
 - Model/user-correctable failures return model-visible `Failed` or `Denied`
   outcomes. Reserve host errors for faults that make the run unable to continue.
-- Results are bounded, redacted, and carry authoritative side-effect evidence.
+- Results are bounded and redacted. External effects require authoritative
+  evidence plus read-back verification; claim-only results are explicitly
+  marked unverified as defined in `tool-evidence.md`.
 
 Built-in capabilities are appropriate for host-coupled product behavior. WASM
 is the default for sandboxed extension code. MCP is appropriate for external
@@ -62,7 +67,8 @@ than creating a parallel execution pipeline.
 4. Route invocation through `CapabilityHost`, including approval/resume when the
    policy requires it.
 5. Implement the effect behind host-runtime services or a `RuntimeAdapter`.
-6. Return bounded, redacted output plus authoritative effect evidence.
+6. Return bounded, redacted output plus authoritative effect evidence and
+   read-back verification, or explicitly mark a claim-only result unverified.
 7. Add caller-path tests for allow, deny, approval/resume, invalid input,
    unavailable runtime, cancellation, and redaction.
 

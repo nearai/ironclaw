@@ -1,6 +1,7 @@
 ---
 paths:
   - "crates/**/*.rs"
+  - "src/**/*.rs"
 ---
 # Architecture Discipline — Stop the Sprawl Before It Ships
 
@@ -167,7 +168,7 @@ because each layer catches a different failure mode.
   to name the aggregation that is missing — reviewers reject
   exempts without a plan link.
 - **This rule file is the agent-facing summary.** Loaded into context
-  whenever an agent edits `crates/**/*.rs`. The
+  whenever an agent edits `crates/**/*.rs` or `src/**/*.rs`. The
   agent's job: *don't be the one who adds the twelfth `#[allow]`.*
 
 ## Annotation format (consistent with other rules)

@@ -42,6 +42,11 @@ construction, URL resolution, credential injection, or dispatch. Preserve the
 trust class through prompt envelopes and result handling. Sanitize model-visible
 output and user-visible errors without discarding server-side causes.
 
+For URL fetches, validate and authorize the original URL, then repeat
+validation, authorization, and leak scanning after resolution and on every
+redirect destination. Never inject credentials until the resolved destination
+passes those checks.
+
 Attachments use the single landing routine. Memory writes use their owning
 write-safety contract. Product adapters may normalize transport data but may not
 upgrade its trust.

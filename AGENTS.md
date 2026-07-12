@@ -61,9 +61,9 @@ Use `crates/AGENTS.md` as the routing index, then verify ownership from live
 dependencies and public contracts:
 
 ```bash
-rg -n "<Concept|Trait|Type>" crates
-rg -n "ironclaw_<candidate>" crates/*/Cargo.toml Cargo.toml
-find crates/ironclaw_<candidate> -maxdepth 2 \
+rg -n "CONCEPT_OR_TRAIT_OR_TYPE" crates
+rg -n "ironclaw_CANDIDATE" crates/*/Cargo.toml Cargo.toml
+find crates/ironclaw_CANDIDATE -maxdepth 2 \
   \( -name AGENTS.md -o -name CLAUDE.md -o -name CONTRACT.md -o -name README.md \)
 ```
 
@@ -98,8 +98,8 @@ trigger submitter factories.
 
 ## Coding and contract rules
 
-- Avoid `.unwrap()` and `.expect()` in production. Use them in tests or for a
-  documented, genuinely infallible invariant only.
+- Do not use `.unwrap()` or `.expect()` in production. They are allowed in
+  tests; production code propagates an explicit error.
 - Keep clippy clean with zero warnings.
 - Prefer `crate::` imports for cross-module references.
 - Use strong types and enums for known domain shapes; raw strings belong at
@@ -148,8 +148,9 @@ composition, product-workflow, and frontend contracts when onboarding changes.
   execution, deactivation, and removal are explicit lifecycle transitions.
 - Capability failures the model or user can correct are model-visible outcomes;
   host errors are reserved for failures that make the run unable to continue.
-- Side-effecting success requires durable or provider-issued evidence and, when
-  practical, read-back verification.
+- Side-effecting success requires durable or provider-issued evidence plus
+  read-back verification. If read-back is impossible, report the result as
+  explicitly unverified rather than completed.
 
 ## Documentation and testing
 
@@ -172,10 +173,10 @@ composition, product-workflow, and frontend contracts when onboarding changes.
 Test progression for behavior changes:
 
 ```bash
-cargo test -p <owning-crate>
-cargo clippy -p <owning-crate> --all-targets --all-features -- -D warnings
+cargo test -p OWNING_CRATE
+cargo clippy -p OWNING_CRATE --all-targets --all-features -- -D warnings
 cargo test -p ironclaw_architecture  # dependency/ownership changes
-cargo test --test reborn_integration_<name>  # whole-turn behavior
+cargo test --test reborn_integration_SCENARIO  # whole-turn behavior
 bash scripts/reborn-e2e-rust.sh  # Reborn contract/whole-path changes
 scripts/pre-commit-safety.sh
 ```

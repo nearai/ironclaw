@@ -7,6 +7,7 @@ paths:
   - "crates/ironclaw_product_workflow/**"
   - "crates/ironclaw_webui_v2/**"
   - "crates/ironclaw_reborn_webui_ingress/**"
+  - "src/channels/web/**"
 ---
 # Reborn events and transport projections
 
@@ -79,6 +80,10 @@ rg -n "EventStreamManager|subscribe|rebase|lag|redaction" crates/ironclaw_event_
 rg -n "Sse|WebSocket|stream" crates/ironclaw_webui_v2 crates/ironclaw_reborn_webui_ingress
 ```
 
-New event variants require tests for persistence, replay, projection visibility,
+Durable event variants require tests for persistence, replay, projection visibility,
 redaction, ordering, lag/rebase behavior, and transport serialization at the
 appropriate public seams.
+Ephemeral variants require serialization, ordering, and transport coverage, but
+must not be tested as persisted or replayable state. Apply visibility,
+redaction, and lag/rebase assertions wherever their transport contract exposes
+those behaviors.
