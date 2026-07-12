@@ -3072,6 +3072,8 @@ pub async fn build_reborn_runtime(
         model_gateway_override,
         #[cfg(any(test, feature = "test-support"))]
         model_cost_table_override,
+        #[cfg(any(test, feature = "test-support"))]
+        model_availability_retry_attempts_override,
     } = input;
 
     let mut services_input = services_input.ok_or(RebornRuntimeError::InvalidArgument {
@@ -3774,9 +3776,15 @@ pub async fn build_reborn_runtime(
             planned_default_iteration_limit: optional_nonzero_u32_env(
                 "IRONCLAW_REBORN_PLANNED_DEFAULT_ITERATION_LIMIT",
             )?,
-            planned_model_availability_retry_attempts: optional_nonzero_u32_env(
-                "IRONCLAW_REBORN_MODEL_AVAILABILITY_RETRY_ATTEMPTS",
-            )?,
+            planned_model_availability_retry_attempts: {
+                let from_env =
+                    optional_nonzero_u32_env("IRONCLAW_REBORN_MODEL_AVAILABILITY_RETRY_ATTEMPTS")?;
+                #[cfg(any(test, feature = "test-support"))]
+                let resolved = model_availability_retry_attempts_override.or(from_env);
+                #[cfg(not(any(test, feature = "test-support")))]
+                let resolved = from_env;
+                resolved
+            },
         },
         model_route_resolver: None,
         cancellation_factory: None,
@@ -4663,8 +4671,12 @@ fn build_stub_gateway() -> Arc<dyn ironclaw_loop_support::HostManagedModelGatewa
             &self,
             _request: HostManagedModelRequest,
         ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+            // A missing gateway is a build-configuration fault, not an
+            // availability blip: CredentialUnavailable is unclassified in
+            // loop recovery, so runs fail fast instead of riding the
+            // availability backoff budget.
             Err(HostManagedModelError::safe(
-                HostManagedModelErrorKind::Unavailable,
+                HostManagedModelErrorKind::CredentialUnavailable,
                 "no LLM gateway wired (build with `root-llm-provider` feature)",
             ))
         }
@@ -7615,7 +7627,10 @@ output_schema_ref = "schemas/write.output.json"
             interval: Duration::from_millis(10),
             max_total: RUNTIME_POLL_TIMEOUT,
         })
-        .with_model_gateway_override(gateway.clone());
+        .with_model_gateway_override(gateway.clone())
+        // Keep >= 2 retries (the test pins retry-then-fail) but well under
+        // the production budget so the deliberate outage fails in seconds.
+        .with_model_availability_retry_attempts(std::num::NonZeroU32::new(2).expect("nonzero"));
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");

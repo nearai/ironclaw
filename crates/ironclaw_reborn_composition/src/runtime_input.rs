@@ -461,6 +461,13 @@ pub struct RebornRuntimeInput {
     /// override skips).
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) model_cost_table_override: Option<Arc<dyn ironclaw_loop_support::ModelCostTable>>,
+    /// Caps availability-class model retries for this runtime. Tests that
+    /// script deliberate provider outages set a small value so a failed run
+    /// reaches `Failed` in seconds instead of riding the production backoff
+    /// budget for minutes. Wins over the
+    /// `IRONCLAW_REBORN_MODEL_AVAILABILITY_RETRY_ATTEMPTS` env override.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) model_availability_retry_attempts_override: Option<std::num::NonZeroU32>,
 }
 
 impl RebornRuntimeInput {
@@ -495,6 +502,8 @@ impl RebornRuntimeInput {
             model_gateway_override: None,
             #[cfg(any(test, feature = "test-support"))]
             model_cost_table_override: None,
+            #[cfg(any(test, feature = "test-support"))]
+            model_availability_retry_attempts_override: None,
         }
     }
 
@@ -695,6 +704,17 @@ impl RebornRuntimeInput {
     /// LLM-derived cost table comes from
     /// `LlmModelProfilePolicy::build_cost_table()` which the test
     /// override skips.
+    /// Test-only hook: cap availability-class model retries so scripted
+    /// provider outages reach `Failed` quickly (see the field doc).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_model_availability_retry_attempts(
+        mut self,
+        attempts: std::num::NonZeroU32,
+    ) -> Self {
+        self.model_availability_retry_attempts_override = Some(attempts);
+        self
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_model_cost_table_override(
         mut self,
