@@ -9,6 +9,8 @@
 //! * [`payload`] — Telegram Bot API payload normalization (private/group
 //!   gating, attachment descriptors, idempotency from `update_id`).
 //! * [`adapter`] — `ProductAdapter` impl (`parse_inbound`, `render_outbound`).
+//! * [`channel`] — the generic-ingress `ChannelAdapter` (inbound + webhook
+//!   registration hooks, extension-runtime P4).
 //! * [`render`] — `FinalReplyView` -> `sendMessage` body shaping.
 //!
 //! The crate ships as a native Rust ProductAdapter so the contract can be
@@ -19,6 +21,7 @@
 #![forbid(unsafe_code)]
 
 mod adapter;
+mod channel;
 mod payload;
 mod render;
 
@@ -26,8 +29,13 @@ pub use adapter::{
     TelegramV2Adapter, TelegramV2AdapterConfig, telegram_declared_egress_hosts,
     telegram_default_capabilities,
 };
+pub use channel::{
+    TELEGRAM_BOT_TOKEN_HANDLE, TELEGRAM_WEBHOOK_SECRET_HANDLE, TELEGRAM_WEBHOOK_URL_CONFIG,
+    TelegramChannelAdapter,
+};
 pub use payload::{
     GroupTriggerPolicy, PayloadParseError, TELEGRAM_API_HOST, TELEGRAM_FILE_API_HOST,
-    TELEGRAM_USER_ACTOR_KIND, parse_telegram_update,
+    TELEGRAM_USER_ACTOR_KIND, TelegramInboundEvent, TelegramNormalizedMessage,
+    normalize_telegram_update, parse_telegram_update,
 };
 pub use render::{TelegramRenderError, render_final_reply, render_progress_typing};
