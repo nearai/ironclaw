@@ -131,6 +131,48 @@ class CanaryRunContext:
     target_ref: str = ""
 
 
+@dataclass(frozen=True)
+class _ResultClassification:
+    tier: str
+    blocking: bool
+    failure_class: str
+    failure_category: str
+    failure_status: str
+    inconclusive: bool
+
+
+def _normalize_result_classification(entry: dict) -> _ResultClassification:
+    details = entry.get("details") or {}
+    if not isinstance(details, dict):
+        details = {}
+
+    tier_value = details.get("case_tier")
+    tier = tier_value if tier_value in ("contract", "behavioral") else "contract"
+    blocking_value = details.get("blocking")
+    blocking = blocking_value if isinstance(blocking_value, bool) else True
+
+    def typed_string(key: str) -> str:
+        value = details.get(key)
+        return value if isinstance(value, str) else ""
+
+    failure_class = typed_string("failure_class")
+    failure_category = typed_string("failure_category")
+    failure_status = typed_string("failure_status")
+    inconclusive = (
+        details.get("inconclusive") is True
+        or failure_class == "infrastructure"
+        or failure_status == "inconclusive"
+    )
+    return _ResultClassification(
+        tier=tier,
+        blocking=blocking,
+        failure_class=failure_class,
+        failure_category=failure_category,
+        failure_status=failure_status,
+        inconclusive=inconclusive,
+    )
+
+
 def read_tail(path: Path, n_bytes: int) -> str:
     if not path.exists():
         return ""
@@ -198,6 +240,7 @@ def parse_results_json(path: Path, report: LaneReport) -> None:
         if entry.get("success"):
             report.passed += 1
         else:
+            classification = _normalize_result_classification(entry)
             name = (
                 f"{entry.get('provider', '?')}/{entry.get('mode', '?')}"
             )
@@ -219,22 +262,9 @@ def parse_results_json(path: Path, report: LaneReport) -> None:
                     msg = ", ".join(fragments)
             else:
                 details = {}
-            blocking_value = details.get("blocking", True)
-            blocking = (
-                blocking_value
-                if isinstance(blocking_value, bool)
-                else True
-            )
-            failure_class = str(details.get("failure_class") or "")
-            failure_status = str(details.get("failure_status") or "")
-            inconclusive = (
-                bool(details.get("inconclusive"))
-                or failure_class == "infrastructure"
-                or failure_status == "inconclusive"
-            )
-            if inconclusive:
+            if classification.inconclusive:
                 report.inconclusive += 1
-            elif blocking:
+            elif classification.blocking:
                 report.failed += 1
                 report.junit_failures.append((name, msg[:240]))
             else:
@@ -399,6 +429,7 @@ def parse_reborn_qa_case_reports(lane_dir: Path, report: LaneReport) -> None:
     for entry in results:
         if not isinstance(entry, dict):
             continue
+        classification = _normalize_result_classification(entry)
         case = _reborn_case_from_result(entry)
         details = entry.get("details") or {}
         if not isinstance(details, dict):
@@ -422,28 +453,6 @@ def parse_reborn_qa_case_reports(lane_dir: Path, report: LaneReport) -> None:
             or manifest.get("feature")
             or case.replace("_", " ")
         )
-        case_tier_value = details.get(
-            "case_tier",
-            manifest.get("case_tier", "contract"),
-        )
-        case_tier = (
-            case_tier_value
-            if case_tier_value in ("contract", "behavioral")
-            else "contract"
-        )
-        blocking_value = details.get(
-            "blocking",
-            manifest.get("blocking", True),
-        )
-        blocking = blocking_value if isinstance(blocking_value, bool) else True
-        failure_class = str(details.get("failure_class") or "")
-        failure_category = str(details.get("failure_category") or "")
-        failure_status = str(details.get("failure_status") or "")
-        inconclusive = (
-            bool(details.get("inconclusive"))
-            or failure_class == "infrastructure"
-            or failure_status == "inconclusive"
-        )
         latency = entry.get("latency_ms")
         tool_calls = parse_reborn_trace_tool_calls(lane_dir / "traces" / f"{case}.json")
         debug_paths = []
@@ -462,12 +471,12 @@ def parse_reborn_qa_case_reports(lane_dir: Path, report: LaneReport) -> None:
                 success=bool(entry.get("success")),
                 latency_ms=latency if isinstance(latency, (int, float)) else None,
                 message=_reborn_failure_message(entry),
-                case_tier=case_tier,
-                blocking=blocking,
-                failure_class=failure_class,
-                failure_category=failure_category,
-                failure_status=failure_status,
-                inconclusive=inconclusive,
+                case_tier=classification.tier,
+                blocking=classification.blocking,
+                failure_class=classification.failure_class,
+                failure_category=classification.failure_category,
+                failure_status=classification.failure_status,
+                inconclusive=classification.inconclusive,
                 tool_calls=tool_calls,
                 debug_paths=debug_paths,
             )
@@ -988,6 +997,21 @@ def _markdown_run_context_lines(
     return lines
 
 
+def _markdown_reborn_tool_trace(case: RebornQaCaseReport) -> str:
+    summaries: list[str] = []
+    for call in case.tool_calls[:8]:
+        fingerprints: list[str] = []
+        if call.args_hash:
+            fingerprints.append(f"args#`{_github_md_code(call.args_hash, 64)}`")
+        if call.output_digest:
+            fingerprints.append(f"out#`{_github_md_code(call.output_digest, 64)}`")
+        suffix = f" ({', '.join(fingerprints)})" if fingerprints else ""
+        summaries.append(f"`{_github_md_code(call.name, 120)}`{suffix}")
+    if len(case.tool_calls) > 8:
+        summaries.append(f"+{len(case.tool_calls) - 8} more")
+    return ", ".join(summaries)
+
+
 def _markdown_reborn_case_lines(
     cases: list[RebornQaCaseReport],
     run_url: str | None,
@@ -1039,6 +1063,13 @@ def _markdown_reborn_case_lines(
                 else:
                     label = "Failure"
                 lines.append(f"  - {label}: {_github_md_text(case.message)}")
+            if (
+                not case.success
+                and not case.blocking
+                and not case.inconclusive
+                and case.tool_calls
+            ):
+                lines.append(f"  - Tool trace: {_markdown_reborn_tool_trace(case)}")
             if not case.success and case.debug_paths:
                 paths = ", ".join(f"`{_github_md_code(path)}`" for path in case.debug_paths)
                 if run_url:

@@ -347,6 +347,104 @@ class RebornQaSlackReportTests(unittest.TestCase):
         )
         self.assertEqual(report.reborn_qa_cases[0].debug_paths, [])
 
+    def test_manifest_cannot_weaken_missing_or_malformed_result_blocking(self):
+        reports = []
+        for label, blocking_value in (("missing", None), ("malformed", "false")):
+            with self.subTest(blocking=label), tempfile.TemporaryDirectory() as tmpdir:
+                lane_dir = (
+                    Path(tmpdir)
+                    / "reborn-webui-v2-live-qa"
+                    / "reborn-webui-v2"
+                    / label
+                )
+                lane_dir.mkdir(parents=True)
+                details = {
+                    "case": f"qa_10c_{label}_blocking",
+                    "qa_rows": ["10C"],
+                    "feature": "Slack thread visibility",
+                    "error": f"{label} result blocking metadata",
+                }
+                if blocking_value is not None:
+                    details["blocking"] = blocking_value
+                (lane_dir / "results.json").write_text(
+                    json.dumps(
+                        {
+                            "results": [
+                                {
+                                    "provider": "reborn-webui-v2",
+                                    "mode": f"live:qa_10c_{label}_blocking",
+                                    "success": False,
+                                    "latency_ms": 1,
+                                    "details": details,
+                                }
+                            ]
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                (lane_dir / "case-manifest.json").write_text(
+                    json.dumps(
+                        {
+                            "cases": [
+                                {
+                                    "case": f"qa_10c_{label}_blocking",
+                                    "qa_rows": ["10C"],
+                                    "feature": "Slack thread visibility",
+                                    "case_tier": "behavioral",
+                                    "blocking": False,
+                                }
+                            ]
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                report = notify.collect_lane(lane_dir)
+
+            self.assertIsNotNone(report)
+            self.assertEqual(report.failed, 1)
+            self.assertEqual(report.warnings, 0)
+            self.assertEqual(report.status, "fail")
+            self.assertTrue(notify._has_blocking_failure(report))
+            case = report.reborn_qa_cases[0]
+            self.assertEqual(case.case_tier, "contract")
+            self.assertTrue(case.blocking)
+            rendered = json.dumps(notify.slack_payload([report], None, None))
+            self.assertIn(
+                f"*Failure `10C`:* {label} result blocking metadata",
+                rendered,
+            )
+            self.assertNotIn("Warning `10C`", rendered)
+            reports.append(report)
+
+        categorized = {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "categories": [
+                                {
+                                    "category": "typed metadata missing",
+                                    "jobs": [
+                                        "reborn-webui-v2-live-qa (reborn-webui-v2)"
+                                    ],
+                                    "fix": "emit valid result metadata",
+                                }
+                            ]
+                        }
+                    ),
+                }
+            ]
+        }
+        with mock.patch.object(notify, "post_json", return_value=categorized) as post_json:
+            category_summary = notify.categorize_failures(
+                "anthropic-test-key",
+                reports,
+            )
+        self.assertIn("typed metadata missing", category_summary)
+        post_json.assert_called_once()
+
     def test_behavioral_failure_is_a_nonblocking_warning_with_provenance(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             lane_dir = (
@@ -485,6 +583,25 @@ class RebornQaSlackReportTests(unittest.TestCase):
         self.assertIn("abcdef0123", rendered)
         self.assertNotIn("mainsha", rendered)
         self.assertNotIn("haiku-generated-error", rendered)
+
+        comment = notify.github_comment_body(
+            [report],
+            "https://github.com/nearai/ironclaw/actions/runs/123",
+            "mainsha0123456789",
+            run_context=run_context,
+        )
+        self.assertIn("Warning: seeded thread reply was not surfaced", comment)
+        self.assertIn("Tool trace:", comment)
+        self.assertIn("`slack.search_messages`", comment)
+        self.assertIn("args#`1234567890123`", comment)
+        self.assertIn("out#`9876543210987`", comment)
+        self.assertIn(
+            "PR: [#42](https://github.com/nearai/ironclaw/pull/42)",
+            comment,
+        )
+        self.assertIn("Target: `abcdef0123`", comment)
+        self.assertIn("Commit: `abcdef0`", comment)
+        self.assertNotIn("mainsha", comment)
 
         with (
             mock.patch.object(notify, "post_json") as post_json,
