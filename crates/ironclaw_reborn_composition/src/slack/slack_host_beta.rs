@@ -4832,8 +4832,8 @@ mod tests {
         use ironclaw_conversations::{AdapterInstallationId, AdapterKind, ExternalActorRef};
         use ironclaw_triggers::{
             TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
-            TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerId, TriggerRecord, TriggerSchedule,
-            TriggerSourceKind, TriggerState,
+            TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerId, TriggerRecord,
+            TriggerRunHistoryStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
         };
 
         // Bind the trigger actor so the trusted submitter can resolve the
@@ -4892,7 +4892,6 @@ mod tests {
         // trigger poller can be scheduled much later than in a focused test.
         let deadline = Instant::now() + TRIGGER_HOOK_E2E_FIRE_TIMEOUT;
         let mut fired_run_id = None;
-        let mut last_trigger_state = None;
         let mut last_run_history = None;
         while Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -4900,24 +4899,38 @@ mod tests {
                 .list_trigger_run_history(tenant_id.clone(), trigger_id, 1)
                 .await
                 .expect("list trigger run history");
-            if let Some(run_id) = run_history.first().and_then(|run| run.run_id) {
-                fired_run_id = Some(run_id);
-                break;
+            if let Some(run) = run_history.first() {
+                if let Some(run_id) = run.run_id {
+                    fired_run_id = Some(run_id);
+                    break;
+                }
+                assert_ne!(
+                    run.status,
+                    TriggerRunHistoryStatus::Error,
+                    "trigger run failed before acceptance: {run:?}"
+                );
             }
             last_run_history = Some(run_history);
+        }
+
+        // The trigger row is diagnostic-only. Read it once after a timeout
+        // instead of doubling the database load in the polling loop.
+        let last_trigger_state = if fired_run_id.is_none() {
             let current = repo
                 .get_trigger(tenant_id.clone(), trigger_id)
                 .await
                 .expect("get_trigger")
                 .expect("record present");
-            last_trigger_state = Some((
+            Some((
                 current.next_run_at,
                 current.last_run_at,
                 current.last_status,
                 current.active_fire_slot,
                 current.active_run_ref,
-            ));
-        }
+            ))
+        } else {
+            None
+        };
 
         // Read delivery records from the unified outbound store that the
         // production hook writes through.  `local_runtime` is `pub(crate)`
