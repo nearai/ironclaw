@@ -57,6 +57,7 @@ where
 {
     root: Arc<F>,
     crypto: Arc<SecretsCrypto>,
+    operation_lock: tokio::sync::Mutex<()>,
 }
 
 impl<F> FilesystemAdminSecretProvisioner<F>
@@ -64,7 +65,31 @@ where
     F: RootFilesystem + 'static,
 {
     pub(crate) fn new(root: Arc<F>, crypto: Arc<SecretsCrypto>) -> Self {
-        Self { root, crypto }
+        Self {
+            root,
+            crypto,
+            operation_lock: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    fn resource_scope(admin_scope: &AdminUserSecretScope) -> ResourceScope {
+        ResourceScope {
+            tenant_id: admin_scope.tenant_id.clone(),
+            user_id: admin_scope.user_id.clone(),
+            agent_id: admin_scope.agent_id.clone(),
+            project_id: admin_scope.project_id.clone(),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
+    }
+
+    fn legacy_resource_scope(admin_scope: &AdminUserSecretScope) -> ResourceScope {
+        ResourceScope {
+            agent_id: None,
+            project_id: None,
+            ..Self::resource_scope(admin_scope)
+        }
     }
 
     /// Build a target-user secret store plus the matching `ResourceScope`. The
@@ -79,15 +104,20 @@ where
         &self,
         admin_scope: &AdminUserSecretScope,
     ) -> Result<(FilesystemSecretStore<F>, ResourceScope), SecretStoreError> {
-        let scope = ResourceScope {
-            tenant_id: admin_scope.tenant_id.clone(),
-            user_id: admin_scope.user_id.clone(),
-            agent_id: admin_scope.agent_id.clone(),
-            project_id: admin_scope.project_id.clone(),
-            mission_id: None,
-            thread_id: None,
-            invocation_id: InvocationId::new(),
-        };
+        self.store_for_resource_scope(Self::resource_scope(admin_scope))
+    }
+
+    fn legacy_store_for(
+        &self,
+        admin_scope: &AdminUserSecretScope,
+    ) -> Result<(FilesystemSecretStore<F>, ResourceScope), SecretStoreError> {
+        self.store_for_resource_scope(Self::legacy_resource_scope(admin_scope))
+    }
+
+    fn store_for_resource_scope(
+        &self,
+        scope: ResourceScope,
+    ) -> Result<(FilesystemSecretStore<F>, ResourceScope), SecretStoreError> {
         let view = crate::invocation_mount_view(&scope).map_err(|error| {
             SecretStoreError::StoreUnavailable {
                 reason: format!("admin secret mount view: {error}"),
@@ -102,6 +132,26 @@ where
             scope,
         ))
     }
+
+    async fn metadata_with_legacy(
+        &self,
+        admin_scope: &AdminUserSecretScope,
+        mut metadata: Vec<SecretMetadata>,
+    ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
+        if admin_scope.agent_id.is_none() && admin_scope.project_id.is_none() {
+            return Ok(metadata);
+        }
+        let (legacy_store, legacy_scope) = self.legacy_store_for(admin_scope)?;
+        for legacy_metadata in legacy_store.metadata_for_scope(&legacy_scope).await? {
+            if !metadata
+                .iter()
+                .any(|current| current.handle == legacy_metadata.handle)
+            {
+                metadata.push(legacy_metadata);
+            }
+        }
+        Ok(metadata)
+    }
 }
 
 #[async_trait]
@@ -113,8 +163,10 @@ where
         &self,
         scope: &AdminUserSecretScope,
     ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
+        let _guard = self.operation_lock.lock().await;
         let (store, resource_scope) = self.store_for(scope)?;
-        store.metadata_for_scope(&resource_scope).await
+        let metadata = store.metadata_for_scope(&resource_scope).await?;
+        self.metadata_with_legacy(scope, metadata).await
     }
 
     async fn put(
@@ -123,8 +175,16 @@ where
         handle: SecretHandle,
         material: SecretMaterial,
     ) -> Result<SecretMetadata, SecretStoreError> {
+        let _guard = self.operation_lock.lock().await;
         let (store, resource_scope) = self.store_for(scope)?;
-        store.put(resource_scope, handle, material, None).await
+        let metadata = store
+            .put(resource_scope, handle.clone(), material, None)
+            .await?;
+        if scope.agent_id.is_some() || scope.project_id.is_some() {
+            let (legacy_store, legacy_scope) = self.legacy_store_for(scope)?;
+            legacy_store.delete(&legacy_scope, &handle).await?;
+        }
+        Ok(metadata)
     }
 
     async fn delete(
@@ -132,7 +192,14 @@ where
         scope: &AdminUserSecretScope,
         handle: &SecretHandle,
     ) -> Result<bool, SecretStoreError> {
+        let _guard = self.operation_lock.lock().await;
         let (store, resource_scope) = self.store_for(scope)?;
-        store.delete(&resource_scope, handle).await
+        let deleted = store.delete(&resource_scope, handle).await?;
+        if scope.agent_id.is_none() && scope.project_id.is_none() {
+            return Ok(deleted);
+        }
+        let (legacy_store, legacy_scope) = self.legacy_store_for(scope)?;
+        let legacy_deleted = legacy_store.delete(&legacy_scope, handle).await?;
+        Ok(deleted || legacy_deleted)
     }
 }

@@ -1044,6 +1044,18 @@ fn caller_resource_scope(caller: &WebUiAuthenticatedCaller) -> ResourceScope {
     }
 }
 
+fn admin_user_secret_scope(
+    caller: WebUiAuthenticatedCaller,
+    user_id: UserId,
+) -> AdminUserSecretScope {
+    AdminUserSecretScope::new(
+        caller.tenant_id,
+        user_id,
+        caller.agent_id,
+        caller.project_id,
+    )
+}
+
 fn operator_config_not_wired_response() -> RebornOperatorConfigListResponse {
     RebornOperatorConfigListResponse {
         entries: Vec::new(),
@@ -3282,12 +3294,7 @@ impl RebornServicesApi for RebornServices {
         self.authorize_admin(&caller).await?;
         self.require_admin_target(&caller.tenant_id, &user_id)
             .await?;
-        let scope = AdminUserSecretScope::new(
-            caller.tenant_id,
-            user_id,
-            caller.agent_id,
-            caller.project_id,
-        );
+        let scope = admin_user_secret_scope(caller, user_id);
         let secrets = self
             .admin_users
             .list_secrets(&scope)
@@ -3306,12 +3313,7 @@ impl RebornServicesApi for RebornServices {
         self.authorize_admin(&caller).await?;
         self.require_admin_target(&caller.tenant_id, &user_id)
             .await?;
-        let scope = AdminUserSecretScope::new(
-            caller.tenant_id,
-            user_id,
-            caller.agent_id,
-            caller.project_id,
-        );
+        let scope = admin_user_secret_scope(caller, user_id);
         let secret = self
             .admin_users
             .put_secret(&scope, handle, SecretString::from(request.value))
@@ -3331,12 +3333,7 @@ impl RebornServicesApi for RebornServices {
             .await?;
         // Echo the parsed, canonical handle back on the wire as a plain string.
         let handle_str = handle.as_str().to_string();
-        let scope = AdminUserSecretScope::new(
-            caller.tenant_id,
-            user_id,
-            caller.agent_id,
-            caller.project_id,
-        );
+        let scope = admin_user_secret_scope(caller, user_id);
         let deleted = self
             .admin_users
             .delete_secret(&scope, handle)
