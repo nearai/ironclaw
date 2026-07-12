@@ -20,6 +20,8 @@ class CaseSpec:
         self,
         fn: CaseFn,
         *,
+        tier: str = "contract",
+        blocking: bool = True,
         requires_slack: bool = False,
         requires_slack_target: bool = False,
         requires_slack_personal_auth: bool = False,
@@ -30,7 +32,13 @@ class CaseSpec:
         default_enabled: bool = True,
         implemented: bool = True,
     ) -> None:
+        if tier not in ("contract", "behavioral"):
+            raise ValueError(
+                "CaseSpec tier must be exactly 'contract' or 'behavioral'"
+            )
         self.fn = fn
+        self.tier = tier
+        self.blocking = blocking
         self.requires_slack = requires_slack
         self.requires_slack_target = requires_slack_target
         self.requires_slack_personal_auth = requires_slack_personal_auth

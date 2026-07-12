@@ -61,6 +61,28 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             env={},
         )
 
+    def test_case_spec_accepts_only_explicit_contract_or_behavioral_tiers(self):
+        async def fake_case(_ctx):
+            return None
+
+        contract = run_live_qa.CaseSpec(
+            fake_case,
+            tier="contract",
+            blocking=True,
+        )
+        behavioral = run_live_qa.CaseSpec(
+            fake_case,
+            tier="behavioral",
+            blocking=False,
+        )
+
+        self.assertEqual(contract.tier, "contract")
+        self.assertTrue(contract.blocking)
+        self.assertEqual(behavioral.tier, "behavioral")
+        self.assertFalse(behavioral.blocking)
+        with self.assertRaisesRegex(ValueError, "tier"):
+            run_live_qa.CaseSpec(fake_case, tier="advisory", blocking=False)
+
     def _fake_assistant_reply_page(
         self,
         response_text: str,
@@ -5988,6 +6010,293 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertEqual(paths, [tool_index_path, message_path])
             self.assertNotIn(secret_path, paths)
             self.assertEqual(payload["entries"][1]["contents"]["content"], "hello live trace")
+
+    def test_case_manifest_and_results_include_tier_and_blocking_metadata(self):
+        async def fake_case(_ctx):
+            return None
+
+        cases = {
+            "contract_case": run_live_qa.CaseSpec(
+                fake_case,
+                tier="contract",
+                blocking=True,
+            ),
+            "behavioral_case": run_live_qa.CaseSpec(
+                fake_case,
+                tier="behavioral",
+                blocking=False,
+            ),
+        }
+        failure_details = {
+            "error": "observed mismatch",
+            "failure_class": "product",
+            "failure_category": "assertion_mismatch",
+            "failure_status": "failed",
+        }
+
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.object(run_live_qa, "CASES", cases),
+            patch.object(run_live_qa, "QA_SHEET_CASES", {}),
+        ):
+            manifest_path = run_live_qa.write_case_manifest(
+                Path(tmpdir),
+                list(cases),
+            )
+            contract_result = run_live_qa._result(
+                "contract_case",
+                False,
+                run_live_qa.time.monotonic(),
+                dict(failure_details),
+            )
+            behavioral_result = run_live_qa._result(
+                "behavioral_case",
+                False,
+                run_live_qa.time.monotonic(),
+                dict(failure_details),
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        manifest_cases = {entry["case"]: entry for entry in manifest["cases"]}
+        self.assertEqual(manifest_cases["contract_case"]["case_tier"], "contract")
+        self.assertTrue(manifest_cases["contract_case"]["blocking"])
+        self.assertEqual(
+            manifest_cases["behavioral_case"]["case_tier"],
+            "behavioral",
+        )
+        self.assertFalse(manifest_cases["behavioral_case"]["blocking"])
+
+        self.assertFalse(contract_result.success)
+        self.assertFalse(behavioral_result.success)
+        self.assertEqual(contract_result.details["case_tier"], "contract")
+        self.assertTrue(contract_result.details["blocking"])
+        self.assertEqual(behavioral_result.details["case_tier"], "behavioral")
+        self.assertFalse(behavioral_result.details["blocking"])
+        for key, value in failure_details.items():
+            self.assertEqual(contract_result.details[key], value)
+            self.assertEqual(behavioral_result.details[key], value)
+
+    def test_run_cases_exits_only_for_blocking_failures(self):
+        def run_failed_case(*, tier: str, blocking: bool) -> tuple[int, dict]:
+            case_name = f"{tier}_case"
+
+            async def fake_case(_ctx):
+                return run_live_qa._result(
+                    case_name,
+                    False,
+                    run_live_qa.time.monotonic(),
+                    {
+                        "error": "observed mismatch",
+                        "failure_class": "product",
+                        "failure_category": "assertion_mismatch",
+                        "failure_status": "failed",
+                    },
+                )
+
+            async def fake_start_reborn_server(*_args, **_kwargs):
+                return object(), "http://127.0.0.1:38555"
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                output_dir = root / "out"
+                binary = root / "ironclaw-reborn"
+                binary.touch()
+                prepared_home = root / "prepared-home"
+                prepared_home.mkdir()
+                args = argparse.Namespace(
+                    all_cases=False,
+                    non_telegram_qa_cases=False,
+                    case=[case_name],
+                    output_dir=output_dir,
+                    reborn_home=root / "source-home",
+                    skip_build=True,
+                    require_slack_live=False,
+                )
+                cases = {
+                    case_name: run_live_qa.CaseSpec(
+                        fake_case,
+                        tier=tier,
+                        blocking=blocking,
+                    )
+                }
+                prepared = run_live_qa.PreparedRebornHome(
+                    path=prepared_home,
+                    preflight={
+                        "slack": {},
+                        "slack_personal_auth": {},
+                        "google_product_auth": {},
+                        "telegram": {},
+                        "github_auth": {},
+                    },
+                )
+                with (
+                    patch.object(run_live_qa, "CASES", cases),
+                    patch.object(run_live_qa, "QA_SHEET_CASES", {}),
+                    patch.object(run_live_qa, "_reborn_binary", return_value=binary),
+                    patch.object(
+                        run_live_qa,
+                        "prepare_reborn_home",
+                        return_value=prepared,
+                    ),
+                    patch.object(
+                        run_live_qa,
+                        "start_reborn_server",
+                        side_effect=fake_start_reborn_server,
+                    ),
+                    patch.object(run_live_qa, "stop_process"),
+                ):
+                    status = asyncio.run(run_live_qa.run_cases(args))
+                payload = json.loads(
+                    (output_dir / "results.json").read_text(encoding="utf-8")
+                )
+                return status, payload["results"][0]
+
+        behavioral_status, behavioral_result = run_failed_case(
+            tier="behavioral",
+            blocking=False,
+        )
+        contract_status, contract_result = run_failed_case(
+            tier="contract",
+            blocking=True,
+        )
+
+        self.assertEqual(behavioral_status, 0)
+        self.assertFalse(behavioral_result["success"])
+        self.assertEqual(behavioral_result["details"]["case_tier"], "behavioral")
+        self.assertFalse(behavioral_result["details"]["blocking"])
+        self.assertEqual(contract_status, 1)
+        self.assertFalse(contract_result["success"])
+        self.assertEqual(contract_result["details"]["case_tier"], "contract")
+        self.assertTrue(contract_result["details"]["blocking"])
+
+    def test_model_unavailable_short_circuits_remaining_cases_as_inconclusive(self):
+        started_servers: list[str] = []
+        prepared_cases: list[str] = []
+
+        async def unavailable_case(_ctx):
+            return run_live_qa._result(
+                "unavailable_case",
+                False,
+                run_live_qa.time.monotonic(),
+                {
+                    "error": "The configured model provider is unavailable.",
+                    "failure_category": "model_unavailable",
+                    "failure_status": "failed",
+                },
+            )
+
+        async def later_case(_ctx):
+            raise AssertionError("later case must be inconclusive without running")
+
+        async def fake_start_reborn_server(
+            _binary,
+            reborn_home,
+            _output_dir,
+            _env,
+        ):
+            started_servers.append(reborn_home.name)
+            return object(), "http://127.0.0.1:38555"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_dir = root / "out"
+            binary = root / "ironclaw-reborn"
+            binary.touch()
+            args = argparse.Namespace(
+                all_cases=False,
+                non_telegram_qa_cases=False,
+                case=["unavailable_case", "later_case"],
+                output_dir=output_dir,
+                reborn_home=root / "source-home",
+                skip_build=True,
+                require_slack_live=False,
+            )
+            cases = {
+                "unavailable_case": run_live_qa.CaseSpec(
+                    unavailable_case,
+                    tier="contract",
+                    blocking=True,
+                ),
+                "later_case": run_live_qa.CaseSpec(
+                    later_case,
+                    tier="behavioral",
+                    blocking=False,
+                ),
+            }
+
+            def fake_prepare_reborn_home(_args, _selected, *, case_name):
+                prepared_cases.append(case_name)
+                home = output_dir / "reborn-home" / case_name
+                home.mkdir(parents=True)
+                return run_live_qa.PreparedRebornHome(
+                    path=home,
+                    preflight={
+                        "slack": {},
+                        "slack_personal_auth": {},
+                        "google_product_auth": {},
+                        "telegram": {},
+                        "github_auth": {},
+                    },
+                )
+
+            with (
+                patch.object(run_live_qa, "CASES", cases),
+                patch.object(run_live_qa, "QA_SHEET_CASES", {}),
+                patch.object(run_live_qa, "_reborn_binary", return_value=binary),
+                patch.object(
+                    run_live_qa,
+                    "prepare_reborn_home",
+                    side_effect=fake_prepare_reborn_home,
+                ),
+                patch.object(
+                    run_live_qa,
+                    "start_reborn_server",
+                    side_effect=fake_start_reborn_server,
+                ),
+                patch.object(run_live_qa, "stop_process"),
+            ):
+                status = asyncio.run(run_live_qa.run_cases(args))
+
+            payload = json.loads(
+                (output_dir / "results.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(prepared_cases, ["unavailable_case"])
+        self.assertEqual(started_servers, ["unavailable_case"])
+        self.assertEqual(len(payload["results"]), 2)
+        unavailable_result, inconclusive_result = payload["results"]
+        self.assertFalse(unavailable_result["success"])
+        self.assertEqual(
+            unavailable_result["details"]["failure_class"],
+            "infrastructure",
+        )
+        self.assertEqual(
+            unavailable_result["details"]["failure_category"],
+            "model_unavailable",
+        )
+        self.assertEqual(unavailable_result["details"]["failure_status"], "failed")
+        self.assertFalse(unavailable_result["details"]["blocking"])
+        self.assertTrue(unavailable_result["details"]["inconclusive"])
+
+        self.assertFalse(inconclusive_result["success"])
+        self.assertEqual(inconclusive_result["details"]["case"], "later_case")
+        self.assertEqual(inconclusive_result["details"]["case_tier"], "behavioral")
+        self.assertFalse(inconclusive_result["details"]["blocking"])
+        self.assertTrue(inconclusive_result["details"]["inconclusive"])
+        self.assertEqual(
+            inconclusive_result["details"]["failure_class"],
+            "infrastructure",
+        )
+        self.assertEqual(
+            inconclusive_result["details"]["failure_category"],
+            "model_unavailable",
+        )
+        self.assertEqual(
+            inconclusive_result["details"]["failure_status"],
+            "inconclusive",
+        )
+        self.assertIn("unavailable_case", inconclusive_result["details"]["error"])
 
     def test_run_cases_isolates_reborn_home_and_preflight_per_selected_case(self):
         async def fake_case(ctx: run_live_qa.LiveQaContext) -> run_live_qa.ProbeResult:

@@ -1182,7 +1182,15 @@ def _exc_text(exc: BaseException) -> str:
 
 
 def _result(case_name: str, success: bool, started: float, details: dict[str, object]) -> ProbeResult:
-    details = {"case": case_name, **details}
+    case_spec = CASES.get(case_name)
+    case_tier = case_spec.tier if case_spec is not None else "contract"
+    blocking = case_spec.blocking if case_spec is not None else True
+    details = {
+        **details,
+        "case": case_name,
+        "case_tier": case_tier,
+        "blocking": blocking,
+    }
     if case_name in QA_SHEET_CASES:
         qa_spec = QA_SHEET_CASES[case_name]
         details = {
@@ -1197,6 +1205,19 @@ def _result(case_name: str, success: bool, started: float, details: dict[str, ob
         latency_ms=int((time.monotonic() - started) * 1000),
         details=details,
     )
+
+
+def _is_blocking_failure(result: ProbeResult) -> bool:
+    return not result.success and bool(result.details.get("blocking", True))
+
+
+def _is_provider_unavailable(result: ProbeResult) -> bool:
+    if result.success:
+        return False
+    return result.details.get("failure_category") in {
+        "model_unavailable",
+        "provider_unavailable",
+    }
 
 
 def _record_assistant_reply_wait_result(
@@ -6843,6 +6864,8 @@ def write_case_manifest(output_dir: Path, selected_cases: list[str]) -> Path:
                 "qa_rows": QA_SHEET_CASES.get(name, {}).get("rows", []),
                 "feature": QA_SHEET_CASES.get(name, {}).get("feature"),
                 "gate": QA_SHEET_CASES.get(name, {}).get("gate"),
+                "case_tier": spec.tier,
+                "blocking": spec.blocking,
                 "default_enabled": spec.default_enabled,
                 "requires_slack": spec.requires_slack,
                 "requires_slack_target": spec.requires_slack_target,
@@ -7015,7 +7038,7 @@ async def run_cases(args: argparse.Namespace) -> int:
     results: list[ProbeResult] = []
     trace_exports: list[dict[str, object]] = []
     first_base_url = ""
-    for name in selected_cases:
+    for case_index, name in enumerate(selected_cases):
         case_spec = CASES[name]
         prepared_home = prepare_reborn_home(args, [name], case_name=name)
         preflight_path = write_preflight(args.output_dir, prepared_home)
@@ -7335,6 +7358,41 @@ async def run_cases(args: argparse.Namespace) -> int:
                 f"latency_ms={result.latency_ms}",
                 flush=True,
             )
+            if _is_provider_unavailable(result):
+                result.details.update(
+                    {
+                        "blocking": False,
+                        "failure_class": "infrastructure",
+                        "inconclusive": True,
+                    }
+                )
+                failure_category = str(result.details["failure_category"])
+                for remaining_name in selected_cases[case_index + 1 :]:
+                    inconclusive = _result(
+                        remaining_name,
+                        False,
+                        time.monotonic(),
+                        {
+                            "error": (
+                                "case was not run because the model provider became "
+                                f"unavailable during {name}"
+                            ),
+                            "failure_class": "infrastructure",
+                            "failure_category": failure_category,
+                            "failure_status": "inconclusive",
+                            "inconclusive": True,
+                            "short_circuited_by": name,
+                        },
+                    )
+                    inconclusive.details["blocking"] = False
+                    results.append(inconclusive)
+                    print(
+                        "[reborn-webui-v2-live-qa] "
+                        f"case={remaining_name} success={inconclusive.success} "
+                        f"inconclusive=provider_unavailable source_case={name}",
+                        flush=True,
+                    )
+                break
         finally:
             stop_process(proc)
             trace_export = export_case_trace(args.output_dir, name, prepared_home.path)
@@ -7353,7 +7411,7 @@ async def run_cases(args: argparse.Namespace) -> int:
         f"[reborn-webui-v2-live-qa] green_run_explanation={green_explanation_path}",
         flush=True,
     )
-    return 0 if all(result.success for result in results) else 1
+    return 1 if any(_is_blocking_failure(result) for result in results) else 0
 
 
 def main() -> int:

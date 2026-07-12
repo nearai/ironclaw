@@ -229,6 +229,26 @@ class GoogleOauthPreflightReportTests(unittest.TestCase):
 
 
 class RebornQaSlackReportTests(unittest.TestCase):
+    def test_empty_structured_results_do_not_mask_summary_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lane_dir = Path(tmpdir) / "summary-lane" / "provider" / "run"
+            lane_dir.mkdir(parents=True)
+            (lane_dir / "results.json").write_text(
+                json.dumps({"results": []}),
+                encoding="utf-8",
+            )
+            (lane_dir / "summary.md").write_text(
+                _SUMMARY_TEMPLATE.format(status="1"),
+                encoding="utf-8",
+            )
+
+            report = notify.collect_lane(lane_dir)
+
+        self.assertIsNotNone(report)
+        self.assertEqual(report.status, "fail")
+        self.assertFalse(report.structured_results)
+        self.assertTrue(notify._has_blocking_failure(report))
+
     def test_collect_lane_populates_per_case_reports(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             lane_dir = Path(tmpdir) / "reborn-webui-v2-live-qa" / "reborn-webui-v2" / "20260628T000000Z"
@@ -326,6 +346,164 @@ class RebornQaSlackReportTests(unittest.TestCase):
             ],
         )
         self.assertEqual(report.reborn_qa_cases[0].debug_paths, [])
+
+    def test_behavioral_failure_is_a_nonblocking_warning_with_provenance(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lane_dir = (
+                Path(tmpdir)
+                / "reborn-webui-v2-live-qa"
+                / "reborn-webui-v2"
+                / "20260712T000000Z"
+            )
+            lane_dir.mkdir(parents=True)
+            (lane_dir / "results.json").write_text(
+                json.dumps(
+                    {
+                        "results": [
+                            {
+                                "provider": "reborn-webui-v2",
+                                "mode": "live:qa_10c_slack_thread_replies",
+                                "success": False,
+                                "latency_ms": 4321,
+                                "details": {
+                                    "case": "qa_10c_slack_thread_replies",
+                                    "qa_rows": ["10C"],
+                                    "feature": "Slack thread visibility",
+                                    "case_tier": "behavioral",
+                                    "blocking": False,
+                                    "failure_class": "product",
+                                    "failure_category": "assertion_mismatch",
+                                    "failure_status": "failed",
+                                    "error": "seeded thread reply was not surfaced",
+                                },
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            # Result metadata is authoritative if an older/stale manifest
+            # disagrees with the result emitted by the runner.
+            (lane_dir / "case-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "cases": [
+                            {
+                                "case": "qa_10c_slack_thread_replies",
+                                "qa_rows": ["10C"],
+                                "feature": "Slack thread visibility",
+                                "case_tier": "contract",
+                                "blocking": True,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            traces_dir = lane_dir / "traces"
+            traces_dir.mkdir()
+            (traces_dir / "qa_10c_slack_thread_replies.json").write_text(
+                _trace_json(
+                    [
+                        {
+                            "name": "slack.search_messages",
+                            "args_hash": "1234567890123",
+                            "output_digest": "9876543210987",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            report = notify.collect_lane(lane_dir)
+
+        self.assertIsNotNone(report)
+        self.assertEqual(report.tests, 1)
+        self.assertEqual(report.passed, 0)
+        self.assertEqual(report.failed, 0)
+        self.assertEqual(report.warnings, 1)
+        self.assertEqual(report.status, "warn")
+        self.assertEqual(report.junit_failures, [])
+        self.assertEqual(len(report.reborn_qa_cases), 1)
+        case = report.reborn_qa_cases[0]
+        self.assertFalse(case.success)
+        self.assertEqual(case.case_tier, "behavioral")
+        self.assertFalse(case.blocking)
+        self.assertEqual(case.failure_class, "product")
+        self.assertEqual(case.failure_category, "assertion_mismatch")
+        self.assertEqual(case.failure_status, "failed")
+        self.assertEqual(case.message, "seeded thread reply was not surfaced")
+        self.assertEqual([tool.name for tool in case.tool_calls], ["slack.search_messages"])
+        self.assertEqual(
+            case.debug_paths[0],
+            "reborn-webui-v2-live-qa/reborn-webui-v2/20260712T000000Z/results.json",
+        )
+
+        haiku_response = {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "status": "fail",
+                            "reason": "optional enrichment called this blocking",
+                            "tool_calls_total": 0,
+                            "tools_used": [],
+                            "notable": "",
+                            "test_name": "haiku-generated-test",
+                            "error": "haiku-generated-error",
+                            "root_cause": "haiku-generated-root-cause",
+                            "fix": "haiku-generated-fix",
+                        }
+                    ),
+                }
+            ]
+        }
+        with mock.patch.object(notify, "post_json", return_value=haiku_response):
+            notify.run_haiku("anthropic-test-key", report)
+        self.assertEqual(report.status, "warn")
+
+        run_context = notify.CanaryRunContext(
+            repository="nearai/ironclaw",
+            trigger_context="/canary PR #42 abcdef0123 by @maintainer",
+            target_pr="42",
+            target_branch="codex/fix-q10-slack-canaries",
+            target_ref="abcdef0123456789",
+        )
+        payload = notify.slack_payload(
+            [report],
+            "https://github.com/nearai/ironclaw/actions/runs/123",
+            "mainsha0123456789",
+            run_context=run_context,
+        )
+        rendered = json.dumps(payload)
+        self.assertIn("1 warning", rendered)
+        self.assertIn("Warning `10C`", rendered)
+        self.assertIn("seeded thread reply was not surfaced", rendered)
+        self.assertIn("slack.search_messages", rendered)
+        self.assertIn("pull/42", rendered)
+        self.assertIn("abcdef0123", rendered)
+        self.assertNotIn("mainsha", rendered)
+        self.assertNotIn("haiku-generated-error", rendered)
+
+        with (
+            mock.patch.object(notify, "post_json") as post_json,
+            mock.patch.object(notify, "get_json") as get_json,
+        ):
+            self.assertEqual(
+                notify.categorize_failures("anthropic-test-key", [report]),
+                "",
+            )
+            issue_urls = notify.create_canary_issues(
+                [report],
+                repo="nearai/ironclaw",
+                github_token="github-test-token",
+                run_url="https://github.com/nearai/ironclaw/actions/runs/123",
+                commit="abcdef0123456789",
+            )
+        self.assertEqual(issue_urls, [])
+        post_json.assert_not_called()
+        get_json.assert_not_called()
 
     def test_slack_payload_renders_each_reborn_qa_row(self):
         report = notify.LaneReport(
