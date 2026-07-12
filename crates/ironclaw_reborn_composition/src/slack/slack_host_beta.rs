@@ -1368,6 +1368,7 @@ mod tests {
     use ironclaw_secrets::InMemorySecretStore;
     use ironclaw_slack_v2_adapter::SLACK_USER_ACTOR_KIND;
     use ironclaw_threads::{ListThreadsForScopeRequest, ThreadHistoryRequest, ThreadScope};
+    use ironclaw_triggers::TriggerRunHistoryStatus;
     use ironclaw_turns::{
         GetRunStateRequest, ReplyTargetBindingRef, TurnCoordinator, TurnRunId, TurnScope,
         TurnStatus, run_profile::LoopCapabilityPort,
@@ -1410,6 +1411,39 @@ mod tests {
     const SECRET: &str = "host-signing-secret";
 
     type HmacSha256 = Hmac<sha2::Sha256>;
+
+    fn accepted_trigger_run_id(
+        run_id: Option<TurnRunId>,
+        status: Option<TriggerRunHistoryStatus>,
+    ) -> Option<TurnRunId> {
+        match (run_id, status) {
+            (Some(run_id), _) => Some(run_id),
+            (None, Some(TriggerRunHistoryStatus::Error)) => {
+                panic!("trigger run failed before acceptance")
+            }
+            (None, _) => None,
+        }
+    }
+
+    #[test]
+    fn accepted_trigger_run_id_classifies_persisted_states() {
+        let run_id = TurnRunId::new();
+        assert_eq!(
+            accepted_trigger_run_id(Some(run_id), Some(TriggerRunHistoryStatus::Error)),
+            Some(run_id)
+        );
+        assert_eq!(
+            accepted_trigger_run_id(None, Some(TriggerRunHistoryStatus::Running)),
+            None
+        );
+        assert_eq!(accepted_trigger_run_id(None, None), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "trigger run failed before acceptance")]
+    fn accepted_trigger_run_id_rejects_pre_acceptance_error() {
+        accepted_trigger_run_id(None, Some(TriggerRunHistoryStatus::Error));
+    }
 
     struct OperatorTokenAuthenticator;
 
@@ -4832,8 +4866,8 @@ mod tests {
         use ironclaw_conversations::{AdapterInstallationId, AdapterKind, ExternalActorRef};
         use ironclaw_triggers::{
             TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
-            TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerId, TriggerRecord,
-            TriggerRunHistoryStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
+            TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerId, TriggerRecord, TriggerSchedule,
+            TriggerSourceKind, TriggerState,
         };
 
         // Bind the trigger actor so the trusted submitter can resolve the
@@ -4899,18 +4933,15 @@ mod tests {
                 .list_trigger_run_history(tenant_id.clone(), trigger_id, 1)
                 .await
                 .expect("list trigger run history");
-            if let Some(run) = run_history.first() {
-                if let Some(run_id) = run.run_id {
-                    fired_run_id = Some(run_id);
-                    break;
-                }
-                assert_ne!(
-                    run.status,
-                    TriggerRunHistoryStatus::Error,
-                    "trigger run failed before acceptance: {run:?}"
-                );
-            }
             last_run_history = Some(run_history);
+            let latest_run = last_run_history.as_ref().and_then(|runs| runs.first());
+            if let Some(run_id) = accepted_trigger_run_id(
+                latest_run.and_then(|run| run.run_id),
+                latest_run.map(|run| run.status),
+            ) {
+                fired_run_id = Some(run_id);
+                break;
+            }
         }
 
         // Read delivery records from the unified outbound store that the
