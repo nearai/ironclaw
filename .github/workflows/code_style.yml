@@ -11,8 +11,6 @@ on:
   push:
     branches:
       - main
-      # Temporary main-CI probe; remove this branch before merging the PR.
-      - main-ci-checks-20260712
 
 permissions:
   contents: read
