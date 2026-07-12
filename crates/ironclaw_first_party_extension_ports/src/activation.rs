@@ -908,6 +908,22 @@ where
             if selected.insert(bundle_id.clone()) {
                 activated_bundles.push(bundle_id);
                 selection.activations.push(activation);
+                continue;
+            }
+            // Mode-priority merge: a criteria (keyword/regex) selection only
+            // ranks the listing under `SkillInjectionMode::Listing`, so a later
+            // explicit/model-selected activation of the same bundle must
+            // UPGRADE the existing entry in place — dropping it would leave the
+            // mode at `ActivationCriteria` forever and the body would never
+            // become injection-eligible. Never downgrade a body-eligible mode.
+            if activation.mode == SkillActivationMode::ActivationCriteria {
+                continue;
+            }
+            if let Some(existing) = selection.activations.iter_mut().find(|existing| {
+                existing.bundle_id.as_ref() == Some(&bundle_id)
+                    && existing.mode == SkillActivationMode::ActivationCriteria
+            }) {
+                existing.mode = activation.mode;
             }
         }
         selection.feedback.extend(next.selection.feedback);
@@ -2282,6 +2298,68 @@ mod tests {
         let listing = listing_text(&after);
         assert!(listing.contains("- spreadsheet:"));
         assert!(!listing.contains("- code-review:"));
+    }
+
+    #[tokio::test]
+    async fn listing_mode_skill_activate_upgrades_criteria_listed_skill_and_injects_body() {
+        let selectable = SelectableSkillContextSource::new(two_skill_source(), listing_config());
+        let context = run_context().await;
+        // Turn 1: a criteria (keyword) match only ranks the listing — the
+        // merged active plan now holds an `ActivationCriteria` entry for the
+        // code-review bundle.
+        selectable
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "please review this PR",
+            )
+            .expect("record message");
+        let before = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("criteria selection succeeds");
+        assert!(
+            before
+                .iter()
+                .all(|candidate| candidate.loaded_skill_md().is_none()),
+            "criteria match must stay listing-only before activation"
+        );
+        assert!(listing_text(&before).contains("- code-review:"));
+
+        // Turn 2: the model activates the same skill via `skill_activate`. The
+        // merge must UPGRADE the existing criteria entry to `ModelSelected`
+        // instead of dropping the later activation.
+        let plan = selectable
+            .activate_skills_for_run(&context, &["code-review".to_string()])
+            .await
+            .expect("model-selected activation succeeds");
+        assert!(
+            plan.selection.activations.iter().any(|activation| {
+                activation.name == "code-review"
+                    && activation.mode == SkillActivationMode::ModelSelected
+            }),
+            "merged plan must upgrade the criteria-listed skill to ModelSelected: {:?}",
+            plan.selection.activations
+        );
+
+        let after = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("post-activation load succeeds");
+        assert!(
+            after.iter().any(|candidate| {
+                candidate
+                    .loaded_skill_md()
+                    .is_some_and(|skill_md| skill_md.contains("CODE_REVIEW_SENTINEL"))
+            }),
+            "skill_activate on a criteria-listed skill must inject the body on the next prompt build"
+        );
+        let listing = listing_text(&after);
+        assert!(listing.contains("- spreadsheet:"));
+        assert!(
+            !listing.contains("- code-review:"),
+            "an upgraded activation must leave the listing"
+        );
     }
 
     #[tokio::test]
