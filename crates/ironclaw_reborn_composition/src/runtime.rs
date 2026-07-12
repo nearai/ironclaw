@@ -4638,7 +4638,7 @@ impl ironclaw_llm::LlmProvider for PlaceholderLlmProvider {
 #[cfg(feature = "root-llm-provider")]
 fn placeholder_unconfigured_error() -> ironclaw_llm::LlmError {
     ironclaw_llm::LlmError::RequestFailed {
-        provider: "unconfigured".to_string(),
+        provider: ironclaw_llm::UNCONFIGURED_PROVIDER_ID.to_string(),
         reason: "no LLM provider is configured yet; choose one in Settings → Inference".to_string(),
     }
 }
