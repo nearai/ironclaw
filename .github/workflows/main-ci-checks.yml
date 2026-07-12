@@ -109,7 +109,8 @@ jobs:
     name: Fast-forward staging-release to main
     if: >-
       github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.conclusion == 'success'
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.name == 'Code Style'
     runs-on: ubuntu-latest
     concurrency:
       group: main-ci-checks-staging-release
@@ -121,7 +122,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
       HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
-      # Dedicated branch used by staging deployment.
+      # Dedicated branch used by staging deployment (`staging-release`).
       STAGING_BRANCH: staging-release
     steps:
       - name: Check main CI run set
@@ -217,8 +218,8 @@ jobs:
 
             if [ "${#missing[@]}" -gt 0 ] || [ "${#pending[@]}" -gt 0 ]; then
               if [ "$attempts" -lt "$max_attempts" ]; then
-                attempts=$((attempts + 1))
                 echo "::warning::Required workflow checks for ${HEAD_SHA} are incomplete (attempt ${attempts}/${max_attempts}). Retrying in 30 seconds."
+                attempts=$((attempts + 1))
                 sleep 30
                 continue
               fi
@@ -245,6 +246,7 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
+          persist-credentials: true
 
       - name: Fast-forward staging-release
         if: steps.ci.outputs.ready == 'true'
