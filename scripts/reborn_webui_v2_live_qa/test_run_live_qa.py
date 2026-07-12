@@ -1825,10 +1825,16 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 details={"full_reply_text": "Seeded Slack fixture content."},
             )
 
-        with patch.object(
-            run_live_qa,
-            "_live_chat_case",
-            side_effect=fake_live_chat_case,
+        with (
+            patch.object(
+                run_live_qa,
+                "_live_chat_case",
+                side_effect=fake_live_chat_case,
+            ),
+            patch.object(
+                run_live_qa,
+                "_capability_run_statuses",
+            ) as capability_statuses,
         ):
             chat, reply_text = asyncio.run(
                 run_live_qa._slack_correctness_chat_reply(
@@ -1844,6 +1850,307 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertTrue(chat.success)
         self.assertEqual(reply_text, "Seeded Slack fixture content.")
         self.assertIs(captured["enforce_marker"], False)
+        self.assertEqual(
+            run_live_qa.SLACK_EXTENSION_REQUIREMENT,
+            {
+                "package_id": "slack",
+                "display_name": "Slack",
+                "required_tools": [
+                    "slack.list_conversations",
+                    "slack.get_conversation_history",
+                ],
+            },
+        )
+        self.assertEqual(
+            captured["extensions"],
+            [run_live_qa.SLACK_EXTENSION_REQUIREMENT],
+        )
+        capability_statuses.assert_not_called()
+
+    def test_live_chat_case_preactivates_extensions_before_chat_submit(self):
+        events: list[str] = []
+        authenticated: list[dict[str, object]] = []
+
+        class FakeComposer:
+            async def fill(self, _text):
+                events.append("fill")
+
+            async def press(self, _key):
+                events.append("submit")
+
+        class FakeMessages:
+            @property
+            def last(self):
+                return self
+
+            async def count(self):
+                return 0
+
+        class FakeDismiss:
+            @property
+            def first(self):
+                return self
+
+            async def count(self):
+                return 0
+
+        class FakePage:
+            async def goto(self, url, **_kwargs):
+                events.append(f"goto:{url}")
+
+            def locator(self, selector):
+                if selector == "body":
+                    return object()
+                if selector == "[aria-label='Dismiss connect action']":
+                    return FakeDismiss()
+                if selector == "[data-testid='chat-composer']":
+                    return FakeComposer()
+                if selector in (
+                    "[data-testid='msg-user']",
+                    "[data-testid='msg-error']",
+                    "[data-testid='msg-assistant']",
+                ):
+                    return FakeMessages()
+                raise AssertionError(f"unexpected selector: {selector}")
+
+        class FakeExpectation:
+            async def to_be_visible(self, **_kwargs):
+                return None
+
+            async def to_contain_text(self, _text, **_kwargs):
+                return None
+
+        async def fake_with_page(_output_dir, _case_name, action):
+            await action(FakePage())
+
+        async def fake_ensure(_page, observed, **kwargs):
+            events.append(f"authenticate:{kwargs['package_id']}")
+            authenticated.append({"observed": observed, **kwargs})
+
+        async def fake_wait(_page, **_kwargs):
+            return run_live_qa.AssistantReplyWaitResult(
+                text_excerpt="Slack fixture answer.",
+                full_text="Slack fixture answer.",
+                semantic_judge_used=False,
+                semantic_judge_reason="literal_required_text_matched",
+                final_reply_wait_ms=0,
+                final_reply_reason="final_reply_observed",
+            )
+
+        playwright_module = types.ModuleType("playwright")
+        playwright_async_api = types.ModuleType("playwright.async_api")
+        playwright_async_api.expect = lambda _locator: FakeExpectation()
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "playwright": playwright_module,
+                    "playwright.async_api": playwright_async_api,
+                },
+            ),
+            patch.object(run_live_qa, "_with_page", new=fake_with_page),
+            patch.object(
+                run_live_qa,
+                "_ensure_extension_authenticated_on_page",
+                new=fake_ensure,
+            ),
+            patch.object(run_live_qa, "_wait_for_assistant_reply", new=fake_wait),
+        ):
+            result = asyncio.run(
+                run_live_qa._live_chat_case(
+                    self._dummy_ctx(),
+                    case_name="qa_slack_preactivation_test",
+                    prompt="Read Slack.",
+                    marker=None,
+                    required_text=[],
+                    extensions=[run_live_qa.SLACK_EXTENSION_REQUIREMENT],
+                    enforce_marker=False,
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(len(authenticated), 1)
+        self.assertEqual(
+            {key: value for key, value in authenticated[0].items() if key != "observed"},
+            {
+                "package_id": "slack",
+                "display_name": "Slack",
+                "required_tools": [
+                    "slack.list_conversations",
+                    "slack.get_conversation_history",
+                ],
+                "ensure_installed": True,
+            },
+        )
+        self.assertEqual(
+            result.details["extensions"],
+            ["slack"],
+        )
+        registry_index = events.index(
+            f"goto:{self._dummy_ctx().base_url}/v2/extensions/registry?token="
+            f"{run_live_qa.AUTH_TOKEN}"
+        )
+        auth_index = events.index("authenticate:slack")
+        chat_index = events.index(
+            f"goto:{self._dummy_ctx().base_url}/v2/?token={run_live_qa.AUTH_TOKEN}"
+        )
+        submit_index = events.index("submit")
+        self.assertLess(registry_index, auth_index)
+        self.assertLess(auth_index, chat_index)
+        self.assertLess(chat_index, submit_index)
+
+    def test_live_chat_with_extensions_delegates_to_shared_live_chat_case(self):
+        captured: dict[str, object] = {}
+
+        async def fake_live_chat_case(_ctx, **kwargs):
+            captured.update(kwargs)
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=True,
+                latency_ms=1,
+                details={"text_excerpt": "done"},
+            )
+
+        with patch.object(
+            run_live_qa,
+            "_live_chat_case",
+            side_effect=fake_live_chat_case,
+        ):
+            result = asyncio.run(
+                run_live_qa._live_chat_with_extensions_case(
+                    self._dummy_ctx(),
+                    case_name="qa_extension_delegate_test",
+                    prompt="Use Slack.",
+                    marker="DONE",
+                    required_text=["done"],
+                    extensions=[run_live_qa.SLACK_EXTENSION_REQUIREMENT],
+                    timeout=31.0,
+                    extra_details={"fixture": "ready"},
+                    forbidden_text=["failed"],
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(captured["extensions"], [run_live_qa.SLACK_EXTENSION_REQUIREMENT])
+        self.assertEqual(captured["timeout"], 31.0)
+        self.assertEqual(captured["extra_details"], {"fixture": "ready"})
+        self.assertEqual(captured["forbidden_text"], ["failed"])
+
+    def test_qa_10d_requires_a_new_completed_list_conversations_call(self):
+        membership_view = {
+            "ok": True,
+            "member_channels": [{"id": "C0MEMBER01", "name": "general"}],
+            "member_channel_ids": ["C0MEMBER01"],
+            "listed": [
+                {"id": "C0MEMBER01", "name": "general", "is_member": True},
+                {"id": "C0OUTSIDE1", "name": "random", "is_member": False},
+            ],
+        }
+
+        async def fake_live_chat_case(_ctx, **kwargs):
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=True,
+                latency_ms=1,
+                details={"full_reply_text": "general"},
+            )
+
+        def drive(status_snapshots):
+            with (
+                patch.object(
+                    run_live_qa,
+                    "_require_slack_personal_token",
+                    return_value="xoxp-unit-test",
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_slack_membership_view",
+                    return_value=membership_view,
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_live_chat_case",
+                    side_effect=fake_live_chat_case,
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_capability_run_statuses",
+                    side_effect=status_snapshots,
+                ),
+            ):
+                return asyncio.run(
+                    run_live_qa.case_qa_10d_slack_channel_membership(
+                        self._dummy_ctx()
+                    )
+                )
+
+        no_new_call = drive(
+            [
+                {"slack.list_conversations": ["completed"]},
+                {"slack.list_conversations": ["completed"]},
+            ]
+        )
+        completed_call = drive(
+            [
+                {"slack.list_conversations": ["completed"]},
+                {"slack.list_conversations": ["completed", "completed"]},
+            ]
+        )
+
+        self.assertFalse(no_new_call.success)
+        self.assertEqual(no_new_call.details["failure_class"], "model_quality")
+        self.assertEqual(
+            no_new_call.details["expected_capabilities"],
+            ["slack.list_conversations"],
+        )
+        self.assertEqual(
+            no_new_call.details["capability_completed_counts_before"],
+            {"slack.list_conversations": 1},
+        )
+        self.assertEqual(
+            no_new_call.details["capability_completed_counts_after"],
+            {"slack.list_conversations": 1},
+        )
+        self.assertTrue(completed_call.success)
+        self.assertEqual(completed_call.details["member_channels_named"], ["general"])
+        self.assertEqual(completed_call.details["non_member_channels_claimed"], [])
+
+    def test_slack_correctness_chat_reply_classifies_terminal_provider_errors(self):
+        async def fake_live_chat_case(_ctx, **kwargs):
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=False,
+                latency_ms=1,
+                details={
+                    "error": "The configured model provider is unavailable.",
+                    "failure_category": "model_unavailable",
+                    "failure_status": "failed",
+                },
+            )
+
+        with patch.object(
+            run_live_qa,
+            "_live_chat_case",
+            side_effect=fake_live_chat_case,
+        ):
+            chat, reply_text = asyncio.run(
+                run_live_qa._slack_correctness_chat_reply(
+                    self._dummy_ctx(),
+                    case_name="qa_10_provider_failure_test",
+                    started=run_live_qa.time.monotonic(),
+                    prompt="Read Slack.",
+                    answer_marker="ANSWER_MARKER",
+                    extra_details={},
+                )
+            )
+
+        self.assertFalse(chat.success)
+        self.assertEqual(reply_text, "")
+        self.assertEqual(chat.details["failure_class"], "infrastructure")
+        self.assertEqual(chat.details["failure_category"], "model_unavailable")
 
     def test_wait_for_assistant_reply_uses_semantic_judge_for_text_mismatch(self):
         response_text = (
@@ -4395,9 +4702,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
     def test_raw_slack_user_id_pattern_requires_id_shape(self):
         self.assertEqual(
             run_live_qa._raw_slack_user_ids_in_text(
-                "digest mentions U0BDC16TML3 twice: U0BDC16TML3"
+                "digest mentions U0FIXTURE01 and W0FIXTURE02"
             ),
-            ["U0BDC16TML3", "U0BDC16TML3"],
+            ["U0FIXTURE01", "W0FIXTURE02"],
         )
         self.assertEqual(
             run_live_qa._raw_slack_user_ids_in_text(
@@ -4863,6 +5170,309 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ):
                 run_live_qa._require_slack_second_user_token(self._dummy_ctx())
 
+    def test_qa_10d_classifies_invalid_fixture_and_ground_truth_mismatch(self):
+        valid_view = {
+            "ok": True,
+            "member_channels": [{"id": "C0MEMBER01", "name": "general"}],
+            "member_channel_ids": ["C0MEMBER01"],
+            "listed": [
+                {"id": "C0MEMBER01", "name": "general", "is_member": True},
+                {"id": "C0OUTSIDE1", "name": "random", "is_member": False},
+            ],
+        }
+
+        async def fake_chat_reply(_ctx, **kwargs):
+            reply = "random"
+            return (
+                run_live_qa.ProbeResult(
+                    provider="test",
+                    mode=f"live:{kwargs['case_name']}",
+                    success=True,
+                    latency_ms=1,
+                    details={"text_excerpt": reply},
+                ),
+                reply,
+            )
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_require_slack_personal_token",
+                return_value="xoxp-unit-test",
+            ),
+            patch.object(
+                run_live_qa,
+                "_slack_membership_view",
+                return_value={"ok": False, "error": "fixture unavailable"},
+            ),
+        ):
+            invalid_fixture = asyncio.run(
+                run_live_qa.case_qa_10d_slack_channel_membership(self._dummy_ctx())
+            )
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_require_slack_personal_token",
+                return_value="xoxp-unit-test",
+            ),
+            patch.object(
+                run_live_qa,
+                "_slack_membership_view",
+                return_value=valid_view,
+            ),
+            patch.object(
+                run_live_qa,
+                "_slack_correctness_chat_reply",
+                side_effect=fake_chat_reply,
+            ),
+        ):
+            mismatch = asyncio.run(
+                run_live_qa.case_qa_10d_slack_channel_membership(self._dummy_ctx())
+            )
+
+        self.assertFalse(invalid_fixture.success)
+        self.assertEqual(invalid_fixture.details["failure_class"], "precondition")
+        self.assertFalse(mismatch.success)
+        self.assertEqual(mismatch.details["failure_class"], "product")
+        self.assertEqual(mismatch.details["failure_category"], "answer_mismatch")
+
+    def test_qa_10g_scoped_contract_requires_new_history_call_and_global_preserves_prompt(
+        self,
+    ):
+        seeded: dict[str, str] = {}
+        captured_chat: list[dict[str, object]] = []
+
+        async def fake_seed(_token, channel_id, text, **_kwargs):
+            self.assertEqual(channel_id, "D0FIXTURE1")
+            seeded["text"] = text
+            return {"ok": True}
+
+        async def fake_live_chat_case(_ctx, **kwargs):
+            captured_chat.append(kwargs)
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=True,
+                latency_ms=1,
+                details={"full_reply_text": seeded["text"]},
+            )
+
+        def drive_scoped(status_snapshots):
+            seeded.clear()
+            captured_chat.clear()
+            with (
+                patch.object(
+                    run_live_qa,
+                    "_require_slack_personal_token",
+                    return_value="xoxp-unit-test",
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_require_slack_personal_bot_dm_channel",
+                    return_value="D0FIXTURE1",
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_seed_slack_fixture_message",
+                    side_effect=fake_seed,
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_live_chat_case",
+                    side_effect=fake_live_chat_case,
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_capability_run_statuses",
+                    side_effect=status_snapshots,
+                ),
+            ):
+                result = asyncio.run(
+                    run_live_qa.case_qa_10g_slack_last_message_sent(
+                        self._dummy_ctx()
+                    )
+                )
+            return result, dict(captured_chat[0])
+
+        missing_history, missing_chat = drive_scoped(
+            [
+                {"slack.get_conversation_history": []},
+                {"slack.get_conversation_history": []},
+            ]
+        )
+        completed_history, scoped_chat = drive_scoped(
+            [
+                {"slack.get_conversation_history": []},
+                {"slack.get_conversation_history": ["completed"]},
+            ]
+        )
+
+        self.assertFalse(missing_history.success)
+        self.assertEqual(missing_history.details["failure_class"], "model_quality")
+        self.assertEqual(
+            missing_history.details["expected_capabilities"],
+            ["slack.get_conversation_history"],
+        )
+        self.assertTrue(completed_history.success)
+        self.assertIn("Slack conversation with ID D0FIXTURE1", scoped_chat["prompt"])
+        self.assertEqual(
+            scoped_chat["extensions"],
+            [run_live_qa.SLACK_EXTENSION_REQUIREMENT],
+        )
+        self.assertIs(scoped_chat["enforce_marker"], False)
+        self.assertIn("D0FIXTURE1", missing_chat["prompt"])
+
+        global_calls: list[dict[str, object]] = []
+
+        async def fake_global_chat(_ctx, **kwargs):
+            global_calls.append(kwargs)
+            reply = seeded["text"]
+            return (
+                run_live_qa.ProbeResult(
+                    provider="test",
+                    mode=f"live:{kwargs['case_name']}",
+                    success=True,
+                    latency_ms=1,
+                    details={"text_excerpt": reply},
+                ),
+                reply,
+            )
+
+        seeded.clear()
+        with (
+            patch.object(
+                run_live_qa,
+                "_require_slack_personal_token",
+                return_value="xoxp-unit-test",
+            ),
+            patch.object(
+                run_live_qa,
+                "_require_slack_personal_bot_dm_channel",
+                return_value="D0FIXTURE1",
+            ),
+            patch.object(
+                run_live_qa,
+                "_seed_slack_fixture_message",
+                side_effect=fake_seed,
+            ),
+            patch.object(
+                run_live_qa,
+                "_slack_correctness_chat_reply",
+                side_effect=fake_global_chat,
+            ),
+        ):
+            global_result = asyncio.run(
+                run_live_qa.case_qa_10g_slack_last_message_sent_global(
+                    self._dummy_ctx()
+                )
+            )
+
+        self.assertTrue(global_result.success)
+        self.assertEqual(len(global_calls), 1)
+        self.assertEqual(
+            global_calls[0]["prompt"],
+            "What is the exact text of the most recent message I sent in Slack? "
+            f"Include the exact marker {global_calls[0]['answer_marker']} in your answer.",
+        )
+        self.assertNotIn("D0FIXTURE1", global_calls[0]["prompt"])
+        self.assertIsNone(global_calls[0].get("expected_capability"))
+
+    def test_qa_10i_requires_display_name_and_rejects_raw_ids_or_intervention_once(
+        self,
+    ):
+        async def fake_identity(_token):
+            return {"ok": True, "user_id": "W0FIXTURE1"}
+
+        async def fake_display_name(_token, _user_id):
+            return {"ok": True, "display_name": "Canary Person"}
+
+        async def fake_seed(*_args, **_kwargs):
+            return {"ok": True}
+
+        def drive(reply_text: str) -> tuple[run_live_qa.ProbeResult, int]:
+            calls = 0
+
+            async def fake_chat(_ctx, **kwargs):
+                nonlocal calls
+                calls += 1
+                return (
+                    run_live_qa.ProbeResult(
+                        provider="test",
+                        mode=f"live:{kwargs['case_name']}",
+                        success=True,
+                        latency_ms=1,
+                        details={"text_excerpt": reply_text},
+                    ),
+                    reply_text,
+                )
+
+            with (
+                patch.object(
+                    run_live_qa,
+                    "_require_slack_personal_token",
+                    return_value="xoxp-unit-test",
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_require_slack_bot_token",
+                    return_value="xoxb-unit-test",
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_require_slack_personal_bot_dm_channel",
+                    return_value="D0FIXTURE1",
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_slack_auth_identity",
+                    side_effect=fake_identity,
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_slack_display_name",
+                    side_effect=fake_display_name,
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_seed_slack_fixture_message",
+                    side_effect=fake_seed,
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_slack_correctness_chat_reply",
+                    side_effect=fake_chat,
+                ),
+            ):
+                result = asyncio.run(
+                    run_live_qa.case_qa_10i_slack_raw_entity_hygiene(
+                        self._dummy_ctx()
+                    )
+                )
+            return result, calls
+
+        natural, natural_calls = drive("Canary Person should sync the fixture.")
+        raw_id, raw_id_calls = drive(
+            "Canary Person (W0FIXTURE1) should sync the fixture."
+        )
+        intervened, intervention_calls = drive(
+            "Canary Person ([Slack identifier redacted]) should sync the fixture."
+        )
+        missing_name, missing_name_calls = drive("Someone should sync the fixture.")
+
+        self.assertTrue(natural.success)
+        self.assertFalse(raw_id.success)
+        self.assertEqual(raw_id.details["failure_class"], "product")
+        self.assertFalse(intervened.success)
+        self.assertEqual(intervened.details["failure_class"], "model_quality")
+        self.assertFalse(missing_name.success)
+        self.assertEqual(missing_name.details["failure_class"], "product")
+        self.assertEqual(
+            (natural_calls, raw_id_calls, intervention_calls, missing_name_calls),
+            (1, 1, 1, 1),
+            "10I is a one-shot behavioral observation and must never retry",
+        )
+
     def test_qa_10_case_specs_gate_and_run_by_default(self):
         qa_10_cases = [
             "qa_10a_slack_self_attribution",
@@ -4872,6 +5482,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "qa_10e_slack_error_honesty",
             "qa_10f_slack_mention_encoding",
             "qa_10g_slack_last_message_sent",
+            "qa_10g_slack_last_message_sent_global",
             "qa_10h_slack_email_hallucination_guard",
             "qa_10i_slack_raw_entity_hygiene",
         ]
@@ -4880,7 +5491,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "qa_10c_slack_thread_replies",
             "qa_10f_slack_mention_encoding",
             "qa_10g_slack_last_message_sent",
+            "qa_10g_slack_last_message_sent_global",
             "qa_10h_slack_email_hallucination_guard",
+            "qa_10i_slack_raw_entity_hygiene",
+        }
+        behavioral_cases = {
+            "qa_10g_slack_last_message_sent_global",
             "qa_10i_slack_raw_entity_hygiene",
         }
         for case_name in qa_10_cases:
@@ -4903,10 +5519,31 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 f"{case_name}: requires_slack_target must mark exactly the "
                 "cases that seed into / read from the personal↔bot DM",
             )
+            self.assertEqual(
+                spec.tier,
+                "behavioral" if case_name in behavioral_cases else "contract",
+                case_name,
+            )
+            self.assertEqual(
+                spec.blocking,
+                case_name not in behavioral_cases,
+                case_name,
+            )
             self.assertIn(case_name, run_live_qa.QA_SHEET_CASES)
         self.assertEqual(
             [run_live_qa.QA_SHEET_CASES[name]["rows"] for name in qa_10_cases],
-            [["10A"], ["10B"], ["10C"], ["10D"], ["10E"], ["10F"], ["10G"], ["10H"], ["10I"]],
+            [
+                ["10A"],
+                ["10B"],
+                ["10C"],
+                ["10D"],
+                ["10E"],
+                ["10F"],
+                ["10G"],
+                ["10G"],
+                ["10H"],
+                ["10I"],
+            ],
         )
 
     def test_qa_10_cases_pin_their_audited_failure_asserts(self):
@@ -4964,6 +5601,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ),
             run_live_qa.case_qa_10g_slack_last_message_sent: (
                 "LASTSENT_",
+                "slack.get_conversation_history",
+            ),
+            run_live_qa.case_qa_10g_slack_last_message_sent_global: (
+                "LASTSENT_",
             ),
             run_live_qa.case_qa_10h_slack_email_hallucination_guard: (
                 "EMAIL_UNAVAILABLE",
@@ -4973,6 +5614,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "ENTITYMSG_",
                 "_raw_slack_user_ids_in_text",
                 "<@U",
+                "[Slack identifier redacted]",
                 "_name_token_in_text",
             ),
         }
@@ -5026,6 +5668,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             run_live_qa.case_qa_10d_slack_channel_membership,
             run_live_qa.case_qa_10f_slack_mention_encoding,
             run_live_qa.case_qa_10g_slack_last_message_sent,
+            run_live_qa.case_qa_10g_slack_last_message_sent_global,
             run_live_qa.case_qa_10h_slack_email_hallucination_guard,
             run_live_qa.case_qa_10i_slack_raw_entity_hygiene,
         ):
@@ -5037,6 +5680,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     "probe precondition failed: Slack personal token not "
                     "provisioned (AUTH_LIVE_SLACK_ACCESS_TOKEN)",
                     str(result.details.get("error")),
+                    case_fn.__name__,
+                )
+                self.assertEqual(
+                    result.details.get("failure_class"),
+                    "precondition",
                     case_fn.__name__,
                 )
 
@@ -5093,6 +5741,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             run_live_qa.case_qa_10c_slack_thread_replies,
             run_live_qa.case_qa_10f_slack_mention_encoding,
             run_live_qa.case_qa_10g_slack_last_message_sent,
+            run_live_qa.case_qa_10g_slack_last_message_sent_global,
             run_live_qa.case_qa_10h_slack_email_hallucination_guard,
             run_live_qa.case_qa_10i_slack_raw_entity_hygiene,
         ):
@@ -5295,7 +5944,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         selected_cases = run_live_qa._selected_case_names(args)
 
-        self.assertEqual(len(selected_cases), 46)
+        self.assertEqual(len(selected_cases), 47)
         self.assertNotIn("qa_1a_telegram_connect", selected_cases)
         self.assertNotIn("qa_1b_telegram_near_news_chat", selected_cases)
         self.assertNotIn("qa_1c_telegram_near_news_routine", selected_cases)
@@ -5318,6 +5967,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "qa_10e_slack_error_honesty",
             "qa_10f_slack_mention_encoding",
             "qa_10g_slack_last_message_sent",
+            "qa_10g_slack_last_message_sent_global",
             "qa_10h_slack_email_hallucination_guard",
             "qa_10i_slack_raw_entity_hygiene",
         ):
@@ -5351,6 +6001,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         self.assertEqual(len(sharded_cases), len(set(sharded_cases)))
         self.assertEqual(sharded_cases, selected_cases)
+        self.assertIn("qa_10g_slack_last_message_sent", sharded_cases)
+        self.assertIn("qa_10g_slack_last_message_sent_global", sharded_cases)
         # QA 9/10 are promoted: no shard in the matrix is dispatch_only any
         # more, so every shard (qa-9/qa-10 included) runs on the 3-hourly
         # schedule and on a default cases=all dispatch. The resolve-step

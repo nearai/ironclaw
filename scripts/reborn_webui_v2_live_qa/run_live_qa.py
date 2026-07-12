@@ -215,6 +215,14 @@ EXTENSION_INSTALL_CAPABILITY_ID = "builtin.extension_install"
 EXTENSION_ACTIVATE_CAPABILITY_ID = "builtin.extension_activate"
 OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID = "builtin.outbound_delivery_targets_list"
 QA_7C_BUG_LOGGING_SHEET_TITLE = "bug logging Google Sheet"
+SLACK_EXTENSION_REQUIREMENT = {
+    "package_id": "slack",
+    "display_name": "Slack",
+    "required_tools": [
+        "slack.list_conversations",
+        "slack.get_conversation_history",
+    ],
+}
 
 
 def _qa_7c_bug_logger_prompt(
@@ -1272,6 +1280,7 @@ async def _live_chat_case(
     prompt: str,
     marker: str | None,
     required_text: list[str],
+    extensions: list[dict[str, object]] | None = None,
     timeout: float = 120.0,
     extra_details: dict[str, object] | None = None,
     forbidden_text: list[str] | None = None,
@@ -1284,8 +1293,33 @@ async def _live_chat_case(
 
     started = time.monotonic()
     observed: dict[str, Any] = {}
+    if extensions:
+        observed["extensions"] = [
+            str(extension["package_id"]) for extension in extensions
+        ]
 
     async def action(page: object) -> None:
+        if extensions:
+            await page.goto(
+                f"{ctx.base_url}/v2/extensions/registry?token={AUTH_TOKEN}",
+                wait_until="domcontentloaded",
+            )  # type: ignore[attr-defined]
+            await expect(page.locator("body")).to_contain_text(  # type: ignore[attr-defined]
+                "Extensions",
+                timeout=15000,
+            )
+            for extension in extensions:
+                await _ensure_extension_authenticated_on_page(
+                    page,
+                    observed,
+                    package_id=str(extension["package_id"]),
+                    display_name=str(extension["display_name"]),
+                    required_tools=[
+                        str(tool) for tool in extension.get("required_tools", [])
+                    ],
+                    ensure_installed=bool(extension.get("ensure_installed", True)),
+                )
+
         await page.goto(
             f"{ctx.base_url}/v2/?token={AUTH_TOKEN}",
             wait_until="domcontentloaded",
@@ -1455,76 +1489,17 @@ async def _live_chat_with_extensions_case(
     extra_details: dict[str, object] | None = None,
     forbidden_text: list[str] | None = None,
 ) -> ProbeResult:
-    from playwright.async_api import expect
-
-    started = time.monotonic()
-    observed: dict[str, object] = {
-        "marker": marker,
-        "prompt": prompt,
-        "required_text": required_text,
-        "extensions": [extension["package_id"] for extension in extensions],
-        **(extra_details or {}),
-    }
-
-    async def action(page: object) -> None:
-        await page.goto(
-            f"{ctx.base_url}/v2/extensions/registry?token={AUTH_TOKEN}",
-            wait_until="domcontentloaded",
-        )  # type: ignore[attr-defined]
-        await expect(page.locator("body")).to_contain_text("Extensions", timeout=15000)  # type: ignore[attr-defined]
-        for extension in extensions:
-            await _ensure_extension_authenticated_on_page(
-                page,
-                observed,
-                package_id=str(extension["package_id"]),
-                display_name=str(extension["display_name"]),
-                required_tools=[
-                    str(tool) for tool in extension.get("required_tools", [])
-                ],
-                ensure_installed=bool(extension.get("ensure_installed", True)),
-            )
-
-        await page.goto(
-            f"{ctx.base_url}/v2/?token={AUTH_TOKEN}",
-            wait_until="domcontentloaded",
-        )  # type: ignore[attr-defined]
-        if await _dismiss_visible_connect_action(page):
-            observed["connect_action_dismissed_before_submit"] = True
-        composer = page.locator("[data-testid='chat-composer']")  # type: ignore[attr-defined]
-        await expect(composer).to_be_visible(timeout=15000)
-        await composer.fill(prompt)
-        await composer.press("Enter")
-        try:
-            await expect(page.locator("[data-testid='msg-user']").last).to_contain_text(  # type: ignore[attr-defined]
-                prompt[:80],
-                timeout=15000,
-            )
-        except Exception:
-            if not await _dismiss_visible_connect_action(page):
-                raise
-            observed["connect_action_dismissed_after_submit"] = True
-            await composer.fill(prompt)
-            await composer.press("Enter")
-            await expect(page.locator("[data-testid='msg-user']").last).to_contain_text(  # type: ignore[attr-defined]
-                prompt[:80],
-                timeout=15000,
-            )
-        _record_assistant_reply_wait_result(
-            observed,
-            await _wait_for_assistant_reply(
-                page,
-                marker=marker,
-                required_text=required_text,
-                timeout=timeout,
-                semantic_goal=prompt,
-            ),
-        )
-
-    try:
-        await _with_page(ctx.output_dir, case_name, action)
-        return _result(case_name, True, started, observed)
-    except Exception as exc:
-        return _result(case_name, False, started, {"error": _exc_text(exc), **observed})
+    return await _live_chat_case(
+        ctx,
+        case_name=case_name,
+        prompt=prompt,
+        marker=marker,
+        required_text=required_text,
+        extensions=extensions,
+        timeout=timeout,
+        extra_details=extra_details,
+        forbidden_text=forbidden_text,
+    )
 
 
 async def _dismiss_visible_connect_action(page: object) -> bool:
@@ -4842,11 +4817,11 @@ def _gated_case(case_name: str) -> CaseFn:
     return run_gated
 
 
-RAW_SLACK_USER_ID_PATTERN = re.compile(r"\bU[A-Z0-9]{8,}\b")
+RAW_SLACK_USER_ID_PATTERN = re.compile(r"\b[UW][A-Z0-9]{8,}\b")
 
 
 def _raw_slack_user_ids_in_text(text: str) -> list[str]:
-    """Raw Slack user ids (U…) leaked into user-facing text.
+    """Raw Slack user ids (U…/W…) leaked into user-facing text.
 
     Requires at least one digit so all-caps words like UNDERSTAND never
     false-positive; real Slack ids always mix letters and digits.
@@ -5799,6 +5774,7 @@ async def _slack_correctness_chat_reply(
     prompt: str,
     answer_marker: str,
     extra_details: dict[str, object],
+    expected_capability: str | None = None,
     timeout: float = 240.0,
 ) -> tuple[ProbeResult, str]:
     """Chat arm shared by the QA-10 Slack tool-correctness probes.
@@ -5810,12 +5786,24 @@ async def _slack_correctness_chat_reply(
     full text is stripped from persisted details on both paths; a failed chat
     result is ready to return as-is with latency re-anchored to the case start.
     """
+    expected_capabilities = (
+        [expected_capability] if expected_capability is not None else []
+    )
+    statuses_before: dict[str, list[str]] = {}
+    completed_before: dict[str, int] = {}
+    if expected_capability is not None:
+        statuses_before = _capability_run_statuses(
+            ctx.reborn_home,
+            expected_capabilities,
+        )
+        completed_before = _completed_capability_counts(statuses_before)
     chat = await _live_chat_case(
         ctx,
         case_name=case_name,
         prompt=prompt,
         marker=answer_marker,
         required_text=[],
+        extensions=[SLACK_EXTENSION_REQUIREMENT],
         timeout=timeout,
         extra_details=extra_details,
         expose_full_reply_text=True,
@@ -5826,8 +5814,69 @@ async def _slack_correctness_chat_reply(
         or chat.details.get("text_excerpt")
         or ""
     )
+    if not chat.success:
+        failure_category = str(chat.details.get("failure_category") or "")
+        if failure_category.endswith(("_unavailable", "_transient")):
+            chat.details["failure_class"] = "infrastructure"
+        chat.latency_ms = int((time.monotonic() - started) * 1000)
+        return chat, reply_text
+
+    if expected_capability is not None:
+        statuses_after = _capability_run_statuses(
+            ctx.reborn_home,
+            expected_capabilities,
+        )
+        completed_after = _completed_capability_counts(statuses_after)
+        chat.details.update(
+            {
+                "expected_capabilities": expected_capabilities,
+                "capability_statuses_before": statuses_before,
+                "capability_statuses_after": statuses_after,
+                "capability_completed_counts_before": completed_before,
+                "capability_completed_counts_after": completed_after,
+            }
+        )
+        if completed_after[expected_capability] <= completed_before[
+            expected_capability
+        ]:
+            chat.success = False
+            chat.details.update(
+                {
+                    "error": (
+                        "Slack correctness reply did not complete the expected "
+                        f"capability during this chat turn: {expected_capability}"
+                    ),
+                    "failure_class": "model_quality",
+                    "failure_category": "missing_expected_capability",
+                    "failure_status": "failed",
+                }
+            )
     chat.latency_ms = int((time.monotonic() - started) * 1000)
     return chat, reply_text
+
+
+def _slack_correctness_failure_result(
+    case_name: str,
+    started: float,
+    details: dict[str, object],
+    exc: BaseException,
+) -> ProbeResult:
+    error = _exc_text(exc)
+    precondition = error.startswith("probe precondition failed:")
+    return _result(
+        case_name,
+        False,
+        started,
+        {
+            **details,
+            "error": error,
+            "failure_class": "precondition" if precondition else "product",
+            "failure_category": (
+                "invalid_fixture" if precondition else "answer_mismatch"
+            ),
+            "failure_status": "failed",
+        },
+    )
 
 
 async def case_qa_10a_slack_self_attribution(ctx: LiveQaContext) -> ProbeResult:
@@ -5910,8 +5959,11 @@ async def case_qa_10a_slack_self_attribution(ctx: LiveQaContext) -> ProbeResult:
             )
         return _result(case_name, True, started, details)
     except Exception as exc:
-        return _result(
-            case_name, False, started, {**details, "error": _exc_text(exc)}
+        return _slack_correctness_failure_result(
+            case_name,
+            started,
+            details,
+            exc,
         )
 
 
@@ -6000,8 +6052,11 @@ async def case_qa_10b_slack_ooo_status(ctx: LiveQaContext) -> ProbeResult:
             )
         return _result(case_name, True, started, details)
     except Exception as exc:
-        return _result(
-            case_name, False, started, {**details, "error": _exc_text(exc)}
+        return _slack_correctness_failure_result(
+            case_name,
+            started,
+            details,
+            exc,
         )
 
 
@@ -6099,8 +6154,11 @@ async def case_qa_10c_slack_thread_replies(ctx: LiveQaContext) -> ProbeResult:
             )
         return _result(case_name, True, started, details)
     except Exception as exc:
-        return _result(
-            case_name, False, started, {**details, "error": _exc_text(exc)}
+        return _slack_correctness_failure_result(
+            case_name,
+            started,
+            details,
+            exc,
         )
 
 
@@ -6160,6 +6218,7 @@ async def case_qa_10d_slack_channel_membership(ctx: LiveQaContext) -> ProbeResul
             ),
             answer_marker=answer_marker,
             extra_details=details,
+            expected_capability="slack.list_conversations",
         )
         if not chat.success:
             return chat
@@ -6192,8 +6251,11 @@ async def case_qa_10d_slack_channel_membership(ctx: LiveQaContext) -> ProbeResul
             )
         return _result(case_name, True, started, details)
     except Exception as exc:
-        return _result(
-            case_name, False, started, {**details, "error": _exc_text(exc)}
+        return _slack_correctness_failure_result(
+            case_name,
+            started,
+            details,
+            exc,
         )
 
 
@@ -6236,8 +6298,11 @@ async def case_qa_10e_slack_error_honesty(ctx: LiveQaContext) -> ProbeResult:
             )
         return _result(case_name, True, started, details)
     except Exception as exc:
-        return _result(
-            case_name, False, started, {**details, "error": _exc_text(exc)}
+        return _slack_correctness_failure_result(
+            case_name,
+            started,
+            details,
+            exc,
         )
 
 
@@ -6349,28 +6414,81 @@ async def case_qa_10f_slack_mention_encoding(ctx: LiveQaContext) -> ProbeResult:
             )
         return _result(case_name, True, started, details)
     except Exception as exc:
-        return _result(
-            case_name, False, started, {**details, "error": _exc_text(exc)}
+        return _slack_correctness_failure_result(
+            case_name,
+            started,
+            details,
+            exc,
         )
 
 
 async def case_qa_10g_slack_last_message_sent(ctx: LiveQaContext) -> ProbeResult:
-    """Last-sent recall probe: immediately after the user sends a Slack
-    message, "what is the most recent message I sent" must return its exact
-    text.
+    """Conversation-scoped last-sent contract over seeded history.
 
-    Pins the search-lag/self-identity class: the agent either cannot scope
-    the question to "messages I sent" (no self-identity) or leans on
-    search.messages, whose index lags fresh messages by minutes, and reports
-    a stale or wrong message. Semi-behavioral by design — a parallel canary
-    posting as the same personal user can race the seed — but still pinned
-    with an exact per-run nonce.
+    The prompt names the seeded conversation, requires a fresh
+    slack.get_conversation_history call, and verifies the exact per-run nonce.
     """
     case_name = "qa_10g_slack_last_message_sent"
     started = time.monotonic()
     suffix = str(int(time.time() * 1000))
     answer_marker = f"REBORN_QA_10G_LAST_SENT_{suffix}"
     last_sent_marker = f"LASTSENT_{suffix}"
+    details: dict[str, object] = {"last_sent_marker": last_sent_marker}
+    try:
+        personal_token = _require_slack_personal_token(ctx)
+        channel_id = await _require_slack_personal_bot_dm_channel(ctx)
+        await _seed_slack_fixture_message(
+            personal_token,
+            channel_id,
+            last_sent_marker,
+            label=last_sent_marker,
+            actor="personal",
+        )
+        chat, reply_text = await _slack_correctness_chat_reply(
+            ctx,
+            case_name=case_name,
+            started=started,
+            prompt=(
+                "What is the exact text of the most recent message I sent in "
+                f"the Slack conversation with ID {channel_id}? Include the "
+                f"exact marker {answer_marker} in your answer."
+            ),
+            answer_marker=answer_marker,
+            extra_details=details,
+            expected_capability="slack.get_conversation_history",
+        )
+        if not chat.success:
+            return chat
+        details.update(chat.details)
+        if last_sent_marker not in reply_text:
+            raise AssertionError(
+                "agent did not surface the user's most recent sent message "
+                f"(search-lag/self-identity class): reply lacked {last_sent_marker}"
+            )
+        return _result(case_name, True, started, details)
+    except Exception as exc:
+        return _slack_correctness_failure_result(
+            case_name,
+            started,
+            details,
+            exc,
+        )
+
+
+async def case_qa_10g_slack_last_message_sent_global(
+    ctx: LiveQaContext,
+) -> ProbeResult:
+    """Behavioral workspace-global last-sent recall evaluation.
+
+    This preserves the original latest-anywhere product question. Shared
+    account activity and indexed-search freshness can affect the answer, so it
+    remains visible but nonblocking.
+    """
+    case_name = "qa_10g_slack_last_message_sent_global"
+    started = time.monotonic()
+    suffix = str(int(time.time() * 1000))
+    answer_marker = f"REBORN_QA_10G_GLOBAL_LAST_SENT_{suffix}"
+    last_sent_marker = f"LASTSENT_GLOBAL_{suffix}"
     details: dict[str, object] = {"last_sent_marker": last_sent_marker}
     try:
         personal_token = _require_slack_personal_token(ctx)
@@ -6399,13 +6517,16 @@ async def case_qa_10g_slack_last_message_sent(ctx: LiveQaContext) -> ProbeResult
         details.update(chat.details)
         if last_sent_marker not in reply_text:
             raise AssertionError(
-                "agent did not surface the user's most recent sent message "
-                f"(search-lag/self-identity class): reply lacked {last_sent_marker}"
+                "agent did not surface the user's workspace-global most recent "
+                f"sent message: reply lacked {last_sent_marker}"
             )
         return _result(case_name, True, started, details)
     except Exception as exc:
-        return _result(
-            case_name, False, started, {**details, "error": _exc_text(exc)}
+        return _slack_correctness_failure_result(
+            case_name,
+            started,
+            details,
+            exc,
         )
 
 
@@ -6473,8 +6594,11 @@ async def case_qa_10h_slack_email_hallucination_guard(
             )
         return _result(case_name, True, started, details)
     except Exception as exc:
-        return _result(
-            case_name, False, started, {**details, "error": _exc_text(exc)}
+        return _slack_correctness_failure_result(
+            case_name,
+            started,
+            details,
+            exc,
         )
 
 
@@ -6548,9 +6672,9 @@ async def case_qa_10i_slack_raw_entity_hygiene(ctx: LiveQaContext) -> ProbeResul
             details["text_excerpt"] = RAW_SLACK_USER_ID_PATTERN.sub(
                 "U_REDACTED", excerpt
             )
-        if "<@U" in reply_text:
+        if "<@U" in reply_text or "<@W" in reply_text:
             raise AssertionError(
-                "reply leaked encoded Slack mention markup (<@U…>) into "
+                "reply leaked encoded Slack mention markup (<@U…>/<@W…>) into "
                 "user-facing text"
             )
         leaked_ids = _raw_slack_user_ids_in_text(reply_text)
@@ -6562,6 +6686,22 @@ async def case_qa_10i_slack_raw_entity_hygiene(ctx: LiveQaContext) -> ProbeResul
                 f"reply leaked {len(set(leaked_ids))} raw Slack user id(s) "
                 "instead of a display name"
             )
+        if "[Slack identifier redacted]" in reply_text:
+            return _result(
+                case_name,
+                False,
+                started,
+                {
+                    **details,
+                    "error": (
+                        "assistant output required Slack identifier sanitizer "
+                        "intervention instead of rendering the display name"
+                    ),
+                    "failure_class": "model_quality",
+                    "failure_category": "sanitizer_intervention",
+                    "failure_status": "failed",
+                },
+            )
         if not _name_token_in_text(reply_text, display_name):
             raise AssertionError(
                 "reply did not name the mentioned user by any display-name "
@@ -6569,8 +6709,11 @@ async def case_qa_10i_slack_raw_entity_hygiene(ctx: LiveQaContext) -> ProbeResul
             )
         return _result(case_name, True, started, details)
     except Exception as exc:
-        return _result(
-            case_name, False, started, {**details, "error": _exc_text(exc)}
+        return _slack_correctness_failure_result(
+            case_name,
+            started,
+            details,
+            exc,
         )
 
 
@@ -6819,6 +6962,14 @@ CASES: dict[str, CaseSpec] = {
         requires_slack_target=True,
         requires_slack_personal_auth=True,
     ),
+    "qa_10g_slack_last_message_sent_global": CaseSpec(
+        case_qa_10g_slack_last_message_sent_global,
+        tier="behavioral",
+        blocking=False,
+        requires_slack=True,
+        requires_slack_target=True,
+        requires_slack_personal_auth=True,
+    ),
     "qa_10h_slack_email_hallucination_guard": CaseSpec(
         case_qa_10h_slack_email_hallucination_guard,
         requires_slack=True,
@@ -6827,6 +6978,8 @@ CASES: dict[str, CaseSpec] = {
     ),
     "qa_10i_slack_raw_entity_hygiene": CaseSpec(
         case_qa_10i_slack_raw_entity_hygiene,
+        tier="behavioral",
+        blocking=False,
         requires_slack=True,
         requires_slack_target=True,
         requires_slack_personal_auth=True,

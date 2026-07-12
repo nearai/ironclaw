@@ -329,8 +329,16 @@ QA_SHEET_CASES: dict[str, dict[str, object]] = {
     "qa_10g_slack_last_message_sent": {
         "rows": ["10G"],
         "feature": (
-            "Slack last-sent recall: agent retrieves the user's own most "
-            "recent sent message (pins the search-lag/self-identity class)"
+            "Slack conversation-scoped last-sent recall: agent retrieves the "
+            "user's newest message from seeded conversation history"
+        ),
+        "gate": "requires live Slack personal OAuth and personal DM fixture seeding",
+    },
+    "qa_10g_slack_last_message_sent_global": {
+        "rows": ["10G"],
+        "feature": (
+            "Slack workspace-global last-sent recall behavioral evaluation "
+            "(search freshness and shared-account state remain observable)"
         ),
         "gate": "requires live Slack personal OAuth and personal DM fixture seeding",
     },
