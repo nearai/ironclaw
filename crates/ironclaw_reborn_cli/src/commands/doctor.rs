@@ -1,6 +1,7 @@
 use clap::Args;
 use ironclaw_reborn_composition::{
-    RebornRuntimeComponentStatus, reborn_runtime_readiness_snapshot,
+    RebornBuildError, RebornRuntimeComponentStatus, build_reborn_services,
+    reborn_runtime_readiness_snapshot,
 };
 use ironclaw_reborn_config::{RebornConfigFile, RebornDoctorReport};
 
@@ -14,11 +15,23 @@ pub(crate) struct DoctorCommand {
     /// Output as JSON.
     #[arg(long)]
     json: bool,
+
+    /// Open and initialize the configured storage and secrets backends.
+    /// This may create or migrate Reborn-owned local state.
+    #[arg(long)]
+    live: bool,
 }
 
 impl DoctorCommand {
     pub(crate) fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
-        let dto = build_doctor_dto(&context);
+        let mut dto = build_doctor_dto(&context);
+        dto.checks.push(check_llm_readiness(&context));
+        if self.live {
+            dto.checks.extend(check_live_dependencies(&context));
+        } else {
+            dto.checks.extend(skipped_live_dependency_checks());
+        }
+        refresh_summary(&mut dto);
         let mode = if self.json {
             OutputMode::Json
         } else {
@@ -85,6 +98,180 @@ fn build_doctor_dto(context: &RebornCliContext) -> DoctorDto {
     DoctorDto {
         checks,
         summary: DoctorSummary { pass, fail, skip },
+    }
+}
+
+fn refresh_summary(dto: &mut DoctorDto) {
+    let (pass, fail, skip) =
+        dto.checks
+            .iter()
+            .fold((0, 0, 0), |counts, check| match check.outcome {
+                CheckOutcome::Pass => (counts.0 + 1, counts.1, counts.2),
+                CheckOutcome::Fail => (counts.0, counts.1 + 1, counts.2),
+                CheckOutcome::Skip => (counts.0, counts.1, counts.2 + 1),
+            });
+    dto.summary = DoctorSummary { pass, fail, skip };
+}
+
+#[cfg(feature = "root-llm-provider")]
+fn check_llm_readiness(context: &RebornCliContext) -> DoctorCheck {
+    let config_path = context.boot_config().home().config_file_path();
+    let config = match RebornConfigFile::load(&config_path) {
+        Ok(config) => config,
+        Err(error) => {
+            return dependency_check(
+                "llm_provider",
+                CheckOutcome::Fail,
+                format!("cannot resolve provider until config is valid: {error}"),
+            );
+        }
+    };
+    match ironclaw_reborn_composition::resolve_reborn_runtime_llm(
+        context.boot_config(),
+        config.as_ref(),
+    ) {
+        Ok(Some(llm)) => dependency_check(
+            "llm_provider",
+            CheckOutcome::Pass,
+            format!(
+                "{} / {} credentials resolved",
+                llm.provider_id(),
+                llm.model()
+            ),
+        ),
+        Ok(None) => dependency_check(
+            "llm_provider",
+            CheckOutcome::Fail,
+            "no default provider is configured; run `ironclaw-reborn models set-provider`"
+                .to_string(),
+        ),
+        Err(error) => dependency_check(
+            "llm_provider",
+            CheckOutcome::Fail,
+            format!("provider or credentials are not ready: {error}"),
+        ),
+    }
+}
+
+#[cfg(not(feature = "root-llm-provider"))]
+fn check_llm_readiness(_context: &RebornCliContext) -> DoctorCheck {
+    dependency_check(
+        "llm_provider",
+        CheckOutcome::Skip,
+        "root LLM provider support not compiled".to_string(),
+    )
+}
+
+fn skipped_live_dependency_checks() -> Vec<DoctorCheck> {
+    ["storage_backend", "secrets_store"]
+        .into_iter()
+        .map(|name| {
+            dependency_check(
+                name,
+                CheckOutcome::Skip,
+                "not probed (use `doctor --live`)".to_string(),
+            )
+        })
+        .collect()
+}
+
+fn check_live_dependencies(context: &RebornCliContext) -> Vec<DoctorCheck> {
+    let input = match crate::runtime::build_services_input_with_options(
+        context.boot_config(),
+        crate::runtime::RuntimeInputCaller::Run,
+        crate::runtime::RuntimeInputOptions::default(),
+    ) {
+        Ok(input) => input.services_input,
+        Err(error) => {
+            return vec![
+                dependency_check(
+                    "storage_backend",
+                    CheckOutcome::Fail,
+                    format!("runtime storage configuration is not ready: {error}"),
+                ),
+                dependency_check(
+                    "secrets_store",
+                    CheckOutcome::Skip,
+                    "not probed because runtime storage configuration failed".to_string(),
+                ),
+            ];
+        }
+    };
+
+    let result = crate::runtime::block_on_cli(async move {
+        Ok::<_, anyhow::Error>(build_reborn_services(input).await)
+    });
+    match result {
+        Ok(Ok(_services)) => vec![
+            dependency_check(
+                "storage_backend",
+                CheckOutcome::Pass,
+                "opened and initialized through production composition".to_string(),
+            ),
+            dependency_check(
+                "secrets_store",
+                CheckOutcome::Pass,
+                "initialized through production composition".to_string(),
+            ),
+        ],
+        Ok(Err(error)) => classify_live_build_error(error),
+        Err(error) => vec![
+            dependency_check(
+                "storage_backend",
+                CheckOutcome::Fail,
+                format!("dependency probe could not run: {error}"),
+            ),
+            dependency_check(
+                "secrets_store",
+                CheckOutcome::Skip,
+                "not probed because the dependency probe could not run".to_string(),
+            ),
+        ],
+    }
+}
+
+fn classify_live_build_error(error: RebornBuildError) -> Vec<DoctorCheck> {
+    let detail = error.to_string();
+    let secret_failure = matches!(
+        error,
+        RebornBuildError::MissingSecretMasterKey | RebornBuildError::Secret(_)
+    );
+    vec![
+        dependency_check(
+            "storage_backend",
+            if secret_failure {
+                CheckOutcome::Skip
+            } else {
+                CheckOutcome::Fail
+            },
+            if secret_failure {
+                "storage opened far enough to reach secrets initialization".to_string()
+            } else {
+                detail.clone()
+            },
+        ),
+        dependency_check(
+            "secrets_store",
+            if secret_failure {
+                CheckOutcome::Fail
+            } else {
+                CheckOutcome::Skip
+            },
+            if secret_failure {
+                detail
+            } else {
+                "not probed because storage initialization failed".to_string()
+            },
+        ),
+    ]
+}
+
+fn dependency_check(name: &str, outcome: CheckOutcome, detail: String) -> DoctorCheck {
+    DoctorCheck {
+        name: name.to_string(),
+        category: CheckCategory::Dependencies,
+        outcome,
+        detail,
     }
 }
 
@@ -183,6 +370,7 @@ impl Renderable for DoctorDto {
                 current_category = Some(check.category);
                 let label = match check.category {
                     CheckCategory::Core => "Core",
+                    CheckCategory::Dependencies => "Dependencies",
                     CheckCategory::Drivers => "Drivers",
                 };
                 writeln!(w, "  {label}")?;
@@ -235,6 +423,26 @@ mod tests {
                 .iter()
                 .any(|c| c.category == CheckCategory::Drivers)
         );
+    }
+
+    #[test]
+    fn secret_build_failure_is_attributed_to_secrets_store() {
+        let checks = classify_live_build_error(RebornBuildError::MissingSecretMasterKey);
+        assert_eq!(checks[0].name, "storage_backend");
+        assert_eq!(checks[0].outcome, CheckOutcome::Skip);
+        assert_eq!(checks[1].name, "secrets_store");
+        assert_eq!(checks[1].outcome, CheckOutcome::Fail);
+    }
+
+    #[test]
+    fn database_build_failure_is_attributed_to_storage_backend() {
+        let checks = classify_live_build_error(RebornBuildError::MissingDatabaseHandle {
+            backend: "postgres",
+        });
+        assert_eq!(checks[0].name, "storage_backend");
+        assert_eq!(checks[0].outcome, CheckOutcome::Fail);
+        assert_eq!(checks[1].name, "secrets_store");
+        assert_eq!(checks[1].outcome, CheckOutcome::Skip);
     }
 
     #[test]
