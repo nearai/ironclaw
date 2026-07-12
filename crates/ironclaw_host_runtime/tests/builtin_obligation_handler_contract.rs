@@ -1,8 +1,9 @@
+// arch-exempt: large_file, caller-level obligations regression fixture remains co-located with the contract suite, plan #5499
 mod support;
 
 use support::legacy_capability_fixture_to_v2;
 
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicUsize, atomic::Ordering};
 
 use async_trait::async_trait;
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
@@ -21,7 +22,10 @@ use ironclaw_host_runtime::{
     RuntimeCredentialAccountResolver, RuntimeFailureKind,
 };
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
-use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
+use ironclaw_secrets::{
+    InMemorySecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
+    SecretStoreError,
+};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use serde_json::json;
 
@@ -701,6 +705,49 @@ async fn builtin_obligation_handler_leases_consumes_and_stages_secret_once() {
 }
 
 #[tokio::test]
+async fn builtin_obligation_handler_fails_closed_when_secret_disappears_after_preflight() {
+    let secret_store = Arc::new(SecretDisappearsAfterPreflight::new());
+    let handle = SecretHandle::new("api_token").unwrap();
+    let context = execution_context(CapabilitySet::default());
+    secret_store
+        .put(
+            context.resource_scope.clone(),
+            handle.clone(),
+            SecretMaterial::from("runtime-secret"),
+            None,
+        )
+        .await
+        .unwrap();
+    let handler = BuiltinObligationServices::new(
+        Arc::new(InMemoryAuditSink::new()),
+        secret_store.clone(),
+        Arc::new(InMemoryResourceGovernor::new()),
+    )
+    .obligation_handler();
+
+    let err = handler
+        .prepare(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id(),
+            estimate: &ResourceEstimate::default(),
+            obligations: &[Obligation::InjectSecretOnce {
+                handle: handle.clone(),
+            }],
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityObligationError::Failed {
+            kind: CapabilityObligationFailureKind::Secret
+        }
+    ));
+    assert_eq!(secret_store.metadata_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn builtin_obligation_handler_removes_staged_secret_on_abort() {
     let secret_store = Arc::new(InMemorySecretStore::new());
     let governor = Arc::new(InMemoryResourceGovernor::new());
@@ -1276,6 +1323,92 @@ impl RuntimeCredentialAccountResolver for SourceScopedHandleResolver {
             scope: self.source_scope.clone(),
             handle: self.handle.clone(),
         })
+    }
+}
+
+#[derive(Debug)]
+struct SecretDisappearsAfterPreflight {
+    inner: InMemorySecretStore,
+    metadata_calls: AtomicUsize,
+}
+
+impl SecretDisappearsAfterPreflight {
+    fn new() -> Self {
+        Self {
+            inner: InMemorySecretStore::new(),
+            metadata_calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl SecretStore for SecretDisappearsAfterPreflight {
+    async fn put(
+        &self,
+        scope: ResourceScope,
+        handle: SecretHandle,
+        material: SecretMaterial,
+        expires_at: Option<Timestamp>,
+    ) -> Result<SecretMetadata, SecretStoreError> {
+        self.inner.put(scope, handle, material, expires_at).await
+    }
+
+    async fn metadata(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<Option<SecretMetadata>, SecretStoreError> {
+        self.metadata_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.metadata(scope, handle).await
+    }
+
+    async fn metadata_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
+        self.inner.metadata_for_scope(scope).await
+    }
+
+    async fn delete(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<bool, SecretStoreError> {
+        self.inner.delete(scope, handle).await
+    }
+
+    async fn lease_once(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<SecretLease, SecretStoreError> {
+        if self.metadata_calls.load(Ordering::SeqCst) > 0 {
+            self.inner.delete(scope, handle).await?;
+        }
+        self.inner.lease_once(scope, handle).await
+    }
+
+    async fn consume(
+        &self,
+        scope: &ResourceScope,
+        lease_id: SecretLeaseId,
+    ) -> Result<SecretMaterial, SecretStoreError> {
+        self.inner.consume(scope, lease_id).await
+    }
+
+    async fn revoke(
+        &self,
+        scope: &ResourceScope,
+        lease_id: SecretLeaseId,
+    ) -> Result<SecretLease, SecretStoreError> {
+        self.inner.revoke(scope, lease_id).await
+    }
+
+    async fn leases_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<SecretLease>, SecretStoreError> {
+        self.inner.leases_for_scope(scope).await
     }
 }
 

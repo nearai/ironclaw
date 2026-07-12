@@ -66,6 +66,11 @@ on:
         type: string
         required: false
         default: ""
+      trigger_actor:
+        description: "Optional GitHub login of the maintainer who authorized a ChatOps PR live-QA run."
+        type: string
+        required: false
+        default: ""
       use_target_harness:
         description: "Use target_ref's Reborn WebUI v2 live QA harness instead of restoring the canonical main harness."
         type: boolean
@@ -555,12 +560,17 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - name: Require trusted approval for the exact PR head
+      - name: Require trusted approval or maintainer-triggered PR live QA
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           TARGET_PR: ${{ inputs.target_pr }}
           TARGET_REF: ${{ inputs.target_ref }}
+          # A workflow_dispatch created by Live Canary Command is attributed to
+          # github-actions[bot]. The command verifies this original actor has
+          # repository write access before dispatching; direct dispatches use
+          # GitHub's real triggering actor instead.
+          TRIGGER_ACTOR: ${{ inputs.trigger_actor || github.triggering_actor }}
         run: |
           set -euo pipefail
           if ! [[ "${TARGET_PR}" =~ ^[0-9]+$ && "${TARGET_REF}" =~ ^[0-9a-f]{40}$ ]]; then
@@ -591,11 +601,18 @@ jobs:
               --jq 'sort_by(.submitted_at) | group_by(.user.login) | map(last) | .[] | select(.state == "APPROVED") | [.user.login, .commit_id] | @tsv'
           )
 
+          if [[ -z "${trusted_approval}" && "${TRIGGER_ACTOR}" =~ ^[A-Za-z0-9-]+$ ]]; then
+            permission="$(gh api "repos/${REPO}/collaborators/${TRIGGER_ACTOR}/permission" --jq '.permission')"
+            if [[ "${permission}" == "admin" || "${permission}" == "maintain" || "${permission}" == "write" ]]; then
+              trusted_approval="${TRIGGER_ACTOR} (authorized trigger)"
+            fi
+          fi
+
           if [[ -z "${trusted_approval}" ]]; then
-            echo "::error::PR #${TARGET_PR} head ${TARGET_REF} requires an approving review from a collaborator with write access before live secrets can be used."
+            echo "::error::PR #${TARGET_PR} head ${TARGET_REF} requires either an approving review from a collaborator with write access or a trigger by a collaborator with write access before live secrets can be used."
             exit 1
           fi
-          echo "Trusted approval for ${TARGET_REF} was provided by ${trusted_approval}."
+          echo "Trusted authorization for ${TARGET_REF} was provided by ${trusted_approval}."
 
   prepare-reborn-webui-v2-live-qa:
     name: Prepare Reborn WebUI v2 live QA binary
@@ -778,7 +795,7 @@ jobs:
           )
           jq -n \
             --arg product_ref "${TARGET_REF}" \
-            --arg features "webui-v2-beta,slack-v2-host-beta" \
+            --argjson features '["slack-v2-host-beta","webui-v2-beta"]' \
             '{format_version: 1, product_ref: $product_ref, features: $features}' \
             > artifacts/prepared-reborn-webui-v2-binary/manifest.json
           echo "source=canary-fallback" >> "${GITHUB_OUTPUT}"
@@ -795,8 +812,12 @@ jobs:
     name: Reborn WebUI v2 Live QA (${{ matrix.shard_name }})
     needs: prepare-reborn-webui-v2-live-qa
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 */3 * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'reborn-webui-v2-live-qa'))
+      always() &&
+      needs.prepare-reborn-webui-v2-live-qa.result == 'success' &&
+      (
+        github.event_name == 'schedule' ||
+        (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'reborn-webui-v2-live-qa'))
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
@@ -1015,12 +1036,10 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${TARGET_REF}"
-          (cd .live-qa-binary && sha256sum --check ironclaw-reborn.tar.gz.sha256)
-          jq -e \
-            --arg product_ref "${TARGET_REF}" \
-            --arg features "webui-v2-beta,slack-v2-host-beta" \
-            '.format_version == 1 and .product_ref == $product_ref and .features == $features' \
-            .live-qa-binary/manifest.json > /dev/null
+          python3 scripts/live-canary/validate_reborn_binary_artifact.py \
+            .live-qa-binary \
+            "${TARGET_REF}" \
+            "webui-v2-beta,slack-v2-host-beta"
           mkdir -p target/debug
           tar -C target/debug -xzf .live-qa-binary/ironclaw-reborn.tar.gz
           chmod 755 target/debug/ironclaw-reborn

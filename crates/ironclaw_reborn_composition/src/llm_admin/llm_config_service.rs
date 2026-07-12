@@ -530,6 +530,27 @@ impl LlmConfigService for RebornLlmConfigService {
         provider_id: String,
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
         let id = validate_provider_id(&provider_id)?;
+        // Fail closed: drop the stored key *before* removing the provider
+        // definition. `keys.delete` is idempotent, so if it fails we return an
+        // error with the definition still present — the operation stays
+        // retriable and we never report deletion success while a secret is
+        // orphaned. Reporting success on a swallowed key-cleanup failure would
+        // retain an API key past the point the UI claims cleanup completed.
+        self.keys.delete(&id).await.map_err(|error| {
+            match error {
+                crate::llm_admin::llm_key_store::LlmKeyStoreError::Store(store_error) => {
+                    tracing::error!(
+                        provider_id = %id,
+                        secret_store_reason = store_error.stable_reason(),
+                        "LLM provider delete: key cleanup failed"
+                    );
+                }
+                other => {
+                    tracing::error!(provider_id = %id, %other, "LLM provider delete: key cleanup failed");
+                }
+            }
+            LlmConfigServiceError::Unavailable
+        })?;
         let removed = self
             .repo
             .delete_async(&id)
@@ -538,8 +559,6 @@ impl LlmConfigService for RebornLlmConfigService {
         if !removed {
             return Err(LlmConfigServiceError::NotFound);
         }
-        // Best-effort: drop any stored key for the deleted provider.
-        let _ = self.keys.delete(&id).await;
 
         self.refresh_running_provider().await;
         self.snapshot(caller).await
@@ -1292,6 +1311,90 @@ mod tests {
         }
     }
 
+    /// SecretStore whose `delete` always fails; every other operation delegates
+    /// to an in-memory store. Used to prove provider deletion fails closed when
+    /// the stored key cannot be removed.
+    struct DeleteUnavailableSecretStore {
+        inner: InMemorySecretStore,
+    }
+
+    impl DeleteUnavailableSecretStore {
+        fn new() -> Self {
+            Self {
+                inner: InMemorySecretStore::new(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SecretStore for DeleteUnavailableSecretStore {
+        async fn put(
+            &self,
+            scope: ResourceScope,
+            handle: SecretHandle,
+            material: SecretMaterial,
+            expires_at: Option<ironclaw_host_api::Timestamp>,
+        ) -> Result<SecretMetadata, SecretStoreError> {
+            self.inner.put(scope, handle, material, expires_at).await
+        }
+
+        async fn metadata(
+            &self,
+            scope: &ResourceScope,
+            handle: &SecretHandle,
+        ) -> Result<Option<SecretMetadata>, SecretStoreError> {
+            self.inner.metadata(scope, handle).await
+        }
+
+        async fn metadata_for_scope(
+            &self,
+            scope: &ResourceScope,
+        ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
+            self.inner.metadata_for_scope(scope).await
+        }
+
+        async fn delete(
+            &self,
+            _scope: &ResourceScope,
+            _handle: &SecretHandle,
+        ) -> Result<bool, SecretStoreError> {
+            Err(SecretStoreError::StoreUnavailable {
+                reason: "secret delete unavailable".to_string(),
+            })
+        }
+
+        async fn lease_once(
+            &self,
+            scope: &ResourceScope,
+            handle: &SecretHandle,
+        ) -> Result<SecretLease, SecretStoreError> {
+            self.inner.lease_once(scope, handle).await
+        }
+
+        async fn consume(
+            &self,
+            scope: &ResourceScope,
+            lease_id: SecretLeaseId,
+        ) -> Result<SecretMaterial, SecretStoreError> {
+            self.inner.consume(scope, lease_id).await
+        }
+
+        async fn revoke(
+            &self,
+            scope: &ResourceScope,
+            lease_id: SecretLeaseId,
+        ) -> Result<SecretLease, SecretStoreError> {
+            self.inner.revoke(scope, lease_id).await
+        }
+
+        async fn leases_for_scope(
+            &self,
+            scope: &ResourceScope,
+        ) -> Result<Vec<SecretLease>, SecretStoreError> {
+            self.inner.leases_for_scope(scope).await
+        }
+    }
+
     fn caller() -> WebUiAuthenticatedCaller {
         WebUiAuthenticatedCaller::new(
             TenantId::new("tenant-alpha").expect("tenant"),
@@ -1608,6 +1711,47 @@ mod tests {
                 .expose_secret(),
             "sk-original",
             "masked sentinel must preserve the existing stored key"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_provider_fails_closed_when_key_cleanup_fails() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        let boot = boot_for_home(&reborn_home);
+        let keys = LlmKeyStore::new(Arc::new(DeleteUnavailableSecretStore::new()));
+        let service = RebornLlmConfigService::new(boot.clone(), keys.clone());
+
+        service
+            .upsert_provider(caller(), upsert_request("acme", Some("sk-original"), true))
+            .await
+            .expect("upsert with key");
+        assert!(keys.exists("acme").await.expect("exists"));
+
+        // Key cleanup fails, so deletion must fail closed rather than report
+        // success while the stored secret is orphaned.
+        let err = service
+            .delete_provider(caller(), "acme".to_string())
+            .await
+            .expect_err("delete must fail when key cleanup fails");
+        assert!(matches!(err, LlmConfigServiceError::Unavailable));
+
+        // The provider definition stays present so the operation is retriable,
+        // and the key was never left orphaned behind a deleted definition.
+        let overlay = ProviderRepo::new(boot.home().providers_file_path())
+            .load()
+            .expect("load overlay");
+        assert_eq!(
+            overlay
+                .iter()
+                .filter(|provider| provider.id == "acme")
+                .count(),
+            1,
+            "provider definition must survive a failed key cleanup"
+        );
+        assert!(
+            keys.exists("acme").await.expect("exists"),
+            "stored key must remain until it can be deleted"
         );
     }
 

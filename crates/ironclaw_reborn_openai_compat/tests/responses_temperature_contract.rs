@@ -1,3 +1,5 @@
+#![cfg(feature = "openai-compat-beta")]
+
 //! Caller-level regression tests for per-request `temperature` on the
 //! Responses API (PR #3641, serrrfirat's Medium-severity follow-up).
 //!

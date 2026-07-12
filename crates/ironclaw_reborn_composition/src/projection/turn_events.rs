@@ -1028,7 +1028,7 @@ pub(super) fn bounded_failure_explanation(content: &str) -> Option<String> {
     (!truncated.is_empty()).then_some(truncated)
 }
 
-fn turn_status_wire(status: TurnStatus) -> &'static str {
+pub(super) fn turn_status_wire(status: TurnStatus) -> &'static str {
     match status {
         TurnStatus::Queued => "queued",
         TurnStatus::Running => "running",

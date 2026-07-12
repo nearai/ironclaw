@@ -4732,10 +4732,23 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIn("approve-reborn-webui-v2-pr-live-qa:", workflow)
         self.assertIn("environment: reborn-live-canary-pr", workflow)
         self.assertIn(
-            "requires an approving review from a collaborator with write access",
+            "requires either an approving review from a collaborator with write access or a trigger by a collaborator with write access",
             workflow,
         )
+        self.assertIn("trigger_actor:", workflow)
+        self.assertIn(
+            "inputs.trigger_actor || github.triggering_actor",
+            workflow,
+        )
+        self.assertIn("(authorized trigger)", workflow)
         self.assertIn("needs: prepare-reborn-webui-v2-live-qa", match.group("body"))
+        self.assertIn("always() &&", match.group("body"))
+        self.assertIn(
+            "needs.prepare-reborn-webui-v2-live-qa.result == 'success'",
+            match.group("body"),
+        )
+        self.assertIn("github.event_name == 'schedule'", match.group("body"))
+        self.assertNotIn("github.event.schedule ==", match.group("body"))
         self.assertIn(
             "ref: ${{ needs.prepare-reborn-webui-v2-live-qa.outputs.checkout_ref }}",
             match.group("body"),
@@ -4758,6 +4771,14 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIn("Build fallback Reborn WebUI v2 binary once", prepare_body)
         self.assertIn("if ! (", prepare_body)
         self.assertIn("validate_reborn_binary_artifact.py", prepare_body)
+        self.assertIn(
+            "--features webui-v2-beta,slack-v2-host-beta",
+            prepare_body,
+        )
+        self.assertIn(
+            "webui-v2-beta,slack-v2-host-beta",
+            prepare_body,
+        )
         self.assertIn("using the canary fallback build", prepare_body)
         self.assertIn("prepared-reborn-webui-v2-binary-${{ steps.target.outputs.checkout_ref }}", prepare_body)
         self.assertIn("path: artifacts/prepared-reborn-webui-v2-binary/", prepare_body)
@@ -4771,7 +4792,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             reborn_e2e,
         )
         self.assertIn(
-            "--features webui-v2-beta,slack-v2-host-beta",
+            "--features openai-compat-beta,slack-v2-host-beta",
+            reborn_e2e,
+        )
+        self.assertIn(
+            '["openai-compat-beta","slack-v2-host-beta","webui-v2-beta"]',
             reborn_e2e,
         )
         self.assertIn(
@@ -4785,6 +4810,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         command_workflow = command_workflow_path.read_text(encoding="utf-8")
         self.assertIn('-f target_ref="$HEAD_SHA"', command_workflow)
         self.assertIn('-f target_pr="$PR"', command_workflow)
+        self.assertIn('TRIGGER_ACTOR: ${{ github.event.comment.user.login }}', command_workflow)
+        self.assertIn('-f trigger_actor="$TRIGGER_ACTOR"', command_workflow)
 
     def test_case_manifest_distinguishes_targeted_from_placeholder_gates(self):
         with tempfile.TemporaryDirectory() as tmpdir:

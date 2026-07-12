@@ -49,6 +49,7 @@ pub const WEBUI_V2_ROUTE_LIST_CONNECTABLE_CHANNELS: &str = "webui.v2.list_connec
 pub const WEBUI_V2_ROUTE_LIST_EXTENSIONS: &str = "webui.v2.list_extensions";
 pub const WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY: &str = "webui.v2.list_extension_registry";
 pub const WEBUI_V2_ROUTE_INSTALL_EXTENSION: &str = "webui.v2.install_extension";
+pub const WEBUI_V2_ROUTE_IMPORT_EXTENSION: &str = "webui.v2.import_extension";
 pub const WEBUI_V2_ROUTE_ACTIVATE_EXTENSION: &str = "webui.v2.activate_extension";
 pub const WEBUI_V2_ROUTE_REMOVE_EXTENSION: &str = "webui.v2.remove_extension";
 pub const WEBUI_V2_ROUTE_GET_EXTENSION_SETUP: &str = "webui.v2.get_extension_setup";
@@ -153,6 +154,7 @@ pub const WEBUI_V2_PATTERN_LIST_CONNECTABLE_CHANNELS: &str = "/api/webchat/v2/ch
 pub const WEBUI_V2_PATTERN_LIST_EXTENSIONS: &str = "/api/webchat/v2/extensions";
 pub const WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY: &str = "/api/webchat/v2/extensions/registry";
 pub const WEBUI_V2_PATTERN_INSTALL_EXTENSION: &str = "/api/webchat/v2/extensions/install";
+pub const WEBUI_V2_PATTERN_IMPORT_EXTENSION: &str = "/api/webchat/v2/extensions/import";
 pub const WEBUI_V2_PATTERN_ACTIVATE_EXTENSION: &str =
     "/api/webchat/v2/extensions/{package_id}/activate";
 pub const WEBUI_V2_PATTERN_REMOVE_EXTENSION: &str =
@@ -241,6 +243,7 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         list_extensions_descriptor(),
         list_extension_registry_descriptor(),
         install_extension_descriptor(),
+        import_extension_descriptor(),
         activate_extension_descriptor(),
         remove_extension_descriptor(),
         get_extension_setup_descriptor(),
@@ -342,6 +345,12 @@ pub fn is_webui_v2_operator_webui_config_route_id(route_id: &str) -> bool {
                 | WEBUI_V2_ROUTE_OPERATOR_STATUS
                 | WEBUI_V2_ROUTE_OPERATOR_LOGS
                 | WEBUI_V2_ROUTE_OPERATOR_SERVICE_LIFECYCLE
+                // The zip-upload import route is admin-only (#5499): classifying
+                // it here makes composition strip it from deployments without an
+                // operator surface and pre-gate non-operator callers before the
+                // request body is buffered, instead of relying on the
+                // handler-level capability check alone.
+                | WEBUI_V2_ROUTE_IMPORT_EXTENSION
         )
 }
 
@@ -1062,6 +1071,22 @@ fn install_extension_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_PATTERN_INSTALL_EXTENSION,
         mutation_policy(
             body_limit_kib(16),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+/// `POST /api/webchat/v2/extensions/import` — admin uploads a standalone tool
+/// bundle (zip). 8 MiB cap covers a WASM module plus manifest/schemas/prompts.
+fn import_extension_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_IMPORT_EXTENSION,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_IMPORT_EXTENSION,
+        mutation_policy(
+            body_limit_kib(8192),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
             AllowedEffectPath::ProductWorkflow,

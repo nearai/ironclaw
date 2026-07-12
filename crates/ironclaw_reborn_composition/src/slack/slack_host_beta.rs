@@ -306,6 +306,7 @@ fn slack_outbound_delivery_target_provider_key(config: &SlackHostBetaConfig) -> 
     let mut suffix = String::with_capacity(64);
     for byte in digest {
         use std::fmt::Write as _;
+        #[allow(clippy::let_underscore_must_use)] // writing to a String is infallible
         let _ = write!(&mut suffix, "{byte:02x}");
     }
     format!("{SLACK_OUTBOUND_PROVIDER_KEY_PREFIX}:{suffix}")
@@ -1367,6 +1368,7 @@ mod tests {
     use ironclaw_secrets::InMemorySecretStore;
     use ironclaw_slack_v2_adapter::SLACK_USER_ACTOR_KIND;
     use ironclaw_threads::{ListThreadsForScopeRequest, ThreadHistoryRequest, ThreadScope};
+    use ironclaw_triggers::TriggerRunHistoryStatus;
     use ironclaw_turns::{
         GetRunStateRequest, ReplyTargetBindingRef, TurnCoordinator, TurnRunId, TurnScope,
         TurnStatus, run_profile::LoopCapabilityPort,
@@ -1409,6 +1411,41 @@ mod tests {
     const SECRET: &str = "host-signing-secret";
 
     type HmacSha256 = Hmac<sha2::Sha256>;
+
+    /// A persisted run id proves acceptance even if that run later failed;
+    /// `Error` without a run id means submission failed before acceptance.
+    fn accepted_trigger_run_id(
+        run_id: Option<TurnRunId>,
+        status: Option<TriggerRunHistoryStatus>,
+    ) -> Option<TurnRunId> {
+        match (run_id, status) {
+            (Some(run_id), _) => Some(run_id),
+            (None, Some(TriggerRunHistoryStatus::Error)) => {
+                panic!("trigger run failed before acceptance")
+            }
+            (None, _) => None,
+        }
+    }
+
+    #[test]
+    fn accepted_trigger_run_id_classifies_persisted_states() {
+        let run_id = TurnRunId::new();
+        assert_eq!(
+            accepted_trigger_run_id(Some(run_id), Some(TriggerRunHistoryStatus::Error)),
+            Some(run_id)
+        );
+        assert_eq!(
+            accepted_trigger_run_id(None, Some(TriggerRunHistoryStatus::Running)),
+            None
+        );
+        assert_eq!(accepted_trigger_run_id(None, None), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "trigger run failed before acceptance")]
+    fn accepted_trigger_run_id_rejects_pre_acceptance_error() {
+        accepted_trigger_run_id(None, Some(TriggerRunHistoryStatus::Error));
+    }
 
     struct OperatorTokenAuthenticator;
 
@@ -4737,6 +4774,10 @@ mod tests {
     // then assert that a `TriggeredRunDeliveryRecord` was written to the
     // host-state filesystem via the production hook → driver path.
 
+    const TRIGGER_HOOK_E2E_FIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+    const TRIGGER_HOOK_E2E_DELIVERY_TIMEOUT: std::time::Duration =
+        std::time::Duration::from_secs(30);
+
     async fn runtime_with_trigger_poller() -> (RebornRuntime, tempfile::TempDir) {
         use ironclaw_triggers::TriggerPollerWorkerConfig;
         let root = tempfile::tempdir().expect("tempdir");
@@ -4879,23 +4920,28 @@ mod tests {
         .await
         .expect("upsert trigger record");
 
-        // Wait for the poller to fire the trigger.  `mark_fire_accepted` sets
-        // both `last_fired_slot` and `active_run_ref` atomically, so if we see
-        // `last_fired_slot` we can also safely read the run_id.
-        // Generous deadline: the fire normally lands in ~1-2 s, but this rides
-        // a real poller on shared CI runners (observed >15 s under load); the
-        // extra budget is only ever spent on failure.
-        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        // Wait for the poller to persist an accepted run. `active_run_ref` is
+        // cleared when a fast run completes, so read the durable run-history
+        // row instead of racing that transient field.
+        // Keep this budget generous: under `cargo llvm-cov --all-targets`, this
+        // E2E runs alongside many instrumented async tests, so the background
+        // trigger poller can be scheduled much later than in a focused test.
+        let deadline = Instant::now() + TRIGGER_HOOK_E2E_FIRE_TIMEOUT;
         let mut fired_run_id = None;
+        let mut last_run_history = None;
         while Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let current = repo
-                .get_trigger(tenant_id.clone(), trigger_id)
+            let run_history = repo
+                .list_trigger_run_history(tenant_id.clone(), trigger_id, 1)
                 .await
-                .expect("get_trigger")
-                .expect("record present");
-            if current.last_fired_slot.is_some() {
-                fired_run_id = current.active_run_ref;
+                .expect("list trigger run history");
+            last_run_history = Some(run_history);
+            let latest_run = last_run_history.as_ref().and_then(|runs| runs.first());
+            if let Some(run_id) = accepted_trigger_run_id(
+                latest_run.and_then(|run| run.run_id),
+                latest_run.map(|run| run.status),
+            ) {
+                fired_run_id = Some(run_id);
                 break;
             }
         }
@@ -4916,7 +4962,7 @@ mod tests {
         // wait above.
         let mut delivery_record = None;
         if let Some(run_id) = fired_run_id {
-            let delivery_deadline = Instant::now() + std::time::Duration::from_secs(30);
+            let delivery_deadline = Instant::now() + TRIGGER_HOOK_E2E_DELIVERY_TIMEOUT;
             while Instant::now() < delivery_deadline {
                 if let Ok(Some(rec)) = delivery_store.load_triggered_run_delivery(run_id).await {
                     delivery_record = Some(rec);
@@ -4928,7 +4974,8 @@ mod tests {
 
         assert!(
             fired_run_id.is_some(),
-            "trigger did not fire within 60 s — hook wiring e2e stalled"
+            "trigger did not fire within {:?} — hook wiring e2e stalled; last_run_history={last_run_history:?}",
+            TRIGGER_HOOK_E2E_FIRE_TIMEOUT
         );
         assert!(
             delivery_record.is_some(),

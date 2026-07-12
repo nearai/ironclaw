@@ -862,6 +862,10 @@ registerPack("ja", {
   "ext.registry.emptyDesc": "利用可能な拡張機能はすべてインストール済みか、レジストリが設定されていません。",
   "ext.registry.availableTitle": "利用可能な拡張機能",
   "ext.registry.noMatch": "フィルターに一致する拡張機能はありません。",
+  "ext.registry.import": "インポート",
+  "ext.registry.importing": "インポート中…",
+  "ext.registry.importSuccess": "ツールをインポートしました — レジストリからインストールしてください。",
+  "ext.registry.importFailed": "インポートに失敗しました",
 
   // Chat — history
   "chat.history.loading": "読み込み中...",
@@ -1208,6 +1212,8 @@ registerPack("ja", {
   "extensions.reconfigure": "再設定",
   "extensions.configureName": "{name} を設定します",
   "extensions.allInstalled": "インストール済み",
+  "extensions.scope.shared": "共有",
+  "extensions.scope.private": "自分のもの",
   "mcp.installed": "インストール済みの MCP サーバー",
   "extensions.oneCapability": "1 機能",
   "extensions.pluralCapabilities": "{count} 機能",

@@ -245,9 +245,12 @@ impl SlackChannelSetupActivation for DynamicSlackChannelSetupActivation {
     ) -> Result<(), SlackChannelSetupActivationError> {
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack_bot")
             .map_err(slack_setup_activation_error)?;
+        // Slack is a tenant-shared channel; host setup activates it as the
+        // tenant operator so it operates the shared install (#5459 P1).
+        let caller = self.extension_management.tenant_operator_user_id().clone();
         let projection = self
             .extension_management
-            .project(package_ref.clone())
+            .project(package_ref.clone(), &caller)
             .await
             .map_err(slack_setup_activation_error)?;
         if projection.phase == LifecyclePhase::Discovered {
@@ -260,7 +263,7 @@ impl SlackChannelSetupActivation for DynamicSlackChannelSetupActivation {
         // activate path (WebUI activateExtension after the connect flow),
         // which routes through activate_with_credential_gate.
         self.extension_management
-            .activate(package_ref, ExtensionActivationMode::Static)
+            .activate(package_ref, ExtensionActivationMode::Static, &caller)
             .await
             .map_err(slack_setup_activation_error)?;
         Ok(())
@@ -310,6 +313,7 @@ fn slack_dynamic_outbound_delivery_target_provider_key(
     let mut suffix = String::with_capacity(64);
     for byte in digest {
         use std::fmt::Write as _;
+        #[allow(clippy::let_underscore_must_use)] // writing to a String is infallible
         let _ = write!(&mut suffix, "{byte:02x}");
     }
     format!("slack-host-beta-runtime-setup:{suffix}")

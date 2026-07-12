@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ascii-renderer.draw input",
+  "type": "object",
+  "properties": {
+    "subject": {
+      "type": "string",
+      "description": "Which drawing to render: cat, dog, or robot. Unknown or missing subjects fall back to robot."
+    }
+  },
+  "additionalProperties": false
+}

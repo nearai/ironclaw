@@ -155,6 +155,26 @@ pub fn resolve_llm_selection_against_catalog(
     resolve_against_registry(selection, &registry)
 }
 
+/// Validate provider-overlay bytes with the same typed definitions and
+/// Reborn-specific catalog checks used by runtime composition.
+#[derive(Debug, thiserror::Error)]
+pub enum ProviderCatalogValidationError {
+    #[error("invalid provider catalog JSON: {0}")]
+    Parse(#[from] serde_json::Error),
+    #[error(transparent)]
+    Invalid(#[from] RebornLlmCatalogError),
+}
+
+pub fn validate_reborn_provider_catalog_contents(
+    contents: &str,
+) -> Result<(), ProviderCatalogValidationError> {
+    let definitions =
+        serde_json::from_str::<Vec<ironclaw_llm::registry::ProviderDefinition>>(contents)?;
+    let registry = ProviderRegistry::new(definitions);
+    validate_catalog(&registry)?;
+    Ok(())
+}
+
 /// Resolve a selection against a pre-built registry. Useful in tests
 /// where a synthetic registry can be assembled without touching the
 /// filesystem.
