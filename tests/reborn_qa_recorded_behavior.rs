@@ -118,6 +118,10 @@ const CONNECT_GMAIL: QaPhrase = QaPhrase {
     phrase: "connect to Gmail",
 };
 
+const SLACK_CHANNEL_MEMBERSHIP_FIXTURE: &str = "slack_channel_membership";
+const SLACK_RECENT_MESSAGE_FIXTURE: &str = "slack_recent_message";
+const SLACK_ENTITY_HYGIENE_FIXTURE: &str = "slack_entity_hygiene";
+
 // --- Tier 1: recorders (live API, manual) ----------------------------------
 
 macro_rules! recorder_test {
@@ -167,6 +171,15 @@ fn assert_tool_called_with(trace: &LlmTrace, tool: &str, argument_fragments: &[&
         "expected a recorded {tool} call with arguments containing {argument_fragments:?}; \
          recorded calls: {calls:#?}"
     );
+}
+
+fn assert_tool_sequence(trace: &LlmTrace, expected: &[&str]) {
+    let calls = recorded_tool_calls(trace);
+    let actual = calls
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected, "recorded tool sequence changed");
 }
 
 fn assert_routine_contract(case: &QaPhrase, cron_fragment: &str) {
@@ -236,6 +249,70 @@ async fn contract_connect_gmail_routes_through_extension_tools() {
     let gmail = load_qa_trace(CONNECT_GMAIL.fixture);
     assert_tool_called_with(&gmail, "builtin.extension_install", &["gmail"]);
     assert_tool_called_with(&gmail, "builtin.extension_activate", &["gmail"]);
+}
+
+#[tokio::test]
+async fn contract_slack_channel_membership_lists_joined_conversations() {
+    let trace = load_qa_trace(SLACK_CHANNEL_MEMBERSHIP_FIXTURE);
+    assert_tool_sequence(
+        &trace,
+        &[
+            "builtin.extension_search",
+            "builtin.extension_install",
+            "builtin.extension_activate",
+            "slack.list_conversations",
+        ],
+    );
+}
+
+#[tokio::test]
+async fn contract_slack_recent_message_reads_the_synthetic_conversation() {
+    let trace = load_qa_trace(SLACK_RECENT_MESSAGE_FIXTURE);
+    assert_tool_sequence(
+        &trace,
+        &[
+            "builtin.extension_search",
+            "builtin.extension_install",
+            "builtin.extension_activate",
+            "slack.whoami",
+            "slack.search_messages",
+            "slack.get_conversation_history",
+        ],
+    );
+    assert_tool_called_with(&trace, "slack.get_conversation_history", &["D0CANARY"]);
+}
+
+#[tokio::test]
+async fn contract_slack_entity_hygiene_humanizes_the_chained_user_id() {
+    let trace = load_qa_trace(SLACK_ENTITY_HYGIENE_FIXTURE);
+    assert_tool_sequence(
+        &trace,
+        &[
+            "builtin.outbound_delivery_targets_list",
+            "builtin.extension_search",
+            "builtin.extension_activate",
+            "builtin.extension_install",
+            "builtin.extension_activate",
+            "slack.search_messages",
+            "slack.search_messages",
+            "slack.get_user_info",
+        ],
+    );
+    assert_tool_called_with(&trace, "slack.get_user_info", &["U0CANARY"]);
+
+    let reply = final_text_reply(&trace).expect("entity-hygiene fixture should end in text");
+    assert!(
+        reply.ends_with("Canary User"),
+        "entity-hygiene reply should end with the synthetic display name; reply: {reply:?}"
+    );
+    assert!(
+        !reply.contains("U0CANARY"),
+        "entity-hygiene reply leaked the synthetic raw user id: {reply:?}"
+    );
+    assert!(
+        !reply.contains("D0CANARY"),
+        "entity-hygiene reply leaked the synthetic raw conversation id: {reply:?}"
+    );
 }
 
 // --- Tier 3: runtime replay (hermetic) ---------------------------------------
