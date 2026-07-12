@@ -546,7 +546,7 @@ impl RebornIntegrationHarnessBuilder {
 /// the real decorator chain. See module docs.
 pub struct RebornIntegrationHarness {
     pub(crate) ingress: RebornTestIngress,
-    pub(crate) workflow: DefaultProductWorkflow,
+    pub(crate) workflow: std::sync::Arc<DefaultProductWorkflow>,
     pub(crate) conversation_id: String,
     /// External (raw, pre-resolution) actor id every submit for this thread is
     /// made under. Defaults to `HARNESS_ACTOR_ID`; a group thread built with
@@ -780,6 +780,14 @@ impl RebornIntegrationHarness {
             ProductTriggerReason::DirectChat,
         )?;
         Ok(self.workflow.submit_inbound(envelope).await?)
+    }
+
+    /// The REAL per-thread `DefaultProductWorkflow` (durable idempotency
+    /// ledger → conversation binding → turn submission) as the
+    /// `ProductWorkflow` seam — the generic channel inbound sink submits
+    /// through this exact instance.
+    pub(crate) fn product_workflow_for_test(&self) -> std::sync::Arc<DefaultProductWorkflow> {
+        std::sync::Arc::clone(&self.workflow)
     }
 
     /// Submit a user turn and wait until it blocks on an approval gate, returning

@@ -473,6 +473,10 @@ name = "reborn_integration_extension_runtime"
 path = "tests/integration/extension_runtime.rs"
 
 [[test]]
+name = "reborn_integration_extension_ingress"
+path = "tests/integration/extension_ingress.rs"
+
+[[test]]
 name = "reborn_integration_extension_visibility"
 path = "tests/integration/extension_visibility.rs"
 

@@ -321,10 +321,83 @@ impl ironclaw_extension_host::ExtensionEntrypoint for AcmeFixtureEntrypoint {
     {
         Ok(ironclaw_extension_host::ExtensionBindings {
             tools: Some(Arc::new(AcmeFixtureToolAdapter)),
-            channel: Some(Arc::new(
-                ironclaw_extension_host::test_support::FakeChannelAdapter::default(),
-            )),
+            channel: Some(Arc::new(AcmeFixtureChannelAdapter)),
         })
+    }
+}
+
+/// The fixture's REAL channel adapter: pure protocol parsing of the invented
+/// vendor's wire shape for the generic ingress router (extension-runtime P4).
+///
+/// Wire shape: `{"type":"message","event_id":..,"conversation":..,"user":..,
+/// "text":..}` normalizes to one message; `{"type":"challenge",
+/// "challenge":..}` echoes the challenge; any other authenticated payload is
+/// an ignored no-op.
+pub(crate) struct AcmeFixtureChannelAdapter;
+
+#[async_trait::async_trait]
+impl ironclaw_product_adapters::ChannelAdapter for AcmeFixtureChannelAdapter {
+    fn inbound(
+        &self,
+        request: ironclaw_product_adapters::VerifiedInbound<'_>,
+    ) -> Result<ironclaw_product_adapters::InboundOutcome, ironclaw_product_adapters::ChannelError>
+    {
+        use ironclaw_product_adapters::{
+            ChannelError, ExternalActorRef, ExternalConversationRef, ExternalEventId,
+            ImmediateResponse, InboundOutcome, NormalizedInboundMessage, ProductTriggerReason,
+        };
+        let parse = |reason: String| ChannelError::Parse { reason };
+        let value: serde_json::Value =
+            serde_json::from_slice(request.body).map_err(|error| parse(error.to_string()))?;
+        match value.get("type").and_then(serde_json::Value::as_str) {
+            Some("challenge") => {
+                let challenge = value
+                    .get("challenge")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| parse("missing challenge".to_string()))?;
+                Ok(InboundOutcome::Respond(ImmediateResponse {
+                    status: 200,
+                    content_type: Some("text/plain".to_string()),
+                    body: challenge.as_bytes().to_vec(),
+                }))
+            }
+            Some("message") => {
+                let field = |name: &str| {
+                    value
+                        .get(name)
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                        .ok_or_else(|| parse(format!("missing {name}")))
+                };
+                Ok(InboundOutcome::Messages(vec![NormalizedInboundMessage {
+                    actor: ExternalActorRef::new("acme_user", field("user")?, None::<&str>)
+                        .map_err(|error| parse(error.to_string()))?,
+                    conversation: ExternalConversationRef::new(
+                        None,
+                        field("conversation")?,
+                        None,
+                        None,
+                    )
+                    .map_err(|error| parse(error.to_string()))?,
+                    event_id: ExternalEventId::new(field("event_id")?)
+                        .map_err(|error| parse(error.to_string()))?,
+                    text: field("text")?,
+                    trigger: ProductTriggerReason::DirectChat,
+                    attachments: Vec::new(),
+                    reply_context: Some(b"acme-reply-route".to_vec()),
+                }]))
+            }
+            _ => Ok(InboundOutcome::Ignore),
+        }
+    }
+
+    async fn deliver(
+        &self,
+        _envelope: ironclaw_product_adapters::OutboundEnvelope,
+        _egress: &dyn ironclaw_host_api::RestrictedEgress,
+    ) -> Result<ironclaw_product_adapters::DeliveryReport, ironclaw_product_adapters::ChannelError>
+    {
+        Err(ironclaw_product_adapters::ChannelError::Unsupported)
     }
 }
 

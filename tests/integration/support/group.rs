@@ -1238,7 +1238,7 @@ impl<'g> RebornThreadBuilder<'g> {
 
         Ok(RebornIntegrationHarness {
             ingress,
-            workflow,
+            workflow: Arc::new(workflow),
             conversation_id: self.conversation_id,
             actor_id: actor_id.to_owned(),
             binding,
