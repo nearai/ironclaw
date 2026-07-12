@@ -2381,14 +2381,12 @@ mod tests {
         );
     }
 
-    /// Raw-entity hygiene pin (live canary qa_10i): the model narrates raw
-    /// Slack ids into replies ("… user id U0BDC16TML3 …") unless the ONLY
-    /// model-visible guidance — capability descriptions — forbids it
-    /// explicitly. Every slack read surface must carry the imperative
-    /// "tool calls only … never include" raw-id rule.
+    /// Model-visible Slack-read contract: steer the model to the correct read
+    /// capability and keep user-facing answers humanized rather than exposing
+    /// raw Slack ids.
     #[cfg(feature = "slack-v2-host-beta")]
     #[test]
-    fn slack_read_descriptions_forbid_raw_ids_in_replies() {
+    fn slack_read_descriptions_steer_tool_selection_and_humanized_output() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").unwrap();
@@ -2415,6 +2413,35 @@ mod tests {
                 capability.description
             );
         }
+
+        let search = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "slack.search_messages")
+            .expect("slack manifest declares slack.search_messages");
+        let list = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "slack.list_conversations")
+            .expect("slack manifest declares slack.list_conversations");
+        let history = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "slack.get_conversation_history")
+            .expect("slack manifest declares slack.get_conversation_history");
+
+        assert!(search.description.contains("single newest message"));
+        assert!(search.description.contains("get_conversation_history"));
+        assert!(list.description.contains("is_member"));
+        assert!(list.description.contains("not only"));
+        assert!(history.description.contains("user_display_name"));
+        assert!(history.description.contains("is_current_user"));
     }
 
     /// Honesty pin: the slack_personal OAuth grant does not include
