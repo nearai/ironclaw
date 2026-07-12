@@ -1952,15 +1952,34 @@ async fn nudge_respects_one_shot_cap() {
 }
 
 #[tokio::test]
-async fn completion_nudge_continues_loop_with_tools_on_trailed_off_reply() {
-    // Gate ON + a first reply that trails off (ends with ':'): instead of a
-    // graceful stop, the loop issues ONE more *tools-capable* iteration carrying
-    // the completion-nudge directive, then completes on the follow-through reply.
+async fn completion_nudge_lets_model_use_tools_to_finish_after_trailing_off() {
+    // The task-flip proof, end-to-end through the real loop: the model reads,
+    // then trails off announcing a write it never performs (reply ends with ':').
+    // WITH the gate on, the loop re-enters with the FULL tool surface + the
+    // completion-nudge directive; the model then executes its write tool and
+    // gives a real closing answer — the run completes having produced the
+    // artifact it was trailing off on.
+    let result_ref = LoopResultRef::new("result:file-written").expect("valid");
     let host = MockHost::new(vec![
-        reply_response_with_text("Let me write the summary file:"),
-        reply_response_with_text("Done. Here is the final answer."),
+        // Turn 1: trails off — "let me write the file:" with no tool call.
+        reply_response_with_text("Here are the recommendations, let me write them to the file:"),
+        // Turn 2 (the nudged retry): actually invokes the write tool.
+        calls_response(),
+        // Turn 3: real closing answer.
+        reply_response_with_text("Done — wrote the recommendations to the output file."),
     ])
-    .with_driver_nudges_enabled();
+    .with_driver_nudges_enabled()
+    .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
+        outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+            result_ref: result_ref.clone(),
+            safe_summary: "wrote file".to_string(),
+            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            terminate_hint: false,
+            byte_len: 0,
+            output_digest: None,
+        })],
+        stopped_on_suspension: false,
+    }]);
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
@@ -1973,39 +1992,57 @@ async fn completion_nudge_continues_loop_with_tools_on_trailed_off_reply() {
         matches!(exit, LoopExit::Completed(_)),
         "expected completed exit, got {exit:?}"
     );
-
-    // Two prompt-driven model calls: the original turn and the nudged retry. The
-    // nudged retry appears in `prompt_requests` (the normal, full-tool-surface
-    // prompt path) — NOT as a tool-free exit nudge.
+    // The write tool ran exactly once — on the nudged retry (it could not have
+    // run on the trailed-off turn 1, which emitted no tool call).
+    assert_eq!(
+        host.batch_invocations().len(),
+        1,
+        "the completion nudge must let the model execute its write tool"
+    );
+    // Three prompt-driven model calls: trail-off, tool call, closing answer.
     let prompt_requests = host.prompt_requests();
-    assert_eq!(
-        prompt_requests.len(),
-        2,
-        "trailed-off reply must trigger exactly one nudged retry"
-    );
+    assert_eq!(prompt_requests.len(), 3, "expected trail-off + nudged retry + close");
+    assert!(prompt_requests[0].inline_messages.is_empty());
     assert!(
-        prompt_requests[0].inline_messages.is_empty(),
-        "the first turn carries no injected directive"
+        prompt_requests[1]
+            .inline_messages
+            .iter()
+            .any(|m| m.safe_body.as_str().contains("Finish the task now")),
+        "the nudged retry must carry the completion-nudge directive"
     );
-    assert_eq!(
-        prompt_requests[1].inline_messages.len(),
-        1,
-        "the nudged retry injects exactly the completion-nudge directive"
-    );
-    assert!(
-        prompt_requests[1].inline_messages[0]
-            .safe_body
-            .as_str()
-            .contains("Finish the task now"),
-        "nudged retry must carry the completion-nudge directive text"
-    );
+    assert_eq!(final_staged_state(&host).completion_nudges_used, 1);
+}
 
-    // The counter is spent exactly once.
+#[tokio::test]
+async fn completion_nudge_disabled_leaves_trailed_off_run_without_tool_use() {
+    // Control: the SAME trailed-off trajectory with the gate OFF (production
+    // default). The run ends right after the trail-off — the write tool is never
+    // reached, so the artifact is never produced (the failure the nudge fixes).
+    let host = MockHost::new(vec![
+        reply_response_with_text("Here are the recommendations, let me write them to the file:"),
+        // Present but must NOT be consumed — the loop must not continue.
+        calls_response(),
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
     assert_eq!(
-        final_staged_state(&host).completion_nudges_used,
+        host.prompt_requests().len(),
         1,
-        "one completion nudge issued"
+        "without the nudge the run ends after the trailed-off turn"
     );
+    assert_eq!(
+        host.batch_invocations().len(),
+        0,
+        "without the nudge no tool runs — the artifact is never written"
+    );
+    assert_eq!(final_staged_state(&host).completion_nudges_used, 0);
 }
 
 #[tokio::test]
