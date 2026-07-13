@@ -15,6 +15,10 @@ function loadConnectionStatusForTest() {
     .replace("export function ConnectionStatus", "function ConnectionStatus");
   const context = {
     CONNECTION_STATUS,
+    React: {
+      useEffect: (effect) => effect(),
+      useState: (initial) => [initial, () => {}],
+    },
     html: (strings, ...values) => ({ strings, values }),
     useT: () => (key) => key,
     globalThis: {},
@@ -45,20 +49,25 @@ test("ConnectionStatus hides routine states and renders connection interruptions
   ]) {
     const rendered = ConnectionStatus({ status });
     assert.notEqual(rendered, null, status);
-    assert.equal(rendered.props.role, "status", status);
-    assert.equal(rendered.props["aria-label"], status, status);
-    assert.doesNotMatch(rendered.props.className, /\babsolute\b/, status);
-    assert.match(rendered.props.className, /\bmax-w-32\b/, status);
-    assert.match(rendered.props.className, /\bsm:max-w-48\b/, status);
-    assert.doesNotMatch(rendered.props.className, /\bsticky\b/, status);
-    assert.ok(rendered.props.className.includes(style), status);
-    assert.match(rendered.children[0].props.className, /\bshrink-0\b/, status);
-    assert.match(rendered.children[1].props.className, /\btruncate\b/, status);
-    assert.equal(rendered.children[1].children[0], status, status);
+    const liveStatus = rendered.children[0];
+    const button = rendered.children[1];
+    assert.equal(liveStatus.props.role, "status", status);
+    assert.equal(liveStatus.children[0], status, status);
+    assert.equal(button.props["aria-label"], status, status);
+    assert.equal(button.props["data-testid"], "connection-status", status);
+    assert.match(button.props.className, /\bw-8\b/, status);
+    assert.match(button.props.className, /\bsm:h-7\b/, status);
+    assert.match(button.props.className, /\bsm:w-auto\b/, status);
+    assert.match(button.props.className, /\bsm:max-w-48\b/, status);
+    assert.ok(button.props.className.includes(style), status);
+    assert.match(button.children[0].props.className, /\bshrink-0\b/, status);
+    assert.match(button.children[1].props.className, /\bhidden\b/, status);
+    assert.match(button.children[1].props.className, /\bsm:block\b/, status);
+    assert.equal(button.children[1].children[0], status, status);
   }
 
   const unknown = ConnectionStatus({ status: "blocked" });
   assert.notEqual(unknown, null);
   assert.equal(typeof unknown, "object");
-  assert.ok(unknown.props.className.includes("--v2-surface-soft"));
+  assert.ok(unknown.children[1].props.className.includes("--v2-surface-soft"));
 });

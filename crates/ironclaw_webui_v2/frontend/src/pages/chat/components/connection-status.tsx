@@ -1,3 +1,4 @@
+import React from "react";
 import { useT } from "../../../lib/i18n";
 import { CONNECTION_STATUS, type ConnectionStatus } from "../lib/connection-status";
 
@@ -25,31 +26,55 @@ const HIDDEN_STATUSES: ReadonlySet<ConnectionStatus> = new Set([
 
 export function ConnectionStatus({ status }: ConnectionStatusProps) {
   const t = useT();
+  const [expanded, setExpanded] = React.useState(false);
+
+  React.useEffect(() => {
+    setExpanded(false);
+  }, [status]);
+
   if (!status || HIDDEN_STATUSES.has(status)) return null;
 
   const labelKey = "connection." + status;
   const label = t(labelKey);
+  const statusLabel = label !== labelKey ? label : status;
+  const statusStyle = STATUS_STYLES[status] || DEFAULT_STATUS_STYLE;
 
   return (
-    <div
-      role="status"
-      aria-label={label !== labelKey ? label : status}
-      title={label !== labelKey ? label : status}
-      className={[
-        "inline-flex h-7 max-w-32 shrink-0 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium shadow-[0_8px_20px_-14px_rgba(0,0,0,0.72)] sm:max-w-48",
-        STATUS_STYLES[status] || DEFAULT_STATUS_STYLE,
-      ].join(" ")}
-    >
-      <span
-        aria-hidden="true"
+    <div className="shrink-0">
+      <span role="status" className="sr-only">{statusLabel}</span>
+      <button
+        type="button"
+        data-testid="connection-status"
+        aria-label={statusLabel}
+        title={statusLabel}
+        onClick={() => setExpanded((current) => !current)}
         className={[
-          "h-1.5 w-1.5 shrink-0 rounded-full bg-current",
-          status === CONNECTION_STATUS.RECONNECTING
-            ? "animate-[v2-breathe_1.6s_ease-in-out_infinite]"
-            : "",
+          "inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border text-xs font-medium shadow-[0_8px_20px_-14px_rgba(0,0,0,0.72)] transition-[width,padding] duration-150 sm:h-7 sm:w-auto sm:max-w-48 sm:justify-start sm:px-2.5",
+          expanded
+            ? "max-w-32 justify-start px-2.5"
+            : "w-8 justify-center px-0",
+          statusStyle,
         ].join(" ")}
-      />
-      <span className="truncate">{label !== labelKey ? label : status}</span>
+      >
+        <span
+          aria-hidden="true"
+          className={[
+            "h-1.5 w-1.5 shrink-0 rounded-full bg-current",
+            status === CONNECTION_STATUS.RECONNECTING
+              ? "animate-[v2-breathe_1.6s_ease-in-out_infinite]"
+              : "",
+          ].join(" ")}
+        />
+        <span
+          data-testid="connection-status-label"
+          className={[
+            expanded ? "max-w-24 truncate" : "hidden",
+            "sm:block sm:max-w-40 sm:truncate",
+          ].join(" ")}
+        >
+          {statusLabel}
+        </span>
+      </button>
     </div>
   );
 }
