@@ -148,7 +148,7 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
             &run_context,
             &provider_tool_call(serde_json::json!({
                 "command": if cfg!(windows) {
-                    "if exist /workspace if exist /host echo local-dev-shell-ok"
+                    "echo local-dev-shell-ok /workspace /host"
                 } else {
                     "mkdir -p /workspace/qa-coding-smoke && test -d /host && printf '%s:%s' local-dev-shell-ok \"$PWD\""
                 },
@@ -185,7 +185,7 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
     // never the host layout.
     let output_text = output["output"].as_str().expect("shell output string");
     let expected = if cfg!(windows) {
-        "local-dev-shell-ok"
+        "local-dev-shell-ok \"/workspace\" \"/host\""
     } else {
         "local-dev-shell-ok:/workspace/qa-coding-smoke"
     };
