@@ -502,22 +502,22 @@ output_schema_ref = "schemas/search.output.json"
 "#;
 
 fn catalog_fixture_package() -> AvailableExtensionPackage {
-    let host_ports = ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog");
+    let host_ports = ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"); // safety: test-only fixture setup.
     let contracts =
-        ironclaw_host_runtime::default_host_api_contract_registry().expect("host API contracts");
+        ironclaw_host_runtime::default_host_api_contract_registry().expect("host API contracts"); // safety: test-only fixture setup.
     let manifest = ExtensionManifest::parse_with_host_api_contracts(
         CATALOG_MANIFEST_TOML,
         ManifestSource::InstalledLocal,
         &host_ports,
         &contracts,
     )
-    .expect("catalog fixture manifest");
-    let root = VirtualPath::new("/system/extensions/catalog-mcp").expect("extension root");
+    .expect("catalog fixture manifest"); // safety: test-only fixture setup.
+    let root = VirtualPath::new("/system/extensions/catalog-mcp").expect("extension root"); // safety: test-only fixture setup.
     let package = ExtensionPackage::from_manifest_toml(manifest, root, CATALOG_MANIFEST_TOML)
-        .expect("catalog fixture package");
+        .expect("catalog fixture package"); // safety: test-only fixture setup.
     AvailableExtensionPackage {
         package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "catalog-mcp")
-            .expect("catalog fixture ref"),
+            .expect("catalog fixture ref"), // safety: test-only fixture setup.
         manifest_toml: CATALOG_MANIFEST_TOML.to_string(),
         source: ManifestSource::InstalledLocal,
         package,
@@ -527,8 +527,8 @@ fn catalog_fixture_package() -> AvailableExtensionPackage {
 }
 
 fn owner_scope(user: &str) -> ResourceScope {
-    ResourceScope::local_default(UserId::new(user).expect("valid user"), InvocationId::new())
-        .expect("valid local scope")
+    let user = UserId::new(user).expect("valid user"); // safety: test-only fixture setup.
+    ResourceScope::local_default(user, InvocationId::new()).expect("valid local scope") // safety: test-only fixture setup.
 }
 
 /// Pins the resolver's miss-vs-failure split (T2 review item): a package that
