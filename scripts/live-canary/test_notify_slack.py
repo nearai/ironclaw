@@ -229,6 +229,55 @@ class GoogleOauthPreflightReportTests(unittest.TestCase):
 
 
 class RebornQaSlackReportTests(unittest.TestCase):
+    def test_case_outcome_centralizes_display_priority(self):
+        cases = [
+            (
+                notify.RebornQaCaseReport(
+                    rows=("10A",),
+                    case="passed",
+                    feature="passed",
+                    success=True,
+                    blocking=False,
+                    inconclusive=True,
+                ),
+                ("Passed", ":white_check_mark:"),
+            ),
+            (
+                notify.RebornQaCaseReport(
+                    rows=("10B",),
+                    case="inconclusive",
+                    feature="inconclusive",
+                    success=False,
+                    blocking=True,
+                    inconclusive=True,
+                ),
+                ("Inconclusive", ":grey_question:"),
+            ),
+            (
+                notify.RebornQaCaseReport(
+                    rows=("10C",),
+                    case="warning",
+                    feature="warning",
+                    success=False,
+                    blocking=False,
+                ),
+                ("Warning", ":warning:"),
+            ),
+            (
+                notify.RebornQaCaseReport(
+                    rows=("10D",),
+                    case="failure",
+                    feature="failure",
+                    success=False,
+                ),
+                ("Failure", ":x:"),
+            ),
+        ]
+
+        for case, expected in cases:
+            with self.subTest(case=case.case):
+                self.assertEqual(notify._case_outcome(case), expected)
+
     def test_empty_structured_results_do_not_mask_summary_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             lane_dir = Path(tmpdir) / "summary-lane" / "provider" / "run"

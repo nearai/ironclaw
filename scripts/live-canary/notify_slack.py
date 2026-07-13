@@ -687,6 +687,17 @@ def _qa_group_sort_key(value: str) -> tuple[int, int | str]:
     return (1, value)
 
 
+def _case_outcome(case: RebornQaCaseReport) -> tuple[str, str]:
+    """Return the display label and emoji for a case's effective outcome."""
+    if case.success:
+        return "Passed", ":white_check_mark:"
+    if case.inconclusive:
+        return "Inconclusive", ":grey_question:"
+    if not case.blocking:
+        return "Warning", ":warning:"
+    return "Failure", ":x:"
+
+
 def _format_reborn_tool_summary(cases: list[RebornQaCaseReport]) -> list[str]:
     calls: list[RebornQaToolCall] = []
     for case in cases:
@@ -713,12 +724,7 @@ def _format_reborn_failure_lines(
             continue
         rows = _qa_case_rows(case)
         message = case.message or "failed"
-        if case.inconclusive:
-            label = "Inconclusive"
-        elif not case.blocking:
-            label = "Warning"
-        else:
-            label = "Failure"
+        label, _ = _case_outcome(case)
         lines.append(f"*{label} `{rows}`:* {message}")
         if case.debug_paths:
             paths = ", ".join(f"`{path}`" for path in case.debug_paths)
@@ -734,18 +740,11 @@ def _format_reborn_qa_group(
     cases: list[RebornQaCaseReport],
     run_url: str | None = None,
 ) -> list[dict]:
-    passed = sum(1 for case in cases if case.success)
-    failed = sum(
-        1
-        for case in cases
-        if not case.success and case.blocking and not case.inconclusive
-    )
-    warnings = sum(
-        1
-        for case in cases
-        if not case.success and not case.blocking and not case.inconclusive
-    )
-    inconclusive = sum(1 for case in cases if not case.success and case.inconclusive)
+    outcomes = [_case_outcome(case) for case in cases]
+    passed = sum(1 for label, _ in outcomes if label == "Passed")
+    failed = sum(1 for label, _ in outcomes if label == "Failure")
+    warnings = sum(1 for label, _ in outcomes if label == "Warning")
+    inconclusive = sum(1 for label, _ in outcomes if label == "Inconclusive")
     if failed:
         status = ":x:"
     elif warnings:
@@ -1022,14 +1021,11 @@ def _markdown_reborn_case_lines(
         grouped.setdefault(_qa_group_key(case), []).append(case)
     for group in sorted(grouped, key=_qa_group_sort_key):
         group_cases = grouped[group]
-        passed = sum(1 for case in group_cases if case.success)
-        warnings = sum(
-            1
-            for case in group_cases
-            if not case.success and not case.blocking and not case.inconclusive
-        )
+        outcomes = [_case_outcome(case) for case in group_cases]
+        passed = sum(1 for label, _ in outcomes if label == "Passed")
+        warnings = sum(1 for label, _ in outcomes if label == "Warning")
         inconclusive = sum(
-            1 for case in group_cases if not case.success and case.inconclusive
+            1 for label, _ in outcomes if label == "Inconclusive"
         )
         heading = f"#### QA {group}: {passed}/{len(group_cases)} passed"
         if warnings:
@@ -1038,14 +1034,7 @@ def _markdown_reborn_case_lines(
             heading += f", {inconclusive} inconclusive"
         lines.append(heading)
         for case in group_cases:
-            if case.success:
-                status = ":white_check_mark:"
-            elif case.inconclusive:
-                status = ":grey_question:"
-            elif not case.blocking:
-                status = ":warning:"
-            else:
-                status = ":x:"
+            label, status = _case_outcome(case)
             latency = (
                 f" ({case.latency_ms / 1000.0:.1f}s)"
                 if isinstance(case.latency_ms, (int, float))
@@ -1056,12 +1045,6 @@ def _markdown_reborn_case_lines(
                 f"{_github_md_text(case.feature)}{latency}"
             )
             if not case.success and case.message:
-                if case.inconclusive:
-                    label = "Inconclusive"
-                elif not case.blocking:
-                    label = "Warning"
-                else:
-                    label = "Failure"
                 lines.append(f"  - {label}: {_github_md_text(case.message)}")
             if (
                 not case.success

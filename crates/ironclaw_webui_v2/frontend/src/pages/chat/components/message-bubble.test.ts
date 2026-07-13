@@ -210,6 +210,8 @@ test("error messages render as inline chat bubbles, not centered notices", async
     "error role must not regress to the old centered banner styling",
   );
   assert.match(html, /Provider unavailable/);
+  assert.doesNotMatch(html, /data-failure-category=/);
+  assert.doesNotMatch(html, /data-failure-status=/);
 });
 
 test("error bubbles expose structural provider failure metadata", async () => {
