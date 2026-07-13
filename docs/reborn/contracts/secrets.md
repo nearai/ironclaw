@@ -88,6 +88,11 @@ let lease = secrets.lease_once(&scope, &handle).await?;
 let material = secrets.consume(&scope, lease.id).await?;
 ```
 
+Trusted migration and import paths use `put_if_absent_or_matches` when a
+deterministic secret slot must never overwrite concurrent or pre-existing
+state. The operation atomically inserts an absent record and otherwise reports
+an exact or divergent match without exposing stored material.
+
 `metadata` and `lease` are safe to log only as metadata; they do not include secret values. `material` is the only raw-value carrier and should stay inside the narrow injection path that requested it.
 
 `SecretStore::put(...)` is for trusted setup, composition, migration, or storage-code paths that are already allowed to manage secret material. It is not a runtime/plugin API, and it intentionally does not perform authorization itself.

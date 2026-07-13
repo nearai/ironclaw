@@ -2,10 +2,9 @@
 //!
 //! v1 and Reborn both use AES-256-GCM but bind ciphertext to *different* schemes,
 //! so migration must **decrypt** each v1 secret and **re-encrypt** through
-//! Reborn's `SecretStore::put`. Decryption uses the v1 secrets store constructed
+//! Reborn's secret store. Decryption uses the v1 secrets store constructed
 //! with the independently supplied source key; `RebornTarget::secret_store` is
-//! already built with the separately resolved target key. Without a source key,
-//! secrets are skipped with a recorded loss. A secret whose decrypt fails (e.g.
+//! already built with the separately resolved target key. A secret whose decrypt fails (e.g.
 //! expired or wrong key) is recorded per-secret and skipped rather than aborting
 //! the run.
 
@@ -13,7 +12,7 @@ use std::sync::Arc;
 
 use ironclaw::secrets::{SecretsCrypto, create_secrets_store};
 use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle};
-use ironclaw_secrets::SecretMaterial;
+use ironclaw_secrets::{SecretMaterial, SecretPutOutcome};
 
 use crate::error::MigrationError;
 use crate::options::MigrationOptions;
@@ -27,16 +26,12 @@ pub(crate) async fn run(
     options: &MigrationOptions,
     report: &mut MigrationReport,
 ) -> Result<(), MigrationError> {
-    let Some(master_key) = options.secret_master_key.as_ref() else {
-        report.record_loss(
-            Domain::Secret,
-            "secrets",
-            "*",
-            LossReason::NoTargetField,
-            "no --secret-master-key supplied; v1 secrets cannot be decrypted and were skipped"
-                .to_string(),
-        );
+    let users = src.distinct_user_ids_in("secrets", "user_id").await?;
+    if users.is_empty() {
         return Ok(());
+    }
+    let Some(master_key) = options.secret_master_key.as_ref() else {
+        return Err(MigrationError::MissingSecretKey);
     };
     let Some(secret_store) = tgt.secret_store.clone() else {
         report.record_loss(
@@ -66,7 +61,6 @@ pub(crate) async fn run(
     };
 
     // v1 `list`/`get_decrypted` are per-user; enumerate users from the raw table.
-    let users = src.distinct_user_ids_in("secrets", "user_id").await?;
     for user_id in users {
         let refs = v1_store
             .list(&user_id)
@@ -178,38 +172,16 @@ async fn migrate_one(
         invocation_id: InvocationId::new(),
     };
     let material = SecretMaterial::from(decrypted.expose().to_string());
-    if let Some(existing) =
-        secret_store
-            .metadata(&scope, &handle)
-            .await
-            .map_err(|e| MigrationError::WriteTarget {
-                domain: format!("secret {user_id}:{name}"),
-                reason: format!("read deterministic target slot: {e}"),
-            })?
-    {
-        if existing.expires_at != expires_at {
-            return Err(secret_collision(user_id, name));
-        }
-        let matches = secret_store
-            .material_matches(&scope, &handle, &material)
-            .await
-            .map_err(|e| MigrationError::WriteTarget {
-                domain: format!("secret {user_id}:{name}"),
-                reason: format!("read deterministic target material: {e}"),
-            })?;
-        if matches == Some(true) {
-            report.stats.secrets += 1;
-            return Ok(());
-        }
-        return Err(secret_collision(user_id, name));
-    }
-    secret_store
-        .put(scope, handle, material, expires_at)
+    let outcome = secret_store
+        .put_if_absent_or_matches(scope, handle, material, expires_at)
         .await
         .map_err(|e| MigrationError::WriteTarget {
             domain: format!("secret {user_id}:{name}"),
             reason: e.to_string(),
         })?;
+    if outcome == SecretPutOutcome::Divergent {
+        return Err(secret_collision(user_id, name));
+    }
     report.stats.secrets += 1;
     Ok(())
 }

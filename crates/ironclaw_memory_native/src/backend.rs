@@ -459,6 +459,13 @@ where
             FilesystemOperation::ReadFile,
             self.capabilities.file_documents,
         )?;
+        if !self.capabilities.metadata {
+            return Err(memory_backend_unsupported(
+                context.scope(),
+                FilesystemOperation::ReadFile,
+                "memory backend does not support document metadata",
+            ));
+        }
         ensure_path_matches_context(context, path, FilesystemOperation::ReadFile)?;
         self.repository.read_document_metadata(path).await
     }
@@ -1188,6 +1195,22 @@ mod tests {
                 .list_documents(&alpha_context(), alpha_path().scope())
                 .await
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn metadata_capability_rejects_direct_backend_metadata_reads() {
+        let backend = make_backend().with_capabilities(
+            MemoryBackendCapabilities::default()
+                .set_file_documents(true)
+                .set_metadata(false),
+        );
+        let result = backend
+            .read_document_metadata(&alpha_context(), &alpha_path())
+            .await;
+        assert!(
+            result.is_err(),
+            "metadata reads must fail closed when metadata is unsupported"
         );
     }
 

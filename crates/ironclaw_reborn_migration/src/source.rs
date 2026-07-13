@@ -276,6 +276,8 @@ impl V1Source {
         }
         #[cfg(feature = "postgres")]
         if let Some(pool) = self.handles.pg_pool.as_ref() {
+            use futures::{TryStreamExt as _, pin_mut};
+
             let client = pool.get().await.map_err(source_open_error)?;
             let rows = client
                 .query(
@@ -295,20 +297,30 @@ impl V1Source {
                     quote_identifier(&name),
                 );
                 let rows = client
-                    .query(&sql, &[])
+                    .query_raw(
+                        &sql,
+                        std::iter::empty::<&(dyn tokio_postgres::types::ToSql + Sync)>(),
+                    )
                     .await
                     .map_err(|error| source_read_error(&name, error))?;
-                let encoded_rows = rows
-                    .iter()
-                    .map(|row| {
-                        row.try_get::<_, String>(0)
-                            .map_err(|error| source_read_error(&name, error))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
+                pin_mut!(rows);
+                let mut count = 0_u64;
+                let mut checksum = PostgresTableChecksum::new(&name);
+                while let Some(row) = rows
+                    .try_next()
+                    .await
+                    .map_err(|error| source_read_error(&name, error))?
+                {
+                    let encoded = row
+                        .try_get::<_, String>(0)
+                        .map_err(|error| source_read_error(&name, error))?;
+                    checksum.update(&encoded);
+                    count = count.saturating_add(1);
+                }
                 inventory.push(RawTableInventory {
                     name: name.clone(),
-                    count: encoded_rows.len() as u64,
-                    checksum: postgres_table_content_checksum(&name, &encoded_rows),
+                    count,
+                    checksum: checksum.finish(),
                 });
             }
             return Ok(inventory);
@@ -335,6 +347,11 @@ impl V1Source {
             }
         }
         Ok(users.into_iter().collect())
+    }
+
+    pub(crate) async fn heartbeat_user_ids(&self) -> Result<Vec<String>, MigrationError> {
+        self.distinct_user_ids_in("heartbeat_state", "user_id")
+            .await
     }
 
     #[allow(dead_code, reason = "staged historical-user converter read port")]
@@ -683,16 +700,35 @@ fn percent_encode_query_value(value: &str) -> String {
 }
 
 #[cfg(feature = "postgres")]
-fn postgres_table_content_checksum(name: &str, rows: &[String]) -> String {
-    let mut hash = Sha256::new();
-    hash.update(b"ironclaw-v1-postgres-table-content-v2\0");
-    hash.update((name.len() as u64).to_le_bytes());
-    hash.update(name.as_bytes());
-    for row in rows {
-        hash.update((row.len() as u64).to_le_bytes());
-        hash.update(row.as_bytes());
+struct PostgresTableChecksum(Sha256);
+
+#[cfg(feature = "postgres")]
+impl PostgresTableChecksum {
+    fn new(name: &str) -> Self {
+        let mut hash = Sha256::new();
+        hash.update(b"ironclaw-v1-postgres-table-content-v2\0");
+        hash.update((name.len() as u64).to_le_bytes());
+        hash.update(name.as_bytes());
+        Self(hash)
     }
-    format!("{:x}", hash.finalize())
+
+    fn update(&mut self, row: &str) {
+        self.0.update((row.len() as u64).to_le_bytes());
+        self.0.update(row.as_bytes());
+    }
+
+    fn finish(self) -> String {
+        format!("{:x}", self.0.finalize())
+    }
+}
+
+#[cfg(all(test, feature = "postgres"))]
+fn postgres_table_content_checksum(name: &str, rows: &[String]) -> String {
+    let mut hash = PostgresTableChecksum::new(name);
+    for row in rows {
+        hash.update(row);
+    }
+    hash.finish()
 }
 
 #[cfg(feature = "postgres")]

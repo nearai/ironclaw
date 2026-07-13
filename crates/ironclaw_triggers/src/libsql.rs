@@ -1,3 +1,4 @@
+// arch-exempt: large_file, split libSQL trigger persistence by operation, plan #8513
 #[cfg(feature = "libsql")]
 use std::{collections::HashMap, sync::Arc};
 
@@ -420,6 +421,12 @@ impl TriggerRepository for LibSqlTriggerRepository {
         let conn = self.connect().await?;
         write_record(&conn, &record).await?;
         Ok(())
+    }
+
+    async fn insert_trigger_if_absent(&self, record: TriggerRecord) -> Result<bool, TriggerError> {
+        record.validate()?;
+        let conn = self.connect().await?;
+        insert_record_if_absent(&conn, &record).await
     }
 
     async fn get_trigger(
@@ -1560,6 +1567,51 @@ async fn write_record(
     .await
     .map_err(|error| backend_error("upsert trigger record", error))?;
     Ok(())
+}
+
+#[cfg(feature = "libsql")]
+async fn insert_record_if_absent(
+    conn: &libsql::Connection,
+    record: &TriggerRecord,
+) -> Result<bool, TriggerError> {
+    let (schedule_kind, schedule_expression, schedule_at) = record.schedule.to_storage();
+    let changed = conn.execute(
+        &format!(
+            "INSERT INTO {TRIGGER_TABLE} (
+                trigger_id, tenant_id, creator_user_id, agent_id, project_id,
+                name, source, schedule_expression, schedule_timezone, schedule_kind, prompt,
+                state, next_run_at, last_run_at, last_fired_slot, last_status,
+                active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+            ON CONFLICT (tenant_id, trigger_id) DO NOTHING"
+        ),
+        libsql::params_from_iter([
+            libsql::Value::Text(record.trigger_id.to_string()),
+            libsql::Value::Text(record.tenant_id.as_str().to_string()),
+            libsql::Value::Text(record.creator_user_id.as_str().to_string()),
+            record.agent_id.as_ref().map_or(libsql::Value::Null, |v| libsql::Value::Text(v.as_str().to_string())),
+            record.project_id.as_ref().map_or(libsql::Value::Null, |v| libsql::Value::Text(v.as_str().to_string())),
+            libsql::Value::Text(record.name.clone()),
+            libsql::Value::Text(crate::source_kind_text_codec(record.source).to_string()),
+            libsql::Value::Text(schedule_expression.to_string()),
+            libsql::Value::Text(record.schedule.timezone_text().to_string()),
+            libsql::Value::Text(schedule_kind.to_string()),
+            libsql::Value::Text(record.prompt.clone()),
+            libsql::Value::Text(crate::state_text_codec(record.state).to_string()),
+            libsql::Value::Text(fmt_ts(&record.next_run_at)),
+            record.last_run_at.as_ref().map_or(libsql::Value::Null, |v| libsql::Value::Text(fmt_ts(v))),
+            record.last_fired_slot.as_ref().map_or(libsql::Value::Null, |v| libsql::Value::Text(fmt_ts(v))),
+            record.last_status.map_or(libsql::Value::Null, |v| libsql::Value::Text(crate::status_text_codec(v).to_string())),
+            record.active_fire_slot.as_ref().map_or(libsql::Value::Null, |v| libsql::Value::Text(fmt_ts(v))),
+            record.active_run_ref.as_ref().map_or(libsql::Value::Null, |v| libsql::Value::Text(v.to_string())),
+            libsql::Value::Text(fmt_ts(&record.created_at)),
+            schedule_at.map_or(libsql::Value::Null, libsql::Value::Text),
+            record.delivery_target.as_ref().map_or(libsql::Value::Null, |v| libsql::Value::Text(v.as_str().to_string())),
+        ]),
+    )
+    .await
+    .map_err(|error| backend_error("insert trigger record if absent", error))?;
+    Ok(changed == 1)
 }
 
 #[cfg(feature = "libsql")]

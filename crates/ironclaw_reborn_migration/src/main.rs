@@ -12,7 +12,8 @@ use ironclaw_reborn_config::RebornBootConfig;
 use ironclaw_reborn_migration::{
     ApplyAcknowledgements, Disposition, MIGRATION_PROTOCOL_VERSION, MigrationManifest,
     MigrationOptions, MigrationSecretInputs, MigrationStatus, SourceDb, TargetStore,
-    apply_migration, manifest_target_matches, plan_migration, resume_migration, verify_migration,
+    apply_migration, manifest_target_matches, plan_migration, preflight_apply_migration,
+    preflight_resume_migration, resume_migration, verify_migration,
 };
 use secrecy::SecretString;
 use serde::Serialize;
@@ -196,6 +197,10 @@ struct TargetMigrationState<'a> {
     run_id: String,
     status: &'static str,
     profile: &'a str,
+    target_backend: &'static str,
+    target_locator_fingerprint: &'a str,
+    tenant_id: &'a str,
+    agent_id: &'a str,
     manifest: &'a Path,
 }
 
@@ -272,19 +277,16 @@ async fn run_v1(operation: V1Operation) -> anyhow::Result<()> {
         V1Operation::Apply(command) => {
             let run = resolve_run(command.source)?;
             let manifest = read_manifest(&command.plan)?;
+            let secrets = migration_secrets(run.target_master_key.clone())?;
+            let acknowledgements = ApplyAcknowledgements {
+                source_is_stopped: command.confirm_v1_stopped,
+                source_is_snapshot: command.confirm_source_snapshot,
+            };
+            preflight_apply_migration(&run.options, &manifest, &secrets, acknowledgements).await?;
             let applying = manifest.transition(MigrationStatus::Applying)?;
             write_target_state(&run.target_state_path, &applying, &command.plan)?;
             applying.write_atomic(&command.plan, true)?;
-            let result = apply_migration(
-                run.options,
-                &manifest,
-                migration_secrets(run.target_master_key)?,
-                ApplyAcknowledgements {
-                    source_is_stopped: command.confirm_v1_stopped,
-                    source_is_snapshot: command.confirm_source_snapshot,
-                },
-            )
-            .await;
+            let result = apply_migration(run.options, &manifest, secrets, acknowledgements).await;
             let report = match result {
                 Ok(report) => report,
                 Err(error) => {
@@ -314,6 +316,12 @@ async fn run_v1(operation: V1Operation) -> anyhow::Result<()> {
         V1Operation::Resume(command) => {
             let run = resolve_run(command.source)?;
             let manifest = read_manifest(&command.manifest)?;
+            let secrets = migration_secrets(run.target_master_key.clone())?;
+            let acknowledgements = ApplyAcknowledgements {
+                source_is_stopped: command.confirm_v1_stopped,
+                source_is_snapshot: command.confirm_source_snapshot,
+            };
+            preflight_resume_migration(&run.options, &manifest, &secrets, acknowledgements).await?;
             let applying = if manifest.status == MigrationStatus::Applying {
                 manifest.clone()
             } else {
@@ -321,16 +329,7 @@ async fn run_v1(operation: V1Operation) -> anyhow::Result<()> {
             };
             write_target_state(&run.target_state_path, &applying, &command.manifest)?;
             applying.write_atomic(&command.manifest, true)?;
-            let result = resume_migration(
-                run.options,
-                &manifest,
-                migration_secrets(run.target_master_key)?,
-                ApplyAcknowledgements {
-                    source_is_stopped: command.confirm_v1_stopped,
-                    source_is_snapshot: command.confirm_source_snapshot,
-                },
-            )
-            .await;
+            let result = resume_migration(run.options, &manifest, secrets, acknowledgements).await;
             let report = match result {
                 Ok(report) => report,
                 Err(error) => {
@@ -479,6 +478,13 @@ fn write_target_state(
         run_id: manifest.run_id.to_string(),
         status: status_label(manifest.status),
         profile: &manifest.scope.profile,
+        target_backend: match manifest.target.backend {
+            ironclaw_reborn_migration::StoreBackend::Libsql => "libsql",
+            ironclaw_reborn_migration::StoreBackend::Postgres => "postgres",
+        },
+        target_locator_fingerprint: &manifest.target.locator_fingerprint,
+        tenant_id: &manifest.scope.tenant_id,
+        agent_id: &manifest.scope.agent_id,
         manifest: &absolute_manifest,
     })?;
     let file_name = path
@@ -521,6 +527,7 @@ fn write_target_state(
     {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::File::open(parent)?.sync_all()?;
     }
     Ok(())
 }

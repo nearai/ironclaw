@@ -217,6 +217,11 @@ Claim eligibility checks the trigger state before active-fire metadata. A
 `Paused` or `Completed` trigger with stale active-fire metadata is not due; it
 must not be surfaced as an active scheduled fire.
 
+Repository callers that require create-only semantics use the atomic
+`insert_trigger_if_absent` operation. A conflicting tenant/trigger key leaves
+the existing record unchanged so callers can read it back and reconcile an
+exact replay without an overwrite race.
+
 The skip policy is per-trigger, not global. Other triggers may continue to fire on the same tick.
 
 ### 5.1 Trusted poller scope

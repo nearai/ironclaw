@@ -1,3 +1,4 @@
+// arch-exempt: large_file, split trigger contracts into owned modules, plan #8513
 //! Scheduled trigger domain contracts for IronClaw Reborn.
 //!
 //! This crate owns trigger records, source-provider evaluation, deterministic
@@ -1026,6 +1027,12 @@ impl TriggerSourceProvider for ScheduleTriggerSourceProvider {
 pub trait TriggerRepository: Send + Sync {
     async fn upsert_trigger(&self, record: TriggerRecord) -> Result<(), TriggerError>;
 
+    async fn insert_trigger_if_absent(&self, _record: TriggerRecord) -> Result<bool, TriggerError> {
+        Err(TriggerError::Backend {
+            reason: "atomic insert-if-absent is not implemented by this repository".to_string(),
+        })
+    }
+
     async fn get_trigger(
         &self,
         tenant_id: TenantId,
@@ -1331,6 +1338,17 @@ impl TriggerRepository for InMemoryTriggerRepository {
             record,
         );
         Ok(())
+    }
+
+    async fn insert_trigger_if_absent(&self, record: TriggerRecord) -> Result<bool, TriggerError> {
+        record.validate()?;
+        let mut state = self.lock_state()?;
+        let key = TriggerRepositoryKey::new(&record.tenant_id, record.trigger_id);
+        if state.records.contains_key(&key) {
+            return Ok(false);
+        }
+        state.records.insert(key, record);
+        Ok(true)
     }
 
     async fn get_trigger(

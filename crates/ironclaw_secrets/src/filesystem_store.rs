@@ -60,7 +60,7 @@ use crate::{
     CredentialAccount, CredentialAccountId, CredentialAccountStatus, CredentialAccountStore,
     CredentialBrokerError, CredentialSession, CredentialSessionId, CredentialSessionStore,
     DEFAULT_SECRET_LEASE_TTL_SECONDS, SecretError, SecretLease, SecretLeaseId, SecretLeaseStatus,
-    SecretMaterial, SecretMetadata, SecretStore, SecretStoreError, SecretsCrypto,
+    SecretMaterial, SecretMetadata, SecretPutOutcome, SecretStore, SecretStoreError, SecretsCrypto,
     credential_account_aad, credential_session_aad, filesystem_secret_aad,
 };
 
@@ -87,7 +87,7 @@ const CREDENTIAL_SESSION_KIND: &str = "credential_session";
 // nothing in this file ever writes plaintext secret material to the
 // filesystem.
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct StoredSecret {
     scope: ResourceScope,
     handle: SecretHandle,
@@ -269,15 +269,7 @@ where
 
     async fn write_secret(&self, secret: &StoredSecret) -> Result<(), SecretStoreError> {
         let path = secret_path(&secret.scope, &secret.handle)?;
-        let body = serialize_secret(secret)?;
-        let kind = RecordKind::new(SECRET_RECORD_KIND).map_err(|error| {
-            SecretStoreError::StoreUnavailable {
-                reason: format!("invalid secret record kind: {error}"),
-            }
-        })?;
-        let mut base_entry = Entry::bytes(body).with_content_type(ContentType::json());
-        base_entry.kind = Some(kind);
-        let entry = tag_entry_with_tenant(base_entry, &secret.scope);
+        let entry = serialize_secret_entry(secret)?;
         self.ensure_tenant_id_index(&secret.scope).await?;
         self.filesystem
             .put(&secret.scope, &path, entry, CasExpectation::Any)
@@ -378,6 +370,72 @@ where
             handle,
             expires_at,
         })
+    }
+
+    async fn put_if_absent_or_matches(
+        &self,
+        scope: ResourceScope,
+        handle: SecretHandle,
+        material: SecretMaterial,
+        expires_at: Option<Timestamp>,
+    ) -> Result<SecretPutOutcome, SecretStoreError> {
+        let path = secret_path(&scope, &handle)?;
+        let plaintext = material.expose_secret().as_bytes();
+        let aad = filesystem_secret_aad(&scope, &handle);
+        let (encrypted_value, key_salt) = self
+            .crypto
+            .encrypt(plaintext, &aad)
+            .map_err(secret_error_to_store_error)?;
+        let now = Utc::now();
+        let candidate = StoredSecret {
+            scope: scope.clone(),
+            handle: handle.clone(),
+            encrypted_value,
+            key_salt,
+            expires_at,
+            created_at: now,
+            updated_at: now,
+        };
+        self.ensure_tenant_id_index(&scope).await?;
+        cas_update(
+            self.filesystem.as_ref(),
+            &scope,
+            &path,
+            deserialize_secret::<StoredSecret>,
+            serialize_secret_entry,
+            |current: Option<StoredSecret>| {
+                let candidate = candidate.clone();
+                let scope = scope.clone();
+                let handle = handle.clone();
+                let material = material.clone();
+                let self_ref = self;
+                async move {
+                    let Some(existing) = current else {
+                        return Ok(CasApply::new(candidate, SecretPutOutcome::Inserted));
+                    };
+                    if !same_scope_owner(&existing.scope, &scope)
+                        || existing.handle != handle
+                        || existing.expires_at != expires_at
+                    {
+                        return Ok(CasApply::no_op(existing, SecretPutOutcome::Divergent));
+                    }
+                    let aad = filesystem_secret_aad(&scope, &handle);
+                    let decrypted = self_ref
+                        .crypto
+                        .decrypt(&existing.encrypted_value, &existing.key_salt, &aad)
+                        .map_err(secret_error_to_store_error)?;
+                    let outcome =
+                        if decrypted.expose().as_bytes() == material.expose_secret().as_bytes() {
+                            SecretPutOutcome::ExactMatch
+                        } else {
+                            SecretPutOutcome::Divergent
+                        };
+                    Ok(CasApply::no_op(existing, outcome))
+                }
+            },
+        )
+        .await
+        .map_err(|error| map_cas_error_secret(error, "insert"))
     }
 
     async fn metadata(
@@ -1175,6 +1233,18 @@ fn serialize_lease_entry(lease: &StoredLease) -> Result<Entry, SecretStoreError>
     Ok(tag_entry_with_tenant(base_entry, &lease.scope))
 }
 
+fn serialize_secret_entry(secret: &StoredSecret) -> Result<Entry, SecretStoreError> {
+    let body = serialize_secret(secret)?;
+    let kind = RecordKind::new(SECRET_RECORD_KIND).map_err(|error| {
+        SecretStoreError::StoreUnavailable {
+            reason: format!("invalid secret record kind: {error}"),
+        }
+    })?;
+    let mut base_entry = Entry::bytes(body).with_content_type(ContentType::json());
+    base_entry.kind = Some(kind);
+    Ok(tag_entry_with_tenant(base_entry, &secret.scope))
+}
+
 fn serialize_session_entry(
     stored: &StoredSession,
     scope: &ResourceScope,
@@ -1640,6 +1710,70 @@ mod tests {
 
         let second = store.consume(&scope, lease.id).await.unwrap_err();
         assert!(second.is_consumed());
+    }
+
+    #[tokio::test]
+    async fn filesystem_secret_store_atomic_insert_never_overwrites_divergent_material() {
+        let fs = Arc::new(InMemoryBackend::new());
+        let store = Arc::new(FilesystemSecretStore::new(
+            default_scoped_fs(fs),
+            test_crypto(),
+        ));
+        let scope = sample_scope("tenant-a", "user-a");
+        let handle = SecretHandle::new("migration_key").unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+
+        let first = {
+            let store = Arc::clone(&store);
+            let scope = scope.clone();
+            let handle = handle.clone();
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                store
+                    .put_if_absent_or_matches(scope, handle, SecretMaterial::from("first"), None)
+                    .await
+            })
+        };
+        let second = {
+            let store = Arc::clone(&store);
+            let scope = scope.clone();
+            let handle = handle.clone();
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                store
+                    .put_if_absent_or_matches(scope, handle, SecretMaterial::from("second"), None)
+                    .await
+            })
+        };
+        let outcomes = [
+            first.await.unwrap().unwrap(),
+            second.await.unwrap().unwrap(),
+        ];
+        assert!(outcomes.contains(&SecretPutOutcome::Inserted));
+        assert!(outcomes.contains(&SecretPutOutcome::Divergent));
+
+        let stored_first = store
+            .material_matches(&scope, &handle, &SecretMaterial::from("first"))
+            .await
+            .unwrap();
+        let stored_second = store
+            .material_matches(&scope, &handle, &SecretMaterial::from("second"))
+            .await
+            .unwrap();
+        assert_ne!(stored_first, stored_second);
+        assert!(stored_first == Some(true) || stored_second == Some(true));
+        let winning_material = if stored_first == Some(true) {
+            "first"
+        } else {
+            "second"
+        };
+        let replay = store
+            .put_if_absent_or_matches(scope, handle, SecretMaterial::from(winning_material), None)
+            .await
+            .unwrap();
+        assert_eq!(replay, SecretPutOutcome::ExactMatch);
     }
 
     #[tokio::test]

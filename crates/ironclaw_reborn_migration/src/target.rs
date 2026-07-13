@@ -5,8 +5,9 @@
 //! the converters. Threads / secrets / identity force a concrete filesystem
 //! type, so they are constructed inside the backend match arm where `F` is
 //! known, then stored as `#[async_trait]` trait objects so the converters stay
-//! backend-agnostic. All state is written under one (tenant, agent) scope from
-//! [`MigrationOptions`]; each v1 `user_id` becomes the per-record Reborn `UserId`.
+//! backend-agnostic. Target identity comes from [`MigrationOptions`]; each v1
+//! `user_id` becomes the per-record Reborn `UserId`, and memory retains its
+//! optional v1 agent scope.
 
 use std::sync::Arc;
 
@@ -107,10 +108,56 @@ pub(crate) async fn write_shared_migration_state(
     manifest: &crate::manifest::MigrationManifest,
 ) -> Result<(), MigrationError> {
     match target {
-        TargetStore::LibSql { .. } => {
-            let _ = manifest;
-            Ok(())
+        #[cfg(feature = "libsql")]
+        TargetStore::LibSql { path } => {
+            if let Some(parent) = path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            let database = libsql::Builder::new_local(path)
+                .build()
+                .await
+                .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+            let connection = database
+                .connect()
+                .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+            connection
+                .execute_batch(
+                    "PRAGMA busy_timeout = 5000;
+                     CREATE TABLE IF NOT EXISTS reborn_migration_state (
+                        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                        schema_version TEXT NOT NULL,
+                        migration_protocol_version INTEGER NOT NULL,
+                        release_version TEXT NOT NULL,
+                        run_id TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        profile TEXT NOT NULL,
+                        target_backend TEXT NOT NULL,
+                        target_locator_fingerprint TEXT NOT NULL,
+                        tenant_id TEXT NOT NULL,
+                        agent_id TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                     );
+                     BEGIN IMMEDIATE;",
+                )
+                .await
+                .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+            let result = write_libsql_shared_state(&connection, manifest).await;
+            match result {
+                Ok(()) => connection
+                    .execute("COMMIT", ())
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| MigrationError::OpenTarget(error.to_string())),
+                Err(error) => {
+                    let _ = connection.execute("ROLLBACK", ()).await;
+                    Err(error)
+                }
+            }
         }
+        #[cfg(not(feature = "libsql"))]
+        TargetStore::LibSql { .. } => Err(MigrationError::OpenTarget(
+            "binary built without the libsql feature".to_string(),
+        )),
         #[cfg(feature = "postgres")]
         TargetStore::Postgres { url } => {
             let pool = open_postgres_pool(url)?;
@@ -125,8 +172,16 @@ pub(crate) async fn write_shared_migration_state(
                         run_id TEXT NOT NULL,
                         status TEXT NOT NULL,
                         profile TEXT NOT NULL,
+                        target_backend TEXT,
+                        target_locator_fingerprint TEXT,
+                        tenant_id TEXT,
+                        agent_id TEXT,
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                    )",
+                    );
+                    ALTER TABLE reborn_migration_state ADD COLUMN IF NOT EXISTS target_backend TEXT;
+                    ALTER TABLE reborn_migration_state ADD COLUMN IF NOT EXISTS target_locator_fingerprint TEXT;
+                    ALTER TABLE reborn_migration_state ADD COLUMN IF NOT EXISTS tenant_id TEXT;
+                    ALTER TABLE reborn_migration_state ADD COLUMN IF NOT EXISTS agent_id TEXT;",
                 )
                 .await
                 .map_err(postgres_identity_error)?;
@@ -141,7 +196,8 @@ pub(crate) async fn write_shared_migration_state(
             let existing = transaction
                 .query_opt(
                     "SELECT schema_version, migration_protocol_version, release_version,
-                            run_id, status, profile
+                            run_id, status, profile, target_backend,
+                            target_locator_fingerprint, tenant_id, agent_id
                      FROM reborn_migration_state
                      WHERE singleton = TRUE
                      FOR UPDATE",
@@ -162,11 +218,25 @@ pub(crate) async fn write_shared_migration_state(
                     existing.try_get(4).map_err(postgres_identity_error)?;
                 let existing_profile: String =
                     existing.try_get(5).map_err(postgres_identity_error)?;
+                let existing_backend: Option<String> =
+                    existing.try_get(6).map_err(postgres_identity_error)?;
+                let existing_fingerprint: Option<String> =
+                    existing.try_get(7).map_err(postgres_identity_error)?;
+                let existing_tenant: Option<String> =
+                    existing.try_get(8).map_err(postgres_identity_error)?;
+                let existing_agent: Option<String> =
+                    existing.try_get(9).map_err(postgres_identity_error)?;
                 if existing_schema != schema_version
                     || existing_protocol != protocol_version
                     || existing_release != manifest.release_version
                     || existing_run_id != run_id
                     || existing_profile != manifest.scope.profile
+                    || existing_backend.as_deref()
+                        != Some(store_backend_label(manifest.target.backend))
+                    || existing_fingerprint.as_deref()
+                        != Some(manifest.target.locator_fingerprint.as_str())
+                    || existing_tenant.as_deref() != Some(manifest.scope.tenant_id.as_str())
+                    || existing_agent.as_deref() != Some(manifest.scope.agent_id.as_str())
                 {
                     return Err(MigrationError::OpenTarget(
                         "PostgreSQL target is claimed by a different migration run or protocol"
@@ -193,20 +263,26 @@ pub(crate) async fn write_shared_migration_state(
                         "PostgreSQL target has no active migration claim".to_string(),
                     ));
                 }
-                let parameters: [&(dyn tokio_postgres::types::ToSql + Sync); 6] = [
+                let target_backend = store_backend_label(manifest.target.backend);
+                let parameters: [&(dyn tokio_postgres::types::ToSql + Sync); 10] = [
                     &schema_version,
                     &protocol_version,
                     &manifest.release_version,
                     &run_id,
                     &status,
                     &manifest.scope.profile,
+                    &target_backend,
+                    &manifest.target.locator_fingerprint,
+                    &manifest.scope.tenant_id,
+                    &manifest.scope.agent_id,
                 ];
                 transaction
                     .execute(
                         "INSERT INTO reborn_migration_state (
                         singleton, schema_version, migration_protocol_version,
-                        release_version, run_id, status, profile, updated_at
-                     ) VALUES (TRUE, $1, $2, $3, $4, $5, $6, NOW())",
+                        release_version, run_id, status, profile, target_backend,
+                        target_locator_fingerprint, tenant_id, agent_id, updated_at
+                     ) VALUES (TRUE, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())",
                         &parameters,
                     )
                     .await
@@ -225,7 +301,126 @@ pub(crate) async fn write_shared_migration_state(
     }
 }
 
-#[cfg(feature = "postgres")]
+#[cfg(feature = "libsql")]
+async fn write_libsql_shared_state(
+    connection: &libsql::Connection,
+    manifest: &crate::manifest::MigrationManifest,
+) -> Result<(), MigrationError> {
+    let mut rows = connection
+        .query(
+            "SELECT schema_version, migration_protocol_version, release_version,
+                    run_id, status, profile, target_backend,
+                    target_locator_fingerprint, tenant_id, agent_id
+             FROM reborn_migration_state WHERE singleton = 1",
+            (),
+        )
+        .await
+        .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+    let existing = rows
+        .next()
+        .await
+        .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+    let status = migration_status_label(manifest.status);
+    let run_id = manifest.run_id.to_string();
+    if let Some(existing) = existing {
+        let existing_schema = existing
+            .get::<String>(0)
+            .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+        let existing_protocol = existing
+            .get::<i64>(1)
+            .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+        let existing_release = existing
+            .get::<String>(2)
+            .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+        let existing_run_id = existing
+            .get::<String>(3)
+            .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+        let existing_status = existing
+            .get::<String>(4)
+            .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+        let existing_profile = existing
+            .get::<String>(5)
+            .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+        let existing_backend = existing
+            .get::<String>(6)
+            .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+        let existing_fingerprint = existing
+            .get::<String>(7)
+            .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+        let existing_tenant = existing
+            .get::<String>(8)
+            .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+        let existing_agent = existing
+            .get::<String>(9)
+            .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+        if existing_schema != "ironclaw.reborn.migration-state/v1"
+            || existing_protocol != i64::from(crate::manifest::MIGRATION_PROTOCOL_VERSION)
+            || existing_release != manifest.release_version
+            || existing_run_id != run_id
+            || existing_profile != manifest.scope.profile
+            || existing_backend != store_backend_label(manifest.target.backend)
+            || existing_fingerprint != manifest.target.locator_fingerprint
+            || existing_tenant != manifest.scope.tenant_id
+            || existing_agent != manifest.scope.agent_id
+        {
+            return Err(MigrationError::OpenTarget(
+                "libSQL target is claimed by a different migration run or protocol".to_string(),
+            ));
+        }
+        if !shared_state_transition_allowed(&existing_status, manifest.status) {
+            return Err(MigrationError::OpenTarget(format!(
+                "invalid shared migration state transition {existing_status} -> {status}"
+            )));
+        }
+        connection
+            .execute(
+                "UPDATE reborn_migration_state
+                 SET status = ?1, updated_at = ?2
+                 WHERE singleton = 1 AND run_id = ?3",
+                libsql::params![status, chrono::Utc::now().to_rfc3339(), run_id],
+            )
+            .await
+            .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+    } else {
+        if manifest.status != crate::manifest::MigrationStatus::Applying {
+            return Err(MigrationError::OpenTarget(
+                "libSQL target has no active migration claim".to_string(),
+            ));
+        }
+        connection
+            .execute(
+                "INSERT INTO reborn_migration_state (
+                    singleton, schema_version, migration_protocol_version,
+                    release_version, run_id, status, profile, target_backend,
+                    target_locator_fingerprint, tenant_id, agent_id, updated_at
+                 ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                libsql::params![
+                    "ironclaw.reborn.migration-state/v1",
+                    i64::from(crate::manifest::MIGRATION_PROTOCOL_VERSION),
+                    manifest.release_version.clone(),
+                    run_id,
+                    status,
+                    manifest.scope.profile.clone(),
+                    store_backend_label(manifest.target.backend),
+                    manifest.target.locator_fingerprint.clone(),
+                    manifest.scope.tenant_id.clone(),
+                    manifest.scope.agent_id.clone(),
+                    chrono::Utc::now().to_rfc3339(),
+                ],
+            )
+            .await
+            .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+    }
+    Ok(())
+}
+
+const fn store_backend_label(backend: crate::manifest::StoreBackend) -> &'static str {
+    match backend {
+        crate::manifest::StoreBackend::Libsql => "libsql",
+        crate::manifest::StoreBackend::Postgres => "postgres",
+    }
+}
+
 const fn migration_status_label(status: crate::manifest::MigrationStatus) -> &'static str {
     use crate::manifest::MigrationStatus;
     match status {
@@ -238,7 +433,6 @@ const fn migration_status_label(status: crate::manifest::MigrationStatus) -> &'s
     }
 }
 
-#[cfg(feature = "postgres")]
 fn shared_state_transition_allowed(current: &str, next: crate::manifest::MigrationStatus) -> bool {
     use crate::manifest::MigrationStatus;
 
@@ -268,14 +462,16 @@ pub(crate) async fn readback(
     tenant_id: &TenantId,
 ) -> Result<TargetReadback, MigrationError> {
     let tenant = tenant_id.as_str();
-    let thread_pattern = format!("/tenants/{tenant}/users/%/threads/%/thread.json");
-    let message_pattern = format!("/tenants/{tenant}/users/%/threads/%/messages/%.json");
-    let append_pattern = format!("/tenants/{tenant}/users/%/threads/%/message_appends");
-    let memory_pattern = format!("/memory/tenants/{tenant}/%");
-    let secret_pattern = format!("/tenants/{tenant}/users/%/secrets/%/secrets/%.json");
-    let identity_pattern = format!("/tenants/{tenant}/shared/reborn-identity/external/%");
-    let user_pattern = format!("/tenants/{tenant}/shared/reborn-identity/users/%.json");
-    let project_pattern = format!("/tenants/{tenant}/shared/reborn-projects/%/records/%.json");
+    let tenant_pattern = escape_like_component(tenant);
+    let thread_pattern = format!("/tenants/{tenant_pattern}/users/%/threads/%/thread.json");
+    let message_pattern = format!("/tenants/{tenant_pattern}/users/%/threads/%/messages/%.json");
+    let append_pattern = format!("/tenants/{tenant_pattern}/users/%/threads/%/message_appends");
+    let memory_pattern = format!("/memory/tenants/{tenant_pattern}/%");
+    let secret_pattern = format!("/tenants/{tenant_pattern}/users/%/secrets/%/secrets/%.json");
+    let identity_pattern = format!("/tenants/{tenant_pattern}/shared/reborn-identity/external/%");
+    let user_pattern = format!("/tenants/{tenant_pattern}/shared/reborn-identity/users/%.json");
+    let project_pattern =
+        format!("/tenants/{tenant_pattern}/shared/reborn-projects/%/records/%.json");
 
     match target {
         #[cfg(feature = "libsql")]
@@ -357,13 +553,24 @@ pub(crate) async fn readback(
     }
 }
 
+fn escape_like_component(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if matches!(character, '^' | '%' | '_') {
+            escaped.push('^');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
 #[cfg(feature = "libsql")]
 async fn count_libsql(
     connection: &libsql::Connection,
     table: &str,
     pattern: &str,
 ) -> Result<u64, MigrationError> {
-    let sql = format!("SELECT COUNT(*) FROM {table} WHERE path LIKE ?1");
+    let sql = format!("SELECT COUNT(*) FROM {table} WHERE path LIKE ?1 ESCAPE '^'");
     let mut rows = connection
         .query(&sql, [pattern])
         .await
@@ -407,7 +614,7 @@ async fn count_libsql_files(
     let mut rows = connection
         .query(
             "SELECT COUNT(*) FROM root_filesystem_entries
-             WHERE path LIKE ?1 AND is_dir = 0
+             WHERE path LIKE ?1 ESCAPE '^' AND is_dir = 0
                AND path NOT LIKE '%.meta'
                AND path NOT LIKE '%.versions/%'
                AND path NOT LIKE '%.chunks/%'",
@@ -431,7 +638,7 @@ async fn count_postgres(
     table: &str,
     pattern: &str,
 ) -> Result<u64, MigrationError> {
-    let sql = format!("SELECT COUNT(*)::bigint FROM {table} WHERE path LIKE $1");
+    let sql = format!("SELECT COUNT(*)::bigint FROM {table} WHERE path LIKE $1 ESCAPE '^'");
     let count: i64 = client
         .query_one(&sql, &[&pattern])
         .await
@@ -465,7 +672,7 @@ async fn count_postgres_files(
     let count: i64 = client
         .query_one(
             "SELECT COUNT(*)::bigint FROM root_filesystem_entries
-             WHERE path LIKE $1 AND is_dir = FALSE
+             WHERE path LIKE $1 ESCAPE '^' AND is_dir = FALSE
                AND path NOT LIKE '%.meta'
                AND path NOT LIKE '%.versions/%'
                AND path NOT LIKE '%.chunks/%'",
@@ -652,15 +859,25 @@ impl RebornTarget {
         source_id: &str,
         record: ironclaw_triggers::TriggerRecord,
     ) -> Result<(), MigrationError> {
-        let existing = self
+        if self
+            .trigger_repo
+            .insert_trigger_if_absent(record.clone())
+            .await
+            .map_err(|error| MigrationError::WriteTarget {
+                domain: format!("trigger for {source_id}"),
+                reason: format!("claim deterministic target slot: {error}"),
+            })?
+        {
+            return Ok(());
+        }
+        match self
             .trigger_repo
             .get_trigger(record.tenant_id.clone(), record.trigger_id)
             .await
             .map_err(|error| MigrationError::WriteTarget {
                 domain: format!("trigger for {source_id}"),
-                reason: format!("read deterministic target slot: {error}"),
-            })?;
-        match existing {
+                reason: format!("reconcile deterministic target slot: {error}"),
+            })? {
             Some(existing) if existing == record => Ok(()),
             Some(_) => Err(MigrationError::WriteTarget {
                 domain: format!("trigger for {source_id}"),
@@ -669,14 +886,10 @@ impl RebornTarget {
                     record.trigger_id
                 ),
             }),
-            None => self
-                .trigger_repo
-                .upsert_trigger(record)
-                .await
-                .map_err(|error| MigrationError::WriteTarget {
-                    domain: format!("trigger for {source_id}"),
-                    reason: error.to_string(),
-                }),
+            None => Err(MigrationError::WriteTarget {
+                domain: format!("trigger for {source_id}"),
+                reason: "trigger vanished while reconciling an atomic insert conflict".to_string(),
+            }),
         }
     }
 }
@@ -1005,10 +1218,98 @@ fn is_local_postgres_config(config: &tokio_postgres::Config) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "libsql")]
+    use std::collections::BTreeMap;
+
+    use super::escape_like_component;
     #[cfg(feature = "postgres")]
     use super::shared_state_transition_allowed;
-    #[cfg(feature = "postgres")]
+    #[cfg(feature = "libsql")]
+    use super::write_shared_migration_state;
+    #[cfg(feature = "libsql")]
+    use crate::TargetStore;
     use crate::manifest::MigrationStatus;
+    #[cfg(feature = "libsql")]
+    use crate::manifest::{
+        MANIFEST_SCHEMA_VERSION, MIGRATION_PROTOCOL_VERSION, MigrationManifest,
+        RedactedStoreDescriptor, ResolvedScope, SourceFingerprint, StoreBackend,
+    };
+    #[cfg(feature = "libsql")]
+    use chrono::Utc;
+
+    #[test]
+    fn verification_like_component_escapes_wildcards_and_escape_character() {
+        assert_eq!(escape_like_component("tenant%_caret^"), "tenant^%^_caret^^");
+    }
+
+    #[cfg(feature = "libsql")]
+    fn applying_manifest(path: &std::path::Path) -> MigrationManifest {
+        let now = Utc::now();
+        let mut manifest = MigrationManifest {
+            manifest_schema_version: MANIFEST_SCHEMA_VERSION,
+            migration_protocol_version: MIGRATION_PROTOCOL_VERSION,
+            tool_version: "test".to_string(),
+            release_version: "test".to_string(),
+            run_id: uuid::Uuid::new_v4(),
+            status: MigrationStatus::Applying,
+            source: RedactedStoreDescriptor {
+                backend: StoreBackend::Libsql,
+                locator_fingerprint: "source".to_string(),
+                exists: Some(true),
+            },
+            target: RedactedStoreDescriptor {
+                backend: StoreBackend::Libsql,
+                locator_fingerprint:
+                    ironclaw_reborn_composition::migration_libsql_locator_fingerprint(path),
+                exists: Some(false),
+            },
+            source_schema_version: None,
+            source_fingerprint: SourceFingerprint {
+                algorithm: "test".to_string(),
+                value: "source".to_string(),
+            },
+            source_inventory_checksum: "inventory".to_string(),
+            plan_hash: String::new(),
+            scope: ResolvedScope {
+                profile: "local-dev".to_string(),
+                tenant_id: "tenant".to_string(),
+                agent_id: "agent".to_string(),
+                source_home_fingerprint: None,
+                user_mapping: BTreeMap::new(),
+                target_empty: Some(true),
+            },
+            inventory: Vec::new(),
+            domains: BTreeMap::new(),
+            operator_acknowledgements: Vec::new(),
+            created_at: now,
+            updated_at: now,
+        };
+        manifest.seal().expect("seal manifest");
+        manifest
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn libsql_shared_state_claim_rejects_a_different_run() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("reborn.db");
+        let target = TargetStore::LibSql { path: path.clone() };
+        let first = applying_manifest(&path);
+        write_shared_migration_state(&target, &first)
+            .await
+            .expect("initial claim");
+        write_shared_migration_state(&target, &first)
+            .await
+            .expect("exact replay");
+
+        let mut second = first.clone();
+        second.run_id = uuid::Uuid::new_v4();
+        second.seal().expect("seal second run");
+        let error = write_shared_migration_state(&target, &second)
+            .await
+            .expect_err("different run must not replace the claim");
+        assert!(error.to_string().contains("different migration run"));
+    }
 
     #[cfg(feature = "postgres")]
     #[test]

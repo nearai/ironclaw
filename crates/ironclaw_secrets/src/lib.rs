@@ -96,6 +96,14 @@ pub struct SecretLease {
     pub status: SecretLeaseStatus,
 }
 
+/// Result of an atomic create-if-absent secret write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretPutOutcome {
+    Inserted,
+    ExactMatch,
+    Divergent,
+}
+
 /// Secret service failures. Variants intentionally avoid secret material.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum SecretStoreError {
@@ -1006,6 +1014,24 @@ pub trait SecretStore: Send + Sync {
         material: SecretMaterial,
         expires_at: Option<Timestamp>,
     ) -> Result<SecretMetadata, SecretStoreError>;
+
+    /// Atomically inserts a secret only when its deterministic slot is absent.
+    ///
+    /// An existing record is never replaced. Instead, the store compares its
+    /// expiry and material without exposing the stored value and reports
+    /// whether it is an exact match or divergent state.
+    async fn put_if_absent_or_matches(
+        &self,
+        scope: ResourceScope,
+        handle: SecretHandle,
+        material: SecretMaterial,
+        expires_at: Option<Timestamp>,
+    ) -> Result<SecretPutOutcome, SecretStoreError> {
+        let _ = (scope, handle, material, expires_at);
+        Err(SecretStoreError::StoreUnavailable {
+            reason: "atomic secret insertion is unavailable".to_string(),
+        })
+    }
 
     /// Returns redacted metadata for a secret without exposing material.
     async fn metadata(

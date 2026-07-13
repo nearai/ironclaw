@@ -1,3 +1,4 @@
+// arch-exempt: large_file, split PostgreSQL trigger persistence by operation, plan #8513
 use std::collections::HashMap;
 
 use async_trait::async_trait;
@@ -167,6 +168,70 @@ impl TriggerRepository for PostgresTriggerRepository {
         .await
         .map_err(|error| backend_error("upsert trigger record", error))?;
         Ok(())
+    }
+
+    async fn insert_trigger_if_absent(&self, record: TriggerRecord) -> Result<bool, TriggerError> {
+        record.validate()?;
+        let client = self.connect().await?;
+        let trigger_id = record.trigger_id.to_string();
+        let tenant_id = record.tenant_id.as_str();
+        let creator_user_id = record.creator_user_id.as_str();
+        let agent_id = record.agent_id.as_ref().map(AgentId::as_str);
+        let project_id = record.project_id.as_ref().map(ProjectId::as_str);
+        let source = crate::source_kind_text_codec(record.source);
+        let (schedule_kind, schedule_expression_ref, schedule_at) = record.schedule.to_storage();
+        let schedule_expression = schedule_expression_ref.to_string();
+        let schedule_timezone = record.schedule.timezone_text().to_string();
+        let state = crate::state_text_codec(record.state);
+        let next_run_at = fmt_ts(&record.next_run_at);
+        let last_run_at = record.last_run_at.as_ref().map(fmt_ts);
+        let last_fired_slot = record.last_fired_slot.as_ref().map(fmt_ts);
+        let last_status = record.last_status.map(crate::status_text_codec);
+        let active_fire_slot = record.active_fire_slot.as_ref().map(fmt_ts);
+        let active_run_ref = record.active_run_ref.as_ref().map(ToString::to_string);
+        let created_at = fmt_ts(&record.created_at);
+        let delivery_target = record
+            .delivery_target
+            .as_ref()
+            .map(|target| target.as_str().to_string());
+        let changed = client
+            .execute(
+                r#"INSERT INTO trigger_records (
+                    trigger_id, tenant_id, creator_user_id, agent_id, project_id,
+                    name, source, schedule_expression, schedule_timezone, schedule_kind, prompt,
+                    state, next_run_at, last_run_at, last_fired_slot, last_status,
+                    active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                    $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
+                ) ON CONFLICT (tenant_id, trigger_id) DO NOTHING"#,
+                &[
+                    &trigger_id,
+                    &tenant_id,
+                    &creator_user_id,
+                    &agent_id,
+                    &project_id,
+                    &record.name,
+                    &source,
+                    &schedule_expression,
+                    &schedule_timezone,
+                    &schedule_kind,
+                    &record.prompt,
+                    &state,
+                    &next_run_at,
+                    &last_run_at,
+                    &last_fired_slot,
+                    &last_status,
+                    &active_fire_slot,
+                    &active_run_ref,
+                    &created_at,
+                    &schedule_at,
+                    &delivery_target,
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("insert trigger record if absent", error))?;
+        Ok(changed == 1)
     }
 
     async fn get_trigger(

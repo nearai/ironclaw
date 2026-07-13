@@ -28,6 +28,19 @@ pub(crate) enum MigrationLifecycleStatus {
     Verified,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct MigrationStateRecord {
+    schema_version: String,
+    migration_protocol_version: u32,
+    run_id: String,
+    status: String,
+    profile: String,
+    target_backend: String,
+    target_locator_fingerprint: String,
+    tenant_id: String,
+    agent_id: String,
+}
+
 impl MigrationLifecycleStatus {
     pub(crate) fn parse(status: &str) -> anyhow::Result<Self> {
         match status {
@@ -52,13 +65,6 @@ impl MigrationLifecycleStatus {
             Self::Verifying => "verifying",
             Self::Verified => "verified",
         }
-    }
-
-    const fn is_quarantined(self) -> bool {
-        matches!(
-            self,
-            Self::Applying | Self::Failed | Self::Applied | Self::Verifying
-        )
     }
 
     const fn is_activation_safe(self) -> bool {
@@ -247,26 +253,32 @@ pub(crate) fn read_activation_state_status(
         .home()
         .path()
         .join(MIGRATION_STATE_MARKER_FILE);
-    let local = read_local_target_state_status(&marker)?;
-    let shared = read_shared_target_state_status(context)?;
-    Ok(most_restrictive_status(local, shared))
-}
-
-fn most_restrictive_status(
-    local: Option<MigrationLifecycleStatus>,
-    shared: Option<MigrationLifecycleStatus>,
-) -> Option<MigrationLifecycleStatus> {
+    let local = read_local_target_state(&marker)?;
+    let shared = read_shared_target_state(context)?;
+    let binding = current_target_binding(context)?;
+    if let Some(record) = local.as_ref() {
+        validate_state_binding(record, &binding)?;
+    }
+    if let Some(record) = shared.as_ref() {
+        validate_state_binding(record, &binding)?;
+    }
     match (local, shared) {
-        (Some(_), Some(shared)) if shared.is_quarantined() => Some(shared),
-        (Some(local), Some(_)) if local.is_quarantined() => Some(local),
-        (_, Some(shared)) => Some(shared),
-        (local, None) => local,
+        (None, None) => Ok(None),
+        (Some(_), None) => anyhow::bail!(
+            "Reborn target is quarantined because its local v1 migration marker has no matching target-owned durable state"
+        ),
+        (Some(local), Some(shared)) => {
+            ensure!(
+                local == shared,
+                "Reborn target is quarantined because local and durable v1 migration state do not match"
+            );
+            Ok(Some(MigrationLifecycleStatus::parse(&shared.status)?))
+        }
+        (None, Some(shared)) => Ok(Some(MigrationLifecycleStatus::parse(&shared.status)?)),
     }
 }
 
-fn read_local_target_state_status(
-    marker: &Path,
-) -> anyhow::Result<Option<MigrationLifecycleStatus>> {
+fn read_local_target_state(marker: &Path) -> anyhow::Result<Option<MigrationStateRecord>> {
     let body = match fs::read_to_string(marker) {
         Ok(body) => body,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -279,25 +291,18 @@ fn read_local_target_state_status(
             });
         }
     };
-    let document: serde_json::Value = serde_json::from_str(&body).with_context(|| {
+    let document: MigrationStateRecord = serde_json::from_str(&body).with_context(|| {
         format!(
             "target-owned v1 migration state at {} is invalid; keep the target quarantined and inspect the migration manifest recorded in that marker",
             marker.display()
         )
     })?;
     validate_state_header(
-        document
-            .get("schema_version")
-            .and_then(serde_json::Value::as_str),
-        document
-            .get("migration_protocol_version")
-            .and_then(serde_json::Value::as_u64),
+        Some(&document.schema_version),
+        Some(u64::from(document.migration_protocol_version)),
     )?;
-    let status = document
-        .get("status")
-        .and_then(serde_json::Value::as_str)
-        .context("v1 migration state marker has no status")?;
-    Ok(Some(MigrationLifecycleStatus::parse(status)?))
+    MigrationLifecycleStatus::parse(&document.status)?;
+    Ok(Some(document))
 }
 
 fn validate_state_header(schema: Option<&str>, protocol: Option<u64>) -> anyhow::Result<()> {
@@ -323,69 +328,201 @@ fn activation_status_allowed(status: MigrationLifecycleStatus) -> anyhow::Result
     }
 }
 
-#[cfg(feature = "postgres")]
-fn read_shared_target_state_status(
-    context: &RebornCliContext,
-) -> anyhow::Result<Option<MigrationLifecycleStatus>> {
+#[derive(Debug)]
+struct CurrentTargetBinding {
+    profile: String,
+    target_backend: &'static str,
+    target_locator_fingerprint: String,
+    tenant_id: String,
+    agent_id: String,
+}
+
+fn current_target_binding(context: &RebornCliContext) -> anyhow::Result<CurrentTargetBinding> {
     use ironclaw_reborn_composition::RebornMigrationTargetStore;
 
     let target =
         ironclaw_reborn_composition::resolve_reborn_migration_target(context.boot_config())
             .context("failed to resolve the Reborn target for migration quarantine inspection")?;
-    let url = match target.store {
-        RebornMigrationTargetStore::Postgres { url } => url,
+    let (target_backend, target_locator_fingerprint) = match &target.store {
+        #[cfg(feature = "postgres")]
+        RebornMigrationTargetStore::Postgres { url } => (
+            "postgres",
+            ironclaw_reborn_composition::migration_postgres_locator_fingerprint(url)
+                .context("failed to identify configured PostgreSQL migration target")?,
+        ),
         #[cfg(feature = "libsql")]
-        RebornMigrationTargetStore::LibSql { .. } => return Ok(None),
+        RebornMigrationTargetStore::LibSql { path } => (
+            "libsql",
+            ironclaw_reborn_composition::migration_libsql_locator_fingerprint(path),
+        ),
     };
-    crate::runtime::block_on_cli(async move {
-        let pool = ironclaw_reborn_composition::open_reborn_postgres_pool(url).context(
-            "failed to open the Reborn PostgreSQL target for migration quarantine inspection",
-        )?;
-        let client = pool
-            .get()
-            .await
-            .context("failed to inspect shared PostgreSQL migration quarantine state")?;
-        let relation: Option<String> = client
-            .query_one("SELECT to_regclass('reborn_migration_state')::text", &[])
-            .await
-            .context("failed to inspect shared PostgreSQL migration quarantine schema")?
-            .try_get(0)
-            .context("invalid shared PostgreSQL migration quarantine schema result")?;
-        if relation.is_none() {
-            return Ok::<Option<MigrationLifecycleStatus>, anyhow::Error>(None);
-        }
-        let row = client
-            .query_opt(
-                "SELECT schema_version, migration_protocol_version, status \
-                 FROM reborn_migration_state WHERE singleton = TRUE",
-                &[],
-            )
-            .await
-            .context("failed to read shared PostgreSQL migration quarantine state")?
-            .context("shared PostgreSQL migration quarantine table has no singleton state")?;
-        let schema: String = row
-            .try_get(0)
-            .context("invalid shared PostgreSQL migration quarantine schema version")?;
-        let protocol: i64 = row
-            .try_get(1)
-            .context("invalid shared PostgreSQL migration quarantine protocol version")?;
-        let status: String = row
-            .try_get(2)
-            .context("invalid shared PostgreSQL migration quarantine status")?;
-        let protocol = u64::try_from(protocol)
-            .context("shared PostgreSQL migration quarantine protocol version is negative")?;
-        validate_state_header(Some(&schema), Some(protocol))?;
-        Ok::<Option<MigrationLifecycleStatus>, anyhow::Error>(Some(
-            MigrationLifecycleStatus::parse(&status)?,
-        ))
+    Ok(CurrentTargetBinding {
+        profile: target.profile.as_str().to_string(),
+        target_backend,
+        target_locator_fingerprint,
+        tenant_id: target.tenant_id.to_string(),
+        agent_id: target.agent_id.to_string(),
     })
 }
 
-#[cfg(not(feature = "postgres"))]
-fn read_shared_target_state_status(
-    _context: &RebornCliContext,
-) -> anyhow::Result<Option<MigrationLifecycleStatus>> {
-    Ok(None)
+fn validate_state_binding(
+    record: &MigrationStateRecord,
+    binding: &CurrentTargetBinding,
+) -> anyhow::Result<()> {
+    ensure!(
+        record.profile == binding.profile
+            && record.target_backend == binding.target_backend
+            && record.target_locator_fingerprint == binding.target_locator_fingerprint
+            && record.tenant_id == binding.tenant_id
+            && record.agent_id == binding.agent_id,
+        "Reborn target is quarantined because v1 migration state does not match the configured target profile or scope"
+    );
+    Ok(())
+}
+
+fn read_shared_target_state(
+    context: &RebornCliContext,
+) -> anyhow::Result<Option<MigrationStateRecord>> {
+    use ironclaw_reborn_composition::RebornMigrationTargetStore;
+
+    let target =
+        ironclaw_reborn_composition::resolve_reborn_migration_target(context.boot_config())
+            .context("failed to resolve the Reborn target for migration quarantine inspection")?;
+    match target.store {
+        #[cfg(feature = "postgres")]
+        RebornMigrationTargetStore::Postgres { url } => crate::runtime::block_on_cli(async move {
+            let pool = ironclaw_reborn_composition::open_reborn_postgres_pool(url).context(
+                "failed to open the Reborn PostgreSQL target for migration quarantine inspection",
+            )?;
+            let client = pool
+                .get()
+                .await
+                .context("failed to inspect shared PostgreSQL migration quarantine state")?;
+            let relation: Option<String> = client
+                .query_one("SELECT to_regclass('reborn_migration_state')::text", &[])
+                .await
+                .context("failed to inspect shared PostgreSQL migration quarantine schema")?
+                .try_get(0)
+                .context("invalid shared PostgreSQL migration quarantine schema result")?;
+            if relation.is_none() {
+                return Ok::<Option<MigrationStateRecord>, anyhow::Error>(None);
+            }
+            let row = client
+                .query_opt(
+                    "SELECT schema_version, migration_protocol_version, run_id, status, profile, \
+                        target_backend, target_locator_fingerprint, tenant_id, agent_id \
+                 FROM reborn_migration_state WHERE singleton = TRUE",
+                    &[],
+                )
+                .await
+                .context("failed to read shared PostgreSQL migration quarantine state")?
+                .context("shared PostgreSQL migration quarantine table has no singleton state")?;
+            let schema: String = row
+                .try_get(0)
+                .context("invalid shared PostgreSQL migration quarantine schema version")?;
+            let protocol: i64 = row
+                .try_get(1)
+                .context("invalid shared PostgreSQL migration quarantine protocol version")?;
+            let run_id: String = row
+                .try_get(2)
+                .context("invalid shared PostgreSQL migration run id")?;
+            let status: String = row
+                .try_get(3)
+                .context("invalid shared PostgreSQL migration quarantine status")?;
+            let profile: String = row.try_get(4).context("invalid shared migration profile")?;
+            let target_backend: String = row.try_get(5).context("invalid shared target backend")?;
+            let target_locator_fingerprint: String = row
+                .try_get(6)
+                .context("invalid shared target fingerprint")?;
+            let tenant_id: String = row.try_get(7).context("invalid shared tenant id")?;
+            let agent_id: String = row.try_get(8).context("invalid shared agent id")?;
+            let protocol = u64::try_from(protocol)
+                .context("shared PostgreSQL migration quarantine protocol version is negative")?;
+            validate_state_header(Some(&schema), Some(protocol))?;
+            MigrationLifecycleStatus::parse(&status)?;
+            Ok::<Option<MigrationStateRecord>, anyhow::Error>(Some(MigrationStateRecord {
+                schema_version: schema,
+                migration_protocol_version: u32::try_from(protocol)
+                    .context("shared migration protocol version is too large")?,
+                run_id,
+                status,
+                profile,
+                target_backend,
+                target_locator_fingerprint,
+                tenant_id,
+                agent_id,
+            }))
+        }),
+        #[cfg(feature = "libsql")]
+        RebornMigrationTargetStore::LibSql { path } => read_libsql_target_state(path),
+    }
+}
+
+#[cfg(feature = "libsql")]
+fn read_libsql_target_state(path: PathBuf) -> anyhow::Result<Option<MigrationStateRecord>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    crate::runtime::block_on_cli(async move {
+        let database = libsql::Builder::new_local(&path)
+            .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .build()
+            .await
+            .context("failed to open libSQL migration quarantine state")?;
+        let connection = database
+            .connect()
+            .context("failed to connect libSQL target")?;
+        let mut schema = connection
+            .query(
+                "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'reborn_migration_state'",
+                (),
+            )
+            .await
+            .context("failed to inspect libSQL migration quarantine schema")?;
+        if schema
+            .next()
+            .await
+            .context("failed to read libSQL schema")?
+            .is_none()
+        {
+            return Ok::<Option<MigrationStateRecord>, anyhow::Error>(None);
+        }
+        let mut rows = connection
+            .query(
+                "SELECT schema_version, migration_protocol_version, run_id, status, profile,
+                        target_backend, target_locator_fingerprint, tenant_id, agent_id
+                 FROM reborn_migration_state WHERE singleton = 1",
+                (),
+            )
+            .await
+            .context("failed to read libSQL migration quarantine state")?;
+        let row = rows
+            .next()
+            .await
+            .context("failed to read libSQL migration state row")?
+            .context("libSQL migration quarantine table has no singleton state")?;
+        let record = MigrationStateRecord {
+            schema_version: row.get(0).context("invalid libSQL migration schema")?,
+            migration_protocol_version: u32::try_from(
+                row.get::<i64>(1)
+                    .context("invalid libSQL migration protocol")?,
+            )
+            .context("invalid libSQL migration protocol")?,
+            run_id: row.get(2).context("invalid libSQL migration run id")?,
+            status: row.get(3).context("invalid libSQL migration status")?,
+            profile: row.get(4).context("invalid libSQL migration profile")?,
+            target_backend: row.get(5).context("invalid libSQL target backend")?,
+            target_locator_fingerprint: row.get(6).context("invalid libSQL target fingerprint")?,
+            tenant_id: row.get(7).context("invalid libSQL tenant id")?,
+            agent_id: row.get(8).context("invalid libSQL agent id")?,
+        };
+        validate_state_header(
+            Some(&record.schema_version),
+            Some(u64::from(record.migration_protocol_version)),
+        )?;
+        MigrationLifecycleStatus::parse(&record.status)?;
+        Ok::<Option<MigrationStateRecord>, anyhow::Error>(Some(record))
+    })
 }
 
 fn launch_companion(args: Vec<OsString>) -> anyhow::Result<()> {
@@ -636,12 +773,18 @@ fn propagate_status(status: ExitStatus) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    fn marker(release_version: &str, status: &str) -> String {
+    fn marker(release_version: &str, status: &str, binding: &CurrentTargetBinding) -> String {
         serde_json::json!({
             "schema_version": MIGRATION_STATE_MARKER_SCHEMA,
             "migration_protocol_version": COMPANION_PROTOCOL_VERSION,
             "release_version": release_version,
+            "run_id": "01JTESTMIGRATIONRUN0000000000",
             "status": status,
+            "profile": binding.profile,
+            "target_backend": binding.target_backend,
+            "target_locator_fingerprint": binding.target_locator_fingerprint,
+            "tenant_id": binding.tenant_id,
+            "agent_id": binding.agent_id,
         })
         .to_string()
     }
@@ -679,31 +822,38 @@ mod tests {
     }
 
     #[test]
-    fn verified_marker_from_compatible_release_allows_activation() {
+    fn verified_marker_without_matching_durable_state_stays_quarantined() {
         let (_tmp, context) = RebornCliContext::test_context();
+        let binding = current_target_binding(&context).expect("target binding");
         let path = context
             .boot_config()
             .home()
             .path()
             .join(MIGRATION_STATE_MARKER_FILE);
         fs::create_dir_all(context.boot_config().home().path()).expect("create home");
-        fs::write(&path, marker("previous-release", "verified")).expect("write marker");
+        fs::write(&path, marker("previous-release", "verified", &binding)).expect("write marker");
 
-        ensure_activation_allowed(&context).expect("compatible verified marker should activate");
-        assert_eq!(
-            read_activation_state_status(&context).expect("read marker"),
-            Some(MigrationLifecycleStatus::Verified)
+        let error = ensure_activation_allowed(&context)
+            .expect_err("a local marker alone must not authorize activation");
+        assert!(
+            error
+                .to_string()
+                .contains("no matching target-owned durable state")
         );
     }
 
     #[test]
-    fn shared_quarantine_dominates_stale_local_verified_state() {
-        assert_eq!(
-            most_restrictive_status(
-                Some(MigrationLifecycleStatus::Verified),
-                Some(MigrationLifecycleStatus::Applying)
-            ),
-            Some(MigrationLifecycleStatus::Applying)
-        );
+    fn state_binding_rejects_changed_scope() {
+        let binding = CurrentTargetBinding {
+            profile: "local-dev".to_string(),
+            target_backend: "libsql",
+            target_locator_fingerprint: "target-fingerprint".to_string(),
+            tenant_id: "tenant-a".to_string(),
+            agent_id: "agent-a".to_string(),
+        };
+        let mut record: MigrationStateRecord =
+            serde_json::from_str(&marker("release", "verified", &binding)).expect("marker record");
+        record.tenant_id = "tenant-b".to_string();
+        assert!(validate_state_binding(&record, &binding).is_err());
     }
 }

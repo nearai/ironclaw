@@ -64,6 +64,8 @@ postgres = [
 # Enable embedded libSQL storage composition for volume-backed hosted previews.
 libsql = [
     "ironclaw_reborn_composition/libsql",
+    "ironclaw_reborn_composition/migration-support",
+    "dep:libsql",
 ]
 # Coordinate turn state in a single in-process `InMemoryTurnStateStore` authority
 # instead of the per-user `state.json` filesystem CAS store (the runtime-wedge
@@ -87,6 +89,7 @@ ironclaw_reborn_config = { path = "../ironclaw_reborn_config", version = "0.1.0"
 ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces", version = "0.1.0" }
 ironclaw_reborn_webui_ingress = { path = "../ironclaw_reborn_webui_ingress", version = "0.1.0", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
+libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

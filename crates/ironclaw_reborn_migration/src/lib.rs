@@ -144,6 +144,28 @@ pub async fn apply_migration(
     apply_migration_inner(options, manifest, secrets, acknowledgements, false).await
 }
 
+pub async fn preflight_apply_migration(
+    options: &MigrationOptions,
+    manifest: &MigrationManifest,
+    secrets: &MigrationSecretInputs,
+    acknowledgements: ApplyAcknowledgements,
+) -> Result<(), MigrationError> {
+    validate_apply_preconditions(options, manifest, secrets, acknowledgements, false)
+        .await
+        .map_err(|error| MigrationError::Preflight(Box::new(error)))
+}
+
+pub async fn preflight_resume_migration(
+    options: &MigrationOptions,
+    manifest: &MigrationManifest,
+    secrets: &MigrationSecretInputs,
+    acknowledgements: ApplyAcknowledgements,
+) -> Result<(), MigrationError> {
+    validate_apply_preconditions(options, manifest, secrets, acknowledgements, true)
+        .await
+        .map_err(|error| MigrationError::Preflight(Box::new(error)))
+}
+
 async fn apply_migration_inner(
     options: MigrationOptions,
     manifest: &MigrationManifest,
@@ -151,9 +173,11 @@ async fn apply_migration_inner(
     acknowledgements: ApplyAcknowledgements,
     is_resume: bool,
 ) -> Result<MigrationReport, MigrationError> {
-    validate_apply_preconditions(&options, manifest, acknowledgements, is_resume)
-        .await
-        .map_err(|error| MigrationError::Preflight(Box::new(error)))?;
+    if is_resume {
+        preflight_resume_migration(&options, manifest, &secrets, acknowledgements).await?;
+    } else {
+        preflight_apply_migration(&options, manifest, &secrets, acknowledgements).await?;
+    }
 
     let source_options = MigrationOptions {
         secret_master_key: secrets.source_master_key,
@@ -292,9 +316,9 @@ async fn run_converters(
     report: &mut MigrationReport,
 ) -> Result<(), MigrationError> {
     convert::users::run(source, target, options, report).await?;
-    convert::projects::run(source, target, options, report).await?;
+    let imported_project_ids = convert::projects::run(source, target, options, report).await?;
     convert::threads::run(source, target, options, report).await?;
-    convert::automations::run(source, target, options, report).await?;
+    convert::automations::run(source, target, options, report, &imported_project_ids).await?;
     convert::memory::run(source, target, options, report).await?;
     convert::jobs::run(source, target, options, report).await?;
     convert::secrets::run(source, target, options, report).await?;
@@ -308,6 +332,7 @@ async fn run_converters(
 async fn validate_apply_preconditions(
     options: &MigrationOptions,
     manifest: &MigrationManifest,
+    secrets: &MigrationSecretInputs,
     acknowledgements: ApplyAcknowledgements,
     is_resume: bool,
 ) -> Result<(), MigrationError> {
@@ -321,6 +346,15 @@ async fn validate_apply_preconditions(
         return Err(MigrationError::InvalidInput(
             "migration plan contains unresolved inventory blockers".to_string(),
         ));
+    }
+    if secrets.source_master_key.is_none()
+        && manifest.inventory.iter().any(|item| {
+            item.source_kind == crate::manifest::InventorySourceKind::Table
+                && item.source_name == "secrets"
+                && item.count > 0
+        })
+    {
+        return Err(MigrationError::MissingSecretKey);
     }
     if !is_resume {
         if manifest.status != MigrationStatus::Planned {
@@ -533,15 +567,42 @@ fn target_descriptor(target: &TargetStore) -> Result<RedactedStoreDescriptor, Mi
     Ok(match target {
         TargetStore::LibSql { path } => RedactedStoreDescriptor {
             backend: StoreBackend::Libsql,
-            locator_fingerprint: locator_hash(&canonicalish(path)),
+            locator_fingerprint: target_libsql_locator_fingerprint(path),
             exists: Some(path.exists()),
         },
         TargetStore::Postgres { url } => RedactedStoreDescriptor {
             backend: StoreBackend::Postgres,
-            locator_fingerprint: postgres_locator_fingerprint(url)?,
+            locator_fingerprint: target_postgres_locator_fingerprint(url)?,
             exists: None,
         },
     })
+}
+
+#[cfg(feature = "libsql")]
+fn target_libsql_locator_fingerprint(path: &Path) -> String {
+    ironclaw_reborn_composition::migration_libsql_locator_fingerprint(path)
+}
+
+#[cfg(not(feature = "libsql"))]
+fn target_libsql_locator_fingerprint(path: &Path) -> String {
+    locator_hash(&canonicalish(path))
+}
+
+#[cfg(feature = "postgres")]
+fn target_postgres_locator_fingerprint(
+    locator: &secrecy::SecretString,
+) -> Result<String, MigrationError> {
+    ironclaw_reborn_composition::migration_postgres_locator_fingerprint(locator)
+        .map_err(|error| MigrationError::InvalidInput(error.to_string()))
+}
+
+#[cfg(not(feature = "postgres"))]
+fn target_postgres_locator_fingerprint(
+    _locator: &secrecy::SecretString,
+) -> Result<String, MigrationError> {
+    Err(MigrationError::InvalidInput(
+        "PostgreSQL support is not compiled into this migrator".to_string(),
+    ))
 }
 
 fn locator_hash(locator: &Path) -> String {

@@ -17,9 +17,7 @@ pub(crate) async fn run(
     _options: &MigrationOptions,
     report: &mut MigrationReport,
 ) -> Result<(), MigrationError> {
-    // heartbeat_state is keyed per (user_id, agent_id); enumerate distinct users
-    // and record the gap. No typed all-user read API exists for heartbeat state.
-    for user_id in src.distinct_users().await? {
+    for user_id in src.heartbeat_user_ids().await? {
         report.record_loss(
             Domain::Heartbeat,
             user_id,

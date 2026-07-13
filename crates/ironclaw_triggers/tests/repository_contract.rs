@@ -1,3 +1,4 @@
+// arch-exempt: large_file, split trigger repository contracts by backend, plan #8513
 #![cfg(any(feature = "libsql", feature = "postgres"))]
 
 use chrono::{SecondsFormat, TimeZone, Utc};
@@ -253,6 +254,50 @@ async fn assert_round_trip_and_scoped_isolation(repo: &impl TriggerRepository) {
             .expect("remove missing trigger")
             .is_none()
     );
+}
+
+async fn assert_insert_if_absent_never_overwrites(repo: &impl TriggerRepository) {
+    let trigger_id = TriggerId::parse("01J11111111111111111111111").expect("ulid");
+    let original = sample_record(trigger_id, tenant("insert-once"), ts(1_704_067_200));
+    let mut divergent = original.clone();
+    divergent.prompt = "divergent prompt".to_string();
+
+    assert!(
+        repo.insert_trigger_if_absent(original.clone())
+            .await
+            .expect("first insert")
+    );
+    assert!(
+        !repo
+            .insert_trigger_if_absent(divergent)
+            .await
+            .expect("conflicting insert")
+    );
+    assert_eq!(
+        repo.get_trigger(original.tenant_id.clone(), trigger_id)
+            .await
+            .expect("read original"),
+        Some(original)
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_insert_if_absent_never_overwrites() {
+    let (_dir, repo) = build_libsql_repo().await;
+    assert_insert_if_absent_never_overwrites(&repo).await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_insert_if_absent_never_overwrites() {
+    let Some((_container, pool)) = postgres_pool_or_skip().await else {
+        return;
+    };
+    let repo = PostgresTriggerRepository::new(pool.clone());
+    repo.run_migrations().await.expect("run migrations");
+    assert_insert_if_absent_never_overwrites(&repo).await;
+    clear_postgres_triggers(&pool).await;
 }
 
 async fn assert_round_trip_preserves_optional_run_metadata_and_schedule_kind(

@@ -208,9 +208,8 @@ async fn apply_preflight_failure_preserves_the_planned_manifest() {
         "stderr: {}",
         String::from_utf8_lossy(&apply.stderr)
     );
-    let state: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(reborn_home.join(".v1-migration-state.json")).expect("read target state"),
-    )
-    .expect("target state JSON");
-    assert_eq!(state["status"], "planned");
+    assert!(
+        !reborn_home.join(".v1-migration-state.json").exists(),
+        "preflight failure must not install a target quarantine marker"
+    );
 }

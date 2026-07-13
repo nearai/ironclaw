@@ -22,19 +22,13 @@ pub(crate) async fn run(
 ) -> Result<(), MigrationError> {
     let users = src.distinct_users().await?;
     for user_id in &users {
-        let settings =
-            src.db
-                .get_all_settings(user_id)
-                .await
-                .map_err(|e| MigrationError::ReadSource {
-                    domain: "settings".into(),
-                    reason: e.to_string(),
-                })?;
-        for key in settings.keys() {
+        let settings = src.settings(user_id).await?;
+        for setting in settings {
+            let key = setting.key;
             report.record_loss(
                 Domain::Setting,
                 format!("{user_id}:{key}"),
-                key.clone(),
+                key,
                 LossReason::NoTargetConcept,
                 "Reborn config is a typed config.toml / providers.json / LlmKeyStore; \
                  there is no generic key/value settings store to migrate into. \

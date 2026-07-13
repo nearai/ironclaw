@@ -72,6 +72,10 @@ pub use local_runtime_profile::{
     local_runtime_build_input_with_options,
 };
 #[cfg(all(feature = "migration-support", feature = "libsql"))]
+pub use migration_support::migration_libsql_locator_fingerprint;
+#[cfg(all(feature = "migration-support", feature = "postgres"))]
+pub use migration_support::migration_postgres_locator_fingerprint;
+#[cfg(all(feature = "migration-support", feature = "libsql"))]
 pub use migration_support::resolve_local_migration_target_key;
 #[cfg(feature = "migration-support")]
 pub use migration_support::{

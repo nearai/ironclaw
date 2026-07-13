@@ -19,6 +19,8 @@ use ironclaw_reborn_config::{
     REBORN_PROFILE_ENV, RebornBootConfig, RebornConfigFile, RebornProfile,
 };
 use ironclaw_secrets::SecretMaterial;
+#[cfg(feature = "postgres")]
+use secrecy::ExposeSecret as _;
 
 use crate::{RebornBuildError, RebornRuntimeIdentity};
 #[cfg(feature = "postgres")]
@@ -164,6 +166,118 @@ pub fn resolve_reborn_migration_target(
         agent_id,
         target_master_key,
     })
+}
+
+/// Compute the redacted local target identity consumed by the migration
+/// companion and CLI activation guard. The composition public-surface snapshot
+/// pins this shared boundary so both callers compare the same locator.
+#[cfg(feature = "libsql")]
+pub fn migration_libsql_locator_fingerprint(path: &Path) -> String {
+    use std::path::Component;
+
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    let mut ancestor = normalized.clone();
+    let mut missing_suffix = Vec::new();
+    while !ancestor.exists() {
+        let Some(name) = ancestor.file_name() else {
+            break;
+        };
+        missing_suffix.push(name.to_os_string());
+        if !ancestor.pop() {
+            break;
+        }
+    }
+    let mut resolved = ancestor.canonicalize().unwrap_or(ancestor);
+    for component in missing_suffix.into_iter().rev() {
+        resolved.push(component);
+    }
+    ironclaw_common::hashing::sha256_hex(resolved.as_os_str().as_encoded_bytes())
+}
+
+/// Compute the credential-free PostgreSQL target identity consumed by the
+/// migration companion and CLI activation guard.
+#[cfg(feature = "postgres")]
+pub fn migration_postgres_locator_fingerprint(
+    locator: &SecretMaterial,
+) -> Result<String, RebornBuildError> {
+    use deadpool_postgres::tokio_postgres::config::Host;
+
+    let config = locator
+        .expose_secret()
+        .parse::<deadpool_postgres::tokio_postgres::Config>()
+        .map_err(|_| RebornBuildError::InvalidConfig {
+            reason: "PostgreSQL migration target locator is invalid (details redacted)".to_string(),
+        })?;
+    if config.get_options().is_some() {
+        return Err(RebornBuildError::InvalidConfig {
+            reason: "PostgreSQL connection options are not supported for migration target identity (details redacted)".to_string(),
+        });
+    }
+    let mut material = Vec::new();
+    append_locator_field(&mut material, b"schema", b"postgres-locator-v1");
+    append_locator_field(
+        &mut material,
+        b"database",
+        config
+            .get_dbname()
+            .or_else(|| config.get_user())
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    for (index, host) in config.get_hosts().iter().enumerate() {
+        let label = format!("host-{index}");
+        match host {
+            Host::Tcp(host) => {
+                append_locator_field(&mut material, label.as_bytes(), host.as_bytes())
+            }
+            #[cfg(unix)]
+            Host::Unix(path) => append_locator_field(
+                &mut material,
+                label.as_bytes(),
+                path.as_os_str().as_encoded_bytes(),
+            ),
+        }
+        let port = config.get_ports().get(index).copied().unwrap_or(5432);
+        append_locator_field(
+            &mut material,
+            format!("port-{index}").as_bytes(),
+            port.to_string().as_bytes(),
+        );
+    }
+    for (index, address) in config.get_hostaddrs().iter().enumerate() {
+        append_locator_field(
+            &mut material,
+            format!("hostaddr-{index}").as_bytes(),
+            address.to_string().as_bytes(),
+        );
+    }
+    Ok(ironclaw_common::hashing::sha256_hex(&material))
+}
+
+#[cfg(feature = "postgres")]
+fn append_locator_field(material: &mut Vec<u8>, label: &[u8], value: &[u8]) {
+    material.extend_from_slice(label.len().to_string().as_bytes());
+    material.push(b':');
+    material.extend_from_slice(label);
+    material.extend_from_slice(value.len().to_string().as_bytes());
+    material.push(b':');
+    material.extend_from_slice(value);
 }
 
 /// Resolve or create the cached local-runtime master key. Call this only from

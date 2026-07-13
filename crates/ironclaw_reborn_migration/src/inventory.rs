@@ -89,7 +89,7 @@ const TABLE_RULES: &[DispositionRule] = &[
     DispositionRule {
         name: "heartbeat_state",
         domain: Domain::Heartbeat,
-        disposition: Disposition::SemanticallyConverted,
+        disposition: Disposition::Unsupported,
     },
     DispositionRule {
         name: "secrets",
@@ -371,7 +371,7 @@ fn dynamic_table_rule(name: &str) -> Option<DispositionRule> {
     // arbitrary unknown table remains a hard blocker.
     if name
         .strip_prefix("secret_usage_log_y")
-        .is_some_and(|suffix| suffix.len() == 7 && suffix.as_bytes()[4] == b'm')
+        .is_some_and(valid_audit_partition_suffix)
     {
         return Some(DispositionRule {
             name: "secret_usage_log_partition",
@@ -380,6 +380,21 @@ fn dynamic_table_rule(name: &str) -> Option<DispositionRule> {
         });
     }
     None
+}
+
+fn valid_audit_partition_suffix(suffix: &str) -> bool {
+    let bytes = suffix.as_bytes();
+    let [year_a, year_b, year_c, year_d, b'm', month_a, month_b] = bytes else {
+        return false;
+    };
+    if ![year_a, year_b, year_c, year_d, month_a, month_b]
+        .into_iter()
+        .all(u8::is_ascii_digit)
+    {
+        return false;
+    }
+    let month = (*month_a - b'0') * 10 + (*month_b - b'0');
+    (1..=12).contains(&month)
 }
 
 pub(crate) fn build_home_inventory(
@@ -548,6 +563,21 @@ fn home_entry(
             };
         }
     }
+    if matches!(
+        path_has_nonexcluded_content(&path, excluded_paths),
+        Ok(false)
+    ) {
+        return InventoryEntry {
+            source_kind,
+            source_name: rule.name.to_string(),
+            domain: rule.domain,
+            disposition: rule.disposition,
+            count: 0,
+            checksum: sha256_hex(b"missing"),
+            blocker: None,
+            warning: None,
+        };
+    }
     let (count, count_error) = match count_path_entries_excluding(&path, excluded_paths) {
         Ok(count) => (count, None),
         Err(error) => (0, Some(error)),
@@ -625,7 +655,14 @@ fn checksum_path_excluding(
     } else {
         state.update(b"other\0");
     }
-    update_metadata_shape(&mut state, &metadata);
+    let normalized = normalized_path(path);
+    if !metadata.is_dir()
+        || !excluded_paths
+            .iter()
+            .any(|excluded| excluded.starts_with(&normalized))
+    {
+        update_metadata_shape(&mut state, &metadata);
+    }
     Ok(format!("metadata-fnv1a64:{:016x}", state.finish()))
 }
 
@@ -683,15 +720,7 @@ fn count_path_entries_excluding(
 }
 
 fn normalized_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| {
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .map(|current| current.join(path))
-                .unwrap_or_else(|_| path.to_path_buf())
-        }
-    })
+    crate::canonicalish(path)
 }
 
 fn path_has_nonexcluded_content(
@@ -727,6 +756,32 @@ mod tests {
                 rule.name
             );
         }
+    }
+
+    #[test]
+    fn audit_partition_names_require_exact_year_and_valid_month() {
+        for valid in ["2024m01", "9999m12"] {
+            assert!(valid_audit_partition_suffix(valid), "{valid}");
+        }
+        for invalid in [
+            "ABCDm12", "2024m00", "2024m13", "2024x01", "2024m1", "20240m1",
+        ] {
+            assert!(!valid_audit_partition_suffix(invalid), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn heartbeat_state_is_reported_as_unsupported() {
+        let inventory = build_table_inventory(vec![RawTableInventory {
+            name: "heartbeat_state".to_string(),
+            count: 1,
+            checksum: "checksum".to_string(),
+        }]);
+        let entry = inventory
+            .iter()
+            .find(|entry| entry.source_name == "heartbeat_state")
+            .expect("heartbeat inventory entry");
+        assert_eq!(entry.disposition, Disposition::Unsupported);
     }
 
     #[test]
@@ -838,6 +893,40 @@ mod tests {
             b"key",
         )
         .expect("write target key");
+        let after = build_home_inventory(Some(&home), None, Some(&target));
+
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn target_tree_under_known_directory_does_not_change_inventory() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let home = directory.path().join("home");
+        let target = home.join("projects").join("reborn").join("reborn.db");
+        std::fs::create_dir_all(&home).expect("create home");
+        let before = build_home_inventory(Some(&home), None, Some(&target));
+
+        std::fs::create_dir_all(target.parent().expect("target parent"))
+            .expect("create target parent");
+        std::fs::write(&target, b"target").expect("write target");
+        let after = build_home_inventory(Some(&home), None, Some(&target));
+
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn target_tree_exclusion_preserves_known_directory_siblings() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let home = directory.path().join("home");
+        let projects = home.join("projects");
+        let target = projects.join("reborn.db");
+        std::fs::create_dir_all(&projects).expect("create projects");
+        std::fs::write(projects.join("legacy.json"), b"legacy").expect("write legacy sibling");
+        let before = build_home_inventory(Some(&home), None, Some(&target));
+
+        std::fs::create_dir_all(target.parent().expect("target parent"))
+            .expect("create target parent");
+        std::fs::write(&target, b"target").expect("write target");
         let after = build_home_inventory(Some(&home), None, Some(&target));
 
         assert_eq!(after, before);

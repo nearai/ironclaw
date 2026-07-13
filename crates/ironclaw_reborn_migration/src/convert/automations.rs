@@ -21,10 +21,11 @@
 //! scoped under `ThreadScope.mission_id` — the one place "mission" survives in
 //! Reborn (a scope dimension, not a durable entity).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ironclaw::agent::routine::{Routine, RoutineAction, Trigger};
 use ironclaw_host_api::ProjectId;
+use ironclaw_reborn_identity::RebornUserStatus;
 use ironclaw_triggers::{TriggerRecord, TriggerSchedule, TriggerSourceKind, TriggerState};
 use uuid::Uuid;
 
@@ -42,9 +43,10 @@ pub(crate) async fn run(
     tgt: &mut RebornTarget,
     options: &MigrationOptions,
     report: &mut MigrationReport,
+    imported_project_ids: &BTreeSet<String>,
 ) -> Result<(), MigrationError> {
     convert_routines(src, tgt, options, report).await?;
-    convert_missions(src, tgt, options, report).await?;
+    convert_missions(src, tgt, options, report, imported_project_ids).await?;
     Ok(())
 }
 
@@ -121,12 +123,25 @@ async fn convert_routine(
     let prompt = routine_prompt(&routine.action);
     // v1 routines have no terminal-failed status distinct from disabled;
     // consecutive_failures is recorded as a field loss below.
-    let state = if routine.enabled {
+    let mut state = if routine.enabled {
         TriggerState::Scheduled
     } else {
         TriggerState::Paused
     };
-    let now = routine.next_fire_at.unwrap_or(routine.created_at);
+    let now = match routine.next_fire_at {
+        Some(next_fire_at) => next_fire_at,
+        None => {
+            report.record_loss(
+                Domain::Routine,
+                &source_id,
+                "next_fire_at",
+                LossReason::Degraded,
+                "routine had no next_fire_at; its deterministic created_at is retained and the routine is imported Paused",
+            );
+            state = TriggerState::Paused;
+            routine.created_at
+        }
+    };
 
     record_routine_field_losses(report, &source_id, &routine, is_cron);
 
@@ -136,6 +151,15 @@ async fn convert_routine(
     else {
         return Ok(());
     };
+    pause_for_inactive_owner(
+        tgt,
+        report,
+        Domain::Routine,
+        &source_id,
+        &creator_user_id,
+        &mut state,
+    )
+    .await?;
 
     let migration_identity = ids::MigrationIdentity::from_report(report)?;
     let record = TriggerRecord {
@@ -275,21 +299,33 @@ async fn convert_missions(
     tgt: &mut RebornTarget,
     options: &MigrationOptions,
     report: &mut MigrationReport,
+    imported_project_ids: &BTreeSet<String>,
 ) -> Result<(), MigrationError> {
     let users = src.distinct_users().await?;
+    let mut engine_threads: BTreeMap<Uuid, IndexedEngineThread> = BTreeMap::new();
+    let mut missions: BTreeMap<Uuid, IndexedMission> = BTreeMap::new();
     for user_id in &users {
         let docs = src.all_memory_documents(user_id).await?;
-
-        // Index engine threads by id so mission thread_history can resolve them.
-        let mut engine_threads: HashMap<Uuid, EngineThread> = HashMap::new();
-        let mut missions: Vec<Mission> = Vec::new();
         for doc in &docs {
             if !v2_model::is_engine_path(&doc.path) {
                 continue;
             }
             if doc.path.ends_with("mission.json") {
-                match serde_json::from_str::<Mission>(&doc.content) {
-                    Ok(mission) => missions.push(mission),
+                match parse_engine_document::<Mission>(&doc.content) {
+                    Ok((representation, mission)) => {
+                        let owner = if mission.user_id.is_empty() {
+                            user_id.clone()
+                        } else {
+                            mission.user_id.clone()
+                        };
+                        let indexed = IndexedMission {
+                            source: engine_document_source(doc),
+                            owner,
+                            representation,
+                            mission,
+                        };
+                        insert_mission(&mut missions, indexed)?;
+                    }
                     Err(e) => report.record_loss(
                         Domain::Mission,
                         doc.path.clone(),
@@ -299,9 +335,14 @@ async fn convert_missions(
                     ),
                 }
             } else if doc.path.contains("/threads/") && doc.path.ends_with(".json") {
-                match serde_json::from_str::<EngineThread>(&doc.content) {
-                    Ok(thread) => {
-                        engine_threads.insert(thread.id, thread);
+                match parse_engine_document::<EngineThread>(&doc.content) {
+                    Ok((representation, thread)) => {
+                        let indexed = IndexedEngineThread {
+                            source: engine_document_source(doc),
+                            representation,
+                            thread,
+                        };
+                        insert_engine_thread(&mut engine_threads, indexed)?;
                     }
                     Err(e) => report.record_loss(
                         Domain::Mission,
@@ -313,30 +354,33 @@ async fn convert_missions(
                 }
             }
         }
+    }
 
-        // Threads referenced by a mission's `thread_history`; anything parsed but
-        // never referenced has no Reborn owner to migrate it under.
-        let referenced: std::collections::HashSet<Uuid> = missions
-            .iter()
-            .flat_map(|m| m.thread_history.iter().copied())
-            .collect();
-
-        for mission in &missions {
-            convert_mission(tgt, options, report, user_id, mission, &engine_threads).await?;
-        }
-
-        for id in engine_threads.keys() {
-            if !referenced.contains(id) {
-                report.record_loss(
-                    Domain::Mission,
-                    format!("thread:{id}"),
-                    "*",
-                    LossReason::NoTargetConcept,
-                    "engine thread blob is not referenced by any mission thread_history; \
-                     there is no Reborn mission owner to migrate it under"
-                        .to_string(),
-                );
-            }
+    let referenced: BTreeSet<Uuid> = missions
+        .values()
+        .flat_map(|indexed| indexed.mission.thread_history.iter().copied())
+        .collect();
+    for indexed in missions.values() {
+        convert_mission(
+            tgt,
+            options,
+            report,
+            &indexed.owner,
+            &indexed.mission,
+            &engine_threads,
+            imported_project_ids,
+        )
+        .await?;
+    }
+    for id in engine_threads.keys() {
+        if !referenced.contains(id) {
+            report.record_loss(
+                Domain::Mission,
+                format!("thread:{id}"),
+                "*",
+                LossReason::NoTargetConcept,
+                "engine thread blob is not referenced by any mission thread_history; there is no Reborn mission owner to migrate it under",
+            );
         }
     }
     Ok(())
@@ -348,7 +392,8 @@ async fn convert_mission(
     report: &mut MigrationReport,
     user_id: &str,
     mission: &Mission,
-    engine_threads: &HashMap<Uuid, EngineThread>,
+    engine_threads: &BTreeMap<Uuid, IndexedEngineThread>,
+    imported_project_ids: &BTreeSet<String>,
 ) -> Result<(), MigrationError> {
     let source_id = format!("mission:{}", mission.name);
     let owner = if mission.user_id.is_empty() {
@@ -398,16 +443,22 @@ async fn convert_mission(
                         if synthesized_next_run && state == TriggerState::Scheduled {
                             state = TriggerState::Paused;
                         }
-                        let project_id = mission
-                            .project_id
-                            .map(|id| ProjectId::new(id.to_string()))
-                            .transpose()
-                            .map_err(|error| {
-                                MigrationError::InvalidInput(format!(
-                                    "mission {} has invalid project id: {error}",
-                                    mission.id
-                                ))
-                            })?;
+                        pause_for_inactive_owner(
+                            tgt,
+                            report,
+                            Domain::Mission,
+                            &source_id,
+                            &creator_user_id,
+                            &mut state,
+                        )
+                        .await?;
+                        let project_id = resolve_mission_project(
+                            report,
+                            &source_id,
+                            mission,
+                            imported_project_ids,
+                            &mut state,
+                        )?;
                         let migration_identity = ids::MigrationIdentity::from_report(report)?;
                         let record = TriggerRecord {
                             trigger_id: migration_identity.trigger_id(
@@ -467,9 +518,15 @@ async fn convert_mission(
 
     report.stats.missions += 1;
 
-    // Migrate the mission's threads under ThreadScope.mission_id.
+    let thread_project_id = mission
+        .project_id
+        .filter(|id| imported_project_ids.contains(id.to_string().as_str()));
+    let mut migrated_thread_ids = BTreeSet::new();
     for tid in &mission.thread_history {
-        let Some(thread) = engine_threads.get(tid) else {
+        if !migrated_thread_ids.insert(*tid) {
+            continue;
+        }
+        let Some(indexed_thread) = engine_threads.get(tid) else {
             report.record_loss(
                 Domain::Mission,
                 &source_id,
@@ -481,11 +538,12 @@ async fn convert_mission(
             );
             continue;
         };
+        let thread = &indexed_thread.thread;
         let import = ThreadImport {
             thread_id: thread.id,
             owner_user: owner.clone(),
             title: thread.title.clone().or_else(|| Some(mission.name.clone())),
-            project_id: mission.project_id,
+            project_id: thread_project_id,
             mission_id: Some(mission.id),
             provenance: serde_json::json!({
                 "source": "engine_v2_mission_thread",
@@ -522,6 +580,150 @@ async fn convert_mission(
     }
 
     Ok(())
+}
+
+struct IndexedMission {
+    source: String,
+    owner: String,
+    representation: serde_json::Value,
+    mission: Mission,
+}
+
+struct IndexedEngineThread {
+    source: String,
+    representation: serde_json::Value,
+    thread: EngineThread,
+}
+
+fn parse_engine_document<T: serde::de::DeserializeOwned>(
+    content: &str,
+) -> Result<(serde_json::Value, T), serde_json::Error> {
+    let representation: serde_json::Value = serde_json::from_str(content)?;
+    let parsed = serde_json::from_value(representation.clone())?;
+    Ok((representation, parsed))
+}
+
+fn engine_document_source(document: &ironclaw::workspace::MemoryDocument) -> String {
+    format!(
+        "user={} agent={} path={}",
+        document.user_id,
+        document
+            .agent_id
+            .map_or_else(|| "unscoped".to_string(), |id| id.to_string()),
+        document.path
+    )
+}
+
+fn insert_mission(
+    missions: &mut BTreeMap<Uuid, IndexedMission>,
+    candidate: IndexedMission,
+) -> Result<(), MigrationError> {
+    if let Some(existing) = missions.get(&candidate.mission.id) {
+        if existing.representation == candidate.representation && existing.owner == candidate.owner
+        {
+            return Ok(());
+        }
+        return Err(divergent_engine_document(
+            "mission",
+            candidate.mission.id,
+            &existing.source,
+            &candidate.source,
+        ));
+    }
+    missions.insert(candidate.mission.id, candidate);
+    Ok(())
+}
+
+fn insert_engine_thread(
+    threads: &mut BTreeMap<Uuid, IndexedEngineThread>,
+    candidate: IndexedEngineThread,
+) -> Result<(), MigrationError> {
+    if let Some(existing) = threads.get(&candidate.thread.id) {
+        if existing.representation == candidate.representation {
+            return Ok(());
+        }
+        return Err(divergent_engine_document(
+            "thread",
+            candidate.thread.id,
+            &existing.source,
+            &candidate.source,
+        ));
+    }
+    threads.insert(candidate.thread.id, candidate);
+    Ok(())
+}
+
+fn divergent_engine_document(
+    kind: &str,
+    id: Uuid,
+    existing_source: &str,
+    candidate_source: &str,
+) -> MigrationError {
+    MigrationError::ReadSource {
+        domain: format!("engine {kind} {id}"),
+        reason: format!(
+            "source documents {existing_source} and {candidate_source} contain divergent state for the same durable id"
+        ),
+    }
+}
+
+async fn pause_for_inactive_owner(
+    tgt: &RebornTarget,
+    report: &mut MigrationReport,
+    domain: Domain,
+    source_id: &str,
+    creator_user_id: &ironclaw_host_api::UserId,
+    state: &mut TriggerState,
+) -> Result<(), MigrationError> {
+    let owner = tgt
+        .user_directory(creator_user_id.clone())
+        .get_user(creator_user_id)
+        .await
+        .map_err(|error| MigrationError::WriteTarget {
+            domain: format!("trigger owner {creator_user_id}"),
+            reason: error.to_string(),
+        })?;
+    if !matches!(owner, Some(user) if user.status == RebornUserStatus::Active) {
+        *state = TriggerState::Paused;
+        report.record_loss(
+            domain,
+            source_id,
+            "owner.status",
+            LossReason::Degraded,
+            "automation owner is not an active migrated user; trigger imported Paused",
+        );
+    }
+    Ok(())
+}
+
+fn resolve_mission_project(
+    report: &mut MigrationReport,
+    source_id: &str,
+    mission: &Mission,
+    imported_project_ids: &BTreeSet<String>,
+    state: &mut TriggerState,
+) -> Result<Option<ProjectId>, MigrationError> {
+    let Some(source_project_id) = mission.project_id else {
+        return Ok(None);
+    };
+    let project_id = ProjectId::new(source_project_id.to_string()).map_err(|error| {
+        MigrationError::InvalidInput(format!(
+            "mission {} has invalid project id: {error}",
+            mission.id
+        ))
+    })?;
+    if imported_project_ids.contains(project_id.as_str()) {
+        return Ok(Some(project_id));
+    }
+    *state = TriggerState::Paused;
+    report.record_loss(
+        Domain::Mission,
+        source_id,
+        "project_id",
+        LossReason::Degraded,
+        "mission references a project that was not imported; project scope was omitted and the trigger imported Paused",
+    );
+    Ok(None)
 }
 
 /// The trigger's `next_run_at` for a migrated mission. A mission with an
@@ -574,5 +776,85 @@ fn engine_role(role: v2_model::MessageRole) -> ImportRole {
         v2_model::MessageRole::User => ImportRole::User,
         v2_model::MessageRole::Assistant => ImportRole::Assistant,
         v2_model::MessageRole::System | v2_model::MessageRole::ActionResult => ImportRole::Other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        IndexedEngineThread, IndexedMission, insert_engine_thread, insert_mission,
+        parse_engine_document,
+    };
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn exact_engine_documents_are_deduplicated_by_durable_id() {
+        let mission_json = serde_json::json!({
+            "id": "11111111-1111-4111-8111-111111111111",
+            "user_id": "alice",
+            "name": "daily",
+            "cadence": "Manual"
+        });
+        let content = mission_json.to_string();
+        let (representation, mission) =
+            parse_engine_document::<crate::v2_model::Mission>(&content).unwrap();
+        let mut missions = BTreeMap::new();
+        insert_mission(
+            &mut missions,
+            IndexedMission {
+                source: "first".to_string(),
+                owner: "alice".to_string(),
+                representation: representation.clone(),
+                mission: mission.clone(),
+            },
+        )
+        .unwrap();
+        insert_mission(
+            &mut missions,
+            IndexedMission {
+                source: "second".to_string(),
+                owner: "alice".to_string(),
+                representation,
+                mission,
+            },
+        )
+        .unwrap();
+        assert_eq!(missions.len(), 1);
+    }
+
+    #[test]
+    fn divergent_engine_documents_are_rejected_by_durable_id() {
+        let first = serde_json::json!({
+            "id": "22222222-2222-4222-8222-222222222222",
+            "title": "first"
+        });
+        let second = serde_json::json!({
+            "id": "22222222-2222-4222-8222-222222222222",
+            "title": "second"
+        });
+        let (first_representation, first_thread) =
+            parse_engine_document::<crate::v2_model::EngineThread>(&first.to_string()).unwrap();
+        let (second_representation, second_thread) =
+            parse_engine_document::<crate::v2_model::EngineThread>(&second.to_string()).unwrap();
+        let mut threads = BTreeMap::new();
+        insert_engine_thread(
+            &mut threads,
+            IndexedEngineThread {
+                source: "first".to_string(),
+                representation: first_representation,
+                thread: first_thread,
+            },
+        )
+        .unwrap();
+        let error = insert_engine_thread(
+            &mut threads,
+            IndexedEngineThread {
+                source: "second".to_string(),
+                representation: second_representation,
+                thread: second_thread,
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("divergent state"));
     }
 }

@@ -5,7 +5,7 @@
 //! on the canonical Reborn [`ProjectRepository`]. A repeated source/project id
 //! must be exact; divergent source or target state fails without overwriting it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ironclaw_host_api::ProjectId;
 use ironclaw_projects::{ProjectError, ProjectRecord, ProjectState};
@@ -23,7 +23,7 @@ pub(crate) async fn run(
     target: &RebornTarget,
     options: &MigrationOptions,
     report: &mut MigrationReport,
-) -> Result<(), MigrationError> {
+) -> Result<BTreeSet<String>, MigrationError> {
     let mut projects: BTreeMap<String, (String, ProjectRecord)> = BTreeMap::new();
 
     for document in source.project_documents().await? {
@@ -107,13 +107,14 @@ pub(crate) async fn run(
         projects.insert(key, (document.path, record));
     }
 
+    let imported_project_ids = projects.keys().cloned().collect();
     for (source_id, record) in projects.into_values() {
         if !options.dry_run {
             compare_and_create(target, &source_id, record).await?;
         }
         report.stats.projects = report.stats.projects.saturating_add(1);
     }
-    Ok(())
+    Ok(imported_project_ids)
 }
 
 async fn compare_and_create(

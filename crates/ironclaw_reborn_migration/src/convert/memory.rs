@@ -2,7 +2,8 @@
 //! `ironclaw_memory` documents).
 //!
 //! Each non-engine v1 document is written through the memory service under the
-//! migrated (tenant, user, agent) scope; content and path are preserved.
+//! migrated tenant/user scope while preserving its optional source-agent scope;
+//! content and path are preserved.
 //! Engine-v2 documents (mission/project/runtime blobs) are skipped here:
 //! supported missions and projects are handled by their owning converters,
 //! while other runtime blobs remain unsupported. Chunks/embeddings are derived
@@ -10,7 +11,7 @@
 //! a loss). Version history (`memory_document_versions`) has no Reborn target
 //! and is recorded as a loss.
 
-use ironclaw_host_api::{CorrelationId, InvocationId, ResourceScope};
+use ironclaw_host_api::{AgentId, CorrelationId, InvocationId, ResourceScope};
 use ironclaw_memory::{
     DocumentMetadata, MemoryInvocation, MemoryServiceErrorKind, MemoryServiceReadRequest,
     MemoryServiceWriteRequest,
@@ -62,7 +63,14 @@ pub(crate) async fn run(
             let scope = ResourceScope {
                 tenant_id: tgt.tenant_id.clone(),
                 user_id: user,
-                agent_id: Some(tgt.agent_id.clone()),
+                agent_id: doc
+                    .agent_id
+                    .map(|agent_id| AgentId::new(agent_id.to_string()))
+                    .transpose()
+                    .map_err(|error| MigrationError::WriteTarget {
+                        domain: format!("memory document {}", doc.path),
+                        reason: format!("preserve source agent scope: {error}"),
+                    })?,
                 project_id: None,
                 mission_id: None,
                 thread_id: None,
@@ -97,17 +105,20 @@ pub(crate) async fn run(
                             domain: format!("memory document {}", doc.path),
                             reason: format!("read deterministic target metadata: {error}"),
                         })?
-                        .metadata
-                        .unwrap_or_default();
-                    if existing_metadata == metadata {
+                        .metadata;
+                    if existing_metadata.as_ref() == Some(&metadata)
+                        || (existing_metadata.is_none() && metadata == DocumentMetadata::default())
+                    {
                         report.stats.memory_documents += 1;
                         continue;
                     }
-                    return Err(MigrationError::WriteTarget {
-                        domain: format!("memory document {}", doc.path),
-                        reason: "deterministic memory path already contains divergent metadata; refusing to overwrite"
-                            .to_string(),
-                    });
+                    if existing_metadata.is_some() {
+                        return Err(MigrationError::WriteTarget {
+                            domain: format!("memory document {}", doc.path),
+                            reason: "deterministic memory path already contains divergent metadata; refusing to overwrite"
+                                .to_string(),
+                        });
+                    }
                 }
                 Ok(_) => {
                     return Err(MigrationError::WriteTarget {

@@ -21,7 +21,9 @@ use ironclaw_reborn_migration::{
     SourceDb, TargetStore, apply_migration, plan_migration, resume_migration, run_migration,
     verify_migration,
 };
-use ironclaw_triggers::{LibSqlTriggerRepository, TriggerRepository, TriggerSchedule};
+use ironclaw_triggers::{
+    LibSqlTriggerRepository, TriggerRepository, TriggerSchedule, TriggerState,
+};
 use secrecy::SecretString;
 use uuid::Uuid;
 
@@ -32,6 +34,8 @@ const SUSPENDED_USER: &str = "bob";
 const DEACTIVATED_USER: &str = "carol";
 const LEGACY_DATA_OWNER: &str = "legacy-owner";
 const SOURCE_AGENT: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const OTHER_SOURCE_AGENT: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const UNMIGRATED_PROJECT: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 /// 64-char string ≥ 32 bytes (used verbatim as HKDF IKM by v1 + Reborn crypto).
 const MASTER_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -134,9 +138,13 @@ async fn seed_v1_fixture(dir: &std::path::Path) -> PathBuf {
         .expect("m5");
 
     // ── routines: every trigger variant × both actions ──
+    let mut cron_without_next = routine("cron-light", cron("0 9 * * *"), lightweight(), true);
+    cron_without_next.next_fire_at = None;
+    let mut suspended_owner = routine("cron-fulljob", cron("0 18 * * MON-FRI"), full_job(), true);
+    suspended_owner.user_id = SUSPENDED_USER.to_string();
     for r in [
-        routine("cron-light", cron("0 9 * * *"), lightweight(), true),
-        routine("cron-fulljob", cron("0 18 * * MON-FRI"), full_job(), false),
+        cron_without_next,
+        suspended_owner,
         routine(
             "event-r",
             Trigger::Event {
@@ -174,7 +182,7 @@ async fn seed_v1_fixture(dir: &std::path::Path) -> PathBuf {
     let mission_thread_id = Uuid::new_v4();
     let cron_mission = serde_json::json!({
         "id": Uuid::new_v4(),
-        "project_id": Uuid::new_v4(),
+        "project_id": UNMIGRATED_PROJECT,
         "user_id": USER,
         "name": "daily-digest",
         "goal": "compile a daily digest of important updates",
@@ -191,6 +199,12 @@ async fn seed_v1_fixture(dir: &std::path::Path) -> PathBuf {
     write_engine_doc(
         db.as_ref(),
         ".system/engine/projects/p1/missions/daily-digest/mission.json",
+        &cron_mission,
+    )
+    .await;
+    write_engine_doc(
+        db.as_ref(),
+        "engine/projects/p1/missions/daily-digest/mission.json",
         &cron_mission,
     )
     .await;
@@ -231,8 +245,28 @@ async fn seed_v1_fixture(dir: &std::path::Path) -> PathBuf {
     )
     .await;
 
-    // ── a non-engine memory document ──
-    write_doc(db.as_ref(), "context/vision.md", "# Vision\nbe helpful").await;
+    // ── non-engine memory documents across distinct agent scopes ──
+    let scoped_doc = write_doc_for_agent(
+        db.as_ref(),
+        Some(Uuid::parse_str(SOURCE_AGENT).expect("source agent")),
+        "context/vision.md",
+        "# Vision\nbe helpful",
+    )
+    .await;
+    db.update_document_metadata(
+        scoped_doc,
+        &serde_json::json!({"legacy_label": "source-scoped"}),
+    )
+    .await
+    .expect("write source memory metadata");
+    write_doc_for_agent(db.as_ref(), None, "context/vision.md", "# Vision\nunscoped").await;
+    write_doc_for_agent(
+        db.as_ref(),
+        Some(Uuid::parse_str(OTHER_SOURCE_AGENT).expect("other source agent")),
+        "context/vision.md",
+        "# Vision\nother agent",
+    )
+    .await;
 
     // ── settings ──
     let mut settings = std::collections::HashMap::new();
@@ -420,17 +454,29 @@ async fn write_engine_doc(db: &dyn Database, path: &str, value: &serde_json::Val
 }
 
 async fn write_doc(db: &dyn Database, path: &str, content: &str) {
+    write_doc_for_agent(
+        db,
+        Some(Uuid::parse_str(SOURCE_AGENT).expect("source agent")),
+        path,
+        content,
+    )
+    .await;
+}
+
+async fn write_doc_for_agent(
+    db: &dyn Database,
+    agent_id: Option<Uuid>,
+    path: &str,
+    content: &str,
+) -> Uuid {
     let doc = db
-        .get_or_create_document_by_path(
-            USER,
-            Some(Uuid::parse_str(SOURCE_AGENT).expect("source agent")),
-            path,
-        )
+        .get_or_create_document_by_path(USER, agent_id, path)
         .await
         .expect("create doc");
     db.update_document(doc.id, content)
         .await
         .expect("write doc content");
+    doc.id
 }
 
 fn options(src: PathBuf, dst: PathBuf, dry_run: bool) -> MigrationOptions {
@@ -531,6 +577,20 @@ async fn reborn_entry_json(path: &Path, entry_path: &str) -> serde_json::Value {
     serde_json::from_slice(&row.get::<Vec<u8>>(0).expect("contents blob")).expect("entry JSON")
 }
 
+async fn delete_reborn_entry(path: &Path, entry_path: &str) {
+    let db = libsql::Builder::new_local(path)
+        .build()
+        .await
+        .expect("open reborn db");
+    let conn = db.connect().expect("connect");
+    conn.execute(
+        "DELETE FROM root_filesystem_entries WHERE path = ?1",
+        [entry_path],
+    )
+    .await
+    .expect("delete reborn entry");
+}
+
 fn reborn_user_entry_path(user_id: &str) -> String {
     let encoded = match user_id {
         USER => "YWxpY2U",
@@ -616,7 +676,7 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
     // user+assistant messages: conv1 (2) + conv2 (2) + mission thread (2) = 6.
     assert_eq!(report.stats.messages, 6, "messages: {:?}", report.stats);
     assert_eq!(
-        report.stats.memory_documents, 1,
+        report.stats.memory_documents, 3,
         "memory: {:?}",
         report.stats
     );
@@ -636,12 +696,15 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
         (Domain::Message, 1),
         // 6 routines: each cron routine records 3 field losses
         // (action + guardrails/notify/counters + routine_runs); each non-cron
-        // routine records 1 trigger-source loss + 2 field losses. 6 × 3 = 18.
-        (Domain::Routine, 18),
+        // routine records 1 trigger-source loss + 2 field losses. The active
+        // cron without a next fire and the cron owned by a suspended user each
+        // add one fail-closed degradation. 6 × 3 + 2 = 20.
+        (Domain::Routine, 20),
         // daily-digest: mission_only_fields + status.failed + next_fire_at
         // (the fixture mission has no next_fire_at → synthesized) = 3;
-        // on-deploy: cadence.on_event (1). No orphan threads (blob referenced).
-        (Domain::Mission, 4),
+        // on-deploy: cadence.on_event (1). The missing referenced project is
+        // omitted and paused (1). No orphan threads (blob referenced).
+        (Domain::Mission, 5),
         // fixture seeds no jobs → the job converter records nothing.
         (Domain::Job, 0),
         // single unconditional memory_document_versions gap.
@@ -653,8 +716,8 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
         (Domain::Extension, 2),
         // unconditional pairing_requests gap (both identities adopt cleanly).
         (Domain::Identity, 1),
-        // one heartbeat-state gap per discovered canonical/data-owner user.
-        (Domain::Heartbeat, 4),
+        // fixture seeds no heartbeat state rows.
+        (Domain::Heartbeat, 0),
         // one gap per seeded setting key (model, timezone, legacy_timezone).
         (Domain::Setting, 3),
     ];
@@ -738,7 +801,13 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
     assert!(names.contains(&"cron-light"));
     assert!(names.contains(&"cron-fulljob"));
     assert!(names.contains(&"daily-digest"));
+    let cron_light = triggers.iter().find(|t| t.name == "cron-light").unwrap();
+    assert_eq!(cron_light.state, TriggerState::Paused);
+    let cron_fulljob = triggers.iter().find(|t| t.name == "cron-fulljob").unwrap();
+    assert_eq!(cron_fulljob.state, TriggerState::Paused);
     let digest = triggers.iter().find(|t| t.name == "daily-digest").unwrap();
+    assert_eq!(digest.state, TriggerState::Paused);
+    assert!(digest.project_id.is_none());
     match &digest.schedule {
         TriggerSchedule::Cron { expression, .. } => assert_eq!(expression, "0 7 * * *"),
         other => panic!("expected cron schedule, got {other:?}"),
@@ -790,6 +859,23 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
         reborn_entry_contains(&dst, "%/thread.json", "session started").await,
         "non-user/assistant content must be retained in the migration archive metadata"
     );
+    assert!(
+        !reborn_entry_contains(&dst, "%/thread.json", UNMIGRATED_PROJECT).await,
+        "mission threads must not retain references to projects that were not imported"
+    );
+
+    let scoped_memory_path = format!(
+        "/memory/tenants/{TENANT}/users/{USER}/agents/{SOURCE_AGENT}/projects/_none/context/vision.md"
+    );
+    let unscoped_memory_path = format!(
+        "/memory/tenants/{TENANT}/users/{USER}/agents/_none/projects/_none/context/vision.md"
+    );
+    let other_scoped_memory_path = format!(
+        "/memory/tenants/{TENANT}/users/{USER}/agents/{OTHER_SOURCE_AGENT}/projects/_none/context/vision.md"
+    );
+    assert!(reborn_entry_contains(&dst, &scoped_memory_path, "be helpful").await);
+    assert!(reborn_entry_contains(&dst, &unscoped_memory_path, "unscoped").await);
+    assert!(reborn_entry_contains(&dst, &other_scoped_memory_path, "other agent").await);
 
     // ── idempotency: resume replays the same sealed source identity and must
     // compare-and-apply without duplicating triggers or transcript rows. ──
@@ -797,6 +883,8 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
     let applying_checkpoint = applied_manifest
         .transition(MigrationStatus::Applying)
         .expect("interrupted applying checkpoint");
+    let scoped_metadata_path = format!("{scoped_memory_path}.meta");
+    delete_reborn_entry(&dst, &scoped_metadata_path).await;
     let replay_options = options(src.clone(), dst.clone(), false);
     let report2 = resume_migration(
         replay_options,
@@ -814,6 +902,15 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
         "re-run must re-adopt the same 2 identities"
     );
     assert_eq!(report2.stats.users, 4, "resume must replay exact users");
+    assert_eq!(
+        report2.stats.memory_documents, 3,
+        "resume must replay every distinct memory scope"
+    );
+    assert_eq!(
+        reborn_entry_json(&dst, &scoped_metadata_path).await["legacy_label"],
+        "source-scoped",
+        "resume must complete a body-only partial memory write"
+    );
     assert_eq!(
         reborn_entry_count(&dst, "/tenants/acme/shared/reborn-identity/users/%.json").await,
         4,
@@ -852,8 +949,8 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
     .expect("cold target verification");
     assert_eq!(verified.status, MigrationStatus::Verified);
 
-    // A deterministic target slot containing different data is a conflict,
-    // not an invitation for migration to overwrite operator/runtime state.
+    // A stale applied manifest cannot reopen a verified target claim or
+    // overwrite operator/runtime state.
     overwrite_trigger_prompt(&dst, "cron-light", "divergent target prompt").await;
     let resume_manifest = report2.manifest.as_ref().expect("resume manifest");
     let collision = resume_migration(
@@ -866,9 +963,11 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
         ApplyAcknowledgements::offline_snapshot(),
     )
     .await
-    .expect_err("divergent deterministic target must fail closed");
+    .expect_err("verified target claim must fail closed");
     assert!(
-        collision.to_string().contains("refusing to overwrite"),
+        collision
+            .to_string()
+            .contains("invalid shared migration state transition verified -> applying"),
         "unexpected collision error: {collision}"
     );
     assert_eq!(
@@ -881,6 +980,71 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
         "divergent target prompt",
         "migration must not overwrite a divergent deterministic slot"
     );
+}
+
+#[tokio::test]
+async fn apply_requires_source_key_when_inventory_contains_secrets() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = seed_v1_fixture(dir.path()).await;
+    let dst = dir.path().join("missing-key-target/reborn.db");
+    let migration_options = options(src, dst.clone(), false);
+    let manifest = plan_migration(&migration_options)
+        .await
+        .expect("migration plan");
+
+    let error = apply_migration(
+        migration_options,
+        &manifest,
+        MigrationSecretInputs::default(),
+        ApplyAcknowledgements::offline_snapshot(),
+    )
+    .await
+    .expect_err("source key must be required before applying secret rows");
+
+    assert!(error.to_string().contains("secrets master key required"));
+    assert!(
+        !dst.exists(),
+        "preflight failure must not create the target"
+    );
+}
+
+#[tokio::test]
+async fn apply_tolerates_historical_schema_without_settings_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("without-settings.db");
+    let (db, handles) = connect_with_handles(&libsql_config(&src))
+        .await
+        .expect("create historical fixture");
+    drop(db);
+    let connection = handles
+        .libsql_db
+        .as_ref()
+        .expect("libsql handle")
+        .connect()
+        .expect("connect");
+    connection
+        .execute("DROP TABLE settings", ())
+        .await
+        .expect("remove optional settings table");
+    drop(connection);
+    drop(handles);
+
+    let dst = dir.path().join("without-settings-target/reborn.db");
+    let migration_options = options(src, dst.clone(), false);
+    let manifest = plan_migration(&migration_options)
+        .await
+        .expect("migration plan");
+    let report = apply_migration(
+        migration_options,
+        &manifest,
+        MigrationSecretInputs::default(),
+        ApplyAcknowledgements::offline_snapshot(),
+    )
+    .await
+    .expect("missing optional settings table must be treated as empty");
+
+    assert_eq!(report.losses_in(Domain::Setting), 0);
+    assert!(dst.exists());
 }
 
 #[tokio::test]
