@@ -269,7 +269,15 @@ Rules:
 
 - WASM declarations may name module assets but must not load modules.
 - Script declarations may name a semantic runner, command, args, and optional backend-specific image metadata, but must not execute or expose raw Docker flags.
-- MCP declarations may describe stdio/remote transport but must not connect during manifest parsing/registry insertion.
+- MCP declarations remain declarative and must not connect during manifest
+  parsing/registry insertion. `ironclaw_extensions` owns canonical endpoint
+  syntax and normalized identity only; composition owns manifest-source
+  eligibility and egress policy. Current Reborn dispatch accepts HTTPS HTTP
+  endpoints from `HostBundled` packages and plaintext HTTP only from
+  `InstalledLocal` packages whose URL uses a literal IPv4 loopback host.
+  `RegistryInstalled` MCP HTTP packages are not dispatched, and `localhost`,
+  IPv6, LAN/private non-loopback, remote plaintext, and stdio runtime shapes do
+  not receive the installed-local exception.
 - Host/system declarations require matching trust ceilings and should be rare, host-policy-assigned, and never self-declared by ordinary user-installed packages.
 - Runtime/trust declarations are not grants; privileged effects still require capability grants, mounts, leases, obligations, and resource policy.
 - Extension or loop upgrades that change package identity, signer/source policy, trust class, or requested authority require renewed approval/admin policy before old grants apply.

@@ -527,7 +527,8 @@ impl HostRuntimeCapabilityHarness {
             skill_activation_tenant,
             outbound_target_facade,
             network_http_egress_for_test,
-            activate_bundled_extensions_for_test,
+            activate_extensions_for_test,
+            activate_installed_local_extensions_for_test,
             project_service_fault_injection,
             durable_capability_io,
         } = options;
@@ -563,15 +564,45 @@ impl HostRuntimeCapabilityHarness {
             profiles::extension::seed_extension_lifecycle_credentials(&services, &user_id).await?;
         }
         // C-JOURNEY: publish bundled WASM packages into the active-extension
-        // registry directly (see `HostRuntimeHarnessOptions::activate_bundled_extensions_for_test`
+        // registry directly (see `HostRuntimeHarnessOptions::activate_extensions_for_test`
         // doc) so their capabilities are genuinely dispatchable, not merely
         // granted at the harness-authority layer.
-        for package in &activate_bundled_extensions_for_test {
+        for package in &activate_extensions_for_test {
+            services.publish_active_extension_for_test(package).ok_or(
+                "local-dev Reborn services missing extension management for test publish",
+            )??;
+        }
+        for (package, raw_manifest) in &activate_installed_local_extensions_for_test {
+            use ironclaw_extensions::{
+                ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
+                ExtensionManifestRecord, ExtensionManifestRef, InstallationOwner, ManifestSource,
+            };
+            let store = services
+                .extension_installation_store_for_test()
+                .ok_or("local-dev Reborn services missing installation store")?;
+            let contracts = ironclaw_host_runtime::default_host_api_contract_registry()?;
+            let manifest_record = ExtensionManifestRecord::from_toml_with_contracts(
+                raw_manifest,
+                ManifestSource::InstalledLocal,
+                &ironclaw_host_api::HostPortCatalog::default(),
+                None,
+                &contracts,
+            )?;
+            let installation = ExtensionInstallation::new(
+                ExtensionInstallationId::new(format!("itest-{}", package.id.as_str()))?,
+                package.id.clone(),
+                ExtensionActivationState::Enabled,
+                ExtensionManifestRef::new(package.id.clone(), None),
+                Vec::new(),
+                chrono::Utc::now(),
+                InstallationOwner::Tenant,
+            )?;
+            store
+                .upsert_manifest_and_installation(manifest_record, installation)
+                .await?;
             services
-                .publish_bundled_extension_for_test(package)
-                .ok_or(
-                    "local-dev Reborn services missing extension management for test publish",
-                )??;
+                .publish_active_extension_for_test(package)
+                .ok_or("local-dev Reborn services missing extension management")??;
         }
         let approval_parts = services.local_dev_approval_test_parts();
         let auto_approve_settings = services.local_dev_auto_approve_settings_for_test();

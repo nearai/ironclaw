@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- *(reborn)* allow installed-local MCP packages to use plaintext HTTP only at an exact literal-IPv4-loopback endpoint while keeping host-bundled remote MCP HTTPS-only and registry-installed and stdio MCP blocked.
 - *(reborn)* allow `builtin.time` parse, convert, format, and diff operations to consume JSON numbers or numeric strings containing Unix seconds, integral Unix milliseconds, and fractional Slack timestamps in addition to ISO 8601 strings.
 
 ### Changed

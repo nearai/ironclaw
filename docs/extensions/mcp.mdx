@@ -4,10 +4,16 @@ sidebarTitle: MCP Servers
 description: Connect Model Context Protocol servers to extend IronClaw
 ---
 
-IronClaw can connect to any [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server and expose its tools to the agent. MCP is an open standard for tool servers, with a growing ecosystem of pre-built servers covering databases, APIs, cloud services, and more.
+IronClaw can connect to supported [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) servers and expose their tools to the agent. MCP is an open standard for tool servers, with a growing ecosystem of pre-built servers covering databases, APIs, cloud services, and more.
 
 <Info>
-IronClaw connects to MCP servers over **HTTP transport** using JSON-RPC 2.0. The `stdio` transport (subprocess pipes) is not yet supported.
+The `ironclaw mcp ...` commands below configure the v1 `ironclaw` binary,
+which supports HTTP, stdio, and Unix-socket transports. Reborn uses extension
+manifests instead: `ironclaw-reborn` accepts remote HTTPS MCP only from
+host-bundled packages and plaintext HTTP only from installed-local packages at
+an exact literal IPv4 loopback endpoint (`127.0.0.0/8`). It rejects `localhost`,
+IPv6, LAN/private non-loopback, remote plaintext, registry-installed, and stdio
+MCP endpoints; an omitted loopback HTTP port is pinned to 80.
 
 </Info>
 
@@ -57,15 +63,14 @@ ironclaw mcp remove <server_name>
 
 | Consideration | WASM | MCP |
 |--------------|------|-----|
-| **Isolation** | Strong — wasmtime sandbox, fuel metering, memory limits | Weaker — separate process, but no wasmtime sandbox |
+| **Isolation** | Strong — wasmtime sandbox, fuel metering, memory limits | External service or process outside the wasmtime sandbox |
 | **Credential injection** | Proxy-level injection, WASM module never sees raw tokens | MCP server manages its own auth |
-| **Network control** | Domain allowlist via `capabilities.json` | MCP server controls its own network access |
+| **Network control** | Domain allowlist via `capabilities.json` | Reborn pins host egress to the manifest endpoint; the MCP server controls its own outbound access |
 | **Ecosystem** | Custom-built | Large existing ecosystem (databases, APIs, cloud) |
 | **Language** | Any `wasm32-wasi` target | Any language |
-| **Startup cost** | Module compilation on first load (then cached) | External process must already be running |
+| **Startup cost** | Module compilation on first load (then cached) | MCP service must already be running |
 | **Best for** | Custom integrations where isolation is critical | Leveraging existing MCP servers |
 
 <Note>
 For integrations that handle sensitive credentials or untrusted external data, prefer WASM tools. The network proxy and credential injection model give you stronger isolation guarantees than an MCP server running as a separate process.
 </Note>
-

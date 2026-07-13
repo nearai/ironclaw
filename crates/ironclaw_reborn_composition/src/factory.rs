@@ -760,19 +760,17 @@ impl RebornServices {
             as Arc<dyn ironclaw_product_workflow::InboundAttachmentReader>)
     }
 
-    /// C-JOURNEY: publish a bundled first-party WASM extension package (e.g.
-    /// github) directly into the local-dev active-extension registry + trust
-    /// policy, bypassing the multi-turn `builtin.extension_install` →
-    /// `builtin.extension_activate` capability handshake. Reaches the SAME
+    /// Publish an extension package directly into the local-dev active registry
+    /// for integration tests. Reaches the SAME
     /// `ActiveExtensionPublisher::publish` step `activate()` calls
     /// (`extension_lifecycle.rs`) — the model-visible dispatchable surface —
-    /// so a harness that needs a bundled capability (like `github.*`)
-    /// reachable for dispatch without scripting install/activate turns can
-    /// seed it at construction time. Returns `None` for production-profile
+    /// so a harness can seed a dispatchable package without scripting the
+    /// install/activate turns. Installed packages must separately seed their
+    /// installation row. Returns `None` for production-profile
     /// compositions without a local-dev runtime (mirrors
     /// `extension_installation_store_for_test`).
     #[cfg(feature = "test-support")]
-    pub fn publish_bundled_extension_for_test(
+    pub fn publish_active_extension_for_test(
         &self,
         package: &ironclaw_extensions::ExtensionPackage,
     ) -> Option<Result<(), ironclaw_product_workflow::ProductWorkflowError>> {
@@ -782,6 +780,15 @@ impl RebornServices {
                 .active_extensions_for_test()
                 .publish(package),
         )
+    }
+
+    #[cfg(feature = "test-support")]
+    /// Compatibility helper for bundled-extension test fixtures.
+    pub fn publish_bundled_extension_for_test(
+        &self,
+        package: &ironclaw_extensions::ExtensionPackage,
+    ) -> Option<Result<(), ironclaw_product_workflow::ProductWorkflowError>> {
+        self.publish_active_extension_for_test(package)
     }
 
     /// Test-support authority snapshot for active local-dev extensions.
@@ -894,6 +901,13 @@ fn active_extension_network_policy_for_test(
 ) -> NetworkPolicy {
     if let Some(policy) = gsuite_network_policy_for(&capability.provider) {
         return policy;
+    }
+    if let Some(target) = &capability.local_mcp_loopback_target {
+        return NetworkPolicy {
+            allowed_targets: vec![target.clone()],
+            deny_private_ip_ranges: false,
+            max_egress_bytes: None,
+        };
     }
 
     let mut targets = Vec::new();

@@ -4,10 +4,15 @@ sidebarTitle: MCP 服务器
 description: 连接 Model Context Protocol 服务器扩展 IronClaw
 ---
 
-IronClaw 可连接任意 [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) 服务器，并把其工具暴露给代理。MCP 是开放标准，生态中已有大量数据库、API、云服务连接器。
+IronClaw 可连接受支持的 [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) 服务器，并把其工具暴露给代理。MCP 是开放标准，生态中已有大量数据库、API、云服务连接器。
 
 <Info>
-当前通过 **HTTP 传输**（JSON-RPC 2.0）连接 MCP。`stdio` 传输暂不支持。
+下方的 `ironclaw mcp ...` 命令配置 v1 `ironclaw` 二进制；它支持 HTTP、
+stdio 和 Unix 套接字传输。Reborn 改用扩展清单：`ironclaw-reborn` 仅接受
+host-bundled 包的远程 HTTPS MCP，以及 installed-local 包指向精确 IPv4
+回环地址（`127.0.0.0/8`）的明文 HTTP MCP。它拒绝 `localhost`、IPv6、
+局域网/非回环私网地址、远程明文、registry-installed 和 stdio MCP 端点；
+省略回环 HTTP 端口时固定为 80。
 </Info>
 
 ---
@@ -54,12 +59,12 @@ ironclaw mcp remove <server_name>
 
 | 维度 | WASM | MCP |
 |------|------|-----|
-| 隔离性 | 强（wasmtime 沙箱、fuel、内存限制） | 较弱（独立进程） |
+| 隔离性 | 强（wasmtime 沙箱、fuel、内存限制） | 位于 wasmtime 沙箱之外的外部服务或进程 |
 | 凭据处理 | 代理层注入，模块看不到原始密钥 | 由 MCP 服务自行处理 |
-| 网络控制 | `capabilities.json` 白名单 | 由 MCP 服务控制 |
+| 网络控制 | `capabilities.json` 白名单 | Reborn 将主机出站锁定到清单端点；MCP 服务控制自身出站访问 |
 | 生态 | 自建为主 | 现成生态丰富 |
 | 语言 | 任意 `wasm32-wasi` 目标 | 任意语言 |
-| 启动成本 | 首次需编译缓存 | 服务需预先运行 |
+| 启动成本 | 首次需编译缓存 | MCP 服务需预先运行 |
 | 适合场景 | 强隔离的定制集成 | 复用现有 MCP 服务 |
 
 <Note>

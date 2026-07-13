@@ -74,6 +74,13 @@ Raw HTTP diagnostic logging is intentionally double-gated: the unsafe `IRONCLAW_
 
 MCP HTTP/SSE follows the same rule through `ironclaw_mcp::McpHostHttpClient`: the host supplies an `McpRuntimeHttpAdapter<RuntimeHttpEgress>` and an egress planner for scoped network policy, credential injection handles, response body limits, and timeouts. Generic or direct-network MCP clients keep `uses_host_mediated_http_egress() == false`, so `McpRuntime` rejects HTTP/SSE manifests before any outbound attempt.
 
+The composition planner keeps remote `HostBundled` MCP endpoints HTTPS-only.
+It permits plaintext HTTP only for an `InstalledLocal` manifest whose host is a
+literal IPv4 loopback address, and locks both the capability grant and egress
+policy to that exact scheme, IP, and port (port 80 when omitted). DNS names such
+as `localhost`, IPv6, LAN/private non-loopback, remote plaintext,
+`RegistryInstalled`, and stdio shapes do not receive this exception.
+
 For MCP HTTP/SSE credentials, the host planner is called once for the real
 `tools/call` JSON-RPC body before the handshake. The client validates that plan
 up front, then reuses it when sending `tools/call`; the handshake requests are

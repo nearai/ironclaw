@@ -29,6 +29,9 @@ pub(super) enum RebornCapabilityBackend {
     /// Uses `LoopbackMcpRuntimeHttpEgress` which makes real HTTP connections to
     /// the mock server; no real credentials or network policy are required.
     MockMcp { mcp_url: String },
+    /// Installed-local MCP over the production composition and registry-backed
+    /// egress planner, targeting only the test's literal loopback server.
+    InstalledLocalMcp { mcp_url: String },
     /// GitHub first-party WASM capabilities with a `GithubHarnessAuthorizer`
     /// that attaches an `InjectCredentialAccountOnce` obligation, so a dispatched
     /// `github.*` tool call gets a synthetic access token injected onto the
@@ -153,6 +156,17 @@ impl RebornCapabilityBackend {
                     &format!("{MOCK_MCP_PROVIDER_ID}.search"),
                 )
                 .await?;
+                GroupCapability::HostRuntime(Arc::new(host_runtime))
+            }
+            RebornCapabilityBackend::InstalledLocalMcp { mcp_url } => {
+                let host_runtime =
+                    super::harness::profiles::mock_mcp::installed_local_mcp_tools_profile(
+                        &mcp_url,
+                        MOCK_MCP_PROVIDER_ID,
+                        &format!("{MOCK_MCP_PROVIDER_ID}.search"),
+                    )?
+                    .build()
+                    .await?;
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
             RebornCapabilityBackend::GithubIssueTools => {

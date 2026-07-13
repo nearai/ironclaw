@@ -84,6 +84,7 @@ use crate::extension_host::extension_activation_credentials::{
 };
 use crate::extension_host::extension_credential_requirements::package_runtime_credential_auth_requirements;
 use crate::extension_host::lifecycle::response_with_payload;
+use crate::extension_host::mcp::installed_local_mcp_loopback_target;
 use crate::extension_host::mcp_discovery::{
     HostedMcpDiscoveryError, discover_hosted_mcp_package, is_hosted_http_mcp_package,
 };
@@ -214,6 +215,9 @@ pub(crate) struct ActiveExtensionCapability {
     pub(crate) runtime_credentials: Vec<RuntimeCredentialRequirement>,
     /// Manifest-declared network egress allowlist, independent of credentials.
     pub(crate) network_targets: Vec<NetworkTargetPattern>,
+    /// Exact runtime endpoint for an installed-local MCP server using plaintext
+    /// HTTP on a literal loopback IP. No other extension/runtime shape may set it.
+    pub(crate) local_mcp_loopback_target: Option<NetworkTargetPattern>,
     /// Who the providing extension's installation belongs to (#5459 P1).
     /// Tenant-owned capabilities are grant-minted for every user; user-owned
     /// ones only for their owner (filtered in `LocalDevExtensionSurface`).
@@ -230,7 +234,11 @@ pub(crate) enum ExtensionActivationMode {
 }
 
 impl ActiveExtensionCapability {
-    fn from_descriptor(descriptor: &CapabilityDescriptor, owner: InstallationOwner) -> Self {
+    fn from_descriptor(
+        descriptor: &CapabilityDescriptor,
+        owner: InstallationOwner,
+        local_mcp_loopback_target: Option<NetworkTargetPattern>,
+    ) -> Self {
         Self {
             id: descriptor.id.clone(),
             provider: descriptor.provider.clone(),
@@ -238,6 +246,7 @@ impl ActiveExtensionCapability {
             default_permission: descriptor.default_permission,
             runtime_credentials: descriptor.runtime_credentials.clone(),
             network_targets: descriptor.network_targets.clone(),
+            local_mcp_loopback_target,
             owner,
         }
     }
@@ -555,12 +564,18 @@ impl RebornLocalExtensionManagementPort {
             .capabilities()
             .filter_map(|descriptor| {
                 let owner = owner_by_extension.get(&descriptor.provider)?;
+                let package = registry.get_extension(&descriptor.provider)?;
                 let model_visible = registry
                     .capability_visibility(&descriptor.id)
                     .unwrap_or(CapabilityVisibility::Model)
                     == CapabilityVisibility::Model;
-                model_visible
-                    .then(|| ActiveExtensionCapability::from_descriptor(descriptor, owner.clone()))
+                model_visible.then(|| {
+                    ActiveExtensionCapability::from_descriptor(
+                        descriptor,
+                        owner.clone(),
+                        installed_local_mcp_loopback_target(package),
+                    )
+                })
             })
             .collect())
     }
@@ -3295,6 +3310,44 @@ output_schema_ref = "schemas/run.output.json"
         assert!(!capability_ids.contains(&CapabilityId::new("fixture.write").unwrap()));
         assert!(
             !capability_ids.contains(&CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID).unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn active_installed_local_mcp_carries_exact_loopback_runtime_target() {
+        let package = fixture_installed_local_mcp_package();
+        let (_dir, _storage_root, port, _active_registry, _installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(vec![package]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "local-mcp")
+            .expect("valid ref");
+        port.install(package_ref.clone(), &lifecycle_owner())
+            .await
+            .expect("install local MCP extension");
+        port.activate_with_prechecked_credentials_for_test(
+            package_ref,
+            ExtensionActivationMode::Static,
+        )
+        .await
+        .expect("activate local MCP extension");
+
+        let capability = port
+            .active_model_visible_capabilities()
+            .await
+            .expect("active capabilities")
+            .into_iter()
+            .find(|capability| capability.id.as_str() == "local-mcp.search")
+            .expect("local MCP capability");
+
+        assert_eq!(
+            capability.local_mcp_loopback_target,
+            Some(NetworkTargetPattern {
+                scheme: Some(ironclaw_host_api::NetworkScheme::Http),
+                host_pattern: "127.0.0.2".to_string(),
+                port: Some(4321),
+            })
         );
     }
 
@@ -6448,6 +6501,62 @@ output_schema_ref = "schemas/run.output.json"
 
     fn fixture_extension_package() -> AvailableExtensionPackage {
         fixture_extension_package_from_manifest(fixture_extension_manifest())
+    }
+
+    fn fixture_installed_local_mcp_package() -> AvailableExtensionPackage {
+        let manifest_toml = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "local-mcp"
+name = "Local MCP"
+version = "0.1.0"
+description = "Installed local MCP fixture"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "http://127.0.0.2:4321/mcp"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "local-mcp.search"
+description = "Search local data"
+effects = ["network", "dispatch_capability"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/search.input.json"
+output_schema_ref = "schemas/search.output.json"
+"#;
+        let record = fixture_manifest_record_with_source(
+            manifest_toml,
+            ManifestSource::InstalledLocal,
+            None,
+        );
+        let manifest: ExtensionManifest = record
+            .manifest()
+            .clone()
+            .try_into()
+            .expect("installed-local MCP manifest");
+        let root = VirtualPath::new("/system/extensions/local-mcp").expect("extension root");
+        let package = ExtensionPackage::from_manifest_toml(manifest, root, manifest_toml)
+            .expect("local MCP package");
+        AvailableExtensionPackage {
+            package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "local-mcp")
+                .expect("fixture package ref"),
+            manifest_toml: manifest_toml.to_string(),
+            source: ManifestSource::InstalledLocal,
+            package,
+            surface_kinds: Vec::new(),
+            assets: vec![AvailableExtensionAsset {
+                path: "manifest.toml".to_string(),
+                content: AvailableExtensionAssetContent::Bytes(manifest_toml.as_bytes().to_vec()),
+            }],
+        }
     }
 
     fn fixture_extension_package_with_description(description: &str) -> AvailableExtensionPackage {

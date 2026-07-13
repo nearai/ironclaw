@@ -268,6 +268,12 @@ the mock server on a loopback port, injecting `Authorization: Bearer mock-mcp-te
 so the mock's OAuth gate passes; it rejects any URL not prefixed by the configured
 `mcp_url`. A single MCP capability `"mock-mcp.search"` is registered.
 
+`.with_installed_local_mcp(mcp_url)` instead keeps the production composition
+root, registry-backed planner, installation record, and host-mediated network
+egress. Its URL must use a literal IPv4 loopback host. The installed-local
+fixture declares no credential, so no authorization header is injected; the
+test proves the exact manifest endpoint is the only private-range exception.
+
 Script with `RebornScriptedReply::tool_call("mock-mcp.search", json!({}))`.
 
 - `assert_mcp_tool_called(tool_name)` — maps `tool_name` → `"mock-mcp.<tool_name>"` and delegates to `assert_tool_invoked`.

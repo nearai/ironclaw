@@ -51,7 +51,10 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// runtime's own dispatchable registry, so dispatch silently no-ops (the
     /// tool call never reaches `invoke_capability`). Empty for every harness
     /// that surfaces no bundled WASM capability.
-    pub(crate) activate_bundled_extensions_for_test: Vec<ExtensionPackage>,
+    pub(crate) activate_extensions_for_test: Vec<ExtensionPackage>,
+    /// Installed-local fixtures need both the active package and the enabled
+    /// installation record that production authority derivation joins.
+    pub(crate) activate_installed_local_extensions_for_test: Vec<(ExtensionPackage, String)>,
     /// C-SYNTH `project_create` fault-injection seam: wrap the real
     /// `Arc<dyn ProjectService>` (`services.local_dev_project_service_for_test()`)
     /// in `FaultInjectingProjectService` before it reaches
@@ -84,7 +87,8 @@ impl HostRuntimeHarnessOptions {
             skill_activation_tenant: None,
             outbound_target_facade: None,
             network_http_egress_for_test: None,
-            activate_bundled_extensions_for_test: Vec::new(),
+            activate_extensions_for_test: Vec::new(),
+            activate_installed_local_extensions_for_test: Vec::new(),
             project_service_fault_injection: false,
             durable_capability_io: false,
         }
@@ -118,7 +122,17 @@ impl HostRuntimeHarnessOptions {
     }
 
     pub(crate) fn with_activated_bundled_extension(mut self, package: ExtensionPackage) -> Self {
-        self.activate_bundled_extensions_for_test.push(package);
+        self.activate_extensions_for_test.push(package);
+        self
+    }
+
+    pub(crate) fn with_activated_installed_local_extension(
+        mut self,
+        package: ExtensionPackage,
+        raw_manifest: String,
+    ) -> Self {
+        self.activate_installed_local_extensions_for_test
+            .push((package, raw_manifest));
         self
     }
 

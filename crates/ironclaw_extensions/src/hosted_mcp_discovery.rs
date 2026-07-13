@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionPackage, ExtensionRuntime,
-    ManifestSource,
+    ManifestSource, McpHttpEndpoint, McpHttpScheme,
 };
 
 /// MCP tool descriptor discovered from a hosted provider and converted by the
@@ -89,22 +89,14 @@ fn hosted_http_mcp_url(package: &ExtensionPackage) -> Option<&str> {
     else {
         return None;
     };
-    if transport != "http" || !args.is_empty() || !valid_hosted_mcp_url(url) {
+    if transport != "http"
+        || !args.is_empty()
+        || McpHttpEndpoint::parse(url)
+            .is_none_or(|endpoint| endpoint.scheme() != McpHttpScheme::Https)
+    {
         return None;
     }
     Some(url.as_str())
-}
-
-fn valid_hosted_mcp_url(url: &str) -> bool {
-    let Ok(parsed) = url::Url::parse(url) else {
-        return false;
-    };
-    parsed.scheme() == "https"
-        && parsed.username().is_empty()
-        && parsed.password().is_none()
-        && parsed.host_str().is_some()
-        && parsed.query().is_none()
-        && parsed.fragment().is_none()
 }
 
 fn hosted_mcp_capability_template(
@@ -348,9 +340,27 @@ runtime_credentials = [
         );
     }
 
+    #[test]
+    fn hosted_mcp_discovery_remains_https_only() {
+        assert!(is_hosted_http_mcp_package(&notion_package()));
+        for url in [
+            "http://127.0.0.1:4321/mcp",
+            "http://[::1]:4321/mcp",
+            "http://localhost:4321/mcp",
+            "http://192.168.1.10:4321/mcp",
+        ] {
+            assert!(!is_hosted_http_mcp_package(&notion_package_with_url(url)));
+        }
+    }
+
     fn notion_package() -> ExtensionPackage {
+        notion_package_with_url("https://mcp.notion.com/mcp")
+    }
+
+    fn notion_package_with_url(url: &str) -> ExtensionPackage {
+        let manifest_toml = NOTION_MANIFEST.replace("https://mcp.notion.com/mcp", url);
         let manifest = ExtensionManifest::parse(
-            NOTION_MANIFEST,
+            &manifest_toml,
             ManifestSource::HostBundled,
             &HostPortCatalog::default(),
         )

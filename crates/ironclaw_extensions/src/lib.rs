@@ -412,6 +412,7 @@ pub mod host_api;
 mod hosted_mcp_discovery;
 mod installations;
 mod lifecycle;
+mod mcp_http_endpoint;
 mod registry;
 pub mod v2;
 
@@ -422,6 +423,7 @@ pub use hosted_mcp_discovery::{
     HostedMcpDiscoveredTool, HostedMcpDiscoveredToolAnnotations, is_hosted_http_mcp_package,
     package_with_discovered_hosted_mcp_tools,
 };
+pub use mcp_http_endpoint::{McpHttpEndpoint, McpHttpScheme};
 pub use v2::{
     CapabilityDeclV2, CapabilityVisibility, ExtensionManifestV2, ExtensionRuntimeV2,
     HookSectionEntryV2, HostApiContractRegistry, HostApiId, HostApiManifestContext,
