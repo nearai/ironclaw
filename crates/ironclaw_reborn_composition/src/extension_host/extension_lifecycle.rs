@@ -269,6 +269,22 @@ pub(crate) async fn restore_extension_lifecycle_state(
             }
         };
         if let Err(hash_error) = validate_restored_manifest_hash(&installation, &available) {
+            // Owner-registered manifests follow the same skip-and-log
+            // blast-radius policy as a catalog miss (never boot-abort for
+            // one installation's drifted row): the registration stays on
+            // disk and the install row is left untouched for a future
+            // restore once the manifest is re-registered. Only
+            // `HostBundled` mismatches migrate the stored hash and
+            // propagate a real failure.
+            if is_owner_registered(&available.package.manifest.source) {
+                tracing::debug!(
+                    extension_id = installation.extension_id().as_str(),
+                    installation_id = installation.installation_id().as_str(),
+                    %hash_error,
+                    "skipping registered extension installation restore: on-disk manifest hash drifted from the installed row"
+                );
+                continue;
+            }
             migrate_host_bundled_manifest_hash(
                 installation_store,
                 &available,
@@ -5350,6 +5366,139 @@ output_schema_ref = "schemas/run.output.json"
                 .snapshot()
                 .get_extension(&ExtensionId::new("fixture").unwrap())
                 .is_none()
+        );
+    }
+
+    /// Regression: a registered install row whose on-disk manifest drifted
+    /// (hash mismatch) must be skipped-and-logged like any other
+    /// blast-radius miss, not abort restore for the whole process. Only
+    /// `HostBundled` mismatches get migration + propagation.
+    #[tokio::test]
+    async fn restore_skips_registered_installation_with_drifted_manifest_hash_and_restores_others()
+    {
+        let (_dir, storage_root, port, _active_registry, installation_store, _trust_policy) =
+            extension_management_port_fixture_with_catalog_service_and_trust(
+                AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("valid ref");
+        port.install(package_ref.clone(), &lifecycle_owner_scope())
+            .await
+            .expect("install fixture extension");
+        port.activate_with_prechecked_credentials_for_test(
+            package_ref,
+            ExtensionActivationMode::Static,
+        )
+        .await
+        .expect("activate fixture extension");
+
+        let tenant = TenantId::new("default").expect("valid tenant");
+        let owner = UserId::new("registered-owner").expect("valid user");
+        let registered_extension_id =
+            ExtensionId::new("acme-mcp-registered").expect("valid extension id");
+        let registered_installation_id =
+            ExtensionInstallationId::new("acme-mcp-registered").expect("valid installation");
+        let source = ManifestSource::UserRegistered {
+            tenant_id: tenant.clone(),
+            owner: owner.clone(),
+        };
+        let descriptor_dir = storage_root
+            .join("system/extensions/registered")
+            .join(tenant.as_str())
+            .join(owner.as_str())
+            .join("acme-mcp-registered");
+        std::fs::create_dir_all(&descriptor_dir).expect("registered descriptor dir");
+        std::fs::write(
+            descriptor_dir.join("manifest.toml"),
+            REGISTERED_ISOLATION_MANIFEST_TOML,
+        )
+        .expect("write registered descriptor");
+        let original_hash = ManifestHash::new(sha256_digest_token(
+            REGISTERED_ISOLATION_MANIFEST_TOML.as_bytes(),
+        ))
+        .expect("valid manifest hash");
+        installation_store
+            .upsert_manifest(fixture_manifest_record_with_source(
+                REGISTERED_ISOLATION_MANIFEST_TOML,
+                source,
+                Some(original_hash.as_str().to_string()),
+            ))
+            .await
+            .expect("seed registered manifest record");
+        installation_store
+            .upsert_installation(
+                ExtensionInstallation::new(
+                    registered_installation_id.clone(),
+                    registered_extension_id.clone(),
+                    ExtensionActivationState::Enabled,
+                    ExtensionManifestRef::new(registered_extension_id.clone(), Some(original_hash)),
+                    Vec::new(),
+                    chrono::Utc::now(),
+                    InstallationOwner::user(owner),
+                )
+                .expect("registered installation"),
+            )
+            .await
+            .expect("seed registered installation");
+
+        // Drift the on-disk manifest after the row was stamped with the
+        // original hash, so restore's re-parse no longer matches.
+        std::fs::write(
+            descriptor_dir.join("manifest.toml"),
+            REGISTERED_ISOLATION_MANIFEST_TOML
+                .replace("Acme Registered MCP", "Acme Registered MCP (drifted)"),
+        )
+        .expect("drift registered descriptor");
+
+        let restored_catalog =
+            AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]);
+        let restored_lifecycle = Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        )));
+        let restored_active_registry =
+            Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let restored_trust_policy = test_extension_trust_policy();
+        let restored_active_extensions = test_active_extension_publisher(
+            Arc::clone(&restored_active_registry),
+            Arc::clone(&restored_trust_policy),
+        );
+        let installation_store: Arc<dyn ExtensionInstallationStore> = installation_store;
+
+        restore_extension_lifecycle_state(
+            &restored_catalog,
+            &port.filesystem,
+            &installation_store,
+            &restored_lifecycle,
+            &restored_active_extensions,
+        )
+        .await
+        .expect(
+            "a drifted registered installation must be skipped, not abort restore for the process",
+        );
+
+        // The unrelated host-bundled installation still boots.
+        assert!(
+            restored_active_registry
+                .snapshot()
+                .get_extension(&ExtensionId::new("fixture").expect("valid extension id"))
+                .is_some()
+        );
+        // The drifted registered installation is skipped, not activated —
+        // and its row is preserved (never deleted/rewritten) per the
+        // blast-radius skip-and-log policy.
+        assert!(
+            restored_active_registry
+                .snapshot()
+                .get_extension(&registered_extension_id)
+                .is_none()
+        );
+        assert!(
+            installation_store
+                .get_installation(&registered_installation_id)
+                .await
+                .expect("read registered installation")
+                .is_some()
         );
     }
 
