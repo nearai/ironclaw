@@ -32,7 +32,7 @@ pub(crate) fn mounted_local_filesystem(storage_root: &std::path::Path) -> LocalF
     let mut local_filesystem = LocalFilesystem::new();
     local_filesystem
         .mount_local(
-            VirtualPath::new("/system/extensions").expect("valid virtual path"),
+            VirtualPath::new("/system/extensions").expect("valid virtual path"), // safety: test-only fixture setup.
             HostPath::from_path_buf(storage_root.join("system/extensions")),
         )
         .expect("mount system extensions"); // safety: test-only fixture setup.
@@ -86,8 +86,7 @@ pub(crate) async fn seed_registered_installation(
         ironclaw_host_runtime::default_host_api_contract_registry().expect("host API contracts"); // safety: test-only fixture setup.
     let manifest_hash = manifest_hash.unwrap_or_else(|| {
         ManifestHash::new(sha256_digest_token(manifest_toml.as_bytes()))
-            .expect("valid manifest hash")
-        // safety: test-only fixture setup.
+            .expect("valid manifest hash") // safety: test-only fixture setup.
     });
     let manifest_record = ExtensionManifestRecord::from_toml_with_contracts(
         manifest_toml,
@@ -102,7 +101,7 @@ pub(crate) async fn seed_registered_installation(
     .expect("registered manifest record"); // safety: test-only fixture setup.
     let extension_id = ExtensionId::new(extension_id_str).expect("valid extension id"); // safety: test-only fixture setup.
     let installation = ExtensionInstallation::new(
-        ExtensionInstallationId::new(extension_id_str).expect("valid installation id"),
+        ExtensionInstallationId::new(extension_id_str).expect("valid installation id"), // safety: test-only fixture setup.
         extension_id.clone(),
         ExtensionActivationState::Enabled,
         ExtensionManifestRef::new(extension_id.clone(), Some(manifest_hash.clone())),
