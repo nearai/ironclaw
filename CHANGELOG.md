@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(reborn)* per-user/private MCP registration: an owner-scoped registered-extension store (tenant + user path sharding) with row-authoritative install/search/list/remove/restore resolution, isolated from the shared extension catalog.
+
 ### Fixed
 
 - *(slack)* resolve known DM conversation IDs through an exact Slack lookup before encoding mentions, avoiding wrong-target posts when conversation lists are long or display names are ambiguous.
