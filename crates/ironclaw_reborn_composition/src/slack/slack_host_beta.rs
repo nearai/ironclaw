@@ -2698,10 +2698,7 @@ mod tests {
                 Vec::new(),
             )
             .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
-            .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-            .with_protected_route_mount(slack_channel_route_admin_protected_mount(
-                mounts.channel_routes,
-            )),
+            .with_default_project_id(ProjectId::new(PROJECT).expect("project")),
         )
         .expect("webui app");
 
