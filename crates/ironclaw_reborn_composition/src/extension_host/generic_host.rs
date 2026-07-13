@@ -494,3 +494,163 @@ impl RestrictedEgress for DenyAllRestrictedEgress {
         Err(RestrictedEgressError::PolicyDenied)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_authorization::GrantAuthorizer;
+    use ironclaw_extension_host::test_support::{FakeEntrypoint, FakeToolAdapter};
+    use ironclaw_extensions::{
+        ExtensionInstallation, ExtensionInstallationId, ExtensionManifestRecord,
+        ExtensionManifestRef, ExtensionRegistry, InMemoryExtensionInstallationStore,
+        MANIFEST_SCHEMA_VERSION, ManifestSource,
+    };
+    use ironclaw_filesystem::LocalFilesystem;
+    use ironclaw_host_api::ids::ExtensionId;
+    use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
+    use ironclaw_processes::ProcessServices;
+    use ironclaw_resources::InMemoryResourceGovernor;
+
+    use super::*;
+
+    const FIXTURE_SERVICE: &str = "h5_fixture_host";
+
+    fn fixture_manifest_toml(id: &str) -> String {
+        format!(
+            r#"
+schema_version = "{schema}"
+id = "{id}"
+name = "H5 hydration fixture"
+version = "0.1.0"
+description = "boot hydration fixture extension"
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "{service}"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "{id}.echo"
+description = "Echoes input"
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/echo.input.json"
+"#,
+            schema = MANIFEST_SCHEMA_VERSION,
+            id = id,
+            service = FIXTURE_SERVICE,
+        )
+    }
+
+    /// A native factory whose entrypoint binds a no-op tool adapter — the
+    /// first_party loader branch, no runtime lane required.
+    struct FixtureNativeFactory;
+
+    impl NativeExtensionFactory for FixtureNativeFactory {
+        fn service(&self) -> &str {
+            FIXTURE_SERVICE
+        }
+
+        fn load(
+            &self,
+            _ctx: &LoadContext,
+        ) -> Result<Box<dyn ironclaw_extension_host::ExtensionEntrypoint>, BindError> {
+            Ok(Box::new(FakeEntrypoint {
+                bindings: ExtensionBindings {
+                    tools: Some(Arc::new(FakeToolAdapter)),
+                    channel: None,
+                },
+            }))
+        }
+    }
+
+    async fn seed_installation(
+        store: &InMemoryExtensionInstallationStore,
+        id: &str,
+        state: ExtensionActivationState,
+    ) {
+        let record = ExtensionManifestRecord::from_toml(
+            fixture_manifest_toml(id),
+            ManifestSource::HostBundled,
+            &ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
+            None,
+            &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+        )
+        .expect("fixture manifest resolves");
+        let extension_id = ExtensionId::new(id).expect("extension id");
+        store
+            .upsert_manifest_and_installation(
+                record,
+                ExtensionInstallation::new(
+                    ExtensionInstallationId::new(id.to_string()).expect("installation id"),
+                    extension_id.clone(),
+                    state,
+                    ExtensionManifestRef::new(extension_id, None),
+                    Vec::new(),
+                    chrono::Utc::now(),
+                )
+                .expect("installation record"),
+            )
+            .await
+            .expect("persist installation");
+    }
+
+    fn test_binder() -> ExtensionLaneToolBinder {
+        HostRuntimeServices::new(
+            Arc::new(ExtensionRegistry::new()),
+            Arc::new(LocalFilesystem::new()),
+            Arc::new(InMemoryResourceGovernor::new()),
+            Arc::new(GrantAuthorizer::new()),
+            ProcessServices::in_memory(),
+            CapabilitySurfaceVersion::new("surface-v1").expect("surface version"),
+        )
+        .extension_lane_tool_binder()
+    }
+
+    /// H.5 / MIG-4: the durable binary activation state backfills into the
+    /// generic host's standard seven-state records at boot — a durable
+    /// `Enabled` installation hydrates to an Active record in the first
+    /// published generation (snapshot presence + resolvable capability),
+    /// while a durable `Disabled` installation never activates.
+    #[tokio::test]
+    async fn boot_hydration_activates_enabled_and_skips_disabled_installations() {
+        let store = Arc::new(InMemoryExtensionInstallationStore::default());
+        seed_installation(&store, "h5-enabled", ExtensionActivationState::Enabled).await;
+        seed_installation(&store, "h5-disabled", ExtensionActivationState::Disabled).await;
+
+        let generic = build_generic_extension_host(GenericExtensionHostParams {
+            binder: test_binder(),
+            native_factories: vec![Arc::new(FixtureNativeFactory)],
+            channel_adapters: Vec::new(),
+            installation_store: Arc::clone(&store) as Arc<dyn ExtensionInstallationStore>,
+            governor: Arc::new(InMemoryResourceGovernor::new()),
+            reserved_capability_ids: BTreeSet::new(),
+            reserved_ingress_routes: BTreeSet::new(),
+            channel_egress_transport: None,
+        })
+        .await
+        .expect("generic host builds");
+
+        let snapshot = generic.host.snapshot().await;
+        assert!(
+            snapshot.extension("h5-enabled").is_some(),
+            "durable Enabled installation must hydrate to an Active record \
+             in the first published generation"
+        );
+        assert!(
+            snapshot
+                .resolve_tool(&CapabilityId::new("h5-enabled.echo").expect("capability id"))
+                .is_some(),
+            "the hydrated Active extension's capability must resolve from the snapshot"
+        );
+        assert!(
+            snapshot.extension("h5-disabled").is_none(),
+            "durable Disabled installation must stay inactive after restart"
+        );
+    }
+}
