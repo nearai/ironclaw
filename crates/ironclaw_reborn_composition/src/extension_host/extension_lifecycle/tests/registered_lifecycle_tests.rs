@@ -896,7 +896,7 @@ async fn project_does_not_report_foreign_tenants_installation_as_installed() {
 async fn foreign_and_operator_install_of_registered_package_is_not_found() {
     let owner_scope = resource_scope_for("default", "owner-a");
     let other_scope = resource_scope_for("default", "owner-b");
-    let (_dir, port, package_ref, _active_registry, installation_store) =
+    let (dir, port, package_ref, _active_registry, installation_store) =
         user_registered_isolation_fixture(&owner_scope, true).await;
     // The fixture wires owner-a as the tenant operator, but a distinct
     // operator identity must ALSO fail to resolve a foreign registration;
@@ -917,6 +917,55 @@ async fn foreign_and_operator_install_of_registered_package_is_not_found() {
     assert!(
         !row.owner().is_tenant() && row.owner().visible_to(&owner_scope.user_id),
         "failed foreign install attempts must not evict the registered row to Tenant"
+    );
+
+    // Item E: `other_scope` above is a plain member under the SAME port,
+    // whose fixture-wired tenant operator IS the manifest owner (owner-a) —
+    // it never actually exercises an operator distinct from the owner. Wire
+    // a genuinely third identity as this port's tenant operator, over the
+    // SAME installation store and on-disk descriptor, and confirm their
+    // install of the same id is masked identically.
+    let operator_scope = resource_scope_for("default", "tenant-operator-c");
+    let mut operator_filesystem = LocalFilesystem::new();
+    operator_filesystem
+        .mount_local(
+            VirtualPath::new("/system/extensions").expect("valid virtual path"),
+            HostPath::from_path_buf(dir.path().join("local-dev/system/extensions")),
+        )
+        .expect("mount system extensions");
+    let operator_active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+    let operator_port = RebornLocalExtensionManagementPort::new(
+        Arc::new(operator_filesystem),
+        AvailableExtensionCatalog::from_packages(Vec::new()),
+        installation_store.clone(),
+        Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        ))),
+        test_active_extension_publisher(operator_active_registry, test_extension_trust_policy()),
+        None,
+        operator_scope.user_id.clone(),
+    );
+    let operator_error = operator_port
+        .install(package_ref, &operator_scope)
+        .await
+        .expect_err(
+            "a distinct tenant operator must not install another owner's registered package",
+        );
+    assert!(matches!(
+        operator_error,
+        ProductWorkflowError::InvalidBindingRequest { .. }
+    ));
+    let row_after_operator_attempt = installation_store
+        .get_installation(&ExtensionInstallationId::new("acme-mcp-registered").expect("valid id"))
+        .await
+        .expect("store read")
+        .expect("registered row present");
+    assert!(
+        !row_after_operator_attempt.owner().is_tenant()
+            && row_after_operator_attempt
+                .owner()
+                .visible_to(&owner_scope.user_id),
+        "a distinct operator's failed install attempt must not evict the registered row to Tenant"
     );
 }
 

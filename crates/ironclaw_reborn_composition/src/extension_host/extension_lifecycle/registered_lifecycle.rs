@@ -64,7 +64,20 @@ pub(super) async fn installation_effective_owner_scope(
         .map_err(map_extension_installation_error)?
     {
         Some(record) => record,
-        None => return Ok(None),
+        None => {
+            // Unreachable by construction today: install/rollback ordering
+            // never persists an installation row without its manifest, so
+            // this collapses to the same `Ok(None)` a non-registered source
+            // produces. Logged so a future persistence change that broke
+            // that invariant fails loudly in review instead of silently
+            // bypassing the tenant guard.
+            tracing::debug!(
+                extension_id = installation.extension_id().as_str(),
+                installation_id = installation.installation_id().as_str(),
+                "installation row has no stored manifest; treating as non-registered"
+            );
+            return Ok(None);
+        }
     };
     Ok(effective_owner_scope(
         installation,
