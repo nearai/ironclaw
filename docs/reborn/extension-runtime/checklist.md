@@ -73,13 +73,20 @@ Rules — kept short on purpose:
 
 ## 2. Resolved record (REC)
 
-- [ ] REC-1 Compile once → persisted resolved record + manifest digest; all
+- [x] REC-1 Compile once → persisted resolved record + manifest digest; all
   production projection reads the record (no raw-TOML reparse outside the
-  compiler and migration). — PARTIAL: the generic host's production loader
-  rebuilds packages from the persisted resolved contract, never the raw
-  TOML (`CompositionExtensionLoader::load`, `generic_host.rs` —
-  `ctx.resolved.to_internal(source)`; manifest-source re-checks come from
-  the persisted record). A repo-wide no-reparse scan/gate is still owed.
+  compiler and migration). — the generic host's production loader rebuilds
+  packages from the persisted resolved contract, never the raw TOML
+  (`CompositionExtensionLoader::load`, `generic_host.rs` —
+  `ctx.resolved.to_internal(source)`; manifest-source re-checks come from the
+  persisted record). The no-reparse gate is now enforced:
+  `manifest_reparse_stays_within_the_compiler_migration_and_bundled_paths`
+  (`crates/ironclaw_architecture/tests/reborn_manifest_reparse_gate.rs`)
+  scans production Rust (test-stripped) and holds every
+  `ExtensionManifest::parse` / `ExtensionManifestRecord::from_toml` site to a
+  categorized (compiler/migration/bundled-asset) allowlist — a new
+  projection-path reparse fails until justified; the installed-record load
+  reads `from_resolved` and reparses only pre-resolved legacy rows.
 - [x] REC-2 Restart restores extensions from persisted records with the
   package source unavailable. — `records_rehydrate_from_resolved_in_memory` /
   `records_rehydrate_from_resolved_on_libsql`
@@ -260,22 +267,30 @@ Rules — kept short on purpose:
   proves declaration-staged network policy + token injection (every
   recorded request targets the declared `slack.com` host with the
   injected bearer).
-- [ ] TOOL-5 Missing credential raises the generic auth gate and resumes after
-  the engine completes (caller-level test). — PARTIAL: the raise leg is
-  pinned at the harness tier
+- [x] TOOL-5 Missing credential raises the generic auth gate and resumes after
+  the engine completes (caller-level test). — the raise leg is pinned at the
+  harness tier
   (`runtime_401_after_injection_populates_provider_credential_requirement`,
   `github_auth_gate_denied_resume_completes_without_loop`,
   `tests/integration/auth_gate.rs`); the resume-after-engine leg is pinned
   composed-tier (`vendor_oauth_callback_resumes_blocked_turn_gate`,
-  `local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator`).
-  One harness-tier missing-credential → gate → engine → tool-resumes
-  scenario remains (same open leg as AUTH-14).
-- [ ] TOOL-6 WASM and MCP lanes invoke through `ToolAdapter` with existing
-  result/event semantics. — PARTIAL: the WASM lane is proven through
-  `ToolAdapter` (TOOL-7 plus the binder contract suite,
-  `crates/ironclaw_host_runtime/src/services/tests/extension_tool_binder.rs`);
-  the discovered-MCP invoke through the binder remains (TEST-2's open
-  leg).
+  `local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator`). The
+  full missing-credential → generic auth gate → engine completes → parked tool
+  re-dispatches → run completes chain is now pinned through the integration
+  harness in isolation (auto-approve so no approval gate confounds it) by
+  `group_journeys::scenario_auth_gate_grant_resume`
+  (`journeys_group_auth_convergence_e2e`), asserting the credential-backed
+  re-dispatch's real result surfaced (`assert_tool_result_contains`).
+- [x] TOOL-6 WASM and MCP lanes invoke through `ToolAdapter` with existing
+  result/event semantics. — the WASM lane is proven through `ToolAdapter`
+  (TOOL-7 plus the binder contract suite), and the MCP lane is now pinned by
+  `binder_invokes_a_discovered_mcp_tool_through_the_tool_adapter`
+  (`crates/ironclaw_host_runtime/src/services/tests/extension_tool_binder.rs`):
+  a *discovered* (tools/list-originated via
+  `package_with_discovered_hosted_mcp_tools`) MCP capability binds through the
+  same `LaneBackedToolAdapter` and dispatches into the MCP lane, with the
+  exact discovered capability id + input reaching the executor and the output
+  flowing back — the binder never distinguishes discovered from static.
 - [x] TOOL-7 The five real Slack tools activate and invoke through the generic
   dispatcher (integration, recorded egress). —
   `slack_tools_invoke_through_the_generic_dispatcher_with_recorded_egress`
@@ -293,16 +308,24 @@ Rules — kept short on purpose:
   leg (`test_reborn_slack_channel_e2e.py`) both observe the coordinated
   reply landing on `chat.postMessage` via host-side channel egress with no
   tool invocation in the path.
-- [ ] TOOL-9 MCP discovery is loader-owned (`ToolAdapter` has no discovery
+- [x] TOOL-9 MCP discovery is loader-owned (`ToolAdapter` has no discovery
   method); validated tool surfaces publish atomically; a refresh replaces the
   set completely or not at all; discovered tools run the same dispatcher
-  pipeline as static ones. — PARTIAL: structurally loader-owned —
-  `ToolAdapter` has no discovery method; hosted-MCP discovery runs at
-  activation via `discover_hosted_mcp_package` (`mcp_discovery.rs`) with
-  staged connection authority (`stage_hosted_mcp_discovery_authority`,
-  `extension_lifecycle.rs`), and the discovered set publishes through the
-  same snapshot activation as static tools. The all-or-nothing refresh
-  pin is still owed.
+  pipeline as static ones. — structurally loader-owned (`ToolAdapter` has no
+  discovery method; hosted-MCP discovery runs at activation via
+  `discover_hosted_mcp_package` with staged connection authority
+  `stage_hosted_mcp_discovery_authority`), and the discovered set publishes
+  through the same snapshot activation as static tools. The all-or-nothing
+  refresh property is pinned by
+  `hosted_mcp_rediscovery_replaces_the_published_tool_set_completely` (a
+  re-activation whose tools/list yields a different tool replaces the set
+  wholesale — the prior discovered tool is gone, not merged) and
+  `hosted_mcp_rediscovery_failure_leaves_the_prior_tool_set_intact` (a refresh
+  that fails the post-discovery credential recheck before publish leaves the
+  prior set live, no partial swap) — both in
+  `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs`.
+  There is no separate refresh API by design: refresh == re-activation →
+  discover → atomic publish.
 - [x] TOOL-10 Host built-in capabilities resolve through the same dispatcher
   pipeline; an extension capability id colliding with a built-in fails
   activation. — built-ins resolve through the registry-lane resolver in the
@@ -401,16 +424,22 @@ Rules — kept short on purpose:
   a typed reason; refresh failure lands in `expired`. —
   `projection_prefers_live_flow_then_account_status`
   (`crates/ironclaw_auth/src/account_state.rs`).
-- [ ] AUTH-11 `api_key` renders from recipe fields, runs the optional
+- [x] AUTH-11 `api_key` renders from recipe fields, runs the optional
   validation probe through restricted egress, and uses the same state machine.
   — probe + storage + state machine proven engine-tier
   (`api_key_probe_validates_through_host_egress_before_storing`,
   `api_key_probe_failure_stores_nothing`, `api_key_without_probe_stores_directly`,
   `auth_engine_contract.rs`); the P6 S5 configure modal now renders
   wire-projected secret/field descriptors generically (`c6bb695ec`,
-  `configure-modal.tsx` — manual-token entry rides the generic form), but
-  an api_key-recipe → wire field projection with its own pin is still
-  owed before this row ticks.
+  `configure-modal.tsx` — manual-token entry rides the generic form). The
+  api_key-recipe → wire field projection is now pinned end-to-end on the real
+  github manifest by
+  `webui_v2_github_api_key_setup_projects_manual_token_secret`
+  (`crates/ironclaw_reborn_composition/tests/webui_v2_e2e.rs`): the composed
+  `/extensions/github/setup` route projects the `[auth.github] method = "api_key"`
+  recipe's single field handle into exactly one `manual_token` secret
+  descriptor (handle-named, not-yet-provided) through the production
+  composition→product-workflow chain, no per-vendor code.
 - [x] AUTH-12 All five current vendors (Slack, Google, Notion, GitHub,
   NEAR AI) are expressed as recipes and pass the engine suite as table rows —
   no vendor-specific test suite exists. — rows loaded from the real bundled
@@ -427,23 +456,26 @@ Rules — kept short on purpose:
   `crates/ironclaw_reborn_composition/src/product_auth/serve/mod.rs`; the
   google/slack callback tests in `tests/webui_v2_product_auth.rs` drive the
   unchanged URLs end-to-end).
-- [ ] AUTH-14 Slack end-to-end: blocked tool → gate → scripted callback →
+- [x] AUTH-14 Slack end-to-end: blocked tool → gate → scripted callback →
   grant stored → tool resumes (extends the existing oauth-connect integration
-  test). — PARTIAL: the generic round trip is proven at the composed-services
-  tier with the recipe-driven driver and the `{provider}` callback route
+  test). — the generic round trip is proven at the composed-services tier with
+  the recipe-driven driver and the `{provider}` callback route
   (`vendor_oauth_callback_resumes_blocked_turn_gate`,
   `crates/ironclaw_reborn_composition/src/product_auth/serve/mod.rs`), and the
   callback→coordinator resume is pinned by
   `local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator`
-  (`crates/ironclaw_reborn_composition/src/factory/auth_tests.rs`). The
-  client-credentials seam now exists generically — `[auth.slack]`
-  `client_credentials` resolve through `[channel.config]` (`4bc633197`) —
-  and the full Slack personal-OAuth connect against production serve is
-  proven end-to-end by the P6 §10 e2e
-  (`tests/e2e/scenarios/test_reborn_slack_channel_e2e.py`: setup →
-  oauth/start → `{provider}` callback → flow Completed → credential-gated
-  activation). The blocked-TOOL → gate → callback → tool-resumes leg
-  through the integration harness is still owed.
+  (`crates/ironclaw_reborn_composition/src/factory/auth_tests.rs`); the full
+  Slack personal-OAuth connect against production serve is proven end-to-end by
+  the P6 §10 e2e (`tests/e2e/scenarios/test_reborn_slack_channel_e2e.py`). The
+  blocked-tool → auth gate → grant stored → tool resumes leg through the
+  integration harness is now pinned by
+  `group_journeys::scenario_auth_then_approval_journey` (turn 1: blocked
+  `github.get_repo` → approval → auth gate → `resolve_auth_gate` grants a real
+  credential through the production manual-token flow → run completes → repo
+  result surfaces) and the isolated
+  `group_journeys::scenario_auth_gate_grant_resume` (auto-approve so the auth
+  gate is the only block). Grant storage is the "user submitted credentials"
+  arm (`resolve_auth_gate`'s `request_manual_token_setup` → `submit_manual_token`).
 - [ ] AUTH-15 Engine flow/grant persistence passes on both DBs. — PARTIAL:
   the engine reuses the backend-generic `FilesystemAuthProductServices`
   store; the connect flow is pinned on the in-memory backend and on a real
@@ -730,9 +762,17 @@ Rules — kept short on purpose:
   registry runtime projection, `59893460e`). The `ProductAdapter`
   metadata getters (`adapter_id` / `installation_id` / `surface_kind` /
   `capabilities`, `crates/ironclaw_product_adapters/src/adapter.rs`)
-  still stand — remaining consumers are `ironclaw_wasm_product_adapters`
-  and `product_workflow::outbound_delivery`; they retire with the
-  `ProductAdapter` trait itself (P7).
+  still stand. OWNER-FLAGGED (P7a → P7b): the whole `ProductAdapter` trait +
+  its outbound path is production-dead — `prepare_and_render_product_outbound`
+  has zero production callers (only `outbound_delivery_contract.rs` tests +
+  the lib re-export, verified workspace-wide), and the live outbound path is
+  `ChannelAdapter` (`SlackChannelAdapter`/`TelegramChannelAdapter` in
+  `channel.rs`), which does not reference `SlackV2Adapter`/`TelegramV2Adapter`
+  or `ProductAdapter`. Retiring the getters therefore means deleting the dead
+  trait + `outbound_delivery.rs` + the `adapter.rs` `ProductAdapter` impls (a
+  ~2000-line multi-crate deletion in the SAME crates DEL-2 renames), so it
+  lands with DEL-2 in P7b as one coherent "adapter retirement" change rather
+  than bloating the P7a wire+legs PR.
 - [x] DEL-6 Composition constructs no concrete extension and mounts no
   concrete route (architecture gate). — The lane deletion removed the last
   concrete construction and route mount from composition (`serve_slack`
@@ -926,10 +966,15 @@ Rules — kept short on purpose:
   Consumers: `crates/ironclaw_slack_v2_adapter/tests/channel_conformance.rs`,
   `crates/ironclaw_telegram_v2_adapter/tests/channel_conformance.rs`, and
   the acme fixture in `tests/integration/extension_runtime.rs`.
-- [ ] TEST-2 The tool-adapter conformance checks run against static, WASM,
+- [x] TEST-2 The tool-adapter conformance checks run against static, WASM,
   and MCP lanes. (P2 landed the WASM-lane proof — the five Slack tools
-  through the binder — and the native/static proof via the acme fixture;
-  a discovered-MCP tool invoke through the binder remains.)
+  through the binder — and the native/static proof via the acme fixture; the
+  MCP lane is now covered by
+  `binder_invokes_a_discovered_mcp_tool_through_the_tool_adapter`
+  (`crates/ironclaw_host_runtime/src/services/tests/extension_tool_binder.rs`),
+  which drives a discovered MCP capability through the same
+  `LaneBackedToolAdapter` and asserts the exact call reached the MCP executor
+  and its output returned — see TOOL-6.)
 - [ ] TEST-3 The auth engine suite is table-driven over recipes; adding a
   vendor adds a row + fixtures, not a suite (checked by suite structure).
 - [ ] TEST-4 The acme fixture drives the full generic path end-to-end in the
