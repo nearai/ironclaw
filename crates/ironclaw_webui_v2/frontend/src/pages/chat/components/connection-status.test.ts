@@ -47,7 +47,9 @@ test("ConnectionStatus hides routine states and renders connection interruptions
     assert.notEqual(rendered, null, status);
     assert.equal(rendered.props.role, "status", status);
     assert.match(rendered.props.className, /\babsolute\b/, status);
+    assert.match(rendered.props.className, /\bw-max\b/, status);
     assert.doesNotMatch(rendered.props.className, /\bsticky\b/, status);
+    assert.doesNotMatch(rendered.props.className, /\binset-x-4\b/, status);
     assert.match(rendered.props.className, new RegExp(style.replace("/", "\\/")), status);
     assert.equal(rendered.children[0], status, status);
   }
