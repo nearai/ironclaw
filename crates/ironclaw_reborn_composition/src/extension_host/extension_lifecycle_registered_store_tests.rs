@@ -548,6 +548,161 @@ async fn restore_migrates_legacy_owner_only_layout_into_default_tenant() {
     );
 }
 
+const NESTED_ASSETS_EXTENSION_ID: &str = "acme-mcp-nested";
+const NESTED_ASSETS_OWNER_USER_ID: &str = "5eee560a-7fe5-474c-965a-67cb69df3d06";
+const NESTED_ASSETS_MANIFEST_TOML: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "acme-mcp-nested"
+name = "Acme Nested Assets MCP"
+version = "0.1.0"
+description = "User-registered hosted MCP server with nested docs/schemas assets"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "http://127.0.0.1:9/mcp"
+"#;
+
+/// `migrate_legacy_owner_dir`'s `copy_tree` claims a full recursive copy
+/// (docs/schemas alongside `manifest.toml`), but
+/// `restore_migrates_legacy_owner_only_layout_into_default_tenant` above only
+/// ever seeds a bare `manifest.toml` — it cannot catch a `copy_tree` that
+/// silently drops nested files. Seed a legacy layout with files under nested
+/// `docs/` and `schemas/` directories and assert all of them land at the
+/// tenant-scoped destination, and the legacy dir is fully removed.
+#[tokio::test]
+async fn restore_migrates_nested_legacy_registered_assets() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage_root = dir.path().join("local-dev");
+    std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
+
+    let mut local_filesystem = LocalFilesystem::new();
+    local_filesystem
+        .mount_local(
+            VirtualPath::new("/system/extensions").expect("valid virtual path"),
+            HostPath::from_path_buf(storage_root.join("system/extensions")),
+        )
+        .expect("mount system extensions");
+    let filesystem: Arc<dyn RootFilesystem> = Arc::new(local_filesystem);
+
+    // Seed the PRE-TENANT layout with nested asset directories alongside the
+    // manifest.
+    let legacy_dir = storage_root
+        .join("system/extensions/registered")
+        .join(NESTED_ASSETS_OWNER_USER_ID)
+        .join(NESTED_ASSETS_EXTENSION_ID);
+    std::fs::create_dir_all(legacy_dir.join("docs")).expect("legacy docs dir");
+    std::fs::create_dir_all(legacy_dir.join("schemas")).expect("legacy schemas dir");
+    std::fs::write(
+        legacy_dir.join("manifest.toml"),
+        NESTED_ASSETS_MANIFEST_TOML,
+    )
+    .expect("write legacy registered manifest");
+    std::fs::write(legacy_dir.join("docs").join("setup.md"), "# setup")
+        .expect("write legacy nested doc");
+    std::fs::write(
+        legacy_dir.join("schemas").join("tool.input.json"),
+        "{\"type\":\"object\"}",
+    )
+    .expect("write legacy nested schema");
+
+    let host_ports = ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog");
+    let contracts =
+        ironclaw_host_runtime::default_host_api_contract_registry().expect("host API contracts");
+    let manifest_hash =
+        ManifestHash::new(sha256_digest_token(NESTED_ASSETS_MANIFEST_TOML.as_bytes()))
+            .expect("valid manifest hash");
+    let manifest_record = ExtensionManifestRecord::from_toml_with_contracts(
+        NESTED_ASSETS_MANIFEST_TOML,
+        ManifestSource::UserRegistered {
+            tenant_id: TenantId::from_trusted(
+                ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string(),
+            ),
+            owner: UserId::new(NESTED_ASSETS_OWNER_USER_ID).expect("valid owner id"),
+        },
+        &host_ports,
+        Some(manifest_hash.clone()),
+        &contracts,
+    )
+    .expect("registered manifest record");
+    let extension_id = ExtensionId::new(NESTED_ASSETS_EXTENSION_ID).expect("valid extension id");
+    let installation = ExtensionInstallation::new(
+        ExtensionInstallationId::new(NESTED_ASSETS_EXTENSION_ID).expect("valid installation id"),
+        extension_id.clone(),
+        ExtensionActivationState::Enabled,
+        ExtensionManifestRef::new(extension_id.clone(), Some(manifest_hash)),
+        Vec::new(),
+        chrono::Utc::now(),
+        InstallationOwner::user(UserId::new(NESTED_ASSETS_OWNER_USER_ID).expect("valid owner id")),
+    )
+    .expect("owner-registered installation");
+    let installation_store: Arc<dyn ExtensionInstallationStore> =
+        Arc::new(InMemoryExtensionInstallationStore::default());
+    installation_store
+        .upsert_manifest(manifest_record)
+        .await
+        .expect("seed registered manifest record");
+    installation_store
+        .upsert_installation(installation)
+        .await
+        .expect("seed owner-registered installation");
+
+    let empty_catalog = AvailableExtensionCatalog::from_packages(Vec::new());
+    let lifecycle_service = Arc::new(Mutex::new(ExtensionLifecycleService::new(
+        ExtensionRegistry::new(),
+    )));
+    let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+    let trust_policy =
+        Arc::new(HostTrustPolicy::new(vec![Box::new(AdminConfig::new())]).expect("trust policy"));
+    let active_extensions = ActiveExtensionPublisher::new(
+        Arc::clone(&active_registry),
+        Arc::clone(&trust_policy),
+        Arc::new(InvalidationBus::new()),
+    );
+
+    restore_extension_lifecycle_state(
+        &empty_catalog,
+        &filesystem,
+        &installation_store,
+        &lifecycle_service,
+        &active_extensions,
+    )
+    .await
+    .expect("restore must migrate the nested legacy assets, then restore through them");
+
+    let migrated_dir = storage_root
+        .join("system/extensions/registered")
+        .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
+        .join(NESTED_ASSETS_OWNER_USER_ID)
+        .join(NESTED_ASSETS_EXTENSION_ID);
+    assert!(
+        migrated_dir.join("manifest.toml").is_file(),
+        "legacy manifest must be moved under the local default tenant"
+    );
+    assert_eq!(
+        std::fs::read_to_string(migrated_dir.join("docs").join("setup.md"))
+            .expect("read migrated nested doc"),
+        "# setup",
+        "nested docs/ file must be copied to the tenant-scoped destination"
+    );
+    assert_eq!(
+        std::fs::read_to_string(migrated_dir.join("schemas").join("tool.input.json"))
+            .expect("read migrated nested schema"),
+        "{\"type\":\"object\"}",
+        "nested schemas/ file must be copied to the tenant-scoped destination"
+    );
+    // The legacy owner-only tree (including its nested asset dirs) must be
+    // fully gone, so nothing re-probes or re-migrates it on the next boot.
+    assert!(
+        !storage_root
+            .join("system/extensions/registered")
+            .join(NESTED_ASSETS_OWNER_USER_ID)
+            .exists(),
+        "legacy owner-only directory (with its nested assets) must be removed after migration"
+    );
+}
+
 /// Safety invariant the registered-store's owner-scoped path convention
 /// (`/system/extensions/registered/<owner>/<id>/manifest.toml`, T1) relies
 /// on: `UserId`'s own validation rejects any value that could escape that
