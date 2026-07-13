@@ -19,8 +19,7 @@ use ironclaw_filesystem::{
     DirEntry, FileStat, FilesystemError, LocalFilesystem, RootFilesystem, VersionedEntry,
 };
 use ironclaw_host_api::{
-    ExtensionId, HostPath, InvocationId, ResourceScope, TenantId, UserId, VirtualPath,
-    sha256_digest_token,
+    ExtensionId, InvocationId, ResourceScope, TenantId, UserId, VirtualPath, sha256_digest_token,
 };
 use ironclaw_product_workflow::{
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload,
@@ -35,6 +34,9 @@ use crate::extension_host::extension_lifecycle::{
     ActiveExtensionPublisher, RebornLocalExtensionManagementPort, restore_extension_lifecycle_state,
 };
 use crate::extension_host::registered_extension_store::resolve_registered_for_scope;
+use crate::extension_host::registered_test_support::{
+    fresh_boot_fixture, mounted_local_filesystem, seed_registered_installation,
+};
 
 const HEALTHY_OWNER_USER_ID: &str = "c3333333-7fe5-474c-965a-67cb69df3d06";
 const BROKEN_OWNER_USER_ID: &str = "d4444444-7fe5-474c-965a-67cb69df3d07";
@@ -112,21 +114,14 @@ fn seed_registered_manifest(storage_root: &std::path::Path, owner: &str, extensi
 async fn restore_continues_past_installation_whose_registered_fallback_errors() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage_root = dir.path().join("local-dev");
-    std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
     seed_registered_manifest(&storage_root, HEALTHY_OWNER_USER_ID, HEALTHY_EXTENSION_ID);
 
-    let mut local_filesystem = LocalFilesystem::new();
-    local_filesystem
-        .mount_local(
-            VirtualPath::new("/system/extensions").expect("valid virtual path"),
-            HostPath::from_path_buf(storage_root.join("system/extensions")),
-        )
-        .expect("mount system extensions");
-    let filesystem: Arc<dyn RootFilesystem> = Arc::new(local_filesystem);
+    let filesystem: Arc<dyn RootFilesystem> = Arc::new(mounted_local_filesystem(&storage_root));
 
-    let host_ports = ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog");
-    let contracts =
-        ironclaw_host_runtime::default_host_api_contract_registry().expect("host API contracts");
+    let default_tenant =
+        TenantId::from_trusted(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string());
+    let installation_store: Arc<dyn ExtensionInstallationStore> =
+        Arc::new(InMemoryExtensionInstallationStore::default());
 
     // Installation #1: on record in the installation store (manifest record
     // seeded, matching a real "registered then reinstalled/deleted" history),
@@ -134,10 +129,8 @@ async fn restore_continues_past_installation_whose_registered_fallback_errors() 
     // misses (static catalog never holds `UserRegistered` packages) and
     // the row-owner-keyed `resolve_registered_for_owner` also misses, since no owner directory
     // has this extension id — the missing-manifest scenario this fix targets.
-    let missing_extension_id = ExtensionId::new("missing-mcp").expect("valid extension id");
-    let missing_manifest_hash = ManifestHash::new(sha256_digest_token(b"missing-mcp-placeholder"))
-        .expect("valid manifest hash");
-    let missing_manifest_record = ExtensionManifestRecord::from_toml_with_contracts(
+    let (missing_extension_id, _) = seed_registered_installation(
+        &installation_store,
         r#"
 schema_version = "reborn.extension_manifest.v2"
 id = "missing-mcp"
@@ -151,96 +144,37 @@ kind = "mcp"
 transport = "http"
 url = "http://127.0.0.1:9/mcp"
 "#,
-        ManifestSource::UserRegistered {
-            tenant_id: TenantId::from_trusted(
-                ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string(),
-            ),
-            owner: UserId::new(BROKEN_OWNER_USER_ID).expect("valid owner id"),
-        },
-        &host_ports,
-        Some(missing_manifest_hash.clone()),
-        &contracts,
+        &default_tenant,
+        &UserId::new(BROKEN_OWNER_USER_ID).expect("valid owner id"),
+        "missing-mcp",
+        Some(
+            ManifestHash::new(sha256_digest_token(b"missing-mcp-placeholder"))
+                .expect("valid manifest hash"),
+        ),
     )
-    .expect("missing manifest record");
-    let missing_installation = ExtensionInstallation::new(
-        ExtensionInstallationId::new("missing-mcp").expect("valid installation id"),
-        missing_extension_id.clone(),
-        ExtensionActivationState::Enabled,
-        ExtensionManifestRef::new(missing_extension_id.clone(), Some(missing_manifest_hash)),
-        Vec::new(),
-        chrono::Utc::now(),
-        InstallationOwner::user(UserId::new(BROKEN_OWNER_USER_ID).expect("valid owner id")),
-    )
-    .expect("missing installation");
+    .await;
 
     // Installation #2: the healthy, owner-registered extension that must
     // still restore and publish despite installation #1's failure.
-    let healthy_manifest_hash =
-        ManifestHash::new(sha256_digest_token(HEALTHY_MANIFEST_TOML.as_bytes()))
-            .expect("valid manifest hash");
-    let healthy_manifest_record = ExtensionManifestRecord::from_toml_with_contracts(
+    let (healthy_extension_id, _) = seed_registered_installation(
+        &installation_store,
         HEALTHY_MANIFEST_TOML,
-        ManifestSource::UserRegistered {
-            tenant_id: TenantId::from_trusted(
-                ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string(),
-            ),
-            owner: UserId::new(HEALTHY_OWNER_USER_ID).expect("valid owner id"),
-        },
-        &host_ports,
-        Some(healthy_manifest_hash.clone()),
-        &contracts,
+        &default_tenant,
+        &UserId::new(HEALTHY_OWNER_USER_ID).expect("valid owner id"),
+        HEALTHY_EXTENSION_ID,
+        None,
     )
-    .expect("healthy manifest record");
-    let healthy_extension_id = ExtensionId::new(HEALTHY_EXTENSION_ID).expect("valid extension id");
-    let healthy_installation = ExtensionInstallation::new(
-        ExtensionInstallationId::new(HEALTHY_EXTENSION_ID).expect("valid installation id"),
-        healthy_extension_id.clone(),
-        ExtensionActivationState::Enabled,
-        ExtensionManifestRef::new(healthy_extension_id.clone(), Some(healthy_manifest_hash)),
-        Vec::new(),
-        chrono::Utc::now(),
-        InstallationOwner::user(UserId::new(HEALTHY_OWNER_USER_ID).expect("valid owner id")),
-    )
-    .expect("healthy owner-registered installation");
-
-    let installation_store: Arc<dyn ExtensionInstallationStore> =
-        Arc::new(InMemoryExtensionInstallationStore::default());
-    installation_store
-        .upsert_manifest(missing_manifest_record)
-        .await
-        .expect("seed missing manifest record");
-    installation_store
-        .upsert_installation(missing_installation)
-        .await
-        .expect("seed missing installation");
-    installation_store
-        .upsert_manifest(healthy_manifest_record)
-        .await
-        .expect("seed healthy manifest record");
-    installation_store
-        .upsert_installation(healthy_installation)
-        .await
-        .expect("seed healthy installation");
+    .await;
 
     let empty_catalog = AvailableExtensionCatalog::from_packages(Vec::new());
-    let lifecycle_service = Arc::new(Mutex::new(ExtensionLifecycleService::new(
-        ExtensionRegistry::new(),
-    )));
-    let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
-    let trust_policy =
-        Arc::new(HostTrustPolicy::new(vec![Box::new(AdminConfig::new())]).expect("trust policy"));
-    let active_extensions = ActiveExtensionPublisher::new(
-        Arc::clone(&active_registry),
-        Arc::clone(&trust_policy),
-        Arc::new(InvalidationBus::new()),
-    );
+    let boot = fresh_boot_fixture();
 
     restore_extension_lifecycle_state(
         &empty_catalog,
         &filesystem,
         &installation_store,
-        &lifecycle_service,
-        &active_extensions,
+        &boot.lifecycle_service,
+        &boot.active_extensions,
     )
     .await
     .expect(
@@ -249,7 +183,7 @@ url = "http://127.0.0.1:9/mcp"
     );
 
     assert!(
-        active_registry
+        boot.active_registry
             .snapshot()
             .get_extension(&healthy_extension_id)
             .is_some(),
@@ -257,7 +191,7 @@ url = "http://127.0.0.1:9/mcp"
          installation's registered-store fallback error"
     );
     assert!(
-        active_registry
+        boot.active_registry
             .snapshot()
             .get_extension(&missing_extension_id)
             .is_none(),
@@ -371,13 +305,7 @@ async fn restore_uses_row_owners_registered_descriptor_not_a_differently_ordered
     std::fs::write(owner_b_dir.join("manifest.toml"), OWNER_B_MANIFEST_TOML)
         .expect("write owner B's descriptor");
 
-    let mut local_filesystem = LocalFilesystem::new();
-    local_filesystem
-        .mount_local(
-            VirtualPath::new("/system/extensions").expect("valid virtual path"),
-            HostPath::from_path_buf(storage_root.join("system/extensions")),
-        )
-        .expect("mount system extensions");
+    let local_filesystem = mounted_local_filesystem(&storage_root);
     let tenant_root = VirtualPath::new(format!(
         "/system/extensions/registered/{}",
         ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID
@@ -388,68 +316,29 @@ async fn restore_uses_row_owners_registered_descriptor_not_a_differently_ordered
         tenant_root,
     });
 
-    let host_ports = ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog");
-    let contracts =
-        ironclaw_host_runtime::default_host_api_contract_registry().expect("host API contracts");
-
-    let owner_a_manifest_hash =
-        ManifestHash::new(sha256_digest_token(OWNER_A_MANIFEST_TOML.as_bytes()))
-            .expect("valid manifest hash");
-    let manifest_record = ExtensionManifestRecord::from_toml_with_contracts(
-        OWNER_A_MANIFEST_TOML,
-        ManifestSource::UserRegistered {
-            tenant_id: TenantId::from_trusted(
-                ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string(),
-            ),
-            owner: UserId::new(OWNER_A_USER_ID).expect("valid owner id"),
-        },
-        &host_ports,
-        Some(owner_a_manifest_hash.clone()),
-        &contracts,
-    )
-    .expect("owner A manifest record");
-    let extension_id = ExtensionId::new(SHARED_EXTENSION_ID).expect("valid extension id");
-    let installation = ExtensionInstallation::new(
-        ExtensionInstallationId::new(SHARED_EXTENSION_ID).expect("valid installation id"),
-        extension_id.clone(),
-        ExtensionActivationState::Enabled,
-        ExtensionManifestRef::new(extension_id.clone(), Some(owner_a_manifest_hash)),
-        Vec::new(),
-        chrono::Utc::now(),
-        InstallationOwner::user(UserId::new(OWNER_A_USER_ID).expect("valid owner id")),
-    )
-    .expect("owner A installation");
-
+    let default_tenant =
+        TenantId::from_trusted(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string());
     let installation_store: Arc<dyn ExtensionInstallationStore> =
         Arc::new(InMemoryExtensionInstallationStore::default());
-    installation_store
-        .upsert_manifest(manifest_record)
-        .await
-        .expect("seed owner A manifest record");
-    installation_store
-        .upsert_installation(installation)
-        .await
-        .expect("seed owner A installation");
+    let (extension_id, _) = seed_registered_installation(
+        &installation_store,
+        OWNER_A_MANIFEST_TOML,
+        &default_tenant,
+        &UserId::new(OWNER_A_USER_ID).expect("valid owner id"),
+        SHARED_EXTENSION_ID,
+        None,
+    )
+    .await;
 
     let empty_catalog = AvailableExtensionCatalog::from_packages(Vec::new());
-    let lifecycle_service = Arc::new(Mutex::new(ExtensionLifecycleService::new(
-        ExtensionRegistry::new(),
-    )));
-    let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
-    let trust_policy =
-        Arc::new(HostTrustPolicy::new(vec![Box::new(AdminConfig::new())]).expect("trust policy"));
-    let active_extensions = ActiveExtensionPublisher::new(
-        Arc::clone(&active_registry),
-        Arc::clone(&trust_policy),
-        Arc::new(InvalidationBus::new()),
-    );
+    let boot = fresh_boot_fixture();
 
     restore_extension_lifecycle_state(
         &empty_catalog,
         &filesystem,
         &installation_store,
-        &lifecycle_service,
-        &active_extensions,
+        &boot.lifecycle_service,
+        &boot.active_extensions,
     )
     .await
     .expect(
@@ -459,7 +348,7 @@ async fn restore_uses_row_owners_registered_descriptor_not_a_differently_ordered
          or trips a manifest-hash mismatch that aborts the whole boot restore)",
     );
 
-    let snapshot = active_registry.snapshot();
+    let snapshot = boot.active_registry.snapshot();
     let published = snapshot
         .get_extension(&extension_id)
         .expect("owner A's row must restore and publish");
@@ -540,16 +429,9 @@ fn owner_scope(user: &str) -> ResourceScope {
 async fn resolve_registered_for_scope_distinguishes_missing_from_read_failure() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage_root = dir.path().join("local-dev");
-    std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
     seed_registered_manifest(&storage_root, HEALTHY_OWNER_USER_ID, HEALTHY_EXTENSION_ID);
 
-    let mut local_filesystem = LocalFilesystem::new();
-    local_filesystem
-        .mount_local(
-            VirtualPath::new("/system/extensions").expect("valid virtual path"),
-            HostPath::from_path_buf(storage_root.join("system/extensions")),
-        )
-        .expect("mount system extensions");
+    let local_filesystem = mounted_local_filesystem(&storage_root);
     let healthy_owner_root = VirtualPath::new(format!(
         "/system/extensions/registered/{}/{HEALTHY_OWNER_USER_ID}",
         ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID
@@ -591,16 +473,9 @@ async fn resolve_registered_for_scope_distinguishes_missing_from_read_failure() 
 async fn list_installed_survives_one_entry_whose_registered_resolution_errors() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage_root = dir.path().join("local-dev");
-    std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
     seed_registered_manifest(&storage_root, HEALTHY_OWNER_USER_ID, HEALTHY_EXTENSION_ID);
 
-    let mut local_filesystem = LocalFilesystem::new();
-    local_filesystem
-        .mount_local(
-            VirtualPath::new("/system/extensions").expect("valid virtual path"),
-            HostPath::from_path_buf(storage_root.join("system/extensions")),
-        )
-        .expect("mount system extensions");
+    let local_filesystem = mounted_local_filesystem(&storage_root);
     let owner_root = VirtualPath::new(format!(
         "/system/extensions/registered/{}/{HEALTHY_OWNER_USER_ID}",
         ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID

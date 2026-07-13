@@ -340,18 +340,12 @@ pub(crate) async fn restore_extension_lifecycle_state(
     Ok(())
 }
 
-/// The row-authoritative registered-store owner scope for an installation:
-/// the row's stored manifest record must exist and be `UserRegistered`, and
-/// `effective_owner_scope` must resolve one singleton owner from it. `Ok(None)`
-/// means the row cannot be pinned to one owner (no stored manifest row,
-/// non-registered source, or a non-singleton owner set) — a genuine miss,
-/// never a real read failure. `Err` is a real store I/O failure and must
-/// never be collapsed into `Ok(None)`: doing so lets a mutation guard's
-/// `None` arm ("no tenant axis to enforce") fail OPEN on a transient read
-/// error. Shared by the boot restore fallback (row-owner-keyed lookup,
-/// which skips-and-logs on `Err`) and the install/activate/remove mutation
-/// guards (row-owner-and-tenant match, which must propagate `Err`) — one
-/// source of truth for "whose registered row is this."
+/// The row-authoritative registered-store owner scope for an installation.
+/// `Ok(None)` is a genuine miss (no stored manifest, non-registered source,
+/// or non-singleton owner set); `Err` is a real store I/O failure and must
+/// never collapse into `Ok(None)`, or a mutation guard's `None` arm fails
+/// OPEN on a transient read error. Boot restore skips-and-logs on `Err`;
+/// install/activate/remove guards propagate it.
 async fn installation_effective_owner_scope(
     installation_store: &Arc<dyn ExtensionInstallationStore>,
     installation: &ExtensionInstallation,
@@ -2538,14 +2532,11 @@ fn registration_owner(source: &ManifestSource) -> Option<InstallationOwner> {
 }
 
 /// Effective owner scope (tenant + user) of a registered installation,
-/// ROW-AUTHORITATIVE on the user axis: the installation row's
-/// `InstallationOwner` singleton member wins over the manifest's
-/// `UserRegistered.owner` when the two disagree (a stale re-registered
-/// manifest must not re-point the install at a different user). The tenant
-/// axis has no row counterpart, so it still comes from the manifest
-/// provenance. `None` for non-registered sources and for rows whose owner is
-/// not a singleton member set (registered rows are always singletons —
-/// design point 5).
+/// ROW-AUTHORITATIVE on the user axis: the row's `InstallationOwner`
+/// singleton member wins over a disagreeing `UserRegistered.owner` (a stale
+/// re-registered manifest must not re-point the install). Tenant has no row
+/// counterpart, so it comes from manifest provenance. `None` for
+/// non-registered sources or a non-singleton owner set.
 fn effective_owner_scope(
     installation: &ExtensionInstallation,
     source: &ManifestSource,
@@ -9439,16 +9430,14 @@ url = "http://127.0.0.1:9/mcp"
         // The fixture wires owner-a as the tenant operator, but a distinct
         // operator identity must ALSO fail to resolve a foreign registration;
         // other_scope covers the plain-member probe.
-        for probe in [&other_scope] {
-            let error = port
-                .install(package_ref.clone(), probe)
-                .await
-                .expect_err("foreign caller must not install another owner's registered package");
-            assert!(matches!(
-                error,
-                ProductWorkflowError::InvalidBindingRequest { .. }
-            ));
-        }
+        let error = port
+            .install(package_ref.clone(), &other_scope)
+            .await
+            .expect_err("foreign caller must not install another owner's registered package");
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
         let row = installation_store
             .get_installation(
                 &ExtensionInstallationId::new("acme-mcp-registered").expect("valid id"),

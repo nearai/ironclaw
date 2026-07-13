@@ -300,15 +300,11 @@ where
 
 /// Boot-only restore fallback, reached on a `catalog.resolve()` miss during
 /// `restore_extension_lifecycle_state`. Row-owner-keyed: the caller derives
-/// `(tenant_id, owner)` from the installation row's `InstallationOwner`
-/// singleton member and its stored manifest's tenant provenance
-/// (`extension_lifecycle::effective_owner_scope`), then this does a direct
-/// lookup at that owner's shard — never a cross-owner scan. A prior version
-/// of this fallback (`resolve_any_owner_for_restore`) scanned every
-/// tenant-owner for a bare id match; that could serve a DIFFERENT owner's
-/// descriptor for this row depending on directory listing order. Callers
-/// that cannot establish a row owner must fail the restore for that package
-/// (skip-and-log) rather than call this with a guessed scope.
+/// `(tenant_id, owner)` from the installation row (`effective_owner_scope`)
+/// and this does a direct lookup at that owner's shard — never a
+/// cross-owner scan, which could otherwise serve a DIFFERENT owner's
+/// descriptor depending on directory listing order. Callers that cannot
+/// establish a row owner must skip-and-log rather than guess a scope.
 pub(crate) async fn resolve_registered_for_owner<F>(
     fs: &F,
     tenant_id: &TenantId,

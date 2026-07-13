@@ -36,6 +36,8 @@ pub(crate) mod mcp_discovery;
 pub(crate) mod registered_extension_store;
 #[cfg(test)]
 pub(crate) mod registered_extension_store_blast_radius_tests;
+#[cfg(test)]
+pub(crate) mod registered_test_support;
 pub(crate) mod skill_learning;
 pub(crate) mod skill_listing;
 pub(crate) mod webui_extension_credentials;
