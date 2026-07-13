@@ -457,7 +457,6 @@ impl RebornLocalExtensionManagementPort {
         credential_gate: Option<&RuntimeExtensionActivationCredentialGate>,
         scope: &ResourceScope,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        let caller = &scope.user_id;
         let extensions = {
             let catalog = self.catalog.read().await;
             catalog.search(query).collect::<Vec<_>>()
@@ -465,7 +464,7 @@ impl RebornLocalExtensionManagementPort {
         let mut summaries = Vec::new();
         for extension in extensions {
             summaries.push(
-                self.search_summary(&extension, credential_gate, caller)
+                self.search_summary(&extension, credential_gate, scope)
                     .await?,
             );
         }
@@ -476,7 +475,7 @@ impl RebornLocalExtensionManagementPort {
             search_with_owner_overlay_for_scope(self.filesystem.as_ref(), scope, query).await?;
         for extension in &owner_overlay {
             summaries.push(
-                self.search_summary(extension, credential_gate, caller)
+                self.search_summary(extension, credential_gate, scope)
                     .await?,
             );
         }
@@ -705,8 +704,9 @@ impl RebornLocalExtensionManagementPort {
         &self,
         extension: &AvailableExtensionPackage,
         credential_gate: Option<&RuntimeExtensionActivationCredentialGate>,
-        caller: &UserId,
+        scope: &ResourceScope,
     ) -> Result<LifecycleSearchExtensionSummary, ProductWorkflowError> {
+        let caller = &scope.user_id;
         let mut summary = extension.summary();
         suppress_search_credential_onboarding(&mut summary);
         let installation = self
@@ -721,6 +721,25 @@ impl RebornLocalExtensionManagementPort {
                 installation_phase: None,
             });
         };
+        // The installation store has no tenant axis (one flat map keyed by
+        // extension id), so the same user id registering the same extension
+        // id under two tenants can otherwise leak the OTHER tenant's install
+        // row onto this descriptor. For registered packages, require the
+        // row's OWN stored-manifest effective registered tenant (never the
+        // currently-searched descriptor's tenant) to match the caller's
+        // scope tenant before reporting a phase at all.
+        if is_owner_registered(&extension.package.manifest.source) {
+            let effective_tenant =
+                installation_effective_owner_scope(&self.installation_store, &installation)
+                    .await
+                    .map(|(tenant_id, _)| tenant_id);
+            if effective_tenant.as_ref() != Some(&scope.tenant_id) {
+                return Ok(LifecycleSearchExtensionSummary {
+                    summary,
+                    installation_phase: None,
+                });
+            }
+        }
         let phase = search_installation_phase(extension, &installation, credential_gate).await?;
         Ok(LifecycleSearchExtensionSummary {
             summary,
@@ -9105,6 +9124,57 @@ url = "http://127.0.0.1:9/mcp"
         assert!(
             row.owner().visible_to(&owner_scope.user_id) && !row.owner().is_tenant(),
             "cross-tenant attempts must not mutate the registered row"
+        );
+    }
+
+    /// Regression: the installation row is a single flat map keyed only by
+    /// extension id (no tenant axis), so the SAME user registering the SAME
+    /// extension id under two different tenants must not let an install row
+    /// from tenant B leak its phase onto tenant A's (never-installed)
+    /// descriptor. `search_summary` must require the row's own effective
+    /// registered tenant to match the caller's search scope tenant.
+    #[tokio::test]
+    async fn search_does_not_report_foreign_tenants_installation_phase() {
+        let installed_scope = resource_scope_for("tenant-b", "owner-a");
+        // Same user id, but registers (never installs) the same extension id
+        // under a different tenant.
+        let uninstalled_scope = resource_scope_for("default", "owner-a");
+        let (dir, port, _package_ref, _active_registry, _installation_store) =
+            user_registered_isolation_fixture(&installed_scope, true).await;
+
+        // Register (not install) the same extension id under the caller's
+        // OWN tenant — a legitimate, distinct registration that has never
+        // been installed anywhere.
+        let uninstalled_descriptor_dir = dir
+            .path()
+            .join("local-dev/system/extensions/registered")
+            .join(uninstalled_scope.tenant_id.as_str())
+            .join(uninstalled_scope.user_id.as_str())
+            .join("acme-mcp-registered");
+        std::fs::create_dir_all(&uninstalled_descriptor_dir)
+            .expect("uninstalled registered descriptor dir");
+        std::fs::write(
+            uninstalled_descriptor_dir.join("manifest.toml"),
+            REGISTERED_ISOLATION_MANIFEST_TOML,
+        )
+        .expect("write uninstalled registered descriptor");
+
+        let search = port
+            .search("acme-mcp-registered", None, &uninstalled_scope)
+            .await
+            .expect("search under the uninstalled tenant runs");
+        let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) = search.payload
+        else {
+            panic!("expected extension search payload");
+        };
+        assert_eq!(
+            extensions.len(),
+            1,
+            "the caller's own registered descriptor must be found"
+        );
+        assert!(
+            extensions[0].installation_phase.is_none(),
+            "must not report tenant-b's installation phase for a descriptor never installed in this tenant"
         );
     }
 
