@@ -458,6 +458,15 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Use an installed-local MCP package through the production composition,
+    /// registry planner, and host-mediated network egress.
+    pub fn with_installed_local_mcp(mut self, mcp_url: impl Into<String>) -> Self {
+        self.capability = RebornCapabilityBackend::InstalledLocalMcp {
+            mcp_url: mcp_url.into(),
+        };
+        self
+    }
+
     /// Build the harness: apply hermetic env, wire the real model gateway over
     /// the scripted provider, and start the planned runtime.
     ///

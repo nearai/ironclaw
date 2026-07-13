@@ -497,9 +497,9 @@ url = "https://mcp.notion.com/mcp"
 For HTTP MCP, Reborn composition:
 
 - accepts HTTPS for host-bundled remote providers;
-- accepts plaintext HTTP only for a literal IPv4 loopback address. This supports
-  installed-local MCP packages and host-bundled local endpoints without making
-  `localhost` (DNS-rebindable), private LAN addresses, or remote HTTP valid;
+- accepts plaintext HTTP only for installed-local MCP packages at a literal
+  IPv4 loopback address, without making host-bundled providers, `localhost`
+  (DNS-rebindable), private LAN addresses, or remote HTTP valid;
 - rejects userinfo, query strings, fragments, wrong scheme, wrong host, and
   wrong path;
 - derives a locked network policy from the manifest endpoint. For an

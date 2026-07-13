@@ -177,9 +177,9 @@ scheme, IP, and port; `deny_private_ip_ranges` is waived only for this pinned
 target. Registry-installed packages do not receive this exception.
 
 Remote host-bundled providers remain HTTPS-only with private-range denial.
-Host-bundled endpoints may also use the same literal-loopback HTTP exception for
-local development and schema discovery. Stdio remains unsupported until a
-mediated process transport exists.
+Host-bundled endpoints do not receive the loopback HTTP exception, including
+during schema discovery. Stdio remains unsupported until a mediated process
+transport exists.
 
 ## 7. Hosted schema discovery
 

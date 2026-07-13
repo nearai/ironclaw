@@ -4,17 +4,20 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use super::super::super::harness_mcp::{
-    build_loopback_mcp_runtime, local_dev_host_runtime_with_registry_egress_and_mcp,
+    build_loopback_mcp_runtime, exact_mcp_loopback_network_policy,
+    installed_local_mcp_extension_package, local_dev_host_runtime_with_registry_egress_and_mcp,
     mcp_loopback_network_policy, mock_mcp_extension_package,
 };
 use super::super::{
     HarnessResult, HostRuntimeCapabilityHarness, RecordingRuntimeHttpEgress,
-    host_runtime_storage_roots, workspace_mounts,
+    capability_ids_from_strs, host_runtime_storage_roots, local_dev_all_effects, workspace_mounts,
 };
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{
     CapabilityId, EffectKind, ExtensionId, MountPermissions, RuntimeKind, UserId,
 };
+
+use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
 
 /// Wire a single MCP capability backed by the loopback mock server.
 ///
@@ -101,5 +104,43 @@ pub(crate) async fn mock_mcp_tools(
         persistent_approval_policies: None,
         trigger_repository: None,
         reborn_services: None,
+    })
+}
+
+/// Installed-local MCP profile that keeps the production composition root,
+/// registry-backed MCP planner, and host network egress intact. Only the model
+/// and the loopback HTTP server are test doubles.
+pub(crate) fn installed_local_mcp_tools_profile(
+    mcp_url: &str,
+    provider_id: &str,
+    capability_id: &str,
+) -> HarnessResult<ToolsProfile> {
+    let (package, raw_manifest) =
+        installed_local_mcp_extension_package(provider_id, mcp_url, capability_id)?;
+    Ok(ToolsProfile {
+        capability_ids: capability_ids_from_strs(&[capability_id])?,
+        effect_kinds: local_dev_all_effects(),
+        options: HostRuntimeHarnessOptions::new(
+            ironclaw_host_api::MountView::default(),
+            Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
+                true,
+            )?),
+        )
+        .with_activated_installed_local_extension(package, raw_manifest),
+        network_policy_override: Some(exact_mcp_loopback_network_policy(mcp_url)?),
+        provider_trust_override: Some(vec![(
+            ExtensionId::new(provider_id)?,
+            vec![EffectKind::DispatchCapability, EffectKind::Network],
+        )]),
+        post_construct_asset_copy: Some((
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/installed_local_mcp"),
+            std::path::PathBuf::from(format!("local-dev/system/extensions/{provider_id}")),
+        )),
+        auto_approve_default: Some(true),
+        ..ToolsProfile::new(
+            "reborn-e2e-installed-local-mcp",
+            "reborn-itest-installed-local-mcp-user",
+        )?
     })
 }

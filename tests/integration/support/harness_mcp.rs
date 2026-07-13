@@ -16,9 +16,9 @@ use ironclaw_extensions::{
 };
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, CapabilityProfileSchemaRef, EffectKind, ExtensionId,
-    NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, PackageId, PermissionMode,
-    RequestedTrustClass, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-    RuntimeHttpEgressResponse, RuntimeKind, TrustClass, VirtualPath,
+    HostPortCatalog, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, PackageId,
+    PermissionMode, RequestedTrustClass, RuntimeHttpEgress, RuntimeHttpEgressError,
+    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, TrustClass, VirtualPath,
 };
 use ironclaw_host_runtime::{
     BUILTIN_FIRST_PARTY_PROVIDER, CapabilitySurfaceVersion as HostRuntimeCapabilitySurfaceVersion,
@@ -170,6 +170,71 @@ pub(super) fn mock_mcp_extension_package(
             capabilities,
         )?,
     )
+}
+
+pub(super) fn installed_local_mcp_extension_package(
+    provider_id: &str,
+    mcp_url: &str,
+    capability_id: &str,
+) -> HarnessResult<(ExtensionPackage, String)> {
+    let raw_manifest = format!(
+        r#"schema_version = "reborn.extension_manifest.v2"
+id = "{provider_id}"
+name = "Installed local MCP fixture"
+version = "0.1.0"
+description = "Installed-local MCP extension (test only)"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "{mcp_url}"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "{capability_id}"
+description = "Mock MCP capability"
+effects = ["dispatch_capability", "network"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/mock-mcp/mock.input.v1.json"
+output_schema_ref = "schemas/mock-mcp/mock.output.v1.json"
+"#
+    );
+    let contracts = ironclaw_host_runtime::default_host_api_contract_registry()?;
+    let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
+        &raw_manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::default(),
+        &contracts,
+    )?;
+    let package = ExtensionPackage::from_manifest(
+        manifest,
+        VirtualPath::new(format!("/system/extensions/{provider_id}"))?,
+    )?;
+    Ok((package, raw_manifest))
+}
+
+pub(super) fn exact_mcp_loopback_network_policy(mcp_url: &str) -> HarnessResult<NetworkPolicy> {
+    let parsed = url::Url::parse(mcp_url)?;
+    let host = match parsed.host() {
+        Some(url::Host::Ipv4(address)) if address.is_loopback() => address.to_string(),
+        _ => return Err("installed-local MCP fixture requires a literal IPv4 loopback URL".into()),
+    };
+    Ok(NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Http),
+            host_pattern: host,
+            port: Some(parsed.port_or_known_default().ok_or("missing MCP port")?),
+        }],
+        deny_private_ip_ranges: false,
+        max_egress_bytes: Some(1_000_000),
+    })
 }
 
 /// Trust policy for MCP integration tests: first-party builtins + user-trusted

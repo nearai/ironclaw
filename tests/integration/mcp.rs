@@ -88,6 +88,51 @@ async fn mcp_tool_call_reaches_mock_server() {
     assert_recorded_tools_call(&server, "search", "needle-xyz-42");
 }
 
+/// Regression for issue #5998: installed-local MCP must traverse the same
+/// production composition and registry-backed egress planner as shipped code,
+/// while receiving only the exact literal-loopback HTTP exception.
+#[tokio::test]
+async fn installed_local_mcp_dispatches_through_production_composition() {
+    let server = start_mock_mcp_server(vec![MockToolResponse {
+        name: "search".to_string(),
+        content: serde_json::json!({"results": ["local result"]}),
+    }])
+    .await;
+    server.allow_unauthenticated();
+
+    let h = RebornIntegrationHarness::test_default()
+        .script([
+            RebornScriptedReply::tool_call(
+                "mock-mcp.search",
+                serde_json::json!({"query": "local-needle-5998"}),
+            ),
+            RebornScriptedReply::text("done"),
+        ])
+        .with_installed_local_mcp(server.mcp_url())
+        .build()
+        .await
+        .expect("production-composed installed-local MCP harness builds");
+
+    let turn = h.submit_turn("search locally").await;
+    assert!(
+        turn.is_ok(),
+        "installed-local MCP turn failed: {:?}; server saw {:?}",
+        turn.err(),
+        server.recorded_requests()
+    );
+    h.assert_reply_contains("done")
+        .await
+        .expect("final reply finalized");
+    assert_recorded_tools_call(&server, "search", "local-needle-5998");
+    assert!(
+        server
+            .recorded_requests()
+            .iter()
+            .all(|request| request.authorization.is_none()),
+        "public installed-local MCP should not require a test-injected credential"
+    );
+}
+
 /// Twin of `mcp_tool_call_reaches_mock_server`: same client `Accept:
 /// application/json, text/event-stream` header (`crates/ironclaw_mcp/src/lib.rs`),
 /// but here the mock server answers every leg with SSE framing instead of
