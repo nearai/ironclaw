@@ -53,7 +53,8 @@ mod triggered;
 
 pub use observer::RunDeliveryObserver;
 pub use triggered::{
-    PreferenceTargetCodec, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
+    PreferenceTargetCodec, PreferenceTargetEncodeRequest, TriggeredRunDeliveryDriver,
+    TriggeredRunDeliveryRequest,
 };
 
 const MAX_RUN_POLL_INTERVAL: Duration = Duration::from_secs(5);

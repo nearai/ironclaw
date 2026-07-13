@@ -10,6 +10,7 @@
 use ironclaw_host_api::{AgentId, ProjectId};
 use ironclaw_product_adapters::{
     AdapterInstallationId, ExternalActorRef, ExternalConversationRef, PreferenceTargetCodec,
+    PreferenceTargetEncodeRequest,
 };
 use ironclaw_turns::ReplyTargetBindingRef;
 
@@ -37,6 +38,47 @@ impl PreferenceTargetCodec for SlackPreferenceTargetCodec {
 
     fn is_personal_direct_message(&self, target: &ReplyTargetBindingRef) -> bool {
         slack_reply_target_is_personal_dm(target)
+    }
+
+    fn direct_message_actor_for_target(&self, target: &ReplyTargetBindingRef) -> Option<String> {
+        if !slack_reply_target_is_personal_dm(target) {
+            return None;
+        }
+        decode_slack_reply_target_binding_ref(target)?.actor_id
+    }
+
+    fn encode_shared_conversation_target(
+        &self,
+        request: PreferenceTargetEncodeRequest<'_>,
+    ) -> Option<ReplyTargetBindingRef> {
+        // Slack refs always carry the workspace (team) binding; a
+        // conversation without a space cannot be encoded (fail closed).
+        let team_id = request.conversation.space_id()?;
+        slack_shared_channel_reply_target_binding_ref(
+            request.installation_id,
+            request.agent_id,
+            request.project_id,
+            team_id,
+            request.conversation.conversation_id(),
+        )
+        .ok()
+    }
+
+    fn encode_personal_direct_message_target(
+        &self,
+        request: PreferenceTargetEncodeRequest<'_>,
+        external_actor_id: &str,
+    ) -> Option<ReplyTargetBindingRef> {
+        let team_id = request.conversation.space_id()?;
+        slack_personal_dm_reply_target_binding_ref(
+            request.installation_id,
+            request.agent_id,
+            request.project_id,
+            team_id,
+            request.conversation.conversation_id(),
+            external_actor_id,
+        )
+        .ok()
     }
 }
 
@@ -329,6 +371,76 @@ mod tests {
 
         let shared = shared_channel_binding_ref("C0HOST");
         assert!(!codec.is_personal_direct_message(&shared));
+    }
+
+    #[test]
+    fn codec_exposes_dm_actor_only_for_personal_dm_refs() {
+        let codec = SlackPreferenceTargetCodec;
+        assert_eq!(
+            codec.direct_message_actor_for_target(&dm_binding_ref("D0HOST", SLACK_USER)),
+            Some(SLACK_USER.to_string()),
+        );
+        assert_eq!(
+            codec.direct_message_actor_for_target(&shared_channel_binding_ref("C0HOST")),
+            None,
+            "shared refs carry no DM actor"
+        );
+    }
+
+    #[test]
+    fn codec_encode_halves_round_trip_through_the_decode_halves() {
+        let codec = SlackPreferenceTargetCodec;
+        let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation");
+        let agent_id = AgentId::new(AGENT).expect("agent");
+        let project_id = ProjectId::new(PROJECT).expect("project");
+
+        let shared_conversation =
+            ExternalConversationRef::new(Some(TEAM), "C0HOST", None, None).expect("conversation");
+        let shared = codec
+            .encode_shared_conversation_target(PreferenceTargetEncodeRequest {
+                installation_id: &installation_id,
+                agent_id: &agent_id,
+                project_id: Some(&project_id),
+                conversation: &shared_conversation,
+            })
+            .expect("shared ref encodes");
+        assert_eq!(shared, shared_channel_binding_ref("C0HOST"));
+        assert!(!codec.is_personal_direct_message(&shared));
+
+        let dm_conversation =
+            ExternalConversationRef::new(Some(TEAM), "D0HOST", None, None).expect("conversation");
+        let dm = codec
+            .encode_personal_direct_message_target(
+                PreferenceTargetEncodeRequest {
+                    installation_id: &installation_id,
+                    agent_id: &agent_id,
+                    project_id: Some(&project_id),
+                    conversation: &dm_conversation,
+                },
+                SLACK_USER,
+            )
+            .expect("dm ref encodes");
+        assert_eq!(dm, dm_binding_ref("D0HOST", SLACK_USER));
+        assert!(codec.is_personal_direct_message(&dm));
+        assert_eq!(
+            codec.direct_message_actor_for_target(&dm),
+            Some(SLACK_USER.to_string())
+        );
+
+        // A conversation without the workspace binding cannot be encoded.
+        let spaceless =
+            ExternalConversationRef::new(None::<&str>, "C0HOST", None, None).expect("conversation");
+        assert!(
+            codec
+                .encode_shared_conversation_target(PreferenceTargetEncodeRequest {
+                    installation_id: &installation_id,
+                    agent_id: &agent_id,
+                    project_id: Some(&project_id),
+                    conversation: &spaceless,
+                })
+                .is_none(),
+            "spaceless conversations must not encode"
+        );
     }
 
     #[test]

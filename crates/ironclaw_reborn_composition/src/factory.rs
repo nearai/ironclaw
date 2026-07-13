@@ -79,12 +79,8 @@ use ironclaw_outbound::CommunicationPreferenceRepository;
 use ironclaw_outbound::FilesystemOutboundStateStore;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 use ironclaw_outbound::InMemoryOutboundStateStore;
-#[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRunDeliveryStore};
-#[cfg(all(
-    not(any(feature = "libsql", feature = "postgres")),
-    feature = "slack-v2-host-beta"
-))]
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
 use ironclaw_outbound::{InMemoryDeliveredGateRouteStore, InMemoryTriggeredRunDeliveryStore};
 use ironclaw_processes::ProcessServices;
 use ironclaw_product_workflow::{
@@ -626,9 +622,6 @@ impl RebornServices {
         let workflow_state = Arc::new(FilesystemChannelWorkflowStateFactory::new(Arc::clone(
             &local_runtime.extension_filesystem,
         )));
-        // The outbound stores ride the delivery coordinator's feature gate;
-        // both dissolve together when the stores ungate.
-        #[cfg(feature = "slack-v2-host-beta")]
         let delivery = self.delivery_coordinator.clone().map(|coordinator| {
             crate::extension_host::channel_host::ChannelHostDeliveryDeps {
                 coordinator,
@@ -641,16 +634,6 @@ impl RebornServices {
                 settings: run_delivery_settings,
             }
         });
-        #[cfg(not(feature = "slack-v2-host-beta"))]
-        let delivery: Option<crate::extension_host::channel_host::ChannelHostDeliveryDeps> = {
-            let _ = (
-                approval_context,
-                blocked_auth_prompts,
-                auth_flow_cancel,
-                run_delivery_settings,
-            );
-            None
-        };
 
         let identity_lookup = local_runtime
             .channel_identity_store
@@ -995,7 +978,7 @@ impl RebornServices {
     /// (`outbound_preferences`). Integration proofs build generic
     /// run-delivery components over these so observer and coordinator share
     /// one delivery ledger. `None` without a local-dev runtime.
-    #[cfg(all(feature = "test-support", feature = "slack-v2-host-beta"))]
+    #[cfg(feature = "test-support")]
     #[allow(clippy::type_complexity)]
     pub fn outbound_delivery_stores_for_test(
         &self,
@@ -1059,11 +1042,8 @@ pub(crate) struct RebornLocalRuntimeServices {
     /// Settings write flips it and the next turn's selection honors the new
     /// value without a restart.
     pub(crate) skill_auto_activate_learned: Arc<AtomicBool>,
-    #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) outbound_state: Arc<dyn OutboundStateStore>,
-    #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) delivered_gate_routes: Arc<dyn DeliveredGateRouteStore>,
-    #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     pub(crate) trigger_conversation_services: InMemoryConversationServices,
@@ -2144,9 +2124,6 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         // SAME reply-context store the ingress router writes (ING-11).
         // Interrupted (`Sending`) attempts from prior lifetimes are
         // reconciled lazily per scope before that scope's first delivery.
-        // Gated with the outbound stores it persists through; the gate
-        // (and the stores' gate) dissolves with the P6 extraction.
-        #[cfg(feature = "slack-v2-host-beta")]
         let (delivery_coordinator, channel_delivery_resolver) = match channel_egress_transport {
             Some(transport) => {
                 let resolver: Arc<dyn ironclaw_product_workflow::ChannelDeliveryResolver> =
@@ -2170,11 +2147,6 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                 (Some(coordinator), Some(resolver))
             }
             None => (None, None),
-        };
-        #[cfg(not(feature = "slack-v2-host-beta"))]
-        let (delivery_coordinator, channel_delivery_resolver) = {
-            let _ = channel_egress_transport;
-            (None, None)
         };
         (
             Some(ingress_parts),
@@ -2669,11 +2641,8 @@ async fn build_local_dev_store_graph(
         project_service: Arc::new(RebornProjectService::new(Arc::clone(&project_repository))),
         outbound_preferences: outbound_stores.outbound_preferences,
         skill_auto_activate_learned: Arc::new(AtomicBool::new(true)),
-        #[cfg(feature = "slack-v2-host-beta")]
         outbound_state: outbound_stores.outbound_state,
-        #[cfg(feature = "slack-v2-host-beta")]
         delivered_gate_routes: outbound_stores.delivered_gate_routes,
-        #[cfg(feature = "slack-v2-host-beta")]
         triggered_run_delivery: outbound_stores.triggered_run_delivery,
         #[cfg(not(any(feature = "libsql", feature = "postgres")))]
         trigger_conversation_services,
@@ -2824,11 +2793,8 @@ async fn build_local_dev_store_graph(
         project_service: Arc::new(RebornProjectService::new(Arc::clone(&project_repository))),
         outbound_preferences: outbound_stores.outbound_preferences,
         skill_auto_activate_learned: Arc::new(AtomicBool::new(true)),
-        #[cfg(feature = "slack-v2-host-beta")]
         outbound_state: outbound_stores.outbound_state,
-        #[cfg(feature = "slack-v2-host-beta")]
         delivered_gate_routes: outbound_stores.delivered_gate_routes,
-        #[cfg(feature = "slack-v2-host-beta")]
         triggered_run_delivery: outbound_stores.triggered_run_delivery,
         #[cfg(not(any(feature = "libsql", feature = "postgres")))]
         trigger_conversation_services,
@@ -3763,11 +3729,8 @@ fn local_dev_scoped_filesystem(
 /// See docs/plans/2026-05-29-trigger-loop-delivery-resolution-implementation.md.
 pub(crate) struct LocalDevOutboundStores {
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
-    #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) outbound_state: Arc<dyn OutboundStateStore>,
-    #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) delivered_gate_routes: Arc<dyn DeliveredGateRouteStore>,
-    #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
 }
 
@@ -3785,11 +3748,8 @@ fn local_dev_outbound_store(filesystem: Arc<LocalDevRootFilesystem>) -> LocalDev
     );
     LocalDevOutboundStores {
         outbound_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
-        #[cfg(feature = "slack-v2-host-beta")]
         outbound_state: Arc::clone(&store) as Arc<dyn OutboundStateStore>,
-        #[cfg(feature = "slack-v2-host-beta")]
         delivered_gate_routes: Arc::clone(&store) as Arc<dyn DeliveredGateRouteStore>,
-        #[cfg(feature = "slack-v2-host-beta")]
         triggered_run_delivery: store as Arc<dyn TriggeredRunDeliveryStore>,
     }
 }
@@ -3808,11 +3768,8 @@ fn local_dev_outbound_store(_filesystem: Arc<LocalDevRootFilesystem>) -> LocalDe
     let outbound = Arc::new(InMemoryOutboundStateStore::default());
     LocalDevOutboundStores {
         outbound_preferences: Arc::clone(&outbound) as Arc<dyn CommunicationPreferenceRepository>,
-        #[cfg(feature = "slack-v2-host-beta")]
         outbound_state: outbound as Arc<dyn OutboundStateStore>,
-        #[cfg(feature = "slack-v2-host-beta")]
         delivered_gate_routes: Arc::new(InMemoryDeliveredGateRouteStore::default()),
-        #[cfg(feature = "slack-v2-host-beta")]
         triggered_run_delivery: Arc::new(InMemoryTriggeredRunDeliveryStore::default()),
     }
 }
@@ -5640,11 +5597,8 @@ mod tests {
             project_service: Arc::clone(&base_runtime.project_service),
             outbound_preferences: Arc::clone(&base_runtime.outbound_preferences),
             skill_auto_activate_learned: Arc::clone(&base_runtime.skill_auto_activate_learned),
-            #[cfg(feature = "slack-v2-host-beta")]
             outbound_state: Arc::clone(&base_runtime.outbound_state),
-            #[cfg(feature = "slack-v2-host-beta")]
             delivered_gate_routes: Arc::clone(&base_runtime.delivered_gate_routes),
-            #[cfg(feature = "slack-v2-host-beta")]
             triggered_run_delivery: Arc::clone(&base_runtime.triggered_run_delivery),
             #[cfg(not(any(feature = "libsql", feature = "postgres")))]
             trigger_conversation_services: base_runtime.trigger_conversation_services.clone(),

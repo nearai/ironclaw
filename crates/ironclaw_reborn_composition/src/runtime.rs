@@ -673,9 +673,9 @@ pub struct RebornRuntime {
     skill_learning_extraction_tasks:
         Option<Arc<crate::extension_host::skill_learning::SkillLearningExtractionTasks>>,
     /// Late-binding slot shared with the poller's `PostSubmitHookWrappedSubmitter`.
-    /// `set_trigger_post_submit_hook` fills this after `build_reborn_runtime` returns.
+    /// Filled at build time by the generic triggered-delivery hook (or by a
+    /// concrete channel lane through `set_trigger_post_submit_hook`).
     /// `None` when the trigger poller is not enabled.
-    #[cfg(feature = "slack-v2-host-beta")]
     post_submit_hook_slot: Option<
         Arc<
             std::sync::OnceLock<Arc<dyn crate::automation::trigger_poller::PostSubmitDeliveryHook>>,
@@ -844,10 +844,9 @@ struct TriggerPollerServices {
     materializer: Arc<dyn ironclaw_triggers::TriggerPromptMaterializer>,
     trusted_submitter: Arc<dyn ironclaw_triggers::TrustedTriggerFireSubmitter>,
     /// Late-binding slot for the post-submit hook. Created here and shared with
-    /// the poller wrapper; filled later by `RebornRuntime::set_trigger_post_submit_hook`
-    /// so `build_slack_host_beta_mounts` (called after runtime build) can wire the
-    /// hook without restarting the poller.
-    #[cfg(feature = "slack-v2-host-beta")]
+    /// the poller wrapper; filled by the composition root (generic hook) or
+    /// later through `RebornRuntime::set_trigger_post_submit_hook` (a lane
+    /// wired after runtime build) without restarting the poller.
     post_submit_hook_slot: Arc<
         std::sync::OnceLock<Arc<dyn crate::automation::trigger_poller::PostSubmitDeliveryHook>>,
     >,
@@ -898,7 +897,6 @@ async fn build_trigger_poller_services(
         Ok(TriggerPollerServices {
             materializer,
             trusted_submitter,
-            #[cfg(feature = "slack-v2-host-beta")]
             post_submit_hook_slot: Arc::new(std::sync::OnceLock::new()),
             #[cfg(any(test, feature = "test-support"))]
             pairing_service,
@@ -925,7 +923,6 @@ async fn build_trigger_poller_services(
         Ok(TriggerPollerServices {
             materializer,
             trusted_submitter,
-            #[cfg(feature = "slack-v2-host-beta")]
             post_submit_hook_slot: Arc::new(std::sync::OnceLock::new()),
             #[cfg(any(test, feature = "test-support"))]
             pairing_service,
@@ -1765,14 +1762,13 @@ impl RebornRuntime {
                 reason: format!("outbound delivery target provider lookup failed: {error}"),
             })
     }
-    /// Wire the triggered-run delivery hook into the already-spawned trigger
-    /// poller. Must be called after [`build_reborn_runtime`] returns and after
-    /// the hook itself is constructed (e.g. inside
-    /// [`crate::slack::slack_host_beta::build_slack_host_beta_mounts`]). The hook is
-    /// idempotent: a second call is silently ignored. Returns `false` when the
-    /// trigger poller is not enabled (slot is `None`) or the slot is already
-    /// occupied, `true` on first successful set.
-    #[cfg(feature = "slack-v2-host-beta")]
+    /// Wire a triggered-run delivery hook into the already-spawned trigger
+    /// poller. The composition root installs the generic hook at build time;
+    /// a concrete channel lane built after [`build_reborn_runtime`] returns
+    /// may call this instead. The hook is idempotent: a second call is
+    /// silently ignored. Returns `false` when the trigger poller is not
+    /// enabled (slot is `None`) or the slot is already occupied, `true` on
+    /// first successful set.
     pub fn set_trigger_post_submit_hook(
         &self,
         hook: Arc<dyn crate::automation::trigger_poller::PostSubmitDeliveryHook>,
@@ -1792,7 +1788,7 @@ impl RebornRuntime {
         }
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
+    #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(dead_code))]
     pub(crate) fn trigger_post_submit_hook_is_set(&self) -> bool {
         self.post_submit_hook_slot
             .as_ref()
@@ -3898,6 +3894,35 @@ pub async fn build_reborn_runtime(
         })
     };
 
+    // Generic outbound-delivery targets (extension-runtime P6): one provider
+    // over the assembly's vendor codecs, the `[channel.config]` routing
+    // values, and the generic DM-target store serves every active channel
+    // extension.
+    if let (Some(registry), Some(assembly), Some(local_runtime)) = (
+        outbound_delivery_target_registry.as_ref(),
+        channel_host_assembly.as_ref(),
+        local_runtime,
+    ) && let (Some(channel_config), Some(dm_targets)) = (
+        local_runtime.channel_config.clone(),
+        local_runtime.channel_dm_target_store.clone(),
+    ) {
+        crate::extension_host::channel_outbound_targets::register_generic_channel_outbound_targets(
+            registry,
+            crate::extension_host::channel_outbound_targets::GenericChannelOutboundTargetDeps {
+                watch: assembly.snapshot_watch(),
+                assembly: Arc::clone(assembly),
+                channel_config,
+                dm_targets,
+                identity:
+                    crate::extension_host::channel_outbound_targets::ChannelOutboundTargetIdentity {
+                        tenant_id: thread_scope.tenant_id.clone(),
+                        agent_id: thread_scope.agent_id.clone(),
+                        project_id: thread_scope.project_id.clone(),
+                    },
+            },
+        );
+    }
+
     // `trigger_poller_handle`, `post_submit_hook_slot`, and the test-support
     // `trigger_conversation_pairing_value` are produced atomically inside
     // a single `if trigger_poller.enabled` expression. Avoid a
@@ -3905,7 +3930,6 @@ pub async fn build_reborn_runtime(
     // (review f-ptr-3): the `let X;` deferred-init form is single-assign
     // per branch and Rust's borrow checker prevents reads before init.
     let trigger_poller_handle: Option<TriggerPollerRuntimeHandle>;
-    #[cfg(feature = "slack-v2-host-beta")]
     let runtime_post_submit_hook_slot: Option<
         Arc<
             std::sync::OnceLock<Arc<dyn crate::automation::trigger_poller::PostSubmitDeliveryHook>>,
@@ -3940,12 +3964,8 @@ pub async fn build_reborn_runtime(
             trigger_conversation_pairing_value =
                 Some(Arc::clone(&trigger_poller_services.pairing_service));
         }
-        #[cfg(feature = "slack-v2-host-beta")]
         let hook_slot = Arc::clone(&trigger_poller_services.post_submit_hook_slot);
-        #[cfg(feature = "slack-v2-host-beta")]
-        {
-            runtime_post_submit_hook_slot = Some(Arc::clone(&hook_slot));
-        }
+        runtime_post_submit_hook_slot = Some(Arc::clone(&hook_slot));
         trigger_poller_handle = spawn_trigger_poller(
             trigger_poller,
             TriggerPollerCompositionDeps {
@@ -3953,7 +3973,6 @@ pub async fn build_reborn_runtime(
                 materializer: trigger_poller_services.materializer,
                 trusted_submitter: trigger_poller_services.trusted_submitter,
                 active_run_lookup,
-                #[cfg(feature = "slack-v2-host-beta")]
                 post_submit_hook_slot: hook_slot,
             },
         )
@@ -3962,15 +3981,47 @@ pub async fn build_reborn_runtime(
         })?;
     } else {
         trigger_poller_handle = None;
-        #[cfg(feature = "slack-v2-host-beta")]
-        {
-            runtime_post_submit_hook_slot = None;
-        }
+        runtime_post_submit_hook_slot = None;
         #[cfg(any(test, feature = "test-support"))]
         {
             trigger_conversation_pairing_value = None;
         }
     }
+
+    // Generic triggered-run delivery (extension-runtime P6): one hook routes
+    // each settled trigger fire to the owning channel extension's driver via
+    // the assembly's vendor codecs. While the retiring Slack lane is
+    // compiled in, the lane still owns the slot (it wires its own hook after
+    // runtime build and errors when the slot is pre-occupied), so the
+    // generic hook is only INSTALLED without that lane.
+    if let (Some(slot), Some(assembly), Some(local_runtime)) = (
+        runtime_post_submit_hook_slot.as_ref(),
+        channel_host_assembly.as_ref(),
+        local_runtime,
+    ) {
+        let generic_trigger_hook: Arc<
+            dyn crate::automation::trigger_poller::PostSubmitDeliveryHook,
+        > = Arc::new(
+            crate::extension_host::channel_triggered_delivery::GenericTriggeredRunDeliveryHook::new(
+                Arc::clone(assembly),
+                Arc::clone(&local_runtime.triggered_run_delivery),
+                Arc::clone(&local_runtime.outbound_preferences),
+            ),
+        );
+        #[cfg(not(feature = "slack-v2-host-beta"))]
+        if slot.set(generic_trigger_hook).is_err() {
+            tracing::debug!(
+                "generic triggered-run delivery hook slot was already occupied; keeping the first hook"
+            );
+        }
+        #[cfg(feature = "slack-v2-host-beta")]
+        {
+            // Lane-owned slot: the Slack lane wires its own hook after
+            // runtime build; drop the generic hook unused.
+            let _ = (slot, generic_trigger_hook);
+        }
+    }
+
     let scheduler_notifier = composition.scheduler_handle.wake_notifier();
 
     // Spawn the engine-owned credential keepalive sweep (B4;
@@ -4051,7 +4102,6 @@ pub async fn build_reborn_runtime(
         trace_flush_worker,
         #[cfg(feature = "root-llm-provider")]
         skill_learning_extraction_tasks,
-        #[cfg(feature = "slack-v2-host-beta")]
         post_submit_hook_slot: runtime_post_submit_hook_slot,
         #[cfg(any(test, feature = "test-support"))]
         trigger_conversation_pairing: trigger_conversation_pairing_value,

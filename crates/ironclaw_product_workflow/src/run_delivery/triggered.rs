@@ -38,7 +38,7 @@ use crate::{ProductOutboundTargetResolver, ProductWorkflowError};
 // is implemented by channel extension crates, which never depend on this
 // crate); re-exported here so the triggered-delivery consumers keep one
 // import surface.
-pub use ironclaw_product_adapters::PreferenceTargetCodec;
+pub use ironclaw_product_adapters::{PreferenceTargetCodec, PreferenceTargetEncodeRequest};
 
 /// One trigger-submitted run to watch and deliver, in generic vocabulary.
 /// The composition's post-submit hook translates its trigger-fire type into

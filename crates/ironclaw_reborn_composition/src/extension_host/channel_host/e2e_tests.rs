@@ -140,6 +140,10 @@ struct Harness {
     /// The production configure service backing the assembly — admission
     /// scenarios save routing values through it mid-test.
     channel_config: Arc<ChannelConfigService>,
+    /// The harness's outbound state store — the SAME allocation the
+    /// assembly's delivery deps read communication preferences from, so
+    /// tests can seed the creator's personal preference.
+    outbound: Arc<InMemoryOutboundStateStore>,
     /// Keeps the harness extension host (and its published snapshot) alive.
     _host: Arc<ExtensionHost>,
     /// Keeps the assembly (and its reconcile loop + registrations) alive.
@@ -355,7 +359,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
     let outbound = Arc::new(InMemoryOutboundStateStore::default());
     let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
-    let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
+    let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound.clone();
     let egress = RecordingEgress::default();
 
     let host = slack_test_extension_host().await;
@@ -452,6 +456,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         route_store,
         identity_lookup,
         channel_config,
+        outbound,
         _host: host,
         assembly,
     }
@@ -3870,4 +3875,440 @@ async fn slack_approval_then_auth_resume_completes_without_second_approval() {
 
     // FakeAuthChallengeProvider must have been called exactly once (for the auth prompt).
     auth_provider.assert_single_call();
+}
+
+// ─── Generic outbound-delivery targets + generic triggered hook (P6 c-rest) ─
+
+use crate::extension_host::channel_dm_targets::{
+    FilesystemChannelDmTargetStore, dm_target_payload,
+};
+use crate::extension_host::channel_outbound_targets::{
+    ChannelOutboundTargetIdentity, GenericChannelOutboundTargetDeps,
+    GenericChannelOutboundTargetProvider,
+};
+use crate::extension_host::channel_triggered_delivery::GenericTriggeredRunDeliveryHook;
+use crate::outbound::OutboundDeliveryTargetProvider;
+use ironclaw_outbound::TriggeredRunDeliveryStore;
+use ironclaw_product_workflow::{PreferenceTargetCodec as _, WebUiAuthenticatedCaller};
+
+/// The retired Slack setup surface's installation id — DIFFERENT from the
+/// durable extension installation id (`INSTALLATION`) the active snapshot
+/// carries. Stored beta preferences embed this id in their binding refs.
+const RETIRED_INSTALLATION: &str = "retired-setup-install";
+/// A shared channel routed to the operator through `slack_subject_routes`.
+const ROUTED_CHANNEL: &str = "C777";
+
+fn generic_dm_target_store() -> Arc<FilesystemChannelDmTargetStore> {
+    Arc::new(FilesystemChannelDmTargetStore::new(
+        Arc::new(InMemoryBackend::new()),
+        TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
+        UserId::new(USER).expect("user"),       // safety: static test user id is valid.
+    ))
+}
+
+fn generic_outbound_target_provider(
+    harness: &Harness,
+    dm_targets: Arc<FilesystemChannelDmTargetStore>,
+) -> GenericChannelOutboundTargetProvider {
+    GenericChannelOutboundTargetProvider::new(GenericChannelOutboundTargetDeps {
+        watch: harness.assembly.snapshot_watch(),
+        assembly: Arc::clone(&harness.assembly),
+        channel_config: Arc::clone(&harness.channel_config),
+        dm_targets,
+        identity: ChannelOutboundTargetIdentity {
+            tenant_id: TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
+            agent_id: AgentId::new(AGENT).expect("agent"), // safety: static test agent id is valid.
+            project_id: Some(ProjectId::new(PROJECT).expect("project")), // safety: static test project id is valid.
+        },
+    })
+}
+
+fn operator_caller() -> WebUiAuthenticatedCaller {
+    WebUiAuthenticatedCaller::new(
+        TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
+        UserId::new(USER).expect("user"),       // safety: static test user id is valid.
+        Some(AgentId::new(AGENT).expect("agent")), // safety: static test agent id is valid.
+        Some(ProjectId::new(PROJECT).expect("project")), // safety: static test project id is valid.
+    )
+}
+
+/// Save the `[channel.config]` values the generic target provider reads:
+/// the workspace claim (space id) and one explicit subject route assigning
+/// `ROUTED_CHANNEL` to the operator.
+async fn save_outbound_target_config(harness: &Harness) {
+    harness
+        .channel_config
+        .save(
+            &ExtensionId::new(ADAPTER).expect("extension id"), // safety: static id is valid.
+            vec![
+                ("slack_team_id".to_string(), TEAM.to_string()),
+                (
+                    "slack_subject_routes".to_string(),
+                    format!(r#"{{"{ROUTED_CHANNEL}":"{USER}"}}"#),
+                ),
+            ],
+        )
+        .await
+        .expect("save outbound target config"); // safety: manifest declares the handles.
+}
+
+/// The generic provider lists the operator's routed shared channel (from
+/// `slack_subject_routes`) and their provisioned personal DM (from the
+/// generic DM-target store) — no lane-owned state anywhere.
+#[tokio::test]
+async fn generic_outbound_targets_list_from_channel_config_and_generic_dm_store() {
+    let harness = build_harness(TurnMode::Running).await;
+    save_outbound_target_config(&harness).await;
+    let dm_targets = generic_dm_target_store();
+    dm_targets
+        .upsert(
+            ADAPTER,
+            &UserId::new(USER).expect("user"), // safety: static test user id is valid.
+            SLACK_USER.to_string(),
+            dm_target_payload(Some(TEAM), CHANNEL),
+        )
+        .await
+        .expect("provision DM target");
+    let provider = generic_outbound_target_provider(&harness, dm_targets);
+    let codec = SlackPreferenceTargetCodec;
+
+    let listed = provider
+        .list_outbound_delivery_targets(&operator_caller())
+        .await
+        .expect("target list");
+    assert_eq!(listed.len(), 2, "one shared + one DM target: {listed:?}");
+
+    let shared = listed
+        .iter()
+        .find(|entry| entry.summary.target_id.as_str().contains("shared-channel"))
+        .expect("shared-channel target listed");
+    assert_eq!(
+        shared.summary.target_id.as_str(),
+        format!("slack:shared-channel:{TEAM}:{ROUTED_CHANNEL}"),
+        "generic ids keep the retired lane's shape"
+    );
+    let shared_conversation = codec
+        .conversation_for_target(&shared.reply_target_binding_ref)
+        .expect("shared binding ref decodes");
+    assert_eq!(shared_conversation.conversation_id(), ROUTED_CHANNEL);
+    assert_eq!(shared_conversation.space_id(), Some(TEAM));
+    assert!(!codec.is_personal_direct_message(&shared.reply_target_binding_ref));
+
+    let dm = listed
+        .iter()
+        .find(|entry| entry.summary.target_id.as_str().contains("personal-dm"))
+        .expect("personal-DM target listed");
+    assert_eq!(
+        dm.summary.target_id.as_str(),
+        format!("slack:personal-dm:{TEAM}:{USER}")
+    );
+    assert!(codec.is_personal_direct_message(&dm.reply_target_binding_ref));
+    assert_eq!(
+        codec.direct_message_actor_for_target(&dm.reply_target_binding_ref),
+        Some(SLACK_USER.to_string()),
+        "the encoded DM ref carries the provisioned actor"
+    );
+    // The encoded refs carry the DURABLE installation id from the snapshot.
+    assert!(
+        dm.reply_target_binding_ref.as_str().contains(&format!(
+            "installation:{}:{INSTALLATION};",
+            INSTALLATION.len()
+        )),
+        "DM ref must embed the durable installation id: {}",
+        dm.reply_target_binding_ref.as_str()
+    );
+
+    // resolve-by-id round-trips for the owner…
+    for entry in &listed {
+        let resolved = provider
+            .resolve_outbound_delivery_target(&operator_caller(), &entry.summary.target_id)
+            .await
+            .expect("resolve succeeds")
+            .expect("owner resolves the listed target");
+        assert_eq!(resolved.summary.target_id, entry.summary.target_id);
+    }
+    // …and fails closed for foreign callers.
+    let foreign_tenant = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant:other").expect("tenant"), // safety: static test tenant id is valid.
+        UserId::new(USER).expect("user"),               // safety: static test user id is valid.
+        None,
+        None,
+    );
+    assert!(
+        provider
+            .list_outbound_delivery_targets(&foreign_tenant)
+            .await
+            .expect("list succeeds")
+            .is_empty(),
+        "cross-tenant caller sees no targets"
+    );
+    let other_user = WebUiAuthenticatedCaller::new(
+        TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
+        UserId::new("user:slack-bob").expect("user"), // safety: static test user id is valid.
+        None,
+        None,
+    );
+    assert!(
+        provider
+            .list_outbound_delivery_targets(&other_user)
+            .await
+            .expect("list succeeds")
+            .is_empty(),
+        "another user sees neither the operator's routed channel nor their DM"
+    );
+    for entry in &listed {
+        assert!(
+            provider
+                .resolve_outbound_delivery_target(&other_user, &entry.summary.target_id)
+                .await
+                .expect("resolve succeeds")
+                .is_none(),
+            "another user must not resolve the operator's target {}",
+            entry.summary.target_id.as_str()
+        );
+    }
+}
+
+/// REGRESSION (migration tolerance): stored beta preferences embed the
+/// RETIRED setup installation id in their binding refs. Resolution must
+/// tolerate both ids — ownership is proven against caller-scoped generic
+/// state, never against the ref's installation segment — and each resolve
+/// returns a freshly encoded ref carrying the DURABLE installation id.
+#[tokio::test]
+async fn generic_outbound_targets_tolerate_retired_installation_id_binding_refs() {
+    let harness = build_harness(TurnMode::Running).await;
+    save_outbound_target_config(&harness).await;
+    let dm_targets = generic_dm_target_store();
+    dm_targets
+        .upsert(
+            ADAPTER,
+            &UserId::new(USER).expect("user"), // safety: static test user id is valid.
+            SLACK_USER.to_string(),
+            dm_target_payload(Some(TEAM), CHANNEL),
+        )
+        .await
+        .expect("provision DM target");
+    let provider = generic_outbound_target_provider(&harness, dm_targets);
+
+    let retired_installation =
+        AdapterInstallationId::new(RETIRED_INSTALLATION).expect("installation"); // safety: static id is valid.
+    let agent = AgentId::new(AGENT).expect("agent"); // safety: static test agent id is valid.
+    let project = ProjectId::new(PROJECT).expect("project"); // safety: static test project id is valid.
+    let durable_segment = format!("installation:{}:{INSTALLATION};", INSTALLATION.len());
+
+    // Shared-channel preference saved under the retired setup id.
+    let retired_shared = ironclaw_slack_v2_adapter::slack_shared_channel_reply_target_binding_ref(
+        &retired_installation,
+        &agent,
+        Some(&project),
+        TEAM,
+        ROUTED_CHANNEL,
+    )
+    .expect("retired shared ref builds");
+    let resolved_shared = provider
+        .resolve_reply_target_binding(&operator_caller(), &retired_shared)
+        .await
+        .expect("resolve succeeds")
+        .expect("retired-id shared preference still resolves");
+    assert!(
+        resolved_shared
+            .reply_target_binding_ref
+            .as_str()
+            .contains(&durable_segment),
+        "re-resolved ref carries the durable installation id: {}",
+        resolved_shared.reply_target_binding_ref.as_str()
+    );
+
+    // Personal-DM preference saved under the retired setup id.
+    let retired_dm = ironclaw_slack_v2_adapter::slack_personal_dm_reply_target_binding_ref(
+        &retired_installation,
+        &agent,
+        Some(&project),
+        TEAM,
+        CHANNEL,
+        SLACK_USER,
+    )
+    .expect("retired DM ref builds");
+    let resolved_dm = provider
+        .resolve_reply_target_binding(&operator_caller(), &retired_dm)
+        .await
+        .expect("resolve succeeds")
+        .expect("retired-id DM preference still resolves");
+    assert!(
+        resolved_dm
+            .reply_target_binding_ref
+            .as_str()
+            .contains(&durable_segment),
+        "re-resolved DM ref carries the durable installation id: {}",
+        resolved_dm.reply_target_binding_ref.as_str()
+    );
+
+    // Fail-closed arms: a tampered actor never resolves; an unrouted
+    // conversation never resolves (regardless of which id the ref carries).
+    let tampered_actor = ironclaw_slack_v2_adapter::slack_personal_dm_reply_target_binding_ref(
+        &retired_installation,
+        &agent,
+        Some(&project),
+        TEAM,
+        CHANNEL,
+        "U_EVIL",
+    )
+    .expect("tampered DM ref builds");
+    assert!(
+        provider
+            .resolve_reply_target_binding(&operator_caller(), &tampered_actor)
+            .await
+            .expect("resolve succeeds")
+            .is_none(),
+        "a DM ref with a foreign actor must not resolve"
+    );
+    let unrouted = ironclaw_slack_v2_adapter::slack_shared_channel_reply_target_binding_ref(
+        &retired_installation,
+        &agent,
+        Some(&project),
+        TEAM,
+        "C999",
+    )
+    .expect("unrouted shared ref builds");
+    assert!(
+        provider
+            .resolve_reply_target_binding(&operator_caller(), &unrouted)
+            .await
+            .expect("resolve succeeds")
+            .is_none(),
+        "an unrouted shared conversation must not resolve"
+    );
+}
+
+/// The generic triggered hook routes a settled fire to the owning
+/// extension's driver: the creator's stored preference decodes through the
+/// slack codec registered in the assembly extras, the driver is built from
+/// the assembly's OWN delivery services, and the approval prompt lands on
+/// the harness egress with the delivered gate route recorded.
+#[tokio::test]
+async fn generic_triggered_hook_routes_fire_to_the_owning_extension_driver() {
+    let (harness, _approvals) = build_harness_for_delivered_route_tests().await;
+
+    // A blocked run the coordinator knows about (the hook's driver polls the
+    // SAME coordinator the assembly wires).
+    let block_response = harness.post_event(DM_BLOCK).await;
+    assert_eq!(block_response.status(), StatusCode::OK);
+    harness.drain().await;
+    let blocked_run_id = harness
+        .coordinator
+        .blocked_run_id()
+        .expect("run must be blocked after DM_BLOCK"); // safety: E2E test assertion.
+
+    let tenant = TenantId::new(TENANT).expect("tenant"); // safety: static test tenant id is valid.
+    let user = UserId::new(USER).expect("user"); // safety: static test user id is valid.
+
+    // Seed the creator's personal preference on the SAME store the
+    // assembly's delivery deps read.
+    let dm_target = dm_reply_target_binding_ref();
+    harness
+        .outbound
+        .write_communication_preference(WriteCommunicationPreferenceRequest {
+            record: CommunicationPreferenceRecord {
+                scope: DeliveryDefaultScope::personal(tenant.clone(), user.clone()),
+                final_reply_target: Some(dm_target.clone()),
+                progress_target: None,
+                approval_prompt_target: Some(dm_target.clone()),
+                auth_prompt_target: None,
+                default_modality: None,
+                updated_at: chrono::Utc::now(),
+                updated_by: user.clone(),
+            },
+            expected_version: None,
+        })
+        .await
+        .expect("seed personal preference"); // safety: in-memory store should not fail.
+
+    let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+    let hook = GenericTriggeredRunDeliveryHook::new(
+        Arc::clone(&harness.assembly),
+        Arc::clone(&delivery_store) as Arc<dyn TriggeredRunDeliveryStore>,
+        harness.outbound.clone() as Arc<dyn CommunicationPreferenceRepository>,
+    );
+
+    let fire = TriggerFire {
+        identity: TriggerFireIdentity::new(tenant.clone(), TriggerId::new(), chrono::Utc::now()),
+        creator_user_id: user.clone(),
+        agent_id: None,
+        project_id: None,
+        prompt: "generic triggered delivery".to_string(),
+    };
+    use crate::automation::trigger_poller::PostSubmitDeliveryHook as _;
+    hook.on_trigger_submitted(fire, blocked_run_id, foreign_run_scope())
+        .await;
+
+    // The routed slack driver posted the approval prompt to the creator's DM
+    // through the assembly's delivery coordinator (harness egress).
+    let approval_prompts = wait_for_approval_prompt_messages(&harness.egress, GATE).await;
+    assert_eq!(
+        approval_prompts.len(),
+        1,
+        "exactly one approval-prompt chat.postMessage: {approval_prompts:?}"
+    );
+    assert_eq!(approval_prompts[0]["channel"], CHANNEL);
+
+    // …and auto-recorded the delivered gate route into the assembly's store.
+    let route = wait_for_gate_route_matching(
+        harness.route_store.as_ref(),
+        &tenant,
+        &user,
+        GATE,
+        |record| record.run_id == blocked_run_id,
+    )
+    .await;
+    assert!(
+        route
+            .delivered_conversation_fingerprints
+            .contains(&dm_conversation_fingerprint()),
+        "driver route carries the DM conversation fingerprint: {:?}",
+        route.delivered_conversation_fingerprints
+    );
+
+    // Fail-closed routing: a stored preference no registered codec decodes
+    // records a Failed outcome instead of guessing a channel.
+    harness
+        .outbound
+        .write_communication_preference(WriteCommunicationPreferenceRequest {
+            record: CommunicationPreferenceRecord {
+                scope: DeliveryDefaultScope::personal(tenant.clone(), user.clone()),
+                final_reply_target: Some(
+                    ReplyTargetBindingRef::new("reply:adapter:5:other;rest").expect("ref"), // safety: static test ref is valid.
+                ),
+                progress_target: None,
+                approval_prompt_target: None,
+                auth_prompt_target: None,
+                default_modality: None,
+                updated_at: chrono::Utc::now(),
+                updated_by: user.clone(),
+            },
+            expected_version: Some(ironclaw_outbound::CommunicationPreferenceVersion::from_raw(
+                1,
+            )),
+        })
+        .await
+        .expect("overwrite preference with a foreign-vendor target");
+    let foreign_fire = TriggerFire {
+        identity: TriggerFireIdentity::new(tenant.clone(), TriggerId::new(), chrono::Utc::now()),
+        creator_user_id: user.clone(),
+        agent_id: None,
+        project_id: None,
+        prompt: "unroutable triggered delivery".to_string(),
+    };
+    let unroutable_run_id = TurnRunId::new();
+    hook.on_trigger_submitted(foreign_fire, unroutable_run_id, foreign_run_scope())
+        .await;
+    let record = delivery_store
+        .load_triggered_run_delivery(unroutable_run_id)
+        .await
+        .expect("load outcome")
+        .expect("unroutable fire records an outcome");
+    assert_eq!(
+        record.outcome,
+        ironclaw_outbound::TriggeredRunDeliveryOutcomeKind::Failed,
+        "an undecodable stored target fails closed"
+    );
 }

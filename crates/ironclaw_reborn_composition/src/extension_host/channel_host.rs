@@ -394,6 +394,83 @@ impl GenericChannelHostAssembly {
             .clone()
     }
 
+    /// The snapshot watch the assembly reconciles over — shared with the
+    /// generic outbound-target provider so both read the same active set.
+    pub(crate) fn snapshot_watch(&self) -> SnapshotWatch {
+        self.deps.watch.clone()
+    }
+
+    /// The deployment identity per-extension workflows bind under.
+    pub(crate) fn identity(&self) -> &ChannelHostIdentity {
+        &self.deps.identity
+    }
+
+    /// Every ACTIVE channel extension with a registered preference-target
+    /// codec, in extension-id order — the generic triggered-delivery hook
+    /// routes stored preference refs across these.
+    pub(crate) fn active_preference_codecs(&self) -> Vec<(String, Arc<dyn PreferenceTargetCodec>)> {
+        let snapshot = self.deps.watch.current();
+        snapshot
+            .extension_ids()
+            .into_iter()
+            .filter(|extension_id| {
+                snapshot
+                    .extension(extension_id)
+                    .is_some_and(|active| active.resolved.channel.is_some())
+            })
+            .filter_map(|extension_id| {
+                self.preference_target_codec(&extension_id)
+                    .map(|codec| (extension_id, codec))
+            })
+            .collect()
+    }
+
+    /// Generic run-delivery services for the triggered-delivery driver on
+    /// one extension. Binding-free: the triggered path resolves its target
+    /// from the creator's stored preference, never from a conversation
+    /// binding. `None` when the composed runtime has no delivery
+    /// coordinator (nothing can deliver).
+    pub(crate) fn triggered_run_delivery_services(
+        &self,
+        extension_id: &str,
+    ) -> Option<RunDeliveryServices> {
+        let delivery = self.deps.delivery.as_ref()?;
+        let identity = &self.deps.identity;
+        let notice_thread_id = match ThreadId::new(format!("{extension_id}-channel-notices")) {
+            Ok(thread_id) => thread_id,
+            Err(error) => {
+                tracing::warn!(
+                    target = "ironclaw::reborn::channel_host",
+                    extension_id,
+                    %error,
+                    "invalid channel-notice thread id; triggered delivery unavailable"
+                );
+                return None;
+            }
+        };
+        let fallback_notice_scope = TurnScope::new_with_owner(
+            identity.tenant_id.clone(),
+            Some(identity.agent_id.clone()),
+            identity.project_id.clone(),
+            notice_thread_id,
+            Some(identity.operator_user_id.clone()),
+        );
+        Some(RunDeliveryServices {
+            binding_service: Arc::new(TriggeredNoopConversationBindingService),
+            thread_service: Arc::clone(&self.deps.thread_service),
+            turn_coordinator: Arc::clone(&self.deps.turn_coordinator),
+            outbound_store: Arc::clone(&delivery.outbound_store),
+            route_store: Arc::clone(&delivery.route_store),
+            communication_preferences: Arc::clone(&delivery.communication_preferences),
+            coordinator: Arc::clone(&delivery.coordinator),
+            extension_id: extension_id.to_string(),
+            fallback_notice_scope,
+            approval_context: delivery.approval_context.clone(),
+            blocked_auth_prompts: delivery.blocked_auth_prompts.clone(),
+            auth_flow_cancel: delivery.auth_flow_cancel.clone(),
+        })
+    }
+
     fn stored_extras(&self, extension_id: &str) -> StoredChannelExtras {
         self.extras
             .lock()
@@ -816,6 +893,34 @@ fn spawn_drain(drain: Option<Arc<dyn ChannelIngressDrain>>) {
         tokio::spawn(async move {
             drain.drain().await;
         });
+    }
+}
+
+/// No-op [`ConversationBindingService`] for the triggered-delivery
+/// services: the triggered path receives its `TurnScope` from the poller
+/// and resolves its target from the creator's stored preference, so no
+/// binding is ever resolved. This stub satisfies the type system without
+/// an unnecessary installation-level conversation registry.
+struct TriggeredNoopConversationBindingService;
+
+#[async_trait]
+impl ConversationBindingService for TriggeredNoopConversationBindingService {
+    async fn resolve_binding(
+        &self,
+        _request: ironclaw_product_workflow::ResolveBindingRequest,
+    ) -> Result<ironclaw_product_workflow::ResolvedBinding, ProductWorkflowError> {
+        Err(ProductWorkflowError::BindingResolutionFailed {
+            reason: "conversation bindings are not supported in triggered delivery".to_string(),
+        })
+    }
+
+    async fn lookup_binding(
+        &self,
+        _request: ironclaw_product_workflow::ResolveBindingRequest,
+    ) -> Result<ironclaw_product_workflow::ResolvedBinding, ProductWorkflowError> {
+        Err(ProductWorkflowError::BindingResolutionFailed {
+            reason: "conversation bindings are not supported in triggered delivery".to_string(),
+        })
     }
 }
 

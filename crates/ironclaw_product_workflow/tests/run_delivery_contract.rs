@@ -363,6 +363,25 @@ impl PreferenceTargetCodec for StaticCodec {
     fn is_personal_direct_message(&self, _target: &ReplyTargetBindingRef) -> bool {
         self.personal_dm
     }
+
+    fn direct_message_actor_for_target(&self, _target: &ReplyTargetBindingRef) -> Option<String> {
+        None
+    }
+
+    fn encode_shared_conversation_target(
+        &self,
+        _request: ironclaw_product_workflow::PreferenceTargetEncodeRequest<'_>,
+    ) -> Option<ReplyTargetBindingRef> {
+        None
+    }
+
+    fn encode_personal_direct_message_target(
+        &self,
+        _request: ironclaw_product_workflow::PreferenceTargetEncodeRequest<'_>,
+        _external_actor_id: &str,
+    ) -> Option<ReplyTargetBindingRef> {
+        None
+    }
 }
 
 // ── Fixture helpers ────────────────────────────────────────────────────────

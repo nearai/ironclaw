@@ -41,7 +41,7 @@ const SUBJECT_ROUTES_FIELD: &str = "subject_routes";
 
 /// Handle-suffix convention shared with the connection-scoping claims:
 /// `{name}` or `*_{name}` declares the admission field.
-fn handle_declares_field(handle: &str, name: &str) -> bool {
+pub(crate) fn handle_declares_field(handle: &str, name: &str) -> bool {
     handle == name
         || handle
             .strip_suffix(name)

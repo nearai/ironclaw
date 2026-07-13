@@ -154,9 +154,10 @@ pub use policy::{
 };
 pub use run_delivery::{
     ApprovalPromptContextSource, BlockedAuthFlowCancel, BlockedAuthPromptRequest,
-    BlockedAuthPromptSource, DeliveredChannelMessage, PreferenceTargetCodec, RunDeliveryError,
-    RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
-    TriggeredRunDeliveryRequest, triggered_run_delivery_settings,
+    BlockedAuthPromptSource, DeliveredChannelMessage, PreferenceTargetCodec,
+    PreferenceTargetEncodeRequest, RunDeliveryError, RunDeliveryObserver, RunDeliveryServices,
+    RunDeliverySettings, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
+    triggered_run_delivery_settings,
 };
 // Projection/event types that route handlers need to thread through SSE
 // (parse the resume cursor, render browser-safe event payloads). Re-exported
