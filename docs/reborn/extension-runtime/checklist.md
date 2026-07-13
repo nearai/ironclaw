@@ -64,9 +64,11 @@ Rules — kept short on purpose:
   workflow test; the WebUI's internal channel uses the same enum.
 - [x] MAN-11 The credential-authority type is `VendorId` end to end; the v3
   field is `vendor` (v2 `provider` maps in normalization); stored vendor id
-  strings are unchanged; the old type name survives only as a deprecation
-  alias, deleted by P7. — workspace-wide rename
-  (`crates/ironclaw_host_api/src/ids.rs`; alias documented for P7 deletion);
+  strings are unchanged; the old type name's deprecation alias is now
+  **deleted (P7b)**. — workspace-wide rename
+  (`crates/ironclaw_host_api/src/ids.rs`; the
+  `RuntimeCredentialAccountProviderId = VendorId` alias was removed with zero
+  remaining references workspace-wide);
   `v2_and_v3_rewrites_resolve_identically` pins the `provider` → `vendor`
   mapping; the serde wire field stays `provider` (persisted turn-state
   compatibility).

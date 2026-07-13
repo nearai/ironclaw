@@ -201,13 +201,6 @@ string_id!(ExtensionId, "extension", validate_name_segment);
 string_id!(PackageId, "package", validate_name_segment);
 string_id!(SecretHandle, "secret", validate_name_segment);
 string_id!(VendorId, "vendor", validate_name_segment);
-
-/// Transitional alias for the pre-unified-extension-runtime name of
-/// [`VendorId`]. "Vendor" names the external service that issues credentials
-/// and accounts; several extensions may share one vendor. Stored id strings
-/// are unchanged. Deleted at extension-runtime P7 — import `VendorId` in new
-/// code.
-pub type RuntimeCredentialAccountProviderId = VendorId;
 string_id!(SystemServiceId, "system_service", validate_name_segment);
 
 /// Provider-facing tool/function name.
