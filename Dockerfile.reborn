@@ -60,6 +60,12 @@ RUN cargo chef cook \
     --package ironclaw_reborn_cli \
     --features webui-v2-beta,slack-v2-host-beta,libsql,postgres,inmemory-turn-state \
     --recipe-path recipe.json
+RUN cargo chef cook \
+    --profile dist \
+    --package ironclaw_reborn_migration \
+    --no-default-features \
+    --features libsql \
+    --recipe-path recipe.json
 
 FROM deps AS builder
 

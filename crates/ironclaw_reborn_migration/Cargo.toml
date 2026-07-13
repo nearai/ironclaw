@@ -42,8 +42,7 @@ libsql = [
 ]
 postgres = [
     "dep:deadpool-postgres",
-    "dep:tokio-postgres",
-    "ironclaw/postgres",
+    "ironclaw?/postgres",
     "ironclaw_filesystem/postgres",
     "ironclaw_triggers/postgres",
     "ironclaw_reborn_composition/postgres",
@@ -87,7 +86,6 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 # backend-specific handles (optional, pulled in by feature)
 deadpool-postgres = { version = "0.14", optional = true }
 libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
-tokio-postgres = { version = "0.7", optional = true, features = ["with-serde_json-1"] }
 
 [dev-dependencies]
 tempfile = "3"
