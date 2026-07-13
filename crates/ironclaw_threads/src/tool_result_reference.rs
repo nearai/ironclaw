@@ -1250,6 +1250,41 @@ mod tests {
         );
     }
 
+    /// `item_count` is allowlisted on `result_reference` details, but only as
+    /// a u64 — a malformed value must drop the observation through the
+    /// best-effort constructor and fall back to the safe summary.
+    #[test]
+    fn best_effort_observation_drops_non_u64_item_count() {
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            "result:malformed-item-count",
+            ToolResultSafeSummary::new("tool completed").expect("summary"),
+            Some(serde_json::json!({
+                "schema_version": 1,
+                "status": "success",
+                "summary": "Tool completed; preview truncated.",
+                "detail": {
+                    "kind": "result_reference",
+                    "result_ref": "result:malformed-item-count",
+                    "byte_len": 4096,
+                    "total_bytes": 4096,
+                    "next_offset": 2048,
+                    "item_count": "lots"
+                },
+                "trust": "untrusted_tool_output"
+            })),
+        )
+        .expect("envelope construction is fail-open");
+
+        assert!(
+            envelope.model_observation.is_none(),
+            "a non-u64 item_count must drop the observation, not persist it"
+        );
+        assert_eq!(
+            envelope.model_visible_content_or_safe_summary(),
+            "tool completed"
+        );
+    }
+
     #[test]
     fn provider_reference_validation_accepts_safe_zero_arg_metadata() {
         let mut envelope = provider_reference();

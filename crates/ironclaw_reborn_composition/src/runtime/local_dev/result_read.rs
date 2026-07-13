@@ -389,10 +389,18 @@ fn parse_result_read_input(
                     Some("required field".to_string()),
                     None,
                 ),
-                Some(other) => (
+                // A number that isn't a u64 (negative, float) is an
+                // InvalidValue; any other JSON type is a TypeMismatch echoing
+                // only the type name (mirrors the result_ref arm).
+                Some(other) if other.is_number() => (
                     DispatchInputIssueCode::InvalidValue,
                     Some("non-negative integer".to_string()),
                     Some(sanitized_issue_text(other.to_string())),
+                ),
+                Some(other) => (
+                    DispatchInputIssueCode::TypeMismatch,
+                    Some("integer".to_string()),
+                    Some(json_value_kind(other).to_string()),
                 ),
             };
             return Err(invalid_input_failure(
@@ -420,6 +428,18 @@ fn parse_result_read_input(
             },
         ));
     };
+    if !max_bytes_value.is_number() {
+        return Err(invalid_input_failure(
+            "result_read requires a max_bytes integer",
+            CapabilityInputIssue {
+                path: "max_bytes".to_string(),
+                code: DispatchInputIssueCode::TypeMismatch,
+                expected: Some("integer".to_string()),
+                received: Some(json_value_kind(max_bytes_value).to_string()),
+                schema_path: Some("properties/max_bytes".to_string()),
+            },
+        ));
+    }
     let max_bytes = match max_bytes_value
         .as_u64()
         .filter(|value| (RESULT_READ_MIN_BYTES..=RESULT_READ_MAX_BYTES).contains(value))

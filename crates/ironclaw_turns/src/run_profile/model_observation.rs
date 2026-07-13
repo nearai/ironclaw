@@ -109,6 +109,9 @@ pub enum ToolObservationDetail {
         total_bytes: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         next_offset: Option<u64>,
+        /// Element count when the full result is a top-level JSON array.
+        /// Attached only to truncated previews, so the model cannot misread
+        /// a byte-sliced array as the complete result.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         item_count: Option<u64>,
     },

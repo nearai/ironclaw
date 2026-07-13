@@ -3098,6 +3098,21 @@ mod tests {
                 }),
             ),
             (
+                // Wrong JSON type is a TypeMismatch echoing only the type
+                // name (mirrors the non-string result_ref arm), not an
+                // InvalidValue echoing the raw value.
+                "non-integer offset",
+                serde_json::json!({"result_ref": valid_ref, "offset": "8", "max_bytes": 8}),
+                "result_read requires a non-negative offset",
+                Some(CapabilityInputIssue {
+                    path: "offset".to_string(),
+                    code: DispatchInputIssueCode::TypeMismatch,
+                    expected: Some("integer".to_string()),
+                    received: Some("string".to_string()),
+                    schema_path: Some("properties/offset".to_string()),
+                }),
+            ),
+            (
                 "missing max_bytes",
                 serde_json::json!({"result_ref": valid_ref, "offset": 0}),
                 "result_read requires a max_bytes integer",
@@ -3106,6 +3121,18 @@ mod tests {
                     code: DispatchInputIssueCode::MissingRequired,
                     expected: Some("required field".to_string()),
                     received: None,
+                    schema_path: Some("properties/max_bytes".to_string()),
+                }),
+            ),
+            (
+                "non-integer max_bytes",
+                serde_json::json!({"result_ref": valid_ref, "offset": 0, "max_bytes": true}),
+                "result_read requires a max_bytes integer",
+                Some(CapabilityInputIssue {
+                    path: "max_bytes".to_string(),
+                    code: DispatchInputIssueCode::TypeMismatch,
+                    expected: Some("integer".to_string()),
+                    received: Some("boolean".to_string()),
                     schema_path: Some("properties/max_bytes".to_string()),
                 }),
             ),

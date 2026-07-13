@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- *(reborn)* `builtin.result_read` input errors now carry a structured, model-visible `CapabilityInputIssue` (field path, issue code, expected/received) with model-controlled echoes secret-redacted, and truncated previews of top-level JSON-array results report the array's `item_count` — persisted end-to-end through the observation validator ([#6059](https://github.com/nearai/ironclaw/pull/6059)).
 - *(reborn)* ride out transient model-provider outages with cancellation-aware availability retries, fail fast when no provider is configured, and preserve actionable shell/coding failure reasons for the model ([#5959](https://github.com/nearai/ironclaw/pull/5959)).
 - *(slack)* resolve known DM conversation IDs through an exact Slack lookup before encoding mentions, avoiding wrong-target posts when conversation lists are long or display names are ambiguous.
 - *(reborn)* add an explicit tenant extension-ownership migration that assigns every installed extension to every existing user, and clean up the departing user's external connection and personal credentials without tearing down the package for remaining users.
