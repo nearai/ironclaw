@@ -6998,7 +6998,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         selected_cases = run_live_qa._selected_case_names(args)
 
-        self.assertEqual(len(selected_cases), 47)
+        self.assertEqual(len(selected_cases), 48)
         self.assertNotIn("qa_1a_telegram_connect", selected_cases)
         self.assertNotIn("qa_1b_telegram_near_news_chat", selected_cases)
         self.assertNotIn("qa_1c_telegram_near_news_routine", selected_cases)

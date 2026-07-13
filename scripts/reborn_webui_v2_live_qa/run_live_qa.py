@@ -7517,8 +7517,11 @@ async def case_qa_10j_slack_stale_unavailable_history(
         await _with_page(ctx.output_dir, case_name, action)
         return _result(case_name, True, started, details)
     except Exception as exc:
-        return _result(
-            case_name, False, started, {**details, "error": _exc_text(exc)}
+        return _slack_correctness_failure_result(
+            case_name,
+            started,
+            details,
+            exc,
         )
 
 
