@@ -6,7 +6,9 @@ This binary is available as the workspace package `ironclaw_reborn_cli` and buil
 The Reborn Docker image also builds `ironclaw_reborn_migration`, whose
 `ironclaw-reborn-migration` executable is installed beside the primary binary.
 Source builds can do the same; native `cargo-dist` installers do not yet package
-the pair.
+the pair. Build the primary CLI with the target backend it must inspect after
+migration (`--features libsql` or `--features postgres`); the companion enables
+both backends by default.
 
 ## Current status
 
@@ -69,8 +71,7 @@ It intentionally does not yet support:
 - replacing `ironclaw` behavior;
 - daemon/service installation;
 - live/zero-downtime v1 migration or reverse migration;
-- production extension/tool execution;
-- long-lived Reborn runtime services.
+- production extension/tool execution.
 
 The WebChat v2 web UI **is** supported through `serve`, but only when the
 binary is built with `--features webui-v2-beta`. The `serve` subcommand is
@@ -324,17 +325,21 @@ cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- doctor
 Expected fields include:
 
 - `reborn_home`
-- `home_source`
 - `profile`
 - `v1_state: not-used`
 - `v1_migration_state`
-- `driver_registry: initialized`
+- `config_file`
+- `providers_file`
+- `text_only_driver`
+- `planned_driver`
+- `subagent_planned_driver`
+- `planned_default_profile`
 
 `v1_migration_state` is skipped for `not_detected`, `available`,
 `explicitly_skipped`, or `planned`, passes for `verified`, and fails for an
 invalid or quarantined (`applying`, `failed`, `applied`, or `verifying`) target.
-The check may read the local
-migration marker, shared PostgreSQL quarantine state, and non-secret source
+The check may read the local migration marker, durable libSQL/PostgreSQL
+quarantine state, and non-secret source
 evidence; it does not create state or start services.
 
 ### `hooks list`
@@ -458,6 +463,8 @@ Supported profiles:
 
 - `local-dev` (default)
 - `local-dev-yolo`
+- `hosted-single-tenant`
+- `hosted-single-tenant-volume`
 - `production`
 - `migration-dry-run`
 
@@ -598,6 +605,8 @@ Supported values:
 
 - `local-dev` (default)
 - `local-dev-yolo`
+- `hosted-single-tenant`
+- `hosted-single-tenant-volume`
 - `production`
 - `migration-dry-run`
 

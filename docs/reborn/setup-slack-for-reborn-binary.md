@@ -72,7 +72,7 @@ That profile grants trusted host access and `serve` refuses non-loopback binds.
 Minimum local env shape:
 
 ```bash
-export IRONCLAW_REBORN_HOME="$PWD/.reborn-home"
+export IRONCLAW_REBORN_HOME="$HOME/.ironclaw-reborn-demo"
 export IRONCLAW_REBORN_PROFILE="local-dev"
 
 # WebUI env-bearer auth; required by `ironclaw-reborn serve`.

@@ -27,6 +27,14 @@ records `available` and prints the explicit follow-up command. Normal `run`,
 refuse quarantined targets until verification succeeds. Extension lifecycle
 commands enforce the same activation gate.
 
+For `--migrate-v1`, a non-empty `MIGRATION_SOURCE_POSTGRES` takes precedence.
+Otherwise onboarding looks for
+`${IRONCLAW_BASE_DIR:-$HOME/.ironclaw}/ironclaw.db`. It forwards that same base
+directory as `--source-home` and writes the plan to
+`$IRONCLAW_REBORN_HOME/v1-migration-manifest.json`. A plan against a live source
+is rehearsal evidence only; use a stopped, WAL-consistent database and matching
+home snapshot for the cutover-grade plan.
+
 The completion marker schema is:
 
 ```json
@@ -53,9 +61,10 @@ onboarding marker.
 
 `v1_state: not-used` remains the Reborn runtime boundary: Reborn does not boot
 from or mutate the v1 state root. `v1_migration.state` separately records the
-onboarding decision. Once apply begins, the lifecycle authority is the
-target-owned `.v1-migration-state.json` marker under Reborn home; this prevents
-a non-default manifest path from bypassing startup quarantine.
+onboarding decision. Once apply begins, lifecycle authority is bound to the
+target through the local `.v1-migration-state.json` marker and the durable
+`reborn_migration_state` record. This prevents a non-default manifest path,
+mismatched target, or another run from bypassing startup quarantine.
 
 Use:
 

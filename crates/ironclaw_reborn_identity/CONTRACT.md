@@ -7,8 +7,9 @@ any runtime state (conversation binding, thread ownership) is touched. Identity
 provisioning lives here, not in WebUI ingress and not in `ironclaw_conversations`
 (which consumes an already-resolved `UserId`).
 
-This crate is **also the durable home of the minimal user profile** (email,
-display name, timestamps), not only an identity→`UserId` map. Resolving an
+This crate is **also the durable home of the canonical user profile** (identity,
+status, role, provenance, timestamps, and metadata), not only an
+identity→`UserId` map. Resolving an
 identity persists a `StoredUser` record keyed by `UserId`, so "what do we know
 about this user, and where is it stored" is answered *here* — there is no
 separate users table elsewhere in the Reborn stack. Any future enumeration or
@@ -49,7 +50,7 @@ segment maps to the `_` sentinel).
 
 | Record | Path (opaque segments base64url-encoded) | Fields |
 |---|---|---|
-| `StoredUser` — the canonical **user profile** | `…/users/{user_id}.json` | `email`, `display_name`, `created_at`, `updated_at` |
+| `StoredUser` — the canonical **user profile** | `…/users/{user_id}.json` | `tenant_id`, `email`, `display_name`, `status`, `role`, `created_by`, `created_at`, `updated_at`, `last_login_at`, `metadata` |
 | `StoredExternalIdentity` — one bound external login | `…/external/{tenant}/{surface}/{provider}/{instance}/{subject}.json` | `user_id`, `email`, `email_verified`, `created_at` |
 | `StoredVerifiedEmailIndex` — cross-provider link | `…/verified-email/{tenant}/{lower_email}.json` | `user_id` |
 
@@ -58,6 +59,8 @@ login upserts the profile); this is why a user's email and display name are
 durably captured on SSO login without any separate directory. The record fields
 are `pub(super)` — the on-disk JSON is an implementation detail, and upstream
 consumers read through the resolver surface below rather than the raw records.
+Legacy records default fields added after the minimal profile shape; historical
+migration writes the full canonical state through `import_migrated_user`.
 (Known gap: `adopt_migrated_identity` does **not** write `StoredUser` today —
 tracked as #5616.)
 

@@ -63,10 +63,12 @@ cargo build -p ironclaw_reborn_cli --bin ironclaw-reborn
 ```
 
 To use `migrate`, build the same-version companion into the same target
-directory too:
+directory too. Compile the primary CLI with the target backend it must inspect
+after migration (libSQL shown; use `--features postgres` for PostgreSQL):
 
 ```bash
-cargo build -p ironclaw_reborn_cli -p ironclaw_reborn_migration
+cargo build -p ironclaw_reborn_cli --features libsql
+cargo build -p ironclaw_reborn_migration
 ./target/debug/ironclaw-reborn migrate v1 --help
 ```
 
@@ -74,14 +76,14 @@ The default Reborn home is `$HOME/.ironclaw/reborn`. Override it with an
 absolute path when you want isolated state:
 
 ```bash
-export IRONCLAW_REBORN_HOME="$PWD/.reborn-home"
+export IRONCLAW_REBORN_HOME="$HOME/.ironclaw-reborn-demo"
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- config path
 ```
 
 `config path` and `doctor` are safe diagnostics; they report the resolved home,
 profile, `config.toml`, `providers.json`, and `v1_state: not-used`. `doctor`
 also reports `v1_migration_state`, including detected sources and any local or
-shared PostgreSQL quarantine. They do not create Reborn state or seed config
+durable target quarantine. They do not create Reborn state or seed config
 files.
 
 ### Migrate an existing v1 installation
@@ -114,7 +116,7 @@ apply, verification, and rollback procedure in
 The CLI-native way to configure Reborn's default model route is:
 
 ```bash
-export IRONCLAW_REBORN_HOME="$PWD/.reborn-home"
+export IRONCLAW_REBORN_HOME="$HOME/.ironclaw-reborn-demo"
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models set-provider openai --model gpt-5-mini
 ```
 
@@ -214,7 +216,7 @@ seeded config does not include `[llm.default]`, so env-only model selection
 continues to work:
 
 ```bash
-export IRONCLAW_REBORN_HOME="$PWD/.reborn-env-only"
+export IRONCLAW_REBORN_HOME="$HOME/.ironclaw-reborn-env-only"
 export LLM_BACKEND=openai
 export OPENAI_API_KEY="sk-..."
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- run --message "hello"
@@ -280,7 +282,7 @@ env-bearer token and a user id at startup. It also needs the model route from
 the earlier section, including that provider's credential env var:
 
 ```bash
-export IRONCLAW_REBORN_HOME="$PWD/.reborn-home"
+export IRONCLAW_REBORN_HOME="$HOME/.ironclaw-reborn-demo"
 export OPENAI_API_KEY="sk-..." # or the required env var for your configured provider
 export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"
 export IRONCLAW_REBORN_WEBUI_USER_ID="reborn-cli"
@@ -378,7 +380,7 @@ Slack support is compiled behind the `slack-v2-host-beta` Cargo feature. That
 feature includes `webui-v2-beta`, so Slack runs on the same `serve` command:
 
 ```bash
-export IRONCLAW_REBORN_HOME="$PWD/.reborn-home"
+export IRONCLAW_REBORN_HOME="$HOME/.ironclaw-reborn-demo"
 export OPENAI_API_KEY="sk-..." # or the required env var for your configured provider
 export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"
 export IRONCLAW_REBORN_WEBUI_USER_ID="reborn-cli"

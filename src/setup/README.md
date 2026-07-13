@@ -47,6 +47,11 @@ Reborn-specific contract lives in `docs/reborn/onboarding.md`; changes to
 `ironclaw-reborn onboard` should keep that document and this boundary note in
 sync.
 
+Planning selects non-empty `MIGRATION_SOURCE_POSTGRES` first; otherwise it uses
+`${IRONCLAW_BASE_DIR:-$HOME/.ironclaw}/ironclaw.db`, seals that same base as the
+source home, and writes `$IRONCLAW_REBORN_HOME/v1-migration-manifest.json`. A
+cutover-grade plan must use a stopped, WAL-consistent source snapshot.
+
 ---
 
 ## Startup Sequence (main.rs)

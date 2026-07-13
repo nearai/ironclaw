@@ -144,6 +144,11 @@ pub async fn apply_migration(
     apply_migration_inner(options, manifest, secrets, acknowledgements, false).await
 }
 
+/// Validate a new apply without opening or claiming the target.
+///
+/// This checks the stopped/snapshot acknowledgements, sealed source and target
+/// identity, source secret-key requirements, manifest state, and target
+/// freshness. Callers may persist `Applying` only after this succeeds.
 pub async fn preflight_apply_migration(
     options: &MigrationOptions,
     manifest: &MigrationManifest,
@@ -155,6 +160,11 @@ pub async fn preflight_apply_migration(
         .map_err(|error| MigrationError::Preflight(Box::new(error)))
 }
 
+/// Validate a resumable apply without opening or claiming the target.
+///
+/// This accepts only resumable lifecycle states for the same sealed run and
+/// performs the same source, key, acknowledgement, and binding checks as apply
+/// without requiring the run-owned target to be empty.
 pub async fn preflight_resume_migration(
     options: &MigrationOptions,
     manifest: &MigrationManifest,

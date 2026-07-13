@@ -2,7 +2,9 @@
 
 The Reborn Docker image ships `ironclaw-reborn-migration` beside
 `ironclaw-reborn`. Source builds must build both executables into the same
-target directory. Native `cargo-dist` installers do not yet package the pair.
+target directory and compile the primary CLI with the intended target backend
+(`--features libsql` or `--features postgres`). The companion enables both
+backends by default. Native `cargo-dist` installers do not yet package the pair.
 Operators use the companion through the primary binary:
 
 ```text
@@ -57,13 +59,16 @@ risk incorporating opaque or secret-bearing session options. PostgreSQL source
 sessions are forced read-only, and the sealed source fingerprint binds table
 contents rather than credentials.
 
-If encrypted v1 secrets should be converted, also export the old key:
+If the source `secrets` table contains any rows, export the old key before
+apply or resume:
 
 ```bash
 export MIGRATION_SOURCE_SECRET_MASTER_KEY='...'
 ```
 
 Do not put either value in a command argument, shell history, manifest, or log.
+Planning can inventory encrypted rows without the key, but apply/resume treats a
+missing source key as a preflight blocker rather than silently skipping secrets.
 
 ## 1. Rehearse and review the plan
 
@@ -105,7 +110,9 @@ strict failures regardless of their recorded count.
 snapshot), independently of where a database backup was placed. The final plan
 must use the stopped-source home snapshot that apply will receive. Omitting it
 leaves home-artifact coverage unproven and records an apply-blocking inventory
-entry.
+entry. If the configured Reborn target is nested under that home, inventory
+excludes only the exact target-owned tree; adjacent v1 files and directories
+remain part of the sealed source-home fingerprint.
 
 Review every category before scheduling downtime:
 
@@ -169,14 +176,21 @@ The source inventory/content fingerprint and the target backend, locator,
 profile, tenant, agent, and source-home seal must still match the plan.
 Divergent deterministic target records fail closed instead of being
 overwritten.
+Apply and resume complete source, manifest, key, and acknowledgement preflight
+before persisting an `applying` checkpoint. Apply additionally proves target
+freshness and accepts only a `planned` manifest; resume accepts `applying`,
+`failed`, or `applied` for the same run.
 Apply, resume, and verify also update the target-owned
 `$IRONCLAW_REBORN_HOME/.v1-migration-state.json` marker atomically. Runtime
 startup consults this canonical marker rather than assuming the manifest is at
 a default path, so an interrupted operation remains quarantined even when the
 operator selected a manifest elsewhere.
-PostgreSQL targets additionally keep the same lifecycle status in the shared
-`reborn_migration_state` table so every replica observes the quarantine even
-when replicas use different local homes.
+Both libSQL and PostgreSQL targets also keep an atomic, run-bound lifecycle
+claim in `reborn_migration_state`. The claim binds the release, protocol,
+profile, backend, target fingerprint, tenant, and agent, and another run cannot
+replace it. PostgreSQL stores this authority in the shared database so every
+replica observes the quarantine even when replicas use different local homes.
+Startup requires local and durable state to agree when both are present.
 
 Successful apply and resume print a `MigrationReport` JSON document to stdout.
 Preserve it in a secure operator-controlled location: its `lossy` entries
@@ -237,6 +251,14 @@ terms:
   map to member. Synthesized owners are members with epoch timestamps: older
   schemas without a canonical users table produce active users, while owners
   missing from an existing canonical table are suspended;
+- non-engine memory documents preserve their optional source-agent scope rather
+  than being rebound to the configured target agent;
+- exact duplicate engine project, mission, and mission-thread documents sharing
+  a durable UUID are deduplicated; divergent duplicates fail the migration;
+- supported cron routines and missions import paused when their migrated owner
+  is absent or suspended. Missing `next_fire_at` also imports paused, retaining a
+  deterministic historical timestamp for operator review. A mission that
+  references an unimported project drops that project scope and imports paused;
 - typed settings, engine-v2 plan/runtime documents without an explicit
   converter, unsupported schedule sources, unsupported executable artifacts,
   v1 home `projects/` content, and operational histories are currently
@@ -249,9 +271,9 @@ terms:
 - agent jobs/actions/events are archive-only inventory (their payloads are not
   copied), while approvals, leases, pairing requests, rate-limit counters,
   logs, lock files, and derived indexes are reset or rebuilt;
-- `heartbeat_state` is inventoried as semantically converted, but this release
-  writes no durable heartbeat row: apply reports the gap and the cadence must be
-  recreated as a Reborn scheduled trigger.
+- `heartbeat_state` is unsupported in this release. Actual heartbeat rows are
+  reported as requiring operator action, no durable heartbeat row is written,
+  and the cadence must be recreated as a Reborn scheduled trigger.
 
 Run `status --json` to inspect the complete redacted manifest and the current
 target-fingerprint match programmatically. Use the securely retained apply or

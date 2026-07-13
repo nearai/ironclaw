@@ -255,6 +255,9 @@ pub(crate) fn read_activation_state_status(
         .join(MIGRATION_STATE_MARKER_FILE);
     let local = read_local_target_state(&marker)?;
     let shared = read_shared_target_state(context)?;
+    if local.is_none() && shared.is_none() {
+        return Ok(None);
+    }
     let binding = current_target_binding(context)?;
     if let Some(record) = local.as_ref() {
         validate_state_binding(record, &binding)?;
@@ -337,6 +340,7 @@ struct CurrentTargetBinding {
     agent_id: String,
 }
 
+#[cfg(any(feature = "postgres", feature = "libsql"))]
 fn current_target_binding(context: &RebornCliContext) -> anyhow::Result<CurrentTargetBinding> {
     use ironclaw_reborn_composition::RebornMigrationTargetStore;
 
@@ -365,6 +369,11 @@ fn current_target_binding(context: &RebornCliContext) -> anyhow::Result<CurrentT
     })
 }
 
+#[cfg(not(any(feature = "postgres", feature = "libsql")))]
+fn current_target_binding(_context: &RebornCliContext) -> anyhow::Result<CurrentTargetBinding> {
+    anyhow::bail!("migration target inspection requires a binary built with libsql or postgres")
+}
+
 fn validate_state_binding(
     record: &MigrationStateRecord,
     binding: &CurrentTargetBinding,
@@ -380,14 +389,18 @@ fn validate_state_binding(
     Ok(())
 }
 
+#[cfg(any(feature = "postgres", feature = "libsql"))]
 fn read_shared_target_state(
     context: &RebornCliContext,
 ) -> anyhow::Result<Option<MigrationStateRecord>> {
     use ironclaw_reborn_composition::RebornMigrationTargetStore;
 
-    let target =
-        ironclaw_reborn_composition::resolve_reborn_migration_target(context.boot_config())
-            .context("failed to resolve the Reborn target for migration quarantine inspection")?;
+    let target = match ironclaw_reborn_composition::resolve_reborn_migration_target(
+        context.boot_config(),
+    ) {
+        Ok(target) => target,
+        Err(_) => return Ok(None),
+    };
     match target.store {
         #[cfg(feature = "postgres")]
         RebornMigrationTargetStore::Postgres { url } => crate::runtime::block_on_cli(async move {
@@ -456,6 +469,13 @@ fn read_shared_target_state(
         #[cfg(feature = "libsql")]
         RebornMigrationTargetStore::LibSql { path } => read_libsql_target_state(path),
     }
+}
+
+#[cfg(not(any(feature = "postgres", feature = "libsql")))]
+fn read_shared_target_state(
+    _context: &RebornCliContext,
+) -> anyhow::Result<Option<MigrationStateRecord>> {
+    Ok(None)
 }
 
 #[cfg(feature = "libsql")]
@@ -822,6 +842,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "libsql")]
     fn verified_marker_without_matching_durable_state_stays_quarantined() {
         let (_tmp, context) = RebornCliContext::test_context();
         let binding = current_target_binding(&context).expect("target binding");

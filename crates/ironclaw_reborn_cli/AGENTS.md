@@ -55,10 +55,13 @@ cargo build -p ironclaw_reborn_cli --features webui-v2-beta --release
 
 These examples build only the primary WebUI binary; they do not provide the
 required migration companion. For `migrate`, build both workspace packages so
-the same-version executables land beside each other:
+the same-version executables land beside each other. The primary CLI must
+include the target backend it will inspect after migration (libSQL shown;
+substitute `postgres` when appropriate):
 
 ```bash
-cargo build -p ironclaw_reborn_cli -p ironclaw_reborn_migration --release
+cargo build -p ironclaw_reborn_cli --features libsql --release
+cargo build -p ironclaw_reborn_migration --release
 ```
 
 The beta WebUI static crate runs the frontend bundler from Cargo build scripts,

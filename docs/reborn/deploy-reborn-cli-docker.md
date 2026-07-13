@@ -11,8 +11,9 @@ ironclaw-reborn serve --host ${IRONCLAW_REBORN_SERVE_HOST:-127.0.0.1} --port ${P
 ```
 
 Railway supplies `PORT`; set `IRONCLAW_REBORN_SERVE_HOST=0.0.0.0` for
-Railway/public deployments. Local Docker runs can keep the loopback default and
-set `IRONCLAW_REBORN_SERVE_PORT=3000`.
+Railway/public deployments. Docker bridge-mode runs must also bind the listener
+to `0.0.0.0` inside the container; publishing it with
+`-p 127.0.0.1:3000:3000` still limits host exposure to loopback.
 
 ## Build
 
@@ -48,7 +49,7 @@ docker run --rm \
 Minimum local env shape:
 
 ```bash
-IRONCLAW_REBORN_SERVE_HOST=127.0.0.1
+IRONCLAW_REBORN_SERVE_HOST=0.0.0.0
 IRONCLAW_REBORN_SERVE_PORT=3000
 IRONCLAW_REBORN_PROFILE=local-dev
 IRONCLAW_REBORN_WEBUI_TOKEN=<random-hex-32-bytes-or-longer>

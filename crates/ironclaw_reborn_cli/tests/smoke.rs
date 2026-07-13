@@ -1988,6 +1988,7 @@ fn run_reports_runtime_readiness_snapshot_without_touching_v1_state() {
 }
 
 #[test]
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
 fn run_fails_closed_for_a_non_default_applied_migration_manifest() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
@@ -2000,7 +2001,13 @@ fn run_fails_closed_for_a_non_default_applied_migration_manifest() {
             "schema_version": "ironclaw.reborn.migration-state/v1",
             "migration_protocol_version": 1,
             "release_version": env!("CARGO_PKG_VERSION"),
+            "run_id": "01KXE6YQKR3047DV18GG8DCWDG",
             "status": "applied",
+            "profile": "local-dev",
+            "target_backend": "libsql",
+            "target_locator_fingerprint": "test-only-unresolved-target",
+            "tenant_id": "local",
+            "agent_id": "default",
             "manifest": non_default_manifest,
         })
         .to_string(),
@@ -2016,8 +2023,10 @@ fn run_fails_closed_for_a_non_default_applied_migration_manifest() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("target is quarantined"), "stderr: {stderr}");
-    assert!(stderr.contains("status is `applied`"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("migration target inspection requires a binary built with libsql or postgres"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -2061,7 +2070,8 @@ fn doctor_uses_reborn_home_override_without_touching_v1_state() {
 }
 
 #[test]
-fn doctor_reports_the_status_from_onboardings_migration_manifest() {
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
+fn doctor_reports_unverifiable_migration_state_without_a_storage_backend() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
     std::fs::create_dir(&reborn_home).expect("Reborn home");
@@ -2073,7 +2083,13 @@ fn doctor_reports_the_status_from_onboardings_migration_manifest() {
             "schema_version": "ironclaw.reborn.migration-state/v1",
             "migration_protocol_version": 1,
             "release_version": env!("CARGO_PKG_VERSION"),
+            "run_id": "01KXE6YQKR3047DV18GG8DCWDG",
             "status": "applied",
+            "profile": "local-dev",
+            "target_backend": "libsql",
+            "target_locator_fingerprint": "test-only-unresolved-target",
+            "tenant_id": "local",
+            "agent_id": "default",
             "manifest": manifest,
         })
         .to_string(),
@@ -2104,10 +2120,7 @@ fn doctor_reports_the_status_from_onboardings_migration_manifest() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("v1_migration_state: applied"),
-        "stdout: {stdout}"
-    );
+    assert!(stdout.contains("v1_migration_state: invalid"), "stdout: {stdout}");
 }
 
 #[test]

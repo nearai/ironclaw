@@ -9,7 +9,9 @@ The public lifecycle is:
 
 ```rust
 plan_migration(&MigrationOptions)
+preflight_apply_migration(&MigrationOptions, &MigrationManifest, &MigrationSecretInputs, ApplyAcknowledgements)
 apply_migration(MigrationOptions, &MigrationManifest, MigrationSecretInputs, ApplyAcknowledgements)
+preflight_resume_migration(&MigrationOptions, &MigrationManifest, &MigrationSecretInputs, ApplyAcknowledgements)
 resume_migration(MigrationOptions, &MigrationManifest, MigrationSecretInputs, ApplyAcknowledgements)
 verify_migration(&MigrationOptions, &MigrationManifest)
 ```
@@ -27,7 +29,9 @@ explicit lifecycle.
 - The manifest contains redacted locator fingerprints, not database URLs,
   keys, tokens, or decrypted values.
 - Source and target keys are independent. Source key input is used only for v1
-  decryption; target key resolution follows production Reborn composition.
+  decryption; target key resolution follows production Reborn composition. A
+  non-empty source `secrets` table makes the source key an apply/resume preflight
+  requirement.
 - The v1 home is an explicit sealed input independent of the database snapshot
   location. Omitting it records an apply blocker because home coverage is unknown.
 - Unknown or incompatible executable artifacts are never enabled.
@@ -38,8 +42,13 @@ explicit lifecycle.
   read back other manifest domains, and does not boot a full Reborn runtime or
   prove every product service can consume the records. `applying`, `failed`,
   `applied`, and `verifying` targets remain quarantined.
-- PostgreSQL lifecycle state is stored in the shared target as well as the local
-  marker so every replica enforces the same quarantine.
+- Apply/resume preflight finishes before the CLI persists `applying`. Apply
+  accepts only `planned`; resume accepts `applying`, `failed`, or `applied` for
+  the same sealed run.
+- libSQL and PostgreSQL targets keep an atomic, run-bound lifecycle claim as
+  well as the local marker. The claim binds release/protocol, profile, backend,
+  locator fingerprint, tenant, and agent. PostgreSQL makes it visible to every
+  replica; startup requires local and durable records to agree when both exist.
 
 ## Source and target ownership
 
@@ -72,8 +81,14 @@ converted, archive-only, re-auth/reinstall, intentionally reset,
 operator-skipped, unsupported, or derived/rebuilt. A new v1 category without a
 registry entry is a blocker, not an implicit skip.
 
-Converters must implement deterministic compare-and-upsert semantics. Exact
-replay is a no-op; a divergent target collision fails without overwriting.
+Converters must claim deterministic slots atomically and use absent-or-exact or
+compare-and-create semantics. Exact replay is a no-op; a divergent target
+collision fails without overwriting. Exact duplicate engine documents with the
+same durable id are deduplicated, while divergent source duplicates fail the
+migration. Non-engine memory retains its optional source-agent scope. Supported
+automations import paused when their owner is not active, their next-fire time
+is missing, or a mission references a project that was not imported; the latter
+also omits the invalid project scope.
 Unsupported transcript payloads are retained in thread metadata where the
 converter explicitly says so. `archive_only` operational categories currently
 retain inventory counts/checksums and a disposition only; the source payload is
@@ -87,6 +102,9 @@ must not claim `status --json` contains per-record losses.
 API-token hashes cannot become Reborn signed sessions. Unknown v1 WASM/channel
 packages cannot become runnable Reborn installations. Both require an explicit
 re-auth/reinstall disposition.
+
+`heartbeat_state` is unsupported: only actual source rows produce a loss, no
+durable heartbeat row is written, and operators must recreate the cadence.
 
 ## Validation
 

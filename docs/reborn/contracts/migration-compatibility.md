@@ -30,10 +30,10 @@ Important current differences from this architecture target are:
 
 - memory documents are imported, chunks/embeddings are rebuilt, and document
   versions are archive-only inventory rather than migrated;
-- when the explicit v1 source key is supplied and a record decrypts, secrets
-  are re-encrypted with the production Reborn target key. Absent keys and
-  decrypt failures are reported and skipped; usage/audit metadata is not
-  preserved;
+- when the source contains secrets, the explicit v1 source key is an
+  apply/resume preflight requirement. Records that decrypt are re-encrypted with
+  the production Reborn target key; per-record decrypt failures are reported
+  and skipped, while usage/audit metadata is not preserved;
 - typed settings, root-filesystem entries, home config/provider/profile files,
   skills, and the home `projects/` directory remain unsupported or require
   reinstall; there is no generic `.system/**` typed-repository import;

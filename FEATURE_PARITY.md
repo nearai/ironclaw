@@ -726,8 +726,9 @@ export or retain the source payload. The companion is resolved beside the
 primary executable rather than from `PATH`, and database URLs/master keys remain
 environment-only. See
 `docs/reborn/v1-migration.md` for cutover and rollback.
-PostgreSQL targets persist migration quarantine state in the shared database so
-all replicas block activation until verification succeeds.
+Both target backends persist an atomic, run-bound migration claim; PostgreSQL
+stores it in the shared database so all replicas block activation until
+verification succeeds.
 
 The current conversion layer maps cron routines and cron missions to Reborn
 `TriggerRecord`s (mission threads land under `ThreadScope.mission_id`).

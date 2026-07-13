@@ -99,8 +99,11 @@ pub struct SecretLease {
 /// Result of an atomic create-if-absent secret write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecretPutOutcome {
+    /// The deterministic slot was absent and the record was created.
     Inserted,
+    /// The slot already contained the same material and expiry.
     ExactMatch,
+    /// The slot already contained different material or expiry.
     Divergent,
 }
 

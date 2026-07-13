@@ -1027,6 +1027,10 @@ impl TriggerSourceProvider for ScheduleTriggerSourceProvider {
 pub trait TriggerRepository: Send + Sync {
     async fn upsert_trigger(&self, record: TriggerRecord) -> Result<(), TriggerError>;
 
+    /// Atomically insert a validated trigger when its tenant/id slot is absent.
+    ///
+    /// Returns `true` only when inserted and never overwrites an existing row.
+    /// Callers receiving `false` must read back and reconcile the stored record.
     async fn insert_trigger_if_absent(&self, _record: TriggerRecord) -> Result<bool, TriggerError> {
         Err(TriggerError::Backend {
             reason: "atomic insert-if-absent is not implemented by this repository".to_string(),

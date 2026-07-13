@@ -61,7 +61,9 @@ The canonical Reborn memory path should include agent scope:
 /memory/tenants/{tenant}/users/{user}/agents/{agent-or-_none}/projects/{project-or-_none}/{relative/path}
 ```
 
-The current implementation path without `agents/{agent}` is transitional. Contract-finalizing implementation work must add `AgentId` before declaring memory service parity complete.
+The current implementation uses this agent-aware path. Offline v1 migration
+preserves each non-engine document's optional source `AgentId`, including the
+`_none` scope for unscoped documents.
 
 Rules:
 
