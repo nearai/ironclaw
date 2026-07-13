@@ -749,8 +749,18 @@ async fn slack_oauth_callback_activates_and_publishes_all_personal_tools() {
     )
     .expect("Slack package ref");
     let lifecycle_owner = UserId::new("alice").expect("valid lifecycle owner"); // safety: fixed test user id literal is valid.
+    let scope = turn_scope();
+    let lifecycle_scope = ResourceScope {
+        tenant_id: scope.tenant_id.clone(),
+        user_id: lifecycle_owner.clone(),
+        agent_id: scope.agent_id.clone(),
+        project_id: scope.project_id.clone(),
+        mission_id: None,
+        thread_id: Some(scope.thread_id.clone()),
+        invocation_id: InvocationId::new(),
+    };
     extension_management
-        .install(package_ref.clone(), &lifecycle_owner)
+        .install(package_ref.clone(), &lifecycle_scope)
         .await
         .expect("install Slack before OAuth");
     let auth_scope = auth_scope_for_turn(
@@ -796,7 +806,7 @@ async fn slack_oauth_callback_activates_and_publishes_all_personal_tools() {
 
     assert_eq!(
         extension_management
-            .project(package_ref, &lifecycle_owner)
+            .project(package_ref, &lifecycle_scope)
             .await
             .expect("project Slack after OAuth")
             .phase,
