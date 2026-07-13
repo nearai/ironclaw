@@ -236,7 +236,7 @@ pub(crate) async fn restore_extension_lifecycle_state(
             Ok(available) => available,
             Err(_) => {
                 match installation_effective_owner_scope(installation_store, &installation).await {
-                    Some((tenant_id, owner)) => {
+                    Ok(Some((tenant_id, owner))) => {
                         match resolve_registered_for_owner(
                             filesystem.as_ref(),
                             &tenant_id,
@@ -257,11 +257,23 @@ pub(crate) async fn restore_extension_lifecycle_state(
                             }
                         }
                     }
-                    None => {
+                    Ok(None) => {
                         tracing::warn!(
                             extension_id = installation.extension_id().as_str(),
                             installation_id = installation.installation_id().as_str(),
                             "skipping extension installation restore: not available in the catalog and the row has no resolvable registered-owner scope"
+                        );
+                        continue;
+                    }
+                    // A real store I/O failure while resolving the row's own
+                    // owner scope — blast-radius policy: skip-and-log this
+                    // one installation, never boot-abort the whole restore.
+                    Err(error) => {
+                        tracing::debug!(
+                            extension_id = installation.extension_id().as_str(),
+                            installation_id = installation.installation_id().as_str(),
+                            %error,
+                            "skipping extension installation restore: failed to read the row's registered-owner scope"
                         );
                         continue;
                     }
@@ -330,24 +342,32 @@ pub(crate) async fn restore_extension_lifecycle_state(
 
 /// The row-authoritative registered-store owner scope for an installation:
 /// the row's stored manifest record must exist and be `UserRegistered`, and
-/// `effective_owner_scope` must resolve one singleton owner from it. `None`
-/// means the row cannot be pinned to one owner (no stored manifest,
-/// non-registered source, or a non-singleton owner set). Shared by the boot
-/// restore fallback (row-owner-keyed lookup) and the install/activate/remove
-/// mutation guards (row-owner-and-tenant match) — one source of truth for
-/// "whose registered row is this."
+/// `effective_owner_scope` must resolve one singleton owner from it. `Ok(None)`
+/// means the row cannot be pinned to one owner (no stored manifest row,
+/// non-registered source, or a non-singleton owner set) — a genuine miss,
+/// never a real read failure. `Err` is a real store I/O failure and must
+/// never be collapsed into `Ok(None)`: doing so lets a mutation guard's
+/// `None` arm ("no tenant axis to enforce") fail OPEN on a transient read
+/// error. Shared by the boot restore fallback (row-owner-keyed lookup,
+/// which skips-and-logs on `Err`) and the install/activate/remove mutation
+/// guards (row-owner-and-tenant match, which must propagate `Err`) — one
+/// source of truth for "whose registered row is this."
 async fn installation_effective_owner_scope(
     installation_store: &Arc<dyn ExtensionInstallationStore>,
     installation: &ExtensionInstallation,
-) -> Option<(TenantId, UserId)> {
+) -> Result<Option<(TenantId, UserId)>, ProductWorkflowError> {
     let stored_manifest = match installation_store
         .get_manifest(installation.extension_id())
         .await
+        .map_err(map_extension_installation_error)?
     {
-        Ok(Some(record)) => record,
-        Ok(None) | Err(_) => return None,
+        Some(record) => record,
+        None => return Ok(None),
     };
-    effective_owner_scope(installation, &stored_manifest.manifest().source)
+    Ok(effective_owner_scope(
+        installation,
+        &stored_manifest.manifest().source,
+    ))
 }
 
 async fn remove_retired_internal_installation(
@@ -766,7 +786,7 @@ impl RebornLocalExtensionManagementPort {
         if is_owner_registered(&extension.package.manifest.source) {
             let effective_tenant =
                 installation_effective_owner_scope(&self.installation_store, &installation)
-                    .await
+                    .await?
                     .map(|(tenant_id, _)| tenant_id);
             if effective_tenant.as_ref() != Some(&scope.tenant_id) {
                 return Ok(LifecycleSearchExtensionSummary {
@@ -934,7 +954,7 @@ impl RebornLocalExtensionManagementPort {
                         // not just the user id (T2 cross-tenant follow-up).
                         let existing_effective_scope =
                             installation_effective_owner_scope(&self.installation_store, &existing)
-                                .await;
+                                .await?;
                         ensure_registered_row_owner_match(
                             &available.package.id,
                             existing_effective_scope,
@@ -1113,7 +1133,7 @@ impl RebornLocalExtensionManagementPort {
             // follow-up) — check that axis too before the caller may act on
             // this row.
             let existing_effective_scope =
-                installation_effective_owner_scope(&self.installation_store, &installation).await;
+                installation_effective_owner_scope(&self.installation_store, &installation).await?;
             ensure_registered_row_tenant_match(
                 &extension_id,
                 existing_effective_scope,
@@ -1203,7 +1223,7 @@ impl RebornLocalExtensionManagementPort {
             hosted_mcp_changed_during_discovery_error()
         })?;
         let existing_effective_scope =
-            installation_effective_owner_scope(&self.installation_store, &installation).await;
+            installation_effective_owner_scope(&self.installation_store, &installation).await?;
         ensure_registered_row_tenant_match(
             &extension_id,
             existing_effective_scope,
@@ -1774,7 +1794,7 @@ impl RebornLocalExtensionManagementPort {
         // Tenant axis companion to the user-id check above (T2 cross-tenant
         // follow-up) — see the identical comment at the activate chokepoint.
         let existing_effective_scope =
-            installation_effective_owner_scope(&self.installation_store, &installation).await;
+            installation_effective_owner_scope(&self.installation_store, &installation).await?;
         ensure_registered_row_tenant_match(&extension_id, existing_effective_scope, tenant_id)?;
         ensure_caller_may_mutate_tenant_installation(
             &installation,
@@ -4905,6 +4925,119 @@ output_schema_ref = "schemas/run.output.json"
         assert!(!operations.contains(&ExtensionLifecycleOperation::Disable));
     }
 
+    /// Regression: a real `get_manifest` I/O failure inside
+    /// `installation_effective_owner_scope` must not be silently discarded
+    /// and read as "no resolvable owner scope" — masking it that way makes
+    /// `ensure_registered_row_tenant_match`'s `None` arm treat the row as
+    /// having no tenant axis to enforce, which fails OPEN: a foreign-tenant
+    /// caller (same user id, wrong tenant) can remove another tenant's
+    /// registered install just by hitting a transient store read failure.
+    /// The fix must propagate the read failure as a real error instead.
+    #[tokio::test]
+    async fn extension_remove_propagates_installation_store_manifest_read_error() {
+        let real_owner_scope = resource_scope_for("tenant-b", "owner-a");
+        // Same user id, wrong tenant — must normally be denied by the
+        // tenant-match check.
+        let foreign_tenant_scope = resource_scope_for("default", "owner-a");
+        let extension_id = ExtensionId::new("acme-mcp-registered").expect("valid extension id");
+        let source = ManifestSource::UserRegistered {
+            tenant_id: real_owner_scope.tenant_id.clone(),
+            owner: real_owner_scope.user_id.clone(),
+        };
+
+        let failing_store = DeleteInstallationFailingStore::default();
+        failing_store
+            .inner
+            .upsert_manifest(fixture_manifest_record_with_source(
+                REGISTERED_ISOLATION_MANIFEST_TOML,
+                source.clone(),
+                None,
+            ))
+            .await
+            .expect("seed registered manifest");
+        failing_store
+            .inner
+            .upsert_installation(
+                ExtensionInstallation::new(
+                    ExtensionInstallationId::new("acme-mcp-registered")
+                        .expect("valid installation id"),
+                    extension_id.clone(),
+                    ExtensionActivationState::Enabled,
+                    ExtensionManifestRef::new(extension_id, None),
+                    Vec::new(),
+                    chrono::Utc::now(),
+                    InstallationOwner::user(real_owner_scope.user_id.clone()),
+                )
+                .expect("registered installation"),
+            )
+            .await
+            .expect("seed registered installation");
+        // Only the very next `get_manifest` read (the ownership-scope check
+        // inside `remove_locked`) fails; later reads succeed normally.
+        failing_store
+            .fail_next_get_manifest
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        // Also seed the in-memory lifecycle registry, so `remove` reaches
+        // `remove_locked`'s ownership-scope check instead of failing
+        // earlier on "extension is not installed" in the lifecycle package
+        // lookup (`removed_extension_providers`).
+        let manifest = ExtensionManifest::parse(
+            REGISTERED_ISOLATION_MANIFEST_TOML,
+            source,
+            &HostPortCatalog::empty(),
+        )
+        .expect("registered manifest");
+        let root =
+            VirtualPath::new("/system/extensions/acme-mcp-registered").expect("extension root");
+        let package = ExtensionPackage::from_manifest_toml(
+            manifest,
+            root,
+            REGISTERED_ISOLATION_MANIFEST_TOML,
+        )
+        .expect("registered package");
+        let mut lifecycle_registry = ExtensionRegistry::new();
+        lifecycle_registry
+            .insert(package)
+            .expect("lifecycle package");
+
+        let (_dir, port, _active_registry, _failing_store, _trust_policy) =
+            extension_port_with_failing_store(
+                ExtensionRegistry::new(),
+                failing_store,
+                ExtensionLifecycleService::new(lifecycle_registry),
+            );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "acme-mcp-registered")
+                .expect("valid ref");
+
+        let error = port
+            .remove(
+                package_ref,
+                &foreign_tenant_scope,
+                Some(&foreign_tenant_scope.user_id),
+            )
+            .await
+            .expect_err(
+                "a manifest read failure during the ownership check must propagate, not fail open for a foreign-tenant caller",
+            );
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+        // The error must be the injected `get_manifest` read failure from
+        // the ownership-scope check itself, NOT a downstream teardown
+        // error — proving the tenant check actually ran and denied before
+        // any mutation, rather than the read failure being masked as "no
+        // scope to enforce" and letting the foreign caller reach teardown.
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("get manifest failed"),
+            "expected the propagated get_manifest read failure, got: {rendered}"
+        );
+    }
+
     #[tokio::test]
     async fn extension_lifecycle_search_propagates_installation_store_read_error() {
         let (_dir, port, _active_registry, _failing_store, _trust_policy) =
@@ -7859,6 +7992,10 @@ output_schema_ref = "schemas/run.output.json"
         fail_set_activation_enabled: bool,
         fail_get_installation: bool,
         mismatched_get_installation: bool,
+        /// Fail the NEXT `get_manifest` once, then clear — simulates a real
+        /// store I/O failure on one read, distinct from a genuine "no
+        /// manifest row" miss (`Ok(None)`).
+        fail_next_get_manifest: std::sync::atomic::AtomicBool,
         /// #5459 P1: fail the NEXT `upsert_installation` once, then clear —
         /// simulates a mid-install persist failure so the retry can heal.
         fail_next_upsert_installation: std::sync::atomic::AtomicBool,
@@ -7906,6 +8043,14 @@ output_schema_ref = "schemas/run.output.json"
             &self,
             extension_id: &ExtensionId,
         ) -> Result<Option<ExtensionManifestRecord>, ExtensionInstallationError> {
+            if self
+                .fail_next_get_manifest
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(ExtensionInstallationError::InvalidInstallation {
+                    reason: "get manifest failed".to_string(),
+                });
+            }
             self.inner.get_manifest(extension_id).await
         }
 
