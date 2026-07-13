@@ -3141,8 +3141,8 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         crate_name: "ironclaw_host_runtime",
         dependency_name: "ironclaw_skills",
         introduced: "2026-07-09",
-        removes_in: "W5",
-        reason: "host_runtime still wires skill host behavior that should move behind the loop-host boundary",
+        removes_in: "W7",
+        reason: "host_runtime still owns first-party skill management tools and skill URL install limits; remove when kernel consolidation or a dedicated skill-host extraction moves that execution surface out of host_runtime",
     },
     LayerMatrixException {
         crate_name: "ironclaw_capabilities",
@@ -3232,8 +3232,8 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         crate_name: "ironclaw_mcp",
         dependency_name: "ironclaw_extensions",
         introduced: "2026-07-09",
-        removes_in: "W5",
-        reason: "MCP runtime support still exposes extension-host wiring that should move behind the loop-host boundary",
+        removes_in: "W7",
+        reason: "MCP runtime still consumes ExtensionPackage and ExtensionRuntime manifest DTOs; remove when extension runtime descriptors move to a neutral contract or runtime lanes are folded behind the extension-host boundary",
     },
     LayerMatrixException {
         crate_name: "ironclaw_mcp",
@@ -3246,8 +3246,8 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         crate_name: "ironclaw_scripts",
         dependency_name: "ironclaw_extensions",
         introduced: "2026-07-09",
-        removes_in: "W5",
-        reason: "script runtime support still exposes extension-host wiring that should move behind the loop-host boundary",
+        removes_in: "W7",
+        reason: "script runtime still consumes ExtensionPackage and ExtensionRuntime manifest DTOs; remove when extension runtime descriptors move to a neutral contract or runtime lanes are folded behind the extension-host boundary",
     },
     LayerMatrixException {
         crate_name: "ironclaw_scripts",
