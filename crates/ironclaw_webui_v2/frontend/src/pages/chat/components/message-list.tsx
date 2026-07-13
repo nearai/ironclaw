@@ -65,6 +65,7 @@ export function MessageList({
   hasMore,
   onLoadMore,
   onRetryMessage,
+  onDismissMessage,
   threadId,
   logsPath,
   pending = false,
@@ -275,6 +276,7 @@ export function MessageList({
                 key={item.id}
                 message={item.message}
                 onRetry={onRetryMessage}
+                onDismiss={onDismissMessage}
                 threadId={threadId}
               />)
         )}

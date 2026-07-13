@@ -1074,6 +1074,23 @@ export function useChat(threadId) {
     [send, seedThreadMessages, setMessages, threadId],
   );
 
+  // Mark a client-only error bubble dismissed rather than removing it: the id
+  // stays in state so a projection replay (SSE reconnect) hits the dedup
+  // update branch and preserves `dismissed` instead of re-adding the bubble.
+  // Dismissed messages are filtered out of the rendered list.
+  const dismissMessage = React.useCallback(
+    (messageId) => {
+      setMessages((prev) =>
+        prev.map((message) =>
+          message && message.id === messageId
+            ? { ...message, dismissed: true }
+            : message,
+        ),
+      );
+    },
+    [setMessages],
+  );
+
   return {
     // v2-native
     messages,
@@ -1096,6 +1113,7 @@ export function useChat(threadId) {
     dismissOnboardingPairing,
     cancelRun,
     loadMore,
+    dismissMessage,
     // fork-shape compatibility — see comments above
     suggestions: [],
     setSuggestions: noop,

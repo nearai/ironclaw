@@ -5,6 +5,7 @@ import { test } from "vitest";
 import vm from "node:vm";
 
 import { channelConnectionDisplayName } from "../../../lib/channel-connection-events";
+import { filterVisibleMessages } from "./message-types";
 
 function chatSourceForTest() {
   const source = readFileSync(new URL("../chat.tsx", import.meta.url), "utf8");
@@ -121,6 +122,7 @@ function renderChat({
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     channelConnectionDisplayName,
+    filterVisibleMessages,
     setThreadState: (threadId, state) =>
       threadStateUpdates.push({ threadId, state }),
     setTimeout: () => 1,

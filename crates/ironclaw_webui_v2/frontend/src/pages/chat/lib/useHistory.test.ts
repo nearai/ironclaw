@@ -567,6 +567,89 @@ test("mergeFullRefresh anchors preserved runtime bubbles at their original posit
   );
 });
 
+test("mergeFullRefresh keeps a surviving optimistic user bubble in place, not last (issue #16)", () => {
+  // After a run settles the client refetches the timeline and merges with
+  // `preserveClientOnly`. When an optimistic user message did NOT reconcile
+  // against the fresh timeline (its persisted twin is absent), it must stay in
+  // its original position between the persisted rows — not get appended below
+  // later persisted rows, which made an earlier (1:49 PM) message render after
+  // later (1:53 PM) ones.
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  const merged = mergeFullRefresh(
+    [
+      { id: "msg-a", role: "assistant", timestamp: "2026-07-11T13:45:00Z" },
+      { id: "msg-b", role: "assistant", timestamp: "2026-07-11T13:53:00Z" },
+    ],
+    [
+      { id: "msg-a", role: "assistant", timestamp: "2026-07-11T13:45:00Z" },
+      {
+        id: "pending-u1",
+        role: "user",
+        content: "my 1:49 message",
+        isOptimistic: true,
+        timestamp: "2026-07-11T13:49:00Z",
+      },
+    ],
+    { preserveClientOnly: true },
+  );
+
+  assert.equal(merged.map((m) => m.id).join(","), "msg-a,pending-u1,msg-b");
+});
+
+test("mergeFullRefresh inserts an unanchored earlier optimistic bubble before the next persisted row", () => {
+  // An optimistic bubble with no *preceding* anchored row but a following one
+  // must render before that follower (chronological), not drop to the bottom.
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  const merged = mergeFullRefresh(
+    [
+      { id: "msg-a", role: "assistant", timestamp: "2026-07-11T13:45:00Z" },
+      { id: "msg-b", role: "assistant", timestamp: "2026-07-11T13:53:00Z" },
+    ],
+    [
+      {
+        id: "pending-early",
+        role: "user",
+        content: "earlier optimistic message",
+        isOptimistic: true,
+        timestamp: "2026-07-11T13:40:00Z",
+      },
+      { id: "msg-a", role: "assistant", timestamp: "2026-07-11T13:45:00Z" },
+    ],
+    { preserveClientOnly: true },
+  );
+
+  assert.equal(merged.map((m) => m.id).join(","), "pending-early,msg-a,msg-b");
+});
+
+test("mergeFullRefresh appends a trailing optimistic bubble with no anchor on either side", () => {
+  // No preceding AND no following anchored row → genuinely trailing → append.
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  const merged = mergeFullRefresh(
+    [{ id: "msg-b", role: "assistant", timestamp: "2026-07-11T13:53:00Z" }],
+    [
+      {
+        id: "pending-trailing",
+        role: "user",
+        content: "trailing optimistic message",
+        isOptimistic: true,
+        timestamp: "2026-07-11T13:59:00Z",
+      },
+    ],
+    { preserveClientOnly: true },
+  );
+
+  assert.equal(merged.map((m) => m.id).join(","), "msg-b,pending-trailing");
+});
+
 test("mergeFullRefresh carries optimistic timestamps onto confirmed messages", () => {
   const context = { globalThis: {}, React: createReactStub() };
   vm.runInNewContext(useHistorySourceForTest(), context);
