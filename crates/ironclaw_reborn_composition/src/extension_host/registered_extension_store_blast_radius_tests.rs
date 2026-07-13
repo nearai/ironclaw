@@ -33,7 +33,9 @@ use crate::extension_host::available_extensions::{
 use crate::extension_host::extension_lifecycle::{
     ActiveExtensionPublisher, RebornLocalExtensionManagementPort, restore_extension_lifecycle_state,
 };
-use crate::extension_host::registered_extension_store::resolve_registered_for_scope;
+use crate::extension_host::registered_extension_store::{
+    migrate_legacy_owner_layout, resolve_registered_for_scope,
+};
 use crate::extension_host::registered_test_support::{
     fresh_boot_fixture, mounted_local_filesystem, seed_registered_installation,
 };
@@ -89,6 +91,14 @@ impl RootFilesystem for FailListDirFilesystem {
 
     async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
         self.inner.read_file(path).await
+    }
+
+    async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        self.inner.write_file(path, bytes).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
     }
 }
 
@@ -753,5 +763,122 @@ url = "http://127.0.0.1:9/mcp"
         1,
         "the owner's registered directory must be loaded once per boot, not once per \
          catalog-miss installation (RED before batching: this was 2)"
+    );
+}
+
+const MIGRATION_GOOD_OWNER_USER_ID: &str = "b7777777-7fe5-474c-965a-67cb69df3d11";
+const MIGRATION_BROKEN_OWNER_USER_ID: &str = "c8888888-7fe5-474c-965a-67cb69df3d12";
+const MIGRATION_GOOD_EXTENSION_ID: &str = "good-legacy-mcp";
+const MIGRATION_BROKEN_EXTENSION_ID: &str = "broken-legacy-mcp";
+const MIGRATION_GOOD_MANIFEST_TOML: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "good-legacy-mcp"
+name = "Good Legacy MCP"
+version = "0.1.0"
+description = "Healthy sibling owner's legacy descriptor (migration blast-radius fixture)"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "http://127.0.0.1:9/mcp"
+"#;
+const MIGRATION_BROKEN_MANIFEST_TOML: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "broken-legacy-mcp"
+name = "Broken Legacy MCP"
+version = "0.1.0"
+description = "Legacy descriptor whose owner directory fails to list (migration blast-radius fixture)"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "http://127.0.0.1:9/mcp"
+"#;
+
+/// `migrate_legacy_owner_layout`'s per-owner error swallow
+/// (`tracing::debug!` with no propagation, no `continue`-vs-abort branch)
+/// was untested: nothing pinned that one owner's `list_dir` failure during
+/// legacy-layout migration is skip-and-logged rather than aborting the
+/// migration pass for every other owner. Injects a `list_dir` failure on
+/// exactly the broken owner's legacy directory (reusing `FailListDirFilesystem`
+/// from `resolve_registered_for_scope_distinguishes_missing_from_read_failure`
+/// above) and asserts the sibling (good) owner's descriptor still migrates to
+/// the tenant-scoped path despite it.
+#[tokio::test]
+async fn migration_continues_after_one_owner_io_failure() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage_root = dir.path().join("local-dev");
+    std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
+
+    // Seed BOTH owners in the pre-tenant (legacy) layout: no tenant segment
+    // between `registered` and the owner directory.
+    let good_legacy_dir = storage_root
+        .join("system/extensions/registered")
+        .join(MIGRATION_GOOD_OWNER_USER_ID)
+        .join(MIGRATION_GOOD_EXTENSION_ID);
+    std::fs::create_dir_all(&good_legacy_dir).expect("good owner legacy dir");
+    std::fs::write(
+        good_legacy_dir.join("manifest.toml"),
+        MIGRATION_GOOD_MANIFEST_TOML,
+    )
+    .expect("write good owner legacy manifest");
+
+    let broken_legacy_dir = storage_root
+        .join("system/extensions/registered")
+        .join(MIGRATION_BROKEN_OWNER_USER_ID)
+        .join(MIGRATION_BROKEN_EXTENSION_ID);
+    std::fs::create_dir_all(&broken_legacy_dir).expect("broken owner legacy dir");
+    std::fs::write(
+        broken_legacy_dir.join("manifest.toml"),
+        MIGRATION_BROKEN_MANIFEST_TOML,
+    )
+    .expect("write broken owner legacy manifest");
+
+    let local_filesystem = mounted_local_filesystem(&storage_root);
+    // `migrate_legacy_owner_dir` lists exactly this path for the broken
+    // owner — inject the failure there, leaving the top-level registered
+    // root listing and the good owner's own directory untouched.
+    let broken_owner_legacy_root = VirtualPath::new(format!(
+        "/system/extensions/registered/{MIGRATION_BROKEN_OWNER_USER_ID}"
+    ))
+    .expect("valid virtual path");
+    let filesystem = FailListDirFilesystem {
+        inner: local_filesystem,
+        fail_path: broken_owner_legacy_root,
+    };
+
+    migrate_legacy_owner_layout(&filesystem).await.expect(
+        "one owner's list_dir failure during legacy migration must be skip-and-logged, \
+             never abort the whole migration pass",
+    );
+
+    let migrated_good_manifest = storage_root
+        .join("system/extensions/registered")
+        .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
+        .join(MIGRATION_GOOD_OWNER_USER_ID)
+        .join(MIGRATION_GOOD_EXTENSION_ID)
+        .join("manifest.toml");
+    assert!(
+        migrated_good_manifest.is_file(),
+        "the sibling (good) owner's descriptor must still migrate to the tenant-scoped path \
+         despite the broken owner's list_dir failure"
+    );
+
+    // The broken owner's descriptor must be left exactly where it was — the
+    // failure occurred before any file was moved, so nothing should have
+    // been touched or partially migrated for it.
+    assert!(
+        broken_legacy_dir.join("manifest.toml").is_file(),
+        "the broken owner's legacy descriptor must remain untouched after the skipped migration"
+    );
+    assert!(
+        !storage_root
+            .join("system/extensions/registered")
+            .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
+            .join(MIGRATION_BROKEN_OWNER_USER_ID)
+            .exists(),
+        "the broken owner's descriptor must not have been migrated"
     );
 }
