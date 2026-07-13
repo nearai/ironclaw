@@ -75,7 +75,11 @@ Rules — kept short on purpose:
 
 - [ ] REC-1 Compile once → persisted resolved record + manifest digest; all
   production projection reads the record (no raw-TOML reparse outside the
-  compiler and migration).
+  compiler and migration). — PARTIAL: the generic host's production loader
+  rebuilds packages from the persisted resolved contract, never the raw
+  TOML (`CompositionExtensionLoader::load`, `generic_host.rs` —
+  `ctx.resolved.to_internal(source)`; manifest-source re-checks come from
+  the persisted record). A repo-wide no-reparse scan/gate is still owed.
 - [x] REC-2 Restart restores extensions from persisted records with the
   package source unavailable. — `records_rehydrate_from_resolved_in_memory` /
   `records_rehydrate_from_resolved_on_libsql`
@@ -90,7 +94,10 @@ Rules — kept short on purpose:
   a byte-identical no-op.
 - [ ] REC-4 Upgrade diff classifies equal / narrowed / widened contracts;
   widening (scopes, egress, effects, credentials, route) requires approval
-  before activation; approval denial leaves the old generation active.
+  before activation; approval denial leaves the old generation active. —
+  NOT BUILT: upgrades run through the lifecycle facade's install/update
+  path without a contract diff; the classify + widen-approval legs remain
+  open (post-P6).
 
 ## 3. Binding, loaders, lifecycle (LIFE)
 
@@ -157,7 +164,11 @@ Rules — kept short on purpose:
   (`removal_context_reports_other_active_extensions_for_shared_vendor`); the
   shared-vendor grant policy itself is enforced by the injected auth-revoke
   hook, proven end-to-end with the P3 auth engine.
-- [ ] LIFE-13 Conversation/LLM history survives extension removal.
+- [ ] LIFE-13 Conversation/LLM history survives extension removal. — No
+  direct pin yet: removal runs the vendor-blind removable-channel cleanup
+  (grants, integration state, identity bindings — `3812d9fe3`) and never
+  touches turn/LLM history stores by construction; a named
+  history-survives-removal assertion at the harness tier remains owed.
 - [x] LIFE-14 Duplicate capability id or ingress route across active
   extensions fails activation.
   — `duplicate_capability_across_extensions_fails_activation`
@@ -175,10 +186,28 @@ Rules — kept short on purpose:
   (`tests/lifecycle_contract.rs`): a load failure falls to Installed with a
   typed error and does not block the valid restore.
 - [ ] LIFE-17 Full lifecycle (install → configure → activate → remove) passes
-  on both DBs through the integration harness with the acme fixture.
-- [ ] LIFE-18 Editing channel config while `Active` triggers an automatic
+  on both DBs through the integration harness with the acme fixture. —
+  PARTIAL: the harness leg exists single-backend
+  (`acme_fixture_lifecycle_dispatches_from_the_active_snapshot`,
+  `tests/integration/extension_runtime.rs`: install → activate → snapshot
+  dispatch → remove through model tool calls); install persistence is
+  matrixed over libSQL + real Postgres
+  (`extension_install_persists_across_storage_backends`). The configure
+  leg and the both-DB matrix of the FULL lifecycle remain owed.
+- [x] LIFE-18 Editing channel config while `Active` triggers an automatic
   deactivate → reactivate; adapters observe the new values; no bespoke
-  reconfigure state exists.
+  reconfigure state exists. — §6.5 cycle: `ChannelConfigService::save` →
+  `ChannelConfigReactivation::reactivate_if_active`
+  (`extension_lifecycle.rs`: generic-host deactivate →
+  `publish_to_generic_host` with the freshly stored config). Pins:
+  `save_triggers_the_reactivate_cycle_only_when_something_changed` +
+  `reactivation_failure_surfaces_as_a_typed_error` (`channel_config.rs`),
+  and the integration proof — the §6.5 leg inside
+  `telegram_update_becomes_a_turn_and_a_coordinated_reply`
+  (`tests/integration/extension_delivery.rs`) edits
+  `telegram_webhook_url` while Active and asserts the rebuilt adapter
+  re-registers the NEW webhook URL over recorded egress. No reconfigure
+  state exists — the cycle reuses the standard deactivate/activate legs.
 
 ## 4. Tool dispatch (TOOL)
 
@@ -214,12 +243,34 @@ Rules — kept short on purpose:
   `dispatch_failed` (selection succeeded when the binding was constructed;
   the backend is what's missing) — pinned in
   `unconfigured_lane_fails_missing_backend_and_releases_prepared_reservation`.
-- [ ] TOOL-4 Credential injection derives from the resolved declaration; an
-  adapter cannot reach an undeclared credential, egress host, or port.
+- [x] TOOL-4 Credential injection derives from the resolved declaration; an
+  adapter cannot reach an undeclared credential, egress host, or port. —
+  Channel side: the declaration-derived `[[channel.egress]]` policy is
+  pinned at the `RestrictedEgress` seam by
+  `undeclared_host_is_rejected_before_any_transport_activity`,
+  `non_https_and_undeclared_method_are_rejected_before_transport`, and
+  `undeclared_credential_handle_is_rejected`
+  (`crates/ironclaw_extension_host/src/egress.rs`). Tool side: TOOL-7's
+  `slack_tools_invoke_through_the_generic_dispatcher_with_recorded_egress`
+  proves declaration-staged network policy + token injection (every
+  recorded request targets the declared `slack.com` host with the
+  injected bearer).
 - [ ] TOOL-5 Missing credential raises the generic auth gate and resumes after
-  the engine completes (caller-level test).
+  the engine completes (caller-level test). — PARTIAL: the raise leg is
+  pinned at the harness tier
+  (`runtime_401_after_injection_populates_provider_credential_requirement`,
+  `github_auth_gate_denied_resume_completes_without_loop`,
+  `tests/integration/auth_gate.rs`); the resume-after-engine leg is pinned
+  composed-tier (`vendor_oauth_callback_resumes_blocked_turn_gate`,
+  `local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator`).
+  One harness-tier missing-credential → gate → engine → tool-resumes
+  scenario remains (same open leg as AUTH-14).
 - [ ] TOOL-6 WASM and MCP lanes invoke through `ToolAdapter` with existing
-  result/event semantics.
+  result/event semantics. — PARTIAL: the WASM lane is proven through
+  `ToolAdapter` (TOOL-7 plus the binder contract suite,
+  `crates/ironclaw_host_runtime/src/services/tests/extension_tool_binder.rs`);
+  the discovered-MCP invoke through the binder remains (TEST-2's open
+  leg).
 - [x] TOOL-7 The five real Slack tools activate and invoke through the generic
   dispatcher (integration, recorded egress). —
   `slack_tools_invoke_through_the_generic_dispatcher_with_recorded_egress`
@@ -228,12 +279,25 @@ Rules — kept short on purpose:
   snapshot-first (the registry lane is builtin-restricted) through the WASM
   lane with staged policy + token injection; every recorded transport
   request targets `slack.com` and carries the injected bearer token.
-- [ ] TOOL-8 `slack.send_message` remains an explicit side-effect tool; final
-  replies never route through it.
+- [x] TOOL-8 `slack.send_message` remains an explicit side-effect tool; final
+  replies never route through it. — `slack.send_message` stays a declared
+  capability (`ironclaw_first_party_extensions/assets/slack/manifest.toml`);
+  final replies ride the delivery coordinator path, not the tool:
+  `slack_final_reply_flows_through_the_real_delivery_coordinator`
+  (`tests/integration/extension_delivery.rs`) and the P6 §10 e2e reply-out
+  leg (`test_reborn_slack_channel_e2e.py`) both observe the coordinated
+  reply landing on `chat.postMessage` via host-side channel egress with no
+  tool invocation in the path.
 - [ ] TOOL-9 MCP discovery is loader-owned (`ToolAdapter` has no discovery
   method); validated tool surfaces publish atomically; a refresh replaces the
   set completely or not at all; discovered tools run the same dispatcher
-  pipeline as static ones.
+  pipeline as static ones. — PARTIAL: structurally loader-owned —
+  `ToolAdapter` has no discovery method; hosted-MCP discovery runs at
+  activation via `discover_hosted_mcp_package` (`mcp_discovery.rs`) with
+  staged connection authority (`stage_hosted_mcp_discovery_authority`,
+  `extension_lifecycle.rs`), and the discovered set publishes through the
+  same snapshot activation as static tools. The all-or-nothing refresh
+  pin is still owed.
 - [x] TOOL-10 Host built-in capabilities resolve through the same dispatcher
   pipeline; an extension capability id colliding with a built-in fails
   activation. — built-ins resolve through the registry-lane resolver in the
@@ -318,7 +382,10 @@ Rules — kept short on purpose:
   `legal_transitions_only`, `auth_account_state_wire_form_matches_str`;
   re-exported by `ironclaw_extension_host::state`); the engine +
   `project_auth_account_state` drive it; wire exposure of the projection
-  (accounts list / extension surfaces) is still pending (P6 UI work).
+  is still pending — after the P6 S5 frontend cutover the extensions wire
+  still carries `connected: Option<bool>` plus an `activation_status`
+  string (`reborn_services/types.rs`), not the shared enum; the enum wire
+  projection remains open.
 - [x] AUTH-10 Flow TTL expiry and vendor denial land in `disconnected` with
   a typed reason; refresh failure lands in `expired`. —
   `projection_prefers_live_flow_then_account_status`
@@ -328,7 +395,11 @@ Rules — kept short on purpose:
   — probe + storage + state machine proven engine-tier
   (`api_key_probe_validates_through_host_egress_before_storing`,
   `api_key_probe_failure_stores_nothing`, `api_key_without_probe_stores_directly`,
-  `auth_engine_contract.rs`); recipe-driven form rendering is P6 frontend work.
+  `auth_engine_contract.rs`); the P6 S5 configure modal now renders
+  wire-projected secret/field descriptors generically (`c6bb695ec`,
+  `configure-modal.tsx` — manual-token entry rides the generic form), but
+  an api_key-recipe → wire field projection with its own pin is still
+  owed before this row ticks.
 - [x] AUTH-12 All five current vendors (Slack, Google, Notion, GitHub,
   NEAR AI) are expressed as recipes and pass the engine suite as table rows —
   no vendor-specific test suite exists. — rows loaded from the real bundled
@@ -354,16 +425,24 @@ Rules — kept short on purpose:
   callback→coordinator resume is pinned by
   `local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator`
   (`crates/ironclaw_reborn_composition/src/factory/auth_tests.rs`). The
-  Slack-package blocked-TOOL leg through the integration harness needs the P4
-  channel wiring (the harness has no Slack OAuth client credentials seam yet).
+  client-credentials seam now exists generically — `[auth.slack]`
+  `client_credentials` resolve through `[channel.config]` (`4bc633197`) —
+  and the full Slack personal-OAuth connect against production serve is
+  proven end-to-end by the P6 §10 e2e
+  (`tests/e2e/scenarios/test_reborn_slack_channel_e2e.py`: setup →
+  oauth/start → `{provider}` callback → flow Completed → credential-gated
+  activation). The blocked-TOOL → gate → callback → tool-resumes leg
+  through the integration harness is still owed.
 - [ ] AUTH-15 Engine flow/grant persistence passes on both DBs. — PARTIAL:
   the engine reuses the backend-generic `FilesystemAuthProductServices`
   store; the connect flow is pinned on the in-memory backend and on a real
   libSQL root filesystem (`oauth_connect_flow_persists_credential_account`,
   `oauth_connect_flow_persists_credential_account_on_libsql`,
   `tests/integration/oauth_connect.rs`). A direct Postgres-rooted leg is
-  still owed (the store has no backend-specific code; the leg needs a
-  Postgres root-filesystem bundle in test support).
+  still owed (the store has no backend-specific code; the harness now
+  carries a real-Postgres lane — `StorageMode::Postgres`, used by
+  `extension_install_persists_across_storage_backends` — so the remaining
+  work is wiring a connect-flow case onto it).
 - [x] AUTH-16 The provider string multiplexor, provider spec constants, and
   Slack OAuth branches are deleted. — `MultiplexAuthProviderClient` /
   `compose_provider_clients`, `HostOAuthProviderSpec`, `TokenResponseShape`,
@@ -603,7 +682,13 @@ Rules — kept short on purpose:
   triggered-delivery hook replaced every lane surface; the H.3/H.4 folds
   (`channel_state_folds.rs`) carry retired durable state forward.
 - [ ] DEL-2 `ironclaw_slack_v2_adapter` and `ironclaw_telegram_v2_adapter` are
-  folded into their extension crates and removed from the workspace.
+  folded into their extension crates and removed from the workspace. —
+  OWNER CALL (P6): the fold ran in the opposite direction — the lane's
+  vendor glue folded INTO `ironclaw_slack_v2_adapter`, making it the
+  de-facto extension crate (adapter + codecs + preference-target codec);
+  the pure crate rename to `ironclaw_slack_extension` /
+  `ironclaw_telegram_extension` is deferred to P7 (the deletion-gate
+  crate lists already reserve both names).
 - [x] DEL-3 `serve_slack.rs` and the `slack-v2-host-beta` cargo feature are
   deleted; no channel-specific config type remains in
   `ironclaw_reborn_config`. — `SlackSection`/`SlackChannelRouteSection` are
@@ -612,23 +697,49 @@ Rules — kept short on purpose:
   keeps the `xoxb-`/`xoxp-`/`xapp-` prefixes.
 - [ ] DEL-4 Slack cleanup constants in product workflow and Slack connection
   copy in lifecycle are deleted (standard pipeline + manifest display data).
+  — PARTIAL: no non-test slack constant remains in
+  `ironclaw_product_workflow` (removal cleanup rides the vendor-blind
+  removable-channel path); the Slack connection copy still lives in
+  `channel_connection_requirement` (`extension_lifecycle.rs` — a
+  hardcoded `slack` OAuth branch with inline copy). It moves to manifest
+  display data before this row ticks.
 - [ ] DEL-5 The old `ProductAdapter` metadata getters and the unused registry
-  runtime projection are deleted. (P2 deleted the projection —
-  `ProductAdapterRuntimeEntry` / `list_enabled_product_adapter_entries` and
-  their read-path validation are gone from
-  `crates/ironclaw_product_adapter_registry`; the retiring `ProductAdapter`
-  metadata getters go when their P4/P5 callers cut over.)
-- [ ] DEL-6 Composition constructs no concrete extension and mounts no
-  concrete route (architecture gate).
+  runtime projection are deleted. — PARTIAL: both projection halves are
+  gone (P2 deleted `ProductAdapterRuntimeEntry` /
+  `list_enabled_product_adapter_entries` from
+  `crates/ironclaw_product_adapter_registry`; P6 deleted the unused
+  registry runtime projection, `59893460e`). The `ProductAdapter`
+  metadata getters (`adapter_id` / `installation_id` / `surface_kind` /
+  `capabilities`, `crates/ironclaw_product_adapters/src/adapter.rs`)
+  still stand — remaining consumers are `ironclaw_wasm_product_adapters`
+  and `product_workflow::outbound_delivery`; they retire with the
+  `ProductAdapter` trait itself (P7).
+- [x] DEL-6 Composition constructs no concrete extension and mounts no
+  concrete route (architecture gate). — The lane deletion removed the last
+  concrete construction and route mount from composition (`serve_slack`
+  and `with_slack_channel_routes` are gone; the CLI supplies channel
+  adapters through `RebornBuildInput::with_channel_extension_bindings`).
+  Gates green: `reborn_generic_code_names_no_concrete_extension` +
+  `concrete_extension_crates_link_only_from_the_binary_and_tests`
+  (`crates/ironclaw_architecture/tests/reborn_extension_specificity.rs`,
+  empty `CONCRETE_DEPENDENCY_EXCEPTIONS`).
 - [x] DEL-7 Only `ironclaw_reborn_cli` and tests depend on concrete extension
   crates (`cargo metadata` gate). — `CONCRETE_DEPENDENCY_EXCEPTIONS` is
   empty; composition keeps `ironclaw_slack_v2_adapter` as a dev-dependency
   only (the sanctioned test linkage); the CLI supplies the Slack channel
   adapter + extras through `RebornBuildInput::with_channel_extension_bindings`.
-- [ ] DEL-8 The concrete-name scanner allowlist is empty.
-- [ ] DEL-9 `check-generic-without-concrete.sh` passes in CI: every generic
+- [ ] DEL-8 The concrete-name scanner allowlist is empty. — Not yet: the
+  shrink-only `ALLOWLIST` (`reborn_extension_specificity.rs`) carries 200
+  `(path, term)` entries after P6; every entry for the deleted
+  `composition/src/slack/**` tree is gone (stale entries fail the gate),
+  and the S5 i18n cut removed the 11 locale slack entries. Target stays
+  empty-at-P7.
+- [x] DEL-9 `check-generic-without-concrete.sh` passes in CI: every generic
   crate's dependency tree is free of concrete extension crates and its tests
-  pass — the deletion test.
+  pass — the deletion test. — `bash scripts/ci/check-generic-without-concrete.sh`
+  green post-deletion with `TEMPORARY_EXCEPTIONS` empty (63 generic
+  crates checked; the P6 S6 lane deletion removed the composition→slack
+  edge; full per-crate test runs included).
 - [x] DEL-10 Telegram runs as a real installed package (manifest +
   `activate()` webhook registration) — the addition test proven by the second
   production channel. — Adapter half (P4):
@@ -654,19 +765,56 @@ Rules — kept short on purpose:
 
 - [ ] UI-1 The wire carries surface keys, the installation state enum, the
   auth state enum, and config field descriptors; one golden fixture pins it.
+  — PARTIAL: the wire carries surfaces (`RebornExtensionSurface`) and
+  setup field/secret descriptors (`reborn_services/types.rs`,
+  `RebornExtensionSetupField`/`RebornExtensionSetupSecret`), but the
+  installation state rides as an `activation_status` string and auth
+  state as `connected: Option<bool>` — the two shared enums on the wire
+  and the single golden fixture remain (see AUTH-9).
 - [ ] UI-2 The channels tab renders every channel surface with the same
   components; the acme fixture channel renders, configures, and connects with
-  no frontend source change.
-- [ ] UI-3 Config forms are schema-driven; secret fields mask and never echo
-  stored values.
-- [ ] UI-4 Connect/Reconnect/Configure/Remove affordances derive from the two
+  no frontend source change. — PARTIAL: since P6 S5 every channel surface
+  renders through the same generic sections — connect sections derive
+  solely from the wire connection strategy (`c6bb695ec`, channels-tab +
+  configure-modal). The acme renders/configures/connects browser proof
+  (no frontend source change) remains owed.
+- [x] UI-3 Config forms are schema-driven; secret fields mask and never echo
+  stored values. — The configure modal renders wire-projected
+  `[channel.config]` field + secret descriptors generically
+  (`c6bb695ec`; `configure-modal.tsx`); secret inputs render
+  `type="password"` and the wire is presence-only — stored values never
+  echo: `save_routes_secrets_to_the_scoped_store_and_status_reports_presence_only`
+  (`channel_config.rs`) and the presence-only secrets projection in
+  `lifecycle_setup.rs` (secret channel-config fields surface as
+  `provided` flags only).
+- [x] UI-4 Connect/Reconnect/Configure/Remove affordances derive from the two
   state enums + config completeness — no per-extension logic (source-scan
-  test).
-- [ ] UI-5 Slack setup panel, channel picker, and their API modules are
-  deleted; no concrete package-id branch remains in frontend source.
-- [ ] UI-6 The existing Python e2e harness covers: configure → connect →
+  test). — Affordances derive from the wire connect strategy + lifecycle
+  state with zero per-extension logic; pinned by the repinned assets.rs
+  source-scan (`5208f7df0`: the channels tab and configure modal carry no
+  concrete package-id condition, pairing-vs-OAuth routing derives from
+  the wire connect strategy, the post-OAuth auto-activate is generic).
+  Note: the wire currently types those states as
+  `activation_status`/`connected` rather than the two shared enums —
+  tracked under UI-1/AUTH-9.
+- [x] UI-5 Slack setup panel, channel picker, and their API modules are
+  deleted; no concrete package-id branch remains in frontend source. —
+  slack-setup-panel, slack-channel-picker, slack-setup-api,
+  slack-channels-api (+ tests) deleted (`c6bb695ec`); the slack i18n
+  blocks died across all 11 locales (`345c54135`); the source-scan pin
+  keeps the four files deleted and the frontend free of concrete
+  package-id branches (`5208f7df0`).
+- [x] UI-6 The existing Python e2e harness covers: configure → connect →
   inbound message → reply → remove for one real channel; no new e2e harness is
-  added.
+  added. — `tests/e2e/scenarios/test_reborn_slack_channel_e2e.py` over
+  the EXISTING harness (conftest fixtures + `fake_slack_api.py` extended
+  with `oauth.v2.access`; no new harness): install + `[channel.config]`
+  setup POST → real product-auth OAuth connect against the fake vendor
+  through the loopback-only rewrite seam → credential-gated activation →
+  v0-signed inbound DM on the canonical generic route → coordinated
+  reply on `chat.postMessage` (+ the MIG-5 alias round trip) → remove
+  (no further admission, no further delivery). Green on the standard
+  `webui-v2-beta` binary.
 
 ## 10. Migration and compatibility (MIG)
 
@@ -685,13 +833,27 @@ Rules — kept short on purpose:
   + `fold_skips_malformed_records_and_operator_owned_values` (+ the libSQL
   flavor). Dry-run posture: the fold only runs on the local-runtime build
   path; the `MigrationDryRun` profile never executes it.
-- [ ] MIG-3 Slack state roots migrate to generic scoped state; no slack-named
+- [x] MIG-3 Slack state roots migrate to generic scoped state; no slack-named
   root is read outside migration code. — The H.4 fold (same module/tests as
   MIG-2) moves identities, channel routes, and DM targets onto the generic
-  roots; the second half ("no slack-named root is READ outside migration
-  code") lands when the slack lane is deleted (P6 S6 steps 4-6).
-- [ ] MIG-4 Old installation lifecycle records backfill into the standard
-  state enum.
+  roots; the P6 S6 lane deletion removed every non-migration reader. The
+  only slack-named root reads left are the fold inputs and the H.4b
+  sanctioned legacy WORKFLOW storage root table, both homed in the
+  migration module (`channel_state_folds.rs`;
+  `sanctioned_legacy_roots_cover_only_the_retired_lane` pins the table to
+  exactly the retired lane's roots); the table shrinks to nothing with
+  the alias retirement.
+- [x] MIG-4 Old installation lifecycle records backfill into the standard
+  state enum. — The durable store's binary activation state
+  (`ExtensionActivationState::Enabled`/`Disabled`) backfills into the
+  generic host's standard seven-state records at every boot: the facade
+  restore (`restore_extension_lifecycle_state`) plus the host hydration
+  (`build_generic_extension_host`). Pinned by
+  `boot_hydration_activates_enabled_and_skips_disabled_installations`
+  (`crates/ironclaw_reborn_composition/src/extension_host/generic_host.rs`):
+  durable Enabled → an Active record in the first published generation
+  (snapshot presence + capability resolves); durable Disabled → inactive
+  after restart.
 - [x] MIG-5 `/webhooks/slack/events` forwards to the canonical route for one
   release; a removal note names the release that deletes it. — The legacy
   path is an internal forwarding alias into the generic router, homed in the
@@ -701,10 +863,23 @@ Rules — kept short on purpose:
   REMOVAL NOTE: delete the slack alias entry (and the module when the table
   empties) in the first release after the P4 cutover ships; vendors
   reconfigure their Events URL to `/webhooks/extensions/slack/events`.
-- [ ] MIG-6 OAuth callback URLs are unchanged (no vendor reconfiguration
-  needed) — verified by the route tests.
+- [x] MIG-6 OAuth callback URLs are unchanged (no vendor reconfiguration
+  needed) — verified by the route tests. — The
+  `/api/reborn/product-auth/oauth/{provider}/callback` shape is unchanged
+  (AUTH-13's pins: `vendor_oauth_callback_completes_a_started_flow`,
+  `product_auth/serve/mod.rs`; the google/slack callback URL tests in
+  `tests/webui_v2_product_auth.rs`), and the P6 §10 e2e drives the same
+  URL against production serve
+  (`test_reborn_slack_channel_e2e.py`).
 - [ ] MIG-7 Migrations are idempotent (second run is a no-op) and skip
-  malformed records with a logged reason, on both DBs.
+  malformed records with a logged reason, on both DBs. — PARTIAL:
+  idempotence + malformed-skip are pinned
+  (`fold_moves_setup_state_roots_onto_generic_homes_and_second_run_is_a_noop`,
+  `fold_skips_malformed_records_and_operator_owned_values`) and the fold
+  runs against a real libSQL root filesystem
+  (`fold_runs_against_the_libsql_root_filesystem`). The folds are
+  `RootFilesystem`-generic with no backend-specific code; the
+  Postgres-rooted flavor is still owed (same posture as AUTH-15).
 
 ## 11. Testing and gates (TEST)
 
@@ -735,7 +910,13 @@ Rules — kept short on purpose:
   integration proofs drive slack + telegram in
   `tests/integration/extension_delivery.rs`). Remaining: the acme connect
   leg and an acme-through-the-coordinator outbound row if P6 keeps acme as
-  the invented-vendor canary.)
+  the invented-vendor canary. P6 status: acme also runs the TEST-1
+  conformance contract
+  (`acme_channel_adapter_satisfies_the_conformance_contract`) and the
+  durable ingress admission/replay proof
+  (`tests/integration/extension_ingress.rs`); the full
+  configure → connect → deliver e2e is proven with the real slack package
+  (UI-6) rather than acme — the acme connect leg stays open.)
 - [x] TEST-5 Slack and Telegram each have exactly one inbound and one outbound
   integration proof; protocol details are unit-tested inside their crates. —
   One scenario per channel drives BOTH halves through the production mount
@@ -757,13 +938,32 @@ Rules — kept short on purpose:
 
 ## 12. Release (REL)
 
-- [ ] REL-1 Every item above is checked with named evidence.
+- [ ] REL-1 Every item above is checked with named evidence. — Open rows
+  remain (see the unticked items; each carries an honest status note as
+  of P6).
 - [ ] REL-2 `cargo fmt`, `cargo clippy` (zero warnings), `cargo test`
   (workspace + integration features), architecture tests, and frontend tests
-  pass.
+  pass. — P6 branch status: `cargo fmt` clean; CI-exact
+  `cargo clippy --all --tests --examples --all-features -- -D warnings`
+  raw exit 0; composition full suite
+  (`test-support,webui-v2-beta,libsql` — 1113 lib tests + all targets),
+  `ironclaw_architecture`, `ironclaw_network`, CLI (`webui-v2-beta`),
+  config, and `ironclaw_webui_v2 --all-features` suites green; the
+  delivery/ingress/runtime/oauth-connect integration suites green with
+  Docker (real Postgres lane included); the P6 §10 Python e2e green.
+  The FULL workspace `cargo test` sweep and the frontend JS suites were
+  not run here — this row ticks at release, not per-phase.
 - [ ] REL-3 Both-DB integration lanes ran against a real PostgreSQL (a skip is
-  a failure).
+  a failure). — PARTIAL: the harness's real-Postgres lane ran here
+  (`StorageMode::Postgres` via `extension_install_persists_across_storage_backends`,
+  Docker/testcontainers); the remaining Postgres-rooted legs are itemized
+  under AUTH-15 and MIG-7.
 - [ ] REL-4 `docs/reborn/contracts/*`, the `reborn-extension-surfaces` skill,
-  `FEATURE_PARITY.md`, and `CHANGELOG.md` describe the shipped system.
+  `FEATURE_PARITY.md`, and `CHANGELOG.md` describe the shipped system. —
+  Not verified in P6; refresh at release (the skill still describes the
+  pre-deletion lane in places).
 - [ ] REL-5 The deletion test (DEL-9) and the addition proof (DEL-10) both
-  hold at the release commit.
+  hold at the release commit. — Both hold locally at the P6 head (DEL-9
+  script green with full per-crate tests; DEL-10's
+  `telegram_update_becomes_a_turn_and_a_coordinated_reply` green in the
+  delivery suite); the same-CI-run pairing at the release commit remains.
