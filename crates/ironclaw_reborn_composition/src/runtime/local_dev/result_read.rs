@@ -399,18 +399,28 @@ fn parse_result_read_input(
             ));
         }
     };
-    let max_bytes = object.get("max_bytes").and_then(serde_json::Value::as_u64);
-    let max_bytes = match max_bytes
+    let max_bytes_value = object.get("max_bytes");
+    let max_bytes = match max_bytes_value
+        .and_then(serde_json::Value::as_u64)
         .filter(|value| (RESULT_READ_MIN_BYTES..=RESULT_READ_MAX_BYTES).contains(value))
     {
         Some(value) => value,
         None => {
-            let received = object.get("max_bytes").map(|value| value.to_string());
+            // Absent is `MissingRequired` (matching `result_ref`/`offset`
+            // above); present-but-out-of-range or wrong-typed stays
+            // `InvalidValue` -- the allowed-range prose applies to both.
+            let (code, received) = match max_bytes_value {
+                None => (DispatchInputIssueCode::MissingRequired, None),
+                Some(value) => (
+                    DispatchInputIssueCode::InvalidValue,
+                    Some(value.to_string()),
+                ),
+            };
             return Err(invalid_input_failure(
                 "result_read max_bytes is outside the allowed range",
                 Some(CapabilityInputIssue {
                     path: "max_bytes".to_string(),
-                    code: DispatchInputIssueCode::InvalidValue,
+                    code,
                     expected: Some(format!("{RESULT_READ_MIN_BYTES}..={RESULT_READ_MAX_BYTES}")),
                     received,
                     schema_path: Some("properties/max_bytes".to_string()),

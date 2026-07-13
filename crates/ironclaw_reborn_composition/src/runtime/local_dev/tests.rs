@@ -3076,6 +3076,18 @@ mod tests {
                 }),
             ),
             (
+                "missing max_bytes",
+                serde_json::json!({"result_ref": valid_ref, "offset": 0}),
+                "result_read max_bytes is outside the allowed range",
+                Some(CapabilityInputIssue {
+                    path: "max_bytes".to_string(),
+                    code: DispatchInputIssueCode::MissingRequired,
+                    expected: Some(max_bytes_range.clone()),
+                    received: None,
+                    schema_path: Some("properties/max_bytes".to_string()),
+                }),
+            ),
+            (
                 "max_bytes below RESULT_READ_MIN_BYTES",
                 serde_json::json!({"result_ref": valid_ref, "offset": 0, "max_bytes": 1}),
                 "result_read max_bytes is outside the allowed range",
