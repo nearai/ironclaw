@@ -56,6 +56,8 @@ test("ConnectionStatus hides routine states and renders connection interruptions
     assert.equal(button.props["aria-label"], status, status);
     assert.equal(button.props["data-testid"], "connection-status", status);
     assert.match(button.props.className, /\bw-8\b/, status);
+    assert.match(button.props.className, /\bborder-transparent\b/, status);
+    assert.match(button.props.className, /\bbg-transparent\b/, status);
     assert.match(button.props.className, /\bsm:h-7\b/, status);
     assert.match(button.props.className, /\bsm:w-auto\b/, status);
     assert.match(button.props.className, /\bsm:max-w-48\b/, status);
@@ -64,10 +66,17 @@ test("ConnectionStatus hides routine states and renders connection interruptions
     assert.match(button.children[1].props.className, /\bhidden\b/, status);
     assert.match(button.children[1].props.className, /\bsm:block\b/, status);
     assert.equal(button.children[1].children[0], status, status);
+    const floatingLabel = rendered.children[2];
+    assert.equal(floatingLabel.props["data-testid"], "connection-status-label", status);
+    assert.match(floatingLabel.props.className, /\babsolute\b/, status);
+    assert.match(floatingLabel.props.className, /\binvisible\b/, status);
+    assert.match(floatingLabel.props.className, /\bsm:hidden\b/, status);
+    assert.ok(floatingLabel.props.className.includes(style), status);
+    assert.equal(floatingLabel.children[0], status, status);
   }
 
   const unknown = ConnectionStatus({ status: "blocked" });
   assert.notEqual(unknown, null);
   assert.equal(typeof unknown, "object");
-  assert.ok(unknown.children[1].props.className.includes("--v2-surface-soft"));
+  assert.ok(unknown.children[2].props.className.includes("--v2-surface-soft"));
 });
