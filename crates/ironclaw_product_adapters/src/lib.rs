@@ -6,8 +6,6 @@ mod adapter;
 pub mod auth;
 pub mod capabilities;
 mod channel_adapter;
-#[cfg(any(test, feature = "test-support"))]
-pub mod conformance;
 mod egress;
 mod error;
 pub mod external;
@@ -18,6 +16,8 @@ pub mod inbound;
 mod outbound;
 mod projection;
 pub mod redaction;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 mod workflow;
 
 pub use adapter::{ProductAdapter, ProductAdapterHealth};

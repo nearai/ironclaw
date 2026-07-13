@@ -392,9 +392,9 @@ impl RebornLocalExtensionManagementPort {
     /// [`Self::publish_bundled_package_for_test`] with non-secret operator
     /// config on the installation record — the stand-in for the deferred
     /// production configure surface (P6/H): channel extensions whose
-    /// activation hook reads `[channel.config]` values (e.g. Telegram's
-    /// `telegram_webhook_url` for `setWebhook`) need them present at
-    /// `host.activate` time.
+    /// activation hook reads `[channel.config]` values (e.g. a public
+    /// webhook URL consumed by vendor-side registration) need them present
+    /// at `host.activate` time.
     #[cfg(feature = "test-support")]
     pub(crate) async fn publish_bundled_package_with_config_for_test(
         &self,

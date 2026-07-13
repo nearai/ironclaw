@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use ironclaw_host_api::{RestrictedEgressRequest, RestrictedEgressResponse};
-use ironclaw_product_adapters::conformance::{
+use ironclaw_product_adapters::test_support::conformance::{
     ChannelAdapterConformance, ConformanceInbound, run_channel_adapter_conformance,
 };
 use ironclaw_product_adapters::{
