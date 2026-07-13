@@ -177,6 +177,28 @@ impl RebornLocalExtensionManagementPort {
         Ok(effective_tenant.as_ref() == Some(&scope.tenant_id))
     }
 
+    /// Pure (no I/O) sibling of [`Self::registered_row_matches_scope_tenant`]
+    /// for listing loops that have already batch-loaded every stored
+    /// manifest once (item 5): `stored_source` is the row's OWN manifest
+    /// source, looked up from that batch instead of a per-row
+    /// `get_manifest` call. Same semantics as the async version — a missing
+    /// stored manifest collapses to "does not match" for a registered
+    /// source, matching `installation_effective_owner_scope`'s `None` arm.
+    pub(super) fn registered_row_matches_scope_tenant_batched(
+        source: &ManifestSource,
+        installation: &ExtensionInstallation,
+        stored_source: Option<&ManifestSource>,
+        scope: &ResourceScope,
+    ) -> bool {
+        if !is_owner_registered(source) {
+            return true;
+        }
+        let effective_tenant = stored_source
+            .and_then(|stored_source| effective_owner_scope(installation, stored_source))
+            .map(|(tenant_id, _)| tenant_id);
+        effective_tenant.as_ref() == Some(&scope.tenant_id)
+    }
+
     /// The caller's registered packages, read once and keyed by extension id
     /// — the batched replacement for calling `resolve_registered_for_scope`
     /// (which internally lists the caller's entire registered directory) once

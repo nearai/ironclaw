@@ -685,6 +685,17 @@ impl RebornLocalExtensionManagementPort {
         // of letting every catalog-miss below re-scan and re-parse the
         // caller's entire registered directory via `list_for_scope`.
         let registered_by_id = self.registered_packages_by_id(scope).await;
+        // Item 5: batch every stored manifest ONCE instead of letting the
+        // tenant-match check below issue a `get_manifest` per row — the
+        // store already exposes a single-pass `list_manifests` for this.
+        let stored_manifest_sources: std::collections::HashMap<ExtensionId, ManifestSource> = self
+            .installation_store
+            .list_manifests()
+            .await
+            .map_err(map_extension_installation_error)?
+            .into_iter()
+            .map(|record| (record.extension_id().clone(), record.manifest().source.clone()))
+            .collect();
         let mut summaries = Vec::with_capacity(installations.len());
         for installation in installations {
             // #5459 P1: a caller's list is tenant-shared entries plus their
@@ -720,14 +731,12 @@ impl RebornLocalExtensionManagementPort {
             // tenant's install row of the same id (search_summary's #5525
             // fix applies here identically): require the row's own
             // registered tenant to match this scope's tenant, or skip it.
-            if !self
-                .registered_row_matches_scope_tenant(
-                    &available.package.manifest.source,
-                    &installation,
-                    scope,
-                )
-                .await?
-            {
+            if !Self::registered_row_matches_scope_tenant_batched(
+                &available.package.manifest.source,
+                &installation,
+                stored_manifest_sources.get(installation.extension_id()),
+                scope,
+            ) {
                 continue;
             }
             summaries.push(LifecycleInstalledExtensionSummary {
