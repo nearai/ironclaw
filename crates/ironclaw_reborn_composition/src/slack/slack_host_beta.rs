@@ -2995,7 +2995,7 @@ mod tests {
         // After Slack OAuth binding the provisioner must open the DM and
         // register the personal DM target so it appears in the delivery-target
         // list. This drives the production seam:
-        // SlackPersonalOAuthBindingConfig → SlackPersonalUserBinder
+        // generic channel-identity hook → SlackDmProvisioningPostBind
         // → background provisioner → SlackPersonalDmTargetStore.
         let egress = Arc::new(RecordingRuntimeHttpEgress::default());
         let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
