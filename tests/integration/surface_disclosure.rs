@@ -39,9 +39,19 @@ use serde_json::json;
 /// `RebornScriptedReply::tool_call` encoding).
 const FLAT_READ_FILE_TOOL_NAME: &str = "builtin__read_file";
 
+/// Flat wire name for `builtin.shell` (same `.` -> `__` encoding).
+const FLAT_SHELL_TOOL_NAME: &str = "builtin__shell";
+
 /// Substring of `LocalDevSurfaceDisclosure`'s `confirmed_host_roots_note`
 /// output stable across `local_dev_mounts.rs` mount-alias wording changes.
 const SCOPED_ROOTS_NOTE_NEEDLE: &str = "Available scoped roots";
+
+/// Substring of `LOCAL_DEV_LOCAL_HOST_SHELL_NOTE`, the fixed local-host-shell
+/// annotation `apply_to_surface_fields` appends unconditionally to
+/// `builtin.shell`'s description once the layer is enabled at all (unlike the
+/// scoped-path capabilities, `builtin.shell` gets no `scoped_roots_note`
+/// gate of its own — its branch returns immediately after appending).
+const SHELL_LOCAL_HOST_NOTE_NEEDLE: &str = "Runs on the local host with local-dev shell";
 
 /// A harness with a confirmed `/host` mount (Change 4's new
 /// `.with_confirmed_host_mount()` backend) must surface the scoped-roots note
@@ -85,6 +95,50 @@ async fn workspace_only_mount_excludes_scoped_roots_note() {
     h.assert_model_tool_description_excludes(FLAT_READ_FILE_TOOL_NAME, SCOPED_ROOTS_NOTE_NEEDLE)
         .await
         .expect("without a confirmed host mount the disclosure note must not appear");
+}
+
+/// `builtin.shell` takes a DIFFERENT branch in `apply_to_surface_fields`
+/// (`capability_id.as_str() == SHELL_CAPABILITY_ID`, checked before the
+/// scoped-path capability match): it appends `LOCAL_DEV_LOCAL_HOST_SHELL_NOTE`
+/// unconditionally rather than gating on `scoped_roots_note`. But the whole
+/// port is still gated on `LocalDevSurfaceDisclosure::enabled()`
+/// (`scoped_roots_note.is_some()`, i.e. a confirmed `/host` mount) in
+/// `wrap_local_dev_surface_disclosure` — without a confirmed host mount the
+/// wrapper is skipped entirely and `builtin.shell` never gets annotated. This
+/// pins the enabled case; the negative control below pins the disabled case.
+#[tokio::test]
+async fn confirmed_host_mount_adds_local_host_shell_note_to_shell() {
+    let h = RebornIntegrationHarness::test_default()
+        .with_confirmed_host_mount()
+        .script([RebornScriptedReply::text("done")])
+        .build()
+        .await
+        .expect("confirmed-host-mount harness builds");
+
+    h.submit_turn("hello").await.expect("turn completes");
+
+    h.assert_model_tool_description_contains(FLAT_SHELL_TOOL_NAME, SHELL_LOCAL_HOST_NOTE_NEEDLE)
+        .await
+        .expect("confirmed /host mount must surface the local-host shell note");
+}
+
+/// Negative control: without a confirmed `/host` mount `enabled()` is false,
+/// so `wrap_local_dev_surface_disclosure` returns the inner port unwrapped
+/// and `builtin.shell`'s description is never touched.
+#[tokio::test]
+async fn workspace_only_mount_excludes_local_host_shell_note() {
+    let h = RebornIntegrationHarness::test_default()
+        .with_builtin_http_tools()
+        .script([RebornScriptedReply::text("done")])
+        .build()
+        .await
+        .expect("workspace-only harness builds");
+
+    h.submit_turn("hello").await.expect("turn completes");
+
+    h.assert_model_tool_description_excludes(FLAT_SHELL_TOOL_NAME, SHELL_LOCAL_HOST_NOTE_NEEDLE)
+        .await
+        .expect("without a confirmed host mount the local-host shell note must not appear");
 }
 
 /// Change 4's second pin: the input-ref/result-ref round trip crosses ONE

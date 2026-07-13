@@ -119,6 +119,8 @@ impl ExtensionManagementTestHandle {
     /// `pub`) so the crate-private `RebornLocalExtensionManagementPort` type
     /// never appears in this crate's public API; only `runtime::local_dev`'s
     /// test-support constructor (which already names the type) may call this.
+    /// For tests only -- gated behind `test-support`, ships zero bytes in
+    /// production builds.
     pub(crate) fn extension_management(
         &self,
     ) -> std::sync::Arc<
