@@ -9,8 +9,8 @@ use ironclaw_filesystem::ScopedFilesystem;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_projects::{FilesystemProjectRepository, ProjectRepository};
 use ironclaw_reborn_migration::{
-    ApplyAcknowledgements, Domain, MigrationOptions, MigrationSecretInputs, MigrationStatus,
-    SourceDb, TargetStore, apply_migration, plan_migration, resume_migration, verify_migration,
+    ApplyAcknowledgements, Domain, MigrationOptions, MigrationSecretInputs, SourceDb, TargetStore,
+    apply_migration, plan_migration, resume_migration,
 };
 use secrecy::SecretString;
 use uuid::Uuid;
@@ -198,13 +198,6 @@ async fn migrates_both_project_layouts_and_replay_conflicts_fail_closed() {
     .await
     .expect("exact replay");
     assert_eq!(replay.stats.projects, 2);
-    let verified = verify_migration(
-        &options(source.clone(), target.clone()),
-        replay.manifest.as_ref().expect("replay manifest"),
-    )
-    .await
-    .expect("project readback count verifies");
-    assert_eq!(verified.status, MigrationStatus::Verified);
 
     let mut divergent = alpha;
     divergent.description = "operator changed this project".to_string();

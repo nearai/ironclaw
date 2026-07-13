@@ -380,7 +380,7 @@ async fn manifest_write_is_owner_only_and_no_clobber_by_default() {
 }
 
 #[tokio::test]
-async fn verification_requires_durable_target_readback() {
+async fn verification_requires_an_active_target_claim() {
     let directory = tempfile::tempdir().expect("tempdir");
     let source = directory.path().join("source.db");
     let target = directory.path().join("target.db");
@@ -393,25 +393,37 @@ async fn verification_requires_durable_target_readback() {
     let applied = applying
         .transition(MigrationStatus::Applied)
         .expect("applied");
-
     let error = verify_migration(&options, &applied)
         .await
-        .expect_err("missing target cannot be verified");
-    assert!(error.to_string().contains("does not exist"));
+        .expect_err("an unclaimed target cannot be verified");
+    assert!(
+        error.to_string().contains("no active migration claim"),
+        "unexpected verification error: {error}"
+    );
 
     let verifying = applied
         .transition(MigrationStatus::Verifying)
         .expect("persist verifying before readback");
     let resumed_error = verify_migration(&options, &verifying)
         .await
-        .expect_err("resumed verification still requires target readback");
-    assert!(resumed_error.to_string().contains("does not exist"));
+        .expect_err("resumed verification still requires an active target claim");
+    assert!(
+        resumed_error
+            .to_string()
+            .contains("no active migration claim"),
+        "unexpected resumed verification error: {resumed_error}"
+    );
 
     let verified = verifying
         .transition(MigrationStatus::Verified)
         .expect("verified");
     let reverify_error = verify_migration(&options, &verified)
         .await
-        .expect_err("verified manifests still require target readback");
-    assert!(reverify_error.to_string().contains("does not exist"));
+        .expect_err("verified manifests still require an active target claim");
+    assert!(
+        reverify_error
+            .to_string()
+            .contains("no active migration claim"),
+        "unexpected re-verification error: {reverify_error}"
+    );
 }
