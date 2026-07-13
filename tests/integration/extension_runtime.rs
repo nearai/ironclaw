@@ -87,6 +87,7 @@ async fn acme_channel_adapter_satisfies_the_conformance_contract() {
 
 /// Install → activate → dispatch-from-snapshot → remove, all through model
 /// tool calls against the real dispatcher (TEST-4; LIFE-17's harness leg).
+/// Also pins LIFE-13: conversation/LLM history survives extension removal.
 #[tokio::test]
 async fn acme_fixture_lifecycle_dispatches_from_the_active_snapshot() {
     let group = RebornIntegrationGroup::extension_runtime_acme()
@@ -196,6 +197,19 @@ async fn acme_fixture_lifecycle_dispatches_from_the_active_snapshot() {
         .assert_tool_result_contains("\"removed\":true")
         .await
         .expect("removal reported success");
+
+    // LIFE-13: removal is integration-state cleanup only — it never touches
+    // conversation/LLM history (repo law: LLM data is never deleted). The
+    // invoke thread's turn (the user prompt and the model's reply) predates
+    // the removal above and must still be readable from persisted history.
+    invoke
+        .assert_conversation_history_contains("send an acme note")
+        .await
+        .expect("user turn survives extension removal");
+    invoke
+        .assert_conversation_history_contains("note sent")
+        .await
+        .expect("assistant reply survives extension removal");
 }
 
 /// The same production install flow, matrixed across every storage backend —
