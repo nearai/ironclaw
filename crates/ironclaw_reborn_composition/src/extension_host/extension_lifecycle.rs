@@ -583,15 +583,15 @@ impl RebornLocalExtensionManagementPort {
         // same extension id must not project as installed against this
         // caller's own tenant-scoped registered descriptor.
         if let Some(found) = installation.as_ref()
-            && is_owner_registered(&available.package.manifest.source)
+            && !self
+                .registered_row_matches_scope_tenant(
+                    &available.package.manifest.source,
+                    found,
+                    scope,
+                )
+                .await?
         {
-            let effective_tenant =
-                installation_effective_owner_scope(&self.installation_store, found)
-                    .await?
-                    .map(|(tenant_id, _)| tenant_id);
-            if effective_tenant.as_ref() != Some(&scope.tenant_id) {
-                installation = None;
-            }
+            installation = None;
         }
         let phase = installation
             .as_ref()
@@ -680,6 +680,29 @@ impl RebornLocalExtensionManagementPort {
         Ok(requirements)
     }
 
+    /// True unless `source` is a registered package whose installation row's
+    /// own stored-manifest tenant diverges from `scope`'s tenant. The
+    /// installation store has no tenant axis (one flat map keyed by extension
+    /// id), so a registered row must be re-checked against its OWN effective
+    /// tenant before it's allowed to project as installed for this scope;
+    /// non-registered sources have no such row to diverge from and always
+    /// match.
+    async fn registered_row_matches_scope_tenant(
+        &self,
+        source: &ManifestSource,
+        installation: &ExtensionInstallation,
+        scope: &ResourceScope,
+    ) -> Result<bool, ProductWorkflowError> {
+        if !is_owner_registered(source) {
+            return Ok(true);
+        }
+        let effective_tenant =
+            installation_effective_owner_scope(&self.installation_store, installation)
+                .await?
+                .map(|(tenant_id, _)| tenant_id);
+        Ok(effective_tenant.as_ref() == Some(&scope.tenant_id))
+    }
+
     async fn installed_summaries(
         &self,
         scope: &ResourceScope,
@@ -732,14 +755,15 @@ impl RebornLocalExtensionManagementPort {
             // tenant's install row of the same id (search_summary's #5525
             // fix applies here identically): require the row's own
             // registered tenant to match this scope's tenant, or skip it.
-            if is_owner_registered(&available.package.manifest.source) {
-                let effective_tenant =
-                    installation_effective_owner_scope(&self.installation_store, &installation)
-                        .await?
-                        .map(|(tenant_id, _)| tenant_id);
-                if effective_tenant.as_ref() != Some(&scope.tenant_id) {
-                    continue;
-                }
+            if !self
+                .registered_row_matches_scope_tenant(
+                    &available.package.manifest.source,
+                    &installation,
+                    scope,
+                )
+                .await?
+            {
+                continue;
             }
             summaries.push(LifecycleInstalledExtensionSummary {
                 summary: available.summary(),
@@ -834,17 +858,18 @@ impl RebornLocalExtensionManagementPort {
         // row's OWN stored-manifest effective registered tenant (never the
         // currently-searched descriptor's tenant) to match the caller's
         // scope tenant before reporting a phase at all.
-        if is_owner_registered(&extension.package.manifest.source) {
-            let effective_tenant =
-                installation_effective_owner_scope(&self.installation_store, &installation)
-                    .await?
-                    .map(|(tenant_id, _)| tenant_id);
-            if effective_tenant.as_ref() != Some(&scope.tenant_id) {
-                return Ok(LifecycleSearchExtensionSummary {
-                    summary,
-                    installation_phase: None,
-                });
-            }
+        if !self
+            .registered_row_matches_scope_tenant(
+                &extension.package.manifest.source,
+                &installation,
+                scope,
+            )
+            .await?
+        {
+            return Ok(LifecycleSearchExtensionSummary {
+                summary,
+                installation_phase: None,
+            });
         }
         let phase = search_installation_phase(extension, &installation, credential_gate).await?;
         Ok(LifecycleSearchExtensionSummary {
