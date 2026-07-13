@@ -128,4 +128,34 @@ impl RebornServices {
             turn_coordinator,
         ))
     }
+
+    /// Fill the deferred per-caller channel-connection facade slot
+    /// (`RebornLocalRuntimeServices::channel_connection_facade_slot`) a
+    /// harness's own local-dev composition carries, mirroring
+    /// `RebornRuntime::set_channel_connection_facade`'s production wiring
+    /// (Slack host-beta composition calls it after `build_reborn_runtime`).
+    /// The same `OnceLock` is shared with the already-built
+    /// `RebornLocalExtensionManagementPort`
+    /// (`extension_lifecycle.rs::cleanup_channel_before_remove`), so a test
+    /// harness built via `new_with_options` can exercise the real
+    /// `builtin.extension_remove` -> channel-disconnect path without a
+    /// second port build. Returns `false` when there is no local-dev runtime
+    /// or the slot is already filled (idempotent, like the production
+    /// setter).
+    ///
+    /// For tests only -- gated behind `test-support`, ships zero bytes in
+    /// production builds.
+    #[cfg(feature = "test-support")]
+    pub fn set_channel_connection_facade_for_test(
+        &self,
+        facade: Arc<dyn ironclaw_product_workflow::ChannelConnectionFacade>,
+    ) -> bool {
+        let Some(local_runtime) = self.local_runtime.as_ref() else {
+            return false;
+        };
+        local_runtime
+            .channel_connection_facade_slot
+            .set(facade)
+            .is_ok()
+    }
 }
