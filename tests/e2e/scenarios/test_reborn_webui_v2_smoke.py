@@ -504,8 +504,13 @@ async def test_reborn_v2_disconnected_run_shows_status_and_stops_typing(
         await expect(connection_status_label).to_have_text("Reconnecting...")
         mobile_status_box = await connection_status.bounding_box()
         assert mobile_status_box is not None
+        assert mobile_status_box["width"] <= 32
         assert mobile_status_box["x"] >= 12
         assert mobile_status_box["x"] + mobile_status_box["width"] <= 378
+        mobile_label_box = await connection_status_label.bounding_box()
+        assert mobile_label_box is not None
+        assert mobile_label_box["x"] >= 12
+        assert mobile_label_box["x"] + mobile_label_box["width"] <= 378
         await expect(page.get_by_test_id("header-logs-link")).to_be_visible()
         await expect(page.get_by_test_id("header-docs-link")).to_be_visible()
 
