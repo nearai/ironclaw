@@ -85,14 +85,22 @@ async fn acme_channel_adapter_satisfies_the_conformance_contract() {
     .await;
 }
 
-/// Install → activate → dispatch-from-snapshot → remove, all through model
-/// tool calls against the real dispatcher (TEST-4; LIFE-17's harness leg).
-/// Also pins LIFE-13: conversation/LLM history survives extension removal.
+/// Full lifecycle — install → configure (credential) → activate →
+/// dispatch-from-snapshot → remove — all through model tool calls against the
+/// real dispatcher, matrixed over libSQL and a real PostgreSQL testcontainer
+/// (LIFE-17: the full lifecycle on both DBs; REL-3: a Postgres skip is a
+/// failure). Also pins LIFE-13: conversation/LLM history survives extension
+/// removal, now on both backends.
+#[rstest]
+#[case(StorageMode::LibSql)]
+#[case(StorageMode::Postgres)]
 #[tokio::test]
-async fn acme_fixture_lifecycle_dispatches_from_the_active_snapshot() {
-    let group = RebornIntegrationGroup::extension_runtime_acme()
+async fn acme_fixture_lifecycle_dispatches_from_the_active_snapshot(#[case] storage: StorageMode) {
+    let group = RebornIntegrationGroup::builder()
+        .storage(storage)
+        .extension_runtime_acme()
         .await
-        .expect("acme extension-runtime group builds");
+        .expect("acme extension-runtime group builds on this backend");
 
     // Install + activate through the production lifecycle tools.
     let lifecycle = group

@@ -9,6 +9,17 @@
 //! This proves design-spec §3.8 coverage: real stores, mock only the OAuth HTTP
 //! seam at the `RuntimeHttpEgress` boundary.
 
+// Mounted for the Postgres arm only: the harness owns the real-Postgres
+// testcontainer provisioner (`start_postgres_testcontainer` + `postgres_pool`),
+// reused here rather than duplicated (correction A: prefer the harness's
+// real-Postgres lane).
+#[allow(dead_code)]
+#[path = "support/mod.rs"]
+mod reborn_support;
+#[allow(dead_code)]
+#[path = "../support/mod.rs"]
+mod support;
+
 use chrono::{Duration, Utc};
 use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowKind, AuthProductScope,
@@ -322,6 +333,106 @@ async fn oauth_connect_flow_persists_credential_account_on_libsql() {
         .await
         .expect("get_account must not error")
         .expect("credential account must persist on the libsql backend");
+    assert_eq!(account.provider, provider);
+    assert_eq!(
+        bundle
+            .egress
+            .captured_grant_types()
+            .first()
+            .map(String::as_str),
+        Some("authorization_code")
+    );
+}
+
+/// The same connect flow persisted through a real Postgres-backed durable
+/// flow/account store — the auth engine's both-DB persistence leg on real
+/// PostgreSQL (checklist AUTH-15; REL-3: a Postgres skip is a failure). Reuses
+/// the harness's testcontainer provisioner; the OAuth product-auth bundle is
+/// built outside the harness storage composite (so it can't reuse
+/// `StorageMode::Postgres`) and takes the pool directly.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn oauth_connect_flow_persists_credential_account_on_postgres() {
+    let (_container, database_url) = reborn_support::builder::start_postgres_testcontainer()
+        .await
+        .expect("postgres testcontainer must start (REL-3: a skip is a failure)");
+    let pool =
+        reborn_support::builder::postgres_pool(&database_url).expect("postgres pool must build");
+    let root = std::sync::Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(pool));
+    root.run_migrations()
+        .await
+        .expect("postgres filesystem migrations");
+    let bundle =
+        ironclaw_reborn_composition::test_support::build_oauth_product_auth_for_test_on_root(root)
+            .await;
+    let scope = test_scope();
+    let provider = AuthProviderId::new("test-oauth-provider").unwrap();
+    let state_hash = OpaqueStateHash::new(hex64(0x51)).unwrap();
+    let pkce_hash = PkceVerifierHash::new(hex64(0x52)).unwrap();
+    let code_hash = AuthorizationCodeHash::new(hex64(0x53)).unwrap();
+    let expires_at = Utc::now() + Duration::minutes(5);
+
+    let flow = bundle
+        .services
+        .flow_manager()
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: provider.clone(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new(
+                    "https://accounts.example.com/o/oauth2/auth",
+                )
+                .unwrap(),
+                expires_at,
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: Some(state_hash.clone()),
+            pkce_verifier_hash: Some(pkce_hash.clone()),
+            expires_at,
+        })
+        .await
+        .expect("create_flow must succeed on postgres");
+
+    let response = bundle
+        .services
+        .handle_oauth_callback(RebornOAuthCallbackRequest {
+            scope: scope.clone(),
+            flow_id: flow.id,
+            opaque_state_hash: state_hash,
+            outcome: RebornOAuthCallbackOutcome::Authorized {
+                provider_request: OAuthProviderCallbackRequest {
+                    provider: provider.clone(),
+                    account_label: CredentialAccountLabel::new("Postgres Account").unwrap(),
+                    authorization_code: OAuthAuthorizationCode::new(SecretString::from(
+                        "postgres-auth-code".to_string(),
+                    ))
+                    .unwrap(),
+                    authorization_code_hash: code_hash,
+                    pkce_verifier: PkceVerifierSecret::new(SecretString::from(
+                        "postgres-pkce-verifier".to_string(),
+                    ))
+                    .unwrap(),
+                    pkce_verifier_hash: pkce_hash,
+                    scopes: vec![ProviderScope::new("test.readonly").unwrap()],
+                },
+            },
+        })
+        .await
+        .expect("handle_oauth_callback must succeed on postgres");
+
+    let account_id = response
+        .credential_account_id
+        .expect("completed callback must carry a credential_account_id");
+    let account = bundle
+        .services
+        .credential_account_service()
+        .get_account(CredentialAccountLookupRequest::new(scope, account_id))
+        .await
+        .expect("get_account must not error")
+        .expect("credential account must persist on the postgres backend");
     assert_eq!(account.provider, provider);
     assert_eq!(
         bundle

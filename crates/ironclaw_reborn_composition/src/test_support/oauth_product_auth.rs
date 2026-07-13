@@ -520,6 +520,71 @@ pub async fn build_oauth_product_auth_for_test_on_libsql(
     }
 }
 
+/// The same engine-backed bundle as [`build_oauth_product_auth_for_test`] with
+/// the durable flow/account store persisted on a caller-supplied real root
+/// filesystem — the both-DB persistence leg for the auth engine (checklist
+/// AUTH-15; REL-3: a Postgres skip is a failure). Generic over the backend so
+/// composition test-support does not need a concrete-backend feature enabled
+/// through the `ironclaw` dependency: the caller (which already links
+/// `ironclaw_filesystem/postgres`) builds and migrates the root filesystem and
+/// passes it here. There is no root-generic bundle builder otherwise (the
+/// shared `build_oauth_product_auth_infra` is `InMemoryBackend`-hardcoded), and
+/// the OAuth product-auth bundle is built outside the harness's storage
+/// composite, so the harness's `StorageMode::Postgres` cannot construct it
+/// (correction A: this is the sanctioned thin composition-tier addition).
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub async fn build_oauth_product_auth_for_test_on_root<F>(
+    root: Arc<F>,
+) -> OAuthProductAuthTestBundle
+where
+    F: ironclaw_filesystem::RootFilesystem + 'static,
+{
+    use ironclaw_filesystem::ScopedFilesystem;
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    use ironclaw_secrets::InMemorySecretStore;
+
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/secrets").expect("mount alias"),
+        VirtualPath::new("/tenants/test-tenant/users/test-user/secrets").expect("virtual path"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    let scoped_fs: Arc<ScopedFilesystem<F>> =
+        Arc::new(ScopedFilesystem::with_fixed_view(root, mounts));
+    let secret_store: Arc<dyn ironclaw_secrets::SecretStore> = Arc::new(InMemorySecretStore::new());
+    let durable = Arc::new(
+        crate::product_auth::durable::FilesystemAuthProductServices::new(
+            Arc::clone(&scoped_fs),
+            Arc::clone(&secret_store),
+        ),
+    );
+    let egress = Arc::new(ScriptedOAuthTokenEgress::with_access_token(
+        "test-access-token-abc123",
+    ));
+    let engine = engine_provider_client_for_test(
+        "test-oauth-provider",
+        &["test.readonly"],
+        "https://oauth.test.example.com/token",
+        Arc::clone(&egress),
+        Arc::clone(&secret_store),
+    );
+    let services = Arc::new(crate::RebornProductAuthServices::new(
+        durable.clone() as Arc<dyn ironclaw_auth::AuthFlowManager>,
+        durable.clone() as Arc<dyn ironclaw_auth::AuthInteractionService>,
+        durable.clone() as Arc<dyn ironclaw_auth::CredentialSetupService>,
+        durable.clone() as Arc<dyn ironclaw_auth::CredentialAccountService>,
+        Arc::clone(&engine) as Arc<dyn ironclaw_auth::AuthProviderClient>,
+        durable as Arc<dyn ironclaw_auth::SecretCleanupService>,
+        Arc::new(TestNoopContinuationDispatcher),
+    ));
+    let keepalive_recipes = Arc::clone(engine.recipes());
+    OAuthProductAuthTestBundle {
+        services,
+        egress,
+        keepalive_recipes,
+    }
+}
+
 // ─── Slice 8: OAuth credential-refresh sweep test support ────────────────────
 //
 // `FixedCandidateSource` and `OAuthProductAuthTestBundle::sweep_for_refresh`

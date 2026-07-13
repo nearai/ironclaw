@@ -197,15 +197,17 @@ Rules — kept short on purpose:
   — `restore_skips_a_load_failure_without_blocking_the_rest`
   (`tests/lifecycle_contract.rs`): a load failure falls to Installed with a
   typed error and does not block the valid restore.
-- [ ] LIFE-17 Full lifecycle (install → configure → activate → remove) passes
+- [x] LIFE-17 Full lifecycle (install → configure → activate → remove) passes
   on both DBs through the integration harness with the acme fixture. —
-  PARTIAL: the harness leg exists single-backend
-  (`acme_fixture_lifecycle_dispatches_from_the_active_snapshot`,
-  `tests/integration/extension_runtime.rs`: install → activate → snapshot
-  dispatch → remove through model tool calls); install persistence is
-  matrixed over libSQL + real Postgres
-  (`extension_install_persists_across_storage_backends`). The configure
-  leg and the both-DB matrix of the FULL lifecycle remain owed.
+  `acme_fixture_lifecycle_dispatches_from_the_active_snapshot`
+  (`tests/integration/extension_runtime.rs`) is now an rstest matrix over
+  `#[case(StorageMode::LibSql)]` + `#[case(StorageMode::Postgres)]` (a real
+  PostgreSQL testcontainer; REL-3: a Postgres skip is a failure), driving
+  install → configure (the `seed_capability_credential_account` credential
+  step) → activate → snapshot dispatch → remove through model tool calls on
+  each backend, plus the LIFE-13 history-survives assertion. Both arms green
+  (`case_1` libSQL, `case_2` Postgres). Install persistence is separately
+  matrixed by `extension_install_persists_across_storage_backends`.
 - [x] LIFE-18 Editing channel config while `Active` triggers an automatic
   deactivate → reactivate; adapters observe the new values; no bespoke
   reconfigure state exists. — §6.5 cycle: `ChannelConfigService::save` →
@@ -476,16 +478,21 @@ Rules — kept short on purpose:
   `group_journeys::scenario_auth_gate_grant_resume` (auto-approve so the auth
   gate is the only block). Grant storage is the "user submitted credentials"
   arm (`resolve_auth_gate`'s `request_manual_token_setup` → `submit_manual_token`).
-- [ ] AUTH-15 Engine flow/grant persistence passes on both DBs. — PARTIAL:
-  the engine reuses the backend-generic `FilesystemAuthProductServices`
-  store; the connect flow is pinned on the in-memory backend and on a real
-  libSQL root filesystem (`oauth_connect_flow_persists_credential_account`,
+- [x] AUTH-15 Engine flow/grant persistence passes on both DBs. — the engine
+  reuses the backend-generic `FilesystemAuthProductServices` store; the
+  connect flow is pinned on the in-memory backend, on a real libSQL root
+  filesystem, and now on a real PostgreSQL root filesystem
+  (`oauth_connect_flow_persists_credential_account`,
   `oauth_connect_flow_persists_credential_account_on_libsql`,
-  `tests/integration/oauth_connect.rs`). A direct Postgres-rooted leg is
-  still owed (the store has no backend-specific code; the harness now
-  carries a real-Postgres lane — `StorageMode::Postgres`, used by
-  `extension_install_persists_across_storage_backends` — so the remaining
-  work is wiring a connect-flow case onto it).
+  `oauth_connect_flow_persists_credential_account_on_postgres`,
+  `tests/integration/oauth_connect.rs`; all three green, REL-3: a Postgres
+  skip is a failure). The Postgres arm reuses the harness's testcontainer
+  provisioner (`start_postgres_testcontainer`, now `pub(crate)`) and a new
+  backend-generic bundle builder
+  `build_oauth_product_auth_for_test_on_root<F: RootFilesystem>` (the OAuth
+  bundle is built outside the harness storage composite, so it can't reuse
+  `StorageMode::Postgres` — correction A's sanctioned thin composition-tier
+  addition; generic so it needs no concrete-backend feature).
 - [x] AUTH-16 The provider string multiplexor, provider spec constants, and
   Slack OAuth branches are deleted. — `MultiplexAuthProviderClient` /
   `compose_provider_clients`, `HostOAuthProviderSpec`, `TokenResponseShape`,
@@ -945,15 +952,20 @@ Rules — kept short on purpose:
   `tests/webui_v2_product_auth.rs`), and the P6 §10 e2e drives the same
   URL against production serve
   (`test_reborn_slack_channel_e2e.py`).
-- [ ] MIG-7 Migrations are idempotent (second run is a no-op) and skip
-  malformed records with a logged reason, on both DBs. — PARTIAL:
-  idempotence + malformed-skip are pinned
+- [x] MIG-7 Migrations are idempotent (second run is a no-op) and skip
+  malformed records with a logged reason, on both DBs. — idempotence +
+  malformed-skip are pinned
   (`fold_moves_setup_state_roots_onto_generic_homes_and_second_run_is_a_noop`,
-  `fold_skips_malformed_records_and_operator_owned_values`) and the fold
-  runs against a real libSQL root filesystem
-  (`fold_runs_against_the_libsql_root_filesystem`). The folds are
-  `RootFilesystem`-generic with no backend-specific code; the
-  Postgres-rooted flavor is still owed (same posture as AUTH-15).
+  `fold_skips_malformed_records_and_operator_owned_values`), and the fold runs
+  against a real libSQL root filesystem
+  (`fold_runs_against_the_libsql_root_filesystem`) AND a real PostgreSQL root
+  filesystem (`fold_runs_against_the_postgres_root_filesystem`,
+  `#[cfg(feature="postgres")]`, `channel_state_folds.rs`) — the second run is a
+  no-op on each. REL-3: the Postgres arm uses a no-skip `src/`-local
+  testcontainer provisioner (the `pub(crate)` fold can't be reached from the
+  integration harness — correction A escape hatch); it runs under
+  `cargo test -p ironclaw_reborn_composition --features
+  test-support,webui-v2-beta,libsql,postgres`.
 
 ## 11. Testing and gates (TEST)
 

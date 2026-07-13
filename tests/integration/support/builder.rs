@@ -1831,7 +1831,7 @@ pub(crate) async fn build_storage_composite(
 /// Start a per-`build()` PostgreSQL testcontainer. A provisioning failure is
 /// a test failure (REL-3): in CI it panics with the docker context; locally
 /// the message names the fix.
-async fn start_postgres_testcontainer() -> HarnessResult<(
+pub(crate) async fn start_postgres_testcontainer() -> HarnessResult<(
     testcontainers_modules::testcontainers::ContainerAsync<
         testcontainers_modules::postgres::Postgres,
     >,

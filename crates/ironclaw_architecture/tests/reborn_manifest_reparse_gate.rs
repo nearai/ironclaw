@@ -234,7 +234,7 @@ fn manifest_reparse_stays_within_the_compiler_migration_and_bundled_paths() {
             Some(_) => {}
         }
     }
-    for (path, _) in &allow {
+    for path in allow.keys() {
         if !found.contains_key(path) {
             problems.push(format!(
                 "STALE allowlist entry `{path}` — no manifest reparse found there anymore. Remove \

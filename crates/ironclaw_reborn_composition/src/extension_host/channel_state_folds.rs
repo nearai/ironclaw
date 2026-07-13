@@ -1308,4 +1308,102 @@ supports_threads = true
         let second = fold_retired_slack_channel_state(&fixture.inputs).await;
         assert!(!second.changed(), "second run must be a no-op: {second:?}");
     }
+
+    /// No-skip Postgres testcontainer provisioner (REL-3: a Postgres skip is a
+    /// failure, not a pass). The fold is a `pub(crate)` `src/` function the
+    /// integration harness cannot reach, so — per correction A's escape hatch —
+    /// Postgres is provisioned inside the composition crate's own test module.
+    #[cfg(feature = "postgres")]
+    async fn start_postgres_pool_or_fail() -> (
+        testcontainers_modules::testcontainers::ContainerAsync<
+            testcontainers_modules::postgres::Postgres,
+        >,
+        deadpool_postgres::Pool,
+    ) {
+        use deadpool_postgres::tokio_postgres;
+        use testcontainers_modules::testcontainers::{ImageExt, runners::AsyncRunner};
+
+        let container = testcontainers_modules::postgres::Postgres::default()
+            .with_db_name("ironclaw_test")
+            .with_user("postgres")
+            .with_password("postgres")
+            .with_tag("16-alpine")
+            .start()
+            .await
+            .expect(
+                "Postgres testcontainer must start (REL-3: a skip is a failure; \
+                 locally run `colima start` or start Docker Desktop)",
+            );
+        let host = container.get_host().await.expect("resolve container host");
+        let port = container
+            .get_host_port_ipv4(5432)
+            .await
+            .expect("resolve container port");
+        let database_url = format!("postgres://postgres:postgres@{host}:{port}/ironclaw_test");
+        let config: tokio_postgres::Config = database_url.parse().expect("database url must parse");
+        let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
+        let pool = deadpool_postgres::Pool::builder(manager)
+            .max_size(4)
+            .build()
+            .expect("postgres pool must build");
+        (container, pool)
+    }
+
+    /// MIG-7: the same fold on a real PostgreSQL root filesystem — the both-DB
+    /// leg (REL-3). The fold reads only `Arc<dyn RootFilesystem>` roots, so it
+    /// is backend-agnostic; this proves it on real Postgres, not just libSQL.
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn fold_runs_against_the_postgres_root_filesystem() {
+        let (_container, pool) = start_postgres_pool_or_fail().await;
+        let filesystem = ironclaw_filesystem::PostgresRootFilesystem::new(pool);
+        filesystem.run_migrations().await.expect("migrations");
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(filesystem);
+
+        let installation_store = installed_store().await;
+        let secret_store = Arc::new(InMemorySecretStore::new());
+        let scope = scope();
+        let inputs = RetiredChannelStateFoldInputs {
+            filesystem: Arc::clone(&filesystem),
+            installation_store: Arc::clone(&installation_store)
+                as Arc<dyn ExtensionInstallationStore>,
+            secret_store: secret_store.clone() as Arc<dyn SecretStore>,
+            legacy_secret_scope: scope.clone(),
+            channel_config_secret_scope: scope.clone(),
+            identity_store: Arc::new(FilesystemChannelIdentityStore::new(
+                Arc::clone(&filesystem),
+                scope.tenant_id.clone(),
+                scope.user_id.clone(),
+            )),
+            dm_targets: Arc::new(FilesystemChannelDmTargetStore::new(
+                Arc::clone(&filesystem),
+                scope.tenant_id.clone(),
+                scope.user_id.clone(),
+            )),
+        };
+        let fixture = Fixture {
+            inputs,
+            filesystem,
+            installation_store,
+            secret_store,
+            scope,
+        };
+        seed_retired_state(&fixture).await;
+
+        let report = fold_retired_slack_channel_state(&fixture.inputs).await;
+        assert_eq!(report.identities, 1);
+        assert_eq!(report.dm_targets, 1);
+        assert_eq!(report.route_values, 2);
+        assert_eq!(
+            fixture
+                .inputs
+                .identity_store
+                .resolve_user_identity("slack", &format!("{DURABLE_INSTALLATION_ID}:U777"))
+                .await
+                .expect("identity resolves"),
+            Some(UserId::new("user-alice").expect("user"))
+        );
+        let second = fold_retired_slack_channel_state(&fixture.inputs).await;
+        assert!(!second.changed(), "second run must be a no-op: {second:?}");
+    }
 }
