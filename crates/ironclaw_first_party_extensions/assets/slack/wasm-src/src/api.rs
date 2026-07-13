@@ -393,6 +393,9 @@ pub fn get_conversation_info(channel: &str) -> Result<GetConversationInfoResult,
     let url = format!("conversations.info?channel={}", url_encode(channel));
     let parsed = slack_api_call("GET", &url, None)?;
     let mut conversation = conversation_from_value(&parsed["channel"]);
+    if conversation.id != channel {
+        return Err("Slack API response did not contain the requested conversation".to_string());
+    }
     enrich_conversation_counterpart(&mut conversation);
     Ok(GetConversationInfoResult {
         ok: true,
