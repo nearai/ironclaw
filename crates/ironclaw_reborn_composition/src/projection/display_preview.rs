@@ -1196,7 +1196,7 @@ fn format_utc_datetime(value: &str) -> Option<String> {
         Ok(datetime) => datetime,
         Err(_) => {
             // Do not attach the raw host-provided value: it is not trusted for logs.
-            tracing::warn!("routine display preview omitted malformed next_run_at");
+            tracing::debug!("routine display preview omitted malformed next_run_at");
             return None;
         }
     };
