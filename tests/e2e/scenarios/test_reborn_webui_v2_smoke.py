@@ -171,7 +171,7 @@ async def test_reborn_v2_light_theme_semantic_colors_have_readable_contrast(
     await composer.press("Enter")
     user_message = reborn_v2_page.locator(SEL_V2["msg_user"]).last
     await expect(user_message).to_contain_text("editable composer slow response", timeout=15000)
-    cancel_button = reborn_v2_page.get_by_role("button", name="Cancel")
+    cancel_button = reborn_v2_page.get_by_role("button", name="Cancel").first
     await expect(cancel_button).to_be_visible(timeout=10000)
     await _assert_readable(cancel_button, "light-theme danger button")
 
@@ -214,9 +214,7 @@ async def test_reborn_v2_light_theme_semantic_colors_have_readable_contrast(
     try:
         restore_toggle = reborn_v2_page.get_by_role("button", name=restore_label).first
         await expect(restore_toggle).to_be_visible(timeout=15000)
-        success_banner = reborn_v2_page.locator(
-            'div[class*="--v2-positive-soft"]'
-        ).last
+        success_banner = reborn_v2_page.locator(SEL_V2["skill_action_result"])
         await expect(success_banner).to_be_visible(timeout=15000)
         await _assert_readable(success_banner, "light-theme success banner")
     finally:

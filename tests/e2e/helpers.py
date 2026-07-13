@@ -318,6 +318,7 @@ SEL_V2 = {
         "[data-testid='settings-tool-permission-select'] button[aria-haspopup='listbox']"
     ),
     "settings_tool_lock": "[data-testid='settings-tool-lock']",
+    "skill_action_result": "[data-testid='skill-action-result']",
     "llm_provider_card_for": (
         "[data-testid='llm-provider-card'][data-provider-id='{provider_id}']"
     ),
