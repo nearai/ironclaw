@@ -1755,7 +1755,12 @@ async fn product_auth_google_oauth_callback_rejects_disallowed_scopes() {
         )))
         .await
         .expect("oneshot");
-    assert_eq!(replay_response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(replay_response.status(), StatusCode::CONFLICT);
+    assert!(
+        read_body_string(replay_response)
+            .await
+            .contains("\"code\":\"flow_already_terminal\"")
+    );
 }
 
 #[tokio::test]
@@ -1824,7 +1829,12 @@ async fn product_auth_google_oauth_callback_rejects_empty_parsed_scopes() {
         )))
         .await
         .expect("oneshot");
-    assert_eq!(replay_response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(replay_response.status(), StatusCode::CONFLICT);
+    assert!(
+        read_body_string(replay_response)
+            .await
+            .contains("\"code\":\"flow_already_terminal\"")
+    );
 }
 
 #[tokio::test]
