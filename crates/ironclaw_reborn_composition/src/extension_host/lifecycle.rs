@@ -371,15 +371,15 @@ impl RebornLocalLifecycleFacade {
                     return unsupported_projection(Some(package_ref));
                 };
                 let caller = lifecycle_caller(&context)?;
+                let scope = lifecycle_resource_scope(&context)?;
                 let credential_gate = self
                     .extension_activation_credential_gate(
-                        &context,
+                        &scope,
                         extension_management,
                         &package_ref,
                         &caller,
                     )
                     .await?;
-                let scope = lifecycle_resource_scope(&context)?;
                 if extension_management
                     .package_requires_hosted_mcp_discovery(&package_ref)
                     .await?
@@ -456,16 +456,17 @@ impl RebornLocalLifecycleFacade {
 
     async fn extension_activation_credential_gate(
         &self,
-        context: &LifecycleProductContext,
+        scope: &ResourceScope,
         extension_management: &RebornLocalExtensionManagementPort,
         package_ref: &LifecyclePackageRef,
         caller: &UserId,
     ) -> Result<Option<RuntimeExtensionActivationCredentialGate>, ProductWorkflowError> {
-        // The requirements preflight checks ownership first, so a non-owner
-        // exits here with the masked "is not installed" denial before any
-        // credential or hosted-MCP probing can leak the install's existence.
+        // The requirements preflight checks ownership AND tenant first (Item
+        // B), so a non-owner or foreign-tenant caller exits here with the
+        // masked "is not installed" denial before any credential or
+        // hosted-MCP probing can leak the install's existence.
         let requirements = extension_management
-            .activation_credential_requirements(package_ref, caller)
+            .activation_credential_requirements(package_ref, caller, &scope.tenant_id)
             .await?;
         if requirements.is_empty() {
             return Ok(None);
@@ -478,7 +479,7 @@ impl RebornLocalLifecycleFacade {
             return Ok(None);
         };
         Ok(Some(RuntimeExtensionActivationCredentialGate::new(
-            lifecycle_resource_scope(context)?,
+            scope.clone(),
             Arc::clone(credential_accounts),
         )))
     }

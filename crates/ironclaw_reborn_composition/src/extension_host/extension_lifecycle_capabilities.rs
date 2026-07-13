@@ -176,7 +176,11 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                 let package_ref = extension_package_ref(input.extension_id)?;
                 let requirements = self
                     .extension_management
-                    .activation_credential_requirements(&package_ref, &request.scope.user_id)
+                    .activation_credential_requirements(
+                        &package_ref,
+                        &request.scope.user_id,
+                        &request.scope.tenant_id,
+                    )
                     .await
                     .map_err(lifecycle_error)?;
                 let credential_gate = RuntimeExtensionActivationCredentialGate::new(

@@ -175,6 +175,197 @@ async fn user_registered_isolation_fixture(
     (dir, port, package_ref, active_registry, installation_store)
 }
 
+/// Item B fixture: a registered manifest that declares a required runtime
+/// credential, so `activation_credential_requirements` returns a non-empty,
+/// real requirement list instead of an empty one — the shape the masked
+/// "is not installed" denial must never be distinguishable from.
+const REGISTERED_CREDENTIALED_MANIFEST_TOML: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "acme-mcp-credentialed"
+name = "Acme Credentialed MCP"
+version = "0.1.0"
+description = "User-registered hosted MCP server requiring credentials (Item B fixture)"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "https://mcp.acme.example/mcp"
+
+[[capabilities]]
+id = "acme-mcp-credentialed.acme-mcp-credentialed-tool"
+description = "Acme credentialed MCP tool."
+effects = ["dispatch_capability", "network", "use_secret"]
+runtime_credentials = [
+  { handle = "mcp_acme_access_token", source = { type = "product_auth_account", provider = "acme", setup = { kind = "oauth", scopes = [] } }, audience = { scheme = "https", host_pattern = "mcp.acme.example" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/acme/acme-mcp-credentialed-tool.input.v1.json"
+output_schema_ref = "schemas/acme/acme-mcp-credentialed-tool.output.v1.json"
+prompt_doc_ref = "prompts/acme/acme-mcp-credentialed-tool.md"
+"#;
+
+/// The store-side manifest record for the Item B fixture. Statically
+/// declared `[[capabilities]]` are rejected by the contract-validated parse
+/// (`from_toml_with_contracts`) for any non-first-party source — real
+/// registered/hosted MCP installs get their capabilities from runtime
+/// discovery, not the stored manifest — so the persisted record stays
+/// capability-free while the in-memory lifecycle package below (built via
+/// the lenient parse, mirroring what discovery would have produced) is the
+/// one that actually carries the credentialed capability.
+const REGISTERED_CREDENTIALED_STORE_MANIFEST_TOML: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "acme-mcp-credentialed"
+name = "Acme Credentialed MCP"
+version = "0.1.0"
+description = "User-registered hosted MCP server requiring credentials (Item B fixture)"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "https://mcp.acme.example/mcp"
+"#;
+
+/// Same shape as `user_registered_isolation_fixture`, but seeded with
+/// `REGISTERED_CREDENTIALED_MANIFEST_TOML` so the install actually declares
+/// a runtime credential requirement (Item B).
+async fn credentialed_registered_isolation_fixture(
+    owner_scope: &ResourceScope,
+) -> (
+    tempfile::TempDir,
+    Arc<RebornLocalExtensionManagementPort>,
+    LifecyclePackageRef,
+) {
+    let extension_id = ExtensionId::new("acme-mcp-credentialed").expect("valid extension id");
+    let source = ManifestSource::UserRegistered {
+        tenant_id: owner_scope.tenant_id.clone(),
+        owner: owner_scope.user_id.clone(),
+    };
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage_root = dir.path().join("local-dev");
+    let descriptor_dir = storage_root
+        .join("system/extensions/registered")
+        .join(owner_scope.tenant_id.as_str())
+        .join(owner_scope.user_id.as_str())
+        .join("acme-mcp-credentialed");
+    std::fs::create_dir_all(&descriptor_dir).expect("registered descriptor dir");
+    std::fs::write(
+        descriptor_dir.join("manifest.toml"),
+        REGISTERED_CREDENTIALED_MANIFEST_TOML,
+    )
+    .expect("write registered descriptor");
+    let mut local_filesystem = LocalFilesystem::new();
+    local_filesystem
+        .mount_local(
+            VirtualPath::new("/system/extensions").expect("valid virtual path"),
+            HostPath::from_path_buf(storage_root.join("system/extensions")),
+        )
+        .expect("mount system extensions");
+
+    let mut lifecycle_registry = ExtensionRegistry::new();
+    let mut active_registry_initial = ExtensionRegistry::new();
+    let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
+    let manifest = ExtensionManifest::parse(
+        REGISTERED_CREDENTIALED_MANIFEST_TOML,
+        source.clone(),
+        &HostPortCatalog::empty(),
+    )
+    .expect("credentialed registered manifest");
+    let root =
+        VirtualPath::new("/system/extensions/acme-mcp-credentialed").expect("extension root");
+    let package =
+        ExtensionPackage::from_manifest_toml(manifest, root, REGISTERED_CREDENTIALED_MANIFEST_TOML)
+            .expect("credentialed registered package");
+    lifecycle_registry
+        .insert(package.clone())
+        .expect("lifecycle package");
+    active_registry_initial
+        .insert(package)
+        .expect("active package");
+    let manifest_record = fixture_manifest_record_with_source(
+        REGISTERED_CREDENTIALED_STORE_MANIFEST_TOML,
+        source.clone(),
+        None,
+    );
+    installation_store
+        .upsert_manifest(manifest_record)
+        .await
+        .expect("seed registered manifest record");
+    let installation = ExtensionInstallation::new(
+        ExtensionInstallationId::new("acme-mcp-credentialed").expect("valid installation id"),
+        extension_id.clone(),
+        ExtensionActivationState::Enabled,
+        ExtensionManifestRef::new(extension_id, None),
+        Vec::new(),
+        chrono::Utc::now(),
+        InstallationOwner::user(owner_scope.user_id.clone()),
+    )
+    .expect("registered installation");
+    installation_store
+        .upsert_installation(installation)
+        .await
+        .expect("seed registered installation");
+    let active_registry = Arc::new(SharedExtensionRegistry::new(active_registry_initial));
+
+    let port = Arc::new(RebornLocalExtensionManagementPort::new(
+        Arc::new(local_filesystem),
+        AvailableExtensionCatalog::from_packages(Vec::new()),
+        installation_store,
+        Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            lifecycle_registry,
+        ))),
+        test_active_extension_publisher(
+            Arc::clone(&active_registry),
+            test_extension_trust_policy(),
+        ),
+        None,
+        owner_scope.user_id.clone(),
+    ));
+    let package_ref =
+        LifecyclePackageRef::new(LifecyclePackageKind::Extension, "acme-mcp-credentialed")
+            .expect("valid ref");
+    (dir, port, package_ref)
+}
+
+/// Item B regression: `remove`'s credential-provider preflight
+/// (`removed_extension_providers` -> `activation_credential_requirements`)
+/// only checks the caller's USER axis (`ensure_caller_may_operate`), not the
+/// registered row's TENANT axis, so a same-user-id caller from a foreign
+/// tenant reaches it and gets a REAL non-empty requirement list back. With no
+/// authenticated actor supplied, `remove` then surfaces the distinguishing
+/// "extension credential cleanup requires an authenticated actor" error
+/// instead of the masked "is not installed" `remove_locked`'s tenant check
+/// would produce — leaking that a credentialed install exists under this id
+/// before the tenant guard ever runs. Red before the fix.
+#[tokio::test]
+async fn remove_credential_preflight_masks_foreign_tenant_caller_before_authenticated_actor_check()
+{
+    let owner_scope = resource_scope_for("tenant-b", "owner-a");
+    // Same user id, different (default) tenant scope, no authenticated
+    // actor supplied — the exact shape that exposes the preflight ordering
+    // bug.
+    let cross_tenant_scope = resource_scope_for("default", "owner-a");
+    let (_dir, port, package_ref) = credentialed_registered_isolation_fixture(&owner_scope).await;
+
+    let error = port
+        .remove(package_ref, &cross_tenant_scope, None)
+        .await
+        .expect_err("a foreign-tenant caller must not remove another tenant's registered install");
+
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("is not installed"),
+        "the caller's first divergence must be the masked not-installed denial, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("authenticated actor"),
+        "must not leak that a credentialed install exists via the authenticated-actor message, got: {rendered}"
+    );
+}
+
 pub(super) fn resource_scope_for(tenant: &str, user: &str) -> ResourceScope {
     let mut scope =
         ResourceScope::local_default(UserId::new(user).expect("valid user"), InvocationId::new())

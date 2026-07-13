@@ -641,6 +641,7 @@ impl RebornLocalExtensionManagementPort {
         &self,
         package_ref: &LifecyclePackageRef,
         caller: &UserId,
+        caller_tenant_id: &TenantId,
     ) -> Result<Vec<RuntimeCredentialAuthRequirement>, ProductWorkflowError> {
         let (extension_id, installation_id) = extension_ids_from_package_ref(package_ref)?;
         let _operation_guard = self.operation_lock.lock().await;
@@ -651,6 +652,19 @@ impl RebornLocalExtensionManagementPort {
         // get the "is not installed" denial, never a requirement shape that
         // confirms a private credentialed install exists (#5525 review).
         ensure_caller_may_operate(&installation, caller)?;
+        // Tenant axis companion (Item B, T2 cross-tenant follow-up): the same
+        // user id can be valid in a different tenant, which the check above
+        // does not catch. Without this, a foreign-tenant caller reaches the
+        // real requirement list (or the distinguishing "requires an
+        // authenticated actor" error further up the `remove` call chain)
+        // instead of the masked "is not installed" denial.
+        let existing_effective_scope =
+            installation_effective_owner_scope(&self.installation_store, &installation).await?;
+        ensure_registered_row_tenant_match(
+            &extension_id,
+            existing_effective_scope,
+            caller_tenant_id,
+        )?;
         let package = self.lifecycle_package(&extension_id).await?;
         let requirements = package_runtime_credential_auth_requirements(&package);
         Ok(requirements)
@@ -4311,7 +4325,11 @@ output_schema_ref = "schemas/run.output.json"
             .expect("install public Slack extension");
 
         let requirements = port
-            .activation_credential_requirements(&slack_ref, &lifecycle_owner())
+            .activation_credential_requirements(
+                &slack_ref,
+                &lifecycle_owner(),
+                &lifecycle_owner_scope().tenant_id,
+            )
             .await
             .expect("Slack activation requirements");
         assert_eq!(requirements.len(), 1);
