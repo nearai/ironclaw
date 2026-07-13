@@ -57,6 +57,7 @@ jobs:
     outputs:
       docs_only: ${{ steps.non_diff.outputs.docs_only || steps.diff.outputs.docs_only }}
       has_core_code: ${{ steps.non_diff.outputs.has_core_code || steps.diff.outputs.has_core_code }}
+      has_windows_local_dev_risk: ${{ steps.non_diff.outputs.has_windows_local_dev_risk || steps.diff.outputs.has_windows_local_dev_risk }}
       has_runtime_heavy_risk: ${{ steps.non_diff.outputs.has_runtime_heavy_risk || steps.diff.outputs.has_runtime_heavy_risk }}
       has_web_risk: ${{ steps.non_diff.outputs.has_web_risk || steps.diff.outputs.has_web_risk }}
       has_direct_wasm_abi_risk: ${{ steps.non_diff.outputs.has_direct_wasm_abi_risk || steps.diff.outputs.has_direct_wasm_abi_risk }}
@@ -71,6 +72,7 @@ jobs:
         run: |
           echo "docs_only=false" >> "$GITHUB_OUTPUT"
           echo "has_core_code=true" >> "$GITHUB_OUTPUT"
+          echo "has_windows_local_dev_risk=true" >> "$GITHUB_OUTPUT"
           echo "has_legacy_tests=true" >> "$GITHUB_OUTPUT"
           echo "has_runtime_heavy_risk=true" >> "$GITHUB_OUTPUT"
           # Keep deterministic full browser E2E in its own scheduled/manual
@@ -107,6 +109,12 @@ jobs:
           }
 
           printf '%s\n' "$CHANGED_FILES" | scripts/ci/classify-test-scope.sh >> "$GITHUB_OUTPUT"
+
+          if has_match '^(crates/ironclaw_reborn_composition/src/(factory\.rs|factory/local_dev_host_tests\.rs|local_dev_mounts\.rs)|tests/(integration/local_dev_windows_mounts\.rs|reborn_local_dev_windows_mounts\.rs)|\.github/workflows/platform-and-compat\.yml$)'; then
+            echo "has_windows_local_dev_risk=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_windows_local_dev_risk=false" >> "$GITHUB_OUTPUT"
+          fi
 
           if has_match '^(crates/ironclaw_(common|safety|skills)/|src/(agent|auth|bridge|config|context|db|extensions|gate|history|hooks|orchestrator|ownership|pairing|safety|sandbox|secrets|setup|skills|tools|webhooks|worker|workspace)/|src/channels/channel\.rs$|src/channels/manager\.rs$|src/channels/relay/|src/channels/wasm/|channels-src/telegram/|migrations/|src/app\.rs$|src/main\.rs$|src/lib\.rs$|tests/telegram_auth_integration\.rs$|tests/e2e_thread_scheduling\.rs$|\.github/workflows/(test|nightly-deep-ci)\.yml$)'; then
             echo "has_runtime_heavy_risk=true" >> "$GITHUB_OUTPUT"
@@ -239,6 +247,26 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Check compilation
         run: cargo check --all --benches --tests --examples ${{ matrix.flags }}
+
+  windows-local-dev-yolo-test:
+    name: Windows local-dev-yolo integration test
+    needs: changes
+    if: needs.changes.outputs.has_windows_local_dev_risk == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: windows-local-dev-yolo
+          save-if: false
+      - name: Run Windows local-dev-yolo integration test
+        run: cargo test --no-default-features --features libsql --test reborn_local_dev_windows_mounts -- --nocapture
 
   wasm-wit-compat:
     name: WASM WIT Compatibility
@@ -448,6 +476,7 @@ jobs:
       - changes
       - hooks-parity-tests
       - windows-build
+      - windows-local-dev-yolo-test
       - wasm-wit-compat
       - bench-compile
       - docker-build
@@ -477,6 +506,7 @@ jobs:
           for job_result in \
             "hooks-parity-tests=${{ needs.hooks-parity-tests.result }}" \
             "windows-build=${{ needs.windows-build.result }}" \
+            "windows-local-dev-yolo-test=${{ needs.windows-local-dev-yolo-test.result }}" \
             "wasm-wit-compat=${{ needs.wasm-wit-compat.result }}" \
             "bench-compile=${{ needs.bench-compile.result }}" \
             "docker-build=${{ needs.docker-build.result }}" \
