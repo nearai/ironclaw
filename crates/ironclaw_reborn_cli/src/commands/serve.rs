@@ -567,10 +567,15 @@ impl ServeCommand {
             }
             #[cfg(feature = "slack-v2-host-beta")]
             if let Some(slack_mounts) = slack_mounts {
-                let slack_personal_oauth_binding = slack_mounts.personal_oauth_binding_config();
+                // The generic post-OAuth channel identity binding: the Slack
+                // lane rides it as one per-extension override; installed
+                // pure-manifest channel extensions bind through generic
+                // discovery over the same hook.
+                let channel_identity_binding =
+                    slack_mounts.channel_identity_binding_config(&runtime);
                 serve_config = serve_config
                     .with_public_route_mount(slack_mounts.events)
-                    .with_slack_personal_oauth_binding(slack_personal_oauth_binding)
+                    .with_channel_identity_binding(channel_identity_binding)
                     .with_slack_channel_routes(slack_mounts.channel_routes);
             }
             // Public NEAR AI login callback route (token redirect target). Built

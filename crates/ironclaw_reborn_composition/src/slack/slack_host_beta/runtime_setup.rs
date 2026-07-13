@@ -24,26 +24,19 @@ use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
 use crate::provider_identity::{ProviderIdentityActorResolver, RebornUserIdentityLookup};
 use crate::provider_identity::{
-    RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
-    RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
+    RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingStore,
 };
 use crate::slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteStore, SlackChannelRouteSubjectResolver,
     SlackChannelSetupActivation, SlackChannelSetupActivationError,
 };
 use crate::slack::slack_host_state::FilesystemSlackHostState;
-use crate::slack::slack_personal_binding::{
-    SlackPersonalBindingInstallation, SlackPersonalBindingPrincipal, SlackPersonalUserBinder,
-    SlackPersonalUserBindingError, SlackPersonalUserBindingRequest,
-    SlackPersonalUserBindingService,
-};
 use crate::slack::slack_preference_targets::{
     SlackHostBetaOutboundTargetProvider, SlackOutboundTargetProviderConfig, SlackPersonalDmTarget,
     SlackPersonalDmTargetError, SlackPersonalDmTargetProvisioner, SlackPersonalDmTargetStore,
 };
 use crate::slack::slack_serve::{
-    SlackInstallationSelector, SlackTeamId, SlackUserId, slack_events_alias_mount,
-    slack_inbound_classifier,
+    SlackTeamId, SlackUserId, slack_events_alias_mount, slack_inbound_classifier,
 };
 use crate::slack::slack_setup::{
     SlackInstallationSetup, SlackInstallationSetupStore, SlackSetupService,
@@ -55,12 +48,14 @@ use ironclaw_extension_host::ingress::{
 use ironclaw_host_api::SecretHandle;
 
 use super::{
-    ProvisioningSlackPersonalUserBinder, SlackConversationServices, SlackHostBetaBuildError,
+    SlackConversationServices, SlackDmProvisioningPostBind, SlackHostBetaBuildError,
     SlackHostBetaConfig, SlackHostBetaConfigInput, SlackHostBetaMounts, SlackHostBetaRuntimeConfig,
-    SlackHostBetaRuntimeParts, SlackPersonalConnectionScope, SlackPersonalConnectionScopeResolver,
-    SlackPersonalDmTargetProvisioning, SlackPreferenceTargetCodec, SlackTriggeredRunDeliveryHook,
-    build_slack_inbound_sink, build_triggered_run_delivery_hook_from_parts,
-    extension_ingress_parts,
+    SlackHostBetaRuntimeParts, SlackPersonalDmTargetProvisioning, SlackPreferenceTargetCodec,
+    SlackTriggeredRunDeliveryHook, build_slack_inbound_sink,
+    build_triggered_run_delivery_hook_from_parts, extension_ingress_parts,
+};
+use crate::extension_host::channel_identity::{
+    ChannelConnectionScope, ChannelConnectionScopeSource, ChannelIdentityPostBind,
 };
 use crate::extension_host::extension_ingress::GenericChannelInboundSink;
 
@@ -90,9 +85,6 @@ pub(super) async fn build_runtime_mounts(
     let user_identity_delete_store: Arc<dyn RebornUserIdentityBindingDeleteStore> = state.clone();
     let channel_route_store: Arc<dyn SlackChannelRouteStore> = state.clone();
     let personal_dm_target_store: Arc<dyn SlackPersonalDmTargetStore> = state.clone();
-    let dynamic_binding_service: Arc<dyn SlackPersonalUserBinder> = Arc::new(
-        DynamicSlackPersonalUserBinder::new(Arc::clone(&setup_service), Arc::clone(&binding_store)),
-    );
     let dm_provisioner: Arc<dyn SlackPersonalDmTargetProvisioning> =
         Arc::new(DynamicSlackPersonalDmTargetProvisioner::new(
             Arc::clone(&setup_service),
@@ -102,11 +94,8 @@ pub(super) async fn build_runtime_mounts(
                 .ok_or(SlackHostBetaBuildError::DurableHostStateUnavailable)?,
             Arc::clone(&personal_dm_target_store),
         ));
-    let personal_oauth_binder: Arc<dyn SlackPersonalUserBinder> =
-        Arc::new(ProvisioningSlackPersonalUserBinder::new(
-            Arc::clone(&dynamic_binding_service),
-            dm_provisioner,
-        ));
+    let post_bind_provisioning: Arc<dyn ChannelIdentityPostBind> =
+        Arc::new(SlackDmProvisioningPostBind::new(dm_provisioner));
     let ingress = extension_ingress_parts(runtime)?;
     let dynamic_sink = Arc::new(DynamicSlackInboundSink::new(
         Arc::clone(&parts),
@@ -246,8 +235,8 @@ pub(super) async fn build_runtime_mounts(
         });
     }
 
-    let personal_connection_scope_resolver: Arc<dyn SlackPersonalConnectionScopeResolver> =
-        Arc::new(DynamicSlackPersonalConnectionScopeResolver {
+    let connection_scope_source: Arc<dyn ChannelConnectionScopeSource> =
+        Arc::new(SetupSlackConnectionScopeSource {
             setup_service: Arc::clone(&setup_service),
         });
 
@@ -255,9 +244,9 @@ pub(super) async fn build_runtime_mounts(
         events,
         channel_routes,
         tenant_id: config.tenant_id.clone(),
-        personal_connection_scope: None,
-        personal_connection_scope_resolver,
-        personal_oauth_binder,
+        connection_scope_source,
+        post_bind_provisioning,
+        user_identity_binding_store: binding_store,
         user_identity_lookup,
         user_identity_delete_store,
         personal_dm_target_store,
@@ -340,15 +329,17 @@ fn slack_legacy_workflow_storage_roots(
     })
 }
 
-struct DynamicSlackPersonalConnectionScopeResolver {
+/// Setup-derived connection scope for the runtime mounts path: the live
+/// workspace setup supplies the installation id plus the workspace and app
+/// claims the generic identity hook validates a proven OAuth identity
+/// against. No saved setup means "not configured yet" (fail-closed).
+struct SetupSlackConnectionScopeSource {
     setup_service: Arc<SlackSetupService>,
 }
 
 #[async_trait::async_trait]
-impl SlackPersonalConnectionScopeResolver for DynamicSlackPersonalConnectionScopeResolver {
-    async fn resolve_personal_connection_scope(
-        &self,
-    ) -> Result<Option<SlackPersonalConnectionScope>, String> {
+impl ChannelConnectionScopeSource for SetupSlackConnectionScopeSource {
+    async fn resolve_connection_scope(&self) -> Result<Option<ChannelConnectionScope>, String> {
         let Some(setup) = self
             .setup_service
             .current_setup()
@@ -357,11 +348,13 @@ impl SlackPersonalConnectionScopeResolver for DynamicSlackPersonalConnectionScop
         else {
             return Ok(None);
         };
-        let installation_id =
-            AdapterInstallationId::new(setup.installation_id).map_err(|error| error.to_string())?;
-        Ok(Some(SlackPersonalConnectionScope {
+        let installation_id = AdapterInstallationId::new(setup.installation_id.clone())
+            .map_err(|error| error.to_string())?;
+        Ok(Some(ChannelConnectionScope {
             installation_id,
-            team_id: SlackTeamId::new(setup.team_id),
+            expected_team_id: Some(setup.team_id),
+            expected_enterprise_id: None,
+            expected_app_id: Some(setup.api_app_id),
         }))
     }
 }
@@ -795,79 +788,6 @@ impl ChannelIngressDrain for DynamicSlackInboundSink {
 }
 
 #[derive(Clone)]
-struct DynamicSlackPersonalUserBinder {
-    setup_service: Arc<SlackSetupService>,
-    store: Arc<dyn RebornUserIdentityBindingStore>,
-}
-
-impl DynamicSlackPersonalUserBinder {
-    fn new(
-        setup_service: Arc<SlackSetupService>,
-        store: Arc<dyn RebornUserIdentityBindingStore>,
-    ) -> Self {
-        Self {
-            setup_service,
-            store,
-        }
-    }
-
-    async fn binding_service(
-        &self,
-    ) -> Result<SlackPersonalUserBindingService, SlackPersonalUserBindingError> {
-        let setup = self
-            .setup_service
-            .current_setup()
-            .await
-            .map_err(|error| {
-                SlackPersonalUserBindingError::BindingStore(
-                    RebornUserIdentityBindingError::Backend(error.to_string()),
-                )
-            })?
-            .ok_or_else(|| SlackPersonalUserBindingError::UnknownInstallation {
-                tenant_id: self.setup_service.tenant_id().clone(),
-                installation_id: AdapterInstallationId::new("slack_setup_missing")
-                    .expect("missing Slack setup sentinel installation id must be valid"), // safety: literal is non-empty and contains no control characters.
-            })?;
-        let installation = SlackPersonalBindingInstallation {
-            tenant_id: self.setup_service.tenant_id().clone(),
-            installation_id: setup.installation_id().map_err(|error| {
-                SlackPersonalUserBindingError::BindingStore(
-                    RebornUserIdentityBindingError::Backend(error.to_string()),
-                )
-            })?,
-            selector: SlackInstallationSelector::app_team(setup.api_app_id, setup.team_id),
-        };
-        Ok(SlackPersonalUserBindingService::new(
-            [installation],
-            Arc::clone(&self.store),
-        ))
-    }
-}
-
-impl std::fmt::Debug for DynamicSlackPersonalUserBinder {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("DynamicSlackPersonalUserBinder")
-            .field("tenant_id", &self.setup_service.tenant_id())
-            .finish_non_exhaustive()
-    }
-}
-
-#[async_trait::async_trait]
-impl SlackPersonalUserBinder for DynamicSlackPersonalUserBinder {
-    async fn bind_personal_user(
-        &self,
-        principal: SlackPersonalBindingPrincipal,
-        request: SlackPersonalUserBindingRequest,
-    ) -> Result<RebornUserIdentityBinding, SlackPersonalUserBindingError> {
-        self.binding_service()
-            .await?
-            .bind_personal_user(principal, request)
-            .await
-    }
-}
-
-#[derive(Clone)]
 struct SlackDynamicOutboundTargetProviderConfig {
     tenant_id: TenantId,
     agent_id: AgentId,
@@ -1037,7 +957,7 @@ pub(crate) fn slack_provider_identity_actor_resolver(
     lookup: Arc<dyn RebornUserIdentityLookup>,
 ) -> ProviderIdentityActorResolver {
     ProviderIdentityActorResolver::new(
-        crate::slack::slack_channel_connection::SLACK_IDENTITY_PROVIDER,
+        ironclaw_auth::SLACK_PROVIDER_ID,
         ironclaw_slack_v2_adapter::SLACK_V2_ADAPTER_ID,
         ironclaw_slack_v2_adapter::SLACK_USER_ACTOR_KIND,
         lookup,
@@ -1054,7 +974,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn dynamic_personal_connection_scope_resolver_reads_current_setup() {
+    async fn setup_connection_scope_source_reads_current_setup() {
         let setup_service = Arc::new(SlackSetupService::new(
             TenantId::new("tenant:slack").unwrap(),
             AgentId::new("agent:slack").unwrap(),
@@ -1063,20 +983,22 @@ mod tests {
             Arc::new(InMemorySetupStore::new(setup_record(7))),
             Arc::new(InMemorySecretStore::default()),
         ));
-        let resolver = DynamicSlackPersonalConnectionScopeResolver { setup_service };
+        let source = SetupSlackConnectionScopeSource { setup_service };
 
-        let scope = resolver
-            .resolve_personal_connection_scope()
+        let scope = source
+            .resolve_connection_scope()
             .await
             .expect("scope resolves")
             .expect("setup exists");
 
         assert_eq!(scope.installation_id.as_str(), "install-a");
-        assert_eq!(scope.team_id.as_str(), "T123");
+        assert_eq!(scope.expected_team_id.as_deref(), Some("T123"));
+        assert_eq!(scope.expected_app_id.as_deref(), Some("A123"));
+        assert_eq!(scope.expected_enterprise_id, None);
     }
 
     #[tokio::test]
-    async fn dynamic_personal_connection_scope_resolver_returns_none_without_setup() {
+    async fn setup_connection_scope_source_returns_none_without_setup() {
         let setup_service = Arc::new(SlackSetupService::new(
             TenantId::new("tenant:slack").unwrap(),
             AgentId::new("agent:slack").unwrap(),
@@ -1085,11 +1007,11 @@ mod tests {
             Arc::new(InMemorySetupStore::empty()),
             Arc::new(InMemorySecretStore::default()),
         ));
-        let resolver = DynamicSlackPersonalConnectionScopeResolver { setup_service };
+        let source = SetupSlackConnectionScopeSource { setup_service };
 
         assert!(
-            resolver
-                .resolve_personal_connection_scope()
+            source
+                .resolve_connection_scope()
                 .await
                 .expect("scope resolves")
                 .is_none()

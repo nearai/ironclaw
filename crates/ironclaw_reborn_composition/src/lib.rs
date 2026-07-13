@@ -74,6 +74,7 @@ pub use automation::facade::RebornAutomationProductFacade;
 pub use automation::trigger_poller::{NoopPostSubmitDeliveryHook, PostSubmitDeliveryHook};
 pub use error::RebornBuildError;
 pub use extension_host::channel_host::{ChannelHostIdentity, GenericChannelHostAssembly};
+pub use extension_host::channel_identity::ChannelIdentityBindingConfig;
 pub use extension_host::extension_ingress::{
     ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
     ExtensionIngressParts, ExtensionIngressRegistry, GenericChannelInboundSink,
@@ -214,8 +215,6 @@ pub use runtime_input::{
 #[cfg(feature = "root-llm-provider")]
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
 #[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_channel_connection::build_webui_services_with_slack_host_beta_mounts;
-#[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH,
     WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH, WEBUI_V2_CHANNELS_SLACK_SUBJECTS_PATH,
@@ -226,23 +225,8 @@ pub use slack::slack_host_beta::{
     SlackHostBetaConfigInput, SlackHostBetaMounts, SlackHostBetaRuntimeConfig,
     build_slack_events_route_mount, build_slack_events_route_mount_with_actor_user_resolver,
     build_slack_host_beta_mounts, build_slack_host_beta_runtime_mounts,
-    build_triggered_run_delivery_hook,
+    build_triggered_run_delivery_hook, build_webui_services_with_slack_host_beta_mounts,
 };
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_personal_binding::{
-    SlackPersonalBindingInstallation, SlackPersonalBindingPrincipal, SlackPersonalUserBindingError,
-    SlackPersonalUserBindingRequest, SlackPersonalUserBindingService,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_personal_binding_serve::{
-    SLACK_PERSONAL_BINDING_OAUTH_CALLBACK_PATH, SLACK_PERSONAL_BINDING_OAUTH_START_PATH,
-    SlackPersonalBindingAuthorizationUrl, SlackPersonalBindingOAuthClient,
-    SlackPersonalBindingOAuthError, SlackPersonalBindingOAuthIdentity,
-    SlackPersonalBindingRouteConfig, SlackPersonalBindingRouteConfigError,
-    SlackPersonalBindingStartResponse,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_personal_oauth::SlackPersonalOAuthBindingConfig;
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_serve;
 #[cfg(feature = "slack-v2-host-beta")]

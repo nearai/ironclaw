@@ -58,6 +58,7 @@ use serde_json::json;
 use url::Url;
 use uuid::Uuid;
 
+use crate::extension_host::channel_identity::ProviderIdentityHookFactory;
 use crate::product_auth::api::auth::RebornOAuthStartFlowRequest;
 use crate::{
     RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse,
@@ -153,10 +154,12 @@ pub(crate) struct ProductAuthRouteState {
     tenant_id: TenantId,
     default_agent_id: Option<AgentId>,
     default_project_id: Option<ProjectId>,
-    /// Post-exchange provider-identity hooks, keyed by vendor id — data
-    /// registered by composition wiring (e.g. the Slack personal binding),
-    /// never a vendor match arm in a handler.
-    vendor_identity_hooks: std::collections::BTreeMap<String, Arc<VendorIdentityHookFactory>>,
+    /// The vendor-blind post-exchange provider-identity hook — registered
+    /// by composition wiring as data (the generic channel identity
+    /// binding), never a vendor match arm in a handler. The factory
+    /// receives the callback's vendor id and resolves what (if anything)
+    /// to bind itself.
+    provider_identity_hook: Option<Arc<ProviderIdentityHookFactory>>,
     // First-slice WebUI OAuth stores the raw PKCE verifier process-locally
     // because `AuthFlowRecord` deliberately serializes hashes only. Production
     // HA must replace this with a host-owned encrypted verifier store before
@@ -176,7 +179,7 @@ impl ProductAuthRouteState {
             tenant_id,
             default_agent_id,
             default_project_id,
-            vendor_identity_hooks: std::collections::BTreeMap::new(),
+            provider_identity_hook: None,
             pkce_verifiers: ExpiringLruCache::new(
                 OAUTH_PKCE_VERIFIER_CACHE_CAPACITY,
                 StoredPkceVerifier::expires_at,
@@ -184,26 +187,24 @@ impl ProductAuthRouteState {
         }
     }
 
-    /// Register a post-exchange provider-identity hook for one vendor. The
-    /// handler resolves hooks by the callback's vendor id — data lookup, no
-    /// vendor branch.
-    pub(crate) fn with_vendor_identity_hook(
+    /// Register the post-exchange provider-identity hook. The handler
+    /// hands it the callback's vendor id — data lookup, no vendor branch.
+    pub(crate) fn with_provider_identity_hook(
         mut self,
-        vendor: impl Into<String>,
-        factory: Arc<VendorIdentityHookFactory>,
+        factory: Arc<ProviderIdentityHookFactory>,
     ) -> Self {
-        self.vendor_identity_hooks.insert(vendor.into(), factory);
+        self.provider_identity_hook = Some(factory);
         self
     }
 
-    pub(super) fn vendor_identity_hook(
+    pub(super) fn provider_identity_hook(
         &self,
         vendor: &str,
         callback_scope: &AuthProductScope,
     ) -> Option<crate::product_auth::api::auth::OAuthProviderIdentityCheck> {
-        self.vendor_identity_hooks
-            .get(vendor)
-            .and_then(|factory| factory(callback_scope))
+        self.provider_identity_hook
+            .as_ref()
+            .and_then(|factory| factory(vendor, callback_scope))
     }
 
     fn auth_engine(&self) -> Result<Arc<ironclaw_auth::AuthEngine>, ProductAuthRouteFailure> {
@@ -251,8 +252,8 @@ impl std::fmt::Debug for ProductAuthRouteState {
             .field("default_agent_id", &self.default_agent_id)
             .field("default_project_id", &self.default_project_id)
             .field(
-                "vendor_identity_hooks",
-                &self.vendor_identity_hooks.keys().collect::<Vec<_>>(),
+                "provider_identity_hook",
+                &self.provider_identity_hook.is_some(),
             );
         builder
             .field("pkce_verifiers", &"ExpiringLruCache<...>")
@@ -765,12 +766,6 @@ pub(super) struct VendorOAuthCallbackQuery {
     #[serde(alias = "scope")]
     scopes: Option<String>,
 }
-
-/// Factory producing one post-exchange provider-identity check for a callback
-/// scope (or `None` when the vendor needs no identity binding).
-pub(crate) type VendorIdentityHookFactory = dyn Fn(&AuthProductScope) -> Option<crate::product_auth::api::auth::OAuthProviderIdentityCheck>
-    + Send
-    + Sync;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ProductAuthRouteFailure {

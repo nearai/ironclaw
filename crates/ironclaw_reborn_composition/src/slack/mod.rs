@@ -1,6 +1,4 @@
 #[cfg(feature = "slack-v2-host-beta")]
-pub(crate) mod slack_channel_connection;
-#[cfg(feature = "slack-v2-host-beta")]
 pub(crate) mod slack_channel_routes;
 #[cfg(feature = "slack-v2-host-beta")]
 #[cfg(feature = "slack-v2-host-beta")]
@@ -9,10 +7,6 @@ pub(crate) mod slack_channel_routes;
 pub(crate) mod slack_host_beta;
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) mod slack_host_state;
-#[cfg(feature = "slack-v2-host-beta")]
-pub(crate) mod slack_personal_binding;
-#[cfg(feature = "slack-v2-host-beta")]
-pub(crate) mod slack_personal_binding_serve;
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) mod slack_personal_oauth;
 #[cfg(feature = "slack-v2-host-beta")]

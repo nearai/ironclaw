@@ -430,8 +430,9 @@ async fn vendor_oauth_callback_attempt(
             },
         },
     };
-    // Post-exchange identity binding is a per-vendor hook registered as data.
-    let identity_check = state.vendor_identity_hook(provider.as_str(), callback_scope);
+    // Post-exchange identity binding is a vendor-blind hook registered as
+    // data; it receives the callback's vendor id and resolves the rest.
+    let identity_check = state.provider_identity_hook(provider.as_str(), callback_scope);
     let response = match run_with_backend_timeout(
         state
             .product_auth

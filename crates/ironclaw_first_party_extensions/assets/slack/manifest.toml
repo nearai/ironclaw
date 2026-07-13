@@ -131,6 +131,13 @@ signed_payload = [
 fields = [
   { handle = "slack_bot_token", label = "Bot token", secret = true },
   { handle = "slack_signing_secret", label = "Signing secret", secret = true },
+  # Connection-scoping values for the generic post-OAuth identity binding
+  # (handle-suffix convention: *_team_id / *_app_id map onto the proven
+  # identity claims). The Slack setup surface still owns these values until
+  # its configure lane folds into [channel.config]; the manifest declares
+  # their durable home.
+  { handle = "slack_team_id", label = "Workspace (team) ID", secret = false },
+  { handle = "slack_api_app_id", label = "App ID", secret = false },
 ]
 
 [[channel.egress]]

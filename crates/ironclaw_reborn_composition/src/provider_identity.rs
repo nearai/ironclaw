@@ -93,7 +93,7 @@ pub trait RebornUserIdentityBindingStore: Send + Sync {
 }
 
 #[async_trait::async_trait]
-pub(crate) trait RebornUserIdentityBindingDeleteStore: Send + Sync {
+pub trait RebornUserIdentityBindingDeleteStore: Send + Sync {
     async fn delete_user_identity_bindings_for_user(
         &self,
         provider: &str,

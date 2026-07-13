@@ -1,0 +1,810 @@
+//! Generic per-user channel connection facade (extension-runtime §6.4).
+//!
+//! One vendor-blind [`ChannelConnectionFacade`] replaces the per-vendor
+//! facades: for every installed extension whose manifest declares a channel
+//! surface and an auth vendor, the caller's connection state is derived from
+//! the identity-binding store — connected iff the caller holds a binding for
+//! the extension's vendor under the extension's current installation-scoped
+//! prefix. Disconnect runs the fixed order: revoke the caller's personal
+//! vendor credential → per-extension vendor cleanup (lane-supplied residue,
+//! e.g. personal delivery targets) → delete the caller's identity bindings.
+//! The binding is the "connected" signal and deletes last (commit point);
+//! the credential revokes first so a mid-sequence failure leaves the caller
+//! visibly connected with every step retryable.
+//!
+//! Channel lanes whose configure surface predates `[channel.config]`
+//! register a [`ChannelConnectionEntry`] carrying their own scope source and
+//! cleanup port; pure-manifest extensions are discovered generically over
+//! the durable installation store.
+
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use ironclaw_auth::{
+    AuthProductScope, AuthProviderId, AuthSurface, SecretCleanupAction, SecretCleanupReport,
+    SecretCleanupRequest,
+};
+use ironclaw_extensions::ExtensionInstallationStore;
+use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, TenantId};
+use ironclaw_product_workflow::{
+    ChannelConnectionFacade, RebornServicesError, WebUiAuthenticatedCaller,
+};
+
+use crate::extension_host::channel_identity::{
+    ChannelConnectionScope, ChannelConnectionScopeSource, channel_config_connection_scope_source,
+    discover_channel_extensions,
+};
+use crate::provider_identity::{RebornUserIdentityBindingDeleteStore, RebornUserIdentityLookup};
+
+/// Narrow disconnect-side port over product-auth lifecycle cleanup, so the
+/// per-user channel disconnect can revoke the caller's personal vendor
+/// credential without depending on the whole product-auth bundle (and so
+/// tests can record the issued cleanup). Production forwards to
+/// [`crate::RebornProductAuthServices::cleanup_credentials_for_lifecycle`],
+/// the guardrail-sanctioned lifecycle cleanup entry point.
+#[async_trait]
+pub(crate) trait ChannelCredentialCleanup: Send + Sync {
+    async fn cleanup_credentials_for_lifecycle(
+        &self,
+        request: SecretCleanupRequest,
+    ) -> Result<SecretCleanupReport, RebornServicesError>;
+}
+
+#[async_trait]
+impl ChannelCredentialCleanup for crate::RebornProductAuthServices {
+    async fn cleanup_credentials_for_lifecycle(
+        &self,
+        request: SecretCleanupRequest,
+    ) -> Result<SecretCleanupReport, RebornServicesError> {
+        crate::RebornProductAuthServices::cleanup_credentials_for_lifecycle(self, request)
+            .await
+            .map_err(|error| {
+                RebornServicesError::internal_from(format!(
+                    "channel credential cleanup failed: {:?}",
+                    error.code
+                ))
+            })
+    }
+}
+
+/// Vendor residue port: per-caller cleanup a channel lane still owns when
+/// the caller disconnects (for example, deleting personal delivery targets
+/// keyed by the installation). Runs only when the extension's connection
+/// scope resolves — targets keyed by an installation are unreachable while
+/// no scope exists.
+#[async_trait]
+pub(crate) trait ChannelDisconnectCleanup: Send + Sync {
+    async fn cleanup_disconnected_caller(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        scope: &ChannelConnectionScope,
+    ) -> Result<(), String>;
+}
+
+/// One channel lane's registration with the generic facade: the extension
+/// id, the auth vendors whose bindings mean "connected", the lane's scope
+/// source, and its optional disconnect-side cleanup.
+#[derive(Clone)]
+pub(crate) struct ChannelConnectionEntry {
+    pub(crate) extension_id: String,
+    pub(crate) providers: Vec<String>,
+    pub(crate) scope_source: Arc<dyn ChannelConnectionScopeSource>,
+    pub(crate) disconnect_cleanup: Option<Arc<dyn ChannelDisconnectCleanup>>,
+}
+
+/// The generic per-user channel connection facade.
+pub(crate) struct GenericChannelConnectionFacade {
+    tenant_id: TenantId,
+    /// Lane-registered entries; win over generic discovery for their ids.
+    entries: Vec<ChannelConnectionEntry>,
+    /// Generic discovery + scope source. `None` when the composed runtime
+    /// has no durable installation store — only lane entries report then.
+    installation_store: Option<Arc<dyn ExtensionInstallationStore>>,
+    identity_lookup: Arc<dyn RebornUserIdentityLookup>,
+    identity_delete_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
+    /// Genuinely optional: compositions without product auth cannot have
+    /// minted a personal vendor credential in the first place, so there is
+    /// nothing to revoke on disconnect.
+    credential_cleanup: Option<Arc<dyn ChannelCredentialCleanup>>,
+}
+
+impl GenericChannelConnectionFacade {
+    pub(crate) fn new(
+        tenant_id: TenantId,
+        entries: Vec<ChannelConnectionEntry>,
+        installation_store: Option<Arc<dyn ExtensionInstallationStore>>,
+        identity_lookup: Arc<dyn RebornUserIdentityLookup>,
+        identity_delete_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
+        credential_cleanup: Option<Arc<dyn ChannelCredentialCleanup>>,
+    ) -> Self {
+        Self {
+            tenant_id,
+            entries,
+            installation_store,
+            identity_lookup,
+            identity_delete_store,
+            credential_cleanup,
+        }
+    }
+
+    /// The lane entries plus generically-discovered channel extensions.
+    async fn connection_entries(&self) -> Result<Vec<ChannelConnectionEntry>, RebornServicesError> {
+        let mut entries = self.entries.clone();
+        let Some(installation_store) = &self.installation_store else {
+            return Ok(entries);
+        };
+        let overridden: BTreeSet<String> = entries
+            .iter()
+            .map(|entry| entry.extension_id.clone())
+            .collect();
+        let discovered = discover_channel_extensions(installation_store, &overridden)
+            .await
+            .map_err(RebornServicesError::internal_from)?;
+        for extension in discovered {
+            let Ok(extension_id) = ExtensionId::new(&extension.extension_id) else {
+                continue;
+            };
+            entries.push(ChannelConnectionEntry {
+                extension_id: extension.extension_id,
+                providers: extension.providers,
+                scope_source: channel_config_connection_scope_source(
+                    Arc::clone(installation_store),
+                    extension_id,
+                ),
+                disconnect_cleanup: None,
+            });
+        }
+        Ok(entries)
+    }
+
+    async fn entry_scope(
+        &self,
+        entry: &ChannelConnectionEntry,
+    ) -> Result<Option<ChannelConnectionScope>, RebornServicesError> {
+        entry
+            .scope_source
+            .resolve_connection_scope()
+            .await
+            .map_err(RebornServicesError::internal_from)
+    }
+
+    async fn caller_connected(
+        &self,
+        entry: &ChannelConnectionEntry,
+        caller: &WebUiAuthenticatedCaller,
+        scope: &ChannelConnectionScope,
+    ) -> Result<bool, RebornServicesError> {
+        let prefix = scope.provider_user_id_prefix();
+        for provider in &entry.providers {
+            let connected = self
+                .identity_lookup
+                .user_has_provider_binding_with_provider_user_id_prefix(
+                    provider,
+                    &caller.user_id,
+                    Some(prefix.as_str()),
+                )
+                .await
+                .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
+            if connected {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    async fn revoke_personal_credentials(
+        &self,
+        entry: &ChannelConnectionEntry,
+        caller: &WebUiAuthenticatedCaller,
+    ) -> Result<(), RebornServicesError> {
+        let Some(cleanup) = &self.credential_cleanup else {
+            return Ok(());
+        };
+        for provider in &entry.providers {
+            cleanup
+                .cleanup_credentials_for_lifecycle(personal_credential_cleanup_request(
+                    caller,
+                    &entry.extension_id,
+                    provider,
+                )?)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn delete_identity_bindings(
+        &self,
+        entry: &ChannelConnectionEntry,
+        caller: &WebUiAuthenticatedCaller,
+        provider_user_id_prefix: Option<&str>,
+    ) -> Result<(), RebornServicesError> {
+        for provider in &entry.providers {
+            self.identity_delete_store
+                .delete_user_identity_bindings_for_user(
+                    provider,
+                    &caller.user_id,
+                    provider_user_id_prefix,
+                )
+                .await
+                .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ChannelConnectionFacade for GenericChannelConnectionFacade {
+    async fn caller_channel_connections(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<HashMap<String, bool>, RebornServicesError> {
+        let entries = self.connection_entries().await?;
+        let mut connections = HashMap::with_capacity(entries.len());
+        for entry in &entries {
+            let connected = if caller.tenant_id != self.tenant_id {
+                false
+            } else {
+                match self.entry_scope(entry).await? {
+                    Some(scope) => self.caller_connected(entry, &caller, &scope).await?,
+                    None => false,
+                }
+            };
+            connections.insert(entry.extension_id.clone(), connected);
+        }
+        Ok(connections)
+    }
+
+    async fn disconnect_channel_for_caller(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        channel: &str,
+    ) -> Result<(), RebornServicesError> {
+        if caller.tenant_id != self.tenant_id {
+            return Ok(());
+        }
+        let entries = self.connection_entries().await?;
+        let Some(entry) = entries.iter().find(|entry| entry.extension_id == channel) else {
+            return Ok(());
+        };
+        let Some(scope) = self.entry_scope(entry).await? else {
+            // No connection scope means there is no installation to key the
+            // vendor cleanup or prefix-scoped binding deletes — the state of
+            // a fresh instance, or one whose setup was deleted. Refusing
+            // here used to fail extension uninstall before the channel was
+            // ever configured. Instead: still revoke the caller's
+            // provider-scoped credentials, then drop the caller's own
+            // bindings without an installation prefix (the delete stays
+            // tenant + caller-user bound). Vendor cleanup is skipped — its
+            // records are keyed by installation and unreachable while no
+            // scope exists.
+            self.revoke_personal_credentials(entry, &caller).await?;
+            self.delete_identity_bindings(entry, &caller, None).await?;
+            return Ok(());
+        };
+        // Ordering: credential revoke → vendor cleanup → identity binding.
+        // The binding is the "connected" signal and deletes last (commit
+        // point); the credential revokes first so a mid-sequence failure
+        // leaves the caller visibly connected with every step retryable —
+        // deleting vendor delivery state before a failing revoke would
+        // silently break proactive delivery while the UI still shows
+        // connected.
+        self.revoke_personal_credentials(entry, &caller).await?;
+        if let Some(cleanup) = &entry.disconnect_cleanup {
+            cleanup
+                .cleanup_disconnected_caller(&caller, &scope)
+                .await
+                .map_err(RebornServicesError::internal_from)?;
+        }
+        let prefix = scope.provider_user_id_prefix();
+        self.delete_identity_bindings(entry, &caller, Some(prefix.as_str()))
+            .await?;
+        Ok(())
+    }
+}
+
+// OAuth-minted personal credentials carry no extension ownership/grants, so
+// the provider selector is what actually reaches the caller's personal
+// vendor account. Shared by the scoped and no-scope disconnect arms so the
+// revoke request cannot drift between them.
+fn personal_credential_cleanup_request(
+    caller: &WebUiAuthenticatedCaller,
+    extension_id: &str,
+    provider: &str,
+) -> Result<SecretCleanupRequest, RebornServicesError> {
+    Ok(SecretCleanupRequest {
+        scope: AuthProductScope::new(
+            ResourceScope {
+                tenant_id: caller.tenant_id.clone(),
+                user_id: caller.user_id.clone(),
+                agent_id: caller.agent_id.clone(),
+                project_id: caller.project_id.clone(),
+                mission_id: None,
+                thread_id: None,
+                invocation_id: InvocationId::new(),
+            },
+            AuthSurface::Callback,
+        ),
+        extension_id: ExtensionId::new(extension_id)
+            .map_err(|error| RebornServicesError::internal_from(error.to_string()))?,
+        provider: Some(
+            AuthProviderId::new(provider)
+                .map_err(|error| RebornServicesError::internal_from(error.to_string()))?,
+        ),
+        action: SecretCleanupAction::Uninstall,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    use ironclaw_host_api::{AgentId, UserId};
+    use ironclaw_product_adapters::AdapterInstallationId;
+
+    use super::*;
+    use crate::provider_identity::{
+        RebornUserIdentityBindingError, RebornUserIdentityLookupError,
+        installation_scoped_provider_user_id,
+    };
+
+    const VENDOR: &str = "acmechat";
+    const EXTENSION: &str = "acmechat";
+
+    fn tenant() -> TenantId {
+        TenantId::new("tenant:test").expect("tenant")
+    }
+
+    fn caller() -> WebUiAuthenticatedCaller {
+        WebUiAuthenticatedCaller::new(
+            tenant(),
+            UserId::new("user:alice").expect("user"),
+            None::<AgentId>,
+            None,
+        )
+    }
+
+    fn scope(installation: &str) -> ChannelConnectionScope {
+        ChannelConnectionScope {
+            installation_id: AdapterInstallationId::new(installation).expect("installation"),
+            expected_team_id: Some("T123".to_string()),
+            expected_enterprise_id: None,
+            expected_app_id: Some("A123".to_string()),
+        }
+    }
+
+    fn facade(
+        scope: Option<ChannelConnectionScope>,
+        identity_store: Arc<RecordingIdentityStore>,
+        disconnect_cleanup: Option<Arc<dyn ChannelDisconnectCleanup>>,
+        credential_cleanup: Option<Arc<dyn ChannelCredentialCleanup>>,
+    ) -> GenericChannelConnectionFacade {
+        GenericChannelConnectionFacade::new(
+            tenant(),
+            vec![ChannelConnectionEntry {
+                extension_id: EXTENSION.to_string(),
+                providers: vec![VENDOR.to_string()],
+                scope_source: Arc::new(StaticScopeSource(scope)),
+                disconnect_cleanup,
+            }],
+            None,
+            identity_store.clone(),
+            identity_store,
+            credential_cleanup,
+        )
+    }
+
+    fn bound_identity_store(installation: &str) -> Arc<RecordingIdentityStore> {
+        let installation_id = AdapterInstallationId::new(installation).expect("installation");
+        Arc::new(RecordingIdentityStore::new([(
+            installation_scoped_provider_user_id(&installation_id, "U123"),
+            UserId::new("user:alice").expect("user"),
+        )]))
+    }
+
+    #[tokio::test]
+    async fn facade_disconnects_identity_and_vendor_state_in_order() {
+        let identity_store = bound_identity_store("install-alpha");
+        let vendor_cleanup = Arc::new(RecordingDisconnectCleanup::default());
+        let credential_cleanup = Arc::new(RecordingCredentialCleanup::default());
+        let facade = facade(
+            Some(scope("install-alpha")),
+            identity_store.clone(),
+            Some(vendor_cleanup.clone()),
+            Some(credential_cleanup.clone()),
+        );
+        let caller = caller();
+
+        assert_eq!(
+            facade
+                .caller_channel_connections(caller.clone())
+                .await
+                .expect("connection lookup"),
+            HashMap::from([(EXTENSION.to_string(), true)])
+        );
+
+        facade
+            .disconnect_channel_for_caller(caller.clone(), EXTENSION)
+            .await
+            .expect("disconnect succeeds");
+
+        // Disconnect must revoke the caller's personal credential through
+        // the product-auth lifecycle cleanup port, scoped to exactly this
+        // tenant + caller, the extension, and its vendor.
+        let requests = credential_cleanup.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].extension_id.as_str(), EXTENSION);
+        assert_eq!(
+            requests[0].provider.as_ref().map(|p| p.as_str()),
+            Some(VENDOR),
+            "the provider selector is what reaches the grant-less OAuth account"
+        );
+        assert_eq!(requests[0].action, SecretCleanupAction::Uninstall);
+        assert_eq!(&requests[0].scope.resource.tenant_id, &tenant());
+        assert_eq!(&requests[0].scope.resource.user_id, &caller.user_id);
+
+        assert_eq!(
+            vendor_cleanup.calls(),
+            vec![(caller.user_id.clone(), "install-alpha".to_string())],
+            "vendor disconnect cleanup runs with the resolved scope"
+        );
+        assert_eq!(
+            identity_store.deletes(),
+            vec![(
+                VENDOR.to_string(),
+                caller.user_id.clone(),
+                Some("install-alpha:".to_string())
+            )]
+        );
+        assert_eq!(
+            facade
+                .caller_channel_connections(caller.clone())
+                .await
+                .expect("connection lookup after disconnect"),
+            HashMap::from([(EXTENSION.to_string(), false)])
+        );
+
+        // Retry convergence for extension removal: `remove_extension` runs
+        // the caller disconnect before `ExtensionRemove`, so a failed
+        // removal retries the disconnect for a caller who is already
+        // disconnected. That repeat disconnect must stay an idempotent
+        // no-op success, not an error that would wedge the removal retry.
+        facade
+            .disconnect_channel_for_caller(caller.clone(), EXTENSION)
+            .await
+            .expect("repeat disconnect for a disconnected caller is an idempotent no-op");
+        assert_eq!(
+            credential_cleanup.requests().len(),
+            2,
+            "the removal-retry repeat disconnect re-issues the (idempotent) credential cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn facade_keeps_identity_when_vendor_cleanup_fails() {
+        let identity_store = bound_identity_store("install-alpha");
+        let facade = facade(
+            Some(scope("install-alpha")),
+            identity_store.clone(),
+            Some(Arc::new(FailingDisconnectCleanup)),
+            None,
+        );
+        let caller = caller();
+
+        assert!(
+            facade
+                .disconnect_channel_for_caller(caller.clone(), EXTENSION)
+                .await
+                .is_err(),
+            "vendor cleanup failure must fail the disconnect"
+        );
+        assert_eq!(
+            facade
+                .caller_channel_connections(caller)
+                .await
+                .expect("connection lookup after failed disconnect"),
+            HashMap::from([(EXTENSION.to_string(), true)]),
+            "identity binding must remain until vendor cleanup succeeds"
+        );
+        assert_eq!(identity_store.deletes(), Vec::new());
+    }
+
+    #[tokio::test]
+    async fn facade_keeps_identity_when_credential_cleanup_fails() {
+        let identity_store = bound_identity_store("install-alpha");
+        let facade = facade(
+            Some(scope("install-alpha")),
+            identity_store.clone(),
+            None,
+            Some(Arc::new(FailingCredentialCleanup)),
+        );
+        let caller = caller();
+
+        assert!(
+            facade
+                .disconnect_channel_for_caller(caller.clone(), EXTENSION)
+                .await
+                .is_err(),
+            "credential cleanup failure must fail the disconnect"
+        );
+        assert_eq!(
+            facade
+                .caller_channel_connections(caller)
+                .await
+                .expect("connection lookup after failed disconnect"),
+            HashMap::from([(EXTENSION.to_string(), true)]),
+            "identity binding must remain until credential cleanup succeeds, so the removal retry re-runs the full disconnect"
+        );
+        assert_eq!(identity_store.deletes(), Vec::new());
+    }
+
+    #[tokio::test]
+    async fn facade_requires_current_installation_scope_for_connected() {
+        // A binding under a different installation than the current scope
+        // must not report connected.
+        let identity_store = bound_identity_store("install-beta");
+        let facade = facade(Some(scope("install-alpha")), identity_store, None, None);
+
+        assert_eq!(
+            facade
+                .caller_channel_connections(caller())
+                .await
+                .expect("connection lookup"),
+            HashMap::from([(EXTENSION.to_string(), false)])
+        );
+    }
+
+    #[tokio::test]
+    async fn facade_disconnects_without_a_connection_scope() {
+        // A fresh instance (or one whose setup was deleted) has no
+        // connection scope. Uninstall/disconnect must still succeed and
+        // clean the caller's own bindings without an installation prefix
+        // while staying caller-bound; vendor cleanup is skipped (its records
+        // are keyed by installation and unreachable).
+        let identity_store = bound_identity_store("install-alpha");
+        let vendor_cleanup = Arc::new(RecordingDisconnectCleanup::default());
+        let credential_cleanup = Arc::new(RecordingCredentialCleanup::default());
+        let facade = facade(
+            None,
+            identity_store.clone(),
+            Some(vendor_cleanup.clone()),
+            Some(credential_cleanup.clone()),
+        );
+        let caller = caller();
+
+        assert_eq!(
+            facade
+                .caller_channel_connections(caller.clone())
+                .await
+                .expect("connection lookup"),
+            HashMap::from([(EXTENSION.to_string(), false)])
+        );
+        facade
+            .disconnect_channel_for_caller(caller.clone(), EXTENSION)
+            .await
+            .expect("disconnect succeeds without a connection scope");
+        assert_eq!(
+            credential_cleanup.requests().len(),
+            1,
+            "no-scope disconnect must still revoke the caller's credential"
+        );
+        assert!(vendor_cleanup.calls().is_empty());
+        assert_eq!(
+            identity_store.deletes(),
+            vec![(VENDOR.to_string(), caller.user_id, None)],
+            "caller's bindings are cleaned without an installation prefix"
+        );
+    }
+
+    #[tokio::test]
+    async fn facade_ignores_foreign_tenants_and_unknown_channels() {
+        let identity_store = bound_identity_store("install-alpha");
+        let credential_cleanup = Arc::new(RecordingCredentialCleanup::default());
+        let facade = facade(
+            Some(scope("install-alpha")),
+            identity_store.clone(),
+            None,
+            Some(credential_cleanup.clone()),
+        );
+        let foreign_caller = WebUiAuthenticatedCaller::new(
+            TenantId::new("tenant:other").expect("tenant"),
+            UserId::new("user:alice").expect("user"),
+            None::<AgentId>,
+            None,
+        );
+
+        assert_eq!(
+            facade
+                .caller_channel_connections(foreign_caller.clone())
+                .await
+                .expect("connection lookup"),
+            HashMap::from([(EXTENSION.to_string(), false)])
+        );
+        facade
+            .disconnect_channel_for_caller(foreign_caller, EXTENSION)
+            .await
+            .expect("foreign tenant disconnect is a no-op");
+        facade
+            .disconnect_channel_for_caller(caller(), "unknown-channel")
+            .await
+            .expect("unknown channel disconnect is a no-op");
+        assert!(credential_cleanup.requests().is_empty());
+        assert_eq!(identity_store.deletes(), Vec::new());
+    }
+
+    struct StaticScopeSource(Option<ChannelConnectionScope>);
+
+    #[async_trait]
+    impl ChannelConnectionScopeSource for StaticScopeSource {
+        async fn resolve_connection_scope(&self) -> Result<Option<ChannelConnectionScope>, String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingDisconnectCleanup {
+        calls: Mutex<Vec<(UserId, String)>>,
+    }
+
+    impl RecordingDisconnectCleanup {
+        fn calls(&self) -> Vec<(UserId, String)> {
+            self.calls.lock().expect("lock").clone()
+        }
+    }
+
+    #[async_trait]
+    impl ChannelDisconnectCleanup for RecordingDisconnectCleanup {
+        async fn cleanup_disconnected_caller(
+            &self,
+            caller: &WebUiAuthenticatedCaller,
+            scope: &ChannelConnectionScope,
+        ) -> Result<(), String> {
+            self.calls.lock().expect("lock").push((
+                caller.user_id.clone(),
+                scope.installation_id.as_str().to_string(),
+            ));
+            Ok(())
+        }
+    }
+
+    struct FailingDisconnectCleanup;
+
+    #[async_trait]
+    impl ChannelDisconnectCleanup for FailingDisconnectCleanup {
+        async fn cleanup_disconnected_caller(
+            &self,
+            _caller: &WebUiAuthenticatedCaller,
+            _scope: &ChannelConnectionScope,
+        ) -> Result<(), String> {
+            Err("vendor cleanup unavailable".to_string())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingCredentialCleanup {
+        requests: Mutex<Vec<SecretCleanupRequest>>,
+    }
+
+    impl RecordingCredentialCleanup {
+        fn requests(&self) -> Vec<SecretCleanupRequest> {
+            self.requests.lock().expect("lock").clone()
+        }
+    }
+
+    #[async_trait]
+    impl ChannelCredentialCleanup for RecordingCredentialCleanup {
+        async fn cleanup_credentials_for_lifecycle(
+            &self,
+            request: SecretCleanupRequest,
+        ) -> Result<SecretCleanupReport, RebornServicesError> {
+            self.requests.lock().expect("lock").push(request);
+            Ok(SecretCleanupReport::default())
+        }
+    }
+
+    struct FailingCredentialCleanup;
+
+    #[async_trait]
+    impl ChannelCredentialCleanup for FailingCredentialCleanup {
+        async fn cleanup_credentials_for_lifecycle(
+            &self,
+            _request: SecretCleanupRequest,
+        ) -> Result<SecretCleanupReport, RebornServicesError> {
+            Err(RebornServicesError::internal_from(
+                "credential cleanup unavailable",
+            ))
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingIdentityStore {
+        bindings: Mutex<HashMap<String, UserId>>,
+        deletes: Mutex<Vec<(String, UserId, Option<String>)>>,
+    }
+
+    impl RecordingIdentityStore {
+        fn new(bindings: impl IntoIterator<Item = (String, UserId)>) -> Self {
+            Self {
+                bindings: Mutex::new(bindings.into_iter().collect()),
+                deletes: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn deletes(&self) -> Vec<(String, UserId, Option<String>)> {
+            self.deletes.lock().expect("lock").clone()
+        }
+    }
+
+    #[async_trait]
+    impl RebornUserIdentityLookup for RecordingIdentityStore {
+        async fn resolve_user_identity(
+            &self,
+            provider: &str,
+            provider_user_id: &str,
+        ) -> Result<Option<UserId>, RebornUserIdentityLookupError> {
+            if provider != VENDOR {
+                return Ok(None);
+            }
+            Ok(self
+                .bindings
+                .lock()
+                .expect("lock")
+                .get(provider_user_id)
+                .cloned())
+        }
+
+        async fn user_has_provider_binding(
+            &self,
+            provider: &str,
+            user_id: &UserId,
+        ) -> Result<bool, RebornUserIdentityLookupError> {
+            self.user_has_provider_binding_with_provider_user_id_prefix(provider, user_id, None)
+                .await
+        }
+
+        async fn user_has_provider_binding_with_provider_user_id_prefix(
+            &self,
+            provider: &str,
+            user_id: &UserId,
+            provider_user_id_prefix: Option<&str>,
+        ) -> Result<bool, RebornUserIdentityLookupError> {
+            if provider != VENDOR {
+                return Ok(false);
+            }
+            Ok(self.bindings.lock().expect("lock").iter().any(
+                |(provider_user_id, bound_user_id)| {
+                    bound_user_id == user_id
+                        && provider_user_id_prefix
+                            .map(|prefix| provider_user_id.starts_with(prefix))
+                            .unwrap_or(true)
+                },
+            ))
+        }
+    }
+
+    #[async_trait]
+    impl RebornUserIdentityBindingDeleteStore for RecordingIdentityStore {
+        async fn delete_user_identity_bindings_for_user(
+            &self,
+            provider: &str,
+            user_id: &UserId,
+            provider_user_id_prefix: Option<&str>,
+        ) -> Result<usize, RebornUserIdentityBindingError> {
+            self.deletes.lock().expect("lock").push((
+                provider.to_string(),
+                user_id.clone(),
+                provider_user_id_prefix.map(ToString::to_string),
+            ));
+            let mut bindings = self.bindings.lock().expect("lock");
+            let before = bindings.len();
+            bindings.retain(|provider_user_id, bound_user_id| {
+                let prefix_matches = provider_user_id_prefix
+                    .map(|prefix| provider_user_id.starts_with(prefix))
+                    .unwrap_or(true);
+                !(bound_user_id == user_id && prefix_matches)
+            });
+            Ok(before - bindings.len())
+        }
+    }
+}
