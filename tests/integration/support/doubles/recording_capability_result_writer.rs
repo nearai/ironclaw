@@ -7,7 +7,6 @@ use ironclaw_host_api::CapabilityId;
 use ironclaw_loop_support::{
     CapabilityResultWrite, CapabilityWriteResult, LoopCapabilityResultWriter,
 };
-use ironclaw_reborn_composition::ProductLiveCapabilityIo;
 use ironclaw_turns::{
     LoopResultRef,
     run_profile::{AgentLoopHostError, AgentLoopHostErrorKind, LoopRunContext},
@@ -15,8 +14,14 @@ use ironclaw_turns::{
 
 use super::super::harness::RecordedCapabilityResult;
 
+/// Wraps whatever real `LoopCapabilityResultWriter` the harness is currently
+/// backed by -- production's ephemeral `ProductLiveCapabilityIo` test double
+/// by default, or the real `LocalDevCapabilityIo` (durable tool-result
+/// projection seam, issue #5838) when the harness opts into
+/// `.with_durable_capability_io()`. Trait-object `inner` so this recorder is
+/// agnostic to which one is underneath.
 pub(crate) struct RecordingCapabilityResultWriter {
-    pub(crate) inner: Arc<ProductLiveCapabilityIo>,
+    pub(crate) inner: Arc<dyn LoopCapabilityResultWriter>,
     pub(crate) results: Arc<Mutex<Vec<RecordedCapabilityResult>>>,
 }
 

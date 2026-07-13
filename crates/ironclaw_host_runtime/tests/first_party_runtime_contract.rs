@@ -696,6 +696,7 @@ fn first_party_registry_with_effects(effects: Vec<EffectKind>) -> ExtensionRegis
                 ),
                 required_host_ports: Vec::new(),
                 runtime_credentials: Vec::new(),
+                network_targets: Vec::new(),
                 resource_profile: None,
             }],
             hooks: Vec::new(),

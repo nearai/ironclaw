@@ -42,8 +42,9 @@ pub use ironclaw_triggers::TriggerId;
 pub use ironclaw_turns::TurnStatus;
 #[cfg(feature = "root-llm-provider")]
 pub use llm_admin::llm_catalog::{
-    RebornLlmCatalogError, resolve_against_registry, resolve_llm_selection_against_catalog,
-    resolve_reborn_runtime_llm,
+    ProviderCatalogValidationError, RebornLlmCatalogError, resolve_against_registry,
+    resolve_llm_selection_against_catalog, resolve_reborn_runtime_llm,
+    validate_reborn_provider_catalog_contents,
 };
 #[cfg(feature = "root-llm-provider")]
 pub use llm_admin::llm_config_service::{LlmReloadTrigger, RebornLlmConfigService};
@@ -157,21 +158,6 @@ pub use slack::slack_host_beta::{
     SlackHostBetaRuntimeConfig, build_slack_events_route_mount,
     build_slack_events_route_mount_with_actor_user_resolver, build_slack_host_beta_mounts,
     build_slack_host_beta_runtime_mounts, build_triggered_run_delivery_hook,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_personal_binding::{
-    RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
-    RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
-    SlackPersonalBindingInstallation, SlackPersonalBindingPrincipal, SlackPersonalUserBindingError,
-    SlackPersonalUserBindingRequest, SlackPersonalUserBindingService,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_personal_binding_serve::{
-    SLACK_PERSONAL_BINDING_OAUTH_CALLBACK_PATH, SLACK_PERSONAL_BINDING_OAUTH_START_PATH,
-    SlackPersonalBindingAuthorizationUrl, SlackPersonalBindingOAuthClient,
-    SlackPersonalBindingOAuthError, SlackPersonalBindingOAuthIdentity,
-    SlackPersonalBindingRouteConfig, SlackPersonalBindingRouteConfigError,
-    SlackPersonalBindingStartResponse,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_serve;

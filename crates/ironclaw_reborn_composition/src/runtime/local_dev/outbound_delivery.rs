@@ -7,7 +7,7 @@ use ironclaw_host_api::{
     Action, ApprovalRequest, ApprovalRequestId, CapabilityGrantId, CapabilityId, CorrelationId,
     InvocationFingerprint, InvocationId, Principal, ResourceEstimate, ResourceScope, UserId,
 };
-use ironclaw_loop_support::CapabilityResultWrite;
+use ironclaw_loop_support::{CapabilityResultWrite, DurablePersistence};
 use ironclaw_product_workflow::{
     OutboundPreferencesProductFacade, RebornOutboundDeliveryTargetId, RebornServicesError,
     RebornServicesErrorCode, WebUiAuthenticatedCaller,
@@ -541,6 +541,7 @@ async fn write_completed_result(
             capability_id: &invocation.request.capability_id,
             output,
             display_preview: None,
+            durable_persistence: DurablePersistence::Persist,
         })
         .await?;
     Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
@@ -550,6 +551,7 @@ async fn write_completed_result(
         terminate_hint: false,
         byte_len: write_result.byte_len,
         output_digest: write_result.output_digest,
+        model_observation: write_result.model_observation,
     }))
 }
 

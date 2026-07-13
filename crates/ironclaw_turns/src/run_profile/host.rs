@@ -1815,6 +1815,9 @@ pub enum CapabilityOutcome {
         /// Used by ByteCapStrategy to evaluate per-capability byte caps.
         #[serde(default)]
         byte_len: u64,
+        /// Bounded model-visible metadata for the child result.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_observation: Option<ModelVisibleToolObservation>,
     },
     SpawnedChildRun {
         child_run_id: TurnRunId,
@@ -1825,6 +1828,9 @@ pub enum CapabilityOutcome {
         /// Same semantics as AwaitDependentRun.byte_len.
         #[serde(default)]
         byte_len: u64,
+        /// Bounded model-visible metadata for the child result.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_observation: Option<ModelVisibleToolObservation>,
     },
     Denied(CapabilityDenied),
     Failed(CapabilityFailure),
@@ -1866,6 +1872,10 @@ pub struct CapabilityResultMessage {
     /// compatibility and for synthetic results that do not stage real output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_digest: Option<ContentDigest>,
+    /// Bounded, model-visible result metadata or preview. Full output remains
+    /// host-owned and is retrieved only through the result reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_observation: Option<ModelVisibleToolObservation>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

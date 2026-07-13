@@ -28,6 +28,7 @@ use ironclaw_events::{
     EventStreamKey, InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog,
     InMemoryEventSink, ReadScope, RuntimeEventKind,
 };
+use ironclaw_extensions::ExtensionRegistry;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::LocalFilesystem;
@@ -73,6 +74,52 @@ use ironclaw_wasm::{
     WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig,
 };
 use serde_json::json;
+
+fn with_authenticated_actor(
+    mut context: ExecutionContext,
+    actor_user_id: Option<&str>,
+) -> ExecutionContext {
+    context.authenticated_actor_user_id =
+        actor_user_id.map(|value| UserId::new(value).expect("valid authenticated actor user id"));
+    context
+}
+
+fn assert_actor_policy_denied(outcome: RuntimeCapabilityOutcome) {
+    match outcome {
+        RuntimeCapabilityOutcome::Failed(failure) => {
+            assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+            assert!(
+                failure
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("PolicyDenied")),
+                "actor mismatch must surface the policy-denied authorization reason: {failure:?}"
+            );
+        }
+        other => panic!("expected actor policy denial, got {other:?}"),
+    }
+}
+
+async fn assert_alice_run_status(
+    run_state: &InMemoryRunStateStore,
+    scope: &ResourceScope,
+    invocation_id: InvocationId,
+    expected_status: RunStatus,
+) {
+    let record = run_state
+        .get(scope, invocation_id)
+        .await
+        .unwrap()
+        .expect("Alice-owned run must remain present");
+    assert_eq!(record.status, expected_status);
+    assert_eq!(
+        record
+            .authenticated_actor_user_id
+            .as_ref()
+            .map(UserId::as_str),
+        Some("slack-alice")
+    );
+}
 
 #[tokio::test]
 async fn production_wiring_validation_rejects_missing_components_and_local_only_defaults() {
@@ -2754,7 +2801,7 @@ async fn host_runtime_services_resume_trust_preflight_failure_fails_only_matchin
 
     let mut invalid_context = context.clone();
     invalid_context.user_id = UserId::new("tampered-user").unwrap();
-    let invalid_context_outcome = broken_runtime
+    let invalid_context_error = broken_runtime
         .resume_capability(RuntimeCapabilityResumeRequest::new(
             invalid_context,
             gate.approval_request_id,
@@ -2764,8 +2811,11 @@ async fn host_runtime_services_resume_trust_preflight_failure_fails_only_matchin
             trust_decision_with_dispatch_authority(),
         ))
         .await
-        .unwrap();
-    assert_failed_outcome(invalid_context_outcome, RuntimeFailureKind::MissingRuntime);
+        .unwrap_err();
+    assert!(matches!(
+        invalid_context_error,
+        ironclaw_host_runtime::HostRuntimeError::InvalidRequest { .. }
+    ));
     assert_blocked_approval_run(
         &fixture,
         &scope,
@@ -2863,6 +2913,325 @@ async fn host_runtime_services_resume_runtime_policy_denial_fails_matching_block
         "runtime-policy preflight failure must not claim or consume the approval lease"
     );
     assert!(fixture.events.events().is_empty());
+}
+
+#[tokio::test]
+async fn host_runtime_services_resume_rejects_changed_actor_before_preflight_mutates_run() {
+    let fixture = approval_resume_fixture();
+    let runtime = fixture.services.host_runtime_for_local_testing();
+    let alice_context =
+        with_authenticated_actor(execution_context_without_grants(), Some("slack-alice"));
+    let scope = alice_context.resource_scope.clone();
+    let invocation_id = alice_context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "actor-sealed approval resume"});
+    let gate = block_for_approval(
+        &runtime,
+        alice_context.clone(),
+        estimate.clone(),
+        input.clone(),
+    )
+    .await;
+    let lease =
+        approve_dispatch_for_services(&fixture.services, &scope, gate.approval_request_id, None)
+            .await;
+    let event_count_before_resume = fixture.events.events().len();
+    let broken_runtime = resume_runtime_with_empty_registry(&fixture);
+
+    for attempted_actor in [Some("slack-bob"), None] {
+        let attempted_context = with_authenticated_actor(alice_context.clone(), attempted_actor);
+        let outcome = broken_runtime
+            .resume_capability(RuntimeCapabilityResumeRequest::new(
+                attempted_context,
+                gate.approval_request_id,
+                script_capability_id(),
+                estimate.clone(),
+                input.clone(),
+                trust_decision_with_dispatch_authority(),
+            ))
+            .await
+            .unwrap();
+
+        assert_actor_policy_denied(outcome);
+        assert_alice_run_status(
+            fixture.run_state.as_ref(),
+            &scope,
+            invocation_id,
+            RunStatus::BlockedApproval,
+        )
+        .await;
+        assert_eq!(
+            fixture
+                .capability_leases
+                .get(&scope, lease.grant.id)
+                .await
+                .unwrap()
+                .status,
+            CapabilityLeaseStatus::Active,
+            "actor rejection must happen before the approval lease is claimed"
+        );
+        assert_eq!(
+            fixture.events.events().len(),
+            event_count_before_resume,
+            "actor rejection must happen before runtime dispatch events"
+        );
+    }
+
+    let valid_alice_outcome = broken_runtime
+        .resume_capability(RuntimeCapabilityResumeRequest::new(
+            alice_context,
+            gate.approval_request_id,
+            script_capability_id(),
+            estimate,
+            input,
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(valid_alice_outcome, RuntimeFailureKind::MissingRuntime);
+    assert_alice_run_status(
+        fixture.run_state.as_ref(),
+        &scope,
+        invocation_id,
+        RunStatus::Failed,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn host_runtime_services_auth_resume_rejects_changed_actor_before_preflight_mutates_run() {
+    let fixture = approval_resume_fixture();
+    let alice_context =
+        with_authenticated_actor(execution_context_without_grants(), Some("slack-alice"));
+    let scope = alice_context.resource_scope.clone();
+    let invocation_id = alice_context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "actor-sealed auth resume"});
+    fixture
+        .run_state
+        .start(RunStart {
+            invocation_id,
+            scope: scope.clone(),
+            capability_id: script_capability_id(),
+            authenticated_actor_user_id: alice_context.authenticated_actor_user_id.clone(),
+        })
+        .await
+        .unwrap();
+    fixture
+        .run_state
+        .block_auth(&scope, invocation_id, "AuthRequired".to_string())
+        .await
+        .unwrap();
+    let broken_runtime = resume_runtime_with_empty_registry(&fixture);
+
+    for attempted_actor in [Some("slack-bob"), None] {
+        let attempted_context = with_authenticated_actor(alice_context.clone(), attempted_actor);
+        let outcome = broken_runtime
+            .auth_resume_capability(RuntimeCapabilityAuthResumeRequest::new(
+                attempted_context,
+                script_capability_id(),
+                estimate.clone(),
+                input.clone(),
+                trust_decision_with_dispatch_authority(),
+                None,
+            ))
+            .await
+            .unwrap();
+
+        assert_actor_policy_denied(outcome);
+        assert_alice_run_status(
+            fixture.run_state.as_ref(),
+            &scope,
+            invocation_id,
+            RunStatus::BlockedAuth,
+        )
+        .await;
+        assert!(
+            fixture.events.events().is_empty(),
+            "actor rejection must happen before runtime dispatch events"
+        );
+    }
+
+    let valid_alice_outcome = broken_runtime
+        .auth_resume_capability(RuntimeCapabilityAuthResumeRequest::new(
+            alice_context,
+            script_capability_id(),
+            estimate,
+            input,
+            trust_decision_with_dispatch_authority(),
+            None,
+        ))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(valid_alice_outcome, RuntimeFailureKind::MissingRuntime);
+    assert_alice_run_status(
+        fixture.run_state.as_ref(),
+        &scope,
+        invocation_id,
+        RunStatus::Failed,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn host_runtime_services_resume_spawn_rejects_changed_actor_before_input_and_preflight() {
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let process_services = ProcessServices::in_memory();
+    let process_store = process_services.process_store();
+    let sandbox_executor = Arc::new(RecordingSandboxProcessExecutor::default());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_host_bundled_manifest(
+            PROCESS_SANDBOX_MANIFEST,
+        )),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenGrantAuthorizer),
+        process_services.clone(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "system.process_sandbox",
+        process_sandbox_authority_effects(),
+    )))
+    .with_run_state(Arc::clone(&run_state))
+    .with_approval_requests(Arc::clone(&approval_requests))
+    .with_capability_leases(Arc::clone(&capability_leases))
+    .with_process_sandbox_executor(Arc::clone(&sandbox_executor));
+    let runtime = services.host_runtime_for_local_testing();
+    let scope = sample_scope(InvocationId::new());
+    let alice_context = with_authenticated_actor(
+        execution_context_without_grants_for_scope(scope.clone()),
+        Some("slack-alice"),
+    );
+    let input = process_sandbox_input();
+    let estimate = process_sandbox_estimate();
+    let blocked = runtime
+        .spawn_capability(RuntimeCapabilityRequest::new(
+            alice_context.clone(),
+            process_sandbox_capability_id(),
+            estimate.clone(),
+            input.clone(),
+            process_sandbox_trust_decision(),
+        ))
+        .await
+        .unwrap();
+    let approval_request_id = match blocked {
+        RuntimeCapabilityOutcome::ApprovalRequired(gate) => gate.approval_request_id,
+        other => panic!("expected approval gate, got {other:?}"),
+    };
+    let lease = approve_spawn_for_services(&services, &scope, approval_request_id, None).await;
+    let broken_runtime = HostRuntimeServices::new(
+        Arc::new(ExtensionRegistry::new()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenGrantAuthorizer),
+        process_services,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "system.process_sandbox",
+        process_sandbox_authority_effects(),
+    )))
+    .with_run_state(Arc::clone(&run_state))
+    .with_approval_requests(Arc::clone(&approval_requests))
+    .with_capability_leases(Arc::clone(&capability_leases))
+    .with_process_sandbox_executor(Arc::clone(&sandbox_executor))
+    .host_runtime_for_local_testing();
+
+    for attempted_actor in [Some("slack-bob"), None] {
+        let attempted_context = with_authenticated_actor(alice_context.clone(), attempted_actor);
+        let outcome = broken_runtime
+            .resume_spawn_capability(RuntimeCapabilityResumeRequest::new(
+                attempted_context,
+                approval_request_id,
+                process_sandbox_capability_id(),
+                estimate.clone(),
+                input.clone(),
+                process_sandbox_trust_decision(),
+            ))
+            .await
+            .unwrap();
+
+        assert_actor_policy_denied(outcome);
+        assert_alice_run_status(
+            run_state.as_ref(),
+            &scope,
+            scope.invocation_id,
+            RunStatus::BlockedApproval,
+        )
+        .await;
+        assert_eq!(
+            capability_leases
+                .get(&scope, lease.grant.id)
+                .await
+                .unwrap()
+                .status,
+            CapabilityLeaseStatus::Active,
+            "actor rejection must happen before the spawn approval lease is claimed"
+        );
+        assert!(sandbox_executor.requests().is_empty());
+        assert!(
+            process_store
+                .records_for_scope(&scope)
+                .await
+                .unwrap()
+                .is_empty(),
+            "actor rejection must happen before process creation"
+        );
+    }
+
+    let invalid_input_outcome = broken_runtime
+        .resume_spawn_capability(RuntimeCapabilityResumeRequest::new(
+            with_authenticated_actor(alice_context.clone(), Some("slack-bob")),
+            approval_request_id,
+            process_sandbox_capability_id(),
+            estimate.clone(),
+            invalid_process_sandbox_input(),
+            process_sandbox_trust_decision(),
+        ))
+        .await
+        .unwrap();
+    assert_actor_policy_denied(invalid_input_outcome);
+    assert_alice_run_status(
+        run_state.as_ref(),
+        &scope,
+        scope.invocation_id,
+        RunStatus::BlockedApproval,
+    )
+    .await;
+
+    let valid_alice_outcome = broken_runtime
+        .resume_spawn_capability(RuntimeCapabilityResumeRequest::new(
+            alice_context,
+            approval_request_id,
+            process_sandbox_capability_id(),
+            estimate,
+            input,
+            process_sandbox_trust_decision(),
+        ))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(valid_alice_outcome, RuntimeFailureKind::MissingRuntime);
+    assert_alice_run_status(
+        run_state.as_ref(),
+        &scope,
+        scope.invocation_id,
+        RunStatus::Failed,
+    )
+    .await;
+    assert!(sandbox_executor.requests().is_empty());
+    assert!(
+        process_store
+            .records_for_scope(&scope)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -3007,6 +3376,7 @@ async fn host_runtime_services_auth_resume_trust_preflight_failure_fails_blocked
             invocation_id,
             scope: scope.clone(),
             capability_id: script_capability_id(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -3125,6 +3495,7 @@ async fn host_runtime_services_auth_resume_with_approval_id_fails_blocked_auth_r
             invocation_id,
             scope: scope.clone(),
             capability_id: script_capability_id(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();

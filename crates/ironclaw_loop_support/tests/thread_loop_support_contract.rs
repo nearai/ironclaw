@@ -2573,6 +2573,77 @@ async fn transcript_port_drops_invalid_model_observation_without_failing_append(
     assert!(envelope.model_observation.is_none());
 }
 
+/// Issue #5838: a control character in a `ResultReference` preview must
+/// degrade to ref-only (drop `preview`, keep `result_ref`) through the real
+/// `append_capability_result_ref` gate, not lose the whole observation. This
+/// pins the boundary between this crate's neutral pre-check (shape only,
+/// `model_observation.rs`) and `ironclaw_threads`'s canonical content scan
+/// (secret markers/control chars, with graceful degrade).
+#[tokio::test]
+async fn transcript_port_degrades_control_char_result_reference_preview_without_dropping_ref() {
+    let fixture = ThreadFixture::new().await;
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    );
+    let result_ref = LoopResultRef::new("result:control-char-preview-tool").unwrap();
+    let observation = ModelVisibleToolObservation {
+        schema_version: 1,
+        status: ToolObservationStatus::Success,
+        summary: "Tool completed; preview available.".to_string(),
+        detail: ToolObservationDetail::ResultReference {
+            result_ref: result_ref.as_str().to_string(),
+            byte_len: 16,
+            preview: Some("bad\u{0}null and \u{7}bell".to_string()),
+            total_bytes: Some(16),
+            next_offset: None,
+        },
+        artifacts: Vec::new(),
+        recovery: None,
+        trust: ObservationTrust::UntrustedToolOutput,
+    };
+
+    adapter
+        .append_capability_result_ref(AppendCapabilityResultRef {
+            result_ref: result_ref.clone(),
+            safe_summary: "tool completed".to_string(),
+            provider_call: None,
+            model_observation: Some(observation),
+        })
+        .await
+        .expect("control-char preview should not fail append");
+
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    let record = history
+        .messages
+        .iter()
+        .find(|message| message.tool_result_ref.as_deref() == Some(result_ref.as_str()))
+        .expect("tool result reference message");
+    let envelope = ToolResultReferenceEnvelope::from_json_str(record.content.as_deref().unwrap())
+        .expect("valid tool result reference envelope");
+
+    let observation = envelope
+        .model_observation
+        .expect("result reference observation is retained, not fully dropped");
+    assert_eq!(
+        observation["detail"]["result_ref"],
+        result_ref.as_str(),
+        "result_ref must survive so the model can still call result_read"
+    );
+    assert!(
+        observation["detail"].get("preview").is_none(),
+        "the unsafe preview must be stripped, not merely truncated"
+    );
+}
+
 #[tokio::test]
 async fn transcript_port_rejects_unsafe_tool_result_summary() {
     let fixture = ThreadFixture::new().await;

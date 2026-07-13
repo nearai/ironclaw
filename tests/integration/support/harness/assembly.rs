@@ -36,6 +36,20 @@ use super::super::doubles::{
 };
 use super::HarnessResult;
 
+/// Default capability-io pair: the ephemeral `ProductLiveCapabilityIo` test
+/// double, coerced into ONE shared object's two trait-object roles (input
+/// resolver + result writer). Every `HostRuntimeCapabilityHarness`
+/// constructor that does not opt into `.with_durable_capability_io()`
+/// (issue #5838) uses this so both roles keep sharing one underlying object,
+/// matching production's `LocalDevCapabilityIo` invariant.
+pub(crate) fn default_capability_io_pair() -> (
+    Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
+    Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
+) {
+    let capability_io = Arc::new(ironclaw_reborn_composition::ProductLiveCapabilityIo::default());
+    (capability_io.clone(), capability_io)
+}
+
 pub(crate) fn local_dev_host_runtime_with_http_egress(
     storage_root: PathBuf,
     egress: Arc<RecordingRuntimeHttpEgress>,

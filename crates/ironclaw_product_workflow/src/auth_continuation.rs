@@ -9,8 +9,9 @@ use std::sync::Arc;
 
 use ironclaw_auth::{AuthContinuationEvent, AuthContinuationRef, AuthProductError};
 use ironclaw_turns::{
-    GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest,
-    TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnScope,
+    GateRef, GateResumeDisposition, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
+    ResumeTurnRequest, TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnScope,
+    TurnStatus,
 };
 use uuid::Uuid;
 
@@ -61,9 +62,45 @@ impl ProductAuthTurnGateResumeDispatcher {
         }
     }
 
+    pub async fn dispatch_canceled_auth_continuation(
+        &self,
+        event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        if matches!(
+            &event.continuation,
+            AuthContinuationRef::TurnGateResume { .. }
+        ) {
+            let flow_id = event.flow_id;
+            self.dispatch_turn_gate(event, Some(GateResumeDisposition::Denied), true)
+                .await
+                .map(|_| ())
+                .map_err(|error| {
+                    let auth_error = auth_error_for_continuation_dispatch(&error);
+                    tracing::debug!(
+                        %flow_id,
+                        auth_error_code = ?auth_error.code(),
+                        workflow_error_kind = workflow_error_kind(&error),
+                        "canceled product-auth turn-gate denial failed"
+                    );
+                    auth_error
+                })
+        } else {
+            Ok(())
+        }
+    }
+
     pub async fn dispatch_turn_gate_resume(
         &self,
         event: AuthContinuationEvent,
+    ) -> Result<TurnRunId, ProductWorkflowError> {
+        self.dispatch_turn_gate(event, None, false).await
+    }
+
+    async fn dispatch_turn_gate(
+        &self,
+        event: AuthContinuationEvent,
+        resume_disposition: Option<GateResumeDisposition>,
+        ignore_stale_gate: bool,
     ) -> Result<TurnRunId, ProductWorkflowError> {
         let AuthContinuationRef::TurnGateResume {
             turn_run_ref,
@@ -85,6 +122,13 @@ impl ProductAuthTurnGateResumeDispatcher {
             })
             .await
             .map_err(map_auth_resume_error)?;
+        let gate_resolution_ref = parse_gate_ref(gate_ref.as_str())?;
+        if ignore_stale_gate
+            && (state.status != TurnStatus::BlockedAuth
+                || state.gate_ref.as_ref() != Some(&gate_resolution_ref))
+        {
+            return Ok(run_id);
+        }
         let actor = state
             .actor
             .ok_or(ProductWorkflowError::AuthContinuationRejected {
@@ -92,8 +136,11 @@ impl ProductAuthTurnGateResumeDispatcher {
             })?;
         let source_binding_ref = state.source_binding_ref;
         let reply_target_binding_ref = state.reply_target_binding_ref;
-        let gate_resolution_ref = parse_gate_ref(gate_ref.as_str())?;
-        let binding_id = auth_continuation_binding_id(event.flow_id, &run_id, gate_ref.as_str());
+        let mut binding_id =
+            auth_continuation_binding_id(event.flow_id, &run_id, gate_ref.as_str());
+        if let Some(disposition) = &resume_disposition {
+            binding_id.push_str(&binding_ref_segment("disposition", disposition.as_str()));
+        }
         let idempotency_key = idempotency_key_for_binding(&binding_id)?;
 
         self.turn_coordinator
@@ -106,7 +153,7 @@ impl ProductAuthTurnGateResumeDispatcher {
                 reply_target_binding_ref,
                 idempotency_key,
                 precondition: ResumeTurnPrecondition::BlockedAuthGate,
-                resume_disposition: None,
+                resume_disposition,
             })
             .await
             .map_err(map_auth_resume_error)?;
@@ -562,6 +609,77 @@ mod tests {
         assert!(resumes[0].idempotency_key.as_str().contains("flow:"));
         assert!(resumes[0].idempotency_key.as_str().contains("run:"));
         assert!(resumes[0].idempotency_key.as_str().contains("gate:"));
+    }
+
+    #[tokio::test]
+    async fn canceled_turn_gate_continuation_denies_exact_blocked_auth_gate() {
+        let coordinator = Arc::new(RecordingTurnCoordinator::default());
+        let dispatcher = ProductAuthTurnGateResumeDispatcher::new(coordinator.clone());
+        let run_id = TurnRunId::new();
+        coordinator.set_state(run_state_for_actor_owner(
+            run_id,
+            TurnStatus::BlockedAuth,
+            Some("gate:auth"),
+            "authenticated-actor",
+            "alice",
+        ));
+        let event = scoped_event(AuthContinuationRef::TurnGateResume {
+            turn_run_ref: TurnRunRef::new(run_id.to_string()).unwrap(),
+            gate_ref: AuthGateRef::new("gate:auth").unwrap(),
+        });
+
+        dispatcher
+            .dispatch_canceled_auth_continuation(event)
+            .await
+            .expect("canceled auth gate denial");
+
+        let resumes = coordinator.resumes();
+        assert_eq!(resumes.len(), 1);
+        assert_eq!(resumes[0].actor.user_id.as_str(), "authenticated-actor");
+        assert_eq!(
+            resumes[0].precondition,
+            ResumeTurnPrecondition::BlockedAuthGate
+        );
+        assert_eq!(
+            resumes[0].resume_disposition,
+            Some(GateResumeDisposition::Denied)
+        );
+        assert!(
+            resumes[0]
+                .idempotency_key
+                .as_str()
+                .contains(&binding_ref_segment(
+                    "disposition",
+                    GateResumeDisposition::Denied.as_str()
+                ))
+        );
+    }
+
+    #[tokio::test]
+    async fn canceled_continuation_leaves_stale_or_non_turn_gate_untouched() {
+        let coordinator = Arc::new(RecordingTurnCoordinator::default());
+        let dispatcher = ProductAuthTurnGateResumeDispatcher::new(coordinator.clone());
+        let run_id = TurnRunId::new();
+        coordinator.set_state(run_state(
+            run_id,
+            TurnStatus::BlockedAuth,
+            Some("gate:new-auth"),
+        ));
+        let stale = scoped_event(AuthContinuationRef::TurnGateResume {
+            turn_run_ref: TurnRunRef::new(run_id.to_string()).unwrap(),
+            gate_ref: AuthGateRef::new("gate:stale-auth").unwrap(),
+        });
+
+        dispatcher
+            .dispatch_canceled_auth_continuation(stale)
+            .await
+            .expect("a stale cancellation is already converged");
+        dispatcher
+            .dispatch_canceled_auth_continuation(scoped_event(AuthContinuationRef::SetupOnly))
+            .await
+            .expect("setup-only cancellation has no turn side effect");
+
+        assert!(coordinator.resumes().is_empty());
     }
 
     #[tokio::test]

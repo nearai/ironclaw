@@ -17,7 +17,9 @@ use ironclaw_turns::{
     SubmitTurnRequest, TurnId, TurnRunProfile, TurnRunRecord, TurnRunState, TurnStateStore,
     TurnStatus,
     run_profile::{
-        CapabilityResultMessage, CapabilitySurfaceVersion, RegisterProviderToolCallRequest,
+        CapabilityResultMessage, CapabilitySurfaceVersion, ModelVisibleToolObservation,
+        ObservationTrust, RegisterProviderToolCallRequest, ToolObservationDetail,
+        ToolObservationStatus,
     },
 };
 use serde_json::json;
@@ -77,6 +79,11 @@ struct SuspendedBatchPort {
 }
 
 struct NoopResultWriter;
+
+#[derive(Default)]
+struct RecordingResultWriter {
+    delete_calls: std::sync::atomic::AtomicUsize,
+}
 
 struct NoopGoalStore;
 
@@ -288,6 +295,7 @@ impl LoopCapabilityPort for SurfacePrimedSpawnAuthPort {
             terminate_hint: false,
             byte_len: 0,
             output_digest: None,
+            model_observation: None,
         }))
     }
 
@@ -412,6 +420,7 @@ impl LoopCapabilityPort for AuthPassPort {
             terminate_hint: false,
             byte_len: 0,
             output_digest: None,
+            model_observation: None,
         }))
     }
 
@@ -568,6 +577,29 @@ impl LoopCapabilityResultWriter for NoopResultWriter {
             LoopResultRef::new("result:spawn").unwrap(),
             0,
         ))
+    }
+}
+
+#[async_trait]
+impl LoopCapabilityResultWriter for RecordingResultWriter {
+    async fn write_capability_result(
+        &self,
+        _write: CapabilityResultWrite<'_>,
+    ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+        Ok(CapabilityWriteResult::without_output_digest(
+            LoopResultRef::new("result:spawn").unwrap(),
+            0,
+        ))
+    }
+
+    async fn delete_capability_result(
+        &self,
+        _run_context: &LoopRunContext,
+        _result_ref: &LoopResultRef,
+    ) -> Result<(), AgentLoopHostError> {
+        self.delete_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
 }
 
@@ -1318,6 +1350,7 @@ fn completed_outcome(label: &str) -> CapabilityOutcome {
         terminate_hint: false,
         byte_len: 0,
         output_digest: None,
+        model_observation: None,
     })
 }
 
@@ -2302,6 +2335,7 @@ async fn invoke_capability_batch_rolls_back_preceding_spawn_on_inner_batch_failu
     let goal_store = Arc::new(RecordingGoalStore::default());
     let gate_store = Arc::new(InMemoryAwaitEdgeWriter::default());
     let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let result_writer = Arc::new(RecordingResultWriter::default());
     let deps = Arc::new(SubagentSpawnDeps {
         coordinator: Arc::new(StaticCoordinator),
         child_runs: child_runs.clone(),
@@ -2316,7 +2350,7 @@ async fn invoke_capability_batch_rolls_back_preceding_spawn_on_inner_batch_failu
         spawn_input_codec: Arc::new(StaticSpawnInputCodec {
             args: default_spawn_args(),
         }),
-        result_writer: Arc::new(NoopResultWriter),
+        result_writer: result_writer.clone(),
     });
     let port = SubagentSpawnCapabilityPort::new(
         Arc::new(FailingBatchPort),
@@ -2352,6 +2386,13 @@ async fn invoke_capability_batch_rolls_back_preceding_spawn_on_inner_batch_failu
     assert!(gate_store.records().is_empty());
     assert_eq!(goal_store.deletes().len(), 1);
     assert_eq!(turn_store.releases.lock().unwrap().len(), 1);
+    assert_eq!(
+        result_writer
+            .delete_calls
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "rollback must retain durable tool results"
+    );
 
     let child_thread_scope = ThreadScope {
         tenant_id: child_request.child_scope.tenant_id.clone(),
@@ -3292,9 +3333,10 @@ fn child_submit_bindings_are_unique_per_prepared_child_run() {
     );
 }
 
-/// Stub writer that returns a fixed non-zero byte_len.
+/// Stub writer that returns child-result metadata supplied by the durable writer.
 struct FixedByteResultWriter {
     byte_len: u64,
+    model_observation: Option<ModelVisibleToolObservation>,
 }
 
 #[async_trait]
@@ -3303,21 +3345,38 @@ impl LoopCapabilityResultWriter for FixedByteResultWriter {
         &self,
         _write: CapabilityResultWrite<'_>,
     ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
-        Ok(CapabilityWriteResult::without_output_digest(
-            LoopResultRef::new("result:fixed-bytes").unwrap(),
-            self.byte_len,
-        ))
+        Ok(CapabilityWriteResult {
+            result_ref: LoopResultRef::new("result:fixed-bytes").unwrap(),
+            byte_len: self.byte_len,
+            output_digest: None,
+            model_observation: self.model_observation.clone(),
+        })
     }
 }
 
-/// F5: Verify the CapabilityOutcome::AwaitDependentRun produced by the spawn
-/// port carries the byte_len returned by the result writer. Tests that use
-/// NoopResultWriter (byte_len=0) cannot catch a silent discard of this field.
+/// Verify the spawn port carries child-result metadata from the durable writer
+/// into the AwaitDependentRun outcome. Tests that use NoopResultWriter cannot
+/// catch a silent discard of either field.
 #[tokio::test]
-async fn spawn_subagent_propagates_byte_len_from_result_writer() {
+async fn spawn_subagent_propagates_result_metadata_from_result_writer() {
     let context = test_run_context_with_agent_actor("spawn-byte-len").await;
     let child_runs = Arc::new(RecordingChildRuns::default());
     let fixed_byte_len: u64 = 42_000;
+    let observation = ModelVisibleToolObservation {
+        schema_version: 1,
+        status: ToolObservationStatus::Success,
+        summary: "Use result_read to continue this child result.".to_string(),
+        detail: ToolObservationDetail::ResultReference {
+            result_ref: "result:fixed-bytes".to_string(),
+            byte_len: fixed_byte_len,
+            preview: Some("first bounded chunk".to_string()),
+            total_bytes: Some(fixed_byte_len * 2),
+            next_offset: Some(fixed_byte_len),
+        },
+        artifacts: Vec::new(),
+        recovery: None,
+        trust: ObservationTrust::UntrustedToolOutput,
+    };
     let deps = Arc::new(SubagentSpawnDeps {
         coordinator: Arc::new(StaticCoordinator),
         child_runs: child_runs.clone(),
@@ -3334,6 +3393,7 @@ async fn spawn_subagent_propagates_byte_len_from_result_writer() {
         }),
         result_writer: Arc::new(FixedByteResultWriter {
             byte_len: fixed_byte_len,
+            model_observation: Some(observation.clone()),
         }),
     });
     let port = SubagentSpawnCapabilityPort::new(
@@ -3348,7 +3408,12 @@ async fn spawn_subagent_propagates_byte_len_from_result_writer() {
 
     let outcome = invoke_spawn(&port).await;
 
-    let CapabilityOutcome::AwaitDependentRun { byte_len, .. } = outcome else {
+    let CapabilityOutcome::AwaitDependentRun {
+        byte_len,
+        model_observation,
+        ..
+    } = outcome
+    else {
         panic!("expected AwaitDependentRun outcome from blocking spawn");
     };
     assert_eq!(
@@ -3356,6 +3421,7 @@ async fn spawn_subagent_propagates_byte_len_from_result_writer() {
         "spawn port must propagate the byte_len returned by the result writer \
          (D2 un-discard regression: byte_len must reach CapabilityOutcome)"
     );
+    assert_eq!(model_observation.as_ref(), Some(&observation));
 }
 
 // ── New tests for schema redesign ────────────────────────────────────────────

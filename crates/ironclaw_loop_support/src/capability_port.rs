@@ -27,9 +27,10 @@ use ironclaw_turns::{
         CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilityResumeToken,
         ConcurrencyHint, ContentDigest, LoopCapabilityPort, LoopHostMilestone,
         LoopHostMilestoneKind, LoopHostMilestoneSink, LoopProcessRef, LoopRunContext,
-        LoopSafeSummary, ProcessHandleSummary, ProviderToolCall, ProviderToolCallCapabilityIds,
-        ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
-        VisibleCapabilityRequest, VisibleCapabilitySurface, sanitize_model_visible_text,
+        LoopSafeSummary, ModelVisibleToolObservation, ProcessHandleSummary, ProviderToolCall,
+        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
+        RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        sanitize_model_visible_text,
     },
 };
 use serde_json::Value;
@@ -458,6 +459,25 @@ fn contains_capability_input_issue_sensitive_marker(value: &str) -> bool {
         })
 }
 
+/// Whether a capability result write must be durably persisted, or the
+/// content is already fully delivered to the model inline and only needs
+/// best-effort in-memory staging for the current run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DurablePersistence {
+    /// Durably persist the result content. The default, and correct choice
+    /// for any capability result the model has not already seen in full.
+    #[default]
+    Persist,
+    /// Skip durable persistence. Reserved for outputs that are already
+    /// fully model-visible inline (e.g. a `result_read` continuation chunk,
+    /// whose bytes are returned directly in the tool observation) — writing
+    /// them durably again would mint a redundant record per chunk with no
+    /// reader that needs it. Best-effort in-memory staging still happens,
+    /// so an immediate re-read from cache can still succeed; a later durable
+    /// read against this ref must fail gracefully as unavailable.
+    InlineOnly,
+}
+
 pub struct CapabilityResultWrite<'a> {
     pub run_context: &'a LoopRunContext,
     pub input_ref: &'a CapabilityInputRef,
@@ -465,6 +485,7 @@ pub struct CapabilityResultWrite<'a> {
     pub capability_id: &'a CapabilityId,
     pub output: serde_json::Value,
     pub display_preview: Option<CapabilityDisplayOutputPreview>,
+    pub durable_persistence: DurablePersistence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -472,6 +493,7 @@ pub struct CapabilityWriteResult {
     pub result_ref: LoopResultRef,
     pub byte_len: u64,
     pub output_digest: Option<ContentDigest>,
+    pub model_observation: Option<ModelVisibleToolObservation>,
 }
 
 impl CapabilityWriteResult {
@@ -480,6 +502,7 @@ impl CapabilityWriteResult {
             result_ref,
             byte_len,
             output_digest: None,
+            model_observation: None,
         }
     }
 
@@ -502,6 +525,7 @@ impl CapabilityWriteResult {
             }
         };
         Self {
+            model_observation: None,
             result_ref,
             byte_len,
             output_digest,
@@ -1417,6 +1441,7 @@ impl HostRuntimeLoopCapabilityPort {
                 capability_id: &request.capability_id,
                 output,
                 display_preview: None,
+                durable_persistence: DurablePersistence::Persist,
             })
             .await?;
         Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
@@ -1426,6 +1451,7 @@ impl HostRuntimeLoopCapabilityPort {
             terminate_hint: false,
             byte_len: write_result.byte_len,
             output_digest: write_result.output_digest,
+            model_observation: write_result.model_observation,
         }))
     }
 
@@ -2311,6 +2337,10 @@ fn invocation_context_from_visible(
     context.process_id = None;
     context.parent_process_id = None;
     context.resource_scope.invocation_id = invocation_id;
+    context.authenticated_actor_user_id = request
+        .run_context
+        .actor()
+        .map(|actor| actor.user_id.clone());
     context.validate().map_err(|_| {
         AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidInvocation,
@@ -2602,6 +2632,7 @@ async fn runtime_outcome_to_loop(
                     capability_id: &completed.capability_id,
                     output: completed.output.clone(),
                     display_preview: completed.display_preview.clone(),
+                    durable_persistence: DurablePersistence::Persist,
                 })
                 .await?;
             CapabilityOutcome::Completed(CapabilityResultMessage {
@@ -2611,6 +2642,7 @@ async fn runtime_outcome_to_loop(
                 terminate_hint: false,
                 byte_len: write_result.byte_len,
                 output_digest: write_result.output_digest,
+                model_observation: write_result.model_observation,
             })
         }
         RuntimeCapabilityOutcome::ApprovalRequired(gate) => {
@@ -3103,7 +3135,7 @@ mod tests {
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
     use ironclaw_turns::{
         InMemoryRunProfileResolver, LoopDriverId, RunProfileResolutionRequest, RunProfileResolver,
-        TurnId, TurnRunId, TurnScope,
+        TurnActor, TurnId, TurnRunId, TurnScope,
     };
 
     use crate::{capability_info, capability_surface_filter::CapabilitySurfaceVisibleFilter};
@@ -6533,6 +6565,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_capability_preserves_authenticated_actor_distinct_from_subject_scope() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let mut context = execution_context("thread-distinct-actor-subject");
+        let subject = UserId::new("shared-subject").expect("valid subject user id");
+        context.user_id = subject.clone();
+        context.resource_scope.user_id = subject;
+        let run_context = loop_run_context(&context).await.with_actor(TurnActor::new(
+            UserId::new("slack-alice").expect("valid authenticated actor user id"),
+        ));
+        let loop_driver_extension =
+            loop_driver_execution_extension_id(&run_context).expect("valid extension id");
+        context.grants.grants.push(dispatch_capability_grant(
+            &capability_id,
+            &loop_driver_extension,
+        ));
+
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+            capability_id.clone(),
+            provider_id.clone(),
+        )]));
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime.clone(),
+            visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
+                provider_id,
+                dispatch_trust_decision(),
+            )])),
+            Arc::new(StaticInputResolver),
+            Arc::new(StaticResultWriter),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+
+        invoke_visible_runtime_capability(&port)
+            .await
+            .expect("runtime capability invocation succeeds");
+
+        let requests = runtime.take_requests();
+        assert_eq!(requests.len(), 1);
+        let recorded = &requests[0].context;
+        assert_eq!(recorded.resource_scope.user_id.as_str(), "shared-subject");
+        assert_eq!(
+            recorded
+                .authenticated_actor_user_id
+                .as_ref()
+                .map(UserId::as_str),
+            Some("slack-alice")
+        );
+    }
+
+    #[tokio::test]
     async fn runtime_capability_with_reserved_synthetic_id_is_rejected_from_surface() {
         let capability_id =
             CapabilityId::new(capability_info::CAPABILITY_ID).expect("valid capability id");
@@ -8120,6 +8203,7 @@ mod tests {
                 effects,
                 default_permission: PermissionMode::Allow,
                 runtime_credentials: Vec::new(),
+                network_targets: Vec::new(),
                 resource_profile: None,
             },
             access: VisibleCapabilityAccess::Available,
@@ -8673,6 +8757,7 @@ mod tests {
                 result_ref,
                 byte_len: 0,
                 output_digest: Some(output_digest),
+                model_observation: None,
             })
         }
     }

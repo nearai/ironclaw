@@ -130,9 +130,42 @@ fn local_yolo_effective_policy() -> EffectiveRuntimePolicy {
 ///    visible in the request transcript, then return a plain assistant
 ///    reply that the timeline endpoint will surface as the final user-
 ///    visible message.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct ToolCallingGateway {
     call_count: StdMutex<usize>,
+    tool_message: String,
+    // When true, the scripted tool argument embeds `SENSITIVE_TOOL_SENTINEL`
+    // (secret-shaped text), which the durable model-observation validator
+    // (`normalized_model_observation` in
+    // `ironclaw_threads::tool_result_reference`) is designed to strip from
+    // the inline preview while preserving the opaque result reference. The
+    // follow-up assertion below flips accordingly: it checks the sentinel
+    // was NOT hydrated back to the model, instead of checking that it was.
+    expect_redacted_preview: bool,
+}
+
+impl Default for ToolCallingGateway {
+    fn default() -> Self {
+        Self {
+            call_count: StdMutex::new(0),
+            tool_message: "hello from e2e tool".to_string(),
+            expect_redacted_preview: false,
+        }
+    }
+}
+
+impl ToolCallingGateway {
+    /// Scripted tool argument embeds a secret-shaped sentinel so the caller
+    /// can assert the sensitive text never reaches the model's own tool
+    /// result content or any user-facing SSE/timeline surface, matching the
+    /// intended graceful preview-drop behavior.
+    fn with_sensitive_tool_message() -> Self {
+        Self {
+            tool_message: format!("hello from e2e tool {SENSITIVE_TOOL_SENTINEL}"),
+            expect_redacted_preview: true,
+            ..Self::default()
+        }
+    }
 }
 
 #[async_trait]
@@ -172,11 +205,19 @@ impl HostManagedModelGateway for ToolCallingGateway {
                 .iter()
                 .find(|m| m.role == HostManagedModelMessageRole::ToolResult)
                 .expect("follow-up model call must include a tool_result message");
-            assert!(
-                tool_result.content.contains("hello from e2e tool"),
-                "follow-up model call should see hydrated echo output, got: {}",
-                tool_result.content,
-            );
+            if self.expect_redacted_preview {
+                assert!(
+                    !tool_result.content.contains(SENSITIVE_TOOL_SENTINEL),
+                    "follow-up model call must not see the redacted secret-shaped preview, got: {}",
+                    tool_result.content,
+                );
+            } else {
+                assert!(
+                    tool_result.content.contains(&self.tool_message),
+                    "follow-up model call should see hydrated echo output, got: {}",
+                    tool_result.content,
+                );
+            }
             return Ok(HostManagedModelResponse::assistant_reply("e2e tool ok"));
         }
 
@@ -194,19 +235,17 @@ impl HostManagedModelGateway for ToolCallingGateway {
             .expect("builtin.echo must be visible in local-dev capability surface");
 
         let candidate = capabilities
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
-                ProviderToolCall {
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
                 provider_id: "e2e-provider".to_string(),
                 provider_model_id: "e2e-model".to_string(),
                 turn_id: Some("e2e-turn-1".to_string()),
                 id: "e2e-call-1".to_string(),
                 name: echo_tool.name,
-                arguments: json!({"message": format!("hello from e2e tool {SENSITIVE_TOOL_SENTINEL}")}),
+                arguments: json!({"message": self.tool_message.clone()}),
                 response_reasoning: None,
                 reasoning: None,
                 signature: None,
-                },
-            ))
+            }))
             .await
             .map_err(|err| {
                 HostManagedModelError::safe(
@@ -435,11 +474,14 @@ async fn build_harness_with_gateway_and_policy(
     build_harness_at(storage_root, Some(root), gateway, policy).await
 }
 
+// Only consumed by `webui_v2_beta_acceptance_stream_replay_restart_and_redaction`
+// (initial build and post-restart reopen), which needs the sensitive-message
+// gateway variant to exercise `assert_no_sensitive_payload`.
 async fn build_harness_on_storage(storage_root: impl AsRef<Path>) -> Harness {
     build_harness_at(
         storage_root.as_ref().to_path_buf(),
         None,
-        Arc::new(ToolCallingGateway::default()),
+        Arc::new(ToolCallingGateway::with_sensitive_tool_message()),
         local_dev_effective_policy(),
     )
     .await
