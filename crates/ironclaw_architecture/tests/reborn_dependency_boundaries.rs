@@ -1028,6 +1028,44 @@ fn composition_runtime_has_no_slack_output_policy() {
         "the boundary classifier must catch a renamed or moved Slack model-output decorator"
     );
 
+    let imported_policy_installation = r#"
+        use crate::slack::entity_policy::WorkspaceEntityMaskingGateway;
+
+        async fn build_runtime(model_gateway: Arc<dyn HostManagedModelGateway>) {
+            let model_gateway: Arc<dyn HostManagedModelGateway> = Arc::new(
+                WorkspaceEntityMaskingGateway::new(model_gateway),
+            );
+        }
+    "#;
+    assert!(
+        source_installs_slack_specific_model_output_policy(imported_policy_installation),
+        "the boundary classifier must catch an imported Slack decorator at a runtime seam"
+    );
+
+    let distant_helper_policy = format!(
+        r#"
+            struct WorkspaceEntityPolicyGateway;
+            impl HostManagedModelGateway for WorkspaceEntityPolicyGateway {{
+                async fn stream_model(&self, request: HostManagedModelRequest) {{
+                    self.rewrite_response(request).await
+                }}
+            }}
+            {}
+            impl WorkspaceEntityPolicyGateway {{
+                fn rewrite_response(&self, response: &mut HostManagedModelResponse) {{
+                    if response.capability_id.starts_with("slack.") {{
+                        response.content = response.content.replace("W0FIXTURE1", "[redacted]");
+                    }}
+                }}
+            }}
+        "#,
+        "\n".repeat(200)
+    );
+    assert!(
+        source_has_slack_specific_model_output_policy(&distant_helper_policy),
+        "the boundary classifier must not depend on helper proximity"
+    );
+
     let allowed_outbound_delivery = r#"
         struct SlackOutboundDeliveryTargetProvider;
 
@@ -1042,16 +1080,59 @@ fn composition_runtime_has_no_slack_output_policy() {
         "normal integration-owned outbound delivery must remain allowed"
     );
 
+    let co_located_but_unrelated = r#"
+        struct GenericSecretMaskingGateway;
+        impl HostManagedModelGateway for GenericSecretMaskingGateway {
+            async fn stream_model(&self, response: HostManagedModelResponse) {
+                response.content = mask_secret(response.content);
+            }
+        }
+
+        struct SlackOutboundDeliveryTargetProvider;
+        impl OutboundDeliveryTargetProvider for SlackOutboundDeliveryTargetProvider {
+            async fn deliver(&self, payload: ProductOutboundPayload) {
+                self.slack_client.send(payload).await;
+            }
+        }
+    "#;
+    assert!(
+        !source_has_slack_specific_model_output_policy(co_located_but_unrelated),
+        "unrelated Slack delivery and generic model policy in one module must not false-positive"
+    );
+
+    let interleaved_test_module = r#"
+        fn production_before() {}
+        #[cfg(test)]
+        mod shell_tests;
+        fn production_after() {}
+    "#;
+    let production = source_without_cfg_test_modules(interleaved_test_module);
+    assert!(production.contains("production_before"));
+    assert!(production.contains("production_after"));
+    assert!(!production.contains("shell_tests"));
+
     let root = workspace_root();
-    let runtime_sources = production_composition_runtime_sources(&root);
-    let violations = runtime_sources
+    let composition_sources = production_composition_sources(&root);
+    let violations = composition_sources
         .iter()
         .filter_map(|(path, source)| {
-            source_has_slack_specific_model_output_policy(source).then(|| {
-                path.strip_prefix(&root)
-                    .unwrap_or(path)
-                    .display()
-                    .to_string()
+            let relative = path.strip_prefix(&root).unwrap_or(path).to_string_lossy();
+            let is_runtime_root = relative == "crates/ironclaw_reborn_composition/src/runtime.rs";
+            let is_runtime_source = is_runtime_root
+                || relative.starts_with("crates/ironclaw_reborn_composition/src/runtime/");
+            let defines_policy =
+                !is_runtime_root && source_has_slack_specific_model_output_policy(source);
+            let installs_policy =
+                is_runtime_source && source_installs_slack_specific_model_output_policy(source);
+            (defines_policy || installs_policy).then(|| {
+                let kind = if defines_policy && installs_policy {
+                    "defines and installs"
+                } else if defines_policy {
+                    "defines"
+                } else {
+                    "installs"
+                };
+                format!("{relative}: {kind} Slack-specific model-output policy")
             })
         })
         .collect::<Vec<_>>();
@@ -1071,12 +1152,10 @@ fn composition_runtime_has_no_slack_output_policy() {
     );
 }
 
-fn production_composition_runtime_sources(root: &std::path::Path) -> Vec<(PathBuf, String)> {
+fn production_composition_sources(root: &std::path::Path) -> Vec<(PathBuf, String)> {
     let composition_src = root.join("crates/ironclaw_reborn_composition/src");
-    let runtime_file = composition_src.join("runtime.rs");
-    let runtime_dir = composition_src.join("runtime");
-    let mut paths = vec![runtime_file];
-    let mut pending = vec![runtime_dir];
+    let mut paths = Vec::new();
+    let mut pending = vec![composition_src];
 
     while let Some(dir) = pending.pop() {
         let entries = std::fs::read_dir(&dir)
@@ -1103,13 +1182,57 @@ fn production_composition_runtime_sources(root: &std::path::Path) -> Vec<(PathBu
         .map(|path| {
             let source = std::fs::read_to_string(&path)
                 .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-            let production = source
-                .find("#[cfg(test)]\nmod ")
-                .map_or(source.as_str(), |index| &source[..index])
-                .to_string();
-            (path, production)
+            (path, source_without_cfg_test_modules(&source))
         })
         .collect()
+}
+
+fn source_without_cfg_test_modules(source: &str) -> String {
+    let lines = source.lines().collect::<Vec<_>>();
+    let mut output = Vec::with_capacity(lines.len());
+    let mut index = 0;
+
+    while index < lines.len() {
+        let trimmed = lines[index].trim();
+        if trimmed.starts_with("#[cfg(") && trimmed.contains("test") {
+            let mut module_line = index + 1;
+            while module_line < lines.len()
+                && (lines[module_line].trim().is_empty()
+                    || lines[module_line].trim_start().starts_with("#["))
+            {
+                module_line += 1;
+            }
+            if module_line < lines.len() && lines[module_line].trim_start().starts_with("mod ") {
+                let module_declaration = lines[module_line];
+                if module_declaration.trim_end().ends_with(';') {
+                    index = module_line + 1;
+                    continue;
+                }
+
+                let mut depth = 0;
+                let mut saw_opening_brace = false;
+                let mut in_block_comment = false;
+                index = module_line;
+                while index < lines.len() {
+                    let code = strip_line_strings_and_comments(lines[index], &mut in_block_comment);
+                    if code.contains('{') {
+                        saw_opening_brace = true;
+                    }
+                    depth = update_brace_depth(depth, &code);
+                    index += 1;
+                    if saw_opening_brace && depth == 0 {
+                        break;
+                    }
+                }
+                continue;
+            }
+        }
+
+        output.push(lines[index]);
+        index += 1;
+    }
+
+    output.join("\n")
 }
 
 fn source_has_slack_specific_model_output_policy(source: &str) -> bool {
@@ -1131,25 +1254,134 @@ fn source_has_slack_specific_model_output_policy(source: &str) -> bool {
         "mask",
     ];
 
+    let impl_blocks = rust_impl_blocks(source);
+    let gateway_types = impl_blocks
+        .iter()
+        .flat_map(|(header, _)| {
+            GATEWAY_INTERCEPTION_MARKERS
+                .iter()
+                .filter_map(|marker| impl_type_after_marker(header, marker))
+        })
+        .collect::<BTreeSet<_>>();
+
+    gateway_types.into_iter().any(|gateway_type| {
+        let owned_regions = impl_blocks
+            .iter()
+            .filter(|(header, _)| rust_header_mentions_type(header, &gateway_type))
+            .map(|(_, body)| body.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+            .to_ascii_lowercase();
+        owned_regions.contains("slack")
+            && OUTPUT_MUTATION_MARKERS
+                .iter()
+                .any(|marker| owned_regions.contains(marker))
+    })
+}
+
+fn rust_impl_blocks(source: &str) -> Vec<(String, String)> {
+    let lines = source.lines().collect::<Vec<_>>();
+    let mut blocks = Vec::new();
+    let mut index = 0;
+
+    while index < lines.len() {
+        let trimmed = lines[index].trim_start();
+        if !(trimmed.starts_with("impl ") || trimmed.starts_with("impl<")) {
+            index += 1;
+            continue;
+        }
+
+        let start = index;
+        let mut depth = 0;
+        let mut saw_opening_brace = false;
+        let mut in_block_comment = false;
+        while index < lines.len() {
+            let code = strip_line_strings_and_comments(lines[index], &mut in_block_comment);
+            if code.contains('{') {
+                saw_opening_brace = true;
+            }
+            depth = update_brace_depth(depth, &code);
+            index += 1;
+            if saw_opening_brace && depth == 0 {
+                break;
+            }
+        }
+
+        let body = lines[start..index].join("\n");
+        let header = body.split('{').next().unwrap_or_default().to_string();
+        blocks.push((header, body));
+    }
+
+    blocks
+}
+
+fn impl_type_after_marker(header: &str, marker: &str) -> Option<String> {
+    header
+        .split_once(marker)
+        .and_then(|(_, suffix)| {
+            suffix
+                .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                .find(|token| !token.is_empty())
+        })
+        .map(ToString::to_string)
+}
+
+fn rust_header_mentions_type(header: &str, type_name: &str) -> bool {
+    header
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .any(|token| token == type_name)
+}
+
+fn source_installs_slack_specific_model_output_policy(source: &str) -> bool {
+    const WRAPPER_CONSTRUCTION_MARKERS: &[&str] = &[
+        "arc::new",
+        "box::new",
+        "::new(",
+        "wrap(",
+        "decorate",
+        "let model_gateway",
+    ];
+    const IGNORED_IMPORT_TOKENS: &[&str] = &[
+        "as",
+        "crate",
+        "model_gateway",
+        "pub",
+        "self",
+        "slack",
+        "super",
+        "use",
+    ];
+
+    let slack_import_symbols = source
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("use ") && line.to_ascii_lowercase().contains("slack")
+        })
+        .flat_map(|line| {
+            line.split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        })
+        .filter(|token| token.len() > 2 && !IGNORED_IMPORT_TOKENS.contains(token))
+        .collect::<BTreeSet<_>>();
+
     let lines = source.lines().collect::<Vec<_>>();
     lines.iter().enumerate().any(|(index, line)| {
-        if !GATEWAY_INTERCEPTION_MARKERS
-            .iter()
-            .any(|marker| line.contains(marker))
-        {
+        if !line.contains("model_gateway") {
             return false;
         }
 
-        // Inspect the gateway implementation and its nearby helpers/wiring,
-        // without conflating a large composition file's unrelated adapter
-        // wiring with its model-gateway assembly.
-        let start = index.saturating_sub(160);
-        let end = (index + 161).min(lines.len());
-        let window = lines[start..end].join("\n").to_ascii_lowercase();
-        window.contains("slack")
-            && OUTPUT_MUTATION_MARKERS
-                .iter()
-                .any(|marker| window.contains(marker))
+        let start = index.saturating_sub(12);
+        let end = (index + 13).min(lines.len());
+        let window = lines[start..end].join("\n");
+        let lower_window = window.to_ascii_lowercase();
+        let constructs_wrapper = WRAPPER_CONSTRUCTION_MARKERS
+            .iter()
+            .any(|marker| lower_window.contains(marker));
+        let names_slack_directly = lower_window.contains("slack");
+        let uses_slack_import = slack_import_symbols
+            .iter()
+            .any(|symbol| window.contains(*symbol));
+        constructs_wrapper && (names_slack_directly || uses_slack_import)
     })
 }
 
