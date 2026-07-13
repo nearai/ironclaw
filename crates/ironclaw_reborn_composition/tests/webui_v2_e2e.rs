@@ -1616,7 +1616,7 @@ mod operator_llm_config {
             vec![HeaderValue::from_static("http://localhost:0")],
         )
         .with_default_agent_id(AgentId::new(AGENT).expect("agent"));
-        let router = webui_v2_app(bundle, config).expect("webui v2 app");
+        let router = webui_v2_app(bundle.gateway_bundle(), config).expect("webui v2 app");
 
         Harness {
             runtime,

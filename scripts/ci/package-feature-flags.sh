@@ -70,7 +70,7 @@ case "${package}" in
     printf '%s\n' "--features contract-tests"
     ;;
   ironclaw_reborn_webui_ingress)
-    printf '%s\n' "--features dev-in-memory-session"
+    printf '%s\n' "--features webui-v2-beta,dev-in-memory-session"
     ;;
   ironclaw_host_runtime)
     # Integration tests (tests/) link the lib as a normal dependency, so

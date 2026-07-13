@@ -1381,7 +1381,7 @@ mod tests {
         InMemorySlackChannelRouteStore, SlackChannelRoute, SlackChannelRouteAdminRouteMount,
         SlackChannelRouteError, SlackChannelRouteKey, SlackChannelRouteListPage,
         WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH, WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
-        slack_channel_route_admin_route_mount,
+        slack_channel_route_admin_protected_mount, slack_channel_route_admin_route_mount,
     };
     use crate::slack::slack_connectable_channel::{
         SlackOperatorRouteVisibility, build_webui_services_with_slack_host_beta_mounts,
@@ -2119,7 +2119,7 @@ mod tests {
         )
         .expect("webui bundle");
         let app = webui_v2_app(
-            bundle,
+            bundle.gateway_bundle(),
             WebuiServeConfig::new(
                 TenantId::new(TENANT).expect("tenant"),
                 Arc::new(OperatorTokenAuthenticator),
@@ -2127,7 +2127,9 @@ mod tests {
             )
             .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
             .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-            .with_slack_channel_routes(mounts.channel_routes),
+            .with_protected_route_mount(slack_channel_route_admin_protected_mount(
+                mounts.channel_routes,
+            )),
         )
         .expect("webui app");
 
@@ -2204,7 +2206,7 @@ mod tests {
         )
         .expect("webui bundle");
         let app = webui_v2_app(
-            bundle,
+            bundle.gateway_bundle(),
             WebuiServeConfig::new(
                 TenantId::new(TENANT).expect("tenant"),
                 Arc::new(OperatorTokenAuthenticator),
@@ -2212,7 +2214,9 @@ mod tests {
             )
             .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
             .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-            .with_slack_channel_routes(mounts.channel_routes),
+            .with_protected_route_mount(slack_channel_route_admin_protected_mount(
+                mounts.channel_routes,
+            )),
         )
         .expect("webui app");
 
@@ -2264,7 +2268,7 @@ mod tests {
         )
         .expect("webui bundle");
         let app = webui_v2_app(
-            bundle,
+            bundle.gateway_bundle(),
             WebuiServeConfig::new(
                 TenantId::new(TENANT).expect("tenant"),
                 Arc::new(MixedSessionAndOperatorAuthenticator),
@@ -2272,7 +2276,9 @@ mod tests {
             )
             .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
             .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-            .with_slack_channel_routes(mounts.channel_routes),
+            .with_protected_route_mount(slack_channel_route_admin_protected_mount(
+                mounts.channel_routes,
+            )),
         )
         .expect("webui app");
 
@@ -2353,7 +2359,7 @@ mod tests {
         )
         .expect("webui bundle");
         let app = webui_v2_app(
-            bundle,
+            bundle.gateway_bundle(),
             WebuiServeConfig::new(
                 TenantId::new(TENANT).expect("tenant"),
                 Arc::new(OperatorTokenAuthenticator),
@@ -2361,7 +2367,9 @@ mod tests {
             )
             .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
             .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-            .with_slack_channel_routes(mounts.channel_routes),
+            .with_protected_route_mount(slack_channel_route_admin_protected_mount(
+                mounts.channel_routes,
+            )),
         )
         .expect("webui app");
 
@@ -2518,7 +2526,7 @@ mod tests {
             "non-operator WebUI must not advertise Slack admin channel management"
         );
         let app = webui_v2_app(
-            bundle,
+            bundle.gateway_bundle(),
             WebuiServeConfig::new(
                 TenantId::new(TENANT).expect("tenant"),
                 Arc::new(OperatorTokenAuthenticator),
@@ -2526,7 +2534,9 @@ mod tests {
             )
             .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
             .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-            .with_slack_channel_routes(mounts.channel_routes),
+            .with_protected_route_mount(slack_channel_route_admin_protected_mount(
+                mounts.channel_routes,
+            )),
         )
         .expect("webui app");
 
@@ -2681,7 +2691,7 @@ mod tests {
         )
         .expect("webui bundle");
         let app = webui_v2_app(
-            bundle,
+            bundle.gateway_bundle(),
             WebuiServeConfig::new(
                 TenantId::new(TENANT).expect("tenant"),
                 Arc::new(HiddenOperatorRouteAuthenticator),
@@ -2689,7 +2699,9 @@ mod tests {
             )
             .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
             .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-            .with_slack_channel_routes(mounts.channel_routes),
+            .with_protected_route_mount(slack_channel_route_admin_protected_mount(
+                mounts.channel_routes,
+            )),
         )
         .expect("webui app");
 
@@ -3793,7 +3805,7 @@ mod tests {
         )
         .expect("webui bundle");
         let app = webui_v2_app(
-            bundle.clone(),
+            bundle.gateway_bundle(),
             WebuiServeConfig::new(
                 TenantId::new(TENANT).expect("tenant"),
                 Arc::new(OperatorTokenAuthenticator),
@@ -3801,7 +3813,9 @@ mod tests {
             )
             .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
             .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-            .with_slack_channel_routes(mounts.channel_routes),
+            .with_protected_route_mount(slack_channel_route_admin_protected_mount(
+                mounts.channel_routes,
+            )),
         )
         .expect("webui app");
 
