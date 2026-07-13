@@ -490,6 +490,19 @@ async def test_reborn_v2_disconnected_run_shows_status_and_stops_typing(
         status_box = await connection_status.bounding_box()
         assert status_box is not None
         assert status_box["width"] < 320
+        desktop_right_gap = await connection_status.evaluate(
+            "node => node.parentElement.getBoundingClientRect().right "
+            "- node.getBoundingClientRect().right"
+        )
+        assert 15 <= desktop_right_gap <= 17
+
+        await page.set_viewport_size({"width": 390, "height": 844})
+        mobile_status_box = await connection_status.bounding_box()
+        assert mobile_status_box is not None
+        assert mobile_status_box["x"] >= 12
+        assert mobile_status_box["x"] + mobile_status_box["width"] <= 378
+
+        await page.set_viewport_size({"width": 1280, "height": 720})
         await context.set_offline(False)
         await expect(connection_status).to_have_count(0, timeout=5000)
 
