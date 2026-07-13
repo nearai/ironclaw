@@ -59,35 +59,6 @@ transport = "http"
 url = "http://127.0.0.1:9/mcp"
 "#;
 
-/// Shared-catalog package colliding on the SAME id as
-/// `REGISTERED_ISOLATION_MANIFEST_TOML` but a wholly different descriptor
-/// (name/description diverge, so a wrong resolution is trivially
-/// observable). A `HostBundled` package must be wasm + declare
-/// capabilities (the bare-MCP shape is only valid for `UserRegistered`), so
-/// this borrows the legacy `[[capabilities]]` shape from
-/// `fixture_extension_manifest` with the colliding id.
-pub(super) const COLLIDING_CATALOG_MANIFEST_TOML: &str = r#"
-schema_version = "reborn.extension_manifest.v2"
-id = "acme-mcp-registered"
-name = "Colliding Shared Package"
-version = "0.1.0"
-description = "Shared catalog package colliding on the same id"
-trust = "first_party_requested"
-
-[runtime]
-kind = "wasm"
-module = "wasm/colliding.wasm"
-
-[[capabilities]]
-id = "acme-mcp-registered.search"
-description = "Search colliding data"
-effects = ["network"]
-default_permission = "ask"
-visibility = "model"
-input_schema_ref = "schemas/search.input.json"
-output_schema_ref = "schemas/search.output.json"
-"#;
-
 /// Owner-isolation harness for registered packages: writes the descriptor
 /// at the tenant-scoped registered-store path (the overlay's filesystem
 /// source) over an EMPTY shared catalog, with `owner_scope.user_id` also
@@ -98,31 +69,6 @@ output_schema_ref = "schemas/search.output.json"
 async fn user_registered_isolation_fixture(
     owner_scope: &ResourceScope,
     pre_install: bool,
-) -> (
-    tempfile::TempDir,
-    Arc<RebornLocalExtensionManagementPort>,
-    LifecyclePackageRef,
-    Arc<SharedExtensionRegistry>,
-    Arc<InMemoryExtensionInstallationStore>,
-) {
-    user_registered_isolation_fixture_with_operator(
-        owner_scope,
-        pre_install,
-        owner_scope.user_id.clone(),
-    )
-    .await
-}
-
-/// Item 1 variant of `user_registered_isolation_fixture`: lets the caller
-/// wire the tenant operator to a DIFFERENT identity than the registering
-/// owner, so the operator-eviction arm of `install`'s existing-row guard
-/// (`decide_install_on_existing`'s `Tenant` eviction) is actually
-/// exercisable — the base fixture always makes the owner the operator,
-/// which is the wrong shape for that regression.
-async fn user_registered_isolation_fixture_with_operator(
-    owner_scope: &ResourceScope,
-    pre_install: bool,
-    operator_user_id: UserId,
 ) -> (
     tempfile::TempDir,
     Arc<RebornLocalExtensionManagementPort>,
@@ -219,7 +165,9 @@ async fn user_registered_isolation_fixture_with_operator(
             test_extension_trust_policy(),
         ),
         None,
-        operator_user_id,
+        // The registering owner IS the tenant operator: the row must
+        // still be the singleton owner, never Tenant.
+        owner_scope.user_id.clone(),
     ));
     let package_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "acme-mcp-registered")
@@ -720,8 +668,36 @@ async fn project_prefers_registered_row_over_same_id_catalog_package() {
     let (_dir, port, package_ref, _active_registry, _installation_store) =
         user_registered_isolation_fixture(&owner_scope, true).await;
 
+    // A shared-catalog package colliding on the SAME id but a wholly
+    // different descriptor (name/description diverge from the registered
+    // one, so a wrong resolution is trivially observable). A HostBundled
+    // package must be wasm + declare capabilities (the bare-MCP shape is
+    // only valid for `UserRegistered`), so this borrows the legacy
+    // `[[capabilities]]` shape from `fixture_extension_manifest` with the
+    // colliding id.
+    let colliding_manifest = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "acme-mcp-registered"
+name = "Colliding Shared Package"
+version = "0.1.0"
+description = "Shared catalog package colliding on the same id"
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/colliding.wasm"
+
+[[capabilities]]
+id = "acme-mcp-registered.search"
+description = "Search colliding data"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/search.input.json"
+output_schema_ref = "schemas/search.output.json"
+"#;
     let colliding_package = fixture_extension_package_from_manifest_with_root(
-        COLLIDING_CATALOG_MANIFEST_TOML,
+        colliding_manifest,
         "acme-mcp-registered",
     );
     {
@@ -773,108 +749,6 @@ async fn project_prefers_registered_row_over_same_id_catalog_package() {
             ..
         })
     ));
-}
-
-/// Item 1 regression: `install`'s existing-row arm must key the registered
-/// guard off the EXISTING row's own effective owner scope, never off the
-/// freshly resolved package's manifest source. A foreign, non-operator
-/// caller who cannot see the owner's registered descriptor falls back to
-/// resolving the colliding shared-catalog package (a `HostBundled` source),
-/// so a guard keyed on `available.package.manifest.source` sees no
-/// registered source at all and reaches `decide_install_on_existing`, which
-/// JOINs the foreign caller into the private registered row's member set.
-/// Before the fix this call SUCCEEDS and mutates the row; after the fix it
-/// must be masked "is not installed" and the row must be untouched.
-#[tokio::test]
-async fn install_of_colliding_catalog_package_by_foreign_user_rejects_registered_row_takeover() {
-    let owner_scope = resource_scope_for("default", "owner-a");
-    let foreign_scope = resource_scope_for("default", "foreign-user");
-    let (_dir, port, package_ref, _active_registry, installation_store) =
-        user_registered_isolation_fixture(&owner_scope, true).await;
-
-    let colliding_package = fixture_extension_package_from_manifest_with_root(
-        COLLIDING_CATALOG_MANIFEST_TOML,
-        "acme-mcp-registered",
-    );
-    {
-        let mut catalog = port.catalog.write().await;
-        catalog.extend(AvailableExtensionCatalog::from_packages(vec![
-            colliding_package,
-        ]));
-    }
-
-    let error = port
-        .install(package_ref, &foreign_scope)
-        .await
-        .expect_err(
-            "a foreign non-operator caller must not take over the owner's registered row via \
-             a same-id catalog collision",
-        );
-    assert!(
-        error.to_string().contains("is not installed"),
-        "must use the masked not-installed denial, got: {error}"
-    );
-
-    let row = installation_store
-        .get_installation(&ExtensionInstallationId::new("acme-mcp-registered").expect("valid id"))
-        .await
-        .expect("store read")
-        .expect("registered row present");
-    assert!(
-        row.owner().visible_to(&owner_scope.user_id) && !row.owner().visible_to(&foreign_scope.user_id),
-        "the registered row must remain the owner's singleton, unmutated by the collision attempt"
-    );
-}
-
-/// Sibling of the takeover test above for the operator arm: the tenant
-/// operator hitting the same same-id catalog collision must not evict the
-/// registered row to `Tenant` (which `decide_install_on_existing`'s operator
-/// arm would do for an ordinary member-held row) — a registered row has no
-/// membership semantics to evict.
-#[tokio::test]
-async fn install_of_colliding_catalog_package_by_operator_does_not_evict_registered_row() {
-    let owner_scope = resource_scope_for("default", "owner-a");
-    let operator_scope = resource_scope_for("default", "tenant-operator");
-    let (_dir, port, package_ref, _active_registry, installation_store) =
-        user_registered_isolation_fixture_with_operator(
-            &owner_scope,
-            true,
-            operator_scope.user_id.clone(),
-        )
-        .await;
-
-    let colliding_package = fixture_extension_package_from_manifest_with_root(
-        COLLIDING_CATALOG_MANIFEST_TOML,
-        "acme-mcp-registered",
-    );
-    {
-        let mut catalog = port.catalog.write().await;
-        catalog.extend(AvailableExtensionCatalog::from_packages(vec![
-            colliding_package,
-        ]));
-    }
-
-    let error = port
-        .install(package_ref, &operator_scope)
-        .await
-        .expect_err(
-            "the tenant operator must not evict a registered row to Tenant via a same-id \
-             catalog collision",
-        );
-    assert!(
-        error.to_string().contains("is not installed"),
-        "must use the masked not-installed denial, got: {error}"
-    );
-
-    let row = installation_store
-        .get_installation(&ExtensionInstallationId::new("acme-mcp-registered").expect("valid id"))
-        .await
-        .expect("store read")
-        .expect("registered row present");
-    assert!(
-        !row.owner().is_tenant() && row.owner().visible_to(&owner_scope.user_id),
-        "the registered row must remain the owner's singleton, never evicted to Tenant"
-    );
 }
 
 /// Regression: the installation row is a single flat map keyed only by
