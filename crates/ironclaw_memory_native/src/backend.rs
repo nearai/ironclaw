@@ -133,6 +133,19 @@ pub trait MemoryBackend: Send + Sync {
         ))
     }
 
+    async fn read_document_metadata(
+        &self,
+        context: &MemoryContext,
+        path: &MemoryDocumentPath,
+    ) -> Result<Option<serde_json::Value>, FilesystemError> {
+        let _ = path;
+        Err(memory_backend_unsupported(
+            context.scope(),
+            FilesystemOperation::ReadFile,
+            "memory backend does not support document metadata",
+        ))
+    }
+
     async fn write_document(
         &self,
         context: &MemoryContext,
@@ -430,6 +443,20 @@ where
         )?;
         ensure_path_matches_context(context, path, FilesystemOperation::ReadFile)?;
         self.repository.read_document(path).await
+    }
+
+    async fn read_document_metadata(
+        &self,
+        context: &MemoryContext,
+        path: &MemoryDocumentPath,
+    ) -> Result<Option<serde_json::Value>, FilesystemError> {
+        ensure_file_documents_supported(
+            context,
+            FilesystemOperation::ReadFile,
+            self.capabilities.file_documents,
+        )?;
+        ensure_path_matches_context(context, path, FilesystemOperation::ReadFile)?;
+        self.repository.read_document_metadata(path).await
     }
 
     async fn write_document(

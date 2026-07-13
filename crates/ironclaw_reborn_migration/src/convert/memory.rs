@@ -35,7 +35,16 @@ pub(crate) async fn run(
 
         for doc in docs {
             if v2_model::is_engine_path(&doc.path) {
-                continue; // engine-v2 state — handled by the automations converter
+                if !has_engine_converter(&doc.path) {
+                    report.record_loss(
+                        Domain::Memory,
+                        doc.path,
+                        "*",
+                        LossReason::NoTargetConcept,
+                        "engine-v2 runtime document has no supported Reborn converter and was not migrated",
+                    );
+                }
+                continue;
             }
 
             // A malformed source user id is a per-item loss, not a run abort.
@@ -75,8 +84,30 @@ pub(crate) async fn run(
                 .await
             {
                 Ok(existing) if existing.content == doc.content => {
-                    report.stats.memory_documents += 1;
-                    continue;
+                    let existing_metadata = tgt
+                        .memory_service
+                        .read_metadata(
+                            invocation.clone(),
+                            MemoryServiceReadRequest {
+                                path: doc.path.clone(),
+                            },
+                        )
+                        .await
+                        .map_err(|error| MigrationError::WriteTarget {
+                            domain: format!("memory document {}", doc.path),
+                            reason: format!("read deterministic target metadata: {error}"),
+                        })?
+                        .metadata
+                        .unwrap_or_default();
+                    if existing_metadata == metadata {
+                        report.stats.memory_documents += 1;
+                        continue;
+                    }
+                    return Err(MigrationError::WriteTarget {
+                        domain: format!("memory document {}", doc.path),
+                        reason: "deterministic memory path already contains divergent metadata; refusing to overwrite"
+                            .to_string(),
+                    });
                 }
                 Ok(_) => {
                     return Err(MigrationError::WriteTarget {
@@ -128,4 +159,31 @@ pub(crate) async fn run(
             .to_string(),
     );
     Ok(())
+}
+
+fn has_engine_converter(path: &str) -> bool {
+    if path.ends_with("mission.json") || (path.contains("/threads/") && path.ends_with(".json")) {
+        return true;
+    }
+    let segments: Vec<_> = path.trim_matches('/').split('/').collect();
+    matches!(
+        segments.as_slice(),
+        ["engine", "projects", slug, "project.json"]
+            | [".system", "engine", "projects", slug, "project.json"]
+            if !slug.is_empty()
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_engine_converter;
+
+    #[test]
+    fn only_engine_documents_owned_by_specialized_converters_are_recognized() {
+        assert!(has_engine_converter("engine/missions/daily/mission.json"));
+        assert!(has_engine_converter(".system/engine/threads/id.json"));
+        assert!(has_engine_converter("engine/projects/demo/project.json"));
+        assert!(!has_engine_converter("engine/runtime/checkpoint.json"));
+        assert!(!has_engine_converter("engine/projects/project.json"));
+    }
 }

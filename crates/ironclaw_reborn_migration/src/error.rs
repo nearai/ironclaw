@@ -8,6 +8,9 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum MigrationError {
+    #[error("migration preflight failed: {0}")]
+    Preflight(Box<MigrationError>),
+
     #[error("failed to open v1 source database: {0}")]
     OpenSource(String),
 
@@ -34,4 +37,10 @@ pub enum MigrationError {
 
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+impl MigrationError {
+    pub fn is_preflight(&self) -> bool {
+        matches!(self, Self::Preflight(_))
+    }
 }

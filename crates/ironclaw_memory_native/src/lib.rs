@@ -58,9 +58,9 @@ pub use search::{FusionStrategy, MemorySearchRequest, MemorySearchResult};
 pub use service::{
     MemoryContextProfileId, MemoryInvocation, MemoryProfileSetStatus, MemoryService,
     MemoryServiceContextRequest, MemoryServiceContextSnippet, MemoryServiceError,
-    MemoryServiceErrorKind, MemoryServiceProfileSetRequest, MemoryServiceProfileSetResponse,
-    MemoryServiceReadRequest, MemoryServiceReadResponse, MemoryServiceSearchRequest,
-    MemoryServiceSearchResponse, MemoryServiceSearchResult, MemoryServiceTreeRequest,
-    MemoryServiceTreeResponse, MemoryServiceWriteRequest, MemoryServiceWriteResponse,
-    MemoryWriteStatus, NativeMemoryService,
+    MemoryServiceErrorKind, MemoryServiceMetadataResponse, MemoryServiceProfileSetRequest,
+    MemoryServiceProfileSetResponse, MemoryServiceReadRequest, MemoryServiceReadResponse,
+    MemoryServiceSearchRequest, MemoryServiceSearchResponse, MemoryServiceSearchResult,
+    MemoryServiceTreeRequest, MemoryServiceTreeResponse, MemoryServiceWriteRequest,
+    MemoryServiceWriteResponse, MemoryWriteStatus, NativeMemoryService,
 };

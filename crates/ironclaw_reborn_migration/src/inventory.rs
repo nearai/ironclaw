@@ -389,23 +389,20 @@ pub(crate) fn build_home_inventory(
 ) -> Vec<InventoryEntry> {
     let mut out = Vec::new();
     let Some(home) = home else { return out };
-    let mut excluded_names = BTreeSet::new();
+    let mut excluded_paths = BTreeSet::new();
     for path in [source_db, target_db].into_iter().flatten() {
-        if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
-            excluded_names.extend([
-                name.to_string(),
-                format!("{name}-wal"),
-                format!("{name}-shm"),
-            ]);
+        for suffix in ["", "-wal", "-shm"] {
+            let mut candidate = path.as_os_str().to_os_string();
+            candidate.push(suffix);
+            excluded_paths.insert(normalized_path(Path::new(&candidate)));
         }
-        if let Ok(relative) = path.strip_prefix(home)
-            && let Some(name) = relative
-                .components()
-                .next()
-                .and_then(|component| component.as_os_str().to_str())
-        {
-            excluded_names.insert(name.to_string());
-        }
+    }
+    if let Some(target_db) = target_db
+        && let Some(parent) = target_db.parent()
+    {
+        excluded_paths.insert(normalized_path(
+            &parent.join(".reborn-local-dev-secrets-master-key"),
+        ));
     }
 
     for rule in FILE_RULES {
@@ -413,6 +410,7 @@ pub(crate) fn build_home_inventory(
             home.join(rule.name),
             InventorySourceKind::HomeFile,
             *rule,
+            &excluded_paths,
         ));
     }
     for rule in DIRECTORY_RULES {
@@ -420,6 +418,7 @@ pub(crate) fn build_home_inventory(
             home.join(rule.name),
             InventorySourceKind::HomeDirectory,
             *rule,
+            &excluded_paths,
         ));
     }
 
@@ -439,7 +438,9 @@ pub(crate) fn build_home_inventory(
                     }
                 };
                 let name = entry.file_name().to_string_lossy().into_owned();
-                if known.contains(name.as_str()) || excluded_names.contains(&name) {
+                if known.contains(name.as_str())
+                    || excluded_paths.contains(&normalized_path(&entry.path()))
+                {
                     continue;
                 }
                 let kind = match entry.file_type() {
@@ -450,17 +451,31 @@ pub(crate) fn build_home_inventory(
                         continue;
                     }
                 };
-                let (count, count_error) = match count_path_entries(&entry.path()) {
-                    Ok(count) => (count, None),
-                    Err(error) => (0, Some(error)),
-                };
-                let (checksum, checksum_error) = match checksum_path(&entry.path()) {
-                    Ok(checksum) => (checksum, None),
-                    Err(error) => (
-                        sha256_hex(format!("unreadable-home:{name}:{error}").as_bytes()),
-                        Some(error),
-                    ),
-                };
+                let normalized_entry = normalized_path(&entry.path());
+                if matches!(kind, InventorySourceKind::HomeDirectory)
+                    && excluded_paths
+                        .iter()
+                        .any(|excluded| excluded.starts_with(&normalized_entry))
+                    && matches!(
+                        path_has_nonexcluded_content(&entry.path(), &excluded_paths),
+                        Ok(false)
+                    )
+                {
+                    continue;
+                }
+                let (count, count_error) =
+                    match count_path_entries_excluding(&entry.path(), &excluded_paths) {
+                        Ok(count) => (count, None),
+                        Err(error) => (0, Some(error)),
+                    };
+                let (checksum, checksum_error) =
+                    match checksum_path_excluding(&entry.path(), &excluded_paths) {
+                        Ok(checksum) => (checksum, None),
+                        Err(error) => (
+                            sha256_hex(format!("unreadable-home:{name}:{error}").as_bytes()),
+                            Some(error),
+                        ),
+                    };
                 let blocker = count_error.or(checksum_error).map(|error| {
                     format!("v1 home artifact could not be inventoried completely: {error}")
                 });
@@ -490,7 +505,20 @@ fn home_entry(
     path: PathBuf,
     source_kind: InventorySourceKind,
     rule: DispositionRule,
+    excluded_paths: &BTreeSet<PathBuf>,
 ) -> InventoryEntry {
+    if excluded_paths.contains(&normalized_path(&path)) {
+        return InventoryEntry {
+            source_kind,
+            source_name: rule.name.to_string(),
+            domain: rule.domain,
+            disposition: rule.disposition,
+            count: 0,
+            checksum: sha256_hex(b"excluded-database-path"),
+            blocker: None,
+            warning: None,
+        };
+    }
     match path.try_exists() {
         Ok(false) => {
             return InventoryEntry {
@@ -520,11 +548,11 @@ fn home_entry(
             };
         }
     }
-    let (count, count_error) = match count_path_entries(&path) {
+    let (count, count_error) = match count_path_entries_excluding(&path, excluded_paths) {
         Ok(count) => (count, None),
         Err(error) => (0, Some(error)),
     };
-    let (checksum, checksum_error) = match checksum_path(&path) {
+    let (checksum, checksum_error) = match checksum_path_excluding(&path, excluded_paths) {
         Ok(checksum) => (checksum, None),
         Err(error) => (
             sha256_hex(format!("unreadable:{}:{error}", rule.name).as_bytes()),
@@ -560,7 +588,15 @@ fn home_inventory_error(source_name: &str, error: &std::io::Error) -> InventoryE
     }
 }
 
+#[cfg(test)]
 fn checksum_path(path: &Path) -> std::io::Result<String> {
+    checksum_path_excluding(path, &BTreeSet::new())
+}
+
+fn checksum_path_excluding(
+    path: &Path,
+    excluded_paths: &BTreeSet<PathBuf>,
+) -> std::io::Result<String> {
     let metadata = std::fs::symlink_metadata(path)?;
     let mut state = Fnv1a64::new();
     if metadata.file_type().is_symlink() {
@@ -578,9 +614,12 @@ fn checksum_path(path: &Path) -> std::io::Result<String> {
         let mut entries = std::fs::read_dir(path)?.collect::<Result<Vec<_>, _>>()?;
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
+            if excluded_paths.contains(&normalized_path(&entry.path())) {
+                continue;
+            }
             state.update(entry.file_name().as_encoded_bytes());
             state.update(b"\0");
-            state.update(checksum_path(&entry.path())?.as_bytes());
+            state.update(checksum_path_excluding(&entry.path(), excluded_paths)?.as_bytes());
             state.update(b"\0");
         }
     } else {
@@ -619,16 +658,59 @@ impl Fnv1a64 {
     }
 }
 
+#[cfg(test)]
 fn count_path_entries(path: &Path) -> std::io::Result<u64> {
+    count_path_entries_excluding(path, &BTreeSet::new())
+}
+
+fn count_path_entries_excluding(
+    path: &Path,
+    excluded_paths: &BTreeSet<PathBuf>,
+) -> std::io::Result<u64> {
     let metadata = std::fs::symlink_metadata(path)?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Ok(1);
     }
     let mut count = 1_u64;
     for entry in std::fs::read_dir(path)? {
-        count = count.saturating_add(count_path_entries(&entry?.path())?);
+        let entry = entry?;
+        if excluded_paths.contains(&normalized_path(&entry.path())) {
+            continue;
+        }
+        count = count.saturating_add(count_path_entries_excluding(&entry.path(), excluded_paths)?);
     }
     Ok(count)
+}
+
+fn normalized_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|current| current.join(path))
+                .unwrap_or_else(|_| path.to_path_buf())
+        }
+    })
+}
+
+fn path_has_nonexcluded_content(
+    path: &Path,
+    excluded_paths: &BTreeSet<PathBuf>,
+) -> std::io::Result<bool> {
+    if excluded_paths.contains(&normalized_path(path)) {
+        return Ok(false);
+    }
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Ok(true);
+    }
+    for entry in std::fs::read_dir(path)? {
+        if path_has_nonexcluded_content(&entry?.path(), excluded_paths)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -710,5 +792,54 @@ mod tests {
         let vanished = directory.path().join("vanished");
         let error = count_path_entries(&vanished).expect_err("missing path must fail");
         assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn database_exclusion_is_exact_and_preserves_nested_siblings() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let home = directory.path().join("home");
+        let nested = home.join("custom");
+        std::fs::create_dir_all(&nested).expect("create nested directory");
+        let source = nested.join("source.db");
+        std::fs::write(&source, b"database").expect("write source");
+        std::fs::write(nested.join("notes.txt"), b"notes").expect("write sibling");
+        std::fs::write(home.join("source.db"), b"unrelated").expect("write same-name artifact");
+
+        let inventory = build_home_inventory(Some(&home), Some(&source), None);
+        let nested_entry = inventory
+            .iter()
+            .find(|entry| entry.source_name == "custom")
+            .expect("nested directory remains inventoried");
+        assert_eq!(nested_entry.count, 2, "directory plus non-database sibling");
+        assert!(
+            inventory
+                .iter()
+                .any(|entry| entry.source_name == "source.db"),
+            "same basename at a different path must remain visible"
+        );
+    }
+
+    #[test]
+    fn target_only_directories_do_not_change_source_home_inventory() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let home = directory.path().join("home");
+        let target = home.join("reborn").join("reborn.db");
+        std::fs::create_dir_all(&home).expect("create home");
+        let before = build_home_inventory(Some(&home), None, Some(&target));
+
+        std::fs::create_dir_all(target.parent().expect("target parent"))
+            .expect("create target parent");
+        std::fs::write(&target, b"target").expect("write target");
+        std::fs::write(
+            target
+                .parent()
+                .expect("target parent")
+                .join(".reborn-local-dev-secrets-master-key"),
+            b"key",
+        )
+        .expect("write target key");
+        let after = build_home_inventory(Some(&home), None, Some(&target));
+
+        assert_eq!(after, before);
     }
 }

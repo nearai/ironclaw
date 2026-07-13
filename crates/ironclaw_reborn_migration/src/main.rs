@@ -288,9 +288,14 @@ async fn run_v1(operation: V1Operation) -> anyhow::Result<()> {
             let report = match result {
                 Ok(report) => report,
                 Err(error) => {
-                    let failed = applying.transition(MigrationStatus::Failed)?;
-                    write_target_state(&run.target_state_path, &failed, &command.plan)?;
-                    failed.write_atomic(&command.plan, true)?;
+                    if error.is_preflight() {
+                        write_target_state(&run.target_state_path, &manifest, &command.plan)?;
+                        manifest.write_atomic(&command.plan, true)?;
+                    } else {
+                        let failed = applying.transition(MigrationStatus::Failed)?;
+                        write_target_state(&run.target_state_path, &failed, &command.plan)?;
+                        failed.write_atomic(&command.plan, true)?;
+                    }
                     return Err(error.into());
                 }
             };
@@ -350,14 +355,13 @@ async fn run_v1(operation: V1Operation) -> anyhow::Result<()> {
         V1Operation::Verify(command) => {
             let run = resolve_run(command.source)?;
             let manifest = read_manifest(&command.manifest)?;
-            let verifying = match manifest.status {
-                MigrationStatus::Verifying | MigrationStatus::Verified => manifest.clone(),
-                _ => manifest.transition(MigrationStatus::Verifying)?,
+            let verifying = if manifest.status == MigrationStatus::Verifying {
+                manifest.clone()
+            } else {
+                manifest.transition(MigrationStatus::Verifying)?
             };
-            if manifest.status != MigrationStatus::Verified {
-                write_target_state(&run.target_state_path, &verifying, &command.manifest)?;
-                verifying.write_atomic(&command.manifest, true)?;
-            }
+            write_target_state(&run.target_state_path, &verifying, &command.manifest)?;
+            verifying.write_atomic(&command.manifest, true)?;
             let verified = match verify_migration(&run.options, &manifest).await {
                 Ok(verified) => verified,
                 Err(error) => {

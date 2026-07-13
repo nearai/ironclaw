@@ -25,9 +25,11 @@ pub(crate) async fn run(
     _options: &MigrationOptions,
     report: &mut MigrationReport,
 ) -> Result<(), MigrationError> {
-    let users = match src.db.list_users(None).await {
-        Ok(users) => users,
-        Err(error) if crate::source::is_missing_table_error(&error.to_string()) => Vec::new(),
+    let (users, canonical_users_table_present) = match src.db.list_users(None).await {
+        Ok(users) => (users, true),
+        Err(error) if crate::source::is_missing_table_error(&error.to_string()) => {
+            (Vec::new(), false)
+        }
         Err(error) => {
             return Err(MigrationError::ReadSource {
                 domain: "users".to_string(),
@@ -47,9 +49,9 @@ pub(crate) async fn run(
         import_user(tgt, user, report).await?;
     }
 
-    // Older v1 schemas predate the canonical users table. Import deterministic
-    // minimal users for ids that already own durable data so migrated threads,
-    // memory, routines, and identities never point at a missing user record.
+    // Import deterministic minimal users for ids that already own durable data
+    // so migrated records never point at a missing user. Only schemas without
+    // a canonical users table can safely treat those owners as active.
     for raw_id in src.distinct_users().await? {
         if canonical_ids.contains(&raw_id) {
             continue;
@@ -65,7 +67,18 @@ pub(crate) async fn run(
                 user_id,
                 email: None,
                 display_name: Some(raw_id),
-                status: RebornUserStatus::Active,
+                status: if canonical_users_table_present {
+                    report.record_loss(
+                        Domain::User,
+                        &source_id,
+                        "status",
+                        LossReason::Degraded,
+                        "durable-data owner is absent from the canonical users table; synthesized fail-closed as suspended",
+                    );
+                    RebornUserStatus::Suspended
+                } else {
+                    RebornUserStatus::Active
+                },
                 role: RebornUserRole::Member,
                 created_at: "1970-01-01T00:00:00+00:00".to_string(),
                 updated_at: "1970-01-01T00:00:00+00:00".to_string(),

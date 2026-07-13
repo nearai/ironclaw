@@ -240,7 +240,7 @@ fn migration_check(context: &RebornCliContext) -> DoctorCheck {
         .map_or(detail.as_str(), |(state, _)| state)
     {
         "invalid" | "applying" | "failed" | "applied" | "verifying" => CheckOutcome::Fail,
-        "not_detected" | "available" | "planned" => CheckOutcome::Skip,
+        "not_detected" | "available" | "explicitly_skipped" | "planned" => CheckOutcome::Skip,
         "verified" => CheckOutcome::Pass,
         _ => CheckOutcome::Fail,
     };
@@ -280,6 +280,12 @@ fn migration_state(context: &RebornCliContext) -> anyhow::Result<Option<String>>
     let Some(recorded) = recorded else {
         return Ok(None);
     };
+    if !matches!(
+        recorded.as_str(),
+        "planned" | "applying" | "failed" | "applied" | "verifying" | "verified"
+    ) {
+        return Ok(Some(recorded));
+    }
     let Some(manifest_path) = document
         .pointer("/v1_migration/manifest")
         .and_then(serde_json::Value::as_str)
@@ -409,6 +415,32 @@ mod tests {
             "detail: {}",
             check.detail
         );
+    }
+
+    #[test]
+    fn doctor_does_not_open_manifests_for_non_manifest_onboarding_states() {
+        for state in ["not_detected", "available", "explicitly_skipped"] {
+            let (_tmp, context) = RebornCliContext::test_context();
+            let marker =
+                crate::commands::onboard::onboarding_marker_path(context.boot_config().home());
+            std::fs::create_dir_all(context.boot_config().home().path()).expect("create home");
+            std::fs::write(
+                &marker,
+                serde_json::json!({
+                    "v1_migration": {
+                        "state": state,
+                        "manifest": context.boot_config().home().path().join("missing.json"),
+                    }
+                })
+                .to_string(),
+            )
+            .expect("write marker");
+
+            let check = migration_check(&context);
+
+            assert_eq!(check.outcome, CheckOutcome::Skip, "state {state}");
+            assert_eq!(check.detail, state);
+        }
     }
 
     #[test]

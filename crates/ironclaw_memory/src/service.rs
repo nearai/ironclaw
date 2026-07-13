@@ -192,6 +192,11 @@ pub struct MemoryServiceReadResponse {
     pub word_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoryServiceMetadataResponse {
+    pub metadata: Option<DocumentMetadata>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryServiceTreeRequest {
     pub path: String,
@@ -440,6 +445,15 @@ pub trait MemoryService: Send + Sync {
         invocation: MemoryInvocation,
         request: MemoryServiceReadRequest,
     ) -> Result<MemoryServiceReadResponse, MemoryServiceError> {
+        let _ = (invocation, request);
+        Err(MemoryServiceError::unavailable())
+    }
+
+    async fn read_metadata(
+        &self,
+        invocation: MemoryInvocation,
+        request: MemoryServiceReadRequest,
+    ) -> Result<MemoryServiceMetadataResponse, MemoryServiceError> {
         let _ = (invocation, request);
         Err(MemoryServiceError::unavailable())
     }

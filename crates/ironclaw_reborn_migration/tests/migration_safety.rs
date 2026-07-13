@@ -406,4 +406,12 @@ async fn verification_requires_durable_target_readback() {
         .await
         .expect_err("resumed verification still requires target readback");
     assert!(resumed_error.to_string().contains("does not exist"));
+
+    let verified = verifying
+        .transition(MigrationStatus::Verified)
+        .expect("verified");
+    let reverify_error = verify_migration(&options, &verified)
+        .await
+        .expect_err("verified manifests still require target readback");
+    assert!(reverify_error.to_string().contains("does not exist"));
 }

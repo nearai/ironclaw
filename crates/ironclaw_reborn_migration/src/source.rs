@@ -146,7 +146,7 @@ impl V1Source {
             SourceDb::LibSql { path } => fingerprint_local_snapshot(path).await,
             SourceDb::Postgres { .. } => {
                 let tables = self.table_inventory().await?;
-                let mut material = String::from("ironclaw-v1-postgres-v1\n");
+                let mut material = String::from("ironclaw-v1-postgres-v2\n");
                 for table in tables {
                     material.push_str(&table.name);
                     material.push(':');
@@ -156,7 +156,7 @@ impl V1Source {
                     material.push('\n');
                 }
                 Ok(SourceFingerprint {
-                    algorithm: "sha256-table-inventory-v1".to_string(),
+                    algorithm: "sha256-table-content-v2".to_string(),
                     value: ironclaw_common::hashing::sha256_hex(material.as_bytes()),
                 })
             }
@@ -289,34 +289,26 @@ impl V1Source {
                 let name: String = row
                     .try_get(0)
                     .map_err(|error| source_read_error("inventory", error))?;
-                // PostgreSQL's MVCC transaction ids let us detect inserts and
-                // updates without hashing row contents. Some v1 tables contain
-                // bearer-token hashes, provider configuration, or encrypted
-                // secret material; manifest fingerprints must not be derived
-                // from those values.
                 let sql = format!(
-                    "SELECT COUNT(*)::bigint, COALESCE(SUM((xmin::text)::numeric), 0)::text FROM {}",
-                    quote_identifier(&name)
+                    "SELECT to_jsonb(source_row)::text FROM {} AS source_row \
+                     ORDER BY to_jsonb(source_row)::text",
+                    quote_identifier(&name),
                 );
-                let row = client
-                    .query_one(&sql, &[])
+                let rows = client
+                    .query(&sql, &[])
                     .await
                     .map_err(|error| source_read_error(&name, error))?;
-                let count: i64 = row
-                    .try_get(0)
-                    .map_err(|error| source_read_error(&name, error))?;
-                let row_checksum: String = row
-                    .try_get(1)
-                    .map_err(|error| source_read_error(&name, error))?;
+                let encoded_rows = rows
+                    .iter()
+                    .map(|row| {
+                        row.try_get::<_, String>(0)
+                            .map_err(|error| source_read_error(&name, error))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 inventory.push(RawTableInventory {
                     name: name.clone(),
-                    count: count.try_into().map_err(|_| MigrationError::ReadSource {
-                        domain: name.clone(),
-                        reason: "negative row count".to_string(),
-                    })?,
-                    checksum: ironclaw_common::hashing::sha256_hex(
-                        format!("postgres-table-mvcc-v1:{name}:{count}:{row_checksum}").as_bytes(),
-                    ),
+                    count: encoded_rows.len() as u64,
+                    checksum: postgres_table_content_checksum(&name, &encoded_rows),
                 });
             }
             return Ok(inventory);
@@ -653,7 +645,10 @@ fn source_to_config(source: &SourceDb) -> Result<DatabaseConfig, MigrationError>
             };
             Ok(DatabaseConfig {
                 backend: DatabaseBackend::Postgres,
-                url: url.clone(),
+                url: SecretString::from(postgres_read_only_locator(
+                    url.expose_secret(),
+                    parsed.get_options(),
+                )),
                 pool_size: 4,
                 ssl_mode,
                 libsql_path: None,
@@ -662,6 +657,58 @@ fn source_to_config(source: &SourceDb) -> Result<DatabaseConfig, MigrationError>
             })
         }
     }
+}
+
+#[cfg(feature = "postgres")]
+fn postgres_read_only_locator(locator: &str, existing_options: Option<&str>) -> String {
+    let options = match existing_options {
+        Some(existing) if !existing.is_empty() => {
+            format!("{existing} -c default_transaction_read_only=on")
+        }
+        _ => "-c default_transaction_read_only=on".to_string(),
+    };
+    if locator.starts_with("postgres://") || locator.starts_with("postgresql://") {
+        let (base, query) = locator.split_once('?').unwrap_or((locator, ""));
+        let mut parameters = query
+            .split('&')
+            .filter(|parameter| !parameter.is_empty() && !parameter.starts_with("options="))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        parameters.push(format!("options={}", percent_encode_query_value(&options)));
+        format!("{base}?{}", parameters.join("&"))
+    } else {
+        let escaped = options.replace('\\', "\\\\").replace('\'', "\\'");
+        format!("{locator} options='{escaped}'")
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn percent_encode_query_value(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            const HEX: &[u8; 16] = b"0123456789ABCDEF";
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    encoded
+}
+
+#[cfg(feature = "postgres")]
+fn postgres_table_content_checksum(name: &str, rows: &[String]) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"ironclaw-v1-postgres-table-content-v2\0");
+    hash.update((name.len() as u64).to_le_bytes());
+    hash.update(name.as_bytes());
+    for row in rows {
+        hash.update((row.len() as u64).to_le_bytes());
+        hash.update(row.as_bytes());
+    }
+    format!("{:x}", hash.finalize())
 }
 
 #[cfg(feature = "postgres")]
@@ -794,9 +841,11 @@ impl std::io::Write for DigestWriter<'_> {
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "postgres")]
-    use secrecy::SecretString;
+    use secrecy::{ExposeSecret as _, SecretString};
 
     use super::fingerprint_local_snapshot;
+    #[cfg(feature = "postgres")]
+    use super::postgres_table_content_checksum;
     #[cfg(feature = "postgres")]
     use super::source_to_config;
     #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -827,6 +876,50 @@ mod tests {
         };
         let config = source_to_config(&source).expect("local plaintext source");
         assert_eq!(config.ssl_mode, ironclaw::config::SslMode::Disable);
+        let parsed = config
+            .url
+            .expose_secret()
+            .parse::<tokio_postgres::Config>()
+            .expect("parse read-only source URL");
+        assert_eq!(
+            parsed.get_options(),
+            Some("-c default_transaction_read_only=on")
+        );
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn postgres_source_overrides_write_capable_session_options() {
+        let source = SourceDb::Postgres {
+            url: SecretString::from(
+                "postgresql://user:password@localhost/ironclaw?sslmode=disable&options=-c%20default_transaction_read_only%3Doff",
+            ),
+        };
+        let config = source_to_config(&source).expect("read-only source config");
+        let parsed = config
+            .url
+            .expose_secret()
+            .parse::<tokio_postgres::Config>()
+            .expect("parse read-only source URL");
+        assert_eq!(
+            parsed.get_options(),
+            Some("-c default_transaction_read_only=off -c default_transaction_read_only=on")
+        );
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn postgres_table_checksum_is_bound_to_row_contents() {
+        let before = postgres_table_content_checksum(
+            "users",
+            &[r#"{"id": "alice", "status": "active"}"#.to_string()],
+        );
+        let after = postgres_table_content_checksum(
+            "users",
+            &[r#"{"id": "alice", "status": "suspended"}"#.to_string()],
+        );
+
+        assert_ne!(before, after);
     }
 
     #[tokio::test]

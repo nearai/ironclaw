@@ -1079,7 +1079,8 @@ fn require_postgres_resource_governor_singleton_env() -> Result<bool, RebornBuil
 }
 
 #[cfg(feature = "postgres")]
-fn postgres_pool_tls_options_from_env() -> Result<PostgresPoolTlsOptions, RebornBuildError> {
+pub(crate) fn postgres_pool_tls_options_from_env()
+-> Result<PostgresPoolTlsOptions, RebornBuildError> {
     let ssl_mode_override = match std::env::var(DATABASE_SSLMODE_ENV) {
         Ok(value) if value.trim().is_empty() => None,
         Ok(value) => Some(

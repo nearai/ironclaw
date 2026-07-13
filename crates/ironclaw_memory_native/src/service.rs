@@ -28,11 +28,11 @@ use serde_json::{Map, Value, json};
 pub use ironclaw_memory::{
     MemoryContextProfileId, MemoryInvocation, MemoryProfileSetStatus, MemoryService,
     MemoryServiceContextRequest, MemoryServiceContextSnippet, MemoryServiceError,
-    MemoryServiceErrorKind, MemoryServiceProfileSetRequest, MemoryServiceProfileSetResponse,
-    MemoryServiceReadRequest, MemoryServiceReadResponse, MemoryServiceSearchRequest,
-    MemoryServiceSearchResponse, MemoryServiceSearchResult, MemoryServiceTreeRequest,
-    MemoryServiceTreeResponse, MemoryServiceWriteRequest, MemoryServiceWriteResponse,
-    MemoryWriteStatus, memory_context_disabled,
+    MemoryServiceErrorKind, MemoryServiceMetadataResponse, MemoryServiceProfileSetRequest,
+    MemoryServiceProfileSetResponse, MemoryServiceReadRequest, MemoryServiceReadResponse,
+    MemoryServiceSearchRequest, MemoryServiceSearchResponse, MemoryServiceSearchResult,
+    MemoryServiceTreeRequest, MemoryServiceTreeResponse, MemoryServiceWriteRequest,
+    MemoryServiceWriteResponse, MemoryWriteStatus, memory_context_disabled,
 };
 
 const MEMORY_PATH: &str = "MEMORY.md";
@@ -236,6 +236,23 @@ impl MemoryService for NativeMemoryService {
             word_count: content.split_whitespace().count(),
             content,
         })
+    }
+
+    async fn read_metadata(
+        &self,
+        invocation: MemoryInvocation,
+        request: MemoryServiceReadRequest,
+    ) -> Result<MemoryServiceMetadataResponse, MemoryServiceError> {
+        reject_local_or_traversal_path(&request.path)?;
+        let (scope, context) = self.scoped_context(&invocation)?;
+        let path = document_path(&scope, &request.path)?;
+        let metadata = self
+            .backend
+            .read_document_metadata(&context, &path)
+            .await
+            .map_err(MemoryServiceError::operation_from)?
+            .map(|value| DocumentMetadata::from_value(&value));
+        Ok(MemoryServiceMetadataResponse { metadata })
     }
 
     async fn tree(

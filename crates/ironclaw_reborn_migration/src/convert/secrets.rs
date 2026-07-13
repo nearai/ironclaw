@@ -178,6 +178,31 @@ async fn migrate_one(
         invocation_id: InvocationId::new(),
     };
     let material = SecretMaterial::from(decrypted.expose().to_string());
+    if let Some(existing) =
+        secret_store
+            .metadata(&scope, &handle)
+            .await
+            .map_err(|e| MigrationError::WriteTarget {
+                domain: format!("secret {user_id}:{name}"),
+                reason: format!("read deterministic target slot: {e}"),
+            })?
+    {
+        if existing.expires_at != expires_at {
+            return Err(secret_collision(user_id, name));
+        }
+        let matches = secret_store
+            .material_matches(&scope, &handle, &material)
+            .await
+            .map_err(|e| MigrationError::WriteTarget {
+                domain: format!("secret {user_id}:{name}"),
+                reason: format!("read deterministic target material: {e}"),
+            })?;
+        if matches == Some(true) {
+            report.stats.secrets += 1;
+            return Ok(());
+        }
+        return Err(secret_collision(user_id, name));
+    }
     secret_store
         .put(scope, handle, material, expires_at)
         .await
@@ -187,4 +212,12 @@ async fn migrate_one(
         })?;
     report.stats.secrets += 1;
     Ok(())
+}
+
+fn secret_collision(user_id: &str, name: &str) -> MigrationError {
+    MigrationError::WriteTarget {
+        domain: format!("secret {user_id}:{name}"),
+        reason: "deterministic secret slot already contains divergent state; refusing to overwrite"
+            .to_string(),
+    }
 }

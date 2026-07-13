@@ -31,16 +31,6 @@ use crate::options::{MigrationOptions, TargetStore};
 #[path = "target_ids.rs"]
 pub(crate) mod ids;
 
-#[cfg(feature = "postgres")]
-const LIVE_TARGET_TABLES: &[&str] = &[
-    "reborn_migration_state",
-    "root_filesystem_entries",
-    "root_filesystem_events",
-    "root_filesystem_index_specs",
-    "trigger_records",
-    "trigger_run_history",
-];
-
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct TargetReadback {
     pub(crate) users: u64,
@@ -67,23 +57,27 @@ pub(crate) async fn target_is_empty(target: &TargetStore) -> Result<bool, Migrat
                     error
                 ))
             })?;
-            for table in LIVE_TARGET_TABLES {
-                let relation: Option<String> = client
-                    .query_one("SELECT to_regclass($1)::text", &[table])
-                    .await
-                    .map_err(|error| {
-                        MigrationError::OpenTarget(format!(
-                            "PostgreSQL target schema probe failed for {table}: {error}"
-                        ))
-                    })?
+            let relations = client
+                .query(
+                    "SELECT format('%I.%I', namespace.nspname, relation.relname)
+                     FROM pg_catalog.pg_class relation
+                     JOIN pg_catalog.pg_namespace namespace
+                       ON namespace.oid = relation.relnamespace
+                     WHERE relation.relkind IN ('r', 'p')
+                       AND namespace.nspname NOT LIKE 'pg\\_%' ESCAPE '\\'
+                       AND namespace.nspname <> 'information_schema'",
+                    &[],
+                )
+                .await
+                .map_err(|error| {
+                    MigrationError::OpenTarget(format!(
+                        "PostgreSQL target schema inventory failed: {error}"
+                    ))
+                })?;
+            for relation in relations {
+                let table: String = relation
                     .try_get(0)
                     .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
-                if relation.is_none() {
-                    continue;
-                }
-                // Table names are fixed internal constants, never operator
-                // input. Querying one row avoids a potentially expensive full
-                // count while still enforcing the fresh-target contract.
                 let sql = format!("SELECT EXISTS (SELECT 1 FROM {table} LIMIT 1)");
                 let populated: bool = client
                     .query_one(&sql, &[])
@@ -120,7 +114,7 @@ pub(crate) async fn write_shared_migration_state(
         #[cfg(feature = "postgres")]
         TargetStore::Postgres { url } => {
             let pool = open_postgres_pool(url)?;
-            let client = pool.get().await.map_err(postgres_identity_error)?;
+            let mut client = pool.get().await.map_err(postgres_identity_error)?;
             client
                 .batch_execute(
                     "CREATE TABLE IF NOT EXISTS reborn_migration_state (
@@ -136,34 +130,90 @@ pub(crate) async fn write_shared_migration_state(
                 )
                 .await
                 .map_err(postgres_identity_error)?;
+            let transaction = client
+                .transaction()
+                .await
+                .map_err(postgres_identity_error)?;
             let schema_version = "ironclaw.reborn.migration-state/v1";
             let protocol_version = i64::from(crate::manifest::MIGRATION_PROTOCOL_VERSION);
             let run_id = manifest.run_id.to_string();
             let status = migration_status_label(manifest.status);
-            let parameters: [&(dyn tokio_postgres::types::ToSql + Sync); 6] = [
-                &schema_version,
-                &protocol_version,
-                &manifest.release_version,
-                &run_id,
-                &status,
-                &manifest.scope.profile,
-            ];
-            client
-                .execute(
-                    "INSERT INTO reborn_migration_state (
+            let existing = transaction
+                .query_opt(
+                    "SELECT schema_version, migration_protocol_version, release_version,
+                            run_id, status, profile
+                     FROM reborn_migration_state
+                     WHERE singleton = TRUE
+                     FOR UPDATE",
+                    &[],
+                )
+                .await
+                .map_err(postgres_identity_error)?;
+            if let Some(existing) = existing {
+                let existing_schema: String =
+                    existing.try_get(0).map_err(postgres_identity_error)?;
+                let existing_protocol: i64 =
+                    existing.try_get(1).map_err(postgres_identity_error)?;
+                let existing_release: String =
+                    existing.try_get(2).map_err(postgres_identity_error)?;
+                let existing_run_id: String =
+                    existing.try_get(3).map_err(postgres_identity_error)?;
+                let existing_status: String =
+                    existing.try_get(4).map_err(postgres_identity_error)?;
+                let existing_profile: String =
+                    existing.try_get(5).map_err(postgres_identity_error)?;
+                if existing_schema != schema_version
+                    || existing_protocol != protocol_version
+                    || existing_release != manifest.release_version
+                    || existing_run_id != run_id
+                    || existing_profile != manifest.scope.profile
+                {
+                    return Err(MigrationError::OpenTarget(
+                        "PostgreSQL target is claimed by a different migration run or protocol"
+                            .to_string(),
+                    ));
+                }
+                if !shared_state_transition_allowed(&existing_status, manifest.status) {
+                    return Err(MigrationError::OpenTarget(format!(
+                        "invalid shared migration state transition {existing_status} -> {status}"
+                    )));
+                }
+                transaction
+                    .execute(
+                        "UPDATE reborn_migration_state
+                         SET status = $1, updated_at = NOW()
+                         WHERE singleton = TRUE AND run_id = $2",
+                        &[&status, &run_id],
+                    )
+                    .await
+                    .map_err(postgres_identity_error)?;
+            } else {
+                if manifest.status != crate::manifest::MigrationStatus::Applying {
+                    return Err(MigrationError::OpenTarget(
+                        "PostgreSQL target has no active migration claim".to_string(),
+                    ));
+                }
+                let parameters: [&(dyn tokio_postgres::types::ToSql + Sync); 6] = [
+                    &schema_version,
+                    &protocol_version,
+                    &manifest.release_version,
+                    &run_id,
+                    &status,
+                    &manifest.scope.profile,
+                ];
+                transaction
+                    .execute(
+                        "INSERT INTO reborn_migration_state (
                         singleton, schema_version, migration_protocol_version,
                         release_version, run_id, status, profile, updated_at
-                     ) VALUES (TRUE, $1, $2, $3, $4, $5, $6, NOW())
-                     ON CONFLICT (singleton) DO UPDATE SET
-                        schema_version = EXCLUDED.schema_version,
-                        migration_protocol_version = EXCLUDED.migration_protocol_version,
-                        release_version = EXCLUDED.release_version,
-                        run_id = EXCLUDED.run_id,
-                        status = EXCLUDED.status,
-                        profile = EXCLUDED.profile,
-                        updated_at = EXCLUDED.updated_at",
-                    &parameters,
-                )
+                     ) VALUES (TRUE, $1, $2, $3, $4, $5, $6, NOW())",
+                        &parameters,
+                    )
+                    .await
+                    .map_err(postgres_identity_error)?;
+            }
+            transaction
+                .commit()
                 .await
                 .map_err(postgres_identity_error)?;
             Ok(())
@@ -186,6 +236,29 @@ const fn migration_status_label(status: crate::manifest::MigrationStatus) -> &'s
         MigrationStatus::Verifying => "verifying",
         MigrationStatus::Verified => "verified",
     }
+}
+
+#[cfg(feature = "postgres")]
+fn shared_state_transition_allowed(current: &str, next: crate::manifest::MigrationStatus) -> bool {
+    use crate::manifest::MigrationStatus;
+
+    current == migration_status_label(next)
+        || matches!(
+            (current, next),
+            (
+                "applying",
+                MigrationStatus::Failed | MigrationStatus::Applied
+            ) | ("failed", MigrationStatus::Applying)
+                | (
+                    "applied",
+                    MigrationStatus::Applying | MigrationStatus::Verifying
+                )
+                | (
+                    "verifying",
+                    MigrationStatus::Failed | MigrationStatus::Verified
+                )
+                | ("verified", MigrationStatus::Verifying)
+        )
 }
 
 /// Read migrated state through the same durable tables used by production,
@@ -928,4 +1001,62 @@ fn is_local_postgres_config(config: &tokio_postgres::Config) -> bool {
         }
     }
     true
+}
+
+#[cfg(all(test, feature = "postgres"))]
+mod tests {
+    use super::shared_state_transition_allowed;
+    use crate::manifest::MigrationStatus;
+
+    #[test]
+    fn shared_state_accepts_replay_and_manifest_lifecycle_transitions() {
+        assert!(shared_state_transition_allowed(
+            "applying",
+            MigrationStatus::Applying
+        ));
+        assert!(shared_state_transition_allowed(
+            "applying",
+            MigrationStatus::Applied
+        ));
+        assert!(shared_state_transition_allowed(
+            "failed",
+            MigrationStatus::Applying
+        ));
+        assert!(shared_state_transition_allowed(
+            "applied",
+            MigrationStatus::Verifying
+        ));
+        assert!(shared_state_transition_allowed(
+            "verifying",
+            MigrationStatus::Verified
+        ));
+        assert!(shared_state_transition_allowed(
+            "verified",
+            MigrationStatus::Verified
+        ));
+        assert!(shared_state_transition_allowed(
+            "verified",
+            MigrationStatus::Verifying
+        ));
+    }
+
+    #[test]
+    fn shared_state_rejects_skipped_and_unknown_transitions() {
+        assert!(!shared_state_transition_allowed(
+            "applying",
+            MigrationStatus::Verified
+        ));
+        assert!(!shared_state_transition_allowed(
+            "failed",
+            MigrationStatus::Verified
+        ));
+        assert!(!shared_state_transition_allowed(
+            "verified",
+            MigrationStatus::Applying
+        ));
+        assert!(!shared_state_transition_allowed(
+            "unknown",
+            MigrationStatus::Applying
+        ));
+    }
 }

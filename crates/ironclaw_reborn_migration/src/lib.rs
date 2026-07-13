@@ -146,7 +146,9 @@ async fn apply_migration_inner(
     acknowledgements: ApplyAcknowledgements,
     is_resume: bool,
 ) -> Result<MigrationReport, MigrationError> {
-    validate_apply_preconditions(&options, manifest, acknowledgements, is_resume).await?;
+    validate_apply_preconditions(&options, manifest, acknowledgements, is_resume)
+        .await
+        .map_err(|error| MigrationError::Preflight(Box::new(error)))?;
 
     let source_options = MigrationOptions {
         secret_master_key: secrets.source_master_key,
@@ -159,7 +161,11 @@ async fn apply_migration_inner(
         ..options
     };
 
-    let mut applied_manifest = manifest.transition(MigrationStatus::Applying)?;
+    let mut applied_manifest = if manifest.status == MigrationStatus::Applying {
+        manifest.clone()
+    } else {
+        manifest.transition(MigrationStatus::Applying)?
+    };
     applied_manifest.operator_acknowledgements = vec![
         "source_is_stopped".to_string(),
         "source_is_snapshot".to_string(),
@@ -220,9 +226,8 @@ pub async fn verify_migration(
 ) -> Result<MigrationManifest, MigrationError> {
     validate_manifest_source(options, manifest).await?;
     match manifest.status {
-        MigrationStatus::Verified => Ok(manifest.clone()),
-        MigrationStatus::Applied | MigrationStatus::Verifying => {
-            let mut verifying = if manifest.status == MigrationStatus::Applied {
+        MigrationStatus::Applied | MigrationStatus::Verifying | MigrationStatus::Verified => {
+            let mut verifying = if manifest.status != MigrationStatus::Verifying {
                 manifest.transition(MigrationStatus::Verifying)?
             } else {
                 manifest.clone()

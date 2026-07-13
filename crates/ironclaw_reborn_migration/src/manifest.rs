@@ -164,6 +164,7 @@ impl MigrationManifest {
                 | (MigrationStatus::Failed, MigrationStatus::Applying)
                 | (MigrationStatus::Applied, MigrationStatus::Applying)
                 | (MigrationStatus::Applied, MigrationStatus::Verifying)
+                | (MigrationStatus::Verified, MigrationStatus::Verifying)
                 | (MigrationStatus::Verifying, MigrationStatus::Failed)
                 | (MigrationStatus::Verifying, MigrationStatus::Verified)
         );

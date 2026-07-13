@@ -393,6 +393,25 @@ where
             }))
     }
 
+    async fn material_matches(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+        candidate: &SecretMaterial,
+    ) -> Result<Option<bool>, SecretStoreError> {
+        let Some(stored) = self.read_secret(scope, handle).await? else {
+            return Ok(None);
+        };
+        let aad = filesystem_secret_aad(scope, handle);
+        let decrypted = self
+            .crypto
+            .decrypt(&stored.encrypted_value, &stored.key_salt, &aad)
+            .map_err(secret_error_to_store_error)?;
+        Ok(Some(
+            decrypted.expose().as_bytes() == candidate.expose_secret().as_bytes(),
+        ))
+    }
+
     async fn metadata_for_scope(
         &self,
         scope: &ResourceScope,

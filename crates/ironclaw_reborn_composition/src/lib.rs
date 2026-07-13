@@ -919,7 +919,18 @@ where
 pub fn open_reborn_postgres_pool(
     url: secrecy::SecretString,
 ) -> Result<deadpool_postgres::Pool, RebornCompositionError> {
-    Ok(ironclaw_reborn_event_store::open_postgres_pool(url)?)
+    let tls_options = input::postgres_pool_tls_options_from_env().map_err(|error| {
+        RebornCompositionError::InvalidConfig {
+            reason: error.to_string(),
+        }
+    })?;
+    Ok(
+        ironclaw_reborn_event_store::open_postgres_pool_with_tls_options(
+            url,
+            ironclaw_reborn_event_store::DEFAULT_POSTGRES_POOL_MAX_SIZE,
+            tls_options,
+        )?,
+    )
 }
 
 /// Open a PostgreSQL pool for Reborn production storage with an explicit

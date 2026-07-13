@@ -138,3 +138,79 @@ async fn strict_plan_ignores_empty_lossy_categories() {
         "strict plan should still write its manifest"
     );
 }
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn apply_preflight_failure_preserves_the_planned_manifest() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let source_home = directory.path().join("v1-home");
+    let reborn_home = directory.path().join("reborn-home");
+    let source = source_home.join("ironclaw.db");
+    let manifest_path = directory.path().join("migration.json");
+    std::fs::create_dir_all(&source_home).expect("create source home");
+    seed_empty_v1_source(&source).await;
+
+    let plan = Command::new(companion_bin())
+        .args([
+            "v1",
+            "plan",
+            "--source-libsql",
+            source.to_str().expect("UTF-8 source path"),
+            "--source-home",
+            source_home.to_str().expect("UTF-8 source home"),
+            "--manifest",
+            manifest_path.to_str().expect("UTF-8 manifest path"),
+        ])
+        .env_clear()
+        .env("HOME", directory.path())
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev")
+        .output()
+        .expect("plan migration");
+    assert!(
+        plan.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&plan.stderr)
+    );
+
+    let target = reborn_home.join("local-dev").join("reborn-local-dev.db");
+    std::fs::create_dir_all(target.parent().expect("target parent")).expect("target parent");
+    std::fs::write(&target, b"existing Reborn state").expect("existing target");
+
+    let apply = Command::new(companion_bin())
+        .args([
+            "v1",
+            "apply",
+            "--source-libsql",
+            source.to_str().expect("UTF-8 source path"),
+            "--source-home",
+            source_home.to_str().expect("UTF-8 source home"),
+            "--plan",
+            manifest_path.to_str().expect("UTF-8 manifest path"),
+            "--confirm-v1-stopped",
+            "--confirm-source-snapshot",
+        ])
+        .env_clear()
+        .env("HOME", directory.path())
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev")
+        .output()
+        .expect("apply migration");
+    assert!(!apply.status.success());
+
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&manifest_path).expect("read preserved migration manifest"),
+    )
+    .expect("migration manifest JSON");
+    assert_eq!(
+        manifest["status"],
+        "planned",
+        "stderr: {}",
+        String::from_utf8_lossy(&apply.stderr)
+    );
+    let state: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(reborn_home.join(".v1-migration-state.json")).expect("read target state"),
+    )
+    .expect("target state JSON");
+    assert_eq!(state["status"], "planned");
+}

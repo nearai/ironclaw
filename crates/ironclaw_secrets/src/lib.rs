@@ -1012,6 +1012,19 @@ pub trait SecretStore: Send + Sync {
         handle: &SecretHandle,
     ) -> Result<Option<SecretMetadata>, SecretStoreError>;
 
+    /// Compares candidate material with an existing secret without exposing stored material.
+    async fn material_matches(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+        candidate: &SecretMaterial,
+    ) -> Result<Option<bool>, SecretStoreError> {
+        let _ = (scope, handle, candidate);
+        Err(SecretStoreError::StoreUnavailable {
+            reason: "secret material comparison is unavailable".to_string(),
+        })
+    }
+
     /// Lists redacted metadata for secrets under exactly the caller's owner scope.
     ///
     /// This intentionally exposes handles only, never material or leases. Backends

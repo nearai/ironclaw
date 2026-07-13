@@ -625,8 +625,9 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
     // dropped (or newly-recovered) value fails the build. Counts are pinned to
     // the fixture above; see the inline breakdown per domain. ──
     let expected_losses = [
-        // deactivated -> suspended and one non-string metadata value -> JSON text.
-        (Domain::User, 2),
+        // deactivated -> suspended, one non-string metadata value -> JSON text,
+        // and one orphan durable-data owner synthesized fail-closed as suspended.
+        (Domain::User, 3),
         // Hash-only API tokens cannot be converted and require re-authentication.
         (Domain::ApiToken, 1),
         // owner/thread/mission ids are all valid → no thread-identity losses.
@@ -776,7 +777,7 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
     assert_eq!(carol["created_by"], SUSPENDED_USER);
     assert_eq!(carol["metadata"]["quota"], "3");
     let legacy = reborn_entry_json(&dst, &reborn_user_entry_path(LEGACY_DATA_OWNER)).await;
-    assert_eq!(legacy["status"], "active");
+    assert_eq!(legacy["status"], "suspended");
     assert_eq!(legacy["role"], "member");
     assert_eq!(legacy["created_at"], "1970-01-01T00:00:00+00:00");
     assert_eq!(legacy["metadata"]["migration.synthesized"], "true");
@@ -793,10 +794,13 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
     // ── idempotency: resume replays the same sealed source identity and must
     // compare-and-apply without duplicating triggers or transcript rows. ──
     let applied_manifest = report.manifest.clone().expect("applied manifest");
+    let applying_checkpoint = applied_manifest
+        .transition(MigrationStatus::Applying)
+        .expect("interrupted applying checkpoint");
     let replay_options = options(src.clone(), dst.clone(), false);
     let report2 = resume_migration(
         replay_options,
-        &applied_manifest,
+        &applying_checkpoint,
         MigrationSecretInputs {
             source_master_key: Some(SecretString::from(MASTER_KEY)),
             target_master_key: None,
@@ -833,6 +837,11 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
         reborn_message_count(&dst).await,
         6,
         "resume duplicated transcript messages"
+    );
+    assert_eq!(
+        reborn_entry_count(&dst, "%/secret-leases/%").await,
+        0,
+        "secret comparison during resume must not create one-shot leases"
     );
 
     let verified = verify_migration(
