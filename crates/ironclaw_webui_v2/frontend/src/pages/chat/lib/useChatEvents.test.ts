@@ -1265,6 +1265,55 @@ test("useChatEvents: interrupted driver_unavailable projection shows connection 
   assert.deepEqual(contextRunIds, [runId]);
 });
 
+test("useChatEvents: a dismissed run-failure bubble is not resurrected by a replay (issue #16)", () => {
+  const runId = "run-dismissed";
+  const harness = createUseChatEventsHarness({
+    failureMessageForRunStatus: () =>
+      "The run stopped after reaching its iteration limit.",
+  });
+
+  harness.setCurrentActiveRun({ runId, threadId: "thread-1", status: "running" });
+
+  const failureEvent = {
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: runId,
+              status: "failed",
+              failure_category: "iteration_limit",
+              failure_summary: "iteration limit reached",
+            },
+          },
+        ],
+      },
+    },
+  };
+
+  harness.handleEvent(failureEvent);
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, `err-${runId}`);
+
+  // User dismisses the bubble: chat marks it `dismissed` but keeps it in state.
+  harness.replaceMessages(
+    harness.messages.map((message) => ({ ...message, dismissed: true })),
+  );
+
+  // SSE reconnect replays the same terminal failure projection. The dedup
+  // update branch must keep the dismissed bubble, not re-add or un-dismiss it.
+  harness.handleEvent(failureEvent);
+
+  assert.equal(harness.messages.length, 1, "no duplicate bubble on replay");
+  assert.equal(harness.messages[0].id, `err-${runId}`);
+  assert.equal(
+    harness.messages[0].dismissed,
+    true,
+    "replay must not resurrect the dismissed error bubble",
+  );
+});
+
 test("useChatEvents: repeated failed projection updates existing error content", () => {
   const harness = createUseChatEventsHarness({
     failureMessageForRunStatus: (input) =>

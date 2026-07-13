@@ -358,11 +358,19 @@ function insertPreservedAtOriginalPositions(fresh, preserved, current) {
   const currentAnchors = current.map((message) =>
     freshIndexForCurrentMessage(message, freshIndexById),
   );
+  const before = new Map();
   const after = new Map();
   const append = [];
 
   for (const message of preserved) {
-    if (!isRunActivityMessage(message)) {
+    // Anchor run-activity rows AND a surviving optimistic user/assistant
+    // bubble to their original position relative to the fresh timeline.
+    // Previously only run-activity messages were anchored, so a still-
+    // unreconciled optimistic user message fell into `append` and rendered
+    // below later persisted rows — making an earlier message appear last
+    // (issue #16). Client-only error bubbles (err-*) still append at the end
+    // by design.
+    if (!isRunActivityMessage(message) && !isSeededOptimisticMessage(message)) {
       append.push(message);
       continue;
     }
@@ -378,16 +386,38 @@ function insertPreservedAtOriginalPositions(fresh, preserved, current) {
       const group = after.get(previousAnchor) || [];
       group.push(message);
       after.set(previousAnchor, group);
-    } else {
-      append.push(message);
+      continue;
     }
+    // No preceding anchored row. For a surviving optimistic user/assistant
+    // bubble, place it *before* the next anchored row so an earlier message
+    // stays chronological instead of dropping to the bottom. Run-activity rows
+    // keep the legacy append: a prepended in-progress gate activity is meant to
+    // render after the numbered timeline tools, not before them.
+    if (isSeededOptimisticMessage(message)) {
+      let nextAnchor = null;
+      for (let index = originalIndex + 1; index < currentAnchors.length; index += 1) {
+        if (currentAnchors[index] !== null) {
+          nextAnchor = currentAnchors[index];
+          break;
+        }
+      }
+      if (nextAnchor !== null) {
+        const group = before.get(nextAnchor) || [];
+        group.push(message);
+        before.set(nextAnchor, group);
+        continue;
+      }
+    }
+    append.push(message);
   }
 
   const merged = [];
   for (const [index, message] of fresh.entries()) {
+    const beforeGroup = before.get(index);
+    if (beforeGroup) merged.push(...beforeGroup);
     merged.push(message);
-    const group = after.get(index);
-    if (group) merged.push(...group);
+    const afterGroup = after.get(index);
+    if (afterGroup) merged.push(...afterGroup);
   }
   merged.push(...append);
   return merged;

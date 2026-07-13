@@ -30,6 +30,7 @@ import {
   CHAT_MESSAGE_ROLES,
   createErrorChatMessage,
   createRequestFailureChatMessage,
+  filterVisibleMessages,
   isRequestFailureForMessage,
   requestFailureIdForMessage,
 } from "./message-types";
@@ -6153,4 +6154,108 @@ test("useChat.send: blocks a send addressed to a busy thread that is NOT the vie
   assert.equal(result, null, "send into the busy destination thread is rejected");
   assert.equal(sentBody(), null, "sendMessage must not be called for the busy destination");
   assert.equal(createThreadCalls(), 0);
+});
+
+test("useChat.dismissMessage: flags the bubble dismissed and drops it from the rendered list (issue #16)", () => {
+  // The user-facing half of the dismiss feature: chat.tsx computes
+  // `visibleMessages = messages.filter((m) => !m?.dismissed)` and renders
+  // that list. The replay-survival test in useChatEvents pins the
+  // projection dedup branch; this test pins the call site — the dismiss
+  // action exported by useChat, the state mutation it triggers, and the
+  // filter the chat page applies to the rendered list. Without this, a
+  // regression in the filter (or in the action's argument wiring) would
+  // go uncaught and a stale error bubble would re-appear in the chat
+  // thread even though the dedup branch kept `dismissed: true`.
+  const threadId = "thread-1";
+  const renderedMessages = [
+    {
+      id: "msg-user-1",
+      role: "user",
+      content: "earlier question",
+      timestamp: "2026-07-11T13:45:00Z",
+    },
+    {
+      id: "err-run-1",
+      role: "error",
+      content: "The run stopped after reaching its iteration limit.",
+      timestamp: "2026-07-11T13:46:00Z",
+      failureStatus: "failed",
+      failureCategory: "iteration_limit",
+    },
+  ];
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub(),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("dismiss should not create a thread");
+    },
+    globalThis: {},
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("dismiss should not fetch channels");
+      },
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      throw new Error("dismiss should not send a message");
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadError: null,
+      loadHistory: () => {},
+      seedThreadMessages: () => {},
+      setMessages: (updater) => {
+        const next =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+        renderedMessages.length = 0;
+        renderedMessages.push(...next);
+      },
+    }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  chat.dismissMessage("err-run-1");
+
+  // The dismiss action marks the row, not removes it — the projection dedup
+  // branch in appendRunFailureMessage keys on the surviving id and
+  // preserves `dismissed: true` across replays.
+  const errorBubble = renderedMessages.find((message) => message.id === "err-run-1");
+  assert.ok(errorBubble, "dismissed bubble is still in state, not removed");
+  assert.equal(errorBubble.dismissed, true);
+  // The non-dismissed row is untouched.
+  const userBubble = renderedMessages.find((message) => message.id === "msg-user-1");
+  assert.ok(userBubble);
+  assert.equal(userBubble.dismissed, undefined);
+  // Drive the SAME predicate the chat page renders through
+  // (`filterVisibleMessages`, shared from message-types), so a regression in
+  // that filter — not just a copy of it — is caught here.
+  const visibleMessages = filterVisibleMessages(renderedMessages);
+  assert.deepEqual(
+    visibleMessages.map((message) => message.id),
+    ["msg-user-1"],
+  );
+  // And the export from the hook is the same shape the chat page consumes.
+  assert.equal(typeof chat.dismissMessage, "function");
 });

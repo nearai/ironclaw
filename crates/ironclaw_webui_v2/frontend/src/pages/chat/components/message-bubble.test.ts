@@ -237,6 +237,61 @@ test("error bubbles expose structural provider failure metadata", async () => {
   assert.match(html, /data-failure-status="failed"/);
 });
 
+test("error bubbles render a persistent dismiss control inside the bubble when onDismiss is given", async () => {
+  const { MessageBubble } = await import("./message-bubble");
+  // The Icon component is mocked to `<span data-icon="close">`, a stable
+  // marker for the close (×) icon that doesn't depend on i18n resolution.
+  const CLOSE_ICON_MARKER = /data-icon="close"/;
+
+  const withDismiss = renderToStaticMarkup(
+    React.createElement(MessageBubble, {
+      message: {
+        id: "err-1",
+        role: CHAT_MESSAGE_ROLES.ERROR,
+        content: "Provider unavailable",
+        timestamp: "2026-06-02T00:00:00.000Z",
+      },
+      onDismiss: () => {},
+      threadId: "thread-1",
+    }),
+  );
+  assert.match(
+    withDismiss,
+    CLOSE_ICON_MARKER,
+    "an error bubble with onDismiss should render a dismiss control in the bubble body",
+  );
+  // Not gated behind the hover-only meta row (opacity-0) — it lives in the
+  // bubble content so it is discoverable without hovering.
+  const metaRowStart = withDismiss.indexOf('"mt-1 flex min-h-7');
+  assert.notEqual(
+    metaRowStart,
+    -1,
+    "meta row must be present so the negative check below is meaningful",
+  );
+  assert.doesNotMatch(
+    withDismiss.slice(metaRowStart),
+    CLOSE_ICON_MARKER,
+    "the dismiss control should not live in the hover-only meta row",
+  );
+
+  const withoutDismiss = renderToStaticMarkup(
+    React.createElement(MessageBubble, {
+      message: {
+        id: "err-2",
+        role: CHAT_MESSAGE_ROLES.ERROR,
+        content: "Provider unavailable",
+        timestamp: "2026-06-02T00:00:00.000Z",
+      },
+      threadId: "thread-1",
+    }),
+  );
+  assert.doesNotMatch(
+    withoutDismiss,
+    CLOSE_ICON_MARKER,
+    "no dismiss control without an onDismiss handler",
+  );
+});
+
 test("message timestamp and actions share a hover-only meta row", () => {
   assert.match(
     messageBubbleSource,
