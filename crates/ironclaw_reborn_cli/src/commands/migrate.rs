@@ -45,7 +45,7 @@ enum V1MigrationOperation {
     Apply(ApplyArgs),
     /// Resume an interrupted apply using its migration manifest.
     Resume(ResumeArgs),
-    /// Verify an applied target through production Reborn services.
+    /// Verify an applied target with structural durable-store readback.
     Verify(VerifyArgs),
     /// Show the current migration status recorded in a manifest.
     Status(StatusArgs),

@@ -105,6 +105,27 @@ fn migrate_v1_requires_an_explicit_operation() {
 }
 
 #[test]
+fn migrate_verify_help_describes_structural_readback() {
+    let pair = InstalledPair::without_companion();
+    let output = pair.run(
+        env!("CARGO_PKG_VERSION"),
+        0,
+        &["migrate", "v1", "verify", "--help"],
+    );
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("structural durable-store readback"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        !stdout.contains("production Reborn services"),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
 fn migrate_rejects_a_missing_sibling_without_searching_path() {
     let pair = InstalledPair::without_companion();
     let other_bin = pair._temp.path().join("other-bin");
