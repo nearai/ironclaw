@@ -231,6 +231,7 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
 /// structural reason, mirroring `reborn_retired_taxonomy.rs`: the one-time
 /// forward data migrations name what they fold forward.
 const SANCTIONED_PATHS: &[&str] = &[
+    "extension_host/channel_state_folds.rs",
     "extension_host/extension_installation_store.rs",
     "product_auth/durable/",
 ];

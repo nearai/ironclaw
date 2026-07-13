@@ -1950,6 +1950,38 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         ),
     );
     channel_config_credential_slot.fill(Arc::clone(&channel_config_service));
+    // One-time load-time folds (extension-runtime H.3/H.4): retired
+    // channel-lane state folds onto the generic channel storage. Idempotent
+    // per boot; never fails the build.
+    {
+        let fold_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
+        let identity_store = Arc::new(
+            crate::extension_host::channel_identity_store::FilesystemChannelIdentityStore::new(
+                Arc::clone(&fold_filesystem),
+                channel_egress_scope.tenant_id.clone(),
+                channel_egress_scope.user_id.clone(),
+            ),
+        );
+        let dm_targets = Arc::new(
+            crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore::new(
+                Arc::clone(&fold_filesystem),
+                channel_egress_scope.tenant_id.clone(),
+                channel_egress_scope.user_id.clone(),
+            ),
+        );
+        crate::extension_host::channel_state_folds::fold_retired_slack_channel_state(
+            &crate::extension_host::channel_state_folds::RetiredChannelStateFoldInputs {
+                filesystem: fold_filesystem,
+                installation_store: extension_management.installation_store_handle(),
+                secret_store: Arc::clone(&secret_store),
+                legacy_secret_scope: channel_egress_scope.clone(),
+                channel_config_secret_scope: channel_egress_scope.clone(),
+                identity_store,
+                dm_targets,
+            },
+        )
+        .await;
+    }
     if let Some(local_runtime) = Arc::get_mut(&mut store_graph.local_runtime) {
         local_runtime.extension_management = Some(Arc::clone(&extension_management));
         local_runtime.channel_config = Some(channel_config_service);
