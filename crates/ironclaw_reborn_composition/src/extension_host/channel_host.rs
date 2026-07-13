@@ -259,6 +259,11 @@ pub(crate) struct GenericChannelHostDeps {
     pub(crate) approval_interaction: Option<Arc<dyn ApprovalInteractionService>>,
     pub(crate) auth_interaction: Option<Arc<dyn AuthInteractionService>>,
     pub(crate) identity: ChannelHostIdentity,
+    /// The generic channel-identity binding store: verified inbound actors
+    /// on auth-declaring channel extensions resolve through it. `None`
+    /// (composition paths without the durable store) falls back to the
+    /// operator-actor policy.
+    pub(crate) identity_lookup: Option<Arc<dyn crate::provider_identity::RebornUserIdentityLookup>>,
     pub(crate) delivery: Option<ChannelHostDeliveryDeps>,
 }
 
@@ -599,20 +604,36 @@ impl GenericChannelHostAssembly {
             .map_err(|error| format!("invalid adapter id: {error}"))?;
         let installation_id = AdapterInstallationId::new(&active.installation_id)
             .map_err(|error| format!("invalid installation id: {error}"))?;
+        // Auth-declaring channel extensions resolve verified inbound actors
+        // through the generic installation-scoped identity bindings written
+        // by the post-OAuth channel-identity hook; unbound actors fall to
+        // the pairing service (fail-closed pairing flow). Extensions without
+        // an auth vendor keep the operator-actor policy: the ingress
+        // verification secret gates who reaches the installation and no
+        // binding can exist to resolve.
+        let actor_user_resolver: Arc<dyn ProductActorUserResolver> = match (
+            self.deps.identity_lookup.as_ref(),
+            active.resolved.auth.first(),
+        ) {
+            (Some(lookup), Some(auth)) => Arc::new(
+                crate::provider_identity::ProviderIdentityActorResolver::for_any_actor_kind(
+                    auth.vendor.as_str(),
+                    active.extension_id.as_str(),
+                    Arc::clone(lookup),
+                ),
+            ),
+            _ => Arc::new(OperatorActorUserResolver {
+                operator_user_id: identity.operator_user_id.clone(),
+            }),
+        };
         let scope = ProductInstallationScope::with_default_scope(
             identity.tenant_id.clone(),
             identity.agent_id.clone(),
             identity.project_id.clone(),
         )
         .with_default_subject_user_id(identity.operator_user_id.clone())
-        // Every verified inbound actor on this installation resolves to the
-        // deployment's operator: the ingress verification secret gates who
-        // reaches the installation, and per-actor identity binding stays a
-        // vendor-lane concern until the identity surfaces generalize.
         .with_actor_user_resolver(
-            Arc::new(OperatorActorUserResolver {
-                operator_user_id: identity.operator_user_id.clone(),
-            }),
+            actor_user_resolver,
             Arc::clone(&workflow_state.conversations)
                 as Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
         );

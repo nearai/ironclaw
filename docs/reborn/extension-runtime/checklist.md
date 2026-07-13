@@ -663,10 +663,23 @@ Rules — kept short on purpose:
 - [ ] MIG-1 OAuth grant/account storage is reused (vendor id strings
   unchanged); live grants backfill to `connected`; no re-auth required for
   existing users.
-- [ ] MIG-2 Slack setup slots migrate to config/client-credential handles
-  (idempotent, dry-run supported).
+- [x] MIG-2 Slack setup slots migrate to config/client-credential handles
+  (idempotent, dry-run supported). — H.3 load-time fold
+  (`composition/src/extension_host/channel_state_folds.rs`, wired in
+  `build_local_runtime`): non-secret setup ids → durable installation
+  channel config, secret material → the manifest handles at the
+  channel-egress scope, OAuth client id/secret → the `[auth.slack]`
+  `client_credentials` handles (resolved via the generic channel-config
+  credential fallback). Proven by
+  `fold_moves_setup_state_roots_onto_generic_homes_and_second_run_is_a_noop`
+  + `fold_skips_malformed_records_and_operator_owned_values` (+ the libSQL
+  flavor). Dry-run posture: the fold only runs on the local-runtime build
+  path; the `MigrationDryRun` profile never executes it.
 - [ ] MIG-3 Slack state roots migrate to generic scoped state; no slack-named
-  root is read outside migration code.
+  root is read outside migration code. — The H.4 fold (same module/tests as
+  MIG-2) moves identities, channel routes, and DM targets onto the generic
+  roots; the second half ("no slack-named root is READ outside migration
+  code") lands when the slack lane is deleted (P6 S6 steps 4-6).
 - [ ] MIG-4 Old installation lifecycle records backfill into the standard
   state enum.
 - [x] MIG-5 `/webhooks/slack/events` forwards to the canonical route for one

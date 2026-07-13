@@ -652,6 +652,10 @@ impl RebornServices {
             None
         };
 
+        let identity_lookup = local_runtime
+            .channel_identity_store
+            .clone()
+            .map(|store| store as Arc<dyn crate::provider_identity::RebornUserIdentityLookup>);
         Some(
             crate::extension_host::channel_host::GenericChannelHostAssembly::start(
                 GenericChannelHostDeps {
@@ -664,6 +668,7 @@ impl RebornServices {
                     approval_interaction,
                     auth_interaction,
                     identity,
+                    identity_lookup,
                     delivery,
                 },
             ),
@@ -1131,6 +1136,19 @@ pub(crate) struct RebornLocalRuntimeServices {
     /// composition paths without extension management.
     pub(crate) channel_config:
         Option<Arc<crate::extension_host::channel_config::ChannelConfigService>>,
+    /// The generic durable channel-identity binding store (extension-runtime
+    /// §5.5): the channel host assembly resolves verified inbound actors
+    /// through it for auth-declaring channel extensions.
+    pub(crate) channel_identity_store:
+        Option<Arc<crate::extension_host::channel_identity_store::FilesystemChannelIdentityStore>>,
+    /// The generic per-(extension, user) DM-target store (extension-runtime
+    /// §5.4); the H.4 fold seeds it and the channel extras consume it.
+    #[allow(
+        dead_code,
+        reason = "the generic DM-target extras consume this when the channel lane cuts over"
+    )]
+    pub(crate) channel_dm_target_store:
+        Option<Arc<crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub(crate) host_runtime_http_egress: Option<HostRuntimeHttpEgressPort>,
     pub(crate) skill_mounts: MountView,
@@ -1950,41 +1968,44 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         ),
     );
     channel_config_credential_slot.fill(Arc::clone(&channel_config_service));
+    // The generic channel-identity and DM-target stores (extension-runtime
+    // §5.4–§5.5): the fold below seeds them from retired lane state, and the
+    // channel host assembly resolves verified inbound actors through them.
+    let fold_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
+    let channel_identity_store = Arc::new(
+        crate::extension_host::channel_identity_store::FilesystemChannelIdentityStore::new(
+            Arc::clone(&fold_filesystem),
+            channel_egress_scope.tenant_id.clone(),
+            channel_egress_scope.user_id.clone(),
+        ),
+    );
+    let channel_dm_target_store = Arc::new(
+        crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore::new(
+            Arc::clone(&fold_filesystem),
+            channel_egress_scope.tenant_id.clone(),
+            channel_egress_scope.user_id.clone(),
+        ),
+    );
     // One-time load-time folds (extension-runtime H.3/H.4): retired
     // channel-lane state folds onto the generic channel storage. Idempotent
     // per boot; never fails the build.
-    {
-        let fold_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
-        let identity_store = Arc::new(
-            crate::extension_host::channel_identity_store::FilesystemChannelIdentityStore::new(
-                Arc::clone(&fold_filesystem),
-                channel_egress_scope.tenant_id.clone(),
-                channel_egress_scope.user_id.clone(),
-            ),
-        );
-        let dm_targets = Arc::new(
-            crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore::new(
-                Arc::clone(&fold_filesystem),
-                channel_egress_scope.tenant_id.clone(),
-                channel_egress_scope.user_id.clone(),
-            ),
-        );
-        crate::extension_host::channel_state_folds::fold_retired_slack_channel_state(
-            &crate::extension_host::channel_state_folds::RetiredChannelStateFoldInputs {
-                filesystem: fold_filesystem,
-                installation_store: extension_management.installation_store_handle(),
-                secret_store: Arc::clone(&secret_store),
-                legacy_secret_scope: channel_egress_scope.clone(),
-                channel_config_secret_scope: channel_egress_scope.clone(),
-                identity_store,
-                dm_targets,
-            },
-        )
-        .await;
-    }
+    crate::extension_host::channel_state_folds::fold_retired_slack_channel_state(
+        &crate::extension_host::channel_state_folds::RetiredChannelStateFoldInputs {
+            filesystem: fold_filesystem,
+            installation_store: extension_management.installation_store_handle(),
+            secret_store: Arc::clone(&secret_store),
+            legacy_secret_scope: channel_egress_scope.clone(),
+            channel_config_secret_scope: channel_egress_scope.clone(),
+            identity_store: Arc::clone(&channel_identity_store),
+            dm_targets: Arc::clone(&channel_dm_target_store),
+        },
+    )
+    .await;
     if let Some(local_runtime) = Arc::get_mut(&mut store_graph.local_runtime) {
         local_runtime.extension_management = Some(Arc::clone(&extension_management));
         local_runtime.channel_config = Some(channel_config_service);
+        local_runtime.channel_identity_store = Some(channel_identity_store);
+        local_runtime.channel_dm_target_store = Some(channel_dm_target_store);
         local_runtime.runtime_http_egress = Some(product_auth_runtime_ports.runtime_http_egress());
         local_runtime.extension_registry = Arc::clone(&extension_registry);
         local_runtime.shared_extension_registry = Some(services.shared_extension_registry());
@@ -2670,6 +2691,8 @@ async fn build_local_dev_store_graph(
         skill_management,
         extension_management: None,
         channel_config: None,
+        channel_identity_store: None,
+        channel_dm_target_store: None,
         runtime_http_egress: None,
         host_runtime_http_egress: None,
         skill_mounts,
@@ -2823,6 +2846,8 @@ async fn build_local_dev_store_graph(
         skill_management,
         extension_management: None,
         channel_config: None,
+        channel_identity_store: None,
+        channel_dm_target_store: None,
         runtime_http_egress: None,
         host_runtime_http_egress: None,
         skill_mounts,
@@ -5636,6 +5661,8 @@ mod tests {
             skill_management: Arc::clone(&base_runtime.skill_management),
             extension_management: base_runtime.extension_management.clone(),
             channel_config: base_runtime.channel_config.clone(),
+            channel_identity_store: base_runtime.channel_identity_store.clone(),
+            channel_dm_target_store: base_runtime.channel_dm_target_store.clone(),
             runtime_http_egress: base_runtime.runtime_http_egress.clone(),
             host_runtime_http_egress: base_runtime.host_runtime_http_egress.clone(),
             skill_mounts: base_runtime.skill_mounts.clone(),
