@@ -50,11 +50,22 @@ function createReactStub(state) {
         effect();
       }
     },
+    useMemo: (factory) => factory(),
   };
 }
 
 function html(strings, ...values) {
   return { strings: Array.from(strings), values };
+}
+
+function SelectMenu(props) {
+  return html`<SelectMenu
+    value=${props.value}
+    options=${props.options}
+    onChange=${props.onChange}
+    disabled=${props.disabled}
+    ariaLabel=${props.ariaLabel}
+  />`;
 }
 
 function visit(node, fn) {
@@ -145,6 +156,7 @@ test("SlackChannelPicker edits saved channels and blocks save after load failure
   const context = {
     Button: "button",
     React: createReactStub(state),
+    SelectMenu,
     globalThis: {},
     html,
     listSlackAllowedChannels: () => query.data,
@@ -207,6 +219,8 @@ test("SlackChannelPicker edits saved channels and blocks save after load failure
       subject_display_name: "Ops",
     },
   ]);
+  assert.ok(valuesAfter(rendered, "ariaLabel=").includes("Auto-generated team subject (C0ENG)"));
+  assert.ok(valuesAfter(rendered, "ariaLabel=").includes("Auto-generated team subject (C0OPS)"));
 
   valuesAfter(rendered, "onChange=")[0]({ target: { value: " C0NEW " } });
   rendered = renderPicker(context, state);
@@ -318,6 +332,7 @@ test("SlackChannelPicker preserves row subjects when subject catalog fails", () 
   const context = {
     Button: "button",
     React: createReactStub(state),
+    SelectMenu,
     globalThis: {},
     html,
     listSlackAllowedChannels: () => query.data,

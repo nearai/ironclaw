@@ -308,6 +308,16 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// `write_file`/`read_file` tools (same set as `file_tools()`), backed by
+    /// the REAL `LocalDevCapabilityIo` (durable tool-result projection seam,
+    /// issue #5838) instead of the ephemeral `ProductLiveCapabilityIo` test
+    /// double, so a large `read_file` output is persisted durably and
+    /// `result_read` can page through it.
+    pub fn with_durable_capability_io_file_tools(mut self) -> Self {
+        self.capability = RebornCapabilityBackend::FileToolsDurableIo;
+        self
+    }
+
     /// Opt-in to real shell execution for this harness. By default the
     /// `BuiltinHttpTools` backend injects an inert `RecordingProcessPort` so that
     /// `builtin.shell` turns record the command without spawning any OS process.
@@ -657,6 +667,19 @@ impl RebornIntegrationHarness {
         let run_id = self.submit_turn_async(text).await?;
         self.wait_for_status(run_id, TurnStatus::Completed).await?;
         Ok(run_id)
+    }
+
+    /// Enqueue additional scripted replies AFTER the harness is built — for a
+    /// second turn whose tool-call arguments depend on a server-minted value
+    /// (e.g. a durable `result_ref`) only known once an earlier turn has
+    /// completed and its result has been read back from persisted state. The
+    /// fixed-at-build-time script (`.script(..)`) remains the norm; reach for
+    /// this only when the dependent value genuinely cannot be known ahead of
+    /// time.
+    pub fn push_script(&self, replies: impl IntoIterator<Item = RebornScriptedReply>) {
+        for reply in replies {
+            self.scripted_llm.push_step(reply.into_step());
+        }
     }
 
     /// Submit a user turn and return its run id **without** waiting for any status

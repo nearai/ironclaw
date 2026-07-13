@@ -83,7 +83,7 @@ use ironclaw_host_runtime::{
     builtin_first_party_package_for_process_backend,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_loop_support::FilesystemCheckpointStateStore;
+use ironclaw_loop_host::FilesystemCheckpointStateStore;
 use ironclaw_outbound::CommunicationPreferenceRepository;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_outbound::FilesystemOutboundStateStore;
@@ -614,6 +614,22 @@ impl RebornServices {
         Some(Arc::clone(&local_runtime.project_service))
     }
 
+    /// Test-support access to the local-dev session thread service (durable
+    /// tool-result projection seam, issue #5838). This is the SAME `Arc`
+    /// production's `capability_wiring` passes to
+    /// `LocalDevCapabilityIo::new_with_durable_previews` and to the
+    /// `result_read` synthetic capability, so a harness built over this
+    /// `RebornServices` can drive its own real `LocalDevCapabilityIo` through
+    /// `local_dev_capability_io_for_test`. Returns `None` for production-profile
+    /// compositions without a local-dev runtime.
+    #[cfg(feature = "test-support")]
+    pub fn local_dev_thread_service_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_threads::SessionThreadService>> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        Some(Arc::clone(&local_runtime.thread_service))
+    }
+
     /// Test-support access to the local-dev communication-preference repository
     /// (W6-COLD-SPOTS seam). This is the SAME `Arc` that `build_local_dev_store_graph`
     /// wires into `RebornLocalRuntimeServices::outbound_preferences` via
@@ -674,7 +690,7 @@ impl RebornServices {
     #[cfg(feature = "test-support")]
     pub fn local_dev_attachment_test_support_for_test(&self) -> Option<AttachmentTestSupport> {
         let read_port = self.local_dev_workspace_attachment_reader_for_test()?
-            as Arc<dyn ironclaw_loop_support::LoopAttachmentReadPort>;
+            as Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>;
         let read_write_workspace_filesystem = self.read_write_workspace_filesystem()?;
         Some(AttachmentTestSupport {
             read_port,
@@ -914,7 +930,7 @@ fn active_extension_network_policy_for_test(
 #[cfg(feature = "test-support")]
 #[derive(Clone)]
 pub struct AttachmentTestSupport {
-    pub read_port: Arc<dyn ironclaw_loop_support::LoopAttachmentReadPort>,
+    pub read_port: Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>,
     pub lander: Arc<dyn ironclaw_product_workflow::InboundAttachmentLander>,
 }
 

@@ -105,8 +105,12 @@ function keyEvent(key) {
   return {
     key,
     preventDefaultCalls: 0,
+    stopPropagationCalls: 0,
     preventDefault() {
       this.preventDefaultCalls += 1;
+    },
+    stopPropagation() {
+      this.stopPropagationCalls += 1;
     },
   };
 }
@@ -382,6 +386,7 @@ test("SelectMenu only intercepts Escape while open", () => {
 
   firstValueAfter(harness.render(), "onKeyDown=")(closedEscape);
   assert.equal(closedEscape.preventDefaultCalls, 0);
+  assert.equal(closedEscape.stopPropagationCalls, 0);
 
   firstValueAfter(harness.render(), "onClick=")();
   const opened = harness.render();
@@ -389,6 +394,7 @@ test("SelectMenu only intercepts Escape while open", () => {
   firstValueAfter(opened, "onKeyDown=")(openEscape);
 
   assert.equal(openEscape.preventDefaultCalls, 1);
+  assert.equal(openEscape.stopPropagationCalls, 1);
   assert.equal(firstValueAfter(harness.render(), "aria-expanded="), "false");
 });
 

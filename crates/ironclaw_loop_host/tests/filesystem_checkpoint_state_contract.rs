@@ -13,7 +13,7 @@ use ironclaw_host_api::{
     AgentId, HostPath, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId,
     ThreadId, VirtualPath,
 };
-use ironclaw_loop_support::FilesystemCheckpointStateStore;
+use ironclaw_loop_host::FilesystemCheckpointStateStore;
 use ironclaw_turns::{
     CheckpointSchemaId, CheckpointStateRecord, CheckpointStateStore, GetCheckpointStateRequest,
     MAX_CHECKPOINT_STATE_PAYLOAD_BYTES, PutCheckpointStateRequest, RunProfileVersion, TurnError,

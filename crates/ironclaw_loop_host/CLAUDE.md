@@ -1,10 +1,10 @@
-# ironclaw_loop_support
+# ironclaw_loop_host
 
 Owns reusable host-side adapters for neutral loop ports.
 
 ## Main entry points
 
-- `src/lib.rs` exposes loop support adapters and shared host-port helpers.
+- `src/lib.rs` exposes loop host adapters and shared host-port helpers.
 - `skill_context.rs` and `identity_context.rs` build prompt-safe instruction
   and identity context.
 - `capability_port.rs`, `capability_surface_filter.rs`, and

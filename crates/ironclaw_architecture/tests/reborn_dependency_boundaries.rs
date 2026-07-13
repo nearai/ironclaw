@@ -792,17 +792,25 @@ fn reborn_turns_public_surface_keeps_runner_api_explicit() {
 }
 
 #[test]
-fn reborn_loop_support_llm_wiring_stays_out_of_root_src() {
+fn reborn_runner_llm_wiring_stays_out_of_root_src() {
     let root = workspace_root();
     let root_lib =
         std::fs::read_to_string(root.join("src/lib.rs")).expect("root src/lib.rs must be readable");
     assert!(
         !root_lib.contains("pub mod reborn_loop_support;"),
-        "Reborn loop LLM wiring must live under crates/ironclaw_runner, not root src/lib.rs"
+        "retired Reborn loop-support wiring must not return to root src/lib.rs"
     );
     assert!(
         !root.join("src/reborn_loop_support.rs").exists(),
-        "Reborn loop LLM wiring must not live under root src/"
+        "retired Reborn loop-support wiring must not return under root src/"
+    );
+    assert!(
+        !root_lib.contains("pub mod reborn_loop_host;"),
+        "Reborn loop-host wiring must live under crates/ironclaw_loop_host, not root src/lib.rs"
+    );
+    assert!(
+        !root.join("src/reborn_loop_host.rs").exists(),
+        "Reborn loop-host wiring must not live under root src/"
     );
 
     let reborn_gateway = root.join("crates/ironclaw_runner/src/model_gateway.rs");
@@ -862,12 +870,12 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         "crates/ironclaw_threads/src/tool_result_reference.rs",
         // Loop support owns capability-id <-> provider-name surface snapshots,
         // synthetic provider tools, provider-call registration, and replay refs.
-        "crates/ironclaw_loop_support/src/lib.rs",
-        "crates/ironclaw_loop_support/src/capability_info.rs",
-        "crates/ironclaw_loop_support/src/capability_port.rs",
-        "crates/ironclaw_loop_support/src/capability_port/provider_validation.rs",
-        "crates/ironclaw_loop_support/src/capability_port/surface_snapshot.rs",
-        "crates/ironclaw_loop_support/src/subagent_spawn_port.rs",
+        "crates/ironclaw_loop_host/src/lib.rs",
+        "crates/ironclaw_loop_host/src/capability_info.rs",
+        "crates/ironclaw_loop_host/src/capability_port.rs",
+        "crates/ironclaw_loop_host/src/capability_port/provider_validation.rs",
+        "crates/ironclaw_loop_host/src/capability_port/surface_snapshot.rs",
+        "crates/ironclaw_loop_host/src/subagent_spawn_port.rs",
         // The model gateway is the LLM wire boundary. Executor helpers may
         // rebuild provider calls only from stored replay metadata.
         "crates/ironclaw_runner/src/model_gateway.rs",
@@ -931,7 +939,7 @@ fn reborn_internal_crate_keeps_directory_of_modules_lib_rs() {
     // wall. Anyone wanting these items must reach them through a `pub mod`
     // path or (preferably) consume them through `ironclaw_reborn_composition`.
     let forbidden_reexports = [
-        "pub use ironclaw_loop_support::",
+        "pub use ironclaw_loop_host::",
         "pub use loop_driver_host::",
         "pub use milestone_events::",
         "pub use model_gateway::",
@@ -990,9 +998,9 @@ fn reborn_internal_crate_keeps_directory_of_modules_lib_rs() {
         );
     }
     assert!(
-        composition_runtime_sources.contains("use ironclaw_loop_support::")
+        composition_runtime_sources.contains("use ironclaw_loop_host::")
             && composition_runtime_sources.contains("LoopCapabilityPortFactory"),
-        "composition runtime module set missing loop-support capability factory wiring -- \
+        "composition runtime module set missing loop-host capability factory wiring -- \
          the host adapter assembly may live in a runtime submodule, but it must stay inside \
          `ironclaw_reborn_composition` rather than the CLI or other ingress points."
     );
@@ -1560,7 +1568,7 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
         "crates/ironclaw_conversations/src",
         "crates/ironclaw_turns/src",
         "crates/ironclaw_threads/src",
-        "crates/ironclaw_loop_support/src",
+        "crates/ironclaw_loop_host/src",
         // WebChat v2 route surface: a Product/API crate that exposes
         // axum handler functions and `IngressRouteDescriptor`s but must
         // never bind sockets or call `axum::serve` itself — that is
@@ -2029,7 +2037,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_engine",
                 "ironclaw_gateway",
                 "ironclaw_llm",
-                "ironclaw_loop_support",
+                "ironclaw_loop_host",
                 "ironclaw_mcp",
                 "ironclaw_network",
                 "ironclaw_product_adapters",
@@ -2080,7 +2088,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_gateway",
                 "ironclaw_host_runtime",
                 "ironclaw_llm",
-                "ironclaw_loop_support",
+                "ironclaw_loop_host",
                 "ironclaw_mcp",
                 "ironclaw_memory",
                 "ironclaw_network",
@@ -2130,7 +2138,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_gateway",
                 "ironclaw_host_runtime",
                 "ironclaw_llm",
-                "ironclaw_loop_support",
+                "ironclaw_loop_host",
                 "ironclaw_mcp",
                 "ironclaw_memory",
                 "ironclaw_network",
@@ -2188,7 +2196,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_gateway",
                 "ironclaw_host_runtime",
                 "ironclaw_llm",
-                "ironclaw_loop_support",
+                "ironclaw_loop_host",
                 "ironclaw_mcp",
                 "ironclaw_memory",
                 "ironclaw_network",
@@ -2278,7 +2286,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_gateway",
                 "ironclaw_host_runtime",
                 "ironclaw_llm",
-                "ironclaw_loop_support",
+                "ironclaw_loop_host",
                 "ironclaw_mcp",
                 "ironclaw_memory",
                 "ironclaw_network",
@@ -2361,7 +2369,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_host_api",
                 "ironclaw_host_runtime",
                 "ironclaw_llm",
-                "ironclaw_loop_support",
+                "ironclaw_loop_host",
                 "ironclaw_mcp",
                 "ironclaw_memory",
                 "ironclaw_network",
@@ -2398,7 +2406,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_engine",
                 "ironclaw_gateway",
                 "ironclaw_llm",
-                "ironclaw_loop_support",
+                "ironclaw_loop_host",
                 "ironclaw_runner",
                 "ironclaw_skills",
                 "ironclaw_threads",
@@ -2427,7 +2435,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_gateway",
                 "ironclaw_host_runtime",
                 "ironclaw_llm",
-                "ironclaw_loop_support",
+                "ironclaw_loop_host",
                 "ironclaw_mcp",
                 "ironclaw_memory",
                 "ironclaw_network",
@@ -2655,7 +2663,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_host_api",
                 "ironclaw_host_runtime",
                 "ironclaw_llm",
-                "ironclaw_loop_support",
+                "ironclaw_loop_host",
                 "ironclaw_mcp",
                 "ironclaw_memory",
                 "ironclaw_network",
@@ -3015,7 +3023,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         // (executor, strategies, families, state) and depends upward on neutral
         // contracts in `ironclaw_turns`. It must not import host runtime crates,
         // product adapters, dispatcher, capability host, filesystem, network,
-        // secrets, DB backends, or the loop-support adapter layer — those all
+        // secrets, DB backends, or the loop-host adapter layer — those all
         // sit above agent_loop in the stack and would create an inversion.
         BoundaryRule {
             crate_name: "ironclaw_agent_loop",
@@ -3035,7 +3043,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_gateway",
                 "ironclaw_host_runtime",
                 "ironclaw_llm",
-                "ironclaw_loop_support",
+                "ironclaw_loop_host",
                 "ironclaw_mcp",
                 "ironclaw_memory",
                 "ironclaw_network",
@@ -3133,8 +3141,8 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         crate_name: "ironclaw_host_runtime",
         dependency_name: "ironclaw_skills",
         introduced: "2026-07-09",
-        removes_in: "W5",
-        reason: "host_runtime still wires skill host behavior that should move behind the loop-host boundary",
+        removes_in: "W7",
+        reason: "host_runtime still owns first-party skill management tools and skill URL install limits; remove when kernel consolidation or a dedicated skill-host extraction moves that execution surface out of host_runtime",
     },
     LayerMatrixException {
         crate_name: "ironclaw_capabilities",
@@ -3215,13 +3223,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
     },
     LayerMatrixException {
         crate_name: "ironclaw_agent_loop",
-        dependency_name: "ironclaw_observability",
-        introduced: "2026-07-09",
-        removes_in: "W5",
-        reason: "agent_loop still emits shared observability events directly until the loop boundary decision defines the userland telemetry port",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_agent_loop",
         dependency_name: "ironclaw_turns",
         introduced: "2026-07-09",
         removes_in: "W4.3",
@@ -3231,8 +3232,8 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         crate_name: "ironclaw_mcp",
         dependency_name: "ironclaw_extensions",
         introduced: "2026-07-09",
-        removes_in: "W5",
-        reason: "MCP runtime support still exposes extension-host wiring that should move behind the loop-host boundary",
+        removes_in: "W7",
+        reason: "MCP runtime still consumes ExtensionPackage and ExtensionRuntime manifest DTOs; remove when extension runtime descriptors move to a neutral contract or runtime lanes are folded behind the extension-host boundary",
     },
     LayerMatrixException {
         crate_name: "ironclaw_mcp",
@@ -3245,8 +3246,8 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         crate_name: "ironclaw_scripts",
         dependency_name: "ironclaw_extensions",
         introduced: "2026-07-09",
-        removes_in: "W5",
-        reason: "script runtime support still exposes extension-host wiring that should move behind the loop-host boundary",
+        removes_in: "W7",
+        reason: "script runtime still consumes ExtensionPackage and ExtensionRuntime manifest DTOs; remove when extension runtime descriptors move to a neutral contract or runtime lanes are folded behind the extension-host boundary",
     },
     LayerMatrixException {
         crate_name: "ironclaw_scripts",
@@ -3259,15 +3260,15 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         crate_name: "ironclaw_runner",
         dependency_name: "ironclaw_agent_loop",
         introduced: "2026-07-09",
-        removes_in: "W4/W5",
-        reason: "the runner still directly hosts loop-userland contracts until the loop boundary decision is executed",
+        removes_in: "W7",
+        reason: "the runner intentionally bridges loop-userland contracts until kernel consolidation introduces a neutral dispatch boundary",
     },
     LayerMatrixException {
         crate_name: "ironclaw_runner",
-        dependency_name: "ironclaw_loop_support",
+        dependency_name: "ironclaw_loop_host",
         introduced: "2026-07-09",
-        removes_in: "W4/W5",
-        reason: "the runner still directly hosts loop support until scheduler co-location and the loop boundary decision settle the edge",
+        removes_in: "W7",
+        reason: "the runner intentionally composes loop-host adapters until kernel consolidation introduces a neutral dispatch boundary",
     },
     LayerMatrixException {
         crate_name: "ironclaw_reborn_webui_ingress",

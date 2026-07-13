@@ -324,6 +324,16 @@ def _provider_card(page, provider_id: str):
     )
 
 
+async def _choose_select_menu_option(root, label: str, option: str) -> None:
+    trigger = root.get_by_role("button", name=label)
+    await trigger.click()
+    listbox = root.get_by_role("listbox")
+    await expect(listbox).to_be_visible(timeout=5000)
+    await listbox.get_by_role("option", name=option).click()
+    await expect(listbox).to_have_count(0)
+    await expect(trigger).to_contain_text(option)
+
+
 def _mock_llm_state() -> dict:
     return {
         "active": {"provider_id": "openai", "model": "gpt-4.1-mini"},
@@ -484,6 +494,10 @@ async def test_reborn_legacy_settings_inference_add_test_and_activate_provider(
         dialog = page.get_by_role("dialog")
         await expect(dialog.get_by_role("heading", name="New provider")).to_be_visible()
 
+        await expect(dialog.get_by_role("combobox")).to_have_count(0)
+        await _choose_select_menu_option(dialog, "Adapter", "Anthropic")
+        await _choose_select_menu_option(dialog, "Adapter", "OpenAI Compatible")
+
         await dialog.get_by_label("Display name").fill("Acme LLM")
         await expect(dialog.get_by_label("Provider ID")).to_have_value("acme-llm")
         await dialog.get_by_label("Base URL").fill("https://llm.acme.test/v1")
@@ -492,7 +506,7 @@ async def test_reborn_legacy_settings_inference_add_test_and_activate_provider(
 
         await dialog.get_by_role("button", name="Fetch models").click()
         await expect(dialog.get_by_text("2 models found.")).to_be_visible(timeout=5000)
-        await dialog.get_by_role("combobox").nth(1).select_option("acme-pro")
+        await _choose_select_menu_option(dialog, "Default model", "acme-pro")
 
         await dialog.get_by_role("button", name="Test connection").click()
         await expect(dialog.get_by_text("probe ok for acme-pro")).to_be_visible(

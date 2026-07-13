@@ -1,6 +1,6 @@
 //! Dependency-inversion seam for subagent await-edge delivery.
 //!
-//! `ironclaw_loop_support` owns `SubagentSpawnDeps` (see `subagent_spawn_port.rs`)
+//! `ironclaw_loop_host` owns `SubagentSpawnDeps` (see `subagent_spawn_port.rs`)
 //! but cannot depend on `ironclaw_runner`, which owns the concrete CAS'd
 //! filesystem await-edge store and resolver
 //! (`crates/ironclaw_runner/src/subagent/await_edge/`). This module defines
@@ -34,7 +34,7 @@ pub struct ScopeRecoveryInProgress {
 
 /// Spawn-side writer seam (§3 replacement for `SubagentGateResolutionStore`).
 /// Implemented in `ironclaw_runner` by `FilesystemAwaitEdgeStore` (production)
-/// and here by `InMemoryAwaitEdgeWriter` (loop_support's own unit tests, no
+/// and here by `InMemoryAwaitEdgeWriter` (loop_host's own unit tests, no
 /// filesystem/CAS semantics needed).
 #[async_trait]
 pub trait AwaitEdgeWriter: Send + Sync {
