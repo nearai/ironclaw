@@ -5,7 +5,8 @@
 //! v1 stores (secrets, wasm tools, identities) need. Engine-v2 mission/project
 //! state is not a separate connection — it lives as JSON blobs inside the
 //! `memory_documents` table and is read through the same `Database` handle
-//! (see [`crate::convert::automations`] and [`crate::v2_model`]).
+//! (see [`crate::convert::automations`], [`crate::convert::projects`], and
+//! [`crate::v2_model`]).
 
 use std::sync::Arc;
 
@@ -24,8 +25,8 @@ use crate::options::SourceDb;
 
 /// A read-only-by-contract handle to a v1 source snapshot.
 ///
-/// Crate-internal: the only public entry point is [`crate::run_migration`], and
-/// this handle is consumed exclusively by the in-crate converters (mirrors the
+/// Crate-internal: the public lifecycle functions construct this handle, and it
+/// is consumed exclusively by the in-crate planners/converters (mirrors the
 /// symmetric `RebornTarget` visibility).
 pub(crate) struct V1Source {
     pub(crate) db: Arc<dyn Database>,

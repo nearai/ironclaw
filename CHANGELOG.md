@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(reborn)* add the explicit offline `plan` / `apply` / `resume` / `verify` /
+  `status` v1 migration workflow with sealed manifests, deterministic replay,
+  target quarantine, structural durable-store verification, and a same-version
+  companion in Docker and paired source builds. Native installers do not yet
+  package the companion pair.
+
 ### Fixed
 
 - *(slack)* resolve known DM conversation IDs through an exact Slack lookup before encoding mentions, avoiding wrong-target posts when conversation lists are long or display names are ambiguous.

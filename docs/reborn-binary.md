@@ -322,7 +322,14 @@ Expected fields include:
 - `home_source`
 - `profile`
 - `v1_state: not-used`
+- `v1_migration_state`
 - `driver_registry: initialized`
+
+`v1_migration_state` is skipped for `not_detected`, `available`, or `planned`,
+passes for `verified`, and fails for an invalid or quarantined (`applying`,
+`failed`, `applied`, or `verifying`) target. The check may read the local
+migration marker, shared PostgreSQL quarantine state, and non-secret source
+evidence; it does not create state or start services.
 
 ### `hooks list`
 

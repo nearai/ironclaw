@@ -31,11 +31,13 @@ explicit lifecycle.
 - The v1 home is an explicit sealed input independent of the database snapshot
   location. Omitting it records an apply blocker because home coverage is unknown.
 - Unknown or incompatible executable artifacts are never enabled.
-- `verify` performs a cold, read-only structural check of supported records in
-  the production persistence tables before transitioning the manifest to
-  `verified`. It does not boot a full Reborn runtime or prove every product
-  service can consume the records. `applying`, `failed`, `applied`, and
-  `verifying` targets remain quarantined.
+- `verify` performs read-only target-data checks for users, projects, threads,
+  messages, triggers, memory documents, secrets, and identity records in the
+  production persistence tables before transitioning the manifest to
+  `verified`. It writes lifecycle/quarantine state, does not independently
+  read back other manifest domains, and does not boot a full Reborn runtime or
+  prove every product service can consume the records. `applying`, `failed`,
+  `applied`, and `verifying` targets remain quarantined.
 - PostgreSQL lifecycle state is stored in the shared target as well as the local
   marker so every replica enforces the same quarantine.
 
@@ -76,6 +78,11 @@ Unsupported transcript payloads are retained in thread metadata where the
 converter explicitly says so. `archive_only` operational categories currently
 retain inventory counts/checksums and a disposition only; the source payload is
 not copied into a Reborn archive. Do not describe those payloads as archived.
+
+The persisted manifest carries inventory and lifecycle checkpoints. Converter
+`LossyItem` details exist only in the `MigrationReport` JSON emitted by apply or
+resume, so operator guidance must tell users to retain that output securely and
+must not claim `status --json` contains per-record losses.
 
 API-token hashes cannot become Reborn signed sessions. Unknown v1 WASM/channel
 packages cannot become runnable Reborn installations. Both require an explicit

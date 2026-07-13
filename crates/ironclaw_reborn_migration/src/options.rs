@@ -89,9 +89,9 @@ pub enum SourceDb {
     Postgres { url: SecretString },
 }
 
-/// Where Reborn state is written. The `RootFilesystem` KV substrate (threads,
-/// memory, secrets, extensions, identity) and the triggers DB share the same
-/// underlying backend handle.
+/// Where Reborn state is written. The `RootFilesystem` KV substrate (users,
+/// projects, threads, memory, secrets, identity) and the triggers DB share the
+/// same underlying backend handle.
 #[derive(Debug, Clone)]
 pub enum TargetStore {
     /// Local libSQL file (the `reborn-local-dev.db` shape).

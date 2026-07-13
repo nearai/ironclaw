@@ -196,8 +196,8 @@ async fn apply_migration_inner(
     Ok(report)
 }
 
-/// Resume uses the same compare-and-apply path as apply. Converter-level
-/// deterministic ledgers are supplied by the next migration phase.
+/// Resume uses the same deterministic compare-and-apply path as apply. Exact
+/// replay is a no-op and divergent target state fails without overwriting it.
 pub async fn resume_migration(
     options: MigrationOptions,
     manifest: &MigrationManifest,
@@ -207,8 +207,10 @@ pub async fn resume_migration(
     apply_migration_inner(options, manifest, secrets, acknowledgements, true).await
 }
 
-/// Validate the sealed manifest and source snapshot, then read supported state
-/// back from the cold production stores before marking the run verified.
+/// Validate the sealed manifest and source snapshot, then structurally read
+/// supported state from the production durable stores before marking the run
+/// verified. The data readback is read-only, but lifecycle/quarantine state is
+/// updated; this does not boot the production runtime.
 pub async fn verify_migration(
     options: &MigrationOptions,
     manifest: &MigrationManifest,

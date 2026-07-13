@@ -81,6 +81,7 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 | `ironclaw_reborn_composition` | `ironclaw_reborn_composition` | Wiring layer that assembles Reborn services into the host runtime. Composition-only; no policy or persistence logic of its own. |
 | `ironclaw_reborn_config` | `ironclaw_reborn_config` | Reborn boot-config boundary: typed configuration, profiles, and validation consumed before services start. |
 | `ironclaw_reborn_cli` | `ironclaw_reborn_cli` | Reborn-first CLI surface (command modules, completion, shell entry points). Calls into composition; does not own host policy. |
+| `ironclaw_reborn_migration` | `ironclaw_reborn_migration` | Same-release offline companion for manifest-driven v1 planning, conversion, quarantine, resume, and structural verification. It is invoked through `ironclaw-reborn migrate v1`, not linked into the normal runtime. |
 | `ironclaw_reborn_webui_ingress` | `ironclaw_reborn_webui_ingress` | Host-owned listener binding, authenticator implementations, and serve loop for the Reborn WebChat v2 HTTP gateway. |
 | `ironclaw_reborn_openai_compat` | `ironclaw_reborn_openai_compat` | OpenAI-compatible Chat/Responses DTOs, route descriptors, sanitized errors, fail-closed route fragment, and feature-gated durable ref/idempotency storage. |
 | `ironclaw_llm` | `ironclaw_llm` | LLM provider routing and abstraction used by Reborn product surfaces and the agent loop. |

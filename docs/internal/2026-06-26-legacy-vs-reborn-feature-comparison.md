@@ -89,7 +89,7 @@ This document is a summary for planning and triage. It does not replace `FEATURE
 
 | Gap | Impact |
 | --- | --- |
-| v1 migration | Reborn now has an explicit, manifest-driven offline migration workflow with read-only planning, stopped-source snapshot enforcement, and resumable apply. The Docker image packages the same-version companion, but native installers do not yet package the pair. Users, projects, and typed settings are still reported rather than converted; API/session credentials require re-authentication and incompatible executable artifacts require reinstall. |
+| v1 migration | Reborn now has an explicit, manifest-driven offline migration workflow with read-only planning, stopped-source snapshot enforcement, and resumable apply. The Docker image packages the same-version companion, but native installers do not yet package the pair. Canonical users and supported engine-v2 project documents are converted; typed settings and the v1 home `projects/` directory remain reported as unsupported. API/session credentials require re-authentication and incompatible executable artifacts require reinstall. |
 | Production runtime services | Reborn `serve` is beta and not yet a production gateway replacement. |
 | Channel product parity | Reborn channel registry/product adapters are not complete enough to cover legacy channel behavior. |
 | Gateway API parity | OpenAI-compatible API, broader control-plane endpoints, diagnostics, and durable fanout need explicit replacement decisions. |

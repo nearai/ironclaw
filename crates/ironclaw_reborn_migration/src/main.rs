@@ -89,7 +89,7 @@ struct PlanArgs {
     #[arg(long, value_name = "PATH")]
     manifest: PathBuf,
 
-    /// Return failure when the inventory contains unsupported or blocked data.
+    /// Fail after writing when inventory is non-live, unsupported, or blocked.
     #[arg(long)]
     strict: bool,
 }

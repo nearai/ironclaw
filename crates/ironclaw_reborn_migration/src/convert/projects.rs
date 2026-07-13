@@ -1,9 +1,9 @@
 //! Engine-v2 project converter.
 //!
-//! Project state lived in v1 `memory_documents` under two user-visible/system
-//! layouts. Both deserialize through the compatibility DTO and converge on the
-//! canonical Reborn [`ProjectRepository`]. A repeated source/project id must be
-//! exact; divergent source or target state fails without overwriting it.
+//! Project state lived in v1 `memory_documents` under one user-visible and two
+//! system layouts. All deserialize through the compatibility DTO and converge
+//! on the canonical Reborn [`ProjectRepository`]. A repeated source/project id
+//! must be exact; divergent source or target state fails without overwriting it.
 
 use std::collections::BTreeMap;
 

@@ -168,7 +168,7 @@ impl MigrationReport {
             .count()
     }
 
-    /// Pretty JSON for `--report <path>` / stdout.
+    /// Pretty JSON emitted by successful apply/resume operations.
     pub fn to_json(&self) -> serde_json::Result<String> {
         serde_json::to_string_pretty(self)
     }

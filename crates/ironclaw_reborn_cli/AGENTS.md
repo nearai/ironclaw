@@ -15,6 +15,10 @@ This crate owns the standalone `ironclaw-reborn` command surface. Keep it small,
 - Keep commands side-effect free unless the command name and issue explicitly require mutation.
 - Use `IRONCLAW_REBORN_HOME` / `~/.ironclaw/reborn`; do not write current v1 state.
 - no v1 runtime imports: do not depend on root `ironclaw`, `src/agent`, channels, worker, DB, setup, service, sandbox, or `ironclaw_engine`.
+- The only v1-state exception is migration discovery/launch: the CLI may detect
+  non-secret source evidence and invoke the verified same-directory
+  `ironclaw-reborn-migration` companion. Source reads stay in that companion's
+  read-only adapters; neither binary may write v1 state.
 - Do not add workspace dependencies beyond `ironclaw_reborn_composition`, `ironclaw_reborn_config`, `ironclaw_reborn_traces`, and `ironclaw_reborn_webui_ingress` (host-owned WebUI serve lifecycle) without an architecture test update and explicit PR rationale. Provider registry/auth/model UX should enter through the Reborn composition provider-admin facade, not a separate CLI-only path.
 
 ## Adding a command
@@ -24,7 +28,9 @@ This crate owns the standalone `ironclaw-reborn` command surface. Keep it small,
 3. If the command needs boot config, resolve `RebornCliContext` in `commands::Command::execute` and pass it into the command handler.
 4. If the command is pure, do not resolve `RebornCliContext` just to run it.
 5. Add a binary smoke test in `tests/smoke.rs` that invokes `env!("CARGO_BIN_EXE_ironclaw-reborn")`.
-6. If the command can touch state, assert it uses Reborn home only and does not create/read v1 DB/settings/secrets.
+6. If the command can touch state, assert it uses Reborn home only and does not
+   create/read v1 DB/settings/secrets, except for the narrow migration launcher
+   boundary above.
 7. Run:
    - `cargo test -p ironclaw_reborn_cli`
    - `cargo test -p ironclaw_architecture reborn`

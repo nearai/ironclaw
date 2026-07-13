@@ -3,8 +3,9 @@
 //!
 //! Each non-engine v1 document is written through the memory service under the
 //! migrated (tenant, user, agent) scope; content and path are preserved.
-//! Engine-v2 documents (mission/project/runtime blobs) are skipped here — they
-//! are consumed by the automations converter. Chunks/embeddings are derived
+//! Engine-v2 documents (mission/project/runtime blobs) are skipped here:
+//! supported missions and projects are handled by their owning converters,
+//! while other runtime blobs remain unsupported. Chunks/embeddings are derived
 //! state the memory service recomputes on write, so they are not migrated (not
 //! a loss). Version history (`memory_document_versions`) has no Reborn target
 //! and is recorded as a loss.

@@ -733,14 +733,17 @@ The current conversion layer maps cron routines and cron missions to Reborn
 `TriggerRecord`s (mission threads land under `ThreadScope.mission_id`).
 Because Reborn's `TriggerSourceKind` is `Schedule`-only, **event / system-event /
 webhook / manual routines and non-cron mission cadences have no `TriggerRecord`
-target** and are recorded in the migration manifest rather than converted — even
+target** and are recorded in the apply/resume migration report rather than converted — even
 where the runtime supports the *behavior* via hooks/`event_emit`, the durable
 automation row does not carry over. Guardrails, notify config, run counters,
 `routine_runs` history (no public run-history insert), and mission-only fields
 (focus/approach/success-criteria) likewise have no target. See the crate's
-CLAUDE.md and the migration manifest for the full mapping + gap catalog. Current
-verification checks structural counts in production durable tables/paths and
-does not constitute a full production cold-boot/readback test. Intermediate `applied` or `verifying`
+CLAUDE.md, manifest inventory, and retained apply/resume report for the full
+mapping + gap catalog. Current verification checks structural counts for users,
+projects, threads, messages, triggers, memory documents, secrets, and identity
+records in production durable tables/paths; other domains do not receive an
+independent readback, and this does not constitute a full production
+cold-boot/readback test. Intermediate `applied` or `verifying`
 states remain quarantined, and operators must complete a production canary
 before accepting cutover.
 

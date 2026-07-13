@@ -33,16 +33,19 @@ The `--no-onboard` CLI flag suppresses auto-detection.
 ### Reborn Standalone Onboarding
 
 ```
-ironclaw-reborn onboard [--force] [--dry-run] [--import-history]
+ironclaw-reborn onboard [--force] [--dry-run] [--migrate-v1 | --skip-v1-migration]
 ```
 
 This command is owned by the standalone Reborn binary, not by `src/setup`.
 It initializes `IRONCLAW_REBORN_HOME` / `~/.ironclaw/reborn`, creates or
 preserves Reborn `config.toml` and `providers.json`, and writes the Reborn
-`.onboard-completed.json` marker without reading or mutating v1 database,
-channel, settings, or setup state. The detailed Reborn-specific contract lives
-in `docs/reborn/onboarding.md`; changes to `ironclaw-reborn onboard` should keep
-that document and this boundary note in sync.
+`.onboard-completed.json` marker. It may detect non-secret evidence of a v1
+source; only the explicit `--migrate-v1` path invokes read-only inventory and
+writes a plan. It never mutates v1 state or automatically applies a migration.
+`--import-history` is a hidden deprecated alias for `--migrate-v1`. The detailed
+Reborn-specific contract lives in `docs/reborn/onboarding.md`; changes to
+`ironclaw-reborn onboard` should keep that document and this boundary note in
+sync.
 
 ---
 
@@ -462,7 +465,7 @@ Contains only the settings needed BEFORE database connection. Written by
 ```env
 IRONCLAW_PROFILE="local"
 DATABASE_BACKEND="libsql"
-LIBSQL_PATH="/Users/name/.ironclaw/ironclaw.db"
+LIBSQL_PATH="$HOME/.ironclaw/ironclaw.db"
 SECRETS_MASTER_KEY="..."   # only if env key source selected
 ONBOARD_COMPLETED="true"
 ```

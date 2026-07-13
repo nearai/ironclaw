@@ -36,14 +36,18 @@ The completion marker schema is:
   "config_file": "/absolute/path/config.toml",
   "providers_file": "/absolute/path/providers.json",
   "steps_completed": ["reborn_home", "config_files", "completion_marker"],
-  "steps_pending": ["llm_credentials", "model_selection", "channel_setup", "v1_migration"],
+  "steps_pending": ["llm_credentials", "model_selection", "channel_setup"],
   "v1_state": "not-used",
   "v1_migration": {
-    "state": "not_detected | available | planned | applied | verified | explicitly_skipped",
+    "state": "not_detected | available | planned | explicitly_skipped",
     "manifest": "/absolute/path/v1-migration-manifest.json"
   }
 }
 ```
+
+`steps_pending` additionally contains `v1_migration` only when the recorded
+state is `available` or `planned`. Apply and verify do not rewrite this
+onboarding marker.
 
 `v1_state: not-used` remains the Reborn runtime boundary: Reborn does not boot
 from or mutate the v1 state root. `v1_migration.state` separately records the

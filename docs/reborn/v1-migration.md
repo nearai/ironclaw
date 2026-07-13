@@ -47,6 +47,10 @@ The v1 PostgreSQL source uses a separate variable:
 export MIGRATION_SOURCE_POSTGRES='postgresql://...'
 ```
 
+Remote PostgreSQL sources must use TLS; a remote URL with
+`sslmode=disable` is rejected. Local PostgreSQL snapshots may explicitly
+disable TLS.
+
 If encrypted v1 secrets should be converted, also export the old key:
 
 ```bash
@@ -78,16 +82,20 @@ ironclaw-reborn migrate v1 plan \
   --manifest /secure/migration-v1.json
 ```
 
-`plan` does not open or create target storage. The manifest is written with
-owner-only permissions and contains hashed store locators, counts,
+`plan` does not open or create target storage. On Unix, the manifest is written
+with owner-only permissions; on other platforms, protect the manifest with the
+platform's filesystem ACLs. It contains hashed store locators, counts,
 dispositions, warnings, and blockers—not raw database URLs, tokens, or keys.
 Use `--strict` when archive-only, re-auth, reinstall, unsupported, or blocked
 categories should make planning return failure after writing the reviewable
-manifest.
+manifest. Strict mode evaluates registered inventory entries by disposition,
+including zero-count categories.
 
-`--source-home` must name the actual stopped v1 home, independently of where a
-database backup was placed. Omitting it leaves home-artifact coverage unproven
-and records an apply-blocking inventory entry.
+`--source-home` must name the actual v1 home (or its matching rehearsal
+snapshot), independently of where a database backup was placed. The final plan
+must use the stopped-source home snapshot that apply will receive. Omitting it
+leaves home-artifact coverage unproven and records an apply-blocking inventory
+entry.
 
 Review every category before scheduling downtime:
 
@@ -96,11 +104,16 @@ Review every category before scheduling downtime:
 - `archive_only`: inventoried in the manifest but not exported or made live;
 - `requires_reauth` or `requires_reinstall`: cannot be reused safely;
 - `intentionally_reset`: transient runtime state that starts clean;
-- `unsupported`: no safe target representation in this release.
+- `skipped_by_operator`: explicitly excluded by an operator-selected scope;
+- `unsupported`: no safe target representation in this release;
+- `unsupported_unknown`: not recognized by this release and therefore a
+  blocker;
+- `derived_rebuilt`: derived state that Reborn recomputes.
 
 No unknown v1 table or persistent home artifact is treated as implicitly
-successful. Unknown categories block a strict plan and remain visible in the
-manifest.
+successful. Unknown or unreadable categories remain visible in the manifest,
+make `--strict` planning fail after writing it, and block apply even when the
+plan was created without `--strict`.
 
 ## 2. Stop v1 and take the final snapshot
 
@@ -153,6 +166,12 @@ PostgreSQL targets additionally keep the same lifecycle status in the shared
 `reborn_migration_state` table so every replica observes the quarantine even
 when replicas use different local homes.
 
+Successful apply and resume print a `MigrationReport` JSON document to stdout.
+Preserve it in a secure operator-controlled location: its `lossy` entries
+contain the per-record conversion losses that are not copied into the persisted
+migration manifest and can include source identifiers. `status --json` reports
+the redacted manifest and target-fingerprint match, not those apply-time losses.
+
 ## 4. Verify before startup
 
 ```bash
@@ -166,8 +185,12 @@ ironclaw-reborn migrate v1 status \
 ```
 
 Do not start Reborn unless status is `verified`. Current verification closes
-migration-owned handles and checks structural counts in production durable
-tables/paths; it is not yet a full production cold-boot/readback test.
+migration-owned handles and checks exact structural counts for users, projects,
+threads, messages, triggers, memory documents, and secrets, plus a lower-bound
+identity-record count, in production durable tables/paths. Other manifest
+domains do not receive an independent durable readback. Verification updates
+manifest/quarantine lifecycle state, but its target data reads are read-only;
+it is not a full production cold-boot/readback test.
 `applying`, `failed`, `applied`, and `verifying` are quarantined states;
 workers, triggers, adapters, and ingress must remain stopped. After `verified`,
 perform a production canary and inspect representative migrated data before
@@ -190,17 +213,26 @@ until users have accepted the Reborn result.
 The manifest is the authority for a particular release and source. In broad
 terms:
 
-- users, engine-v2 projects, conversations, supported identity links, memory,
-  secrets, and supported schedules are current migration candidates, with
-  per-record losses reported;
-- typed settings, unsupported message payloads, unsupported schedule sources,
-  unsupported executable artifacts, and operational histories are currently
-  inventoried/reported rather than converted;
+- canonical users, data owners synthesized for older schemas, supported
+  engine-v2 project documents, conversations, supported identity links, memory,
+  secrets, and supported schedules are current migration candidates. Canonical
+  deactivated or unknown user states map fail-closed to suspended, unknown roles
+  map to member, and synthesized users are active members with epoch timestamps;
+- typed settings, unsupported schedule sources, unsupported executable
+  artifacts, v1 home `projects/` content, and operational histories are
+  currently inventoried/reported rather than converted. Unsupported transcript
+  payloads are reported and retained in thread metadata only where the
+  converter explicitly supports that fallback;
 - API/session credentials require re-authentication;
 - unknown or incompatible executable extensions require reinstall and are
   never enabled as placeholders;
-- in-flight jobs, approvals, leases, pairing requests, rate-limit counters,
-  logs, lock files, and derived indexes are reset or rebuilt.
+- agent jobs/actions/events are archive-only inventory (their payloads are not
+  copied), while approvals, leases, pairing requests, rate-limit counters,
+  logs, lock files, and derived indexes are reset or rebuilt;
+- `heartbeat_state` is inventoried as semantically converted, but this release
+  writes no durable heartbeat row: apply reports the gap and the cadence must be
+  recreated as a Reborn scheduled trigger.
 
 Run `status --json` to inspect the complete redacted manifest and the current
-target-fingerprint match programmatically.
+target-fingerprint match programmatically. Use the securely retained apply or
+resume report for per-record loss details.

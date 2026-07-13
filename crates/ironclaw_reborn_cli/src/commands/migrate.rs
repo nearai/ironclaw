@@ -80,7 +80,7 @@ struct PlanArgs {
     #[arg(long, value_name = "PATH")]
     manifest: PathBuf,
 
-    /// Fail planning when a supported source item cannot be imported faithfully.
+    /// Fail after writing when inventory is non-live, unsupported, or blocked.
     #[arg(long)]
     strict: bool,
 }

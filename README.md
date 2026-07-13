@@ -79,8 +79,10 @@ cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- config path
 ```
 
 `config path` and `doctor` are safe diagnostics; they report the resolved home,
-profile, `config.toml`, `providers.json`, and `v1_state: not-used`.
-They do not create Reborn state or seed config files.
+profile, `config.toml`, `providers.json`, and `v1_state: not-used`. `doctor`
+also reports `v1_migration_state`, including detected sources and any local or
+shared PostgreSQL quarantine. They do not create Reborn state or seed config
+files.
 
 ### Migrate an existing v1 installation
 
@@ -93,6 +95,7 @@ v1 automatically:
 ```bash
 ironclaw-reborn migrate v1 plan \
   --source-libsql /backups/ironclaw-v1.db \
+  --source-home /srv/ironclaw-v1 \
   --manifest /secure/migration-v1.json
 
 ironclaw-reborn migrate v1 status \

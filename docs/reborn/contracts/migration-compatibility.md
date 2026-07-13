@@ -1,6 +1,6 @@
 # Reborn Contract — Migration and Compatibility
 
-**Status:** Contract-freeze draft
+**Status:** Architecture target; current migrator differs as noted below
 **Date:** 2026-04-25
 **Depends on:** [`storage-placement.md`](storage-placement.md), [`memory.md`](memory.md), [`settings-config.md`](settings-config.md), [`secrets.md`](secrets.md)
 
@@ -17,6 +17,34 @@ Reuse existing schemas where viable, bridge only when necessary.
 ```
 
 This contract tells engineers when to adapt existing tables and when a new schema is justified.
+
+### Current v1-to-Reborn implementation
+
+The shipped offline migrator does not claim full implementation of the target
+contract below. `ironclaw-reborn migrate v1` plans against a read-only v1
+snapshot, writes only to a fresh Reborn target, and makes its versioned manifest
+the authority for the current release's actual dispositions. See
+[`../v1-migration.md`](../v1-migration.md) for the operator workflow.
+
+Important current differences from this architecture target are:
+
+- memory documents are imported, chunks/embeddings are rebuilt, and document
+  versions are archive-only inventory rather than migrated;
+- secrets are decrypted with the explicit v1 source key and re-encrypted with
+  the production Reborn target key, but usage/audit metadata is not preserved;
+- typed settings, root-filesystem entries, home config/provider/profile files,
+  skills, and the home `projects/` directory remain unsupported or require
+  reinstall; there is no generic `.system/**` typed-repository import;
+- supported engine-v2 project and mission documents have explicit converters,
+  while other engine/runtime blobs remain unsupported or archive-only;
+- operational histories are inventory only, and `archive_only` does not copy
+  their payloads into a Reborn archive;
+- verification is structural durable-store readback for selected converted
+  domains, not a production runtime cold boot.
+
+Future work may move these dispositions toward the target contract, but must
+not infer support from Sections 3–8 without updating the manifest registry,
+converter, tests, and operator runbook together.
 
 ---
 

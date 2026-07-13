@@ -7,6 +7,9 @@
 - Outbound state stores are composition-owned via `RebornLocalRuntimeServices`; do not construct `FilesystemOutboundStateStore` in consumer modules (lint-enforced via `clippy::disallowed-methods`).
 - Do not depend on the root `ironclaw` crate or `src/` modules.
 - Do not add legacy bridge modes here until an accepted migration contract exists.
+- The feature-gated `migration_support` module only resolves the production
+  target locator, scope, and encryption configuration without activation. The
+  migration companion owns every v1 source adapter and conversion bridge.
 - Do not route live v1/product traffic here; callers must opt in through explicit Reborn adapters.
 - Production and migration-dry-run profiles must fail closed on local-only or missing required handles.
 - Product auth composition must use `ironclaw_auth` trait-shaped ports. Do not
