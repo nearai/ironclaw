@@ -267,11 +267,20 @@ async fn execute_local_command(
     extra_env: &HashMap<String, String>,
     env_mode: LocalHostProcessEnvMode,
 ) -> Result<(CapturedCommandOutput, i32), RuntimeProcessError> {
-    let mut command = if cfg!(target_os = "windows") {
+    #[cfg(windows)]
+    let mut command = {
+        use std::os::windows::process::CommandExt;
+
         let mut c = Command::new("cmd");
-        c.args(["/C", cmd]);
+        c.args(["/D", "/S", "/C"]);
+        // `cmd.exe` parses its command tail itself rather than with the C
+        // runtime rules used by `Command::arg`. Pass one outer-quoted raw tail
+        // so `/S` removes that wrapper while preserving quotes around paths.
+        c.as_std_mut().raw_arg(format!("\"{cmd}\""));
         c
-    } else {
+    };
+    #[cfg(not(windows))]
+    let mut command = {
         let mut c = Command::new("sh");
         c.args(["-c", cmd]);
         c
@@ -721,5 +730,31 @@ mod tests {
         assert_eq!(exit_code, 0);
         assert_eq!(output.preview.trim(), workdir.path().display().to_string());
         assert_eq!(output.saved_output, None);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn execute_local_command_preserves_cmd_path_quotes() {
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let quoted_path = workdir.path().join("path with spaces");
+        std::fs::create_dir(&quoted_path).expect("quoted path");
+        let command = format!(
+            "if exist \"{}\" (echo quoted-path-ok) else (exit /b 1)",
+            quoted_path.display()
+        );
+
+        let (output, exit_code) = execute_local_command(
+            &ResourceScope::system(),
+            &command,
+            &workdir.path().to_path_buf(),
+            Duration::from_secs(5),
+            &HashMap::new(),
+            LocalHostProcessEnvMode::Scrubbed,
+        )
+        .await
+        .expect("command succeeds");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(output.preview.trim(), "quoted-path-ok");
     }
 }

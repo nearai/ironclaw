@@ -268,6 +268,7 @@ jobs:
       - name: Run Windows local-dev-yolo integration test
         run: |
           cargo test -p ironclaw_filesystem --test filesystem_contract local_write_file_replaces_existing_file -- --nocapture
+          cargo test -p ironclaw_host_runtime execute_local_command_preserves_cmd_path_quotes -- --nocapture
           cargo test -p ironclaw_reborn_composition local_yolo_policy_mounts_confirmed_host_home_as_host -- --nocapture
           cargo test -p ironclaw_reborn_composition local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts -- --nocapture
 
