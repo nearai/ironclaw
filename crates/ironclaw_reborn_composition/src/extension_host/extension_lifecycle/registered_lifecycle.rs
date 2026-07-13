@@ -103,7 +103,7 @@ pub(super) async fn resolve_registered_installation_for_restore(
                 registered_by_owner.insert(owner_key.clone(), by_id);
             }
             Err(error) => {
-                tracing::warn!(
+                tracing::debug!(
                     extension_id = installation.extension_id().as_str(),
                     installation_id = installation.installation_id().as_str(),
                     %error,
@@ -119,7 +119,7 @@ pub(super) async fn resolve_registered_installation_for_restore(
     {
         Some(available) => Ok(Some(Arc::new(available.clone()))),
         None => {
-            tracing::warn!(
+            tracing::debug!(
                 extension_id = installation.extension_id().as_str(),
                 installation_id = installation.installation_id().as_str(),
                 "skipping extension installation restore: row is registered-scoped but its descriptor is not in its row-owned registered store"
