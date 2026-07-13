@@ -225,7 +225,7 @@ pub(crate) async fn restore_extension_lifecycle_state(
     // batching for the live listing path.
     let mut registered_by_owner: std::collections::HashMap<
         (TenantId, UserId),
-        std::collections::HashMap<String, AvailableExtensionPackage>,
+        std::collections::HashMap<ExtensionId, AvailableExtensionPackage>,
     > = std::collections::HashMap::new();
     for installation in installation_store
         .list_installations()
@@ -263,7 +263,6 @@ pub(crate) async fn restore_extension_lifecycle_state(
                     &tenant_id,
                     &owner,
                     &installation,
-                    &package_ref,
                 )
                 .await?
                 {
@@ -708,11 +707,9 @@ impl RebornLocalExtensionManagementPort {
                 let catalog = self.catalog.read().await;
                 catalog.resolve(&package_ref).ok()
             };
-            let available = match catalog_hit.or_else(|| {
-                registered_by_id
-                    .get(installation.extension_id().as_str())
-                    .cloned()
-            }) {
+            let available = match catalog_hit
+                .or_else(|| registered_by_id.get(installation.extension_id()).cloned())
+            {
                 Some(available) => available,
                 None => continue,
             };

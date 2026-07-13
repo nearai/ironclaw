@@ -13,7 +13,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use ironclaw_extensions::{ExtensionInstallation, ExtensionInstallationStore, ManifestSource};
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::{ResourceScope, TenantId, UserId};
+use ironclaw_host_api::{ExtensionId, ResourceScope, TenantId, UserId};
 use ironclaw_product_workflow::{LifecyclePackageRef, ProductWorkflowError};
 
 use crate::extension_host::available_extensions::AvailableExtensionPackage;
@@ -85,12 +85,11 @@ pub(super) async fn resolve_registered_installation_for_restore(
     filesystem: &Arc<dyn RootFilesystem>,
     registered_by_owner: &mut HashMap<
         (TenantId, UserId),
-        HashMap<String, AvailableExtensionPackage>,
+        HashMap<ExtensionId, AvailableExtensionPackage>,
     >,
     tenant_id: &TenantId,
     owner: &UserId,
     installation: &ExtensionInstallation,
-    package_ref: &LifecyclePackageRef,
 ) -> Result<Option<Arc<AvailableExtensionPackage>>, ProductWorkflowError> {
     let owner_key = (tenant_id.clone(), owner.clone());
     if !registered_by_owner.contains_key(&owner_key) {
@@ -98,7 +97,7 @@ pub(super) async fn resolve_registered_installation_for_restore(
             Ok(packages) => {
                 let by_id = packages
                     .into_iter()
-                    .map(|package| (package.package_ref.id.as_str().to_string(), package))
+                    .map(|package| (package.package.id.clone(), package))
                     .collect();
                 registered_by_owner.insert(owner_key.clone(), by_id);
             }
@@ -115,7 +114,7 @@ pub(super) async fn resolve_registered_installation_for_restore(
     }
     match registered_by_owner
         .get(&owner_key)
-        .and_then(|by_id| by_id.get(package_ref.id.as_str()))
+        .and_then(|by_id| by_id.get(installation.extension_id()))
     {
         Some(available) => Ok(Some(Arc::new(available.clone()))),
         None => {
@@ -163,16 +162,11 @@ impl RebornLocalExtensionManagementPort {
     pub(super) async fn registered_packages_by_id(
         &self,
         scope: &ResourceScope,
-    ) -> HashMap<String, Arc<AvailableExtensionPackage>> {
+    ) -> HashMap<ExtensionId, Arc<AvailableExtensionPackage>> {
         match RegisteredExtensionStore::list_for_scope(self.filesystem.as_ref(), scope).await {
             Ok(packages) => packages
                 .into_iter()
-                .map(|package| {
-                    (
-                        package.package_ref.id.as_str().to_string(),
-                        Arc::new(package),
-                    )
-                })
+                .map(|package| (package.package.id.clone(), Arc::new(package)))
                 .collect(),
             Err(error) => {
                 tracing::debug!(
