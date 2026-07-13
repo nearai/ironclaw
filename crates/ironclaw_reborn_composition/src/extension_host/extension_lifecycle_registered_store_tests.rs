@@ -125,6 +125,114 @@ async fn restore_publishes_owner_registered_extension_without_static_catalog_ent
     );
 }
 
+/// A shared-catalog package colliding on the SAME id as
+/// `REGISTERED_MANIFEST_TOML` (`acme-mcp-boot`) but a wholly different
+/// descriptor, so a wrong resolution is trivially observable. `InstalledLocal`
+/// (the source the shared catalog scan stamps) requires wasm + declared
+/// capabilities, mirroring the live-path collision fixture
+/// (`registered_lifecycle_tests::COLLIDING_CATALOG_MANIFEST_TOML`).
+const COLLIDING_CATALOG_MANIFEST_TOML: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "acme-mcp-boot"
+name = "Colliding Shared Package"
+version = "0.1.0"
+description = "Shared catalog package colliding on the same id"
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/colliding.wasm"
+
+[[capabilities]]
+id = "acme-mcp-boot.search"
+description = "Search colliding data"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/search.input.json"
+output_schema_ref = "schemas/search.output.json"
+"#;
+
+/// Item 7: restore-tier sibling of
+/// `registered_lifecycle_tests::project_prefers_registered_row_over_same_id_catalog_package`
+/// — row-provenance-wins (the comment at restore's `installation_effective_owner_scope`
+/// check, "review item 1") must hold at boot too: a same-id shared-catalog
+/// collision must still restore and publish the registered row's OWN
+/// descriptor, never the colliding catalog one, even with a non-empty
+/// catalog (unlike the sibling boot-order test above, which uses an empty
+/// catalog and so never exercises this branch order).
+#[tokio::test]
+async fn restore_prefers_registered_row_over_same_id_catalog_package() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage_root = dir.path().join("local-dev");
+    let filesystem = mounted_local_filesystem(&storage_root);
+
+    let owner_dir = storage_root
+        .join("system/extensions/registered")
+        .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
+        .join(OWNER_USER_ID)
+        .join(REGISTERED_EXTENSION_ID);
+    std::fs::create_dir_all(&owner_dir).expect("registered manifest dir");
+    std::fs::write(owner_dir.join("manifest.toml"), REGISTERED_MANIFEST_TOML)
+        .expect("write registered descriptor");
+
+    // The colliding shared-catalog package materialized under the shared
+    // root, the same place a real first-party install would live.
+    let colliding_dir = storage_root
+        .join("system/extensions")
+        .join(REGISTERED_EXTENSION_ID);
+    std::fs::create_dir_all(&colliding_dir).expect("colliding catalog manifest dir");
+    std::fs::write(
+        colliding_dir.join("manifest.toml"),
+        COLLIDING_CATALOG_MANIFEST_TOML,
+    )
+    .expect("write colliding catalog descriptor");
+
+    let installation_store: Arc<dyn ExtensionInstallationStore> =
+        Arc::new(InMemoryExtensionInstallationStore::default());
+    let (extension_id, _) = seed_registered_installation(
+        &installation_store,
+        REGISTERED_MANIFEST_TOML,
+        &TenantId::from_trusted(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string()),
+        &UserId::new(OWNER_USER_ID).expect("valid owner id"),
+        REGISTERED_EXTENSION_ID,
+        None,
+    )
+    .await;
+
+    // Unlike the empty-catalog boot-order test above, a real, non-empty
+    // catalog scan of the shared root — this is what makes the collision
+    // reachable.
+    let catalog = AvailableExtensionCatalog::from_filesystem_root(
+        &filesystem,
+        &VirtualPath::new("/system/extensions").expect("valid virtual path"),
+    )
+    .await
+    .expect("catalog scan of the shared root");
+    let filesystem: Arc<dyn RootFilesystem> = Arc::new(filesystem);
+    let boot = fresh_boot_fixture();
+
+    restore_extension_lifecycle_state(
+        &catalog,
+        &filesystem,
+        &installation_store,
+        &boot.lifecycle_service,
+        &boot.active_extensions,
+    )
+    .await
+    .expect("restore must resolve the registered row despite the catalog collision");
+
+    let snapshot = boot.active_registry.snapshot();
+    let published = snapshot
+        .get_extension(&extension_id)
+        .expect("owner-registered extension must be published after restore");
+    assert_eq!(
+        published.manifest.name, "Acme Boot MCP",
+        "row-provenance must win: the registered descriptor must be published, not the \
+         colliding shared-catalog package"
+    );
+}
+
 const OTHER_OWNER_USER_ID: &str = "b2222222-7fe5-474c-965a-67cb69df3d05";
 const OWNER_A_GOOD_EXTENSION_ID: &str = "acme-mcp-good";
 const OWNER_A_CORRUPT_EXTENSION_ID: &str = "acme-mcp-corrupt";
