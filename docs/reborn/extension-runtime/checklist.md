@@ -364,14 +364,19 @@ Rules — kept short on purpose:
   (`tests/integration/extension_ingress.rs`: the post-admission observer
   records `ProductInboundAck::Accepted { submitted_run_id, .. }` from the
   REAL `DefaultProductWorkflow`).
-- [ ] ING-11 `reply_context` is stored host-side and returned to the same
-  extension's adapter at delivery time. — Storage half proven:
+- [x] ING-11 `reply_context` is stored host-side and returned to the same
+  extension's adapter at delivery time. — Storage half:
   `reply_context_is_stored_host_side_keyed_by_conversation`
   (`ingress_router_contract.rs`, keyed by conversation fingerprint).
-  Delivery-time return lands with the P5 delivery coordinator (the
-  `OutboundEnvelope.reply_context` slot exists; no coordinator reads the
-  store yet).
-- [ ] ING-12 Slack and Telegram inbound both pass through the same router and
+  Delivery-time return (P5): the coordinator resolves the stored context
+  through its `DeliveryReplyContextSource` port and hands it to the adapter
+  on the `OutboundEnvelope` —
+  `coordinator_persists_sending_before_the_adapter_delivers` asserts the
+  envelope carries the source's bytes (`outbound_delivery_contract.rs`),
+  and `factory.rs` wires `IngressReplyContextSource` over the SAME
+  `ingress_parts.reply_context` store the router writes
+  (`extension_host/channel_delivery.rs`).
+- [x] ING-12 Slack and Telegram inbound both pass through the same router and
   workflow caller with zero host branches (one integration proof each). —
   Slack: the full `slack_serve/e2e_tests.rs` scenario suite (24 tests) now
   drives the generic router + recipe verifier + `SlackChannelAdapter` +
@@ -380,11 +385,12 @@ Rules — kept short on purpose:
   `slack_events_rejects_forged_hmac_signature`), and
   `build_slack_events_route_mount_dispatches_signed_event_callback`
   (`slack_host_beta.rs`) proves it over the composed runtime. Acme proves the
-  route-agnostic half (`tests/integration/extension_ingress.rs`). Telegram:
-  adapter + parsing proven at the crate tier
-  (`crates/ironclaw_telegram_v2_adapter/src/channel.rs`); the
-  through-the-router integration proof lands with the bundled telegram
-  package (see DEL-10).
+  route-agnostic half (`tests/integration/extension_ingress.rs`). Telegram
+  (P5): `telegram_update_becomes_a_turn_and_a_coordinated_reply`
+  (`tests/integration/extension_delivery.rs`) drives a signed update through
+  the SAME production mount, generic sink, and workflow caller — the
+  registration is data (`ChannelIngressRegistration`), zero telegram host
+  branches.
 - [ ] ING-13 Inbound attachments are references; any byte fetch happens
   host-side through restricted egress with the channel credential — adapters
   never fetch. — Reference half holds by construction (`AttachmentRef`
@@ -396,35 +402,114 @@ Rules — kept short on purpose:
 
 ## 7. Channel outbound (OUT)
 
-- [ ] OUT-1 Every outbound intent (final reply, progress, gate prompt, auth
+- [x] OUT-1 Every outbound intent (final reply, progress, gate prompt, auth
   prompt, failure, connect-required, working, cleanup, triggered delivery)
   enters the one coordinator; a grep/architecture check finds no direct
-  product send path.
-- [ ] OUT-2 Target resolution preserves source-route replies and preference
-  targets; unauthorized/unavailable targets fail closed.
-- [ ] OUT-3 An attempt is persisted (`Prepared`→`Sending`) before vendor
-  egress.
-- [ ] OUT-4 The coordinator is the sole delivery-state writer; adapters
-  receive no store; production construction rejects a no-op sink.
-- [ ] OUT-5 Retry/backoff, dedupe, single-flight, and shutdown drain are
-  generic and tested with a scripted adapter.
-- [ ] OUT-6 Crash after possible vendor success records `Unknown`; no blind
-  resend without a vendor idempotency key.
-- [ ] OUT-7 Partial multipart: once any part sends, a later retryable failure
-  is terminal unless an idempotency key proves safe retry.
-- [ ] OUT-8 Restricted egress rejects undeclared hosts/methods,
+  product send path. — The nine `DeliveryIntent`s split policy-class
+  (`deliver`) / notice-class (`deliver_notice`) with cross-class calls
+  rejected (`coordinator_notice_rejects_policy_class_intents`,
+  `coordinator_deliver_rejects_notice_class_intents`,
+  `outbound_delivery_contract.rs`); the generic observer/driver emit ONLY
+  through `RunDeliveryServices.coordinator` (`run_delivery_contract.rs`, 11
+  scenarios); the P5 cutover deleted the direct Slack send lane
+  (`slack_delivery.rs`, `slack_egress.rs`, `slack_dm_open.rs`) and re-pointed
+  all 24 `slack_serve/e2e_tests.rs` scenarios through the coordinator.
+- [x] OUT-2 Target resolution preserves source-route replies and preference
+  targets; unauthorized/unavailable targets fail closed. — Policy-class
+  deliveries run the SAME `OutboundPolicyService` pipeline (source-route
+  reply-target validation + preference targets) inside the coordinator;
+  fail-closed rows: `revoked_or_rejected_target_does_not_call_render_or_egress`,
+  `require_direct_message_true_propagates_to_resolver_and_maps_to_rejected`,
+  `coordinator_fails_closed_when_the_channel_is_unavailable`,
+  `coordinator_notice_fails_closed_when_the_channel_is_unavailable`
+  (`outbound_delivery_contract.rs`); the triggered path resolves the
+  creator's preference target (`run_delivery_contract.rs`).
+- [x] OUT-3 An attempt is persisted (`Prepared`→`Sending`) before vendor
+  egress. — `coordinator_persists_sending_before_the_adapter_delivers` (the
+  scripted adapter reads the durable attempt DURING deliver and sees
+  `Sending`) and `coordinator_notice_is_source_routed_and_persists_before_egress`
+  (`outbound_delivery_contract.rs`); `ironclaw_outbound::service` records the
+  initial attempt as `Prepared`. Integration: `assert_delivered_attempt`
+  (`tests/integration/extension_delivery.rs`) pins that no attempt is left
+  mid-lifecycle after drain.
+- [x] OUT-4 The coordinator is the sole delivery-state writer; adapters
+  receive no store; production construction rejects a no-op sink. —
+  `ChannelAdapter::deliver(envelope, &dyn RestrictedEgress)` receives no
+  store by signature; all status writes live in
+  `delivery_coordinator.rs`; the factory constructs the coordinator only
+  when a real channel-egress transport exists (no transport → `None`, and
+  Slack host construction then fails with
+  `RuntimeHttpEgressUnavailable` rather than wiring a no-op sink —
+  `factory.rs`, `slack_host_beta.rs`).
+- [x] OUT-5 Retry/backoff, dedupe, single-flight, and shutdown drain are
+  generic and tested with a scripted adapter. —
+  `coordinator_retries_fully_retryable_reports_then_delivers` (bounded
+  retry, zero-backoff policy injection),
+  `coordinator_rejects_new_deliveries_while_draining` +
+  `coordinator_notice_rejected_while_draining` (drain), busy-hint FIFO
+  dedupe rows in `run_delivery_contract.rs`; the per-delivery-id
+  single-flight guard (`in_flight` set, both paths) is structural — every
+  prepared attempt mints a fresh delivery id, so double-entry is
+  unreachable through the public API; the guard defends future
+  resume/re-drive paths.
+- [x] OUT-6 Crash after possible vendor success records `Unknown`; no blind
+  resend without a vendor idempotency key. —
+  `coordinator_recovery_marks_interrupted_sending_attempts_unknown` and
+  `coordinator_lazily_recovers_interrupted_attempts_before_a_scopes_first_delivery`
+  (`outbound_delivery_contract.rs`): interrupted `Sending` attempts from a
+  prior lifetime settle `Unknown` (never re-driven) lazily before that
+  scope's first delivery — the store enumerates per scope only, so recovery
+  is per-scope on first touch (owner call, flagged in the PR body).
+- [x] OUT-7 Partial multipart: once any part sends, a later retryable failure
+  is terminal unless an idempotency key proves safe retry. —
+  `coordinator_partial_multipart_failure_is_terminal_without_retry`
+  (`outbound_delivery_contract.rs`): after a `Sent` part, a retryable part
+  failure terminates the attempt (`Failed`, no re-drive) since no vendor
+  idempotency key exists for Slack/Telegram message posts.
+- [x] OUT-8 Restricted egress rejects undeclared hosts/methods,
   adapter-supplied auth headers where injection is declared, cross-host
   redirects, private-IP/DNS-rebind targets, and oversized bodies — before any
-  network call.
-- [ ] OUT-9 Delivery attempt persistence passes on both DBs.
-- [ ] OUT-10 Slack rendering/splitting/DM-provisioning and Telegram rendering
+  network call. — `PolicyEnforcedChannelEgress`
+  (`ironclaw_extension_host::egress`):
+  `undeclared_host_is_rejected_before_any_transport_activity`,
+  `non_https_and_undeclared_method_are_rejected_before_transport`,
+  `adapter_supplied_authorization_header_is_rejected`,
+  `undeclared_credential_handle_is_rejected`,
+  `oversized_transport_response_is_rejected`; the transport pins the network
+  policy to the approved host with `deny_private_ip_ranges` (redirects and
+  DNS-rebind are the host-runtime egress layer's existing SSRF guards —
+  `channel_egress.rs::header_injection_reaches_the_network_request` pins the
+  pinned-policy handoff).
+- [x] OUT-9 Delivery attempt persistence passes on both DBs. —
+  `reborn_integration_outbound_store_durability` (dedicated both-DB store
+  suite) plus the P5 delivery proofs' `Delivered`-attempt assertions run
+  matrixed over `StorageMode::{LibSql,Postgres}`
+  (`tests/integration/extension_delivery.rs`; a Postgres provisioning
+  failure is a test failure, never a skip).
+- [x] OUT-10 Slack rendering/splitting/DM-provisioning and Telegram rendering
   live only in their crates (fixture unit tests) with one outbound
-  integration proof each.
+  integration proof each. — Rendering/splitting/`conversations.open` DM
+  opening live in `ironclaw_slack_v2_adapter` /
+  `ironclaw_telegram_v2_adapter` (fixture tests in each crate's
+  `channel.rs` + TEST-1 conformance); outbound integration proofs:
+  `slack_final_reply_flows_through_the_real_delivery_coordinator` and
+  `telegram_update_becomes_a_turn_and_a_coordinated_reply`
+  (`tests/integration/extension_delivery.rs`). The thin preference-target
+  provisioner glue (`slack_preference_targets.rs`) rides composition as a
+  §11 sliver until the P6 extraction.
 - [ ] OUT-11 Prompt construction consumes `CommunicationPresentationPolicy`
   from the channel contract; concrete channel branches in `ironclaw_llm` are
-  deleted.
-- [ ] OUT-12 Trace contributions use generic extension/surface origin ids;
-  concrete variants are deleted.
+  deleted. — The generic policy type exists in `ironclaw_llm::reasoning`
+  and no concrete channel branch remains in that crate's production code;
+  the remaining half — feeding the manifest's `[channel.presentation]`
+  values (`supports_markdown`, `max_message_chars`) into prompt
+  construction per channel — rides the P6 extraction with the channel
+  contract plumbing.
+- [x] OUT-12 Trace contributions use generic extension/surface origin ids;
+  concrete variants are deleted. — `ironclaw_reborn_traces` carries
+  `channel_origin: Option<String>` as data
+  (`trace_channel_origin_from_host_channel`, `client.rs`); no vendor enum
+  variant remains in the trace vocabulary.
 
 ## 8. Extraction and deletion (DEL)
 
@@ -450,21 +535,26 @@ Rules — kept short on purpose:
 - [ ] DEL-9 `check-generic-without-concrete.sh` passes in CI: every generic
   crate's dependency tree is free of concrete extension crates and its tests
   pass — the deletion test.
-- [ ] DEL-10 Telegram runs as a real installed package (manifest +
+- [x] DEL-10 Telegram runs as a real installed package (manifest +
   `activate()` webhook registration) — the addition test proven by the second
-  production channel. — Adapter half built (P4):
+  production channel. — Adapter half (P4):
   `TelegramChannelAdapter::{inbound,activate,cleanup}` with
   `shared_secret_header` verification host-side and `setWebhook`/
   `deleteWebhook` over `RestrictedEgress`
-  (`activate_registers_the_webhook_with_the_secret_token_handle`,
-  `cleanup_unregisters_the_webhook`,
-  `private_chat_update_normalizes_to_one_message`,
-  `crates/ironclaw_telegram_v2_adapter/src/channel.rs`). Remaining: bundled
-  telegram package assets + catalog entry, the binary-assembled entrypoint
-  binding, a real channel-egress factory (the host's `EgressFactory` is
-  still fail-closed pending the P5 egress work — Telegram's token-in-path
-  Bot API also needs host-side path injection), and the
-  install→activate→signed-update→turn integration proof through the router.
+  (`crates/ironclaw_telegram_v2_adapter/src/channel.rs`). P5 completed the
+  chain: bundled package assets + catalog entry
+  (`ironclaw_first_party_extensions/assets/telegram/manifest.toml`,
+  `available_extensions.rs::telegram_package`), the binary-assembled
+  entrypoint binding (`ironclaw_reborn_cli::runtime::native_extensions`),
+  the real channel-egress transport with host-side path-placeholder token
+  injection (`HostRuntimeChannelEgressTransport`,
+  `path_placeholder_injection_substitutes_the_secret_host_side`), and the
+  install → activate (`setWebhook` over recorded egress) → signed update →
+  turn → coordinated reply proof through the production router mount:
+  `telegram_update_becomes_a_turn_and_a_coordinated_reply`
+  (`tests/integration/extension_delivery.rs`, both DBs). The install's
+  `[channel.config]` values ride a test-support seam until the production
+  configure surface lands (P6/H — flagged owner call).
 
 ## 9. Frontend (UI)
 
@@ -510,8 +600,15 @@ Rules — kept short on purpose:
 
 ## 11. Testing and gates (TEST)
 
-- [ ] TEST-1 The channel-adapter conformance suite exists and runs against
-  Slack, Telegram, and acme.
+- [x] TEST-1 The channel-adapter conformance suite exists and runs against
+  Slack, Telegram, and acme. — `run_channel_adapter_conformance`
+  (`ironclaw_product_adapters::conformance`, test-support export): inbound
+  bounds + malformed-never-panics + challenge, full-envelope delivery with
+  structured per-part reports against a scripted vendor server,
+  activate/cleanup idempotency, unsupported surfaces fail cleanly.
+  Consumers: `crates/ironclaw_slack_v2_adapter/tests/channel_conformance.rs`,
+  `crates/ironclaw_telegram_v2_adapter/tests/channel_conformance.rs`, and
+  the acme fixture in `tests/integration/extension_runtime.rs`.
 - [ ] TEST-2 The tool-adapter conformance checks run against static, WASM,
   and MCP lanes. (P2 landed the WASM-lane proof — the five Slack tools
   through the binder — and the native/static proof via the acme fixture;
@@ -523,10 +620,22 @@ Rules — kept short on purpose:
   `acme_fixture_lifecycle_dispatches_from_the_active_snapshot` drives
   install → activate → snapshot dispatch → remove through model tool calls,
   with the fixture's native factory assembled through the production
-  `RebornBuildInput` seam. The inbound/outbound/connect legs land with
-  P3–P5.)
-- [ ] TEST-5 Slack and Telegram each have exactly one inbound and one outbound
-  integration proof; protocol details are unit-tested inside their crates.
+  `RebornBuildInput` seam. P4 landed the inbound leg —
+  `signed_acme_post_flows_through_the_production_mount_into_a_turn`.
+  P5 landed the outbound machinery generically (the acme adapter's real
+  `deliver` runs under TEST-1 conformance; the coordinated outbound
+  integration proofs drive slack + telegram in
+  `tests/integration/extension_delivery.rs`). Remaining: the acme connect
+  leg and an acme-through-the-coordinator outbound row if P6 keeps acme as
+  the invented-vendor canary.)
+- [x] TEST-5 Slack and Telegram each have exactly one inbound and one outbound
+  integration proof; protocol details are unit-tested inside their crates. —
+  One scenario per channel drives BOTH halves through the production mount
+  and the real coordinator:
+  `slack_final_reply_flows_through_the_real_delivery_coordinator` and
+  `telegram_update_becomes_a_turn_and_a_coordinated_reply`
+  (`tests/integration/extension_delivery.rs`); protocol shapes stay in the
+  adapter crates' fixture tests + TEST-1 conformance.
 - [x] TEST-6 The specificity scanner derives forbidden names from the package
   inventory (an invented product id in a fixture is caught without editing the
   scanner). — `scanner_derives_terms_from_an_invented_inventory_package`
