@@ -207,6 +207,144 @@ async fn binder_fails_typed_for_an_unconfigured_lane() {
     );
 }
 
+/// Success-returning MCP executor double. Records the capability id + input it
+/// was handed and returns a fixed output, so the test can prove a *discovered*
+/// MCP capability was routed by id, through the ToolAdapter, into the MCP lane,
+/// and its output flowed back — the counterpart of `AuthRequiredMcpExecutor`
+/// (which only proves the auth-gate mapping).
+struct RecordingMcpExecutor {
+    output: Value,
+    invoked: std::sync::Mutex<Option<(CapabilityId, Value)>>,
+}
+
+#[async_trait]
+impl ironclaw_mcp::McpExecutor for RecordingMcpExecutor {
+    async fn execute_extension_json(
+        &self,
+        _governor: &dyn ResourceGovernor,
+        request: ironclaw_mcp::McpExecutionRequest<'_>,
+    ) -> Result<ironclaw_mcp::McpExecutionResult, ironclaw_mcp::McpError> {
+        *self.invoked.lock().expect("invoked lock") = Some((
+            request.capability_id.clone(),
+            request.invocation.input.clone(),
+        ));
+        let output_bytes = serde_json::to_vec(&self.output)
+            .map(|bytes| bytes.len() as u64)
+            .unwrap_or_default();
+        let reservation_id = ResourceReservationId::new();
+        Ok(ironclaw_mcp::McpExecutionResult {
+            result: ironclaw_host_api::CapabilityHostResult {
+                output: self.output.clone(),
+                reservation_id,
+                usage: ResourceUsage::default(),
+                output_bytes,
+            },
+            receipt: ResourceReceipt {
+                id: reservation_id,
+                scope: request.scope.clone(),
+                status: ReservationStatus::Released,
+                estimate: ResourceEstimate::default(),
+                actual: None,
+            },
+        })
+    }
+}
+
+/// A runtime HTTP egress that only needs to *exist*: a discovered MCP tool
+/// carries the `network` effect, so `ServiceResolvedRuntimeAdapter` resolves an
+/// egress for the plan before delegating to the executor. The `McpExecutor`
+/// double returns its result without touching the network, so this egress is
+/// never actually called — it errors loudly if it ever is.
+struct UnusedRuntimeHttpEgress;
+
+#[async_trait]
+impl ironclaw_host_api::RuntimeHttpEgress for UnusedRuntimeHttpEgress {
+    async fn execute(
+        &self,
+        request: ironclaw_host_api::RuntimeHttpEgressRequest,
+    ) -> Result<
+        ironclaw_host_api::RuntimeHttpEgressResponse,
+        ironclaw_host_api::RuntimeHttpEgressError,
+    > {
+        Err(ironclaw_host_api::RuntimeHttpEgressError::Request {
+            reason: "runtime egress must not be called in the binder routing test".to_string(),
+            request_bytes: request.body.len() as u64,
+            response_bytes: 0,
+        })
+    }
+}
+
+#[tokio::test]
+async fn binder_invokes_a_discovered_mcp_tool_through_the_tool_adapter() {
+    // TOOL-6 (MCP half): a hosted-MCP package whose tools are *discovered*
+    // (tools/list-originated via `package_with_discovered_hosted_mcp_tools`),
+    // not statically declared, binds and invokes through the very same
+    // `LaneBackedToolAdapter` as the static/WASM lanes. The binder never sees
+    // "discovered vs declared" — a discovered capability carries
+    // `RuntimeKind::Mcp`, so it resolves the MCP lane and dispatches identically.
+    let base = test_package(MCP_TEST_MANIFEST, "test-mcp");
+    let discovered = ironclaw_extensions::package_with_discovered_hosted_mcp_tools(
+        &base,
+        &[ironclaw_extensions::HostedMcpDiscoveredTool {
+            name: "search".to_string(),
+            description: "Discovered search tool".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+            annotations: ironclaw_extensions::HostedMcpDiscoveredToolAnnotations {
+                read_only_hint: true,
+                ..Default::default()
+            },
+        }],
+    )
+    .expect("discovered hosted-MCP package builds");
+
+    let executor = Arc::new(RecordingMcpExecutor {
+        output: serde_json::json!({"hits": ["a", "b"]}),
+        invoked: std::sync::Mutex::new(None),
+    });
+    // Discovered MCP tools carry the `network` effect, so the dispatch planner
+    // needs a non-deny network mode (the executor double itself never touches
+    // the network — this only clears the pre-dispatch policy gate).
+    let services = binder_services(FirstPartyCapabilityRegistry::new())
+        .with_runtime_policy(policy_with(
+            FilesystemBackendKind::HostWorkspace,
+            ProcessBackendKind::LocalHost,
+            NetworkMode::DirectLogged,
+            SecretMode::ScrubbedEnv,
+        ))
+        .with_runtime_http_egress(Arc::new(UnusedRuntimeHttpEgress))
+        .with_mcp_runtime(Arc::clone(&executor));
+    let binder = services.extension_lane_tool_binder();
+
+    let adapter = binder
+        .bind_package(Arc::new(discovered))
+        .expect("discovered MCP package binds through the MCP lane");
+    let ports = ToolPorts {
+        egress: None,
+        state: None,
+    };
+
+    let result = adapter
+        .invoke(
+            call("test-mcp.search", serde_json::json!({"query": "hi"})),
+            &ports,
+        )
+        .await
+        .expect("discovered MCP capability dispatches through the ToolAdapter");
+    assert_eq!(result.output, serde_json::json!({"hits": ["a", "b"]}));
+    assert!(result.output_bytes > 0);
+
+    // The exact discovered capability id + input reached the MCP lane — routing
+    // by capability id, not a static-vs-discovered code path.
+    let invoked = executor
+        .invoked
+        .lock()
+        .expect("invoked lock")
+        .clone()
+        .expect("the MCP lane received the discovered invocation");
+    assert_eq!(invoked.0, CapabilityId::new("test-mcp.search").unwrap());
+    assert_eq!(invoked.1, serde_json::json!({"query": "hi"}));
+}
+
 #[tokio::test]
 async fn registry_resolver_allowlist_restricts_to_builtin_provider() {
     use ironclaw_dispatcher::ToolResolver;

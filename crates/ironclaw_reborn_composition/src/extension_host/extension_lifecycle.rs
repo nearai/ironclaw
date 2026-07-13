@@ -2996,6 +2996,142 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hosted_mcp_rediscovery_replaces_the_published_tool_set_completely() {
+        // TOOL-9 ("a refresh replaces the set completely"): discovery is
+        // loader-owned and has no separate refresh API — a refresh is a
+        // re-activation that re-runs tools/list and atomically republishes.
+        // The second discovery returns a *different* tool, so the published set
+        // is replaced wholesale: the first discovered capability is gone (not
+        // merged), only the second remains.
+        let catalog =
+            AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets");
+        let (_dir, _storage_root, port, active_registry, _installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                catalog,
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
+
+        port.install(package_ref.clone())
+            .await
+            .expect("install Notion MCP");
+        port.activate_with_prechecked_credentials_for_test(
+            package_ref.clone(),
+            ExtensionActivationMode::HostedMcpDiscovery {
+                scope: hosted_mcp_scope("hosted-mcp-refresh"),
+                runtime_http_egress: Arc::new(HostedMcpDiscoveryEgress::with_tool_name(
+                    "search-one",
+                )),
+            },
+        )
+        .await
+        .expect("initial discovery activation");
+        assert!(
+            active_registry
+                .snapshot()
+                .get_capability(&CapabilityId::new("notion.search-one").unwrap())
+                .is_some(),
+            "the first discovered tool publishes"
+        );
+
+        // Refresh: re-activate; tools/list now yields a different tool.
+        port.activate_with_prechecked_credentials_for_test(
+            package_ref,
+            ExtensionActivationMode::HostedMcpDiscovery {
+                scope: hosted_mcp_scope("hosted-mcp-refresh"),
+                runtime_http_egress: Arc::new(HostedMcpDiscoveryEgress::with_tool_name(
+                    "search-two",
+                )),
+            },
+        )
+        .await
+        .expect("re-discovery activation");
+
+        let snapshot = active_registry.snapshot();
+        assert!(
+            snapshot
+                .get_capability(&CapabilityId::new("notion.search-two").unwrap())
+                .is_some(),
+            "the refreshed set contains the newly discovered tool"
+        );
+        assert!(
+            snapshot
+                .get_capability(&CapabilityId::new("notion.search-one").unwrap())
+                .is_none(),
+            "the refresh replaced the set completely — the prior discovered tool is gone, not merged"
+        );
+    }
+
+    #[tokio::test]
+    async fn hosted_mcp_rediscovery_failure_leaves_the_prior_tool_set_intact() {
+        // TOOL-9 ("or not at all"): when a refresh fails after discovery but
+        // before the atomic publish (here the post-discovery credential recheck
+        // fails), the swap never happens — the previously published discovered
+        // set stays live and the new set is not partially applied.
+        let catalog =
+            AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets");
+        let (_dir, _storage_root, port, active_registry, _installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                catalog,
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
+
+        port.install(package_ref.clone())
+            .await
+            .expect("install Notion MCP");
+        port.activate_with_prechecked_credentials_for_test(
+            package_ref.clone(),
+            ExtensionActivationMode::HostedMcpDiscovery {
+                scope: hosted_mcp_scope("hosted-mcp-refresh-fail"),
+                runtime_http_egress: Arc::new(HostedMcpDiscoveryEgress::with_tool_name(
+                    "search-one",
+                )),
+            },
+        )
+        .await
+        .expect("initial discovery activation");
+
+        // Refresh attempt: tools/list would yield a new tool, but the
+        // post-discovery credential recheck fails before publish.
+        let error = port
+            .activate_with_credential_gate(
+                package_ref,
+                ExtensionActivationMode::HostedMcpDiscovery {
+                    scope: hosted_mcp_scope("hosted-mcp-refresh-fail"),
+                    runtime_http_egress: Arc::new(HostedMcpDiscoveryEgress::with_tool_name(
+                        "search-two",
+                    )),
+                },
+                FailsSecondCredentialGate {
+                    calls: Arc::new(AtomicUsize::new(0)),
+                },
+            )
+            .await
+            .expect_err("post-discovery credential failure aborts the refresh");
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+
+        let snapshot = active_registry.snapshot();
+        assert!(
+            snapshot
+                .get_capability(&CapabilityId::new("notion.search-one").unwrap())
+                .is_some(),
+            "the prior discovered set survives a failed refresh"
+        );
+        assert!(
+            snapshot
+                .get_capability(&CapabilityId::new("notion.search-two").unwrap())
+                .is_none(),
+            "a failed refresh publishes nothing — no partial swap to the new set"
+        );
+    }
+
+    #[tokio::test]
     async fn extension_activation_updates_local_dev_host_trust_policy() {
         let (_dir, _storage_root, port, _active_registry, _installation_store, trust_policy) =
             extension_management_port_fixture_with_catalog_service_and_trust(
