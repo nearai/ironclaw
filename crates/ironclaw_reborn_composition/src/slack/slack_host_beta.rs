@@ -2337,12 +2337,10 @@ mod tests {
             .await
             .expect("admin route responds");
         assert_eq!(session_admin_response.status(), StatusCode::FORBIDDEN);
-        let session_admin_body = axum::body::to_bytes(
-            session_admin_response.into_body(),
-            64 * 1024,
-        )
-        .await
-        .expect("session admin response body");
+        let session_admin_body =
+            axum::body::to_bytes(session_admin_response.into_body(), 64 * 1024)
+                .await
+                .expect("session admin response body");
         eprintln!(
             "EVIDENCE slack_admin_session status=403 body={}",
             String::from_utf8_lossy(&session_admin_body)
