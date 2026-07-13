@@ -23,7 +23,9 @@ use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef};
 
 use crate::extension_host::available_extensions::AvailableExtensionCatalog;
 use crate::extension_host::extension_lifecycle::restore_extension_lifecycle_state;
-use crate::extension_host::registered_extension_store::RegisteredExtensionStore;
+use crate::extension_host::registered_extension_store::{
+    RegisteredExtensionStore, migrate_legacy_owner_layout,
+};
 use crate::extension_host::registered_test_support::{
     fresh_boot_fixture, mounted_local_filesystem, seed_registered_installation,
 };
@@ -492,6 +494,90 @@ async fn restore_migrates_nested_legacy_registered_assets() {
             .join(NESTED_ASSETS_OWNER_USER_ID)
             .exists(),
         "legacy owner-only directory (with its nested assets) must be removed after migration"
+    );
+}
+
+const COLLISION_EXTENSION_ID: &str = "acme-mcp-collision";
+const COLLISION_OWNER_USER_ID: &str = "6eee560a-7fe5-474c-965a-67cb69df3d07";
+const COLLISION_LEGACY_MANIFEST_TOML: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "acme-mcp-collision"
+name = "Acme Collision MCP (legacy)"
+version = "0.1.0"
+description = "Legacy pre-tenant descriptor, divergent from the tenant-scoped one"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "http://legacy.example/mcp"
+"#;
+const COLLISION_TENANT_SCOPED_MANIFEST_TOML: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "acme-mcp-collision"
+name = "Acme Collision MCP (tenant-scoped)"
+version = "0.1.0"
+description = "Already-migrated tenant-scoped descriptor, must not be clobbered"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "http://tenant-scoped.example/mcp"
+"#;
+
+/// Migration collision: a tenant-scoped descriptor already exists for an id
+/// AND a divergent legacy (pre-tenant) copy of the same id also exists on
+/// disk. `migrate_legacy_owner_dir` must never clobber the existing
+/// tenant-scoped file, and per its documented stance must leave the
+/// divergent legacy copy in place (untested until now).
+#[tokio::test]
+async fn migration_preserves_existing_tenant_scoped_descriptor_and_leaves_divergent_legacy_copy() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage_root = dir.path().join("local-dev");
+    let filesystem = mounted_local_filesystem(&storage_root);
+
+    // Seed the tenant-scoped layout FIRST, with content that differs from
+    // the legacy copy below.
+    let tenant_scoped_dir = storage_root
+        .join("system/extensions/registered")
+        .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
+        .join(COLLISION_OWNER_USER_ID)
+        .join(COLLISION_EXTENSION_ID);
+    std::fs::create_dir_all(&tenant_scoped_dir).expect("tenant-scoped manifest dir");
+    std::fs::write(
+        tenant_scoped_dir.join("manifest.toml"),
+        COLLISION_TENANT_SCOPED_MANIFEST_TOML,
+    )
+    .expect("write tenant-scoped manifest");
+
+    // Seed a DIVERGENT legacy (pre-tenant) copy of the same extension id.
+    let legacy_dir = storage_root
+        .join("system/extensions/registered")
+        .join(COLLISION_OWNER_USER_ID)
+        .join(COLLISION_EXTENSION_ID);
+    std::fs::create_dir_all(&legacy_dir).expect("legacy manifest dir");
+    std::fs::write(
+        legacy_dir.join("manifest.toml"),
+        COLLISION_LEGACY_MANIFEST_TOML,
+    )
+    .expect("write legacy manifest");
+
+    migrate_legacy_owner_layout(&filesystem)
+        .await
+        .expect("migration must succeed even with a colliding tenant-scoped descriptor");
+
+    assert_eq!(
+        std::fs::read_to_string(tenant_scoped_dir.join("manifest.toml"))
+            .expect("read tenant-scoped manifest after migration"),
+        COLLISION_TENANT_SCOPED_MANIFEST_TOML,
+        "the existing tenant-scoped descriptor must be byte-unchanged after migration"
+    );
+    assert_eq!(
+        std::fs::read_to_string(legacy_dir.join("manifest.toml"))
+            .expect("read legacy manifest after migration"),
+        COLLISION_LEGACY_MANIFEST_TOML,
+        "the divergent legacy copy must remain on disk after migration, not be deleted or merged"
     );
 }
 
