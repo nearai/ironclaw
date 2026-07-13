@@ -26,19 +26,19 @@ function loadConnectionStatusForTest() {
   return context.globalThis.__testExports.ConnectionStatus;
 }
 
-test("ConnectionStatus hides stable states and renders connection interruptions", () => {
+test("ConnectionStatus hides routine states and renders connection interruptions", () => {
   const ConnectionStatus = loadConnectionStatusForTest();
 
   for (const status of [
     undefined,
     CONNECTION_STATUS.IDLE,
+    CONNECTION_STATUS.CONNECTING,
     CONNECTION_STATUS.CONNECTED,
   ]) {
     assert.equal(ConnectionStatus({ status }), null, status);
   }
 
   for (const [status, style] of [
-    [CONNECTION_STATUS.CONNECTING, "bg-iron-700/50"],
     [CONNECTION_STATUS.RECONNECTING, "bg-copper/20"],
     [CONNECTION_STATUS.DISCONNECTED, "bg-red-500/20"],
     [CONNECTION_STATUS.PAUSED, "bg-iron-700/50"],
