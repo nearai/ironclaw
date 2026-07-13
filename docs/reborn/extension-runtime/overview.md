@@ -749,6 +749,12 @@ Disconnected ──start flow──▶ Authenticating ──callback ok──▶
 Connect / Reconnect / Remove) from those two enums plus config completeness —
 no third state machine, no per-extension logic.
 
+The wire models a vendor's auth as a **list of accounts** (each carrying the
+§6.3 state and a default marker) plus each surface's resolved account, even
+while the system enforces one account per vendor — so the accepted
+multi-account follow-up (`adr/0001-multiple-accounts-per-vendor.md`) extends
+behavior without a wire break.
+
 ### 6.5 Other lifecycle rules
 
 - Startup restores all enabled generations from persisted records and publishes
@@ -779,7 +785,7 @@ reintroduced without one.
 | Channel sub-adapter set (connection/target/action traits) | folded into `ChannelAdapter` methods + `[channel.config]` | a real action that config + hooks cannot express |
 | Multiple channel surfaces per extension | no extension has two | one does (wire already carries surface keys) |
 | Installation-scoped OAuth grants (bot-install flows) | manual `[channel.config]` fields cover today's operator setup | a vendor requires OAuth-based operator install (recipes gain an `owner` field) |
-| Multiple accounts per vendor per user | one account per vendor per user matches current behavior | a real work + personal account use case |
+| Multiple accounts per vendor per user | one account per vendor per user matches current behavior | **triggered 2026-07-13** (work + personal Google accounts; two Notion accounts) — accepted as a dedicated post-P7 PR, `adr/0001-multiple-accounts-per-vendor.md`; the train ships only the list-shaped wire (§6.4) |
 | Trigger/file runtime | reserved kinds, no implementation exists | a production trigger/file use case (fourth adapter, additive) |
 | Multi-digest canonicalization, golden canonical JSON | one source digest + resolved-contract diff suffices | never, absent a concrete need |
 | Machine-readable evidence ledger, sign-off roles, checker scripts | checklist + CI + architecture gates are the evidence | never |

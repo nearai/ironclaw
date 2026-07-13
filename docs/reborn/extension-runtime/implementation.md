@@ -404,9 +404,14 @@ config types in `ironclaw_reborn_config`; `serve_slack.rs` and the
 **Frontend** (`crates/ironclaw_webui_v2/frontend`):
 
 - Wire additions (backend `reborn_services/types.rs`): full surface key per
-  surface; installation state enum (§6.1); auth account state enum (§6.3);
-  `[channel.config]` field descriptors; presentation/display data. Freeze one
-  golden wire fixture with an arbitrary channel + a multi-surface extension.
+  surface; installation state enum (§6.1); auth account state enum (§6.3),
+  exposed as a per-vendor **accounts list** (`account_id`, `label`, state,
+  `is_default`) plus each surface's `resolved_account_id` — length ≤ 1 until
+  the post-P7 multi-account follow-up
+  (`adr/0001-multiple-accounts-per-vendor.md`), list-first so the golden
+  fixture never breaks; `[channel.config]` field descriptors;
+  presentation/display data. Freeze one golden wire fixture with an arbitrary
+  channel + a multi-surface extension.
 - Add generic components: `surface-card`, `config-form` (schema-driven,
   secret-masking, never echoes stored secrets), `connect-card` (renders the
   auth state enum), optional `target-picker`. The channels tab keys by surface
@@ -525,3 +530,10 @@ blob store/leases, signing, fencing, shared vendor packages, per-vendor auth
 adapters, trigger/file runtime, evidence tooling, second e2e harness) and the
 named triggers for revisiting each. Reintroducing any of them requires a new
 ADR that cites its trigger.
+
+One exclusion's trigger has already fired: **multiple accounts per vendor**
+(accepted 2026-07-13,
+`docs/reborn/extension-runtime/adr/0001-multiple-accounts-per-vendor.md`).
+It is implemented as a dedicated PR after P7 — within P0–P7 only the
+list-shaped wire exposure lands (Workstream G; checklist UI-1 / AUTH-9
+evidence must name the list shape).
