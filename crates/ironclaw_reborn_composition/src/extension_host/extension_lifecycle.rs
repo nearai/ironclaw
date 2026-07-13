@@ -233,78 +233,96 @@ pub(crate) async fn restore_extension_lifecycle_state(
             LifecyclePackageKind::Extension,
             installation.extension_id().as_str(),
         )?;
-        // The shared catalog never contains `UserRegistered` packages
-        // (boot-leak invariant), so a miss falls back to an any-owner
-        // registered-store lookup. A row neither holds — e.g. a placeholder
-        // row written by the standalone v1->Reborn migration tool ahead of
-        // catalog package materialization, or a registered manifest deleted
-        // on disk — must not abort restore for every other installation
-        // (#5499 review); skip and keep the row (never delete/rewrite
-        // persisted state) so it restores once the package reappears.
-        let available = match catalog.resolve(&package_ref) {
-            Ok(available) => available,
-            Err(_) => {
-                match installation_effective_owner_scope(installation_store, &installation).await {
-                    Ok(Some((tenant_id, owner))) => {
-                        let owner_key = (tenant_id.clone(), owner.clone());
-                        if !registered_by_owner.contains_key(&owner_key) {
-                            match list_for_owner(filesystem.as_ref(), &tenant_id, &owner).await {
-                                Ok(packages) => {
-                                    let by_id = packages
-                                        .into_iter()
-                                        .map(|package| {
-                                            (package.package_ref.id.as_str().to_string(), package)
-                                        })
-                                        .collect();
-                                    registered_by_owner.insert(owner_key.clone(), by_id);
-                                }
-                                Err(error) => {
-                                    tracing::warn!(
-                                        extension_id = installation.extension_id().as_str(),
-                                        installation_id = installation.installation_id().as_str(),
-                                        %error,
-                                        "skipping extension installation restore: failed to load its row-owned registered set"
-                                    );
-                                    continue;
-                                }
-                            }
+        // Row-provenance-wins (review item 1): check the row's OWN stored
+        // manifest source FIRST, before ever asking the shared catalog. A
+        // `UserRegistered` row must restore from its owner-scoped registered
+        // set even if a same-id package happens to sit in the shared catalog
+        // too (the shared catalog never contains `UserRegistered` packages
+        // itself — the boot-leak invariant — but nothing stops an unrelated
+        // shared package from colliding on the same id). Only when the row
+        // ISN'T registered-sourced does the catalog get consulted at all. A
+        // row neither holds — e.g. a placeholder row written by the
+        // standalone v1->Reborn migration tool ahead of catalog package
+        // materialization, or a registered manifest deleted on disk — must
+        // not abort restore for every other installation (#5499 review);
+        // skip and keep the row (never delete/rewrite persisted state) so it
+        // restores once the package reappears.
+        let available = match installation_effective_owner_scope(installation_store, &installation)
+            .await
+        {
+            Ok(Some((tenant_id, owner))) => {
+                let owner_key = (tenant_id.clone(), owner.clone());
+                if !registered_by_owner.contains_key(&owner_key) {
+                    match list_for_owner(filesystem.as_ref(), &tenant_id, &owner).await {
+                        Ok(packages) => {
+                            let by_id = packages
+                                .into_iter()
+                                .map(|package| {
+                                    (package.package_ref.id.as_str().to_string(), package)
+                                })
+                                .collect();
+                            registered_by_owner.insert(owner_key.clone(), by_id);
                         }
-                        match registered_by_owner
-                            .get(&owner_key)
-                            .and_then(|by_id| by_id.get(package_ref.id.as_str()))
-                        {
-                            Some(available) => Arc::new(available.clone()),
-                            None => {
-                                tracing::warn!(
-                                    extension_id = installation.extension_id().as_str(),
-                                    installation_id = installation.installation_id().as_str(),
-                                    "skipping extension installation restore: not available in the catalog or its row-owned registered store"
-                                );
-                                continue;
-                            }
+                        Err(error) => {
+                            tracing::warn!(
+                                extension_id = installation.extension_id().as_str(),
+                                installation_id = installation.installation_id().as_str(),
+                                %error,
+                                "skipping extension installation restore: failed to load its row-owned registered set"
+                            );
+                            continue;
                         }
                     }
-                    Ok(None) => {
+                }
+                match registered_by_owner
+                    .get(&owner_key)
+                    .and_then(|by_id| by_id.get(package_ref.id.as_str()))
+                {
+                    Some(available) => Arc::new(available.clone()),
+                    None => {
                         tracing::warn!(
                             extension_id = installation.extension_id().as_str(),
                             installation_id = installation.installation_id().as_str(),
-                            "skipping extension installation restore: not available in the catalog and the row has no resolvable registered-owner scope"
-                        );
-                        continue;
-                    }
-                    // A real store I/O failure while resolving the row's own
-                    // owner scope — blast-radius policy: skip-and-log this
-                    // one installation, never boot-abort the whole restore.
-                    Err(error) => {
-                        tracing::debug!(
-                            extension_id = installation.extension_id().as_str(),
-                            installation_id = installation.installation_id().as_str(),
-                            %error,
-                            "skipping extension installation restore: failed to read the row's registered-owner scope"
+                            "skipping extension installation restore: row is registered-scoped but its descriptor is not in its row-owned registered store"
                         );
                         continue;
                     }
                 }
+            }
+            Ok(None) => {
+                // Not a registered row (no stored manifest, or a
+                // non-`UserRegistered` source) — the shared catalog is
+                // authoritative, same as every other non-registered
+                // installation.
+                match catalog.resolve(&package_ref) {
+                    Ok(available) => available,
+                    Err(catalog_error) => {
+                        // The error is bound (not discarded) so an eventual
+                        // real catalog-resolution failure is distinguishable
+                        // from a genuine miss in the logs, consistent with
+                        // the `get_manifest` error split (3720f533c). Skip
+                        // this one installation, never boot-abort restore.
+                        tracing::debug!(
+                            extension_id = installation.extension_id().as_str(),
+                            installation_id = installation.installation_id().as_str(),
+                            %catalog_error,
+                            "skipping extension installation restore: not available in the catalog and the row has no resolvable registered-owner scope"
+                        );
+                        continue;
+                    }
+                }
+            }
+            // A real store I/O failure while resolving the row's own owner
+            // scope — blast-radius policy: skip-and-log this one
+            // installation, never boot-abort the whole restore.
+            Err(error) => {
+                tracing::debug!(
+                    extension_id = installation.extension_id().as_str(),
+                    installation_id = installation.installation_id().as_str(),
+                    %error,
+                    "skipping extension installation restore: failed to read the row's registered-owner scope"
+                );
+                continue;
             }
         };
         if let Err(hash_error) = validate_restored_manifest_hash(&installation, &available) {
@@ -805,17 +823,30 @@ impl RebornLocalExtensionManagementPort {
         }
     }
 
-    /// Resolve a package the way every live (non-boot) path must: the shared
-    /// first-party catalog first — its read lock held only for the synchronous
-    /// lookup, never across an await — then the CALLER's registered set, since
-    /// registered packages never enter the shared catalog (boot-leak
-    /// invariant). `Ok(None)` is a genuine miss (a foreign owner's registered
-    /// package included); `Err` is a real registered-store read failure.
+    /// Resolve a package the way every live (non-boot) path must. Row
+    /// provenance wins first: if an installation row already exists for this
+    /// id and its stored manifest is `UserRegistered`, that row's own
+    /// registered descriptor is authoritative — never the shared catalog,
+    /// even if a same-id shared package sits there too (a collision that
+    /// would otherwise serve the wrong manifest to install/project). Only
+    /// when there is NO row (or the row isn't registered-sourced) does the
+    /// shared first-party catalog win — its read lock held only for the
+    /// synchronous lookup, never across an await — falling back to the
+    /// CALLER's registered set on a catalog miss, since registered packages
+    /// never enter the shared catalog (boot-leak invariant). `Ok(None)` is a
+    /// genuine miss (a foreign owner's registered package included); `Err` is
+    /// a real registered-store read failure.
     async fn resolve_available_for_scope(
         &self,
         package_ref: &LifecyclePackageRef,
         scope: &ResourceScope,
     ) -> Result<Option<Arc<AvailableExtensionPackage>>, ProductWorkflowError> {
+        if let Some(available) = self
+            .resolve_registered_row_for_package_ref(package_ref, scope)
+            .await?
+        {
+            return Ok(Some(available));
+        }
         let catalog_hit = {
             let catalog = self.catalog.read().await;
             catalog.resolve(package_ref).ok()
@@ -828,6 +859,60 @@ impl RebornLocalExtensionManagementPort {
                 .await?
                 .map(Arc::new),
         )
+    }
+
+    /// `Ok(Some(_))` only when an installation row exists for `package_ref`'s
+    /// id, its stored manifest source is `UserRegistered`, AND `scope`'s
+    /// caller may see that row — the row-provenance-wins case
+    /// `resolve_available_for_scope` must resolve before ever consulting the
+    /// shared catalog. The visibility check keeps this from becoming a
+    /// resolution oracle for a foreign caller: without it, a foreign owner's
+    /// private registered row would resolve successfully here (row-provenance
+    /// consults the ROW's own owner, not the caller's), undoing the
+    /// masked-as-not-found behavior every ownership-aware caller relies on.
+    /// Reuses `installation_effective_owner_scope` (row-authoritative on the
+    /// user axis) to derive the row's OWN tenant-owner scope, then
+    /// `list_for_owner` (the same helper boot restore batches by owner) to
+    /// locate the descriptor — never the caller's scope for the LOOKUP
+    /// (which may legitimately differ in tenant from the row for a T2
+    /// cross-tenant caller sharing a user id, handled by the visibility
+    /// check above). `Ok(None)` when there is no row, the row isn't
+    /// registered-sourced, the caller cannot see it, or the row's own
+    /// registered descriptor cannot be found (a genuine miss, not a catalog
+    /// fallback — the row's provenance already ruled the catalog out).
+    async fn resolve_registered_row_for_package_ref(
+        &self,
+        package_ref: &LifecyclePackageRef,
+        scope: &ResourceScope,
+    ) -> Result<Option<Arc<AvailableExtensionPackage>>, ProductWorkflowError> {
+        let (_, installation_id) = extension_ids_from_package_ref(package_ref)?;
+        let Some(installation) = self
+            .installation_store
+            .get_installation(&installation_id)
+            .await
+            .map_err(map_extension_installation_error)?
+        else {
+            return Ok(None);
+        };
+        if !installation.owner().visible_to(&scope.user_id) {
+            return Ok(None);
+        }
+        let Some((tenant_id, owner)) =
+            installation_effective_owner_scope(&self.installation_store, &installation).await?
+        else {
+            return Ok(None);
+        };
+        if tenant_id != scope.tenant_id {
+            // T2 cross-tenant follow-up: the row's owner user id matched, but
+            // its own registered tenant does not match this scope's tenant —
+            // never resolve across tenants.
+            return Ok(None);
+        }
+        Ok(list_for_owner(self.filesystem.as_ref(), &tenant_id, &owner)
+            .await?
+            .into_iter()
+            .find(|package| &package.package_ref == package_ref)
+            .map(Arc::new))
     }
 
     async fn search_summary(
@@ -9445,6 +9530,102 @@ url = "http://127.0.0.1:9/mcp"
             row.owner().visible_to(&owner_scope.user_id) && !row.owner().is_tenant(),
             "cross-tenant attempts must not mutate the registered row"
         );
+    }
+
+    /// Row-provenance-wins resolution (review item 1): once an installation
+    /// row exists and its stored manifest is `UserRegistered`, resolution for
+    /// that row must go to the registered store — never the shared catalog,
+    /// even when a same-id shared package sits in the catalog too. Before the
+    /// fix, `resolve_available_for_scope` (used by `project`/`install`)
+    /// checks the catalog unconditionally and would serve the colliding
+    /// catalog descriptor instead of the row's own registered one.
+    #[tokio::test]
+    async fn project_prefers_registered_row_over_same_id_catalog_package() {
+        let owner_scope = resource_scope_for("default", "owner-a");
+        let (_dir, port, package_ref, _active_registry, _installation_store) =
+            user_registered_isolation_fixture(&owner_scope, true).await;
+
+        // A shared-catalog package colliding on the SAME id but a wholly
+        // different descriptor (name/description diverge from the registered
+        // one, so a wrong resolution is trivially observable). A HostBundled
+        // package must be wasm + declare capabilities (the bare-MCP shape is
+        // only valid for `UserRegistered`), so this borrows the legacy
+        // `[[capabilities]]` shape from `fixture_extension_manifest` with the
+        // colliding id.
+        let colliding_manifest = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "acme-mcp-registered"
+name = "Colliding Shared Package"
+version = "0.1.0"
+description = "Shared catalog package colliding on the same id"
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/colliding.wasm"
+
+[[capabilities]]
+id = "acme-mcp-registered.search"
+description = "Search colliding data"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/search.input.json"
+output_schema_ref = "schemas/search.output.json"
+"#;
+        let colliding_package = fixture_extension_package_from_manifest_with_root(
+            colliding_manifest,
+            "acme-mcp-registered",
+        );
+        {
+            let mut catalog = port.catalog.write().await;
+            catalog.extend(AvailableExtensionCatalog::from_packages(vec![
+                colliding_package,
+            ]));
+        }
+
+        let projection = port
+            .project(package_ref.clone(), &owner_scope)
+            .await
+            .expect("owner's project must still resolve despite the catalog collision");
+        let Some(LifecycleProductPayload::ExtensionList { extensions, count }) = projection.payload
+        else {
+            panic!("expected extension list payload");
+        };
+        assert_eq!(count, 1);
+        assert_eq!(
+            extensions[0].summary.name, "Acme Registered MCP",
+            "row-provenance must win: the registered descriptor must be served, not the \
+             colliding shared-catalog package"
+        );
+        assert_eq!(
+            extensions[0].summary.source,
+            LifecycleExtensionSource::UserRegistered,
+            "the served descriptor must still report as user_registered"
+        );
+
+        // Inverse pin: an id with NO installation row still resolves via the
+        // shared catalog as normal — row-provenance-wins must not disable
+        // catalog-first resolution for a fresh, never-installed id.
+        let fresh_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("valid ref");
+        {
+            let mut catalog = port.catalog.write().await;
+            catalog.extend(AvailableExtensionCatalog::from_packages(vec![
+                fixture_extension_package(),
+            ]));
+        }
+        let fresh_install = port
+            .install(fresh_ref, &owner_scope)
+            .await
+            .expect("a fresh id with no installation row must install normally via the catalog");
+        assert!(matches!(
+            fresh_install.payload,
+            Some(LifecycleProductPayload::ExtensionInstall {
+                installed: true,
+                ..
+            })
+        ));
     }
 
     /// Regression: the installation row is a single flat map keyed only by
