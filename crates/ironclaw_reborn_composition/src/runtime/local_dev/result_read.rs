@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{InvocationId, UserId};
-use ironclaw_loop_support::CapabilityResultWrite;
+use ironclaw_loop_support::{CapabilityResultWrite, DurablePersistence};
 use ironclaw_threads::{
     MessageKind, MessageStatus, ReadToolResultRecordRequest, SessionThreadError,
     SessionThreadService, TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadHistoryRequest,
@@ -178,6 +178,15 @@ impl LocalDevSyntheticCapabilityHandler for ResultReadHandler {
             "total_bytes": total_bytes,
             "next_offset": next_offset,
         });
+        // `result_read`'s own chunk is already fully delivered to the model
+        // inline (below, via `result_read_observation`'s `preview`), so the
+        // durable write is skipped -- persisting it again would mint a new
+        // durable record per chunk with no reader that needs it (issue
+        // #5838). In-memory staging still happens, so an immediate re-read
+        // from cache still works; a later durable read against this ref
+        // fails gracefully as unavailable (`unavailable_result_reference`).
+        // The ORIGINAL result this chunk was paged from stays durable and
+        // untouched -- nothing is deleted.
         let mut write = invocation
             .result_writer
             .write_capability_result(CapabilityResultWrite {
@@ -187,6 +196,7 @@ impl LocalDevSyntheticCapabilityHandler for ResultReadHandler {
                 capability_id: &invocation.request.capability_id,
                 output,
                 display_preview: None,
+                durable_persistence: DurablePersistence::InlineOnly,
             })
             .await?;
         write.model_observation = Some(result_read_observation(

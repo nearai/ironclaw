@@ -16,7 +16,7 @@ use ironclaw_host_runtime::{
     VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
 use ironclaw_loop_support::{
-    CapabilityResultWrite, CapabilityWriteResult, HostManagedModelGateway,
+    CapabilityResultWrite, CapabilityWriteResult, DurablePersistence, HostManagedModelGateway,
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
     loop_driver_execution_extension_id,
 };
@@ -746,6 +746,7 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             capability_id,
             output,
             display_preview,
+            durable_persistence,
         } = write;
         let result_ref =
             LoopResultRef::new(format!("result:{}.{}", run_context.run_id, Uuid::new_v4()))
@@ -762,8 +763,15 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
         // record stores, before `output_content` is moved into persistence,
         // so its offsets line up exactly with what `result_read` returns.
         let preview = first_look_result_preview(&output_content);
-        self.persist_tool_result(run_context, &result_ref, output_content)
-            .await?;
+        // `InlineOnly` skips the durable write only: the content is already
+        // fully model-visible inline (e.g. a `result_read` continuation
+        // chunk), so a new durable record would be a redundant copy nobody
+        // reads. In-memory staging below still happens either way, so an
+        // immediate re-read from cache still succeeds.
+        if matches!(durable_persistence, DurablePersistence::Persist) {
+            self.persist_tool_result(run_context, &result_ref, output_content)
+                .await?;
+        }
         self.stage_result_best_effort(&result_ref, output.clone(), serialized_bytes);
         self.display_previews.record_result_with_preview(
             CapabilityDisplayPreviewResult {

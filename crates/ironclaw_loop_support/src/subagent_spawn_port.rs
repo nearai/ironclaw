@@ -34,8 +34,8 @@ use ironclaw_turns::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CapabilityResultWrite, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
-    subagent_prompt_port::DEFAULT_SUBAGENT_GOAL_MAX_BYTES,
+    CapabilityResultWrite, DurablePersistence, LoopCapabilityInputResolver,
+    LoopCapabilityResultWriter, subagent_prompt_port::DEFAULT_SUBAGENT_GOAL_MAX_BYTES,
 };
 
 pub const DEFAULT_SUBAGENT_MAX_DEPTH: u32 = 1;
@@ -898,6 +898,7 @@ impl SubagentSpawnCapabilityPort {
                 capability_id: &self.spawn_id,
                 output: payload,
                 display_preview: None,
+                durable_persistence: DurablePersistence::Persist,
             })
             .await?;
         let result_ref = write_result.result_ref;

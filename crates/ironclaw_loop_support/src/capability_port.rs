@@ -459,6 +459,25 @@ fn contains_capability_input_issue_sensitive_marker(value: &str) -> bool {
         })
 }
 
+/// Whether a capability result write must be durably persisted, or the
+/// content is already fully delivered to the model inline and only needs
+/// best-effort in-memory staging for the current run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DurablePersistence {
+    /// Durably persist the result content. The default, and correct choice
+    /// for any capability result the model has not already seen in full.
+    #[default]
+    Persist,
+    /// Skip durable persistence. Reserved for outputs that are already
+    /// fully model-visible inline (e.g. a `result_read` continuation chunk,
+    /// whose bytes are returned directly in the tool observation) — writing
+    /// them durably again would mint a redundant record per chunk with no
+    /// reader that needs it. Best-effort in-memory staging still happens,
+    /// so an immediate re-read from cache can still succeed; a later durable
+    /// read against this ref must fail gracefully as unavailable.
+    InlineOnly,
+}
+
 pub struct CapabilityResultWrite<'a> {
     pub run_context: &'a LoopRunContext,
     pub input_ref: &'a CapabilityInputRef,
@@ -466,6 +485,7 @@ pub struct CapabilityResultWrite<'a> {
     pub capability_id: &'a CapabilityId,
     pub output: serde_json::Value,
     pub display_preview: Option<CapabilityDisplayOutputPreview>,
+    pub durable_persistence: DurablePersistence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1421,6 +1441,7 @@ impl HostRuntimeLoopCapabilityPort {
                 capability_id: &request.capability_id,
                 output,
                 display_preview: None,
+                durable_persistence: DurablePersistence::Persist,
             })
             .await?;
         Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
@@ -2611,6 +2632,7 @@ async fn runtime_outcome_to_loop(
                     capability_id: &completed.capability_id,
                     output: completed.output.clone(),
                     display_preview: completed.display_preview.clone(),
+                    durable_persistence: DurablePersistence::Persist,
                 })
                 .await?;
             CapabilityOutcome::Completed(CapabilityResultMessage {

@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use ironclaw_host_api::{CapabilityDisplayOutputPreview, CapabilityId, InvocationId};
 use ironclaw_loop_support::{
-    CapabilityResultWrite, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
+    CapabilityResultWrite, DurablePersistence, LoopCapabilityInputResolver,
+    LoopCapabilityResultWriter,
 };
 use ironclaw_threads::{
     CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewStatus, EnsureThreadRequest,
@@ -64,6 +65,7 @@ async fn capability_io_writes_display_preview_to_durable_history() {
                 subtitle: Some("/workspace/main.rs".to_string()),
                 truncated: false,
             }),
+            durable_persistence: DurablePersistence::Persist,
         })
         .await
         .map(|_| ())

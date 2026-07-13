@@ -26,8 +26,9 @@ mod tests {
         WRITE_FILE_CAPABILITY_ID,
     };
     use ironclaw_loop_support::{
-        CapabilityWriteResult, HostManagedModelError, HostManagedModelErrorKind,
-        HostManagedModelRequest, HostManagedModelResponse, HostSkillContextSource,
+        CapabilityWriteResult, DurablePersistence, HostManagedModelError,
+        HostManagedModelErrorKind, HostManagedModelRequest, HostManagedModelResponse,
+        HostSkillContextSource,
     };
     use ironclaw_outbound::CommunicationPreferenceKey;
     use ironclaw_product_workflow::{
@@ -794,6 +795,7 @@ mod tests {
                 capability_id: &capability_id,
                 output: serde_json::json!({"content": "hello"}),
                 display_preview: None,
+                durable_persistence: DurablePersistence::Persist,
             })
             .await
             .expect("result stages");
@@ -888,6 +890,7 @@ mod tests {
                 capability_id: &capability_id,
                 output: serde_json::json!({"content": "hello"}),
                 display_preview: None,
+                durable_persistence: DurablePersistence::Persist,
             })
             .await
             .expect("result stages");
@@ -968,6 +971,7 @@ mod tests {
                 capability_id: &capability_id,
                 output: serde_json::json!({"content": "hello"}),
                 display_preview: None,
+                durable_persistence: DurablePersistence::Persist,
             })
             .await
             .expect("result stages");
@@ -1027,6 +1031,7 @@ mod tests {
                 capability_id: &capability_id,
                 output: serde_json::json!({"content": "hello"}),
                 display_preview: None,
+                durable_persistence: DurablePersistence::Persist,
             })
             .await
             .expect_err("missing thread must reject an unreadable result reference");
@@ -1081,6 +1086,7 @@ mod tests {
                     "x".repeat(LOCAL_DEV_DURABLE_TOOL_RESULT_MAX_BYTES),
                 ),
                 display_preview: None,
+                durable_persistence: DurablePersistence::Persist,
             })
             .await
             .expect_err("oversized durable result must be rejected");
@@ -1159,6 +1165,7 @@ mod tests {
                 capability_id: &capability_id,
                 output: serde_json::json!({"content": "original"}),
                 display_preview: None,
+                durable_persistence: DurablePersistence::Persist,
             })
             .await
             .expect("initial durable write succeeds");
@@ -1263,6 +1270,7 @@ mod tests {
                 capability_id: &capability_id,
                 output: output.clone(),
                 display_preview: None,
+                durable_persistence: DurablePersistence::Persist,
             })
             .await
             .expect("small result stages");
@@ -1368,6 +1376,7 @@ mod tests {
                 capability_id: &capability_id,
                 output,
                 display_preview: None,
+                durable_persistence: DurablePersistence::Persist,
             })
             .await
             .expect("large result stages");
@@ -1492,6 +1501,198 @@ mod tests {
             reassembled, full_text,
             "preview + continuation must reproduce the full serialized result with no gap or overlap"
         );
+    }
+
+    /// Regression (#5838): `result_read`'s own chunk output must NOT mint a
+    /// new durable `ToolResultRecord` -- its bytes are already fully
+    /// delivered to the model inline via the observation preview, so a
+    /// durable copy is a redundant record nobody reads. Paging a large
+    /// result in small chunks previously wrote one durable row per chunk
+    /// (storage amplification). This does not touch the ORIGINAL result's
+    /// durable record, which stays intact (asserted below) -- the fix skips
+    /// only the *new* record `result_read` would otherwise create.
+    #[tokio::test]
+    async fn local_dev_result_read_chunk_does_not_persist_a_new_durable_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+            "local-dev-result-read-no-amplification",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let runtime = services.host_runtime.clone().expect("host runtime");
+        let local_runtime = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate");
+        let fallback_user_id =
+            UserId::new("result-read-no-amplification-owner").expect("fallback user id");
+        let run_context = run_context("result-read-no-amplification").await;
+        let thread_scope = local_dev_thread_scope_for_run(&run_context, &fallback_user_id)
+            .expect("agent-scoped thread");
+        let backend = Arc::new(InMemoryBackend::new());
+        let filesystem = scoped_thread_filesystem(Arc::clone(&backend));
+        let thread_service: Arc<dyn SessionThreadService> =
+            Arc::new(FilesystemSessionThreadService::new(filesystem));
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: thread_scope.clone(),
+                thread_id: Some(run_context.thread_id.clone()),
+                created_by_actor_id: "actor-a".into(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .expect("thread exists");
+
+        let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
+        let capability_io = Arc::new(LocalDevCapabilityIo::new_with_durable_previews(
+            Arc::clone(&display_previews),
+            thread_service.clone(),
+            fallback_user_id.clone(),
+        ));
+        let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
+        let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
+
+        let content = "a".repeat(2046 + 100);
+        let output = serde_json::Value::String(content);
+
+        let input_ref = capability_io
+            .register_provider_tool_call_input(
+                &run_context,
+                &provider_tool_call(serde_json::json!({"message": "hello"})),
+            )
+            .await
+            .expect("input stages");
+        let invocation_id = InvocationId::new();
+        let capability_id = CapabilityId::new("builtin.echo").expect("capability id");
+        let write_result = capability_io
+            .write_capability_result(CapabilityResultWrite {
+                run_context: &run_context,
+                input_ref: &input_ref,
+                invocation_id,
+                capability_id: &capability_id,
+                output,
+                display_preview: None,
+                durable_persistence: DurablePersistence::Persist,
+            })
+            .await
+            .expect("original large result stages durably");
+        let next_offset = match &write_result
+            .model_observation
+            .as_ref()
+            .expect("first-look observation")
+            .detail
+        {
+            ironclaw_turns::run_profile::ToolObservationDetail::ResultReference {
+                next_offset: Some(next_offset),
+                ..
+            } => *next_offset,
+            detail => panic!("expected a truncated result reference preview, got {detail:?}"),
+        };
+
+        thread_service
+            .append_tool_result_reference(AppendToolResultReferenceRequest {
+                scope: thread_scope.clone(),
+                thread_id: run_context.thread_id.clone(),
+                turn_run_id: run_context.run_id.to_string(),
+                result_ref: write_result.result_ref.as_str().to_string(),
+                safe_summary: ToolResultSafeSummary::new("result chunk returned".to_string())
+                    .expect("summary is safe"),
+                provider_call: None,
+                model_observation: write_result
+                    .model_observation
+                    .as_ref()
+                    .map(|observation| serde_json::to_value(observation).expect("serializes")),
+            })
+            .await
+            .expect("finalized reference exists");
+
+        let factory = LocalDevLoopCapabilityPortFactory {
+            runtime,
+            fallback_user_id: fallback_user_id.clone(),
+            policy: Arc::clone(&local_runtime.capability_policy),
+            workspace_mounts: local_runtime.workspace_mounts.clone(),
+            memory_mounts: local_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: local_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
+            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            input_resolver,
+            result_writer,
+            milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            skill_activation_source: None,
+            project_service: Arc::clone(&local_runtime.project_service),
+            thread_service: thread_service.clone(),
+            trajectory_observer: None,
+            outbound_preferences_facade: None,
+            outbound_delivery_target_set_requires_approval: false,
+            approval_settings: Arc::new(
+                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
+            ),
+            approval_requests: local_runtime.approval_requests.clone(),
+            capability_leases: local_runtime.capability_leases.clone(),
+            external_tool_catalog: Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new()),
+        };
+        let port = factory
+            .create_capability_port(&run_context)
+            .await
+            .expect("capability port");
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__result_read",
+                    serde_json::json!({
+                        "result_ref": write_result.result_ref.as_str(),
+                        "offset": next_offset,
+                        "max_bytes": 2048,
+                    }),
+                ),
+            ))
+            .await
+            .expect("result_read provider call stages");
+        let outcome = port
+            .invoke_capability(invocation_for_candidate(&candidate))
+            .await
+            .expect("result_read invokes");
+        let message = match outcome {
+            CapabilityOutcome::Completed(message) => message,
+            outcome => panic!("result_read should complete, got {outcome:?}"),
+        };
+
+        // RED before the fix: `result_read`'s chunk write went through the
+        // same durable path as every other capability result, so this read
+        // would find a durable record for the chunk's own (freshly minted)
+        // result_ref. GREEN after the fix: the chunk write is InlineOnly, so
+        // no durable record exists for it.
+        let chunk_durable_record = thread_service
+            .read_tool_result_record(ironclaw_threads::ReadToolResultRecordRequest {
+                scope: thread_scope.clone(),
+                thread_id: run_context.thread_id.clone(),
+                result_ref: message.result_ref.as_str().to_string(),
+                offset: 0,
+                max_bytes: 64,
+            })
+            .await
+            .expect("durable lookup does not error");
+        assert!(
+            chunk_durable_record.is_none(),
+            "result_read chunk must not mint a new durable ToolResultRecord"
+        );
+
+        // The ORIGINAL result's durable record is untouched (never deleted).
+        let original_durable_record = thread_service
+            .read_tool_result_record(ironclaw_threads::ReadToolResultRecordRequest {
+                scope: thread_scope,
+                thread_id: run_context.thread_id.clone(),
+                result_ref: write_result.result_ref.as_str().to_string(),
+                offset: 0,
+                max_bytes: 64,
+            })
+            .await
+            .expect("durable lookup does not error")
+            .expect("original durable record remains intact");
+        assert!(!original_durable_record.content.is_empty());
     }
 
     #[tokio::test]

@@ -17,7 +17,7 @@ use ironclaw_host_runtime::{
     VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
 use ironclaw_loop_support::{
-    CapabilityResultWrite, CapabilityWriteResult, EmptyUserProfileSource,
+    CapabilityResultWrite, CapabilityWriteResult, DurablePersistence, EmptyUserProfileSource,
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
     HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError, HostManagedModelError,
     HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelRequest,
@@ -80,6 +80,7 @@ async fn write_capability_result_for_test(
             capability_id: &capability_id,
             output,
             display_preview: None,
+            durable_persistence: DurablePersistence::Persist,
         })
         .await?;
     Ok(result_ref)
@@ -164,6 +165,7 @@ async fn capability_io_write_capability_result_returns_serialized_payload_byte_l
             capability_id: &capability_id,
             output: output.clone(),
             display_preview: None,
+            durable_persistence: DurablePersistence::Persist,
         })
         .await
         .expect("write capability result");

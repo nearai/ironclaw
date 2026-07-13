@@ -2,7 +2,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_host_api::InvocationId;
-use ironclaw_loop_support::CapabilityResultWrite;
+use ironclaw_loop_support::{CapabilityResultWrite, DurablePersistence};
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailure, CapabilityFailureKind,
     CapabilityOutcome, CapabilityResultMessage, ConcurrencyHint,
@@ -130,6 +130,7 @@ impl LocalDevSyntheticCapabilityHandler for SkillActivationHandler {
                 capability_id: &invocation.request.capability_id,
                 output,
                 display_preview: None,
+                durable_persistence: DurablePersistence::Persist,
             })
             .await?;
         Ok(CapabilityOutcome::Completed(CapabilityResultMessage {

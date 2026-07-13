@@ -8,7 +8,8 @@ use ironclaw_host_api::{
     AgentId, CapabilityId, InvocationId, ProjectId, ProviderToolName, TenantId, ThreadId,
 };
 use ironclaw_loop_support::{
-    CapabilityResultWrite, LoopCapabilityPortDecorator, LoopCapabilityResultWriter,
+    CapabilityResultWrite, DurablePersistence, LoopCapabilityPortDecorator,
+    LoopCapabilityResultWriter,
 };
 use ironclaw_turns::{
     CapabilityActivityId, TurnId,
@@ -1036,6 +1037,7 @@ impl ToolDisclosureCapabilityPort {
                 capability_id: &request.capability_id,
                 output,
                 display_preview: None,
+                durable_persistence: DurablePersistence::Persist,
             })
             .await?;
         Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
