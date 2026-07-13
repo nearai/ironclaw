@@ -85,21 +85,28 @@ pub(super) async fn installation_effective_owner_scope(
     ))
 }
 
+/// A `registered_by_owner` cache entry: either the loaded registered set, or
+/// a marker that this owner's `list_for_owner` walk already failed this
+/// boot. The `Failed` marker is what makes the failure itself cacheable —
+/// without it, every subsequent installation for the same owner re-walks the
+/// filesystem and re-logs the same failure.
+pub(super) enum RegisteredOwnerLookup {
+    Loaded(HashMap<ExtensionId, AvailableExtensionPackage>),
+    Failed,
+}
+
 /// Boot restore's row-provenance-wins registered lookup (review item 1):
 /// called only once the caller has already determined the row's stored
 /// manifest source is `UserRegistered` (`installation_effective_owner_scope`
 /// returned `Some`). Batches each distinct (tenant, owner)'s registered set
-/// into `registered_by_owner` at most once per boot — multiple installations
-/// frequently share an owner, and each load is a full directory walk +
-/// manifest parse. `Ok(None)` means the caller must skip-and-log-and-continue
-/// this one installation (already logged here); `Ok(Some(_))` is the
-/// resolved package to restore.
+/// (or its failure) into `registered_by_owner` at most once per boot —
+/// multiple installations frequently share an owner, and each load is a full
+/// directory walk + manifest parse. `Ok(None)` means the caller must
+/// skip-and-log-and-continue this one installation (already logged here);
+/// `Ok(Some(_))` is the resolved package to restore.
 pub(super) async fn resolve_registered_installation_for_restore(
     filesystem: &Arc<dyn RootFilesystem>,
-    registered_by_owner: &mut HashMap<
-        (TenantId, UserId),
-        HashMap<ExtensionId, AvailableExtensionPackage>,
-    >,
+    registered_by_owner: &mut HashMap<(TenantId, UserId), RegisteredOwnerLookup>,
     tenant_id: &TenantId,
     owner: &UserId,
     installation: &ExtensionInstallation,
@@ -112,7 +119,7 @@ pub(super) async fn resolve_registered_installation_for_restore(
                     .into_iter()
                     .map(|package| (package.package.id.clone(), package))
                     .collect();
-                registered_by_owner.insert(owner_key.clone(), by_id);
+                registered_by_owner.insert(owner_key.clone(), RegisteredOwnerLookup::Loaded(by_id));
             }
             Err(error) => {
                 tracing::debug!(
@@ -121,23 +128,28 @@ pub(super) async fn resolve_registered_installation_for_restore(
                     %error,
                     "skipping extension installation restore: failed to load its row-owned registered set"
                 );
+                registered_by_owner.insert(owner_key.clone(), RegisteredOwnerLookup::Failed);
                 return Ok(None);
             }
         }
     }
-    match registered_by_owner
-        .get(&owner_key)
-        .and_then(|by_id| by_id.get(installation.extension_id()))
-    {
-        Some(available) => Ok(Some(Arc::new(available.clone()))),
-        None => {
-            tracing::debug!(
-                extension_id = installation.extension_id().as_str(),
-                installation_id = installation.installation_id().as_str(),
-                "skipping extension installation restore: row is registered-scoped but its descriptor is not in its row-owned registered store"
-            );
-            Ok(None)
+    match registered_by_owner.get(&owner_key) {
+        Some(RegisteredOwnerLookup::Loaded(by_id)) => {
+            match by_id.get(installation.extension_id()) {
+                Some(available) => Ok(Some(Arc::new(available.clone()))),
+                None => {
+                    tracing::debug!(
+                        extension_id = installation.extension_id().as_str(),
+                        installation_id = installation.installation_id().as_str(),
+                        "skipping extension installation restore: row is registered-scoped but its descriptor is not in its row-owned registered store"
+                    );
+                    Ok(None)
+                }
+            }
         }
+        // The owner's walk already failed for an earlier installation this
+        // boot (already logged then) — skip without re-walking or re-logging.
+        Some(RegisteredOwnerLookup::Failed) | None => Ok(None),
     }
 }
 

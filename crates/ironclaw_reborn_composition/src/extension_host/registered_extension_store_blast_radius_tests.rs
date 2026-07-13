@@ -767,6 +767,151 @@ url = "http://127.0.0.1:9/mcp"
     );
 }
 
+/// Wraps a real `LocalFilesystem`, counting `list_dir` calls against exactly
+/// one owner directory AND injecting a non-`NotFound` failure on every one of
+/// those calls — the counting counterpart of `FailListDirFilesystem` used to
+/// pin that a failed owner lookup is cached (not re-walked) across multiple
+/// installations sharing that owner.
+struct CountingFailListDirFilesystem {
+    inner: LocalFilesystem,
+    fail_path: VirtualPath,
+    count: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl RootFilesystem for CountingFailListDirFilesystem {
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        if path == &self.fail_path {
+            self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: ironclaw_filesystem::FilesystemOperation::ListDir,
+                reason: "injected transient backend failure".to_string(),
+            });
+        }
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        self.inner.read_file(path).await
+    }
+}
+
+/// CodeRabbit review pin: `resolve_registered_installation_for_restore` must
+/// cache a FAILED owner lookup too, not just a successful one — otherwise
+/// every installation for the same (tenant, owner) after the first re-walks
+/// the filesystem and re-logs the same failure. Two installations share a
+/// failing owner; `list_dir` on that owner's directory must be attempted
+/// exactly once. RED before the fix: `count` was 2.
+#[tokio::test]
+async fn restore_caches_owners_registered_lookup_failure_across_installations() {
+    const OWNER_USER_ID: &str = "d9999999-7fe5-474c-965a-67cb69df3d13";
+    const FIRST_EXTENSION_ID: &str = "owner-failing-first-mcp";
+    const SECOND_EXTENSION_ID: &str = "owner-failing-second-mcp";
+    const FIRST_MANIFEST_TOML: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "owner-failing-first-mcp"
+name = "Owner Failing First MCP"
+version = "0.1.0"
+description = "First registered MCP under an owner whose list_dir fails (failure-cache fixture)"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "http://127.0.0.1:9/mcp"
+"#;
+    const SECOND_MANIFEST_TOML: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "owner-failing-second-mcp"
+name = "Owner Failing Second MCP"
+version = "0.1.0"
+description = "Second registered MCP under the same failing owner (failure-cache fixture)"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "http://127.0.0.1:9/mcp"
+"#;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage_root = dir.path().join("local-dev");
+    std::fs::create_dir_all(&storage_root).expect("storage root"); // safety: test-only fixture setup.
+
+    let local_filesystem = mounted_local_filesystem(&storage_root);
+    let owner_root = VirtualPath::new(format!(
+        "/system/extensions/registered/{}/{}",
+        ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID,
+        OWNER_USER_ID
+    ))
+    .expect("valid virtual path");
+    let failing_filesystem = Arc::new(CountingFailListDirFilesystem {
+        inner: local_filesystem,
+        fail_path: owner_root,
+        count: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let filesystem: Arc<dyn RootFilesystem> = failing_filesystem.clone();
+
+    let default_tenant =
+        TenantId::from_trusted(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string());
+    let installation_store: Arc<dyn ExtensionInstallationStore> =
+        Arc::new(InMemoryExtensionInstallationStore::default());
+    let owner = UserId::new(OWNER_USER_ID).expect("valid owner id");
+    seed_registered_installation(
+        &installation_store,
+        FIRST_MANIFEST_TOML,
+        &default_tenant,
+        &owner,
+        FIRST_EXTENSION_ID,
+        None,
+    )
+    .await;
+    seed_registered_installation(
+        &installation_store,
+        SECOND_MANIFEST_TOML,
+        &default_tenant,
+        &owner,
+        SECOND_EXTENSION_ID,
+        None,
+    )
+    .await;
+
+    let empty_catalog = AvailableExtensionCatalog::from_packages(Vec::new());
+    let boot = fresh_boot_fixture();
+
+    restore_extension_lifecycle_state(
+        &empty_catalog,
+        &filesystem,
+        &installation_store,
+        &boot.lifecycle_service,
+        &boot.active_extensions,
+    )
+    .await
+    .expect(
+        "restore must skip-and-continue past a failing owner's registered lookup for both \
+         installations, not abort",
+    );
+
+    assert_eq!(
+        failing_filesystem
+            .count
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a failed owner lookup must be cached: only the FIRST installation should attempt \
+         list_dir; the second must hit the cached failure outcome, not re-walk (RED before \
+         caching the failure: this was 2)"
+    );
+}
+
 const MIGRATION_GOOD_OWNER_USER_ID: &str = "b7777777-7fe5-474c-965a-67cb69df3d11";
 const MIGRATION_BROKEN_OWNER_USER_ID: &str = "c8888888-7fe5-474c-965a-67cb69df3d12";
 const MIGRATION_GOOD_EXTENSION_ID: &str = "good-legacy-mcp";

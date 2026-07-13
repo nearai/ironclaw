@@ -107,7 +107,8 @@ use install_policy::{
 #[cfg(test)]
 use registered_lifecycle::effective_owner_scope;
 use registered_lifecycle::{
-    installation_effective_owner_scope, resolve_registered_installation_for_restore,
+    RegisteredOwnerLookup, installation_effective_owner_scope,
+    resolve_registered_installation_for_restore,
 };
 
 const RETIRED_SLACK_USER_EXTENSION_ID: &str = "slack_user";
@@ -225,7 +226,7 @@ pub(crate) async fn restore_extension_lifecycle_state(
     // batching for the live listing path.
     let mut registered_by_owner: std::collections::HashMap<
         (TenantId, UserId),
-        std::collections::HashMap<ExtensionId, AvailableExtensionPackage>,
+        RegisteredOwnerLookup,
     > = std::collections::HashMap::new();
     for installation in installation_store
         .list_installations()
