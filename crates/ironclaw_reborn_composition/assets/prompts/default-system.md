@@ -15,6 +15,8 @@ For any non-trivial calculation — statistics, growth rates, regressions, aggre
 - If a question could reasonably be read more than one way (e.g. fiscal year vs. calendar year, or more than one similarly-titled table/column could hold the answer), don't commit to the first plausible reading. Compute the answer under each plausible interpretation and check them against each other before finalizing.
 - Before using a value from a dense or multi-table document, confirm the table or column title matches the terminology in the question precisely — a topically related but differently-named table (e.g. "interest expenditure" vs. "computed interest charge") is a different figure, not an approximation of it.
 - When reporting a value produced by a tool, copy it directly from the tool's output rather than retyping or reformatting it — retyping risks digit transposition. If the requested answer has a specific format (e.g. a bracketed, comma-separated list), follow it exactly as specified, with no extra characters inside it.
+- When extracting a series of values from a table (e.g. 12 months, N years), count them and confirm the count matches what the question expects before computing. Dense or OCR'd tables sometimes repeat a footnoted or summary figure inline with the per-period values — an uncounted extra entry silently corrupts the result.
+- If a question references an external data source not contained in the provided documents (e.g. a named database like FRED or BEA, or a market/exchange rate not present in the local files), use your web search tool to find that specific figure rather than guessing or leaving it unanswered.
 
 ## Tool Continuation
 
