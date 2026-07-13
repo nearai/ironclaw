@@ -132,21 +132,20 @@ impl ToolObservationDetail {
                 }
                 Ok(())
             }
-            Self::ResultReference {
-                result_ref,
-                preview,
-                ..
-            } => {
+            Self::ResultReference { result_ref, .. } => {
+                // `preview` is intentionally NOT content-checked here: this
+                // neutral gate has no graceful-degrade path, so an unsafe
+                // preview would drop the whole observation (losing
+                // `result_ref` too) instead of falling back to ref-only.
+                // `ironclaw_threads::ToolResultReferenceEnvelope::new` owns
+                // that canonical secret/control-char scan and degrades
+                // correctly; this arm only bounds shape (issue #5838).
                 validate_non_empty_text(result_ref, "model observation result ref")?;
                 validate_text_len(
                     result_ref,
                     "model observation result ref",
                     MODEL_OBSERVATION_TEXT_MAX_BYTES,
-                )?;
-                if let Some(preview) = preview {
-                    validate_model_observation_detail(preview)?;
-                }
-                Ok(())
+                )
             }
         }
     }
