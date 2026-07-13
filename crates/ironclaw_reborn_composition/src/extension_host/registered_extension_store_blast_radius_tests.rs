@@ -420,6 +420,7 @@ fn catalog_fixture_package() -> AvailableExtensionPackage {
         manifest_toml: CATALOG_MANIFEST_TOML.to_string(),
         source: ManifestSource::InstalledLocal,
         package,
+        cleanup_requirements: Vec::new(),
         surface_kinds: Vec::new(),
         assets: Vec::new(),
     }

@@ -2291,6 +2291,7 @@ url = "http://127.0.0.1:9/mcp"
             manifest_toml: MANIFEST.to_string(),
             source,
             package,
+            cleanup_requirements: Vec::new(),
             surface_kinds: Vec::new(),
             assets: Vec::new(),
         };

@@ -2541,15 +2541,6 @@ fn extension_ids_from_package_ref(
     Ok((extension_id, installation_id))
 }
 
-/// The remove path resolves its acting caller as actor-or-scope-user; the
-/// list/summaries reads it delegates to are scoped by `scope.user_id`, so
-/// re-point the scope at that caller before delegating.
-fn scope_for_caller(scope: &ResourceScope, caller: &UserId) -> ResourceScope {
-    let mut caller_scope = scope.clone();
-    caller_scope.user_id = caller.clone();
-    caller_scope
-}
-
 /// The installation-row owner a user-registered package must carry: the
 /// singleton MANIFEST owner (design point 2). `None` for every other source —
 /// those derive ownership from the caller via `derive_owner` /
@@ -3499,7 +3490,7 @@ output_schema_ref = "schemas/run.output.json"
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
             .expect("valid ref");
         let scope = hosted_mcp_scope("lifecycle-owner");
-        port.install(package_ref.clone(), &scope.user_id)
+        port.install(package_ref.clone(), &scope)
             .await
             .expect("install external channel");
 
@@ -3765,9 +3756,12 @@ output_schema_ref = "schemas/run.output.json"
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
             .expect("valid ref");
         let authenticated_actor = UserId::new("authenticated-actor").expect("valid actor");
-        port.install(package_ref.clone(), &authenticated_actor)
-            .await
-            .expect("install external channel");
+        port.install(
+            package_ref.clone(),
+            &hosted_mcp_scope("authenticated-actor"),
+        )
+        .await
+        .expect("install external channel");
         let mut removal_scope = hosted_mcp_scope("scope-owner");
         removal_scope.tenant_id = TenantId::new("trusted-tenant").expect("valid tenant");
         removal_scope.agent_id = Some(AgentId::new("trusted-agent").expect("valid agent"));
@@ -3848,7 +3842,7 @@ output_schema_ref = "schemas/run.output.json"
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
             .expect("valid ref");
         let scope = hosted_mcp_scope("scope-owner");
-        port.install(package_ref.clone(), &scope.user_id)
+        port.install(package_ref.clone(), &scope)
             .await
             .expect("install external channel");
 
@@ -3892,12 +3886,9 @@ output_schema_ref = "schemas/run.output.json"
             );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
             .expect("valid ref");
-        port.install(
-            package_ref.clone(),
-            &UserId::new("private-owner").expect("private owner"),
-        )
-        .await
-        .expect("install private external channel");
+        port.install(package_ref.clone(), &hosted_mcp_scope("private-owner"))
+            .await
+            .expect("install private external channel");
         let foreign_scope = hosted_mcp_scope("foreign-user");
 
         let error = port
@@ -3938,7 +3929,7 @@ output_schema_ref = "schemas/run.output.json"
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
             .expect("valid ref");
         let scope = hosted_mcp_scope("authenticated-actor");
-        port.install(package_ref.clone(), &scope.user_id)
+        port.install(package_ref.clone(), &scope)
             .await
             .expect("install external channel");
 
@@ -3982,7 +3973,7 @@ output_schema_ref = "schemas/run.output.json"
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
             .expect("valid ref");
         let scope = hosted_mcp_scope("authenticated-actor");
-        port.install(package_ref.clone(), &scope.user_id)
+        port.install(package_ref.clone(), &scope)
             .await
             .expect("install external channel");
 
@@ -4027,7 +4018,7 @@ output_schema_ref = "schemas/run.output.json"
             );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
             .expect("valid ref");
-        port.install(package_ref.clone(), &lifecycle_owner())
+        port.install(package_ref.clone(), &lifecycle_owner_scope())
             .await
             .expect("install external channel");
 
@@ -4100,7 +4091,7 @@ output_schema_ref = "schemas/run.output.json"
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
             .expect("valid ref");
         installed_port
-            .install(package_ref.clone(), &lifecycle_owner())
+            .install(package_ref.clone(), &lifecycle_owner_scope())
             .await
             .expect("install extension");
 
@@ -4862,7 +4853,7 @@ output_schema_ref = "schemas/run.output.json"
             );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
-        port.install(package_ref.clone(), &lifecycle_owner())
+        port.install(package_ref.clone(), &lifecycle_owner_scope())
             .await
             .expect("install extension");
 
@@ -7057,7 +7048,7 @@ output_schema_ref = "schemas/run.output.json"
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
         installed_port
-            .install(package_ref.clone(), &lifecycle_owner())
+            .install(package_ref.clone(), &lifecycle_owner_scope())
             .await
             .expect("install github");
 
@@ -7108,7 +7099,7 @@ output_schema_ref = "schemas/run.output.json"
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
         let removal_scope = hosted_mcp_scope("alice");
         installed_port
-            .install(package_ref.clone(), &removal_scope.user_id)
+            .install(package_ref.clone(), &removal_scope)
             .await
             .expect("install github");
         let port = RebornLocalExtensionManagementPort::new(
@@ -7274,7 +7265,7 @@ output_schema_ref = "schemas/run.output.json"
             );
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
-        port.install(package_ref.clone(), &lifecycle_owner())
+        port.install(package_ref.clone(), &lifecycle_owner_scope())
             .await
             .expect("install github");
         port.activate_with_prechecked_credentials_for_test(
@@ -7344,7 +7335,7 @@ output_schema_ref = "schemas/run.output.json"
             );
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
-        port.install(package_ref.clone(), &lifecycle_owner())
+        port.install(package_ref.clone(), &lifecycle_owner_scope())
             .await
             .expect("install github");
         port.activate_with_prechecked_credentials_for_test(
@@ -7407,7 +7398,7 @@ output_schema_ref = "schemas/run.output.json"
             );
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
-        port.install(package_ref.clone(), &lifecycle_owner())
+        port.install(package_ref.clone(), &lifecycle_owner_scope())
             .await
             .expect("install github");
         let extension_id = ExtensionId::new("github").expect("valid extension id");
