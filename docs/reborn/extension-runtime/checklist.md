@@ -710,14 +710,28 @@ Rules — kept short on purpose:
   (`tests/integration/extension_delivery.rs`). The thin preference-target
   provisioner glue (`slack_preference_targets.rs`) rides composition as a
   §11 sliver until the P6 extraction.
-- [ ] OUT-11 Prompt construction consumes `CommunicationPresentationPolicy`
+- [x] OUT-11 Prompt construction consumes `CommunicationPresentationPolicy`
   from the channel contract; concrete channel branches in `ironclaw_llm` are
-  deleted. — The generic policy type exists in `ironclaw_llm::reasoning`
-  and no concrete channel branch remains in that crate's production code;
-  the remaining half — feeding the manifest's `[channel.presentation]`
-  values (`supports_markdown`, `max_message_chars`) into prompt
-  construction per channel — rides the P6 extraction with the channel
-  contract plumbing.
+  deleted. — no concrete channel branch remains in `ironclaw_llm`, and the
+  manifest's `[channel.presentation]` (`supports_markdown`,
+  `max_message_chars`) now feeds prompt construction per channel. The resolved
+  `ChannelPresentation` (`ironclaw_host_api::channel`) flows manifest →
+  `LifecycleExtensionSummary.channel_presentation`
+  (`available_extensions.rs::summary` / `channel_presentation_from_manifest_record`)
+  → the communication provider → `ConnectedChannelSummary.presentation` →
+  `LoopRuntimeContext::render_model_content`, which renders a compact per-channel
+  hint (e.g. `Slack (authenticated, active, markdown, ≤40000 chars/message)`).
+  Pins: `renders_channel_presentation_hint`
+  (`ironclaw_turns/src/run_profile/runtime_context.rs`, render half),
+  `bundled_slack_package_declares_product_adapter_channel_surface` (the real
+  slack manifest projects `supports_markdown=true`/`max_message_chars=40000`
+  onto the summary), and `channel_extensions_are_classified_as_connected_channels`
+  (the presentation flows through `RuntimeCommunicationContextProvider` onto the
+  connected-channel summary). OWNER CALL (flagged in the PR body): Option A —
+  widen the communication-context seam (`LifecycleExtensionSummary` → provider →
+  `ConnectedChannelSummary`), reusing the existing per-channel pipe, rather than
+  Option B (a new extension-host lookup port). `LifecycleExtensionSummary` is an
+  internal lifecycle DTO, not the WebUI wire, so no golden fixture changes.
 - [x] OUT-12 Trace contributions use generic extension/surface origin ids;
   concrete variants are deleted. — `ironclaw_reborn_traces` carries
   `channel_origin: Option<String>` as data
@@ -849,10 +863,23 @@ Rules — kept short on purpose:
   affordances derive from `installation_state` + the accounts-list auth state +
   config completeness with no per-extension logic (source-scan
   `chat_omits_connect_action_while_extensions_render_generic_connect_ui`,
-  `assets.rs`; frontend `vitest` 639/639 green after the wire swap). The acme
-  fixture channel *browser* render/configure/connect proof (Python e2e, no
-  frontend source change) is NOT run in this session — it rides the existing
-  `tests/e2e` harness and remains owed (flagged in the PR).
+  `assets.rs`; frontend `vitest` 639/639 green after the wire swap).
+  OWNER-FLAGGED FINDING (verified): the literal "acme fixture channel in the
+  *browser*" is not achievable — the acme fixture is a Rust integration-test
+  fixture (`AcmeFixtureChannelAdapter`, `tests/integration/support`), not a
+  browser-serveable bundled package; the production/e2e catalog carries only
+  real extensions (github, slack, google-*, nearai-mcp, notion-mcp), so
+  `ironclaw-reborn serve` cannot install acme. The generic channel-surface
+  rendering (the substantive UI-2 claim — every channel renders through the
+  same components with no per-extension frontend logic) is therefore proven
+  with the REAL bundled channels: the wire is frozen by the golden fixture
+  (UI-1/AUTH-9), the no-per-extension-logic rendering by the `assets.rs`
+  source-scan + vitest, and the API-level channel configure→connect→remove
+  flow by `test_reborn_slack_channel_e2e.py` (UI-6, httpx). The remaining gap
+  is a *browser* (Playwright) render of the channels tab for a real channel,
+  which rides the existing `tests/e2e` Playwright harness
+  (`test_extensions.py` / `test_channel_pairing_flow.py`) and was not run this
+  session (heavy local Playwright + `serve` setup, frontend/e2e is local-only).
 - [x] UI-3 Config forms are schema-driven; secret fields mask and never echo
   stored values. — The configure modal renders wire-projected
   `[channel.config]` field + secret descriptors generically

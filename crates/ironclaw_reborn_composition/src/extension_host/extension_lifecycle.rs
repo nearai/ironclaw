@@ -2156,6 +2156,7 @@ mod tests {
                     surface_kinds: vec![CapabilitySurfaceKind::Channel],
                     channel_directions: None,
                     channel_connection: None,
+                    channel_presentation: None,
                     visible_capability_ids: Vec::new(),
                     visible_read_only_capability_ids: Vec::new(),
                     credential_requirements: Vec::new(),
@@ -5976,6 +5977,7 @@ output_schema_ref = "schemas/search.output.json"
             package,
             surface_kinds: Vec::new(),
             channel_directions: None,
+            channel_presentation: None,
             assets: vec![
                 AvailableExtensionAsset {
                     path: "manifest.toml".to_string(),

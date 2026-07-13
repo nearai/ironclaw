@@ -189,6 +189,7 @@ async fn fetch_communication_context(
                     name: ext.summary.name.clone(),
                     authenticated: true,
                     active: true,
+                    presentation: ext.summary.channel_presentation.clone(),
                 })
                 .collect();
             ConnectedChannelsState::Known(channels)
@@ -449,6 +450,7 @@ mod tests {
                 surface_kinds: vec![CapabilitySurfaceKind::Channel],
                 channel_directions: None,
                 channel_connection: None,
+                channel_presentation: None,
                 visible_capability_ids: Vec::new(),
                 visible_read_only_capability_ids: Vec::new(),
                 credential_requirements: Vec::new(),
@@ -471,6 +473,7 @@ mod tests {
                 surface_kinds: Vec::new(),
                 channel_directions: None,
                 channel_connection: None,
+                channel_presentation: None,
                 visible_capability_ids: Vec::new(),
                 visible_read_only_capability_ids: Vec::new(),
                 credential_requirements: Vec::new(),
@@ -676,10 +679,17 @@ mod tests {
     async fn channel_extensions_are_classified_as_connected_channels() {
         // Only active channel-surface extensions count: telegram (active channel)
         // is included; github (non-channel) and slack (inactive channel) are not.
+        // The telegram summary also carries a declared presentation (OUT-11).
+        let mut telegram = channel_extension("telegram");
+        telegram.summary.channel_presentation = Some(ironclaw_host_api::ChannelPresentation {
+            supports_markdown: true,
+            supports_threads: false,
+            max_message_chars: Some(4096),
+        });
         let provider = RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesFacade))
             .with_lifecycle_facade(Arc::new(ChannelListLifecycleFacade {
                 extensions: vec![
-                    channel_extension("telegram"),
+                    telegram,
                     non_channel_extension("github"),
                     inactive_channel_extension("slack"),
                 ],
@@ -689,16 +699,26 @@ mod tests {
             .resolve(false)
             .await
             .expect("context");
-        let names: Vec<String> = match ctx.connected_channels {
-            ConnectedChannelsState::Known(channels) => {
-                channels.into_iter().map(|c| c.name).collect()
-            }
+        let channels = match ctx.connected_channels {
+            ConnectedChannelsState::Known(channels) => channels,
             other => panic!("expected Known channels, got {other:?}"),
         };
+        let names: Vec<String> = channels.iter().map(|c| c.name.clone()).collect();
         assert_eq!(
             names,
             vec!["telegram".to_string()],
             "only active channel-surface extensions are reported as connected"
+        );
+        // OUT-11: the channel's declared presentation flows through the provider
+        // onto the connected-channel summary that prompt construction renders.
+        assert_eq!(
+            channels[0].presentation,
+            Some(ironclaw_host_api::ChannelPresentation {
+                supports_markdown: true,
+                supports_threads: false,
+                max_message_chars: Some(4096),
+            }),
+            "the channel's declared presentation reaches the connected-channel summary"
         );
     }
 

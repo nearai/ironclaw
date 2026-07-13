@@ -1662,6 +1662,7 @@ mod tests {
             surface_kinds: Vec::new(),
             channel_directions: None,
             channel_connection: None,
+            channel_presentation: None,
             visible_capability_ids: Vec::new(),
             visible_read_only_capability_ids: Vec::new(),
             credential_requirements: vec![LifecycleExtensionCredentialRequirement {
@@ -1693,6 +1694,7 @@ mod tests {
             surface_kinds: Vec::new(),
             channel_directions: None,
             channel_connection: None,
+            channel_presentation: None,
             visible_capability_ids: vec!["nearai.web_search".to_string()],
             visible_read_only_capability_ids: vec!["nearai.web_search".to_string()],
             credential_requirements: Vec::new(),

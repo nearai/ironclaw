@@ -151,6 +151,10 @@ pub(crate) struct AvailableExtensionPackage {
     /// [`CapabilitySurfaceKind::Channel`]. Cached at construction like
     /// `surface_kinds`.
     pub(crate) channel_directions: Option<LifecycleChannelDirections>,
+    /// The channel surface's declared `[channel.presentation]` (markdown +
+    /// message cap), cached at construction like `channel_directions`. Fed into
+    /// prompt construction via the lifecycle summary (OUT-11).
+    pub(crate) channel_presentation: Option<ironclaw_host_api::ChannelPresentation>,
     pub(crate) assets: Vec<AvailableExtensionAsset>,
 }
 
@@ -172,6 +176,7 @@ impl AvailableExtensionPackage {
             surface_kinds: self.surface_kinds.clone(),
             channel_directions: self.channel_directions,
             channel_connection: channel_connection_for_package(&self.package_ref, self),
+            channel_presentation: self.channel_presentation.clone(),
             visible_capability_ids,
             visible_read_only_capability_ids,
             credential_requirements: credential_requirements(self),
@@ -755,6 +760,7 @@ fn bundled_extension_package(
     })?;
     let surface_kinds = surface_kinds_from_manifest_record(&record, label)?;
     let channel_directions = channel_directions_from_manifest_record(&record, label)?;
+    let channel_presentation = channel_presentation_from_manifest_record(&record);
     let manifest = record.manifest().clone().try_into().map_err(|error| {
         ProductWorkflowError::InvalidBindingRequest {
             reason: format!("bundled {label} extension manifest is invalid: {error}"),
@@ -771,6 +777,7 @@ fn bundled_extension_package(
         package,
         surface_kinds,
         channel_directions,
+        channel_presentation,
         assets,
     })
 }
@@ -828,6 +835,20 @@ fn channel_directions_from_manifest_record(
         entry.outbound |= flags.contains(ProductCapabilityFlag::ExternalFinalReplyPush);
     }
     Ok(directions)
+}
+
+/// The channel surface's declared `[channel.presentation]` (markdown support +
+/// message length cap). Only manifest v3 declares presentation via the resolved
+/// channel descriptor; v2 channels have none. Cached at construction like
+/// `channel_directions` and fed into prompt construction (OUT-11).
+fn channel_presentation_from_manifest_record(
+    record: &ExtensionManifestRecord,
+) -> Option<ironclaw_host_api::ChannelPresentation> {
+    record
+        .resolved()
+        .channel
+        .as_ref()
+        .map(|channel| channel.presentation.clone())
 }
 
 fn github_assets() -> Vec<AvailableExtensionAsset> {
@@ -1716,6 +1737,7 @@ where
         let surface_kinds = surface_kinds_from_manifest_record(&record, entry.name.as_str())?;
         let channel_directions =
             channel_directions_from_manifest_record(&record, entry.name.as_str())?;
+        let channel_presentation = channel_presentation_from_manifest_record(&record);
         let manifest = record
             .manifest()
             .clone()
@@ -1745,6 +1767,7 @@ where
             package,
             surface_kinds,
             channel_directions,
+            channel_presentation,
             assets,
         });
     }
@@ -2574,6 +2597,21 @@ mod tests {
             ],
             "unified slack projects tool + auth + channel surfaces"
         );
+        // OUT-11: the channel's declared [channel.presentation] projects onto
+        // the lifecycle summary, which feeds prompt construction.
+        let presentation = summary
+            .channel_presentation
+            .as_ref()
+            .expect("slack declares [channel.presentation]");
+        assert!(
+            presentation.supports_markdown,
+            "slack declares supports_markdown = true"
+        );
+        assert_eq!(
+            presentation.max_message_chars,
+            Some(40_000),
+            "slack declares max_message_chars = 40000"
+        );
         let directions = summary
             .channel_directions
             .expect("unified slack summary carries channel directions");
@@ -3139,6 +3177,7 @@ output_schema_ref = "schemas/write.output.json"
             package,
             surface_kinds: Vec::new(),
             channel_directions: None,
+            channel_presentation: None,
             assets: vec![
                 AvailableExtensionAsset {
                     path: "manifest.toml".to_string(),
