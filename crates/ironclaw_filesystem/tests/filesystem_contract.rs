@@ -101,6 +101,28 @@ async fn local_put_absent_rejects_existing_file_without_overwrite() {
 }
 
 #[tokio::test]
+async fn local_write_file_replaces_existing_file() {
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("project1")).unwrap();
+
+    let mut root = LocalFilesystem::new();
+    root.mount_local(
+        VirtualPath::new("/projects").unwrap(),
+        HostPath::from_path_buf(storage.path().to_path_buf()),
+    )
+    .unwrap();
+    let path = VirtualPath::new("/projects/project1/existing.txt").unwrap();
+
+    root.write_file(&path, b"first").await.unwrap();
+    root.write_file(&path, b"second").await.unwrap();
+
+    assert_eq!(
+        std::fs::read(storage.path().join("project1/existing.txt")).unwrap(),
+        b"second"
+    );
+}
+
+#[tokio::test]
 async fn scoped_write_is_denied_on_read_only_mount() {
     let storage = tempdir().unwrap();
     std::fs::create_dir_all(storage.path().join("project1")).unwrap();

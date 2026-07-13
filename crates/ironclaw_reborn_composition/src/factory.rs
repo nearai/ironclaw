@@ -605,16 +605,6 @@ impl RebornServices {
             as Arc<dyn ironclaw_filesystem::RootFilesystem>)
     }
 
-    /// Test-support access to the mount policy composed for local-dev
-    /// capability execution. This is the same view production passes into the
-    /// local runtime, exposed read-only for integration assertions.
-    #[cfg(feature = "test-support")]
-    pub fn local_dev_workspace_mounts_for_test(&self) -> Option<MountView> {
-        self.local_runtime
-            .as_ref()
-            .map(|local_runtime| local_runtime.workspace_mounts.clone())
-    }
-
     /// Test-support access to the local-dev project service backing the synthetic
     /// `project_create` capability (E-PROJ seam). Returns `None` for
     /// production-profile compositions without a local-dev runtime.

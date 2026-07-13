@@ -110,7 +110,7 @@ jobs:
 
           printf '%s\n' "$CHANGED_FILES" | scripts/ci/classify-test-scope.sh >> "$GITHUB_OUTPUT"
 
-          if has_match '^(crates/ironclaw_reborn_composition/src/(factory\.rs|factory/local_dev_host_tests\.rs|local_dev_mounts\.rs)|tests/(integration/local_dev_windows_mounts\.rs|reborn_local_dev_windows_mounts\.rs)|\.github/workflows/platform-and-compat\.yml$)'; then
+          if has_match '^(crates/ironclaw_filesystem/src/local\.rs|crates/ironclaw_host_runtime/src/(process_aliases|process_port)\.rs|crates/ironclaw_reborn_composition/src/(factory\.rs|factory/local_dev_host_tests\.rs|local_dev_mounts\.rs|runtime/local_dev/shell_tests\.rs)|\.github/workflows/platform-and-compat\.yml$)'; then
             echo "has_windows_local_dev_risk=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_windows_local_dev_risk=false" >> "$GITHUB_OUTPUT"
@@ -266,7 +266,10 @@ jobs:
           key: windows-local-dev-yolo
           save-if: false
       - name: Run Windows local-dev-yolo integration test
-        run: cargo test --no-default-features --features libsql --test reborn_local_dev_windows_mounts -- --nocapture
+        run: |
+          cargo test -p ironclaw_filesystem --test filesystem_contract local_write_file_replaces_existing_file -- --nocapture
+          cargo test -p ironclaw_reborn_composition local_yolo_policy_mounts_confirmed_host_home_as_host -- --nocapture
+          cargo test -p ironclaw_reborn_composition local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts -- --nocapture
 
   wasm-wit-compat:
     name: WASM WIT Compatibility

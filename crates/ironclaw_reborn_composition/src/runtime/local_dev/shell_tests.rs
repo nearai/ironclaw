@@ -147,7 +147,11 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         .register_provider_tool_call_input(
             &run_context,
             &provider_tool_call(serde_json::json!({
-                "command": "mkdir -p /workspace/qa-coding-smoke && test -d /host && printf '%s:%s' local-dev-shell-ok \"$PWD\"",
+                "command": if cfg!(windows) {
+                    "if not exist /workspace exit /b 1 && if not exist /host exit /b 1 && echo local-dev-shell-ok"
+                } else {
+                    "mkdir -p /workspace/qa-coding-smoke && test -d /host && printf '%s:%s' local-dev-shell-ok \"$PWD\""
+                },
                 "workdir": "/workspace/qa-coding-smoke"
             })),
         )
@@ -179,8 +183,11 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
     // reverse output rewrite virtualizes it back to the `/workspace` alias before
     // the result reaches the model — so the caller only ever sees the alias path,
     // never the host layout.
-    assert_eq!(
-        output["output"],
-        serde_json::json!("local-dev-shell-ok:/workspace/qa-coding-smoke")
-    );
+    let output_text = output["output"].as_str().expect("shell output string");
+    let expected = if cfg!(windows) {
+        "local-dev-shell-ok"
+    } else {
+        "local-dev-shell-ok:/workspace/qa-coding-smoke"
+    };
+    assert_eq!(output_text.trim_end(), expected);
 }

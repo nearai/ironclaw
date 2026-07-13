@@ -82,9 +82,9 @@ pub(crate) fn rewrite_local_host_command_aliases(
         rewritten.push(current);
         if escaped {
             escaped = false;
-        } else if current == '\\' && !in_single_quote {
+        } else if current == '\\' && !cfg!(windows) && !in_single_quote {
             escaped = true;
-        } else if current == '\'' && !in_double_quote {
+        } else if current == '\'' && !cfg!(windows) && !in_double_quote {
             in_single_quote = !in_single_quote;
         } else if current == '"' && !in_single_quote {
             in_double_quote = !in_double_quote;
@@ -190,6 +190,17 @@ fn push_rewritten_alias(
     in_double_quote: bool,
 ) {
     let raw = alias.host_path.display().to_string();
+    #[cfg(windows)]
+    {
+        let _ = in_single_quote;
+        if in_double_quote {
+            rewritten.push_str(&raw.replace('"', "\"\""));
+        } else {
+            rewritten.push_str(&cmd_quote_path(&raw));
+        }
+        return;
+    }
+    #[cfg(not(windows))]
     if in_single_quote {
         rewritten.push_str(&escape_for_single_quote_context(&raw));
     } else if in_double_quote {
@@ -197,6 +208,11 @@ fn push_rewritten_alias(
     } else {
         rewritten.push_str(&shell_quote_path(&raw));
     }
+}
+
+#[cfg(windows)]
+fn cmd_quote_path(path: &str) -> String {
+    format!("\"{}\"", path.replace('"', "\"\""))
 }
 
 fn longest_matching_command_alias<'a>(
@@ -361,6 +377,17 @@ mod tests {
         assert_eq!(
             rewrite_local_host_command_aliases("printf \"$(cat /workspace/file)\"", &[alias]),
             "printf \"$(cat /tmp/workspace/file)\""
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn command_alias_rewrite_uses_cmd_quoting() {
+        let alias = alias("/workspace", r"C:\work space");
+
+        assert_eq!(
+            rewrite_local_host_command_aliases("type /workspace/file.txt", &[alias]),
+            r#"type "C:\work space"/file.txt"#
         );
     }
 

@@ -423,9 +423,7 @@ async fn atomic_write_file(
     drop(file);
 
     let install_result = match cas {
-        CasExpectation::Any => tokio::fs::rename(&temp, target)
-            .await
-            .map_err(|error| io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error)),
+        CasExpectation::Any => replace_file_atomically(virtual_path, &temp, target).await,
         CasExpectation::Absent => match tokio::fs::hard_link(&temp, target).await {
             Ok(()) => tokio::fs::remove_file(&temp).await.map_err(|error| {
                 io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error)
@@ -465,6 +463,53 @@ async fn atomic_write_file(
 
     install_result?;
     sync_parent_dir(virtual_path, parent).await
+}
+
+#[cfg(not(windows))]
+async fn replace_file_atomically(
+    virtual_path: &VirtualPath,
+    temp: &Path,
+    target: &Path,
+) -> Result<(), FilesystemError> {
+    tokio::fs::rename(temp, target)
+        .await
+        .map_err(|error| io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error))
+}
+
+#[cfg(windows)]
+async fn replace_file_atomically(
+    virtual_path: &VirtualPath,
+    temp: &Path,
+    target: &Path,
+) -> Result<(), FilesystemError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let mut temp_wide = temp.as_os_str().encode_wide().collect::<Vec<_>>();
+    temp_wide.push(0);
+    let mut target_wide = target.as_os_str().encode_wide().collect::<Vec<_>>();
+    target_wide.push(0);
+    // SAFETY: Both paths are valid NUL-terminated UTF-16 buffers that live for
+    // the call. The temp file is created beside the target, so MoveFileExW
+    // performs an atomic same-volume replacement when the target exists.
+    let moved = unsafe {
+        MoveFileExW(
+            temp_wide.as_ptr(),
+            target_wide.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        Err(io_error(
+            virtual_path.clone(),
+            FilesystemOperation::WriteFile,
+            std::io::Error::last_os_error(),
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn unique_temp_path(
