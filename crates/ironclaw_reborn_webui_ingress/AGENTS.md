@@ -30,12 +30,18 @@ ingress owns how those are exposed over HTTP.
 ## Allowed dependencies
 
 - `ironclaw_host_api` (identity types: `TenantId`, `UserId`)
+- `ironclaw_product_adapters` (optional, `openai-compat-beta`
+  authenticated-caller evidence only)
 - `ironclaw_product_workflow` (`RebornServicesApi` and authenticated
   WebUI caller contract)
+- `ironclaw_reborn_openai_compat` (optional, `openai-compat-beta`
+  request-scope contract only)
 - `ironclaw_webui_v2` (WebChat v2 route descriptors, static assets, and
   handler router)
-- `axum`, `tokio`, `tracing`, `thiserror`, `async-trait`, `secrecy`,
-  `subtle`
+- `async-trait`, `axum`, `base64`, `chrono`, `hex`, `hmac`,
+  `jsonwebtoken`, `lru`, `parking_lot`, `rand`, `reqwest`, `secrecy`,
+  `serde`, `serde_json`, `sha2`, `subtle`, `thiserror`, `tokio`,
+  `tower`, `tower-http`, `tracing`, `url`, `urlencoding`, `uuid`
 
 Any other workspace crate dependency requires an architecture-test
 update + explicit PR rationale.

@@ -251,6 +251,10 @@ pub struct WebuiServeConfig {
     /// inside the bearer auth layer. These receive the same authenticated
     /// caller extensions and descriptor-driven policy enforcement as WebUI v2.
     pub(crate) protected_mounts: Vec<ProtectedRouteMount>,
+    /// Host-supplied operator-only protected route mounts. These are mounted
+    /// only when the authenticator exposes operator routes, and their
+    /// descriptors also feed the operator authorization matcher.
+    pub(crate) operator_mounts: Vec<ProtectedRouteMount>,
     /// Host-supplied route groups that carry both public and protected routers
     /// over one descriptor set. This is the generic seam for composition-owned
     /// product-auth routes: ingress enforces descriptor policy and auth
@@ -385,6 +389,7 @@ impl WebuiServeConfig {
             default_project_id: None,
             public_mounts: Vec::new(),
             protected_mounts: Vec::new(),
+            operator_mounts: Vec::new(),
             route_mounts: Vec::new(),
         }
     }
@@ -427,6 +432,15 @@ impl WebuiServeConfig {
     /// descriptor-driven rate/body-limit enforcement.
     pub fn with_protected_route_mount(mut self, mount: ProtectedRouteMount) -> Self {
         self.protected_mounts.push(mount);
+        self
+    }
+
+    /// Attach a host-supplied operator-only protected sub-router PLUS its route
+    /// descriptors. The router is merged into the bearer-auth layer only when
+    /// [`WebuiAuthenticator::mounts_operator_webui_config_routes`] returns true,
+    /// and matching requests require `operator_webui_config` capability.
+    pub fn with_operator_route_mount(mut self, mount: ProtectedRouteMount) -> Self {
+        self.operator_mounts.push(mount);
         self
     }
 
@@ -583,6 +597,7 @@ pub fn webui_v2_app_with_lifecycle(
     let mount_operator_routes = config.authenticator.mounts_operator_webui_config_routes();
     let public_mounts = config.public_mounts;
     let protected_mounts = config.protected_mounts;
+    let operator_mounts = config.operator_mounts;
     let route_mounts = config.route_mounts;
     let public_route_drains = PublicRouteDrains::new(
         public_mounts
@@ -609,6 +624,12 @@ pub fn webui_v2_app_with_lifecycle(
     }
     for mount in &protected_mounts {
         descriptors.extend(mount.descriptors.iter().cloned());
+    }
+    if mount_operator_routes {
+        for mount in &operator_mounts {
+            operator_descriptors.extend(mount.descriptors.iter().cloned());
+            descriptors.extend(mount.descriptors.iter().cloned());
+        }
     }
     for mount in &route_mounts {
         descriptors.extend(mount.descriptors.iter().cloned());
@@ -644,6 +665,11 @@ pub fn webui_v2_app_with_lifecycle(
     let mut protected_inner = Router::new().merge(v2_inner);
     for mount in protected_mounts {
         protected_inner = protected_inner.merge(mount.router);
+    }
+    if mount_operator_routes {
+        for mount in operator_mounts {
+            protected_inner = protected_inner.merge(mount.router);
+        }
     }
     let mut public_inner: Option<Router> = None;
     for mount in public_mounts {

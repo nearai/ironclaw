@@ -624,7 +624,7 @@ impl ServeCommand {
                     .with_slack_personal_oauth_binding(slack_personal_oauth_binding);
                 serve_config = serve_config
                     .with_public_route_mount(slack_mounts.events)
-                    .with_protected_route_mount(slack_channel_route_admin_protected_mount(
+                    .with_operator_route_mount(slack_channel_route_admin_protected_mount(
                         slack_mounts.channel_routes,
                     ));
             }

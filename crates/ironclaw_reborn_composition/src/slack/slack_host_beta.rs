@@ -2127,7 +2127,7 @@ mod tests {
             )
             .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
             .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-            .with_protected_route_mount(slack_channel_route_admin_protected_mount(
+            .with_operator_route_mount(slack_channel_route_admin_protected_mount(
                 mounts.channel_routes,
             )),
         )
@@ -2214,7 +2214,7 @@ mod tests {
             )
             .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
             .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-            .with_protected_route_mount(slack_channel_route_admin_protected_mount(
+            .with_operator_route_mount(slack_channel_route_admin_protected_mount(
                 mounts.channel_routes,
             )),
         )
@@ -2276,7 +2276,7 @@ mod tests {
             )
             .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
             .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-            .with_protected_route_mount(slack_channel_route_admin_protected_mount(
+            .with_operator_route_mount(slack_channel_route_admin_protected_mount(
                 mounts.channel_routes,
             )),
         )
@@ -2314,6 +2314,20 @@ mod tests {
             session_strategies.contains(&"oauth"),
             "SSO session token should see personal Slack OAuth connection: {body}"
         );
+
+        let session_admin_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH)
+                    .header("authorization", "Bearer session-token")
+                    .body(Body::empty())
+                    .expect("admin route request builds"),
+            )
+            .await
+            .expect("admin route responds");
+        assert_eq!(session_admin_response.status(), StatusCode::FORBIDDEN);
 
         let response = app
             .oneshot(
@@ -2367,7 +2381,7 @@ mod tests {
             )
             .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
             .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-            .with_protected_route_mount(slack_channel_route_admin_protected_mount(
+            .with_operator_route_mount(slack_channel_route_admin_protected_mount(
                 mounts.channel_routes,
             )),
         )
@@ -2534,7 +2548,7 @@ mod tests {
             )
             .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
             .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-            .with_protected_route_mount(slack_channel_route_admin_protected_mount(
+            .with_operator_route_mount(slack_channel_route_admin_protected_mount(
                 mounts.channel_routes,
             )),
         )
@@ -3810,7 +3824,7 @@ mod tests {
             )
             .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
             .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-            .with_protected_route_mount(slack_channel_route_admin_protected_mount(
+            .with_operator_route_mount(slack_channel_route_admin_protected_mount(
                 mounts.channel_routes,
             )),
         )
