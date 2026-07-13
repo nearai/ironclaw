@@ -819,8 +819,8 @@ impl RebornServices {
     /// [`Self::publish_bundled_extension_for_test`] with non-secret operator
     /// config on the installation record — the test stand-in for the
     /// deferred production configure surface (P6/H). Channel extensions
-    /// whose activation hook reads `[channel.config]` values (e.g.
-    /// Telegram's `telegram_webhook_url` for `setWebhook`) need them present
+    /// whose activation hook reads `[channel.config]` values (e.g. a public
+    /// webhook URL consumed by vendor-side registration) need them present
     /// when `host.activate` fires.
     #[cfg(feature = "test-support")]
     pub async fn publish_bundled_extension_with_config_for_test(

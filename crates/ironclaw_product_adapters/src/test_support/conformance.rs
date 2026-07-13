@@ -1,9 +1,10 @@
 //! The exported channel-adapter conformance suite (extension-runtime §8,
 //! TEST-1): ONE behavioral contract every `ChannelAdapter` implementation
-//! runs against a scripted vendor server. Concrete crates (and the invented
-//! acme fixture) call [`run_channel_adapter_conformance`] from their own
-//! tests; a new channel ships by passing this suite plus its own
-//! vendor-shape fixtures — no bespoke harness per channel.
+//! runs against a scripted vendor server. Concrete adapter crates (and the
+//! invented-vendor integration fixture) call
+//! [`run_channel_adapter_conformance`] from their own tests; a new channel
+//! ships by passing this suite plus its own vendor-shape fixtures — no
+//! bespoke harness per channel.
 //!
 //! Covered: inbound outcomes are bounded and well-formed (and malformed
 //! input never panics), `deliver` honors the envelope with structured
