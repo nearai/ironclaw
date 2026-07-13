@@ -3098,6 +3098,20 @@ mod tests {
                 }),
             ),
             (
+                // A fractional number stays InvalidValue (numeric arm), not
+                // TypeMismatch -- JSON has one number type.
+                "fractional offset",
+                serde_json::json!({"result_ref": valid_ref, "offset": 1.5, "max_bytes": 8}),
+                "result_read requires a non-negative offset",
+                Some(CapabilityInputIssue {
+                    path: "offset".to_string(),
+                    code: DispatchInputIssueCode::InvalidValue,
+                    expected: Some("non-negative integer".to_string()),
+                    received: Some("1.5".to_string()),
+                    schema_path: Some("properties/offset".to_string()),
+                }),
+            ),
+            (
                 // Wrong JSON type is a TypeMismatch echoing only the type
                 // name (mirrors the non-string result_ref arm), not an
                 // InvalidValue echoing the raw value.
@@ -3133,6 +3147,32 @@ mod tests {
                     code: DispatchInputIssueCode::TypeMismatch,
                     expected: Some("integer".to_string()),
                     received: Some("boolean".to_string()),
+                    schema_path: Some("properties/max_bytes".to_string()),
+                }),
+            ),
+            (
+                // Negative and fractional numbers pass the is_number type
+                // guard and land in the range arm as InvalidValue.
+                "negative max_bytes",
+                serde_json::json!({"result_ref": valid_ref, "offset": 0, "max_bytes": -5}),
+                "result_read max_bytes is outside the allowed range",
+                Some(CapabilityInputIssue {
+                    path: "max_bytes".to_string(),
+                    code: DispatchInputIssueCode::InvalidValue,
+                    expected: Some(max_bytes_range.clone()),
+                    received: Some("-5".to_string()),
+                    schema_path: Some("properties/max_bytes".to_string()),
+                }),
+            ),
+            (
+                "fractional max_bytes",
+                serde_json::json!({"result_ref": valid_ref, "offset": 0, "max_bytes": 2.5}),
+                "result_read max_bytes is outside the allowed range",
+                Some(CapabilityInputIssue {
+                    path: "max_bytes".to_string(),
+                    code: DispatchInputIssueCode::InvalidValue,
+                    expected: Some(max_bytes_range.clone()),
+                    received: Some("2.5".to_string()),
                     schema_path: Some("properties/max_bytes".to_string()),
                 }),
             ),
