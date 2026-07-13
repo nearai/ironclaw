@@ -378,10 +378,10 @@ async def test_reborn_v2_composer_accepts_draft_while_run_is_processing(reborn_v
     await expect(reborn_v2_page.locator(SEL_V2["msg_user"])).to_have_count(1, timeout=1000)
 
 
-async def test_reborn_v2_disconnected_run_stops_typing_and_shows_connection_error(
+async def test_reborn_v2_disconnected_run_shows_status_and_stops_typing(
     reborn_v2_server, reborn_v2_browser
 ) -> None:
-    """A disconnected active run shows connection-loss copy instead of spinning forever."""
+    """A disconnected active run shows transport status and stops spinning."""
     thread_id = "thread-disconnected-run"
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
@@ -406,10 +406,10 @@ async def test_reborn_v2_disconnected_run_stops_typing_and_shows_connection_erro
             }
           }
           window.EventSource = FakeEventSource;
-          window.__failLatestV2Sse = () => {
+          window.__failLatestV2Sse = (readyState = 2) => {
             const stream = streams[streams.length - 1];
             if (!stream) throw new Error("no EventSource stream is open");
-            stream.readyState = 2;
+            stream.readyState = readyState;
             if (typeof stream.onerror !== "function") {
               throw new Error("EventSource has no error handler");
             }
@@ -487,7 +487,13 @@ async def test_reborn_v2_disconnected_run_stops_typing_and_shows_connection_erro
         await composer.press("Enter")
         await expect(page.locator(SEL_V2["typing_indicator"])).to_be_visible(timeout=5000)
 
-        await page.evaluate("() => window.__failLatestV2Sse()")
+        connection_status = page.locator(SEL_V2["connection_status"])
+
+        await page.evaluate("() => window.__failLatestV2Sse(0)")
+        await expect(connection_status).to_have_text("Reconnecting...", timeout=5000)
+
+        await page.evaluate("() => window.__failLatestV2Sse(2)")
+        await expect(connection_status).to_have_text("Disconnected", timeout=5000)
 
         await expect(page.locator(SEL_V2["typing_indicator"])).to_have_count(0, timeout=5000)
         await expect(page.locator(SEL_V2["msg_error"]).last).to_contain_text(

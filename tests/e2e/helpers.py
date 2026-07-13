@@ -239,6 +239,7 @@ SEL_V2 = {
     "chat_composer":  "[data-testid='chat-composer']",  # message textarea on /chat
     "attachment_file_input": "input[type=file][multiple]",
     "typing_indicator": "[data-testid='typing-indicator']",
+    "connection_status": "[role='status']",
     "msg_user":       "[data-testid='msg-user']",       # user message bubble
     "msg_assistant":  "[data-testid='msg-assistant']",  # assistant message bubble
     "msg_system":     "[data-testid='msg-system']",     # system notice bubble
