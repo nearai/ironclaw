@@ -3,12 +3,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use ironclaw_extensions::ExtensionRegistry;
-use ironclaw_host_api::{
-    CapabilityId, EffectKind, ExtensionId, MountPermissions, RuntimeKind, UserId,
-};
-use ironclaw_reborn_composition::ProductLiveCapabilityIo;
-
 use super::super::super::harness_mcp::{
     build_loopback_mcp_runtime, local_dev_host_runtime_with_registry_egress_and_mcp,
     mcp_loopback_network_policy, mock_mcp_extension_package,
@@ -16,6 +10,10 @@ use super::super::super::harness_mcp::{
 use super::super::{
     HarnessResult, HostRuntimeCapabilityHarness, RecordingRuntimeHttpEgress,
     host_runtime_storage_roots, workspace_mounts,
+};
+use ironclaw_extensions::ExtensionRegistry;
+use ironclaw_host_api::{
+    CapabilityId, EffectKind, ExtensionId, MountPermissions, RuntimeKind, UserId,
 };
 
 /// Wire a single MCP capability backed by the loopback mock server.
@@ -57,12 +55,16 @@ pub(crate) async fn mock_mcp_tools(
         provider_id,
     )?;
     let mounts = workspace_mounts(MountPermissions::read_write_list_delete())?;
+    let (io, result_writer_io) = super::super::default_capability_io_pair();
     Ok(HostRuntimeCapabilityHarness {
         runtime,
         approval_parts: None,
         auto_approve_settings: None,
         pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
-        io: Arc::new(ProductLiveCapabilityIo::default()),
+        io: Mutex::new(io),
+        result_writer_io: Mutex::new(result_writer_io),
+        durable_capability_io_thread_service: Mutex::new(None),
+        durable_capability_io_requested: false,
         root,
         workspace_root,
         mounts,

@@ -35,7 +35,7 @@ pub const TRIGGER_REMOVE_CAPABILITY_ID: &str = "builtin.trigger_remove";
 pub const TRIGGER_PAUSE_CAPABILITY_ID: &str = "builtin.trigger_pause";
 pub const TRIGGER_RESUME_CAPABILITY_ID: &str = "builtin.trigger_resume";
 
-const TRIGGER_CREATE_DESCRIPTION: &str = "Create a caller-scoped scheduled trigger (one-time or recurring). The prompt is the full task each fire performs; when the task is to message someone or post somewhere, say so in the prompt and pin the exact recipient conversation ids, resolved while the user is present \u{2014} never leave a recipient as a name to look up at fire time. Do not tell the prompt to send results back to the requesting user; each fire's final reply is delivered automatically \u{2014} to this trigger's delivery_target_id when set, otherwise to the user's default outbound delivery target at fire time. Asks like 'send me the result' are delivery routing, not a task step: satisfy them with delivery_target_id alone and keep every send-to-requester step \u{2014} even one with a pinned conversation id \u{2014} out of the prompt. When the user asks for this trigger's results on a specific product or channel, pass delivery_target_id with an id from builtin__outbound_delivery_targets_list; builtin__outbound_delivery_target_set changes only the user-wide default shared by everything else.";
+const TRIGGER_CREATE_DESCRIPTION: &str = "Create a caller-scoped scheduled trigger (one-time or recurring). The prompt is the full task each fire performs. If delivery_target_id is set, never put a send, post, or deliver-results step for that result in the prompt; each fire's final reply is delivered automatically to that target. Do not tell the prompt to send results back to the requesting user. Asks like 'send me the result' are delivery routing, not a task step: pass delivery_target_id with an id from builtin__outbound_delivery_targets_list and keep every send-to-requester step, even one with a pinned conversation id, out of the prompt. Put messaging in the prompt only when messaging someone else is itself the task; pin that third-party recipient, resolved while the user is present. Without delivery_target_id, the user's default outbound target applies at fire time; builtin__outbound_delivery_target_set changes that user-wide default.";
 
 pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
@@ -856,6 +856,12 @@ mod tests {
     /// creation time instead of guessed at fire time.
     #[test]
     fn trigger_create_description_teaches_task_only_prompt_and_host_owned_delivery() {
+        assert!(
+            TRIGGER_CREATE_DESCRIPTION.contains(
+                "If delivery_target_id is set, never put a send, post, or deliver-results step"
+            ),
+            "trigger_create description must front-load the no-duplicate-delivery rule: {TRIGGER_CREATE_DESCRIPTION}"
+        );
         assert!(
             TRIGGER_CREATE_DESCRIPTION.contains("delivered automatically"),
             "trigger_create description must state host-owned result delivery: {TRIGGER_CREATE_DESCRIPTION}"

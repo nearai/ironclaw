@@ -2355,6 +2355,13 @@ mod tests {
             "send_message description must forbid self-delivery of the run's own answer: {}",
             send_message.description
         );
+        assert!(
+            send_message.description.contains(
+                "Never call this — or instruct a trigger to call it — for that run's own final reply"
+            ) && send_message.description.contains("delivery_target_id"),
+            "send_message description must front-load the trigger duplicate-delivery guard: {}",
+            send_message.description
+        );
         // Honesty: a per-trigger delivery_target_id can route the final reply
         // elsewhere, so the description must name the configured outbound
         // delivery target, not promise "the requesting user".
@@ -2379,16 +2386,38 @@ mod tests {
             "send_message description must document the <@U…> mention encoding: {}",
             send_message.description
         );
+        assert!(
+            send_message.description.contains("Never guess")
+                && send_message
+                    .description
+                    .contains("slack.list_conversations")
+                && send_message.description.contains("DM entry's user field"),
+            "send_message description must explain how to resolve the real mention target instead of deriving a user id from a conversation id: {}",
+            send_message.description
+        );
+
+        let list_conversations = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "slack.list_conversations")
+            .expect("slack manifest declares slack.list_conversations");
+        assert!(
+            list_conversations
+                .description
+                .contains("raw counterpart user id"),
+            "list_conversations description must advertise the authoritative DM mention target: {}",
+            list_conversations.description
+        );
     }
 
-    /// Raw-entity hygiene pin (live canary qa_10i): the model narrates raw
-    /// Slack ids into replies ("… user id U0BDC16TML3 …") unless the ONLY
-    /// model-visible guidance — capability descriptions — forbids it
-    /// explicitly. Every slack read surface must carry the imperative
-    /// "tool calls only … never include" raw-id rule.
+    /// Model-visible Slack-read contract: steer the model to the correct read
+    /// capability and keep user-facing answers humanized rather than exposing
+    /// raw Slack ids.
     #[cfg(feature = "slack-v2-host-beta")]
     #[test]
-    fn slack_read_descriptions_forbid_raw_ids_in_replies() {
+    fn slack_read_descriptions_steer_tool_selection_and_humanized_output() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").unwrap();
@@ -2415,6 +2444,35 @@ mod tests {
                 capability.description
             );
         }
+
+        let search = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "slack.search_messages")
+            .expect("slack manifest declares slack.search_messages");
+        let list = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "slack.list_conversations")
+            .expect("slack manifest declares slack.list_conversations");
+        let history = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "slack.get_conversation_history")
+            .expect("slack manifest declares slack.get_conversation_history");
+
+        assert!(search.description.contains("single newest message"));
+        assert!(search.description.contains("get_conversation_history"));
+        assert!(list.description.contains("is_member"));
+        assert!(list.description.contains("not only"));
+        assert!(history.description.contains("user_display_name"));
+        assert!(history.description.contains("is_current_user"));
     }
 
     /// Honesty pin: the slack_personal OAuth grant does not include

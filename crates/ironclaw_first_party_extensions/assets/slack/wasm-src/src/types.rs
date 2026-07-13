@@ -99,9 +99,12 @@ pub enum SlackUserAction {
         /// Channel ID or name (e.g., "#general" or "C1234567890"), or a
         /// DM conversation ID.
         channel: String,
-        /// Message text (supports Slack mrkdwn formatting). To notify
-        /// someone, mention them as `<@U…>` with their real user id —
-        /// a plain `@name` does not notify.
+        /// Message text (supports Slack mrkdwn formatting). Never use this
+        /// operation for a run's own final reply when outbound delivery is
+        /// configured. To notify someone else, mention them as `<@U…>` with
+        /// their real user id — a plain `@name` does not notify. Never derive
+        /// a user id from a conversation id; resolve the DM with
+        /// `slack.list_conversations` and use its `user` field.
         text: String,
         /// Optional thread timestamp to reply in a thread.
         #[serde(default)]
@@ -190,7 +193,8 @@ pub struct Conversation {
     /// difference. Absent for DMs (no membership axis).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_member: Option<bool>,
-    /// For DMs (`im`), the user ID on the other side.
+    /// For DMs (`im`), the authoritative user ID on the other side. Use this
+    /// for follow-up calls or mention encoding; never derive it from `id`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
     /// Human-readable name for `user`, resolved via `users.info` (best-effort:

@@ -17,11 +17,22 @@ tokens:
       - https://www.googleapis.com/auth/calendar.events
       - https://www.googleapis.com/auth/drive.readonly
       - https://www.googleapis.com/auth/drive.file
+  emulate-google-secondary-token:
+    login: secondary.google@example.com
+    scopes:
+      - https://www.googleapis.com/auth/gmail.readonly
+      - https://www.googleapis.com/auth/gmail.send
+      - https://www.googleapis.com/auth/calendar.readonly
+      - https://www.googleapis.com/auth/calendar.events
+      - https://www.googleapis.com/auth/drive.readonly
+      - https://www.googleapis.com/auth/drive.file
 
 google:
   users:
     - email: e2e.google@example.com
       name: E2E Google User
+    - email: secondary.google@example.com
+      name: Secondary Google User
   messages:
     - id: msg_emulate_unread
       user_email: e2e.google@example.com
@@ -43,11 +54,29 @@ google:
       label_ids:
         - INBOX
         - UNREAD
+    - id: msg_emulate_secondary_private
+      user_email: secondary.google@example.com
+      from: private-sender@example.com
+      to: secondary.google@example.com
+      subject: Secondary account private message
+      body_text: This message must never appear in the primary account.
+      date: "2026-06-22T11:50:00.000Z"
+      label_ids:
+        - INBOX
+        - UNREAD
   calendars:
     - id: primary
       user_email: e2e.google@example.com
       summary: E2E Primary Calendar
       description: Calendar data seeded by Emulate for Reborn QA.
+      time_zone: UTC
+      primary: true
+      selected: true
+      access_role: owner
+    - id: primary
+      user_email: secondary.google@example.com
+      summary: Secondary Primary Calendar
+      description: Isolated calendar for the secondary Emulate identity.
       time_zone: UTC
       primary: true
       selected: true
@@ -73,6 +102,13 @@ google:
       attendees:
         - email: buyer@pepsico.example
           display_name: PepsiCo Buyer
+    - id: evt_secondary_private
+      user_email: secondary.google@example.com
+      calendar_id: primary
+      summary: Secondary private planning
+      description: This event belongs only to the secondary identity.
+      start_date_time: "2026-06-22T16:00:00.000Z"
+      end_date_time: "2026-06-22T16:30:00.000Z"
   drive_items:
     - id: drv_reborn_qa_brief
       user_email: e2e.google@example.com
@@ -95,3 +131,10 @@ google:
       parent_google_ids:
         - root
       data: "NEAR AI Strategy: user-owned agents keep credentials and data under user control."
+    - id: drv_secondary_private
+      user_email: secondary.google@example.com
+      name: Secondary Private Brief
+      mime_type: text/plain
+      parent_google_ids:
+        - root
+      data: "This Drive item belongs only to the secondary identity."

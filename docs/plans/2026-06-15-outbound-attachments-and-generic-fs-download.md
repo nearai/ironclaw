@@ -30,7 +30,7 @@ approach (§3.1–3.3 dropped). The agent references files it creates by their `
 path; the WebUI renders workspace-path references as downloadable file chips over the
 generic endpoint. Rationale: the download is a presentation concern over the filesystem
 (the path *is* the file's identity), it reuses the already-built generic endpoint, and
-it avoids a deep/risky change to the core agent loop (`ironclaw_loop_support` finalize +
+it avoids a deep/risky change to the core agent loop (`ironclaw_loop_host` finalize +
 `AssistantReply`). A structured `attach_file` tool + harvest can be added later *iff* a
 non-text surface needs native structured attachments (e.g. Slack file upload) — at which
 point a concrete consumer justifies the cost. The `attach_file` tool work explored this

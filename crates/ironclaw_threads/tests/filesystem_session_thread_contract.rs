@@ -35,9 +35,10 @@ use ironclaw_threads::{
     CapabilityDisplayPreviewStatus, CreateSummaryArtifactRequest, EnsureThreadRequest,
     FilesystemSessionThreadService, FinalizedAssistantMessageByRunRequest,
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
-    MessageStatus, RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
-    SessionThreadService, SummaryKind, SummaryModelContextPolicy, ThreadHistoryRequest,
-    ThreadScope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
+    MessageStatus, PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
+    SummaryModelContextPolicy, ThreadHistoryRequest, ThreadScope, ToolResultSafeSummary,
+    UpdateAssistantDraftRequest,
 };
 use tokio::sync::{Barrier, Mutex, OwnedMutexGuard};
 
@@ -99,6 +100,230 @@ async fn filesystem_delete_thread_removes_owned_thread_and_hides_missing_or_wron
         .await
         .expect_err("missing delete should be non-enumerating");
     assert_unknown_thread(missing_error, &missing);
+}
+
+#[tokio::test]
+async fn filesystem_tool_result_records_survive_restart_and_enforce_scope() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-tool-results", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let owner_scope = scope("fs-tool-results");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: owner_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-tool-results").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let content = br#"{\"message\":\"persisted tool output\"}"#.to_vec();
+    service
+        .put_tool_result_record(PutToolResultRecordRequest {
+            scope: owner_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            result_ref: "result:fs-tool-result".to_string(),
+            content: content.clone(),
+        })
+        .await
+        .expect("durable result write succeeds");
+
+    let reopened = FilesystemSessionThreadService::new(scoped_threads_fs_at(
+        backend,
+        "tenant-tool-results",
+        "alice",
+    ));
+    let chunk = reopened
+        .read_tool_result_record(ReadToolResultRecordRequest {
+            scope: owner_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            result_ref: "result:fs-tool-result".to_string(),
+            offset: 0,
+            max_bytes: 10,
+        })
+        .await
+        .expect("reopened read succeeds")
+        .expect("durable record exists");
+    assert_eq!(chunk.content, content[..10]);
+    assert_eq!(chunk.next_offset, Some(10));
+
+    let unicode_ref = "result:fs-unicode-tool-result".to_string();
+    reopened
+        .put_tool_result_record(PutToolResultRecordRequest {
+            scope: owner_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            result_ref: unicode_ref.clone(),
+            content: "abcédef".as_bytes().to_vec(),
+        })
+        .await
+        .expect("unicode durable result write succeeds");
+    let unicode_chunk = reopened
+        .read_tool_result_record(ReadToolResultRecordRequest {
+            scope: owner_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            result_ref: unicode_ref,
+            offset: 0,
+            max_bytes: 4,
+        })
+        .await
+        .expect("unicode durable read succeeds")
+        .expect("unicode durable record exists");
+    assert_eq!(std::str::from_utf8(&unicode_chunk.content).unwrap(), "abc");
+    assert_eq!(unicode_chunk.next_offset, Some(3));
+
+    let wrong_scope_error = reopened
+        .read_tool_result_record(ReadToolResultRecordRequest {
+            scope: scope("fs-tool-results-wrong"),
+            thread_id: thread.thread_id,
+            result_ref: "result:fs-tool-result".to_string(),
+            offset: 0,
+            max_bytes: 8,
+        })
+        .await
+        .expect_err("wrong scope must not expose durable result records");
+    assert_unknown_thread(
+        wrong_scope_error,
+        &ThreadId::new("thread-fs-tool-results").unwrap(),
+    );
+}
+
+#[tokio::test]
+async fn filesystem_concurrent_duplicate_tool_result_writes_converge() {
+    let backend = Arc::new(ConcurrentToolResultWriteBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-tool-result-race", "alice");
+    let service = Arc::new(FilesystemSessionThreadService::new(scoped));
+    let scope = scope("fs-tool-result-race");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-tool-result-race").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let result_ref = "result:fs-concurrent-tool-result".to_string();
+    let content = b"concurrent durable tool output".to_vec();
+
+    let left = {
+        let service = Arc::clone(&service);
+        let scope = scope.clone();
+        let thread_id = thread.thread_id.clone();
+        let result_ref = result_ref.clone();
+        let content = content.clone();
+        async move {
+            service
+                .put_tool_result_record(PutToolResultRecordRequest {
+                    scope,
+                    thread_id,
+                    result_ref,
+                    content,
+                })
+                .await
+        }
+    };
+    let right = {
+        let service = Arc::clone(&service);
+        let scope = scope.clone();
+        let thread_id = thread.thread_id.clone();
+        let result_ref = result_ref.clone();
+        let content = content.clone();
+        async move {
+            service
+                .put_tool_result_record(PutToolResultRecordRequest {
+                    scope,
+                    thread_id,
+                    result_ref,
+                    content,
+                })
+                .await
+        }
+    };
+
+    let (left, right) = tokio::join!(left, right);
+    left.expect("first concurrent duplicate write converges");
+    right.expect("second concurrent duplicate write converges after CAS retry");
+
+    let stored = service
+        .read_tool_result_record(ReadToolResultRecordRequest {
+            scope,
+            thread_id: thread.thread_id,
+            result_ref,
+            offset: 0,
+            max_bytes: 128,
+        })
+        .await
+        .expect("converged record is readable")
+        .expect("converged record exists");
+    assert_eq!(stored.content, content);
+    assert!(stored.next_offset.is_none());
+}
+
+#[tokio::test]
+async fn filesystem_redaction_retains_durable_tool_result_record() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-tool-redaction", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("fs-tool-redaction");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-tool-redaction").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let result_ref = "result:fs-redacted-tool".to_string();
+    let result = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-fs-tool-redaction".into(),
+            result_ref: result_ref.clone(),
+            safe_summary: ToolResultSafeSummary::new("safe tool result").unwrap(),
+            provider_call: None,
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+    service
+        .put_tool_result_record(PutToolResultRecordRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            result_ref: result_ref.clone(),
+            content: br#"{\"secret\":\"raw tool output\"}"#.to_vec(),
+        })
+        .await
+        .unwrap();
+
+    service
+        .redact_message(RedactMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            message_id: result.message_id,
+            redaction_ref: "redaction/audit/fs-tool".into(),
+        })
+        .await
+        .expect("redaction succeeds");
+
+    assert!(
+        service
+            .read_tool_result_record(ReadToolResultRecordRequest {
+                scope,
+                thread_id: thread.thread_id,
+                result_ref,
+                offset: 0,
+                max_bytes: 128,
+            })
+            .await
+            .expect("redaction keeps the thread readable")
+            .is_some(),
+        "redaction retains the durable raw result for audit and recovery"
+    );
 }
 
 #[tokio::test]
@@ -2988,6 +3213,26 @@ struct TransactionalRaceBackend {
     idempotency_get_count: AtomicUsize,
 }
 
+struct ConcurrentToolResultWriteBackend {
+    inner: InMemoryBackend,
+    tool_result_get_barrier: Barrier,
+    tool_result_get_count: AtomicUsize,
+}
+
+impl ConcurrentToolResultWriteBackend {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryBackend::new(),
+            tool_result_get_barrier: Barrier::new(2),
+            tool_result_get_count: AtomicUsize::new(0),
+        }
+    }
+
+    fn is_tool_result_record_path(path: &VirtualPath) -> bool {
+        path.as_str().contains("/tool_results/")
+    }
+}
+
 impl TransactionalRaceBackend {
     fn new() -> Self {
         Self {
@@ -3314,6 +3559,54 @@ impl RootFilesystem for TransactionalRaceBackend {
             _guard: guard,
             staged_puts: HashMap::new(),
         }))
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for ConcurrentToolResultWriteBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        if Self::is_tool_result_record_path(path)
+            && self.tool_result_get_count.fetch_add(1, Ordering::SeqCst) < 2
+        {
+            let result = self.inner.get(path).await?;
+            self.tool_result_get_barrier.wait().await;
+            return Ok(result);
+        }
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
     }
 }
 

@@ -9,8 +9,8 @@ use ironclaw_turns::{
 use crate::{
     state::CheckpointKind,
     strategies::{
-        BatchPolicy, CapabilityErrorClass, GateKind, ModelErrorClass, ModelPreference,
-        RetryAlteration, SanitizedStrategySummary,
+        BatchPolicy, CapabilityErrorClass, GateKind, ModelErrorClass, ModelErrorSummary,
+        ModelPreference, RetryAlteration, SanitizedStrategySummary,
     },
 };
 
@@ -131,7 +131,7 @@ pub(super) fn capability_host_error(error: AgentLoopHostError) -> AgentLoopExecu
 
 pub(super) fn capability_error_class(kind: &CapabilityFailureKind) -> CapabilityErrorClass {
     // Runtime capability failures are first dispositioned in
-    // `ironclaw_host_runtime` and adapted by `ironclaw_loop_support`.
+    // `ironclaw_host_runtime` and adapted by `ironclaw_loop_host`.
     // Keep this recovery class mapping aligned with that adapter: retryable
     // runtime kinds must arrive here as Transient/Unavailable/Internal,
     // model-visible kinds as OperationFailed/InputInvalid/PolicyDenied, and
@@ -224,6 +224,13 @@ pub(super) fn model_error_failure_category(
         ModelErrorClass::Unavailable => "model_unavailable",
         ModelErrorClass::Internal => "model_internal",
     })
+}
+
+pub(super) fn model_error_failure_summary(
+    summary: &ModelErrorSummary,
+) -> Result<SanitizedFailure, AgentLoopExecutorError> {
+    Ok(model_error_failure_category(summary.class)?
+        .with_detail(summary.safe_summary.as_str().to_string()))
 }
 
 fn sanitized_failure_category(
