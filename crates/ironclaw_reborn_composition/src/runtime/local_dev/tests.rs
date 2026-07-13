@@ -25,7 +25,7 @@ mod tests {
         SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
         WRITE_FILE_CAPABILITY_ID,
     };
-    use ironclaw_loop_support::{
+    use ironclaw_loop_host::{
         CapabilityWriteResult, DurablePersistence, HostManagedModelError,
         HostManagedModelErrorKind, HostManagedModelRequest, HostManagedModelResponse,
         HostSkillContextSource,

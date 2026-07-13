@@ -4,7 +4,7 @@ use std::{error::Error, fmt, sync::Arc};
 
 use ironclaw_events::SecurityAuditSink;
 use ironclaw_host_api::CapabilityId;
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     AwaitEdgeSettler, AwaitEdgeWriter, CapabilitySurfaceProfileResolver,
     CompositeTurnRunWakeNotifier, DecoratingLoopCapabilityPortFactory, HostIdentityContextSource,
     HostInputQueue, HostManagedModelGateway, HostSkillContextSource, HostUserProfileSource,
@@ -211,7 +211,7 @@ fn scheduler_permit_count(worker_count: Option<std::num::NonZeroUsize>) -> usize
 
 fn default_disabled_capability_ids() -> Vec<CapabilityId> {
     vec![
-        CapabilityId::new(ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
+        CapabilityId::new(ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
             .expect("static spawn_subagent capability id must be valid"), // safety: crate-owned static dotted id.
     ]
 }
@@ -820,7 +820,7 @@ where
 /// routine that creates routines" bug). Read-only
 /// [`ironclaw_host_runtime::TRIGGER_LIST_CAPABILITY_ID`] is intentionally
 /// excluded from this list. Applied via
-/// [`ironclaw_loop_support::PerSurfaceCapabilityDenyDecorator`]'s per-surface
+/// [`ironclaw_loop_host::PerSurfaceCapabilityDenyDecorator`]'s per-surface
 /// deny list, scoped to
 /// [`crate::planned_driver_factory::SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID`]
 /// only.
@@ -846,11 +846,10 @@ impl SubagentSpawnCapabilityDecorator {
         spawn_limits: SubagentSpawnLimits,
         flavor_catalog: Vec<SpawnSubagentFlavorDescriptor>,
     ) -> Result<Self, DefaultPlannedRuntimeBuildError> {
-        let spawn_id =
-            CapabilityId::new(ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
-                .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?;
+        let spawn_id = CapabilityId::new(ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
+            .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?;
         let parameters_schema = Arc::new(
-            ironclaw_loop_support::build_spawn_subagent_parameters_schema(&flavor_catalog),
+            ironclaw_loop_host::build_spawn_subagent_parameters_schema(&flavor_catalog),
         );
         Ok(Self {
             spawn_deps: Arc::new(spawn_deps),
@@ -907,7 +906,7 @@ mod tests {
         },
     };
 
-    use ironclaw_loop_support::{
+    use ironclaw_loop_host::{
         DecoratingLoopCapabilityPortFactory, LoopCapabilityPortDecorator,
         LoopCapabilityPortFactory, PerSurfaceCapabilityDenyDecorator,
     };
@@ -1209,7 +1208,7 @@ mod tests {
     /// `PerSurfaceCapabilityDenyDecorator` through, not `decorate()` called
     /// in isolation (mechanism-level coverage of
     /// `PerSurfaceCapabilityDenyDecorator` itself lives in
-    /// `ironclaw_loop_support::capability_surface_filter`).
+    /// `ironclaw_loop_host::capability_surface_filter`).
     struct FixedSurfacePort {
         surface: VisibleCapabilitySurface,
     }
@@ -1260,7 +1259,7 @@ mod tests {
         VisibleCapabilitySurface {
             version: CapabilitySurfaceVersion::new("surface-v1").expect("test version is valid"),
             descriptors: vec![
-                descriptor(ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID),
+                descriptor(ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID),
                 descriptor(TRIGGER_CREATE_CAPABILITY_ID),
                 descriptor(TRIGGER_LIST_CAPABILITY_ID),
                 descriptor(TRIGGER_REMOVE_CAPABILITY_ID),
@@ -1308,7 +1307,7 @@ mod tests {
         // DecoratingLoopCapabilityPortFactory + PerSurfaceCapabilityDenyDecorator
         // pipeline's `visible_capabilities()`, not `decorate()` in isolation.
         let global_denied = vec![
-            CapabilityId::new(ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+            CapabilityId::new(ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
         ];
         let inner: Arc<dyn LoopCapabilityPort> = Arc::new(FixedSurfacePort {
             surface: full_trigger_and_spawn_surface(),
@@ -1341,7 +1340,7 @@ mod tests {
         );
         assert!(
             !scheduled_ids
-                .contains(&ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID.to_string()),
+                .contains(&ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID.to_string()),
             "global deny list must still apply on scheduled_trigger surface"
         );
 
@@ -1356,7 +1355,7 @@ mod tests {
         assert!(interactive_ids.contains(&TRIGGER_LIST_CAPABILITY_ID.to_string()));
         assert!(
             !interactive_ids
-                .contains(&ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID.to_string()),
+                .contains(&ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID.to_string()),
             "global deny list must still apply on the interactive surface"
         );
     }
@@ -1396,7 +1395,7 @@ mod tests {
         // the toggle" means); only the scheduled-trigger set stays denied.
         assert!(
             scheduled_ids
-                .contains(&ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID.to_string())
+                .contains(&ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID.to_string())
         );
     }
 
@@ -1412,9 +1411,9 @@ mod tests {
         //
         // This indirectly proves the threading: if the decorator passes a
         // non-empty catalog, the produced schema will have a satisfiable enum
-        // constraint. The companion empty-catalog test (gap 1, loop_support)
+        // constraint. The companion empty-catalog test (gap 1, loop_host)
         // confirms the absent-enum guard on the other side.
-        use ironclaw_loop_support::build_spawn_subagent_parameters_schema;
+        use ironclaw_loop_host::build_spawn_subagent_parameters_schema;
 
         let catalog = crate::subagent::flavors::builtin_flavor_catalog();
 

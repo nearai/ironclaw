@@ -2296,7 +2296,7 @@ pub trait LoopCheckpointPort: Send + Sync {
     /// Stage a checkpoint payload's raw bytes and return an opaque
     /// [`LoopCheckpointStateRef`] that subsequent `checkpoint(...)` calls
     /// can reference. The default impl fails closed; concrete impls live in
-    /// `ironclaw_loop_support` and wrap the host's `CheckpointStateStore`.
+    /// `ironclaw_loop_host` and wrap the host's `CheckpointStateStore`.
     ///
     /// The executor's checkpoint helper calls this method before invoking
     /// `LoopCheckpointPort::checkpoint(...)` so the metadata write references

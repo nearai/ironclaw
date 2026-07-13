@@ -32,7 +32,7 @@ use ironclaw_host_runtime::{
     RuntimeCapabilityResumeRequest, RuntimeStatusRequest, VisibleCapability,
     VisibleCapabilityAccess, VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     CapabilityResultWrite, CapabilityWriteResult, LoopCapabilityInputResolver,
     LoopCapabilityResultWriter,
 };

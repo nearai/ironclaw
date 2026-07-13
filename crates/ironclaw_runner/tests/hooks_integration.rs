@@ -71,7 +71,7 @@ use ironclaw_host_api::{
     AgentId, CapabilityId, InvocationId, ProjectId, ResourceScope, RuntimeKind, TenantId, ThreadId,
     UserId,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse, LoopCapabilityInputResolver,
 };

@@ -11,7 +11,7 @@ use std::sync::{
 use async_trait::async_trait;
 use ironclaw_host_api::{CapabilityId, ExtensionId, ProviderToolName, RuntimeKind};
 use ironclaw_host_runtime::READ_FILE_CAPABILITY_ID;
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, build_spawn_subagent_parameters_schema,
 };
 use ironclaw_turns::{

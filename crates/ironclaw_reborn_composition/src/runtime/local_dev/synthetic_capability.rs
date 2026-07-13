@@ -5,7 +5,7 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::{CapabilityId, ProviderToolName, RuntimeKind};
-use ironclaw_loop_support::{LoopCapabilityInputResolver, LoopCapabilityResultWriter};
+use ironclaw_loop_host::{LoopCapabilityInputResolver, LoopCapabilityResultWriter};
 use ironclaw_turns::{
     CapabilityActivityId,
     run_profile::{
@@ -535,7 +535,7 @@ mod tests {
     use super::*;
 
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
-    use ironclaw_loop_support::{
+    use ironclaw_loop_host::{
         CapabilityResultWrite, CapabilityWriteResult, EmptyLoopCapabilityPort,
     };
     use ironclaw_turns::{

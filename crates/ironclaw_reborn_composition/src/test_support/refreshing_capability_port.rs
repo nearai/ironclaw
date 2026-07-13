@@ -28,8 +28,8 @@ pub struct RefreshingLocalDevCapabilityPortTestParts {
     /// `Arc::clone`s of the SAME shared io object — production assigns one
     /// `LocalDevCapabilityIo` to both roles so input-ref/result-ref
     /// correlation by `call_id` works; never source them independently.
-    pub input_resolver: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
-    pub result_writer: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
+    pub input_resolver: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
+    pub result_writer: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
     pub milestone_sink: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopHostMilestoneSink>,
     /// Opaque handle built by
     /// `test_support::build_local_dev_skill_context_source_for_test`. Wraps
