@@ -669,8 +669,9 @@ async fn oauth_callback_with_lifecycle_activation_activates_and_publishes_extens
         "github",
     )
     .expect("github package ref");
+    let lifecycle_owner = UserId::new("alice").expect("valid lifecycle owner"); // safety: fixed test user id literal is valid.
     extension_management
-        .install(package_ref.clone())
+        .install(package_ref.clone(), &lifecycle_owner)
         .await
         .expect("install github before OAuth");
     let auth_scope = auth_scope_for_turn(
@@ -690,7 +691,7 @@ async fn oauth_callback_with_lifecycle_activation_activates_and_publishes_extens
     assert_eq!(response.flow_id, flow_id);
     assert_eq!(response.continuation, continuation);
     let projection = extension_management
-        .project(package_ref)
+        .project(package_ref, &lifecycle_owner)
         .await
         .expect("project github after OAuth callback");
     assert_eq!(
@@ -737,8 +738,9 @@ async fn slack_oauth_callback_activates_and_publishes_all_personal_tools() {
         "slack",
     )
     .expect("Slack package ref");
+    let lifecycle_owner = UserId::new("alice").expect("valid lifecycle owner"); // safety: fixed test user id literal is valid.
     extension_management
-        .install(package_ref.clone())
+        .install(package_ref.clone(), &lifecycle_owner)
         .await
         .expect("install Slack before OAuth");
     let auth_scope = auth_scope_for_turn(
@@ -784,7 +786,7 @@ async fn slack_oauth_callback_activates_and_publishes_all_personal_tools() {
 
     assert_eq!(
         extension_management
-            .project(package_ref)
+            .project(package_ref, &lifecycle_owner)
             .await
             .expect("project Slack after OAuth")
             .phase,

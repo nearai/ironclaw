@@ -3158,12 +3158,13 @@ output_schema_ref = "schemas/run.output.json"
             );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
             .expect("valid ref");
-        port.install(package_ref.clone())
+        let scope = hosted_mcp_scope("lifecycle-owner");
+        port.install(package_ref.clone(), &scope.user_id)
             .await
             .expect("install external channel");
 
         let remove = port
-            .remove(package_ref, &hosted_mcp_scope("scope-owner"), None)
+            .remove(package_ref, &scope, None)
             .await
             .expect("cleanup-free extension removal needs no actor");
 
@@ -3423,15 +3424,14 @@ output_schema_ref = "schemas/run.output.json"
         matching.set_probe(&storage_root, installation_store.clone(), "telegram");
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
             .expect("valid ref");
-        port.install(package_ref.clone())
+        let authenticated_actor = UserId::new("authenticated-actor").expect("valid actor");
+        port.install(package_ref.clone(), &authenticated_actor)
             .await
             .expect("install external channel");
         let mut removal_scope = hosted_mcp_scope("scope-owner");
         removal_scope.tenant_id = TenantId::new("trusted-tenant").expect("valid tenant");
         removal_scope.agent_id = Some(AgentId::new("trusted-agent").expect("valid agent"));
         removal_scope.project_id = Some(ProjectId::new("trusted-project").expect("valid project"));
-        let authenticated_actor = UserId::new("authenticated-actor").expect("valid actor");
-
         let remove = port
             .remove(package_ref, &removal_scope, Some(&authenticated_actor))
             .await
@@ -3507,12 +3507,13 @@ output_schema_ref = "schemas/run.output.json"
             );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
             .expect("valid ref");
-        port.install(package_ref.clone())
+        let scope = hosted_mcp_scope("scope-owner");
+        port.install(package_ref.clone(), &scope.user_id)
             .await
             .expect("install external channel");
 
         let error = port
-            .remove(package_ref, &hosted_mcp_scope("scope-owner"), None)
+            .remove(package_ref, &scope, None)
             .await
             .expect_err("declared cleanup requires an authenticated actor");
 
@@ -3596,10 +3597,10 @@ output_schema_ref = "schemas/run.output.json"
             );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
             .expect("valid ref");
-        port.install(package_ref.clone())
+        let scope = hosted_mcp_scope("authenticated-actor");
+        port.install(package_ref.clone(), &scope.user_id)
             .await
             .expect("install external channel");
-        let scope = hosted_mcp_scope("authenticated-actor");
 
         let error = port
             .remove(package_ref, &scope, Some(&scope.user_id))
@@ -3640,10 +3641,10 @@ output_schema_ref = "schemas/run.output.json"
         adapter.set_probe(&storage_root, installation_store.clone(), "telegram");
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
             .expect("valid ref");
-        port.install(package_ref.clone())
+        let scope = hosted_mcp_scope("authenticated-actor");
+        port.install(package_ref.clone(), &scope.user_id)
             .await
             .expect("install external channel");
-        let scope = hosted_mcp_scope("authenticated-actor");
 
         let error = port
             .remove(package_ref, &scope, Some(&scope.user_id))
@@ -3686,7 +3687,7 @@ output_schema_ref = "schemas/run.output.json"
             );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
             .expect("valid ref");
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), &lifecycle_owner())
             .await
             .expect("install external channel");
 
@@ -4517,7 +4518,7 @@ output_schema_ref = "schemas/run.output.json"
             );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), &lifecycle_owner())
             .await
             .expect("install extension");
 
@@ -6466,7 +6467,7 @@ output_schema_ref = "schemas/run.output.json"
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
         installed_port
-            .install(package_ref.clone())
+            .install(package_ref.clone(), &lifecycle_owner())
             .await
             .expect("install github");
 
@@ -6480,8 +6481,9 @@ output_schema_ref = "schemas/run.output.json"
             Arc::clone(&installed_port.lifecycle_service),
             installed_port.active_extensions.clone(),
             Some(cleanup.clone() as Arc<dyn ExtensionCredentialCleanup>),
+            lifecycle_owner(),
         );
-        let removal_scope = hosted_mcp_scope("extension-remove-missing-catalog");
+        let removal_scope = hosted_mcp_scope("lifecycle-owner");
         let response = port
             .remove(package_ref, &removal_scope, Some(&removal_scope.user_id))
             .await
@@ -6526,6 +6528,7 @@ output_schema_ref = "schemas/run.output.json"
             Arc::clone(&installed_port.lifecycle_service),
             installed_port.active_extensions.clone(),
             Some(cleanup.clone() as Arc<dyn ExtensionCredentialCleanup>),
+            lifecycle_owner(),
         );
         let error = port
             .remove(
@@ -6613,7 +6616,7 @@ output_schema_ref = "schemas/run.output.json"
             );
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
-        let removal_scope = hosted_mcp_scope("absent-catalog-repair-tombstone");
+        let removal_scope = hosted_mcp_scope("lifecycle-owner");
         let repair_port = RebornLocalExtensionManagementPort::new(
             Arc::clone(&base_port.filesystem),
             AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
@@ -6621,6 +6624,7 @@ output_schema_ref = "schemas/run.output.json"
             Arc::clone(&base_port.lifecycle_service),
             base_port.active_extensions.clone(),
             Some(cleanup.clone() as Arc<dyn ExtensionCredentialCleanup>),
+            lifecycle_owner(),
         );
         repair_port
             .remove(
@@ -6647,6 +6651,7 @@ output_schema_ref = "schemas/run.output.json"
             Arc::clone(&base_port.lifecycle_service),
             base_port.active_extensions.clone(),
             Some(cleanup.clone() as Arc<dyn ExtensionCredentialCleanup>),
+            lifecycle_owner(),
         );
         no_catalog_port
             .remove(
@@ -6679,7 +6684,7 @@ output_schema_ref = "schemas/run.output.json"
             );
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), &lifecycle_owner())
             .await
             .expect("install github");
         port.activate_with_prechecked_credentials_for_test(
@@ -6702,8 +6707,9 @@ output_schema_ref = "schemas/run.output.json"
             Arc::clone(&port.lifecycle_service),
             port.active_extensions.clone(),
             Some(cleanup as Arc<dyn ExtensionCredentialCleanup>),
+            lifecycle_owner(),
         );
-        let removal_scope = hosted_mcp_scope("orphan-runtime-removal-retry");
+        let removal_scope = hosted_mcp_scope("lifecycle-owner");
         retry_port
             .remove(package_ref, &removal_scope, Some(&removal_scope.user_id))
             .await
@@ -6748,7 +6754,7 @@ output_schema_ref = "schemas/run.output.json"
             );
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), &lifecycle_owner())
             .await
             .expect("install github");
         port.activate_with_prechecked_credentials_for_test(
@@ -6776,8 +6782,9 @@ output_schema_ref = "schemas/run.output.json"
             Arc::clone(&port.lifecycle_service),
             port.active_extensions.clone(),
             None,
+            lifecycle_owner(),
         );
-        let removal_scope = hosted_mcp_scope("fresh-orphan-runtime-repair");
+        let removal_scope = hosted_mcp_scope("lifecycle-owner");
         repair_port
             .remove(package_ref, &removal_scope, Some(&removal_scope.user_id))
             .await
@@ -6810,7 +6817,7 @@ output_schema_ref = "schemas/run.output.json"
             );
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), &lifecycle_owner())
             .await
             .expect("install github");
         let extension_id = ExtensionId::new("github").expect("valid extension id");
@@ -6839,8 +6846,9 @@ output_schema_ref = "schemas/run.output.json"
             Arc::clone(&port.lifecycle_service),
             port.active_extensions.clone(),
             None,
+            lifecycle_owner(),
         );
-        let removal_scope = hosted_mcp_scope("files-only-orphan-repair");
+        let removal_scope = hosted_mcp_scope("lifecycle-owner");
         repair_port
             .remove(package_ref, &removal_scope, Some(&removal_scope.user_id))
             .await
@@ -6963,6 +6971,7 @@ output_schema_ref = "schemas/run.output.json"
                     test_extension_trust_policy(),
                 ),
                 None,
+                lifecycle_owner(),
             )
             .with_removal_cleanup_registry(removal_cleanup),
         );

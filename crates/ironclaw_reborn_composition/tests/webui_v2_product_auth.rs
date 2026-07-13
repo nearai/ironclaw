@@ -271,6 +271,7 @@ impl UnusedServices {
                     activation_status: None,
                     activation_error: None,
                     version: None,
+                    install_scope: None,
                     onboarding_state: None,
                     onboarding: None,
                 })
