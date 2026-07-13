@@ -5,6 +5,7 @@ import { test } from "vitest";
 import { Button } from "./button";
 
 type ButtonElementProps = {
+  className?: string;
   disabled?: boolean;
   "aria-disabled"?: boolean;
   tabIndex?: number;
@@ -53,4 +54,22 @@ test("disabled native Buttons keep the disabled attribute", () => {
   assert.equal(rendered.type, "button");
   assert.equal(rendered.props.disabled, true);
   assert.equal(rendered.props["aria-disabled"], undefined);
+});
+
+test("outline and danger Buttons use theme-aware semantic colors (#6039)", () => {
+  const outline = Button({
+    variant: "outline",
+    children: "Configure",
+  }) as ReactElement<ButtonElementProps>;
+  const danger = Button({
+    variant: "danger",
+    children: "Remove",
+  }) as ReactElement<ButtonElementProps>;
+
+  assert.match(outline.props.className ?? "", /text-\[var\(--v2-accent-text\)\]/);
+  assert.match(outline.props.className ?? "", /hover:bg-\[var\(--v2-accent-soft\)\]/);
+  assert.match(danger.props.className ?? "", /text-\[var\(--v2-danger-text\)\]/);
+  assert.match(danger.props.className ?? "", /hover:bg-\[var\(--v2-danger-soft\)\]/);
+  assert.doesNotMatch(outline.props.className ?? "", /#8fc8f2|#4ca7e6/i);
+  assert.doesNotMatch(danger.props.className ?? "", /#ff6480|rgba\(217,101,116/i);
 });

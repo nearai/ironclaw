@@ -228,7 +228,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
               : "self-start justify-start",
           ].join(" ")}
         >
-          {timeLabel && (<time dateTime={timestamp} className="shrink-0 font-mono text-[11px] text-iron-500">{timeLabel}</time>)}
+          {timeLabel && (<time dateTime={timestamp} className="shrink-0 font-mono text-[11px] text-[var(--v2-text-muted)]">{timeLabel}</time>)}
           {(showActions || showRetryAction) && (
             <div className="flex shrink-0 items-center gap-1">
             {showActions && (

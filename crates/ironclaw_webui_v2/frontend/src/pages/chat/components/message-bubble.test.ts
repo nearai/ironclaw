@@ -217,7 +217,7 @@ test("message timestamp and actions share a hover-only meta row", () => {
   );
   assert.match(
     messageBubbleSource,
-    /<time dateTime=\{timestamp\} className="shrink-0 font-mono text-\[11px\] text-iron-500">\{timeLabel\}<\/time>/,
+    /<time dateTime=\{timestamp\} className="shrink-0 font-mono text-\[11px\] text-\[var\(--v2-text-muted\)\]">\{timeLabel\}<\/time>/,
     "timestamp should render in the hover meta row",
   );
   assert.match(
