@@ -482,6 +482,7 @@ fn unique_temp_path(
     Ok(parent.join(format!(".{name}.tmp.{counter}")))
 }
 
+#[cfg(not(windows))]
 async fn sync_parent_dir(virtual_path: &VirtualPath, parent: &Path) -> Result<(), FilesystemError> {
     let dir = tokio::fs::File::open(parent)
         .await
@@ -489,6 +490,15 @@ async fn sync_parent_dir(virtual_path: &VirtualPath, parent: &Path) -> Result<()
     dir.sync_all()
         .await
         .map_err(|error| io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error))
+}
+
+// Windows does not allow directories to be opened by `tokio::fs::File`, so
+// the Unix-style parent-directory durability sync above returns
+// ERROR_ACCESS_DENIED. The file itself has already been synced and atomically
+// installed before this point.
+#[cfg(windows)]
+async fn sync_parent_dir(_: &VirtualPath, _: &Path) -> Result<(), FilesystemError> {
+    Ok(())
 }
 
 async fn ensure_existing_ancestor_contained(
