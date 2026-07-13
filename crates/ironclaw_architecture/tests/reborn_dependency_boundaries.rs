@@ -1029,7 +1029,10 @@ fn composition_runtime_has_no_slack_output_policy() {
     );
 
     let imported_policy_installation = r#"
-        use crate::slack::entity_policy::WorkspaceEntityMaskingGateway;
+        use crate::{
+            outbound::GenericDeliveryProvider,
+            slack::entity_policy::WorkspaceEntityMaskingGateway,
+        };
 
         async fn build_runtime(model_gateway: Arc<dyn HostManagedModelGateway>) {
             let model_gateway: Arc<dyn HostManagedModelGateway> = Arc::new(
@@ -1094,10 +1097,35 @@ fn composition_runtime_has_no_slack_output_policy() {
                 self.slack_client.send(payload).await;
             }
         }
+
+        async fn build_runtime(model_gateway: Arc<dyn HostManagedModelGateway>) {
+            let model_gateway = Arc::new(GenericSecretMaskingGateway::new(model_gateway));
+        }
     "#;
     assert!(
         !source_has_slack_specific_model_output_policy(co_located_but_unrelated),
         "unrelated Slack delivery and generic model policy in one module must not false-positive"
+    );
+    assert!(
+        !source_installs_slack_specific_model_output_policy(co_located_but_unrelated),
+        "nearby Slack delivery must not taint a generic gateway installation"
+    );
+
+    let aliased_multiline_policy = r#"
+        use ironclaw_loop_support::HostManagedModelGateway as ModelGateway;
+        struct SlackEntityPolicyGateway;
+        impl
+            ModelGateway
+            for SlackEntityPolicyGateway
+        {
+            async fn stream_model(&self, response: HostManagedModelResponse) {
+                response.content = mask_slack_id(response.content);
+            }
+        }
+    "#;
+    assert!(
+        source_has_slack_specific_model_output_policy(aliased_multiline_policy),
+        "trait aliases and multiline impl headers must not evade the definition scan"
     );
 
     let interleaved_test_module = r#"
@@ -1120,8 +1148,7 @@ fn composition_runtime_has_no_slack_output_policy() {
             let is_runtime_root = relative == "crates/ironclaw_reborn_composition/src/runtime.rs";
             let is_runtime_source = is_runtime_root
                 || relative.starts_with("crates/ironclaw_reborn_composition/src/runtime/");
-            let defines_policy =
-                !is_runtime_root && source_has_slack_specific_model_output_policy(source);
+            let defines_policy = source_has_slack_specific_model_output_policy(source);
             let installs_policy =
                 is_runtime_source && source_installs_slack_specific_model_output_policy(source);
             (defines_policy || installs_policy).then(|| {
@@ -1236,10 +1263,6 @@ fn source_without_cfg_test_modules(source: &str) -> String {
 }
 
 fn source_has_slack_specific_model_output_policy(source: &str) -> bool {
-    const GATEWAY_INTERCEPTION_MARKERS: &[&str] = &[
-        "HostManagedModelGateway for",
-        "HostManagedModelStreamSink for",
-    ];
     const OUTPUT_MUTATION_MARKERS: &[&str] = &[
         "safe_text_update",
         "safe_reasoning_update",
@@ -1255,12 +1278,14 @@ fn source_has_slack_specific_model_output_policy(source: &str) -> bool {
     ];
 
     let impl_blocks = rust_impl_blocks(source);
+    let gateway_interception_markers = gateway_trait_impl_markers(source);
     let gateway_types = impl_blocks
         .iter()
         .flat_map(|(header, _)| {
-            GATEWAY_INTERCEPTION_MARKERS
+            let normalized_header = normalize_rust_whitespace(header);
+            gateway_interception_markers
                 .iter()
-                .filter_map(|marker| impl_type_after_marker(header, marker))
+                .filter_map(move |marker| impl_type_after_marker(&normalized_header, marker))
         })
         .collect::<BTreeSet<_>>();
 
@@ -1279,6 +1304,36 @@ fn source_has_slack_specific_model_output_policy(source: &str) -> bool {
     })
 }
 
+fn gateway_trait_impl_markers(source: &str) -> BTreeSet<String> {
+    const GATEWAY_TRAITS: &[&str] = &["HostManagedModelGateway", "HostManagedModelStreamSink"];
+
+    let normalized_source = normalize_rust_whitespace(source);
+    let mut markers = GATEWAY_TRAITS
+        .iter()
+        .map(|trait_name| format!("{trait_name} for"))
+        .collect::<BTreeSet<_>>();
+    for trait_name in GATEWAY_TRAITS {
+        let alias_prefix = format!("{trait_name} as ");
+        let mut remainder = normalized_source.as_str();
+        while let Some(index) = remainder.find(&alias_prefix) {
+            let after_alias = &remainder[index + alias_prefix.len()..];
+            let alias = after_alias
+                .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                .next()
+                .unwrap_or_default();
+            if !alias.is_empty() {
+                markers.insert(format!("{alias} for"));
+            }
+            remainder = after_alias;
+        }
+    }
+    markers
+}
+
+fn normalize_rust_whitespace(source: &str) -> String {
+    source.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn rust_impl_blocks(source: &str) -> Vec<(String, String)> {
     let lines = source.lines().collect::<Vec<_>>();
     let mut blocks = Vec::new();
@@ -1286,7 +1341,7 @@ fn rust_impl_blocks(source: &str) -> Vec<(String, String)> {
 
     while index < lines.len() {
         let trimmed = lines[index].trim_start();
-        if !(trimmed.starts_with("impl ") || trimmed.starts_with("impl<")) {
+        if !(trimmed == "impl" || trimmed.starts_with("impl ") || trimmed.starts_with("impl<")) {
             index += 1;
             continue;
         }
@@ -1341,48 +1396,138 @@ fn source_installs_slack_specific_model_output_policy(source: &str) -> bool {
         "decorate",
         "let model_gateway",
     ];
-    const IGNORED_IMPORT_TOKENS: &[&str] = &[
-        "as",
-        "crate",
-        "model_gateway",
-        "pub",
-        "self",
-        "slack",
-        "super",
-        "use",
-    ];
 
-    let slack_import_symbols = source
-        .lines()
-        .filter(|line| {
-            let trimmed = line.trim_start();
-            trimmed.starts_with("use ") && line.to_ascii_lowercase().contains("slack")
+    let (slack_import_symbols, has_slack_wildcard_import) = slack_import_symbols(source);
+    model_gateway_statements(source)
+        .into_iter()
+        .any(|statement| {
+            let lower_statement = statement.to_ascii_lowercase();
+            let constructs_wrapper = WRAPPER_CONSTRUCTION_MARKERS
+                .iter()
+                .any(|marker| lower_statement.contains(marker));
+            let names_slack_directly = lower_statement.contains("slack::")
+                || lower_statement.contains("crate::slack")
+                || lower_statement
+                    .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                    .any(|token| token.starts_with("slack") && token.len() > "slack".len());
+            let uses_slack_import = slack_import_symbols
+                .iter()
+                .any(|symbol| rust_header_mentions_type(&statement, symbol));
+            constructs_wrapper
+                && (names_slack_directly || uses_slack_import || has_slack_wildcard_import)
         })
-        .flat_map(|line| {
-            line.split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-        })
-        .filter(|token| token.len() > 2 && !IGNORED_IMPORT_TOKENS.contains(token))
-        .collect::<BTreeSet<_>>();
+}
 
+fn model_gateway_statements(source: &str) -> Vec<String> {
     let lines = source.lines().collect::<Vec<_>>();
-    lines.iter().enumerate().any(|(index, line)| {
+    let mut statements = BTreeSet::new();
+    for (index, line) in lines.iter().enumerate() {
         if !line.contains("model_gateway") {
-            return false;
+            continue;
         }
 
-        let start = index.saturating_sub(12);
-        let end = (index + 13).min(lines.len());
-        let window = lines[start..end].join("\n");
-        let lower_window = window.to_ascii_lowercase();
-        let constructs_wrapper = WRAPPER_CONSTRUCTION_MARKERS
-            .iter()
-            .any(|marker| lower_window.contains(marker));
-        let names_slack_directly = lower_window.contains("slack");
-        let uses_slack_import = slack_import_symbols
-            .iter()
-            .any(|symbol| window.contains(*symbol));
-        constructs_wrapper && (names_slack_directly || uses_slack_import)
-    })
+        let mut start = index;
+        while start > 0 {
+            let trimmed = lines[start].trim_start();
+            if trimmed.starts_with("let ") || trimmed.starts_with("model_gateway =") {
+                break;
+            }
+            let previous = lines[start - 1].trim();
+            if previous.ends_with(';') || previous.ends_with('{') || previous.ends_with('}') {
+                break;
+            }
+            start -= 1;
+        }
+
+        let mut end = index;
+        while end + 1 < lines.len() && !lines[end].contains(';') {
+            end += 1;
+        }
+        statements.insert(lines[start..=end].join("\n"));
+    }
+    statements.into_iter().collect()
+}
+
+fn slack_import_symbols(source: &str) -> (BTreeSet<String>, bool) {
+    const IGNORED_IMPORT_TOKENS: &[&str] = &["as", "crate", "pub", "self", "slack", "super", "use"];
+
+    let mut symbols = BTreeSet::new();
+    let mut has_wildcard = false;
+    for statement in rust_use_statements(source) {
+        let normalized = normalize_rust_whitespace(&statement);
+        let lower = normalized.to_ascii_lowercase();
+        if lower.contains("slack::*") {
+            has_wildcard = true;
+        }
+
+        let mut search_from = 0;
+        while let Some(relative_index) = lower[search_from..].find("slack::") {
+            let suffix_start = search_from + relative_index + "slack::".len();
+            let suffix = &normalized[suffix_start..];
+            let segment = slack_import_segment(suffix);
+            for token in segment
+                .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            {
+                if token.len() > 2 && !IGNORED_IMPORT_TOKENS.contains(&token) {
+                    symbols.insert(token.to_string());
+                }
+            }
+            search_from = suffix_start;
+        }
+
+        if let Some(alias_index) = lower.find("slack as ") {
+            let alias = normalized[alias_index + "slack as ".len()..]
+                .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                .next()
+                .unwrap_or_default();
+            if !alias.is_empty() {
+                symbols.insert(alias.to_string());
+            }
+        }
+    }
+    (symbols, has_wildcard)
+}
+
+fn rust_use_statements(source: &str) -> Vec<String> {
+    let lines = source.lines().collect::<Vec<_>>();
+    let mut statements = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let trimmed = lines[index].trim_start();
+        if !(trimmed.starts_with("use ") || trimmed.starts_with("pub use ")) {
+            index += 1;
+            continue;
+        }
+
+        let start = index;
+        while index + 1 < lines.len() && !lines[index].contains(';') {
+            index += 1;
+        }
+        statements.push(lines[start..=index].join("\n"));
+        index += 1;
+    }
+    statements
+}
+
+fn slack_import_segment(suffix: &str) -> &str {
+    if !suffix.starts_with('{') {
+        return suffix.split([',', ';', '}']).next().unwrap_or_default();
+    }
+
+    let mut depth = 0;
+    for (index, character) in suffix.char_indices() {
+        match character {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &suffix[1..index];
+                }
+            }
+            _ => {}
+        }
+    }
+    suffix
 }
 
 /// Lock the boot-config TOML + provider-catalog layering for the
