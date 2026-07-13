@@ -93,8 +93,10 @@ async fn write_project(
 }
 
 fn options(source: PathBuf, target: PathBuf) -> MigrationOptions {
+    let source_home = source.parent().map(Path::to_path_buf);
     MigrationOptions {
         source: SourceDb::LibSql { path: source },
+        source_home,
         target: TargetStore::LibSql { path: target },
         profile: "test-migration".to_string(),
         tenant_id: TenantId::new(TENANT).expect("tenant"),

@@ -72,7 +72,10 @@ impl OnboardCommand {
                     "--migrate-v1 was requested, but no v1 source was detected; set MIGRATION_SOURCE_POSTGRES or place a stopped-source snapshot at $IRONCLAW_BASE_DIR/ironclaw.db, then run `ironclaw-reborn migrate v1 plan --help`"
                 )
             })?;
-            crate::commands::migrate::plan_detected_v1(source, &manifest_path)?;
+            let source_home = context.v1_source_home().ok_or_else(|| {
+                anyhow::anyhow!("could not resolve the v1 source home for migration planning")
+            })?;
+            crate::commands::migrate::plan_detected_v1(source, &source_home, &manifest_path)?;
             "planned"
         } else if source_detected {
             "available"

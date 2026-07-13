@@ -50,13 +50,18 @@ impl RebornCliContext {
             return Some(V1MigrationSourceCandidate::PostgresEnvironment);
         }
 
-        let v1_base = match std::env::var_os("IRONCLAW_BASE_DIR") {
-            Some(path) if !path.is_empty() => PathBuf::from(path),
-            _ => PathBuf::from(std::env::var_os("HOME")?).join(".ironclaw"),
-        };
+        let v1_base = self.v1_source_home()?;
         let database = v1_base.join("ironclaw.db");
         database
             .is_file()
             .then_some(V1MigrationSourceCandidate::LibSql(database))
+    }
+
+    pub(crate) fn v1_source_home(&self) -> Option<PathBuf> {
+        let v1_base = match std::env::var_os("IRONCLAW_BASE_DIR") {
+            Some(path) if !path.is_empty() => PathBuf::from(path),
+            _ => PathBuf::from(std::env::var_os("HOME")?).join(".ironclaw"),
+        };
+        Some(v1_base)
     }
 }

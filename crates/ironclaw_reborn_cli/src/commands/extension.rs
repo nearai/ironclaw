@@ -52,6 +52,7 @@ struct ExtensionPackageCommand {
 
 impl ExtensionCommand {
     pub(crate) fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
+        crate::commands::migrate::ensure_activation_allowed(&context)?;
         crate::runtime::init_tracing();
         let (command, json, label) = match self.command {
             ExtensionSubcommand::Search(command) => (
@@ -114,4 +115,43 @@ fn execute_lifecycle_command(
             .await
             .map_err(anyhow::Error::from)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quarantined_target_rejects_extension_before_service_assembly() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        let marker = context
+            .boot_config()
+            .home()
+            .path()
+            .join(crate::commands::migrate::MIGRATION_STATE_MARKER_FILE);
+        std::fs::create_dir_all(context.boot_config().home().path()).expect("create home");
+        std::fs::write(
+            marker,
+            serde_json::json!({
+                "schema_version": "ironclaw.reborn.migration-state/v1",
+                "migration_protocol_version": 1,
+                "release_version": env!("CARGO_PKG_VERSION"),
+                "status": "applying",
+            })
+            .to_string(),
+        )
+        .expect("write marker");
+        let command = ExtensionCommand {
+            confirm_host_access: false,
+            command: ExtensionSubcommand::Search(ExtensionSearchCommand {
+                query: None,
+                json: false,
+            }),
+        };
+
+        let error = command
+            .execute(context)
+            .expect_err("quarantine must reject extension lifecycle commands");
+        assert!(error.to_string().contains("quarantined"), "{error:#}");
+    }
 }

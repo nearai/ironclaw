@@ -30,14 +30,7 @@ pub(crate) async fn run(
 ) -> Result<(), MigrationError> {
     let users = src.distinct_users().await?;
     for user_id in &users {
-        let docs =
-            src.db
-                .list_documents(user_id, None)
-                .await
-                .map_err(|e| MigrationError::ReadSource {
-                    domain: "memory_documents".into(),
-                    reason: e.to_string(),
-                })?;
+        let docs = src.all_memory_documents(user_id).await?;
 
         for doc in docs {
             if v2_model::is_engine_path(&doc.path) {

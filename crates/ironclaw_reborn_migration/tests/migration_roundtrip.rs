@@ -31,6 +31,7 @@ const USER: &str = "alice";
 const SUSPENDED_USER: &str = "bob";
 const DEACTIVATED_USER: &str = "carol";
 const LEGACY_DATA_OWNER: &str = "legacy-owner";
+const SOURCE_AGENT: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 /// 64-char string ≥ 32 bytes (used verbatim as HKDF IKM by v1 + Reborn crypto).
 const MASTER_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -420,7 +421,11 @@ async fn write_engine_doc(db: &dyn Database, path: &str, value: &serde_json::Val
 
 async fn write_doc(db: &dyn Database, path: &str, content: &str) {
     let doc = db
-        .get_or_create_document_by_path(USER, None, path)
+        .get_or_create_document_by_path(
+            USER,
+            Some(Uuid::parse_str(SOURCE_AGENT).expect("source agent")),
+            path,
+        )
         .await
         .expect("create doc");
     db.update_document(doc.id, content)
@@ -429,8 +434,10 @@ async fn write_doc(db: &dyn Database, path: &str, content: &str) {
 }
 
 fn options(src: PathBuf, dst: PathBuf, dry_run: bool) -> MigrationOptions {
+    let source_home = src.parent().map(Path::to_path_buf);
     MigrationOptions {
         source: SourceDb::LibSql { path: src },
+        source_home,
         target: TargetStore::LibSql { path: dst },
         profile: "test-migration".to_string(),
         tenant_id: TenantId::new(TENANT).unwrap(),
@@ -894,4 +901,3 @@ async fn dry_run_reports_without_writing() {
         "planning created the target path or its parent"
     );
 }
-

@@ -278,14 +278,7 @@ async fn convert_missions(
 ) -> Result<(), MigrationError> {
     let users = src.distinct_users().await?;
     for user_id in &users {
-        let docs =
-            src.db
-                .list_documents(user_id, None)
-                .await
-                .map_err(|e| MigrationError::ReadSource {
-                    domain: "memory_documents(engine)".into(),
-                    reason: e.to_string(),
-                })?;
+        let docs = src.all_memory_documents(user_id).await?;
 
         // Index engine threads by id so mission thread_history can resolve them.
         let mut engine_threads: HashMap<Uuid, EngineThread> = HashMap::new();

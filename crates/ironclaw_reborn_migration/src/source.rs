@@ -9,6 +9,8 @@
 
 use std::sync::Arc;
 
+use sha2::{Digest as _, Sha256};
+
 #[cfg(feature = "postgres")]
 use ironclaw::config::{DatabaseBackend, DatabaseConfig, SslMode};
 use ironclaw::db::{Database, DatabaseHandles};
@@ -41,7 +43,24 @@ pub(crate) struct ProjectDocument {
 /// Tables a v1 user_id can appear in. Queried independently so a DB missing one
 /// (e.g. a minimal libSQL install without `settings`) still discovers users
 /// from the others.
-const USER_ID_TABLES: [&str; 4] = ["conversations", "routines", "memory_documents", "settings"];
+const USER_ID_TABLES: &[(&str, &str)] = &[
+    ("conversations", "user_id"),
+    ("agent_jobs", "user_id"),
+    ("memory_documents", "user_id"),
+    ("heartbeat_state", "user_id"),
+    ("secrets", "user_id"),
+    ("wasm_tools", "user_id"),
+    ("wasm_channels", "user_id"),
+    ("tool_rate_limit_state", "user_id"),
+    ("secret_usage_log", "user_id"),
+    ("leak_detection_events", "user_id"),
+    ("routines", "user_id"),
+    ("settings", "user_id"),
+    ("api_tokens", "user_id"),
+    ("user_identities", "user_id"),
+    ("channel_identities", "owner_id"),
+    ("pairing_requests", "owner_id"),
+];
 
 impl V1Source {
     pub(crate) async fn open(source: &SourceDb) -> Result<Self, MigrationError> {
@@ -305,8 +324,8 @@ impl V1Source {
     /// not exist.
     pub(crate) async fn distinct_users(&self) -> Result<Vec<String>, MigrationError> {
         let mut users = std::collections::BTreeSet::new();
-        for table in USER_ID_TABLES {
-            for uid in self.distinct_user_ids_in(table, "user_id").await? {
+        for (table, column) in USER_ID_TABLES {
+            for uid in self.distinct_user_ids_in(table, column).await? {
                 if !uid.is_empty() {
                     users.insert(uid);
                 }
@@ -371,6 +390,69 @@ impl V1Source {
             .list_documents(user_id, agent_id)
             .await
             .map_err(|error| source_read_error("memory_documents", error))
+    }
+
+    pub(crate) async fn all_memory_documents(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<ironclaw::workspace::MemoryDocument>, MigrationError> {
+        let mut agent_ids = self.memory_document_agent_ids(user_id).await?;
+        let mut documents = self.memory_documents(user_id, None).await?;
+        for agent_id in agent_ids.drain(..) {
+            documents.extend(self.memory_documents(user_id, Some(agent_id)).await?);
+        }
+        Ok(documents)
+    }
+
+    async fn memory_document_agent_ids(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<uuid::Uuid>, MigrationError> {
+        let read_err =
+            |error: &dyn std::fmt::Display| source_read_error("memory_documents.agent_id", error);
+        #[cfg(feature = "libsql")]
+        if let Some(database) = self.handles.libsql_db.as_ref() {
+            let connection = database.connect().map_err(|error| read_err(&error))?;
+            let mut rows = match connection
+                .query(
+                    "SELECT DISTINCT agent_id FROM memory_documents \
+                     WHERE user_id = ?1 AND agent_id IS NOT NULL ORDER BY agent_id",
+                    [user_id],
+                )
+                .await
+            {
+                Ok(rows) => rows,
+                Err(error) if is_missing_table_error(&error.to_string()) => return Ok(Vec::new()),
+                Err(error) => return Err(read_err(&error)),
+            };
+            let mut agent_ids = Vec::new();
+            while let Some(row) = rows.next().await.map_err(|error| read_err(&error))? {
+                let raw = row.get::<String>(0).map_err(|error| read_err(&error))?;
+                agent_ids.push(raw.parse().map_err(|error| read_err(&error))?);
+            }
+            return Ok(agent_ids);
+        }
+        #[cfg(feature = "postgres")]
+        if let Some(pool) = self.handles.pg_pool.as_ref() {
+            let client = pool.get().await.map_err(|error| read_err(&error))?;
+            let rows = match client
+                .query(
+                    "SELECT DISTINCT agent_id FROM memory_documents \
+                     WHERE user_id = $1 AND agent_id IS NOT NULL ORDER BY agent_id",
+                    &[&user_id],
+                )
+                .await
+            {
+                Ok(rows) => rows,
+                Err(error) if is_missing_table_error(&error.to_string()) => return Ok(Vec::new()),
+                Err(error) => return Err(read_err(&error)),
+            };
+            return rows
+                .iter()
+                .map(|row| row.try_get(0).map_err(|error| read_err(&error)))
+                .collect();
+        }
+        Ok(Vec::new())
     }
 
     /// Read every engine-v2 project document regardless of its optional
@@ -481,7 +563,7 @@ impl V1Source {
             domain: table.to_string(),
             reason: e.to_string(),
         };
-        let sql = format!("SELECT DISTINCT {column} FROM {table}");
+        let sql = format!("SELECT DISTINCT {column} FROM {table} WHERE {column} IS NOT NULL");
         #[cfg(feature = "libsql")]
         if let Some(db) = self.handles.libsql_db.as_ref() {
             let conn = db.connect().map_err(|e| read_err(&e))?;
@@ -657,57 +739,64 @@ async fn fingerprint_local_snapshot(
 ) -> Result<SourceFingerprint, MigrationError> {
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        let mut hash = 0xcbf29ce484222325_u64;
-        for candidate in [
-            path.clone(),
-            std::path::PathBuf::from(format!("{}-wal", path.display())),
+        let mut hash = Sha256::new();
+        hash.update(b"ironclaw-v1-libsql-content-set-v1\0");
+        for (role, candidate) in [
+            (b"database".as_slice(), path.clone()),
+            (
+                b"wal".as_slice(),
+                std::path::PathBuf::from(format!("{}-wal", path.display())),
+            ),
         ] {
-            if !candidate.exists() {
-                continue;
-            }
-            for byte in candidate
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .as_bytes()
-            {
-                hash ^= u64::from(*byte);
-                hash = hash.wrapping_mul(0x100000001b3);
-            }
-            let metadata = std::fs::metadata(&candidate)?;
-            for byte in metadata.len().to_le_bytes() {
-                hash ^= u64::from(byte);
-                hash = hash.wrapping_mul(0x100000001b3);
-            }
-            if let Ok(modified) = metadata.modified()
-                && let Ok(since_epoch) = modified.duration_since(std::time::UNIX_EPOCH)
-            {
-                for byte in since_epoch.as_secs().to_le_bytes() {
-                    hash ^= u64::from(byte);
-                    hash = hash.wrapping_mul(0x100000001b3);
+            hash.update(role);
+            hash.update(b"\0");
+            let mut file = match std::fs::File::open(&candidate) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    hash.update(b"missing\0");
+                    continue;
                 }
-                for byte in since_epoch.subsec_nanos().to_le_bytes() {
-                    hash ^= u64::from(byte);
-                    hash = hash.wrapping_mul(0x100000001b3);
-                }
-            }
+                Err(error) => return Err(error.into()),
+            };
+            hash.update(b"present\0");
+            let length = file.metadata()?.len();
+            hash.update(length.to_le_bytes());
+            std::io::copy(&mut file, &mut DigestWriter(&mut hash))?;
         }
         Ok(SourceFingerprint {
-            algorithm: "fnv1a64-file-metadata-set-v1".to_string(),
-            value: format!("{hash:016x}"),
+            algorithm: "sha256-file-content-set-v1".to_string(),
+            value: format!("{:x}", hash.finalize()),
         })
     })
     .await
     .map_err(|error| MigrationError::OpenSource(format!("snapshot fingerprint task: {error}")))?
 }
 
-#[cfg(all(test, feature = "postgres"))]
+struct DigestWriter<'a>(&'a mut Sha256);
+
+impl std::io::Write for DigestWriter<'_> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0.update(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    #[cfg(feature = "postgres")]
     use secrecy::SecretString;
 
+    use super::fingerprint_local_snapshot;
+    #[cfg(feature = "postgres")]
     use super::source_to_config;
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
     use crate::options::SourceDb;
 
+    #[cfg(feature = "postgres")]
     #[test]
     fn remote_postgres_source_rejects_disabled_tls() {
         let source = SourceDb::Postgres {
@@ -722,6 +811,7 @@ mod tests {
         assert!(!rendered.contains("database.example"));
     }
 
+    #[cfg(feature = "postgres")]
     #[test]
     fn local_postgres_source_can_explicitly_disable_tls() {
         let source = SourceDb::Postgres {
@@ -731,5 +821,73 @@ mod tests {
         };
         let config = source_to_config(&source).expect("local plaintext source");
         assert_eq!(config.ssl_mode, ironclaw::config::SslMode::Disable);
+    }
+
+    #[tokio::test]
+    async fn local_snapshot_fingerprint_is_bound_to_file_contents() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let snapshot = directory.path().join("snapshot.db");
+        std::fs::write(&snapshot, b"same-length-a").expect("write snapshot");
+        let original_modified = std::fs::metadata(&snapshot)
+            .expect("snapshot metadata")
+            .modified()
+            .expect("modified time");
+
+        let before = fingerprint_local_snapshot(&snapshot)
+            .await
+            .expect("initial fingerprint");
+        std::fs::write(&snapshot, b"same-length-b").expect("replace snapshot");
+        std::fs::File::options()
+            .write(true)
+            .open(&snapshot)
+            .expect("open snapshot")
+            .set_times(std::fs::FileTimes::new().set_modified(original_modified))
+            .expect("restore modified time");
+        let after = fingerprint_local_snapshot(&snapshot)
+            .await
+            .expect("replacement fingerprint");
+
+        assert_eq!(before.algorithm, "sha256-file-content-set-v1");
+        assert_ne!(before.value, after.value);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn user_discovery_includes_satellite_store_owners() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("source.db");
+        let database = libsql::Builder::new_local(&path)
+            .build()
+            .await
+            .expect("build source");
+        let connection = database.connect().expect("connect source");
+        connection
+            .execute_batch(
+                "CREATE TABLE secrets (user_id TEXT NOT NULL);\
+                 CREATE TABLE wasm_tools (user_id TEXT NOT NULL);\
+                 CREATE TABLE wasm_channels (user_id TEXT NOT NULL);\
+                 CREATE TABLE channel_identities (owner_id TEXT NOT NULL);\
+                 INSERT INTO secrets VALUES ('secret-owner');\
+                 INSERT INTO wasm_tools VALUES ('tool-owner');\
+                 INSERT INTO wasm_channels VALUES ('channel-owner');\
+                 INSERT INTO channel_identities VALUES ('identity-owner');",
+            )
+            .await
+            .expect("seed owners");
+        drop(connection);
+        drop(database);
+
+        let source = super::V1Source::open(&SourceDb::LibSql { path })
+            .await
+            .expect("open source");
+        assert_eq!(
+            source.distinct_users().await.expect("discover users"),
+            vec![
+                "channel-owner",
+                "identity-owner",
+                "secret-owner",
+                "tool-owner"
+            ]
+        );
     }
 }

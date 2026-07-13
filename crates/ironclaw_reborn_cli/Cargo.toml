@@ -59,6 +59,7 @@ openai-compat-beta = [
 # Enable production PostgreSQL storage composition for `ironclaw-reborn`.
 postgres = [
     "ironclaw_reborn_composition/postgres",
+    "ironclaw_reborn_composition/migration-support",
 ]
 # Enable embedded libSQL storage composition for volume-backed hosted previews.
 libsql = [

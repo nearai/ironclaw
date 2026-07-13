@@ -60,6 +60,10 @@ struct SourceArgs {
     /// Read the PostgreSQL snapshot URL from MIGRATION_SOURCE_POSTGRES.
     #[arg(long, group = "source")]
     source_postgres: bool,
+
+    /// v1 home whose persistent artifacts belong to this source snapshot.
+    #[arg(long, value_name = "PATH")]
+    source_home: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -162,6 +166,7 @@ impl MigrateCommand {
 
 pub(crate) fn plan_detected_v1(
     source: V1MigrationSourceCandidate,
+    source_home: &Path,
     manifest: &Path,
 ) -> anyhow::Result<()> {
     let mut args = vec![OsString::from("v1"), OsString::from("plan")];
@@ -173,19 +178,47 @@ pub(crate) fn plan_detected_v1(
             args.push(OsString::from("--source-postgres"));
         }
     }
+    push_path_option(&mut args, "--source-home", source_home.to_path_buf());
     push_path_option(&mut args, "--manifest", manifest.to_path_buf());
     launch_companion(args)
 }
 
 pub(crate) fn ensure_activation_allowed(context: &RebornCliContext) -> anyhow::Result<()> {
+    let status = read_activation_state_status(context)?;
+    let Some(status) = status else {
+        return Ok(());
+    };
+    activation_status_allowed(&status)
+}
+
+pub(crate) fn read_activation_state_status(
+    context: &RebornCliContext,
+) -> anyhow::Result<Option<String>> {
     let marker = context
         .boot_config()
         .home()
         .path()
         .join(MIGRATION_STATE_MARKER_FILE);
-    let body = match fs::read_to_string(&marker) {
+    let local = read_local_target_state_status(&marker)?;
+    let shared = read_shared_target_state_status(context)?;
+    Ok(most_restrictive_status(local, shared))
+}
+
+fn most_restrictive_status(local: Option<String>, shared: Option<String>) -> Option<String> {
+    let quarantined =
+        |status: &str| matches!(status, "applying" | "failed" | "applied" | "verifying");
+    match (local, shared) {
+        (Some(_), Some(shared)) if quarantined(&shared) => Some(shared),
+        (Some(local), Some(_)) if quarantined(&local) => Some(local),
+        (_, Some(shared)) => Some(shared),
+        (local, None) => local,
+    }
+}
+
+fn read_local_target_state_status(marker: &Path) -> anyhow::Result<Option<String>> {
+    let body = match fs::read_to_string(marker) {
         Ok(body) => body,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(error).with_context(|| {
                 format!(
@@ -201,31 +234,45 @@ pub(crate) fn ensure_activation_allowed(context: &RebornCliContext) -> anyhow::R
             marker.display()
         )
     })?;
-    ensure!(
+    validate_state_header(
         document
             .get("schema_version")
-            .and_then(serde_json::Value::as_str)
-            == Some(MIGRATION_STATE_MARKER_SCHEMA),
-        "Reborn target is quarantined because its v1 migration state marker has an unknown schema"
-    );
-    ensure!(
+            .and_then(serde_json::Value::as_str),
         document
             .get("migration_protocol_version")
-            .and_then(serde_json::Value::as_u64)
-            == Some(u64::from(COMPANION_PROTOCOL_VERSION)),
-        "Reborn target is quarantined because its v1 migration state marker has an incompatible protocol"
-    );
-    ensure!(
-        document
-            .get("release_version")
-            .and_then(serde_json::Value::as_str)
-            == Some(env!("CARGO_PKG_VERSION")),
-        "Reborn target is quarantined because its v1 migration state marker belongs to a different release"
-    );
+            .and_then(serde_json::Value::as_u64),
+    )?;
     let status = document
         .get("status")
         .and_then(serde_json::Value::as_str)
         .context("v1 migration state marker has no status")?;
+    Ok(Some(validate_state_status(status)?.to_owned()))
+}
+
+fn validate_state_header(schema: Option<&str>, protocol: Option<u64>) -> anyhow::Result<()> {
+    ensure!(
+        schema == Some(MIGRATION_STATE_MARKER_SCHEMA),
+        "Reborn target is quarantined because its v1 migration state marker has an unknown schema"
+    );
+    ensure!(
+        protocol == Some(u64::from(COMPANION_PROTOCOL_VERSION)),
+        "Reborn target is quarantined because its v1 migration state marker has an incompatible protocol"
+    );
+    Ok(())
+}
+
+fn validate_state_status(status: &str) -> anyhow::Result<&str> {
+    ensure!(
+        matches!(
+            status,
+            "planned" | "applying" | "failed" | "applied" | "verifying" | "verified"
+        ),
+        "Reborn target is quarantined because v1 migration status `{status}` is unknown"
+    );
+    Ok(status)
+}
+
+fn activation_status_allowed(status: &str) -> anyhow::Result<()> {
     match status {
         "planned" | "verified" => Ok(()),
         "applying" | "failed" | "applied" | "verifying" => anyhow::bail!(
@@ -237,34 +284,63 @@ pub(crate) fn ensure_activation_allowed(context: &RebornCliContext) -> anyhow::R
     }
 }
 
-pub(crate) fn read_target_state_status(path: &Path) -> Option<String> {
-    let body = fs::read_to_string(path).ok()?;
-    let document: serde_json::Value = serde_json::from_str(&body).ok()?;
-    if document
-        .get("schema_version")
-        .and_then(serde_json::Value::as_str)
-        != Some(MIGRATION_STATE_MARKER_SCHEMA)
-        || document
-            .get("migration_protocol_version")
-            .and_then(serde_json::Value::as_u64)
-            != Some(u64::from(COMPANION_PROTOCOL_VERSION))
-        || document
-            .get("release_version")
-            .and_then(serde_json::Value::as_str)
-            != Some(env!("CARGO_PKG_VERSION"))
-    {
-        return None;
-    }
-    document
-        .get("status")
-        .and_then(serde_json::Value::as_str)
-        .filter(|status| {
-            matches!(
-                *status,
-                "planned" | "applying" | "failed" | "applied" | "verifying" | "verified"
+#[cfg(feature = "postgres")]
+fn read_shared_target_state_status(context: &RebornCliContext) -> anyhow::Result<Option<String>> {
+    use ironclaw_reborn_composition::RebornMigrationTargetStore;
+
+    let target =
+        ironclaw_reborn_composition::resolve_reborn_migration_target(context.boot_config())
+            .context("failed to resolve the Reborn target for migration quarantine inspection")?;
+    let url = match target.store {
+        RebornMigrationTargetStore::Postgres { url } => url,
+        #[cfg(feature = "libsql")]
+        RebornMigrationTargetStore::LibSql { .. } => return Ok(None),
+    };
+    crate::runtime::block_on_cli(async move {
+        let pool = ironclaw_reborn_composition::open_reborn_postgres_pool(url).context(
+            "failed to open the Reborn PostgreSQL target for migration quarantine inspection",
+        )?;
+        let client = pool
+            .get()
+            .await
+            .context("failed to inspect shared PostgreSQL migration quarantine state")?;
+        let relation: Option<String> = client
+            .query_one("SELECT to_regclass('reborn_migration_state')::text", &[])
+            .await
+            .context("failed to inspect shared PostgreSQL migration quarantine schema")?
+            .try_get(0)
+            .context("invalid shared PostgreSQL migration quarantine schema result")?;
+        if relation.is_none() {
+            return Ok::<Option<String>, anyhow::Error>(None);
+        }
+        let row = client
+            .query_opt(
+                "SELECT schema_version, migration_protocol_version, status \
+                 FROM reborn_migration_state WHERE singleton = TRUE",
+                &[],
             )
-        })
-        .map(ToOwned::to_owned)
+            .await
+            .context("failed to read shared PostgreSQL migration quarantine state")?
+            .context("shared PostgreSQL migration quarantine table has no singleton state")?;
+        let schema: String = row
+            .try_get(0)
+            .context("invalid shared PostgreSQL migration quarantine schema version")?;
+        let protocol: i64 = row
+            .try_get(1)
+            .context("invalid shared PostgreSQL migration quarantine protocol version")?;
+        let status: String = row
+            .try_get(2)
+            .context("invalid shared PostgreSQL migration quarantine status")?;
+        let protocol = u64::try_from(protocol)
+            .context("shared PostgreSQL migration quarantine protocol version is negative")?;
+        validate_state_header(Some(&schema), Some(protocol))?;
+        Ok::<Option<String>, anyhow::Error>(Some(validate_state_status(&status)?.to_owned()))
+    })
+}
+
+#[cfg(not(feature = "postgres"))]
+fn read_shared_target_state_status(_context: &RebornCliContext) -> anyhow::Result<Option<String>> {
+    Ok(None)
 }
 
 fn launch_companion(args: Vec<OsString>) -> anyhow::Result<()> {
@@ -355,6 +431,9 @@ fn push_source_args(args: &mut Vec<OsString>, source: SourceArgs) {
         push_path_option(args, "--source-libsql", path);
     } else if source.source_postgres {
         args.push(OsString::from("--source-postgres"));
+    }
+    if let Some(path) = source.source_home {
+        push_path_option(args, "--source-home", path);
     }
 }
 
@@ -512,6 +591,16 @@ fn propagate_status(status: ExitStatus) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    fn marker(release_version: &str, status: &str) -> String {
+        serde_json::json!({
+            "schema_version": MIGRATION_STATE_MARKER_SCHEMA,
+            "migration_protocol_version": COMPANION_PROTOCOL_VERSION,
+            "release_version": release_version,
+            "status": status,
+        })
+        .to_string()
+    }
+
     #[test]
     fn plan_forwarding_never_contains_database_urls_or_keys() {
         let command = V1MigrationCommand {
@@ -519,6 +608,7 @@ mod tests {
                 source: SourceArgs {
                     source_libsql: None,
                     source_postgres: true,
+                    source_home: Some(PathBuf::from("v1-home")),
                 },
                 manifest: PathBuf::from("manifest.json"),
                 strict: true,
@@ -531,6 +621,8 @@ mod tests {
                 "v1",
                 "plan",
                 "--source-postgres",
+                "--source-home",
+                "v1-home",
                 "--manifest",
                 "manifest.json",
                 "--strict",
@@ -538,6 +630,35 @@ mod tests {
             .into_iter()
             .map(OsString::from)
             .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn verified_marker_from_compatible_release_allows_activation() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        let path = context
+            .boot_config()
+            .home()
+            .path()
+            .join(MIGRATION_STATE_MARKER_FILE);
+        fs::create_dir_all(context.boot_config().home().path()).expect("create home");
+        fs::write(&path, marker("previous-release", "verified")).expect("write marker");
+
+        ensure_activation_allowed(&context).expect("compatible verified marker should activate");
+        assert_eq!(
+            read_activation_state_status(&context)
+                .expect("read marker")
+                .as_deref(),
+            Some("verified")
+        );
+    }
+
+    #[test]
+    fn shared_quarantine_dominates_stale_local_verified_state() {
+        assert_eq!(
+            most_restrictive_status(Some("verified".to_string()), Some("applying".to_string()))
+                .as_deref(),
+            Some("applying")
         );
     }
 }

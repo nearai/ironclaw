@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::error::MigrationError;
 use crate::report::Domain;
 
-pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
+pub const MANIFEST_SCHEMA_VERSION: u32 = 2;
 pub const MIGRATION_PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,6 +105,7 @@ pub struct ResolvedScope {
     pub profile: String,
     pub tenant_id: String,
     pub agent_id: String,
+    pub source_home_fingerprint: Option<String>,
     pub user_mapping: BTreeMap<String, String>,
     pub target_empty: Option<bool>,
 }

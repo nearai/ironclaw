@@ -69,6 +69,10 @@ struct SourceArgs {
     /// Read the PostgreSQL snapshot URL from MIGRATION_SOURCE_POSTGRES.
     #[arg(long, group = "source")]
     source_postgres: bool,
+
+    /// v1 home containing persistent files outside the database snapshot.
+    #[arg(long, value_name = "PATH")]
+    source_home: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -403,11 +407,13 @@ async fn run_v1(operation: V1Operation) -> anyhow::Result<()> {
 }
 
 fn resolve_run(source: SourceArgs) -> anyhow::Result<ResolvedRun> {
+    let source_home = source.source_home.clone();
     let source = resolve_source(source)?;
     let target = resolve_target()?;
     Ok(ResolvedRun {
         options: MigrationOptions {
             source,
+            source_home,
             target: target.store,
             profile: target.profile.clone(),
             tenant_id: target.tenant_id,

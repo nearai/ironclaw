@@ -290,30 +290,37 @@ fn docker_reborn_entrypoint_does_not_seed_target_for_migration_commands() {
     fake_reborn_bin(&bin_dir);
     let reborn_home = temp.path().join("missing-reborn-home");
 
-    let output = Command::new("/bin/sh")
-        .arg(workspace_root().join("docker/reborn/entrypoint.sh"))
-        .args(["migrate", "v1", "--help"])
-        .env_clear()
-        .env("PATH", fake_bin_path(&bin_dir))
-        .env("HOME", temp.path().join("home"))
-        .env("IRONCLAW_REBORN_HOME", &reborn_home)
-        .output()
-        .expect("entrypoint should run");
+    for args in [
+        &["migrate", "v1", "--help"][..],
+        &["migrate", "v1", "apply", "--help"][..],
+        &["migrate", "v1", "resume", "-h"][..],
+        &["migrate", "v1", "verify", "--help"][..],
+    ] {
+        let output = Command::new("/bin/sh")
+            .arg(workspace_root().join("docker/reborn/entrypoint.sh"))
+            .args(args)
+            .env_clear()
+            .env("PATH", fake_bin_path(&bin_dir))
+            .env("HOME", temp.path().join("home"))
+            .env("IRONCLAW_REBORN_HOME", &reborn_home)
+            .output()
+            .expect("entrypoint should run");
 
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("args=migrate v1 --help"),
-        "stdout: {stdout}"
-    );
-    assert!(
-        !reborn_home.exists(),
-        "migration dispatch must not create target state"
-    );
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains(&format!("args={}", args.join(" "))),
+            "stdout: {stdout}"
+        );
+        assert!(
+            !reborn_home.exists(),
+            "migration help dispatch must not create target state"
+        );
+    }
 }
 
 #[cfg(unix)]

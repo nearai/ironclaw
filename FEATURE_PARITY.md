@@ -718,13 +718,16 @@ same-version companion in the Docker image and paired source builds. Native
 installers do not yet package the pair. Planning uses a read-only source adapter
 and does not open the target; apply requires a stopped-source snapshot, a fresh
 target, and the sealed source fingerprint. The versioned manifest inventories
-known v1 tables/home artifacts and labels each category as imported, converted,
+known v1 tables/home artifacts from an explicit sealed source-home path and
+labels each category as imported, converted,
 archive-only, reset, re-auth/reinstall, or unsupported. `archive-only` currently
 means the source category and count remain visible in the manifest; it does not
 export or retain the source payload. The companion is resolved beside the
 primary executable rather than from `PATH`, and database URLs/master keys remain
 environment-only. See
 `docs/reborn/v1-migration.md` for cutover and rollback.
+PostgreSQL targets persist migration quarantine state in the shared database so
+all replicas block activation until verification succeeds.
 
 The current conversion layer maps cron routines and cron missions to Reborn
 `TriggerRecord`s (mission threads land under `ThreadScope.mission_id`).

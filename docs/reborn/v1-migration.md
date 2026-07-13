@@ -65,6 +65,7 @@ is advisory only; final apply must use a stopped-source snapshot.
 ```bash
 ironclaw-reborn migrate v1 plan \
   --source-libsql /backups/ironclaw-v1.db \
+  --source-home /srv/ironclaw-v1 \
   --manifest /secure/migration-v1.json
 ```
 
@@ -73,6 +74,7 @@ For PostgreSQL:
 ```bash
 ironclaw-reborn migrate v1 plan \
   --source-postgres \
+  --source-home /srv/ironclaw-v1 \
   --manifest /secure/migration-v1.json
 ```
 
@@ -82,6 +84,10 @@ dispositions, warnings, and blockers—not raw database URLs, tokens, or keys.
 Use `--strict` when archive-only, re-auth, reinstall, unsupported, or blocked
 categories should make planning return failure after writing the reviewable
 manifest.
+
+`--source-home` must name the actual stopped v1 home, independently of where a
+database backup was placed. Omitting it leaves home-artifact coverage unproven
+and records an apply-blocking inventory entry.
 
 Review every category before scheduling downtime:
 
@@ -116,6 +122,7 @@ recoverable from the redacted manifest:
 ```bash
 ironclaw-reborn migrate v1 apply \
   --source-libsql /backups/ironclaw-v1.db \
+  --source-home /srv/ironclaw-v1 \
   --plan /secure/migration-v1.json \
   --confirm-v1-stopped \
   --confirm-source-snapshot
@@ -129,6 +136,7 @@ If apply is interrupted, use the same manifest and source:
 ```bash
 ironclaw-reborn migrate v1 resume \
   --source-libsql /backups/ironclaw-v1.db \
+  --source-home /srv/ironclaw-v1 \
   --manifest /secure/migration-v1.json \
   --confirm-v1-stopped \
   --confirm-source-snapshot
@@ -141,12 +149,16 @@ Apply, resume, and verify also update the target-owned
 startup consults this canonical marker rather than assuming the manifest is at
 a default path, so an interrupted operation remains quarantined even when the
 operator selected a manifest elsewhere.
+PostgreSQL targets additionally keep the same lifecycle status in the shared
+`reborn_migration_state` table so every replica observes the quarantine even
+when replicas use different local homes.
 
 ## 4. Verify before startup
 
 ```bash
 ironclaw-reborn migrate v1 verify \
   --source-libsql /backups/ironclaw-v1.db \
+  --source-home /srv/ironclaw-v1 \
   --manifest /secure/migration-v1.json
 
 ironclaw-reborn migrate v1 status \

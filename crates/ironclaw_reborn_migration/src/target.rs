@@ -33,6 +33,7 @@ pub(crate) mod ids;
 
 #[cfg(feature = "postgres")]
 const LIVE_TARGET_TABLES: &[&str] = &[
+    "reborn_migration_state",
     "root_filesystem_entries",
     "root_filesystem_events",
     "root_filesystem_index_specs",
@@ -107,6 +108,86 @@ pub(crate) async fn target_is_empty(target: &TargetStore) -> Result<bool, Migrat
     }
 }
 
+pub(crate) async fn write_shared_migration_state(
+    target: &TargetStore,
+    manifest: &crate::manifest::MigrationManifest,
+) -> Result<(), MigrationError> {
+    match target {
+        TargetStore::LibSql { .. } => {
+            let _ = manifest;
+            Ok(())
+        }
+        #[cfg(feature = "postgres")]
+        TargetStore::Postgres { url } => {
+            let pool = open_postgres_pool(url)?;
+            let client = pool.get().await.map_err(postgres_identity_error)?;
+            client
+                .batch_execute(
+                    "CREATE TABLE IF NOT EXISTS reborn_migration_state (
+                        singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+                        schema_version TEXT NOT NULL,
+                        migration_protocol_version BIGINT NOT NULL,
+                        release_version TEXT NOT NULL,
+                        run_id TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        profile TEXT NOT NULL,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )",
+                )
+                .await
+                .map_err(postgres_identity_error)?;
+            let schema_version = "ironclaw.reborn.migration-state/v1";
+            let protocol_version = i64::from(crate::manifest::MIGRATION_PROTOCOL_VERSION);
+            let run_id = manifest.run_id.to_string();
+            let status = migration_status_label(manifest.status);
+            let parameters: [&(dyn tokio_postgres::types::ToSql + Sync); 6] = [
+                &schema_version,
+                &protocol_version,
+                &manifest.release_version,
+                &run_id,
+                &status,
+                &manifest.scope.profile,
+            ];
+            client
+                .execute(
+                    "INSERT INTO reborn_migration_state (
+                        singleton, schema_version, migration_protocol_version,
+                        release_version, run_id, status, profile, updated_at
+                     ) VALUES (TRUE, $1, $2, $3, $4, $5, $6, NOW())
+                     ON CONFLICT (singleton) DO UPDATE SET
+                        schema_version = EXCLUDED.schema_version,
+                        migration_protocol_version = EXCLUDED.migration_protocol_version,
+                        release_version = EXCLUDED.release_version,
+                        run_id = EXCLUDED.run_id,
+                        status = EXCLUDED.status,
+                        profile = EXCLUDED.profile,
+                        updated_at = EXCLUDED.updated_at",
+                    &parameters,
+                )
+                .await
+                .map_err(postgres_identity_error)?;
+            Ok(())
+        }
+        #[cfg(not(feature = "postgres"))]
+        TargetStore::Postgres { .. } => Err(MigrationError::OpenTarget(
+            "binary built without the postgres feature".to_string(),
+        )),
+    }
+}
+
+#[cfg(feature = "postgres")]
+const fn migration_status_label(status: crate::manifest::MigrationStatus) -> &'static str {
+    use crate::manifest::MigrationStatus;
+    match status {
+        MigrationStatus::Planned => "planned",
+        MigrationStatus::Applying => "applying",
+        MigrationStatus::Failed => "failed",
+        MigrationStatus::Applied => "applied",
+        MigrationStatus::Verifying => "verifying",
+        MigrationStatus::Verified => "verified",
+    }
+}
+
 /// Read migrated state through the same durable tables used by production,
 /// without running migrations or starting workers/ingress.
 pub(crate) async fn readback(
@@ -119,7 +200,7 @@ pub(crate) async fn readback(
     let append_pattern = format!("/tenants/{tenant}/users/%/threads/%/message_appends");
     let memory_pattern = format!("/memory/tenants/{tenant}/%");
     let secret_pattern = format!("/tenants/{tenant}/users/%/secrets/%/secrets/%.json");
-    let identity_pattern = format!("/tenants/{tenant}/shared/reborn-identity/%");
+    let identity_pattern = format!("/tenants/{tenant}/shared/reborn-identity/external/%");
     let user_pattern = format!("/tenants/{tenant}/shared/reborn-identity/users/%.json");
     let project_pattern = format!("/tenants/{tenant}/shared/reborn-projects/%/records/%.json");
 
@@ -739,6 +820,79 @@ fn open_postgres_pool(
     dp_config.url = Some(raw.to_string());
     ironclaw::db::tls::create_pool(&dp_config, ssl_mode)
         .map_err(|e| MigrationError::OpenTarget(e.to_string()))
+}
+
+#[cfg(feature = "postgres")]
+pub(crate) async fn postgres_stores_are_distinct(
+    source_pool: &deadpool_postgres::Pool,
+    target_url: &secrecy::SecretString,
+) -> Result<bool, MigrationError> {
+    const LOCK_NAMESPACE: i64 = 0x4943_4d47;
+
+    let source = source_pool.get().await.map_err(postgres_identity_error)?;
+    let target_pool = open_postgres_pool(target_url)?;
+    let target = target_pool.get().await.map_err(postgres_identity_error)?;
+    let source_database_oid: i64 = source
+        .query_one(
+            "SELECT oid::bigint FROM pg_database WHERE datname = current_database()",
+            &[],
+        )
+        .await
+        .map_err(postgres_identity_error)?
+        .get(0);
+    let target_database_oid: i64 = target
+        .query_one(
+            "SELECT oid::bigint FROM pg_database WHERE datname = current_database()",
+            &[],
+        )
+        .await
+        .map_err(postgres_identity_error)?
+        .get(0);
+    let source_lock_key = (LOCK_NAMESPACE << 32) | (source_database_oid & 0xffff_ffff);
+    let target_lock_key = (LOCK_NAMESPACE << 32) | (target_database_oid & 0xffff_ffff);
+    let source_locked: bool = source
+        .query_one("SELECT pg_try_advisory_lock($1)", &[&source_lock_key])
+        .await
+        .map_err(postgres_identity_error)?
+        .get(0);
+    if !source_locked {
+        return Err(MigrationError::OpenSource(
+            "could not establish PostgreSQL source identity lock".to_string(),
+        ));
+    }
+
+    let target_locked = target
+        .query_one("SELECT pg_try_advisory_lock($1)", &[&target_lock_key])
+        .await
+        .map(|row| row.get::<_, bool>(0));
+    let distinct = match target_locked {
+        Ok(locked) => {
+            if locked {
+                let _ = target
+                    .query_one("SELECT pg_advisory_unlock($1)", &[&target_lock_key])
+                    .await;
+            }
+            locked
+        }
+        Err(error) => {
+            let _ = source
+                .query_one("SELECT pg_advisory_unlock($1)", &[&source_lock_key])
+                .await;
+            return Err(postgres_identity_error(error));
+        }
+    };
+    source
+        .query_one("SELECT pg_advisory_unlock($1)", &[&source_lock_key])
+        .await
+        .map_err(postgres_identity_error)?;
+    Ok(distinct)
+}
+
+#[cfg(feature = "postgres")]
+fn postgres_identity_error(error: impl std::fmt::Display) -> MigrationError {
+    MigrationError::OpenTarget(format!(
+        "PostgreSQL store identity probe failed (connection details redacted): {error}"
+    ))
 }
 
 /// True when the parsed Postgres `Config` targets only loopback hosts / Unix

@@ -236,9 +236,10 @@ fn migration_check(context: &RebornCliContext) -> DoctorCheck {
         }
     });
     let outcome = match detail.as_str() {
-        "invalid" | "failed" => CheckOutcome::Fail,
+        "invalid" | "applying" | "failed" | "applied" | "verifying" => CheckOutcome::Fail,
         "not_detected" | "available" | "planned" => CheckOutcome::Skip,
-        _ => CheckOutcome::Pass,
+        "verified" => CheckOutcome::Pass,
+        _ => CheckOutcome::Fail,
     };
     DoctorCheck {
         name: "v1_migration_state".to_string(),
@@ -249,14 +250,10 @@ fn migration_check(context: &RebornCliContext) -> DoctorCheck {
 }
 
 fn migration_state(context: &RebornCliContext) -> Option<String> {
-    let target_state = context
-        .boot_config()
-        .home()
-        .path()
-        .join(crate::commands::migrate::MIGRATION_STATE_MARKER_FILE);
-    if target_state.exists() {
-        return crate::commands::migrate::read_target_state_status(&target_state)
-            .or_else(|| Some("invalid".to_string()));
+    match crate::commands::migrate::read_activation_state_status(context) {
+        Ok(Some(status)) => return Some(status),
+        Err(_) => return Some("invalid".to_string()),
+        Ok(None) => {}
     }
 
     let marker = crate::commands::onboard::onboarding_marker_path(context.boot_config().home());
@@ -316,6 +313,33 @@ mod tests {
                 .iter()
                 .any(|c| c.category == CheckCategory::Drivers)
         );
+    }
+
+    #[test]
+    fn doctor_fails_quarantined_migration_states() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        let marker = context
+            .boot_config()
+            .home()
+            .path()
+            .join(crate::commands::migrate::MIGRATION_STATE_MARKER_FILE);
+        std::fs::create_dir_all(context.boot_config().home().path()).expect("create home");
+
+        for status in ["applying", "applied", "verifying"] {
+            std::fs::write(
+                &marker,
+                serde_json::json!({
+                    "schema_version": "ironclaw.reborn.migration-state/v1",
+                    "migration_protocol_version": 1,
+                    "release_version": env!("CARGO_PKG_VERSION"),
+                    "status": status,
+                })
+                .to_string(),
+            )
+            .expect("write marker");
+            let check = migration_check(&context);
+            assert_eq!(check.outcome, CheckOutcome::Fail, "status {status}");
+        }
     }
 
     #[test]

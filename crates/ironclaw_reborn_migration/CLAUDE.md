@@ -28,12 +28,16 @@ explicit lifecycle.
   keys, tokens, or decrypted values.
 - Source and target keys are independent. Source key input is used only for v1
   decryption; target key resolution follows production Reborn composition.
+- The v1 home is an explicit sealed input independent of the database snapshot
+  location. Omitting it records an apply blocker because home coverage is unknown.
 - Unknown or incompatible executable artifacts are never enabled.
 - `verify` performs a cold, read-only structural check of supported records in
   the production persistence tables before transitioning the manifest to
   `verified`. It does not boot a full Reborn runtime or prove every product
   service can consume the records. `applying`, `failed`, `applied`, and
   `verifying` targets remain quarantined.
+- PostgreSQL lifecycle state is stored in the shared target as well as the local
+  marker so every replica enforces the same quarantine.
 
 ## Source and target ownership
 

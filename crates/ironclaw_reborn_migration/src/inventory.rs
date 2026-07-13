@@ -149,7 +149,7 @@ const TABLE_RULES: &[DispositionRule] = &[
     DispositionRule {
         name: "settings",
         domain: Domain::Setting,
-        disposition: Disposition::SemanticallyConverted,
+        disposition: Disposition::Unsupported,
     },
     DispositionRule {
         name: "users",
@@ -184,7 +184,7 @@ const TABLE_RULES: &[DispositionRule] = &[
     DispositionRule {
         name: "root_filesystem_entries",
         domain: Domain::WorkspaceFile,
-        disposition: Disposition::SemanticallyConverted,
+        disposition: Disposition::Unsupported,
     },
     DispositionRule {
         name: "root_filesystem_events",
@@ -217,22 +217,22 @@ const FILE_RULES: &[DispositionRule] = &[
     DispositionRule {
         name: ".env",
         domain: Domain::Setting,
-        disposition: Disposition::SemanticallyConverted,
+        disposition: Disposition::Unsupported,
     },
     DispositionRule {
         name: "settings.json",
         domain: Domain::Setting,
-        disposition: Disposition::SemanticallyConverted,
+        disposition: Disposition::Unsupported,
     },
     DispositionRule {
         name: "config.toml",
         domain: Domain::Setting,
-        disposition: Disposition::SemanticallyConverted,
+        disposition: Disposition::Unsupported,
     },
     DispositionRule {
         name: "providers.json",
         domain: Domain::Provider,
-        disposition: Disposition::SemanticallyConverted,
+        disposition: Disposition::Unsupported,
     },
     DispositionRule {
         name: "session.json",
@@ -260,12 +260,12 @@ const DIRECTORY_RULES: &[DispositionRule] = &[
     DispositionRule {
         name: "profiles",
         domain: Domain::Setting,
-        disposition: Disposition::SemanticallyConverted,
+        disposition: Disposition::Unsupported,
     },
     DispositionRule {
         name: "skills",
         domain: Domain::Skill,
-        disposition: Disposition::SemanticallyConverted,
+        disposition: Disposition::Unsupported,
     },
     DispositionRule {
         name: "installed_skills",
@@ -285,7 +285,7 @@ const DIRECTORY_RULES: &[DispositionRule] = &[
     DispositionRule {
         name: "projects",
         domain: Domain::Project,
-        disposition: Disposition::SemanticallyConverted,
+        disposition: Disposition::Unsupported,
     },
     DispositionRule {
         name: "logs",
@@ -428,40 +428,60 @@ pub(crate) fn build_home_inventory(
         .chain(DIRECTORY_RULES)
         .map(|rule| rule.name)
         .collect();
-    if let Ok(entries) = std::fs::read_dir(home) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if known.contains(name.as_str()) || excluded_names.contains(&name) {
-                continue;
-            }
-            let kind = entry
-                .file_type()
-                .ok()
-                .map_or(InventorySourceKind::HomeFile, |kind| {
-                    if kind.is_dir() {
-                        InventorySourceKind::HomeDirectory
-                    } else {
-                        InventorySourceKind::HomeFile
+    match std::fs::read_dir(home) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        out.push(home_inventory_error("home_directory_entry", &error));
+                        continue;
                     }
+                };
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if known.contains(name.as_str()) || excluded_names.contains(&name) {
+                    continue;
+                }
+                let kind = match entry.file_type() {
+                    Ok(kind) if kind.is_dir() => InventorySourceKind::HomeDirectory,
+                    Ok(_) => InventorySourceKind::HomeFile,
+                    Err(error) => {
+                        out.push(home_inventory_error("home_entry_type", &error));
+                        continue;
+                    }
+                };
+                let (count, count_error) = match count_path_entries(&entry.path()) {
+                    Ok(count) => (count, None),
+                    Err(error) => (0, Some(error)),
+                };
+                let (checksum, checksum_error) = match checksum_path(&entry.path()) {
+                    Ok(checksum) => (checksum, None),
+                    Err(error) => (
+                        sha256_hex(format!("unreadable-home:{name}:{error}").as_bytes()),
+                        Some(error),
+                    ),
+                };
+                let blocker = count_error.or(checksum_error).map(|error| {
+                    format!("v1 home artifact could not be inventoried completely: {error}")
                 });
-            let count = count_path_entries(&entry.path());
-            let checksum = checksum_path(&entry.path()).unwrap_or_else(|error| {
-                sha256_hex(format!("unreadable-home:{name}:{error}").as_bytes())
-            });
-            out.push(InventoryEntry {
-                source_kind: kind,
-                source_name: name.clone(),
-                domain: Domain::Unknown,
-                disposition: Disposition::UnsupportedUnknown,
-                count,
-                checksum,
-                blocker: Some(
-                    "unknown v1 home artifact requires an explicit migration disposition"
-                        .to_string(),
-                ),
-                warning: None,
-            });
+                out.push(InventoryEntry {
+                    source_kind: kind,
+                    source_name: name.clone(),
+                    domain: Domain::Unknown,
+                    disposition: Disposition::UnsupportedUnknown,
+                    count,
+                    checksum,
+                    blocker: blocker.or_else(|| {
+                        Some(
+                            "unknown v1 home artifact requires an explicit migration disposition"
+                                .to_string(),
+                        )
+                    }),
+                    warning: None,
+                });
+            }
         }
+        Err(error) => out.push(home_inventory_error("home_directory_enumeration", &error)),
     }
     out
 }
@@ -471,9 +491,46 @@ fn home_entry(
     source_kind: InventorySourceKind,
     rule: DispositionRule,
 ) -> InventoryEntry {
-    let count = count_path_entries(&path);
-    let checksum = checksum_path(&path)
-        .unwrap_or_else(|error| sha256_hex(format!("unreadable:{}:{error}", rule.name).as_bytes()));
+    match path.try_exists() {
+        Ok(false) => {
+            return InventoryEntry {
+                source_kind,
+                source_name: rule.name.to_string(),
+                domain: rule.domain,
+                disposition: rule.disposition,
+                count: 0,
+                checksum: sha256_hex(b"missing"),
+                blocker: None,
+                warning: None,
+            };
+        }
+        Ok(true) => {}
+        Err(error) => {
+            return InventoryEntry {
+                source_kind,
+                source_name: rule.name.to_string(),
+                domain: rule.domain,
+                disposition: rule.disposition,
+                count: 0,
+                checksum: sha256_hex(format!("unreadable:{}:{error}", rule.name).as_bytes()),
+                blocker: Some(format!(
+                    "known v1 home artifact could not be inventoried completely: {error}"
+                )),
+                warning: None,
+            };
+        }
+    }
+    let (count, count_error) = match count_path_entries(&path) {
+        Ok(count) => (count, None),
+        Err(error) => (0, Some(error)),
+    };
+    let (checksum, checksum_error) = match checksum_path(&path) {
+        Ok(checksum) => (checksum, None),
+        Err(error) => (
+            sha256_hex(format!("unreadable:{}:{error}", rule.name).as_bytes()),
+            Some(error),
+        ),
+    };
     InventoryEntry {
         source_kind,
         source_name: rule.name.to_string(),
@@ -481,19 +538,30 @@ fn home_entry(
         disposition: rule.disposition,
         count,
         checksum,
-        blocker: None,
+        blocker: count_error.or(checksum_error).map(|error| {
+            format!("known v1 home artifact could not be inventoried completely: {error}")
+        }),
+        warning: None,
+    }
+}
+
+fn home_inventory_error(source_name: &str, error: &std::io::Error) -> InventoryEntry {
+    InventoryEntry {
+        source_kind: InventorySourceKind::HomeDirectory,
+        source_name: source_name.to_string(),
+        domain: Domain::Unknown,
+        disposition: Disposition::UnsupportedUnknown,
+        count: 0,
+        checksum: sha256_hex(format!("unreadable-home:{source_name}:{error}").as_bytes()),
+        blocker: Some(format!(
+            "v1 home directory could not be inventoried completely: {error}"
+        )),
         warning: None,
     }
 }
 
 fn checksum_path(path: &Path) -> std::io::Result<String> {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(sha256_hex(b"missing"));
-        }
-        Err(error) => return Err(error),
-    };
+    let metadata = std::fs::symlink_metadata(path)?;
     let mut state = Fnv1a64::new();
     if metadata.file_type().is_symlink() {
         // A symlink destination may itself contain a username, credential, or
@@ -551,20 +619,16 @@ impl Fnv1a64 {
     }
 }
 
-fn count_path_entries(path: &Path) -> u64 {
-    let Ok(metadata) = std::fs::symlink_metadata(path) else {
-        return 0;
-    };
+fn count_path_entries(path: &Path) -> std::io::Result<u64> {
+    let metadata = std::fs::symlink_metadata(path)?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return 1;
+        return Ok(1);
     }
-    let Ok(entries) = std::fs::read_dir(path) else {
-        return 1;
-    };
-    1 + entries
-        .flatten()
-        .map(|entry| count_path_entries(&entry.path()))
-        .sum::<u64>()
+    let mut count = 1_u64;
+    for entry in std::fs::read_dir(path)? {
+        count = count.saturating_add(count_path_entries(&entry?.path())?);
+    }
+    Ok(count)
 }
 
 #[cfg(test)]
@@ -600,5 +664,51 @@ mod tests {
             format!("fnv1a64:{:016x}", content_digest.finish()),
             "manifest checksums must never be hashes of secret-bearing file contents"
         );
+    }
+
+    #[test]
+    fn unconverted_known_sources_are_never_labeled_semantically_converted() {
+        for name in [
+            "settings",
+            "root_filesystem_entries",
+            ".env",
+            "settings.json",
+            "config.toml",
+            "providers.json",
+            "profiles",
+            "skills",
+            "projects",
+        ] {
+            let rule = TABLE_RULES
+                .iter()
+                .chain(FILE_RULES)
+                .chain(DIRECTORY_RULES)
+                .find(|rule| rule.name == name)
+                .expect("known source rule");
+            assert_eq!(rule.disposition, Disposition::Unsupported, "{name}");
+        }
+    }
+
+    #[test]
+    fn unreadable_home_enumeration_is_a_blocker() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let not_a_directory = directory.path().join("home-file");
+        std::fs::write(&not_a_directory, b"not a directory").expect("write file");
+
+        let inventory = build_home_inventory(Some(&not_a_directory), None, None);
+        let failure = inventory
+            .iter()
+            .find(|entry| entry.source_name == "home_directory_enumeration")
+            .expect("enumeration blocker");
+        assert_eq!(failure.disposition, Disposition::UnsupportedUnknown);
+        assert!(failure.blocker.is_some());
+    }
+
+    #[test]
+    fn vanished_inventory_path_is_an_error() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let vanished = directory.path().join("vanished");
+        let error = count_path_entries(&vanished).expect_err("missing path must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
     }
 }

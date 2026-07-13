@@ -55,8 +55,10 @@ async fn source_contents(path: &Path) -> Vec<(String, String, String)> {
 }
 
 fn options(source: PathBuf, target: PathBuf) -> MigrationOptions {
+    let source_home = source.parent().map(Path::to_path_buf);
     MigrationOptions {
         source: SourceDb::LibSql { path: source },
+        source_home,
         target: TargetStore::LibSql { path: target },
         profile: "test-migration".to_string(),
         tenant_id: TenantId::new("migration-tenant").expect("tenant"),
@@ -64,6 +66,96 @@ fn options(source: PathBuf, target: PathBuf) -> MigrationOptions {
         secret_master_key: None,
         dry_run: true,
     }
+}
+
+#[tokio::test]
+async fn apply_rejects_scope_drift_before_creating_target() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let source = directory.path().join("source.db");
+    let target = directory.path().join("new-target").join("target.db");
+    seed_source(&source).await;
+    let planned_options = options(source, target.clone());
+    let manifest = plan_migration(&planned_options).await.expect("plan");
+
+    let mut changed = planned_options;
+    changed.profile = "different-profile".to_string();
+    let error = apply_migration(
+        changed,
+        &manifest,
+        MigrationSecretInputs::default(),
+        ApplyAcknowledgements::offline_snapshot(),
+    )
+    .await
+    .expect_err("scope drift must fail");
+
+    assert!(error.to_string().contains("sealed plan"));
+    assert!(!target.exists());
+}
+
+#[tokio::test]
+async fn explicit_source_home_is_sealed_and_not_inferred_from_snapshot() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let source_home = directory.path().join("v1-home");
+    let backup_dir = directory.path().join("backups");
+    std::fs::create_dir_all(&source_home).expect("source home");
+    std::fs::create_dir_all(&backup_dir).expect("backup dir");
+    std::fs::write(source_home.join("settings.json"), b"{}").expect("home artifact");
+    let source = backup_dir.join("source.db");
+    seed_source(&source).await;
+    let target = directory.path().join("target.db");
+    let mut migration_options = options(source, target.clone());
+    migration_options.source_home = Some(source_home.clone());
+
+    let manifest = plan_migration(&migration_options).await.expect("plan");
+    assert_eq!(
+        manifest
+            .inventory
+            .iter()
+            .find(|entry| entry.source_name == "settings.json")
+            .expect("settings inventory")
+            .count,
+        1
+    );
+
+    migration_options.source_home = Some(backup_dir);
+    let error = apply_migration(
+        migration_options,
+        &manifest,
+        MigrationSecretInputs::default(),
+        ApplyAcknowledgements::offline_snapshot(),
+    )
+    .await
+    .expect_err("source home drift must fail");
+    assert!(error.to_string().contains("sealed plan"));
+    assert!(!target.exists());
+}
+
+#[tokio::test]
+async fn missing_source_home_blocks_apply() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let source = directory.path().join("source.db");
+    let target = directory.path().join("target.db");
+    seed_source(&source).await;
+    let mut migration_options = options(source, target.clone());
+    migration_options.source_home = None;
+
+    let manifest = plan_migration(&migration_options).await.expect("plan");
+    assert!(
+        manifest
+            .inventory
+            .iter()
+            .any(|entry| entry.source_name == "v1_home" && entry.blocker.is_some())
+    );
+    let error = apply_migration(
+        migration_options,
+        &manifest,
+        MigrationSecretInputs::default(),
+        ApplyAcknowledgements::offline_snapshot(),
+    )
+    .await
+    .expect_err("missing source home must block apply");
+    assert!(error.to_string().contains("inventory blockers"));
+    assert!(!target.exists());
 }
 
 #[tokio::test]

@@ -12,6 +12,10 @@ use secrecy::SecretString;
 pub struct MigrationOptions {
     /// Backend + connection details for the v1 source database.
     pub source: SourceDb,
+    /// Explicit v1 home whose persistent artifacts must be inventoried.
+    /// When absent, planning records a blocker rather than guessing from the
+    /// database snapshot location.
+    pub source_home: Option<PathBuf>,
     /// Where to write Reborn state.
     pub target: TargetStore,
     /// Effective production Reborn profile selected by composition.

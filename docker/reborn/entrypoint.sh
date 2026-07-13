@@ -39,6 +39,11 @@ export IRONCLAW_REBORN_HOME
 # seed config first. Mutating/resume/verify operations continue through the
 # normal persistent-volume and config checks below.
 if [ "${1:-}" = "migrate" ]; then
+  for migration_arg in "$@"; do
+    case "$migration_arg" in
+      -h|--help) exec ironclaw-reborn "$@" ;;
+    esac
+  done
   case "${2:-}:${3:-}" in
     v1:apply|v1:resume|v1:verify) ;;
     *) exec ironclaw-reborn "$@" ;;

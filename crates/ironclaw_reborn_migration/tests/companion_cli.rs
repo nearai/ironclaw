@@ -41,6 +41,7 @@ fn lifecycle_help_never_accepts_raw_postgres_urls_or_keys() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("--source-postgres"), "stdout: {stdout}");
+    assert!(stdout.contains("--source-home"), "stdout: {stdout}");
     assert!(
         !stdout.contains("--source-postgres-url"),
         "stdout: {stdout}"
