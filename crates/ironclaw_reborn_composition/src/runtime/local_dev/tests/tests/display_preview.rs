@@ -12,8 +12,154 @@ use ironclaw_threads::{
 
 use super::{
     CapabilityDisplayPreviewStore, LocalDevCapabilityIo, UserId, local_dev_thread_scope_for_run,
-    provider_tool_call, run_context,
+    provider_tool_call, provider_tool_call_with_name, run_context,
 };
+
+#[tokio::test]
+async fn capability_io_writes_redacted_routine_previews_to_durable_history() {
+    let run_context = run_context("durable-routine-preview").await;
+    let fallback_user_id = UserId::new("durable-routine-preview-owner").expect("fallback user id");
+    let thread_scope = local_dev_thread_scope_for_run(&run_context, &fallback_user_id)
+        .expect("run scope has an agent");
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: Some(run_context.thread_id.clone()),
+            created_by_actor_id: "actor-a".to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("thread exists");
+    let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+        Arc::new(CapabilityDisplayPreviewStore::default()),
+        thread_service.clone(),
+        fallback_user_id,
+    );
+
+    for (provider_name, capability_name, input, output) in [
+        (
+            "builtin__trigger_create",
+            "builtin.trigger_create",
+            serde_json::json!({
+                "name": "Kansas Morning Weather",
+                "prompt": "Call builtin.weather.lookup with an internal command",
+                "schedule": {
+                    "kind": "cron",
+                    "expression": "0 8 * * *",
+                    "timezone": "America/Chicago"
+                }
+            }),
+            serde_json::json!({
+                "trigger": {
+                    "trigger_id": "01KANSASWEATHERTRIGGERID",
+                    "agent_id": "internal-agent-id",
+                    "project_id": "internal-project-id",
+                    "name": "Kansas Morning Weather",
+                    "schedule": {
+                        "kind": "cron",
+                        "expression": "0 8 * * *",
+                        "timezone": "America/Chicago"
+                    },
+                    "state": "scheduled",
+                    "next_run_at": "2026-07-14T13:00:00Z",
+                    "created_at": "2026-07-13T13:00:00Z"
+                }
+            }),
+        ),
+        (
+            "builtin__trigger_list",
+            "builtin.trigger_list",
+            serde_json::json!({}),
+            serde_json::json!({
+                "triggers": [{
+                    "trigger_id": "01KANSASWEATHERTRIGGERID",
+                    "agent_id": "internal-agent-id",
+                    "project_id": "internal-project-id",
+                    "name": "Kansas Morning Weather",
+                    "schedule": {
+                        "kind": "cron",
+                        "expression": "0 8 * * *",
+                        "timezone": "America/Chicago"
+                    },
+                    "state": "scheduled",
+                    "created_at": "2026-07-13T13:00:00Z"
+                }]
+            }),
+        ),
+    ] {
+        let input_ref = capability_io
+            .register_provider_tool_call_input(
+                &run_context,
+                &provider_tool_call_with_name(provider_name, input),
+            )
+            .await
+            .expect("input stages");
+        let capability_id = CapabilityId::new(capability_name).expect("capability id");
+        capability_io
+            .write_capability_result(CapabilityResultWrite {
+                run_context: &run_context,
+                input_ref: &input_ref,
+                invocation_id: InvocationId::new(),
+                capability_id: &capability_id,
+                output,
+                display_preview: None,
+                durable_persistence: DurablePersistence::Persist,
+            })
+            .await
+            .map(|_| ())
+            .expect("result stages");
+    }
+
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: thread_scope,
+            thread_id: run_context.thread_id,
+        })
+        .await
+        .expect("history loads");
+    let previews = history
+        .messages
+        .iter()
+        .filter(|message| message.kind == MessageKind::CapabilityDisplayPreview)
+        .map(|message| {
+            serde_json::from_str::<CapabilityDisplayPreviewEnvelope>(
+                message.content.as_deref().expect("preview content"),
+            )
+            .expect("preview envelope parses")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(previews.len(), 2);
+    assert_eq!(previews[0].title, "Routine");
+    assert_eq!(previews[1].title, "Routines");
+    assert_eq!(
+        previews[0].output_summary.as_deref(),
+        Some("Routine created")
+    );
+    assert_eq!(
+        previews[1].output_summary.as_deref(),
+        Some("Routines listed")
+    );
+
+    let rendered = serde_json::to_string(&previews).expect("previews serialize");
+    assert!(rendered.contains("Kansas Morning Weather"));
+    assert!(rendered.contains("recurring"));
+    for internal in [
+        "01KANSASWEATHERTRIGGERID",
+        "internal-agent-id",
+        "internal-project-id",
+        "0 8 * * *",
+        "builtin.weather.lookup",
+        "created_at",
+        "trigger_id",
+    ] {
+        assert!(
+            !rendered.contains(internal),
+            "preview leaked {internal}: {rendered}"
+        );
+    }
+}
 
 #[tokio::test]
 async fn capability_io_writes_display_preview_to_durable_history() {

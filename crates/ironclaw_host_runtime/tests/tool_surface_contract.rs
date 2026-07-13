@@ -695,6 +695,36 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
             .contains("pass delivery_target_id"),
         "trigger_create description should teach per-trigger delivery routing"
     );
+    assert!(
+        trigger_create
+            .descriptor
+            .description
+            .contains("never expose trigger, agent, project, or delivery-target ids"),
+        "trigger_create description should keep internal ids out of user replies"
+    );
+    assert!(
+        trigger_create.descriptor.description.contains("raw cron"),
+        "trigger_create description should require a plain-language schedule"
+    );
+    let trigger_list = surface
+        .capabilities
+        .iter()
+        .find(|capability| capability.descriptor.id == capability_id("builtin.trigger_list"))
+        .expect("builtin.trigger_list should be visible");
+    assert!(
+        trigger_list
+            .descriptor
+            .description
+            .contains("Use returned ids and raw schedule fields only as internal inputs"),
+        "trigger_list description should distinguish internal tool inputs from user output"
+    );
+    assert!(
+        trigger_list
+            .descriptor
+            .description
+            .contains("never expose trigger, agent, project, or delivery-target ids"),
+        "trigger_list description should keep internal ids out of user replies"
+    );
     let trigger_prompt_description = trigger_create
         .descriptor
         .parameters_schema

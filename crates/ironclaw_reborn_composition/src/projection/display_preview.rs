@@ -184,7 +184,11 @@ impl CapabilityDisplayPreviewStore {
         let mut pending = self.lock_pending_inputs();
         let input_summary = input_summary(tool_name, arguments);
         let input = CapabilityDisplayInputPreview {
-            title: bounded_display_text(tool_name, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES).text,
+            title: bounded_display_text(
+                capability_input_title(tool_name),
+                CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+            )
+            .text,
             subtitle: primary_arg_subtitle(tool_name, arguments),
             truncated: input_summary
                 .as_ref()
@@ -242,10 +246,12 @@ impl CapabilityDisplayPreviewStore {
         let title = input
             .as_ref()
             .map(|input| input.title.clone())
-            .unwrap_or_else(|| safe_capability_title(result.capability_id.as_str()).to_string());
-        let output = display_preview
-            .map(output_preview_from_display)
-            .unwrap_or_else(|| output_preview(result.output));
+            .unwrap_or_else(|| capability_result_title(result.capability_id.as_str()).to_string());
+        let output = output_preview_for_capability(
+            result.capability_id.as_str(),
+            result.output,
+            display_preview,
+        );
         let record = CapabilityDisplayPreviewRecord {
             timeline_message_id: None,
             title,
@@ -303,7 +309,7 @@ impl CapabilityDisplayPreviewStore {
         let title = input
             .as_ref()
             .map(|input| input.title.clone())
-            .unwrap_or_else(|| safe_capability_title(capability_id.as_str()).to_string());
+            .unwrap_or_else(|| capability_result_title(capability_id.as_str()).to_string());
         let bounded = bounded_display_text(summary, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES);
         let record = CapabilityDisplayPreviewRecord {
             timeline_message_id: None,
@@ -555,6 +561,19 @@ fn output_preview(value: &serde_json::Value) -> OutputPreview {
     }
 }
 
+fn output_preview_for_capability(
+    capability_id: &str,
+    value: &serde_json::Value,
+    display_preview: Option<&CapabilityDisplayOutputPreview>,
+) -> OutputPreview {
+    if let Some(operation) = routine_capability(capability_id) {
+        return routine_output_preview(operation, value);
+    }
+    display_preview
+        .map(output_preview_from_display)
+        .unwrap_or_else(|| output_preview(value))
+}
+
 fn output_preview_from_display(value: &CapabilityDisplayOutputPreview) -> OutputPreview {
     let summary = value
         .output_summary
@@ -571,6 +590,10 @@ fn output_preview_from_display(value: &CapabilityDisplayOutputPreview) -> Output
 }
 
 fn input_summary(capability_id: &str, value: &serde_json::Value) -> Option<CapabilityDisplayText> {
+    if let Some(operation) = routine_capability(capability_id) {
+        return Some(routine_input_summary(operation, value));
+    }
+
     if capability_matches(capability_id, "shell")
         && let Some(command) = value.get("command").and_then(serde_json::Value::as_str)
     {
@@ -795,7 +818,9 @@ impl SummaryBuilder {
 fn capability_matches(capability_id: &str, short_name: &str) -> bool {
     capability_id == short_name
         || capability_id == format!("builtin.{short_name}")
+        || capability_id == format!("builtin__{short_name}")
         || capability_id.ends_with(&format!(".{short_name}"))
+        || capability_id.ends_with(&format!("__{short_name}"))
 }
 
 fn string_arg<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
@@ -862,6 +887,261 @@ fn safe_capability_title(capability_id: &str) -> &str {
         .unwrap_or(capability_id)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoutineCapability {
+    Create,
+    List,
+    Remove,
+    Pause,
+    Resume,
+}
+
+impl RoutineCapability {
+    fn title(self) -> &'static str {
+        match self {
+            Self::List => "Routines",
+            Self::Create | Self::Remove | Self::Pause | Self::Resume => "Routine",
+        }
+    }
+
+    fn output_summary(self, value: &serde_json::Value) -> &'static str {
+        match self {
+            Self::Create => "Routine created",
+            Self::List => "Routines listed",
+            Self::Remove
+                if value.get("removed").and_then(serde_json::Value::as_bool) == Some(false) =>
+            {
+                "Routine not found"
+            }
+            Self::Remove => "Routine removed",
+            Self::Pause
+                if value.get("updated").and_then(serde_json::Value::as_bool) == Some(false) =>
+            {
+                "Routine not found"
+            }
+            Self::Pause => "Routine paused",
+            Self::Resume
+                if value.get("updated").and_then(serde_json::Value::as_bool) == Some(false) =>
+            {
+                "Routine not found"
+            }
+            Self::Resume => "Routine resumed",
+        }
+    }
+}
+
+fn routine_capability(capability_id: &str) -> Option<RoutineCapability> {
+    [
+        ("trigger_create", RoutineCapability::Create),
+        ("trigger_list", RoutineCapability::List),
+        ("trigger_remove", RoutineCapability::Remove),
+        ("trigger_pause", RoutineCapability::Pause),
+        ("trigger_resume", RoutineCapability::Resume),
+    ]
+    .into_iter()
+    .find_map(|(short_name, operation)| {
+        capability_matches(capability_id, short_name).then_some(operation)
+    })
+}
+
+fn capability_input_title(capability_id: &str) -> &str {
+    routine_capability(capability_id)
+        .map(RoutineCapability::title)
+        .unwrap_or(capability_id)
+}
+
+fn capability_result_title(capability_id: &str) -> &str {
+    routine_capability(capability_id)
+        .map(RoutineCapability::title)
+        .unwrap_or_else(|| safe_capability_title(capability_id))
+}
+
+fn routine_input_summary(
+    operation: RoutineCapability,
+    value: &serde_json::Value,
+) -> CapabilityDisplayText {
+    match operation {
+        RoutineCapability::Create => {}
+        RoutineCapability::List => {
+            return bounded_display_text(
+                "routine list request",
+                CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+            );
+        }
+        RoutineCapability::Remove => {
+            return bounded_display_text(
+                "routine removal request",
+                CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+            );
+        }
+        RoutineCapability::Pause => {
+            return bounded_display_text(
+                "routine pause request",
+                CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+            );
+        }
+        RoutineCapability::Resume => {
+            return bounded_display_text(
+                "routine resume request",
+                CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+            );
+        }
+    }
+
+    let mut summary = SummaryBuilder::default();
+    if let Some(name) = string_arg(value, &["name"]) {
+        let name = bounded_summary_value(name);
+        summary.push_with_truncation("routine", name.text, name.truncated);
+    }
+    if let Some(schedule) = routine_schedule_label(value.get("schedule")) {
+        summary.push("schedule", schedule);
+    }
+    if let Some(timezone) = value
+        .get("schedule")
+        .and_then(|schedule| schedule.get("timezone"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|timezone| !timezone.is_empty())
+    {
+        let timezone = bounded_summary_value(timezone);
+        summary.push_with_truncation("timezone", timezone.text, timezone.truncated);
+    }
+    summary.finish().unwrap_or_else(|| {
+        bounded_display_text(
+            "routine creation request",
+            CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+        )
+    })
+}
+
+fn routine_output_preview(
+    operation: RoutineCapability,
+    value: &serde_json::Value,
+) -> OutputPreview {
+    let summary = bounded_display_text(
+        operation.output_summary(value),
+        CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+    );
+    let mut truncated = summary.truncated;
+    let lines = match operation {
+        RoutineCapability::List => routine_list_preview_lines(value, &mut truncated),
+        RoutineCapability::Create
+        | RoutineCapability::Remove
+        | RoutineCapability::Pause
+        | RoutineCapability::Resume => {
+            routine_record_preview_lines(operation, value, &mut truncated)
+        }
+    };
+    let preview = bounded_preview_text(&lines.join("\n"));
+    OutputPreview {
+        summary: non_empty(summary.text),
+        preview: non_empty(preview.text),
+        kind: "text".to_string(),
+        truncated: truncated || preview.truncated,
+    }
+}
+
+fn routine_record_preview_lines(
+    operation: RoutineCapability,
+    value: &serde_json::Value,
+    truncated: &mut bool,
+) -> Vec<String> {
+    let mut lines = vec![operation.output_summary(value).to_string()];
+    let Some(trigger) = value.get("trigger").filter(|trigger| trigger.is_object()) else {
+        return lines;
+    };
+    if let Some(name) = trigger
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|name| !name.is_empty())
+    {
+        let name = bounded_summary_value(name);
+        *truncated |= name.truncated;
+        lines[0] = format!("{}: {}", operation.output_summary(value), name.text);
+    }
+    if matches!(
+        operation,
+        RoutineCapability::Create | RoutineCapability::Pause | RoutineCapability::Resume
+    ) && let Some(schedule) = routine_schedule_label(trigger.get("schedule"))
+    {
+        lines.push(format!("Schedule: {schedule}"));
+    }
+    if matches!(
+        operation,
+        RoutineCapability::Create | RoutineCapability::Resume
+    ) && let Some(next_run) = trigger
+        .get("next_run_at")
+        .and_then(serde_json::Value::as_str)
+        .and_then(format_utc_datetime)
+    {
+        lines.push(format!("Next run: {next_run}"));
+    }
+    lines
+}
+
+fn routine_list_preview_lines(value: &serde_json::Value, truncated: &mut bool) -> Vec<String> {
+    let Some(triggers) = value.get("triggers").and_then(serde_json::Value::as_array) else {
+        return vec!["Routines listed".to_string()];
+    };
+    let mut lines = vec![match triggers.len() {
+        0 => "No routines found".to_string(),
+        1 => "1 routine found".to_string(),
+        count => format!("{count} routines found"),
+    }];
+    for trigger in triggers {
+        let Some(name) = trigger
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        let name = bounded_summary_value(name);
+        *truncated |= name.truncated;
+        let mut details = Vec::new();
+        if let Some(state) = routine_state_label(trigger.get("state")) {
+            details.push(state);
+        }
+        if let Some(schedule) = routine_schedule_label(trigger.get("schedule")) {
+            details.push(schedule);
+        }
+        let suffix = if details.is_empty() {
+            String::new()
+        } else {
+            format!(" — {}", details.join(", "))
+        };
+        lines.push(format!("{}{}", name.text, suffix));
+    }
+    lines
+}
+
+fn routine_schedule_label(schedule: Option<&serde_json::Value>) -> Option<&'static str> {
+    match schedule?.get("kind").and_then(serde_json::Value::as_str)? {
+        "cron" => Some("recurring"),
+        "once" => Some("one-time"),
+        _ => Some("scheduled"),
+    }
+}
+
+fn routine_state_label(state: Option<&serde_json::Value>) -> Option<&'static str> {
+    match state?.as_str()? {
+        "scheduled" => Some("active"),
+        "paused" => Some("paused"),
+        "completed" => Some("completed"),
+        _ => None,
+    }
+}
+
+fn format_utc_datetime(value: &str) -> Option<String> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|datetime| {
+            datetime
+                .with_timezone(&chrono::Utc)
+                .format("%Y-%m-%d %H:%M UTC")
+                .to_string()
+        })
+}
+
 fn safe_path_subtitle(value: &serde_json::Value) -> Option<String> {
     let path = value
         .get("path")
@@ -878,6 +1158,15 @@ fn safe_path_subtitle(value: &serde_json::Value) -> Option<String> {
 /// `input_summary` (URL stripping, shell redaction, byte bounds) and falls back
 /// to the path subtitle for tools without a recognized primary argument.
 fn primary_arg_subtitle(capability_id: &str, value: &serde_json::Value) -> Option<String> {
+    if routine_capability(capability_id) == Some(RoutineCapability::Create)
+        && let Some(name) = string_arg(value, &["name"])
+    {
+        return non_empty(bounded_summary_value(name).text);
+    }
+    if routine_capability(capability_id).is_some() {
+        return None;
+    }
+
     // Search-shaped tools → the query string.
     if (capability_matches(capability_id, "memory_search")
         || capability_matches(capability_id, "web_search")

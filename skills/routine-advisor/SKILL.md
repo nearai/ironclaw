@@ -87,6 +87,12 @@ Parameters:
   - Every 2 hours during work: `0 9-17/2 * * MON-FRI`
   - Sunday evening: `0 18 * * SUN`
 
+## Presenting Routines to Users
+
+After creating, finding, listing, pausing, resuming, or removing a routine, describe the result in user-facing language. A creation confirmation should normally include only the routine name, what it does, its schedule in plain language, and where results will be delivered. If an equivalent routine already exists, say that it already exists and summarize its status and schedule in the same friendly form.
+
+Never expose internal trigger IDs, agent or project IDs, delivery-target IDs, raw cron expressions, stored prompts or action definitions, internal capability or command names, result references, timestamps used as system metadata, or other host configuration. These values may be used internally for follow-up capability calls, but they must not appear in the user-facing reply. Say “routine,” not “trigger,” unless the user explicitly asks about implementation details.
+
 ## Delivering Results
 
 Routine results are delivered automatically — never re-send a routine result to the requesting user with a messaging capability (it would arrive twice: once from the host, once from you). Messaging a third party is different: when that is the routine's task, the fire performs it with the messaging capability as instructed by the pinned prompt.

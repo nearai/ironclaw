@@ -473,6 +473,47 @@ async fn capability_display_preview_store_summarizes_search_and_memory_inputs() 
 }
 
 #[tokio::test]
+async fn trigger_create_preview_fails_closed_for_wrapped_internal_input() {
+    let preview = completed_preview_for_input(
+        "builtin__trigger_create",
+        "builtin.trigger_create",
+        serde_json::json!({
+            "operation": "parse",
+            "data": {
+                "name": "Kansas Morning Weather",
+                "prompt": "Call builtin.weather.lookup with an internal command",
+                "schedule": {
+                    "kind": "cron",
+                    "expression": "0 8 * * *",
+                    "timezone": "America/Chicago"
+                }
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(preview.title, "Routine");
+    assert_eq!(
+        preview.input_summary.as_deref(),
+        Some("routine creation request")
+    );
+    assert_eq!(preview.output_summary.as_deref(), Some("Routine created"));
+    let rendered = serde_json::to_string(&preview).expect("preview serializes");
+    for internal in [
+        "builtin.weather.lookup",
+        "0 8 * * *",
+        "America/Chicago",
+        "operation",
+        "prompt",
+    ] {
+        assert!(
+            !rendered.contains(internal),
+            "preview leaked {internal}: {rendered}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn running_input_surfaces_staged_input_until_result_lands() {
     let run_id = TurnRunId::new();
     let input_ref = preview_input_ref("running-web-search");

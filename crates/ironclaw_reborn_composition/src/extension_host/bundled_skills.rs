@@ -498,6 +498,14 @@ mod tests {
             "routine-advisor must frame send-me asks as routing so prompts never carry a \
              send-to-requester step"
         );
+        assert!(
+            skill_md.contains("Never expose internal trigger IDs"),
+            "routine-advisor must keep trigger implementation details out of user replies"
+        );
+        assert!(
+            skill_md.contains("raw cron expressions"),
+            "routine-advisor must require plain-language schedules in user replies"
+        );
     }
 
     #[tokio::test]
