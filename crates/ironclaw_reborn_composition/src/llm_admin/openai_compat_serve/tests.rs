@@ -1225,8 +1225,10 @@ fn model_entries_fall_back_to_default_model_when_no_active_selection() {
 
 #[test]
 fn response_usage_reports_total_input_including_cache_and_breaks_out_cached_tokens() {
+    // `cache_read_input_tokens` is a subset of `input_tokens` (here 2000 of the
+    // 3000 total were cache hits), so it must NOT be added on top of the total.
     let usage = LoopModelUsage {
-        input_tokens: 1_000,
+        input_tokens: 3_000,
         output_tokens: 500,
         cache_read_input_tokens: 2_000,
         cache_creation_input_tokens: 0,
@@ -1245,20 +1247,39 @@ fn response_usage_reports_total_input_including_cache_and_breaks_out_cached_toke
     );
 }
 
+#[test]
+fn response_usage_adds_cache_creation_on_top_of_input() {
+    // `cache_creation_input_tokens` is a separate write-side count that is NOT
+    // part of `input_tokens`, so it is added on top of the total. It is not a
+    // cache *read*, so it never populates `input_tokens_details`.
+    let usage = LoopModelUsage {
+        input_tokens: 1_000,
+        output_tokens: 500,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 3_000,
+    };
+    let built = response_usage_from_model_usage(&usage, "gpt-4o");
+    assert_eq!(built.input_tokens, 4_000); // 1000 + 3000
+    assert_eq!(built.total_tokens, 4_500);
+    assert!(built.input_tokens_details.is_none());
+}
+
 #[cfg(feature = "root-llm-provider")]
 #[test]
 fn response_cost_prices_input_output_and_discounts_cached_tokens() {
     // gpt-4o rates: input 0.0000025/tok, output 0.00001/tok; OpenAI cache-read
-    // discount is 2x (50% off).
+    // discount is 2x (50% off). `input_tokens` is the total (3000), of which
+    // 2000 were cache reads, leaving 1000 fresh at the full rate.
     let usage = LoopModelUsage {
-        input_tokens: 1_000,
+        input_tokens: 3_000,
         output_tokens: 500,
         cache_read_input_tokens: 2_000,
         cache_creation_input_tokens: 0,
     };
     let cost = response_cost_from_model_usage(&usage, "gpt-4o").expect("cost under llm feature");
     assert_eq!(cost.currency, "USD");
-    // input = 1000 * 0.0000025 = 0.0025
+    // fresh input = (3000 - 2000) * 0.0000025 = 0.0025 (cache-read is NOT
+    // charged again at the full rate here)
     assert_eq!(cost.input_cost_usd, "0.0025");
     // cached = 2000 * 0.0000025 / 2 = 0.0025
     assert_eq!(cost.cached_input_cost_usd, "0.0025");
@@ -1266,6 +1287,43 @@ fn response_cost_prices_input_output_and_discounts_cached_tokens() {
     assert_eq!(cost.output_cost_usd, "0.005");
     // total = 0.0025 + 0.0025 + 0.005 = 0.01
     assert_eq!(cost.total_cost_usd, "0.01");
+}
+
+#[cfg(feature = "root-llm-provider")]
+#[test]
+fn response_cost_bills_cache_creation_at_full_input_rate() {
+    // gpt-4o input rate 0.0000025/tok. cache_creation is a write-side count
+    // billed at the full input rate on top of the fresh input; with no
+    // cache_read there is no discounted portion.
+    let usage = LoopModelUsage {
+        input_tokens: 1_000,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 3_000,
+    };
+    let cost = response_cost_from_model_usage(&usage, "gpt-4o").expect("cost");
+    // billable input = (1000 - 0) + 3000 = 4000 → 4000 * 0.0000025 = 0.01
+    assert_eq!(cost.input_cost_usd, "0.01");
+    assert_eq!(cost.cached_input_cost_usd, "0");
+}
+
+#[cfg(feature = "root-llm-provider")]
+#[test]
+fn response_cost_applies_claude_cache_read_discount() {
+    // claude-opus-4-6 input rate 0.000015/tok; the Claude cache-read discount is
+    // 10x (90% off). `input_tokens` is the total (3000), of which 2000 were
+    // cache reads, leaving 1000 fresh.
+    let usage = LoopModelUsage {
+        input_tokens: 3_000,
+        output_tokens: 0,
+        cache_read_input_tokens: 2_000,
+        cache_creation_input_tokens: 0,
+    };
+    let cost = response_cost_from_model_usage(&usage, "claude-opus-4-6").expect("cost");
+    // fresh input = (3000 - 2000) * 0.000015 = 0.015
+    assert_eq!(cost.input_cost_usd, "0.015");
+    // cached = 2000 * 0.000015 / 10 = 0.003
+    assert_eq!(cost.cached_input_cost_usd, "0.003");
 }
 
 #[cfg(feature = "root-llm-provider")]

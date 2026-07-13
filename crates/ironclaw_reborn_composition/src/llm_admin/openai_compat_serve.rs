@@ -582,6 +582,7 @@ impl OpenAiResponsesThreadProjectionReader {
         requested_model: &str,
     ) -> Option<OpenAiResponseUsage> {
         let coordinator = self.turn_coordinator.as_ref()?;
+        // silent-ok: an unparseable run id means there is no usage to report.
         let run_id = TurnRunId::parse(submitted_run_id).ok()?;
         let state = coordinator
             .get_run_state(GetRunStateRequest {
@@ -592,6 +593,8 @@ impl OpenAiResponsesThreadProjectionReader {
                 run_id,
             })
             .await
+            // silent-ok: best-effort usage read — a missing/unreadable run
+            // state yields no usage object, not a request failure.
             .ok()?;
         let usage = state.model_usage?;
         Some(response_usage_from_model_usage(&usage, requested_model))
@@ -1505,10 +1508,12 @@ fn response_object(
 /// under `root-llm-provider`.
 fn response_usage_from_model_usage(usage: &LoopModelUsage, model: &str) -> OpenAiResponseUsage {
     // OpenAI reports total input (including cache) as `input_tokens`, with the
-    // cached subset broken out under `input_tokens_details`.
+    // cached subset broken out under `input_tokens_details`. `cache_read` is
+    // already a subset of `LoopModelUsage::input_tokens`, so it must NOT be
+    // added again; `cache_creation` is a separate write-side count and is
+    // added on top.
     let total_input = usage
         .input_tokens
-        .saturating_add(usage.cache_read_input_tokens)
         .saturating_add(usage.cache_creation_input_tokens);
     OpenAiResponseUsage {
         input_tokens: total_input,
@@ -1535,9 +1540,15 @@ fn response_cost_from_model_usage(usage: &LoopModelUsage, model: &str) -> Option
     let (input_rate, output_rate) =
         ironclaw_llm::costs::model_cost(model).unwrap_or_else(ironclaw_llm::costs::default_cost);
     let discount = cache_read_discount_for_model(model);
+    // `cache_read` is a subset of `input_tokens` billed at the discounted rate
+    // below, so the full-rate portion is `input_tokens - cache_read`. Otherwise
+    // cache-read tokens would be charged twice: once here and once as
+    // `cached_input_cost`. `cache_creation` is a separate write-side count
+    // billed at the full input rate.
     let billable_input = Decimal::from(
         usage
             .input_tokens
+            .saturating_sub(usage.cache_read_input_tokens)
             .saturating_add(usage.cache_creation_input_tokens),
     );
     let input_cost = billable_input * input_rate;

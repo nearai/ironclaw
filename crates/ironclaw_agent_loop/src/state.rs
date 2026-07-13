@@ -351,6 +351,10 @@ impl LoopExecutionState {
         self.input_cursor = LoopInputCursor::origin_for_run(context);
         self.assistant_refs.clear();
         self.result_refs.clear();
+        // A retry rebases onto a different run id; the failed run's token total
+        // belongs to that run and must not be re-reported under the new one.
+        // (Same-run gate resumes return early above, preserving the total.)
+        self.cumulative_model_usage = None;
         self
     }
 }
@@ -809,6 +813,12 @@ mod tests {
             .result_refs
             .push(ironclaw_turns::LoopResultRef::new("result:source-run").unwrap());
         state.iteration = 4;
+        state.cumulative_model_usage = Some(ironclaw_turns::run_profile::LoopModelUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        });
         // Gate-bound resume state must survive the rebase: this path also
         // resumes a run after an approval/auth gate, where the pending-resume
         // record drives re-dispatch of the gated capability.
@@ -853,6 +863,9 @@ mod tests {
         );
         assert!(rebased.assistant_refs.is_empty());
         assert!(rebased.result_refs.is_empty());
+        // A retry rebases onto a different run id, so the failed run's token
+        // total must be dropped rather than re-reported under the new run.
+        assert!(rebased.cumulative_model_usage.is_none());
         // Gate-bound resume state is preserved so an approval/auth resume can
         // re-dispatch the gated capability.
         assert_eq!(rebased.last_gate, state.last_gate);
@@ -879,6 +892,14 @@ mod tests {
             .result_refs
             .push(ironclaw_turns::LoopResultRef::new("result:same-run").unwrap());
         state.iteration = 3;
+        // A same-run gate resume must preserve the run's accumulated token
+        // total; the full-equality assertion below locks that in.
+        state.cumulative_model_usage = Some(ironclaw_turns::run_profile::LoopModelUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        });
 
         let rebased = state.clone().rebase_for_run(&context);
 

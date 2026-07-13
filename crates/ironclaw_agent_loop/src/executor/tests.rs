@@ -1396,6 +1396,75 @@ async fn reply_admission_rejects_candidate_before_finalizing_and_continues() {
     assert_eq!(final_state.stop_state.turns_completed, 3);
 }
 
+/// A tool-using run must count the usage from EVERY model response, including
+/// the capability-call turn — not just the final assistant reply. Regression
+/// for usage/cost being dropped on the `CapabilityCalls` branch: the executor
+/// now accumulates before branching on the model output.
+#[tokio::test]
+async fn cumulative_usage_counts_capability_call_and_reply_turns() {
+    use ironclaw_turns::run_profile::{LoopModelResponse, LoopModelUsage};
+
+    let result_ref = LoopResultRef::new("result:done").expect("valid");
+    // Turn 1 is a capability call carrying its own usage; turn 2 is the reply.
+    let calls_usage = LoopModelUsage {
+        input_tokens: 100,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+    };
+    let reply_usage = LoopModelUsage {
+        input_tokens: 40,
+        output_tokens: 20,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+    };
+    let calls = LoopModelResponse {
+        usage: Some(calls_usage),
+        ..calls_response()
+    };
+    let reply = LoopModelResponse {
+        usage: Some(reply_usage),
+        ..reply_response()
+    };
+    let host = MockHost::new(vec![calls, reply]).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+                result_ref,
+                safe_summary: "done".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                terminate_hint: false,
+                byte_len: 0,
+                output_digest: None,
+            })],
+            stopped_on_suspension: false,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    match exit {
+        LoopExit::Completed(completed) => {
+            // Both turns' usage is summed: had the capability turn been dropped,
+            // this would be only the reply's 40/20.
+            assert_eq!(
+                completed.model_usage,
+                Some(LoopModelUsage {
+                    input_tokens: 140,
+                    output_tokens: 20,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            );
+        }
+        other => panic!("expected completed, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn reply_admission_rendered_flag_stays_false_when_context_suppresses_control_message() {
     let result_ref = LoopResultRef::new("result:done").expect("valid");
