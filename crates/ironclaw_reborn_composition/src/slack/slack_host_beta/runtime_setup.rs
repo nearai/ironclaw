@@ -4,6 +4,7 @@ use ironclaw_conversations::RebornFilesystemConversationServices;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId};
 use ironclaw_outbound::TriggeredRunDeliveryStore;
 use ironclaw_product_adapters::AdapterInstallationId;
+use ironclaw_product_workflow::PreferenceTargetCodec;
 use ironclaw_product_workflow::{
     LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
     ProductConversationSubjectRouteResolver, RebornOutboundDeliveryTargetId, RebornServicesError,
@@ -16,6 +17,7 @@ use tokio::sync::Mutex;
 
 use crate::RebornRuntime;
 use crate::automation::trigger_poller::PostSubmitDeliveryHook;
+use crate::extension_host::channel_host::{ChannelExtras, ChannelWorkflowStorageRoots};
 use crate::extension_host::extension_ingress::{ChannelIngressDrain, ChannelIngressRegistration};
 use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
@@ -41,6 +43,7 @@ use crate::slack::slack_preference_targets::{
 };
 use crate::slack::slack_serve::{
     SlackInstallationSelector, SlackTeamId, SlackUserId, slack_events_alias_mount,
+    slack_inbound_classifier,
 };
 use crate::slack::slack_setup::{
     SlackInstallationSetup, SlackInstallationSetupStore, SlackSetupService,
@@ -55,8 +58,9 @@ use super::{
     ProvisioningSlackPersonalUserBinder, SlackConversationServices, SlackHostBetaBuildError,
     SlackHostBetaConfig, SlackHostBetaConfigInput, SlackHostBetaMounts, SlackHostBetaRuntimeConfig,
     SlackHostBetaRuntimeParts, SlackPersonalConnectionScope, SlackPersonalConnectionScopeResolver,
-    SlackPersonalDmTargetProvisioning, SlackTriggeredRunDeliveryHook, build_slack_inbound_sink,
-    build_triggered_run_delivery_hook_from_parts, extension_ingress_parts,
+    SlackPersonalDmTargetProvisioning, SlackPreferenceTargetCodec, SlackTriggeredRunDeliveryHook,
+    build_slack_inbound_sink, build_triggered_run_delivery_hook_from_parts,
+    extension_ingress_parts,
 };
 use crate::extension_host::extension_ingress::GenericChannelInboundSink;
 
@@ -112,16 +116,39 @@ pub(super) async fn build_runtime_mounts(
     ));
     let drain: Arc<dyn ChannelIngressDrain> =
         Arc::clone(&dynamic_sink) as Arc<dyn ChannelIngressDrain>;
-    ingress.registry.register(
-        "slack",
-        ChannelIngressRegistration {
-            secrets: Arc::new(DynamicSlackIngressSecrets {
-                setup_service: Arc::clone(&setup_service),
-            }),
-            sink: dynamic_sink as Arc<dyn InboundSink>,
-            drain: Some(Arc::clone(&drain)),
-        },
-    );
+    // Registration goes through the generic channel host assembly (P6 S2):
+    // this lane feeds its vendor extras (gate-reply classifier + preference
+    // codec), its legacy storage-root override (the pre-generic durable
+    // roots, kept until the H.4 key migration folds them), and — because
+    // the Slack configure surface still predates `[channel.config]` — a
+    // lane-owned registration override carrying the per-request setup-store
+    // secrets port and the per-revision dynamic sink.
+    let assembly = runtime
+        .channel_host_assembly()
+        .ok_or(SlackHostBetaBuildError::DurableHostStateUnavailable)?;
+    assembly
+        .register_extras(
+            crate::extension_host::available_extensions::SLACK_EXTENSION_ID,
+            ChannelExtras {
+                classifier: Some(slack_inbound_classifier()),
+                preference_target_codec: Some(Arc::new(SlackPreferenceTargetCodec)),
+                storage_roots: Some(slack_legacy_workflow_storage_roots(&config.tenant_id)?),
+                registration: Some(ChannelIngressRegistration {
+                    secrets: Arc::new(DynamicSlackIngressSecrets {
+                        setup_service: Arc::clone(&setup_service),
+                    }),
+                    sink: dynamic_sink as Arc<dyn InboundSink>,
+                    drain: Some(Arc::clone(&drain)),
+                }),
+            },
+        )
+        .await;
+    // The vendor codec now rides the extras registry; the triggered-delivery
+    // hook resolves it back from there (vendor default only as the
+    // fail-safe if the extras entry ever goes missing).
+    let preference_target_codec: Arc<dyn PreferenceTargetCodec> = assembly
+        .preference_target_codec(crate::extension_host::available_extensions::SLACK_EXTENSION_ID)
+        .unwrap_or_else(|| Arc::new(SlackPreferenceTargetCodec));
     let events =
         slack_events_alias_mount(Arc::clone(&ingress.router), Some(drain)).map_err(|error| {
             SlackHostBetaBuildError::InvalidConfig {
@@ -210,6 +237,7 @@ pub(super) async fn build_runtime_mounts(
             Arc::clone(&parts),
             Arc::clone(&setup_service),
             delivery_store,
+            preference_target_codec,
         ));
     let hook_set = runtime.set_trigger_post_submit_hook(trigger_delivery_hook);
     if !hook_set && runtime.trigger_post_submit_hook_is_set() && !provider_already_registered {
@@ -282,6 +310,34 @@ impl SlackChannelSetupActivation for DynamicSlackChannelSetupActivation {
 
 fn slack_setup_activation_error(error: impl std::fmt::Display) -> SlackChannelSetupActivationError {
     SlackChannelSetupActivationError::new(error.to_string())
+}
+
+/// The Slack channel's pre-generic durable roots, fed to the generic
+/// assembly as an explicit storage-root override so behavior does not
+/// change before the H.4 one-time key migration folds them into the
+/// extension-keyed scheme.
+fn slack_legacy_workflow_storage_roots(
+    tenant_id: &ironclaw_host_api::TenantId,
+) -> Result<ChannelWorkflowStorageRoots, SlackHostBetaBuildError> {
+    let tenant = crate::resource_scope_path_segment(tenant_id.as_str());
+    let root = |field: &'static str, path: String| {
+        ironclaw_host_api::VirtualPath::new(path).map_err(|error| {
+            SlackHostBetaBuildError::InvalidConfig {
+                field,
+                reason: error.to_string(),
+            }
+        })
+    };
+    Ok(ChannelWorkflowStorageRoots {
+        idempotency: root(
+            "storage_roots.idempotency",
+            format!("/tenants/{tenant}/shared/slack-product-workflow/idempotency"),
+        )?,
+        conversations: root(
+            "storage_roots.conversations",
+            format!("/tenants/{tenant}/shared/slack-conversations"),
+        )?,
+    })
 }
 
 struct DynamicSlackPersonalConnectionScopeResolver {
@@ -446,6 +502,9 @@ struct DynamicSlackTriggeredRunDeliveryHook {
     parts: Arc<SlackHostBetaRuntimeParts>,
     setup_service: Arc<SlackSetupService>,
     delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
+    /// Resolved from the channel host assembly's extras registry at mount
+    /// build (the vendor half of the generic triggered driver).
+    preference_target_codec: Arc<dyn PreferenceTargetCodec>,
     cached_driver: Arc<Mutex<Option<DynamicSlackTriggeredRunDeliveryDriver>>>,
 }
 
@@ -460,11 +519,13 @@ impl DynamicSlackTriggeredRunDeliveryHook {
         parts: Arc<SlackHostBetaRuntimeParts>,
         setup_service: Arc<SlackSetupService>,
         delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
+        preference_target_codec: Arc<dyn PreferenceTargetCodec>,
     ) -> Self {
         Self {
             parts,
             setup_service,
             delivery_store,
+            preference_target_codec,
             cached_driver: Arc::new(Mutex::new(None)),
         }
     }
@@ -498,6 +559,7 @@ impl DynamicSlackTriggeredRunDeliveryHook {
             &self.parts,
             &config,
             Arc::clone(&self.delivery_store),
+            Arc::clone(&self.preference_target_codec),
         )
         .map_err(|error| error.to_string())?;
 

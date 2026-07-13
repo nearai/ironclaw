@@ -331,6 +331,12 @@ impl RebornLocalExtensionManagementPort {
         let _ = self.generic_host.set(host);
     }
 
+    /// The attached generic host, when this facade has one — the snapshot
+    /// authority the channel host assembly reconciles against.
+    pub(crate) fn generic_host(&self) -> Option<Arc<ironclaw_extension_host::ExtensionHost>> {
+        self.generic_host.get().cloned()
+    }
+
     /// Mirror an activation into the generic host's snapshot. Runs after the
     /// registry publish succeeded; a failure here fails the activation (the
     /// caller compensates) — extension dispatch resolves from the snapshot,

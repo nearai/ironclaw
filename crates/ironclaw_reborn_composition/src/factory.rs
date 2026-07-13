@@ -520,6 +520,36 @@ pub(crate) enum CredentialRefreshWorkerReady {
     Absent,
 }
 
+/// Production wiring for [`RebornServices::start_channel_host_assembly`]:
+/// the run-world services and identity the per-extension channel workflows
+/// bind under, plus the prompt-enrichment ports for the run-delivery
+/// observer half.
+pub(crate) struct ChannelHostAssemblyWiring {
+    pub(crate) thread_service: Arc<dyn SessionThreadService>,
+    pub(crate) turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
+    pub(crate) approval_interaction:
+        Option<Arc<dyn ironclaw_product_workflow::ApprovalInteractionService>>,
+    pub(crate) auth_interaction: Option<Arc<dyn ironclaw_product_workflow::AuthInteractionService>>,
+    pub(crate) identity: crate::extension_host::channel_host::ChannelHostIdentity,
+    pub(crate) approval_context:
+        Option<Arc<dyn ironclaw_product_workflow::ApprovalPromptContextSource>>,
+    pub(crate) blocked_auth_prompts:
+        Option<Arc<dyn ironclaw_product_workflow::BlockedAuthPromptSource>>,
+    pub(crate) auth_flow_cancel: Option<Arc<dyn ironclaw_product_workflow::BlockedAuthFlowCancel>>,
+    pub(crate) run_delivery_settings: ironclaw_product_workflow::RunDeliverySettings,
+}
+
+/// Harness-facing wiring for
+/// [`RebornServices::start_channel_host_assembly_for_test`]: the test group
+/// supplies its own run-world services; everything else is production.
+#[cfg(any(test, feature = "test-support"))]
+pub struct ChannelHostAssemblyTestWiring {
+    pub thread_service: Arc<dyn SessionThreadService>,
+    pub turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
+    pub identity: crate::extension_host::channel_host::ChannelHostIdentity,
+    pub run_delivery_settings: ironclaw_product_workflow::RunDeliverySettings,
+}
+
 impl RebornServices {
     /// The shared scoped secret store backing this composition.
     #[cfg_attr(
@@ -558,6 +588,111 @@ impl RebornServices {
         Some(Arc::new(
             crate::extension_host::channel_config::RebornChannelConfigFacade::new(service),
         ))
+    }
+
+    /// Start the generic channel host assembly (extension-runtime P6 S2):
+    /// the per-extension inbound-channel reconcile loop over the generic
+    /// host's active snapshot. `None` when this composition path has no
+    /// generic host, no ingress registry, or no `[channel.config]` service
+    /// — there is nothing to reconcile against. The run-delivery observer
+    /// half follows the delivery coordinator's availability: without a
+    /// coordinator, registrations are ingress-only.
+    pub(crate) fn start_channel_host_assembly(
+        &self,
+        wiring: ChannelHostAssemblyWiring,
+    ) -> Option<Arc<crate::extension_host::channel_host::GenericChannelHostAssembly>> {
+        use crate::extension_host::channel_host::{
+            FilesystemChannelWorkflowStateFactory, GenericChannelHostDeps,
+        };
+
+        let ChannelHostAssemblyWiring {
+            thread_service,
+            turn_coordinator,
+            approval_interaction,
+            auth_interaction,
+            identity,
+            approval_context,
+            blocked_auth_prompts,
+            auth_flow_cancel,
+            run_delivery_settings,
+        } = wiring;
+        let local_runtime = self.local_runtime.as_ref()?;
+        let generic_host = local_runtime
+            .extension_management
+            .as_ref()?
+            .generic_host()?;
+        let ingress = self.extension_ingress.as_ref()?;
+        let channel_config = local_runtime.channel_config.clone()?;
+        let workflow_state = Arc::new(FilesystemChannelWorkflowStateFactory::new(Arc::clone(
+            &local_runtime.extension_filesystem,
+        )));
+        // The outbound stores ride the delivery coordinator's feature gate;
+        // both dissolve together when the stores ungate.
+        #[cfg(feature = "slack-v2-host-beta")]
+        let delivery = self.delivery_coordinator.clone().map(|coordinator| {
+            crate::extension_host::channel_host::ChannelHostDeliveryDeps {
+                coordinator,
+                outbound_store: Arc::clone(&local_runtime.outbound_state),
+                route_store: Arc::clone(&local_runtime.delivered_gate_routes),
+                communication_preferences: Arc::clone(&local_runtime.outbound_preferences),
+                approval_context,
+                blocked_auth_prompts,
+                auth_flow_cancel,
+                settings: run_delivery_settings,
+            }
+        });
+        #[cfg(not(feature = "slack-v2-host-beta"))]
+        let delivery: Option<crate::extension_host::channel_host::ChannelHostDeliveryDeps> = {
+            let _ = (
+                approval_context,
+                blocked_auth_prompts,
+                auth_flow_cancel,
+                run_delivery_settings,
+            );
+            None
+        };
+
+        Some(
+            crate::extension_host::channel_host::GenericChannelHostAssembly::start(
+                GenericChannelHostDeps {
+                    watch: generic_host.snapshot_watch(),
+                    registry: Arc::clone(&ingress.registry),
+                    channel_config,
+                    workflow_state,
+                    thread_service,
+                    turn_coordinator,
+                    approval_interaction,
+                    auth_interaction,
+                    identity,
+                    delivery,
+                },
+            ),
+        )
+    }
+
+    /// Test-support flavor of [`Self::start_channel_host_assembly`]: the
+    /// integration harness supplies its own run-world services (thread
+    /// service, turn coordinator, identity) because the harness's runs
+    /// execute on the test group's shared turn runtime, not this composed
+    /// runtime's. Everything else (snapshot watch, ingress registry,
+    /// channel-config secret storage, workflow state substrate, delivery
+    /// coordinator + outbound stores) is the production wiring.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn start_channel_host_assembly_for_test(
+        &self,
+        wiring: ChannelHostAssemblyTestWiring,
+    ) -> Option<Arc<crate::extension_host::channel_host::GenericChannelHostAssembly>> {
+        self.start_channel_host_assembly(ChannelHostAssemblyWiring {
+            thread_service: wiring.thread_service,
+            turn_coordinator: wiring.turn_coordinator,
+            approval_interaction: None,
+            auth_interaction: None,
+            identity: wiring.identity,
+            approval_context: None,
+            blocked_auth_prompts: None,
+            auth_flow_cancel: None,
+            run_delivery_settings: wiring.run_delivery_settings,
+        })
     }
 
     /// The snapshot-backed channel delivery resolver behind the coordinator.

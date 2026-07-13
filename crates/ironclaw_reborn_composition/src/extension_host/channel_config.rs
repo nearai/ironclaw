@@ -195,6 +195,28 @@ impl ChannelConfigService {
         Ok(())
     }
 
+    /// Read one stored secret's material from the channel-config secret
+    /// storage (the scoped secret store at the channel-egress credential
+    /// scope, under the manifest-declared handle). `None` when the secret
+    /// was never provided. Per-request read: a configure save takes effect
+    /// on the next resolution with no rewiring — the ingress verification
+    /// port resolves `verification.secret_handle` through this.
+    pub(crate) async fn secret_material(
+        &self,
+        handle: &ironclaw_host_api::SecretHandle,
+    ) -> Result<Option<SecretMaterial>, ChannelConfigError> {
+        let lease = match self.secrets.lease_once(&self.secret_scope, handle).await {
+            Ok(lease) => lease,
+            Err(error) if error.is_unknown_secret() => return Ok(None),
+            Err(error) => return Err(storage_error(error)),
+        };
+        self.secrets
+            .consume(&self.secret_scope, lease.id)
+            .await
+            .map(Some)
+            .map_err(storage_error)
+    }
+
     /// Per-field presence for the extension's `[channel.config]` fields
     /// (§6.4 derived config completeness). Secret fields report
     /// `provided` only — stored values are never echoed back.

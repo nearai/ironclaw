@@ -21,9 +21,12 @@ pub use extension_host::extension_lifecycle_command::{
 pub use extension_host::gsuite::{
     bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers,
 };
+pub use extension_host::channel_host::{ChannelHostIdentity, GenericChannelHostAssembly};
 pub use extension_host::skill_listing::{RebornSkillListError, list_reborn_local_skills};
 #[cfg(feature = "test-support")]
 pub use factory::AttachmentTestSupport;
+#[cfg(feature = "test-support")]
+pub use factory::ChannelHostAssemblyTestWiring;
 #[cfg(feature = "test-support")]
 pub use factory::RebornLocalDevApprovalTestParts;
 #[cfg(feature = "migration-support")]

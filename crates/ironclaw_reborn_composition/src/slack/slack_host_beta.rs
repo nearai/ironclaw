@@ -636,13 +636,19 @@ pub fn build_triggered_run_delivery_hook(
     delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
 ) -> Result<Arc<SlackTriggeredRunDeliveryHook>, SlackHostBetaBuildError> {
     let parts = SlackHostBetaRuntimeParts::from_runtime(runtime)?;
-    build_triggered_run_delivery_hook_from_parts(&parts, config, delivery_store)
+    build_triggered_run_delivery_hook_from_parts(
+        &parts,
+        config,
+        delivery_store,
+        Arc::new(SlackPreferenceTargetCodec),
+    )
 }
 
 fn build_triggered_run_delivery_hook_from_parts(
     parts: &SlackHostBetaRuntimeParts,
     config: &SlackHostBetaConfig,
     delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
+    preference_target_codec: Arc<dyn PreferenceTargetCodec>,
 ) -> Result<Arc<SlackTriggeredRunDeliveryHook>, SlackHostBetaBuildError> {
     // The triggered path never resolves a conversation binding: the target
     // comes from the creator's personal preference.
@@ -655,7 +661,7 @@ fn build_triggered_run_delivery_hook_from_parts(
         services,
         triggered_run_delivery_settings(),
         Arc::clone(&delivery_store),
-        Arc::new(SlackPreferenceTargetCodec),
+        preference_target_codec,
         config.agent_id.clone(),
     ));
     Ok(Arc::new(SlackTriggeredRunDeliveryHook {

@@ -647,6 +647,13 @@ impl From<DefaultPlannedRuntimeBuildError> for RebornRuntimeError {
 pub struct RebornRuntime {
     services: RebornServices,
     turn_coordinator: Arc<dyn TurnCoordinator>,
+    /// Generic channel host assembly (extension-runtime P6 S2): the
+    /// per-extension inbound-channel reconcile loop over the generic host's
+    /// active snapshot. `None` when the composition path has no generic
+    /// host. Held here so the loop lives exactly as long as the runtime and
+    /// so concrete channel lanes can feed their vendor extras.
+    channel_host_assembly:
+        Option<Arc<crate::extension_host::channel_host::GenericChannelHostAssembly>>,
     /// Concrete in-memory turn-state authority, kept so graceful `shutdown` can
     /// flush the full snapshot durably (recovering in-flight turns on the next
     /// restart, not just gate-blocked ones). `None` when no local runtime is
@@ -1632,6 +1639,16 @@ impl RebornRuntime {
 
     pub(crate) fn webui_turn_coordinator(&self) -> Arc<dyn TurnCoordinator> {
         self.turn_coordinator.clone()
+    }
+
+    /// The generic channel host assembly, when this runtime composed a
+    /// generic extension host. Concrete channel lanes route their inbound
+    /// registration (and vendor extras) through this instead of writing the
+    /// ingress registry directly.
+    pub(crate) fn channel_host_assembly(
+        &self,
+    ) -> Option<Arc<crate::extension_host::channel_host::GenericChannelHostAssembly>> {
+        self.channel_host_assembly.clone()
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
@@ -3829,6 +3846,58 @@ pub async fn build_reborn_runtime(
     };
     services.turn_coordinator = Some(Arc::clone(&planned_turn_coordinator));
 
+    // Generic channel host assembly (extension-runtime P6 S2): reconcile
+    // per-extension inbound-channel registrations from the generic host's
+    // active snapshot for EVERY composed runtime with a generic host. The
+    // run-delivery observer half follows the delivery coordinator's
+    // availability (no coordinator -> ingress-only registrations).
+    let channel_host_assembly = {
+        let approval_context = services.local_runtime.as_ref().map(|local_runtime| {
+            Arc::new(
+                crate::extension_host::run_delivery_ports::ProjectionApprovalPromptContextSource::new(
+                    local_runtime.approval_requests.clone()
+                        as Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
+                ),
+            ) as Arc<dyn ironclaw_product_workflow::ApprovalPromptContextSource>
+        });
+        let blocked_auth_prompts = Some(Arc::new(
+            crate::extension_host::run_delivery_ports::ProductAuthBlockedAuthPromptSource::new(
+                services
+                    .product_auth
+                    .as_ref()
+                    .and_then(|product_auth| product_auth.as_auth_challenge_provider()),
+            ),
+        )
+            as Arc<dyn ironclaw_product_workflow::BlockedAuthPromptSource>);
+        let auth_flow_cancel = services
+            .product_auth
+            .as_ref()
+            .and_then(|product_auth| product_auth.as_blocked_auth_flow_canceller())
+            .map(|canceller| {
+                Arc::new(
+                    crate::extension_host::run_delivery_ports::ProductAuthBlockedAuthFlowCancel::new(
+                        canceller,
+                    ),
+                ) as Arc<dyn ironclaw_product_workflow::BlockedAuthFlowCancel>
+            });
+        services.start_channel_host_assembly(crate::factory::ChannelHostAssemblyWiring {
+            thread_service: Arc::clone(&thread_service),
+            turn_coordinator: Arc::clone(&planned_turn_coordinator),
+            approval_interaction: Some(Arc::clone(&approval_interaction_service)),
+            auth_interaction: Some(Arc::clone(&auth_interaction_service)),
+            identity: crate::extension_host::channel_host::ChannelHostIdentity {
+                tenant_id: thread_scope.tenant_id.clone(),
+                agent_id: thread_scope.agent_id.clone(),
+                project_id: thread_scope.project_id.clone(),
+                operator_user_id: actor_user_id.clone(),
+            },
+            approval_context,
+            blocked_auth_prompts,
+            auth_flow_cancel,
+            run_delivery_settings: ironclaw_product_workflow::RunDeliverySettings::default(),
+        })
+    };
+
     // `trigger_poller_handle`, `post_submit_hook_slot`, and the test-support
     // `trigger_conversation_pairing_value` are produced atomically inside
     // a single `if trigger_poller.enabled` expression. Avoid a
@@ -3969,6 +4038,7 @@ pub async fn build_reborn_runtime(
     Ok(RebornRuntime {
         services,
         turn_coordinator,
+        channel_host_assembly,
         #[cfg(feature = "inmemory-turn-state")]
         turn_state_flush,
         turn_tree_store: turn_state_store,
