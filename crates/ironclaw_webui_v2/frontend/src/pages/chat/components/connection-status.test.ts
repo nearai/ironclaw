@@ -46,6 +46,8 @@ test("ConnectionStatus hides routine states and renders connection interruptions
     const rendered = ConnectionStatus({ status });
     assert.notEqual(rendered, null, status);
     assert.equal(rendered.props.role, "status", status);
+    assert.match(rendered.props.className, /\babsolute\b/, status);
+    assert.doesNotMatch(rendered.props.className, /\bsticky\b/, status);
     assert.match(rendered.props.className, new RegExp(style.replace("/", "\\/")), status);
     assert.equal(rendered.children[0], status, status);
   }

@@ -30,7 +30,7 @@ export function ConnectionStatus({ status }: ConnectionStatusProps) {
     <div
       role="status"
       className={[
-        "sticky top-4 z-20 mx-auto mt-4 md:mt-0 mb-2 max-w-md rounded-full border px-4 py-1.5 text-center text-xs font-medium backdrop-blur-xl",
+        "pointer-events-none absolute inset-x-4 top-4 z-20 mx-auto max-w-md rounded-full border px-4 py-1.5 text-center text-xs font-medium backdrop-blur-xl",
         STATUS_STYLES[status] || DEFAULT_STATUS_STYLE,
       ].join(" ")}
     >
