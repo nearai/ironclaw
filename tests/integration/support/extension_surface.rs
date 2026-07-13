@@ -95,6 +95,7 @@ pub const BUNDLED_EXTENSION_CAPABILITY_IDS: &[&str] = &[
     "web-access.get_content",
     "slack.search_messages",
     "slack.list_conversations",
+    "slack.get_conversation_info",
     "slack.get_conversation_history",
     "slack.get_thread_replies",
     "slack.get_user_info",

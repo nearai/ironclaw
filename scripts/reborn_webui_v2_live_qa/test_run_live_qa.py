@@ -526,6 +526,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     "status": "pending",
                 }
             self.assertEqual(method, "GET")
+            if path == "/api/webchat/v2/extensions":
+                return {"extensions": []}
             self.assertEqual(path, "/api/webchat/v2/channels/connectable")
             return {
                 "channels": [
@@ -657,6 +659,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             fetched_paths,
             [
                 "/api/webchat/v2/channels/connectable",
+                "/api/webchat/v2/extensions",
                 "/api/webchat/v2/extensions/install",
                 "/api/reborn/product-auth/accounts/list",
                 "/api/webchat/v2/extensions/slack/setup/oauth/start",
@@ -891,6 +894,47 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "Message the IronClaw Reborn app in Slack to get a pairing code, "
                 "then paste it here."
             )
+        )
+
+    def test_extension_is_listed_recognizes_an_existing_package(self):
+        extensions = [
+            {"package_ref": {"kind": "extension", "id": "github"}},
+            {"package_ref": {"kind": "extension", "id": "slack"}},
+        ]
+
+        self.assertTrue(run_live_qa._extension_is_listed(extensions, "slack"))
+        self.assertFalse(run_live_qa._extension_is_listed(extensions, "gmail"))
+
+    def test_extension_install_preflight_reuses_existing_installation(self):
+        async def fake_fetch(_page: object, path: str) -> dict[str, object]:
+            self.assertEqual(path, "/api/webchat/v2/extensions")
+            return {
+                "extensions": [
+                    {"package_ref": {"kind": "extension", "id": "slack"}}
+                ]
+            }
+
+        async def fail_if_install_runs(*_args, **_kwargs) -> dict[str, object]:
+            raise AssertionError("existing Slack installation must not be reinstalled")
+
+        observed: dict[str, object] = {}
+        with (
+            patch.object(run_live_qa, "_fetch_webui_json", new=fake_fetch),
+            patch.object(run_live_qa, "_webui_json", new=fail_if_install_runs),
+        ):
+            asyncio.run(
+                run_live_qa._ensure_extension_installed_on_page(
+                    object(),
+                    observed,
+                    package_id="slack",
+                    display_name="Slack",
+                )
+            )
+
+        self.assertEqual(observed["slack_install_message"], "Slack already installed")
+        self.assertEqual(
+            observed["slack_install_onboarding_state"],
+            "existing_installation",
         )
 
     def test_product_connect_cases_start_from_chat_then_verify_registry(self):

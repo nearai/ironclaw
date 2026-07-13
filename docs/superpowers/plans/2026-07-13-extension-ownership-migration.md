@@ -144,7 +144,8 @@ Expected: PASS with no warnings.
 
 **Files:**
 - No repository files.
-- Backup/report artifacts stay under a mode-0700 directory in `/tmp`.
+- Backup/report artifacts stay under a mode-0700 directory under the operator's
+  chosen temporary or scratch path.
 
 **Interfaces:**
 - Consumes: port 8745 hosted-volume stack, operator bearer, Account A/B bearers, and the new migration binary.
