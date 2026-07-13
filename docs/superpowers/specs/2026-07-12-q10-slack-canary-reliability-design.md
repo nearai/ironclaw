@@ -65,6 +65,15 @@ QA-9C and QA-10I evaluate stochastic final-answer entity rendering rather than
 a deterministic capability contract, so both are behavioral/nonblocking while
 retaining their failed observation and trace artifacts.
 
+QA-9B still requires an independent Slack history observation to pass its
+exactly-once contract. If that readback cleanly misses the marker after the
+exact trigger run completed exactly one `slack.send_message` call to the
+expected DM and Slack returned `ok: true`, the result remains unsuccessful but
+is classified as infrastructure/inconclusive and nonblocking. Missing send
+evidence, duplicate sends, a wrong channel, or an unsuccessful Slack response
+remain blocking failures. Persisted evidence contains aggregate counts only,
+not Slack channel IDs or message text.
+
 ### 2. Separate extension lifecycle from Slack correctness
 
 The existing extension/connect journeys continue to validate discovery,

@@ -7507,6 +7507,160 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             )
         )
 
+    def test_trigger_run_slack_send_evidence_is_exact_run_scoped_and_sanitized(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "reborn-home"
+            db_path = home / "local-dev" / "reborn-local-dev.db"
+            run_live_qa._root_filesystem_create_table(db_path)
+            expected_channel = "D_EXPECTED_PRIVATE_CHANNEL"
+            marker = "PRIVATE_QA_DELIVERY_MARKER"
+
+            def put_preview(path_suffix: str, *, run_id: str, channel: str) -> None:
+                run_live_qa._put_root_filesystem_json(
+                    db_path,
+                    (
+                        "/tenants/reborn-cli/users/test/threads/agents/reborn-cli-agent/"
+                        "owners/test/threads/thread-target/messages/"
+                        f"{path_suffix}.json"
+                    ),
+                    {
+                        "turn_run_id": run_id,
+                        "kind": "capability_display_preview",
+                        "content": json.dumps(
+                            {
+                                "capability_id": "slack.send_message",
+                                "status": "completed",
+                                "input_summary": json.dumps(
+                                    {"channel": channel, "text": f"result {marker}"}
+                                ),
+                                "output_preview": json.dumps(
+                                    {"channel": channel, "ok": True, "ts": "1.2"}
+                                ),
+                            }
+                        ),
+                    },
+                )
+
+            put_preview("expected", run_id="run-target", channel=expected_channel)
+            put_preview("other-run", run_id="run-distractor", channel="D_OTHER")
+
+            evidence = run_live_qa._trigger_run_slack_send_evidence(
+                home,
+                run_id="run-target",
+                thread_id="thread-target",
+                expected_channel_id=expected_channel,
+                marker=marker,
+            )
+
+        self.assertEqual(evidence["completed_send_count"], 1)
+        self.assertEqual(evidence["marker_send_count"], 1)
+        self.assertEqual(evidence["expected_channel_marker_send_count"], 1)
+        self.assertEqual(evidence["expected_channel_marker_ok_count"], 1)
+        self.assertEqual(evidence["wrong_channel_marker_send_count"], 0)
+        serialized = json.dumps(evidence, sort_keys=True)
+        self.assertNotIn(expected_channel, serialized)
+        self.assertNotIn(marker, serialized)
+
+    def test_slack_delivery_readback_inconclusive_requires_one_verified_send(self):
+        history_miss = {"checked": True, "found": False, "message_count": 7}
+        delivered = {"outcome": "delivered"}
+        exact_send = {
+            "completed_send_count": 1,
+            "marker_send_count": 1,
+            "expected_channel_marker_send_count": 1,
+            "expected_channel_marker_ok_count": 1,
+            "wrong_channel_marker_send_count": 0,
+            "parse_error_count": 0,
+        }
+
+        self.assertTrue(
+            run_live_qa._slack_delivery_readback_is_inconclusive(
+                delivered,
+                history_miss,
+                exact_send,
+            )
+        )
+        for changed in (
+            {"completed_send_count": 2, "marker_send_count": 2},
+            {"wrong_channel_marker_send_count": 1},
+            {"expected_channel_marker_ok_count": 0},
+            {"parse_error_count": 1},
+        ):
+            with self.subTest(changed=changed):
+                self.assertFalse(
+                    run_live_qa._slack_delivery_readback_is_inconclusive(
+                        delivered,
+                        history_miss,
+                        {**exact_send, **changed},
+                    )
+                )
+        self.assertFalse(
+            run_live_qa._slack_delivery_readback_is_inconclusive(
+                delivered,
+                {**history_miss, "error": "missing_scope"},
+                exact_send,
+            )
+        )
+
+    def test_slack_delivery_routine_readback_miss_is_infrastructure_inconclusive(self):
+        async def fake_creation(_ctx, **kwargs):
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=True,
+                latency_ms=1,
+                details={"creation": "ok"},
+            )
+
+        evidence = {
+            "completed_send_count": 1,
+            "marker_send_count": 1,
+            "expected_channel_marker_send_count": 1,
+            "expected_channel_marker_ok_count": 1,
+            "wrong_channel_marker_send_count": 0,
+            "parse_error_count": 0,
+        }
+
+        async def fake_wait(*_args, **_kwargs):
+            raise run_live_qa.SlackDeliveryReadbackInconclusive(
+                "Slack accepted the exact-run send but history did not expose it",
+                evidence,
+            )
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_routine_creation_case",
+                side_effect=fake_creation,
+            ),
+            patch.object(
+                run_live_qa,
+                "_wait_for_slack_delivery_marker",
+                side_effect=fake_wait,
+            ),
+        ):
+            result = asyncio.run(
+                run_live_qa._slack_delivery_routine_case(
+                    self._dummy_ctx(),
+                    case_name="qa_9b_routine_dm_delivery_exactly_once",
+                    routine_prefix="qa-9b",
+                    marker_prefix="QA_9B",
+                    routine_instruction="send the marker to Slack",
+                    required_delivery_text=["status"],
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.details["failure_class"], "infrastructure")
+        self.assertEqual(
+            result.details["failure_category"],
+            "slack_delivery_readback_unavailable",
+        )
+        self.assertEqual(result.details["failure_status"], "inconclusive")
+        self.assertTrue(result.details["inconclusive"])
+        self.assertFalse(result.details["blocking"])
+        self.assertEqual(result.details["delivery_readback_evidence"], evidence)
+
     def test_export_case_trace_writes_runtime_entries_without_secret_store(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

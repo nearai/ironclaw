@@ -2766,6 +2766,140 @@ def _slack_delivery_observed(
     )
 
 
+class SlackDeliveryReadbackInconclusive(RuntimeError):
+    """The exact trigger run sent once, but Slack history did not expose it."""
+
+    def __init__(self, message: str, evidence: dict[str, object]) -> None:
+        super().__init__(message)
+        self.evidence = evidence
+
+
+def _trigger_run_slack_send_evidence(
+    reborn_home: Path,
+    *,
+    run_id: str,
+    thread_id: str,
+    expected_channel_id: str,
+    marker: str,
+) -> dict[str, object]:
+    """Read sanitized ``slack.send_message`` evidence for one trigger run.
+
+    Only aggregate counts leave this helper. Slack channel IDs, message text,
+    and output payloads remain in the local runtime database and are never
+    copied into canary results.
+    """
+    evidence: dict[str, object] = {
+        "completed_send_count": 0,
+        "marker_send_count": 0,
+        "expected_channel_marker_send_count": 0,
+        "expected_channel_marker_ok_count": 0,
+        "wrong_channel_marker_send_count": 0,
+        "parse_error_count": 0,
+    }
+    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    if not db_path.exists():
+        evidence["read_error"] = "reborn-local-dev.db missing"
+        return evidence
+    try:
+        database_uri = f"{db_path.resolve().as_uri()}?mode=ro"
+        with closing(sqlite3.connect(database_uri, uri=True)) as db:
+            rows = db.execute(
+                """
+                SELECT contents
+                FROM root_filesystem_entries
+                WHERE is_dir = 0
+                  AND content_type = 'application/json'
+                  AND path LIKE ?
+                """,
+                (f"%/threads/{thread_id}/messages/%",),
+            ).fetchall()
+    except sqlite3.Error as exc:
+        evidence["read_error"] = _exc_text(exc)
+        return evidence
+
+    def json_object(value: object) -> dict[str, object] | None:
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        if not isinstance(value, str):
+            return None
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    for (raw_contents,) in rows:
+        message = json_object(raw_contents)
+        if (
+            message is None
+            or message.get("turn_run_id") != run_id
+            or message.get("kind") != "capability_display_preview"
+        ):
+            continue
+        preview = json_object(message.get("content"))
+        if preview is None:
+            evidence["parse_error_count"] = int(evidence["parse_error_count"]) + 1
+            continue
+        if preview.get("capability_id") != "slack.send_message":
+            continue
+        input_summary = json_object(preview.get("input_summary"))
+        output_preview = json_object(preview.get("output_preview"))
+        if input_summary is None or output_preview is None:
+            evidence["parse_error_count"] = int(evidence["parse_error_count"]) + 1
+            continue
+
+        status = str(preview.get("status") or "")
+        if status == "completed":
+            evidence["completed_send_count"] = int(evidence["completed_send_count"]) + 1
+        text = str(input_summary.get("text") or "")
+        if marker not in text:
+            continue
+        evidence["marker_send_count"] = int(evidence["marker_send_count"]) + 1
+        input_channel = str(input_summary.get("channel") or "")
+        if input_channel != expected_channel_id:
+            evidence["wrong_channel_marker_send_count"] = (
+                int(evidence["wrong_channel_marker_send_count"]) + 1
+            )
+            continue
+        evidence["expected_channel_marker_send_count"] = (
+            int(evidence["expected_channel_marker_send_count"]) + 1
+        )
+        if (
+            status == "completed"
+            and output_preview.get("ok") is True
+            and str(output_preview.get("channel") or "") == expected_channel_id
+        ):
+            evidence["expected_channel_marker_ok_count"] = (
+                int(evidence["expected_channel_marker_ok_count"]) + 1
+            )
+    return evidence
+
+
+def _slack_delivery_readback_is_inconclusive(
+    outcome: dict[str, object] | None,
+    history: dict[str, object] | None,
+    evidence: dict[str, object],
+) -> bool:
+    """Distinguish a Slack history miss from wrong or duplicate model sends."""
+    return (
+        isinstance(outcome, dict)
+        and outcome.get("outcome") == "delivered"
+        and isinstance(history, dict)
+        and history.get("checked") is True
+        and not history.get("found")
+        and not history.get("error")
+        and not evidence.get("read_error")
+        and evidence.get("completed_send_count") == 1
+        and evidence.get("marker_send_count") == 1
+        and evidence.get("expected_channel_marker_send_count") == 1
+        and evidence.get("expected_channel_marker_ok_count") == 1
+        and evidence.get("wrong_channel_marker_send_count") == 0
+        and evidence.get("parse_error_count") == 0
+    )
+
+
 async def _wait_for_slack_delivery_marker(
     ctx: LiveQaContext,
     *,
@@ -2782,6 +2916,8 @@ async def _wait_for_slack_delivery_marker(
     last_rows: list[dict[str, object]] = []
     last_outcome: dict[str, object] | None = None
     last_history: dict[str, object] | None = None
+    last_delivered_row: dict[str, object] | None = None
+    last_delivered_outcome: dict[str, object] | None = None
     approved_gate_refs: set[str] = set()
     approval_attempts: list[dict[str, object]] = []
     while time.monotonic() < deadline:
@@ -2796,6 +2932,9 @@ async def _wait_for_slack_delivery_marker(
                 outcome = _triggered_delivery_outcome(ctx.reborn_home, run_id)
                 if outcome:
                     last_outcome = outcome
+                    if outcome.get("outcome") == "delivered":
+                        last_delivered_row = row
+                        last_delivered_outcome = outcome
                 for route in _delivered_gate_routes_for_run(ctx.reborn_home, run_id):
                     gate_ref = str(route.get("gate_ref") or "")
                     if gate_ref in approved_gate_refs:
@@ -2853,6 +2992,28 @@ async def _wait_for_slack_delivery_marker(
                         f"run={row!r} outcome={outcome!r} history={history!r}"
                     )
         await asyncio.sleep(2.0)
+    if last_delivered_row is not None:
+        run_id = str(last_delivered_row.get("run_id") or "")
+        thread_id = str(last_delivered_row.get("thread_id") or "")
+        if run_id and thread_id:
+            send_evidence = _trigger_run_slack_send_evidence(
+                ctx.reborn_home,
+                run_id=run_id,
+                thread_id=thread_id,
+                expected_channel_id=channel_id,
+                marker=marker,
+            )
+            if _slack_delivery_readback_is_inconclusive(
+                last_delivered_outcome,
+                last_history,
+                send_evidence,
+            ):
+                raise SlackDeliveryReadbackInconclusive(
+                    "the exact trigger run completed one verified Slack send to the "
+                    "expected DM, but the independent Slack history readback did not "
+                    "expose the marker before timeout",
+                    send_evidence,
+                )
     raise AssertionError(
         "Slack delivery marker was not observed before timeout. "
         f"routine_name={routine_name!r} marker={marker!r} "
@@ -4493,6 +4654,23 @@ async def _slack_delivery_routine_case(
                 "exactly_once": exactly_once,
             },
         )
+    except SlackDeliveryReadbackInconclusive as exc:
+        result = _result(
+            case_name,
+            False,
+            started,
+            {
+                **base_details,
+                "error": _exc_text(exc),
+                "failure_class": "infrastructure",
+                "failure_category": "slack_delivery_readback_unavailable",
+                "failure_status": "inconclusive",
+                "inconclusive": True,
+                "delivery_readback_evidence": exc.evidence,
+            },
+        )
+        result.details["blocking"] = False
+        return result
     except Exception as exc:
         return _result(
             case_name,

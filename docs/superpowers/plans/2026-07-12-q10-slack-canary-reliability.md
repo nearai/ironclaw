@@ -374,6 +374,11 @@ Classify missing capability as model_quality, answer/ground-truth mismatch as pr
 Open the capability-evidence SQLite store read-only and classify any evidence
 read failure as nonblocking infrastructure/inconclusive rather than missing
 model capability evidence.
+For QA-9B, keep a clean Slack history observation as the only passing path. If
+history misses after the exact trigger run records one successful send to the
+expected DM, report the observation as nonblocking infrastructure/inconclusive;
+duplicate, wrong-channel, failed, or unproven sends stay blocking. Export only
+sanitized evidence counts.
 
 - [ ] **Step 5: Register scoped/global 10G and strict 10I**
 
