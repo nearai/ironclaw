@@ -685,12 +685,15 @@ fn canonicalish(path: &Path) -> PathBuf {
     resolved
 }
 
-#[cfg(all(test, feature = "postgres"))]
+#[cfg(test)]
 mod tests {
+    #[cfg(feature = "postgres")]
     use secrecy::SecretString;
 
+    #[cfg(feature = "postgres")]
     use super::{SourceDb, TargetStore, postgres_locator_fingerprint, validate_distinct_stores};
 
+    #[cfg(feature = "postgres")]
     #[test]
     fn postgres_locator_fingerprint_excludes_password_but_binds_database() {
         let first = SecretString::from(
@@ -721,6 +724,7 @@ mod tests {
         assert!(!first_fingerprint.contains("database.example"));
     }
 
+    #[cfg(feature = "postgres")]
     #[test]
     fn postgres_store_identity_rejects_credential_only_differences() {
         let source = SourceDb::Postgres {
@@ -741,6 +745,7 @@ mod tests {
         assert!(!error.to_string().contains("database.example"));
     }
 
+    #[cfg(feature = "postgres")]
     #[test]
     fn postgres_locator_options_fail_closed_without_echoing_values() {
         let locator = SecretString::from(

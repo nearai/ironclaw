@@ -348,22 +348,6 @@ impl V1Source {
         })
     }
 
-    #[allow(dead_code, reason = "staged API-token disposition converter read port")]
-    pub(crate) async fn api_token_count(&self) -> Result<u64, MigrationError> {
-        let mut count = 0_u64;
-        for user in self.distinct_users().await? {
-            let tokens = self.db.list_api_tokens(&user).await.or_else(|error| {
-                if is_missing_table_error(&error.to_string()) {
-                    Ok(Vec::new())
-                } else {
-                    Err(source_read_error("api_tokens", error))
-                }
-            })?;
-            count = count.saturating_add(tokens.len() as u64);
-        }
-        Ok(count)
-    }
-
     #[allow(dead_code, reason = "staged typed-settings converter read port")]
     pub(crate) async fn settings(
         &self,

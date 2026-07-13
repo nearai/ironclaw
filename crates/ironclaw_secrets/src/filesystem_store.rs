@@ -40,6 +40,8 @@
 //! TODO(reborn/fs-secrets): once `EncryptedBackend` ships, replace the inline
 //! `encrypt`/`decrypt` calls with plaintext writes wrapped by the decorator.
 
+// arch-exempt: large_file, filesystem secret-store decomposition is tracked, plan #4088
+
 use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;

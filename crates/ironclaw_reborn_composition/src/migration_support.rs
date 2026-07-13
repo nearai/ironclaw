@@ -220,14 +220,18 @@ fn runtime_identity(config_file: Option<&RebornConfigFile>) -> RebornRuntimeIden
     }
 }
 
-#[cfg(all(test, feature = "libsql"))]
+#[cfg(test)]
 mod tests {
+    #[cfg(feature = "libsql")]
     use std::fs;
 
+    #[cfg(feature = "libsql")]
     use ironclaw_reborn_config::{RebornBootConfig, RebornHome, RebornProfile};
 
+    #[cfg(feature = "libsql")]
     use super::{RebornMigrationTargetStore, resolve_reborn_migration_target};
 
+    #[cfg(feature = "libsql")]
     #[test]
     fn local_target_resolution_matches_runtime_layout_without_creating_state() {
         let temp = tempfile::tempdir().unwrap();
@@ -259,6 +263,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "libsql")]
     #[test]
     fn config_profile_and_identity_select_the_same_local_target_scope_as_boot() {
         let temp = tempfile::tempdir().unwrap();
@@ -302,6 +307,7 @@ default_agent = "migrated-agent"
         assert_eq!(resolved.agent_id.as_str(), "migrated-agent");
     }
 
+    #[cfg(feature = "libsql")]
     #[test]
     fn local_profile_rejects_storage_config_instead_of_ignoring_it() {
         let temp = tempfile::tempdir().unwrap();

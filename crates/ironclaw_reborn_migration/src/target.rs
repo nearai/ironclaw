@@ -1003,11 +1003,14 @@ fn is_local_postgres_config(config: &tokio_postgres::Config) -> bool {
     true
 }
 
-#[cfg(all(test, feature = "postgres"))]
+#[cfg(test)]
 mod tests {
+    #[cfg(feature = "postgres")]
     use super::shared_state_transition_allowed;
+    #[cfg(feature = "postgres")]
     use crate::manifest::MigrationStatus;
 
+    #[cfg(feature = "postgres")]
     #[test]
     fn shared_state_accepts_replay_and_manifest_lifecycle_transitions() {
         assert!(shared_state_transition_allowed(
@@ -1040,6 +1043,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "postgres")]
     #[test]
     fn shared_state_rejects_skipped_and_unknown_transitions() {
         assert!(!shared_state_transition_allowed(
