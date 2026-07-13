@@ -128,10 +128,12 @@ Rules — kept short on purpose:
 - [x] LIFE-6 The installation state machine is one shared enum
   (`Installed/Activating/Active/Deactivating/Removing/RemovalPending/Removed`);
   no extension-specific state value exists anywhere (grep + wire schema test).
-  — one `InstallationState` enum (`crates/ironclaw_extension_host/src/state.rs`);
-  `installation_state_wire_form_matches_str` pins the exact wire vocabulary.
-  The whole-workspace no-extension-specific-state grep lands with the P2 wire
-  exposure.
+  — one `InstallationState` enum (relocated to
+  `crates/ironclaw_host_api/src/state.rs` in P7a so the product wire and the
+  host both name it without a new dependency edge; re-exported by
+  `ironclaw_extension_host::state`); `installation_state_wire_form_matches_str`
+  (`host_api/src/state.rs`) pins the exact wire vocabulary, now exposed on the
+  extensions wire as `RebornExtensionInfo.installation_state`.
 - [x] LIFE-7 Every lifecycle transition is persisted; crash during any
   transient state resumes deterministically at startup.
   — `transient_states_resume_deterministically` (`state.rs`) plus
@@ -164,11 +166,14 @@ Rules — kept short on purpose:
   (`removal_context_reports_other_active_extensions_for_shared_vendor`); the
   shared-vendor grant policy itself is enforced by the injected auth-revoke
   hook, proven end-to-end with the P3 auth engine.
-- [ ] LIFE-13 Conversation/LLM history survives extension removal. — No
-  direct pin yet: removal runs the vendor-blind removable-channel cleanup
-  (grants, integration state, identity bindings — `3812d9fe3`) and never
-  touches turn/LLM history stores by construction; a named
-  history-survives-removal assertion at the harness tier remains owed.
+- [x] LIFE-13 Conversation/LLM history survives extension removal. — removal
+  runs the vendor-blind removable-channel cleanup (grants, integration state,
+  identity bindings — `3812d9fe3`) and never touches turn/LLM history stores
+  by construction; P7a pins it at the harness tier —
+  `acme_fixture_lifecycle_dispatches_from_the_active_snapshot`
+  (`tests/integration/extension_runtime.rs`) removes the extension through the
+  model tool, then asserts the invoke thread's persisted turn (user prompt +
+  model reply) is still readable via `assert_conversation_history_contains`.
 - [x] LIFE-14 Duplicate capability id or ingress route across active
   extensions fails activation.
   — `duplicate_capability_across_extensions_fails_activation`
@@ -374,18 +379,24 @@ Rules — kept short on purpose:
   `vendor_error_responses_are_size_capped_and_never_echoed`
   (`auth_engine_contract.rs`) and the existing
   `serde_redaction_contract.rs` suite.
-- [ ] AUTH-9 The auth account state machine is one shared enum
+- [x] AUTH-9 The auth account state machine is one shared enum
   (`disconnected/authenticating/connected/expired/revoking` + typed
   `last_error`); no vendor- or extension-specific state exists; the wire
-  exposes exactly this enum. — enum + typed `last_error` + transitions now
-  live with the engine (`crates/ironclaw_auth/src/account_state.rs`,
+  exposes exactly this enum. — enum + typed `last_error` + transitions live
+  with the engine (`crates/ironclaw_auth/src/account_state.rs`,
   `legal_transitions_only`, `auth_account_state_wire_form_matches_str`;
-  re-exported by `ironclaw_extension_host::state`); the engine +
-  `project_auth_account_state` drive it; wire exposure of the projection
-  is still pending — after the P6 S5 frontend cutover the extensions wire
-  still carries `connected: Option<bool>` plus an `activation_status`
-  string (`reborn_services/types.rs`), not the shared enum; the enum wire
-  projection remains open.
+  re-exported by `ironclaw_extension_host::state`). P7a puts it on the wire:
+  the extensions wire now carries a per-vendor **accounts list** whose
+  `RebornAuthAccount.state` is exactly this enum (`reborn_services/types.rs`),
+  replacing the `connected: Option<bool>` stopgap. The accounts-list shape
+  (`account_id`/`label`/`state`/`is_default`) is frozen by the golden fixture
+  `list_extensions_golden_wire_multi_surface_extension_freezes_accounts_list`
+  (`reborn_services_contract.rs`), driven through `list_extensions`; the
+  projection `vendor_auth_accounts` (`reborn_services/extensions.rs`) maps a
+  live grant to `connected` (MIG-1). Richer per-account state (expired/
+  authenticating/revoking) flows when the credential service surfaces it with
+  the post-P7 multi-account feature — the wire type already carries the full
+  enum.
 - [x] AUTH-10 Flow TTL expiry and vendor denial land in `disconnected` with
   a typed reason; refresh failure lands in `expired`. —
   `projection_prefers_live_flow_then_account_status`
@@ -695,14 +706,22 @@ Rules — kept short on purpose:
   gone; a stale `[slack]` section hard-fails config parse (accepted beta
   posture, pinned by `rejects_retired_slack_section`); the secrets guard
   keeps the `xoxb-`/`xoxp-`/`xapp-` prefixes.
-- [ ] DEL-4 Slack cleanup constants in product workflow and Slack connection
+- [x] DEL-4 Slack cleanup constants in product workflow and Slack connection
   copy in lifecycle are deleted (standard pipeline + manifest display data).
-  — PARTIAL: no non-test slack constant remains in
-  `ironclaw_product_workflow` (removal cleanup rides the vendor-blind
-  removable-channel path); the Slack connection copy still lives in
-  `channel_connection_requirement` (`extension_lifecycle.rs` — a
-  hardcoded `slack` OAuth branch with inline copy). It moves to manifest
-  display data before this row ticks.
+  — no non-test slack constant remains in `ironclaw_product_workflow`
+  (removal cleanup rides the vendor-blind removable-channel path); P7a
+  deletes the hardcoded `slack` OAuth branch in
+  `channel_connection_requirement` (`extension_lifecycle.rs`). The connect
+  strategy now derives from the manifest's declared auth setup
+  (`channel_connect_strategy`: an OAuth recipe → OAuth, otherwise the generic
+  proof-code pairing) and the copy renders generically from the S5
+  `display_name` — pinned by
+  `channel_connect_strategy_is_manifest_driven_not_name_based` (the real Slack
+  package resolves to OAuth from its `[auth.slack]` recipe; a bot-token
+  fixture named "slack" resolves to proof-code, proving no name hardcode
+  survives). The remaining `slack` allowlist term entries for
+  `extension_lifecycle.rs` cover other (non-DEL-4) slack references and retire
+  with the P7b allowlist→0 sweep.
 - [ ] DEL-5 The old `ProductAdapter` metadata getters and the unused registry
   runtime projection are deleted. — PARTIAL: both projection halves are
   gone (P2 deleted `ProductAdapterRuntimeEntry` /
@@ -763,21 +782,30 @@ Rules — kept short on purpose:
 
 ## 9. Frontend (UI)
 
-- [ ] UI-1 The wire carries surface keys, the installation state enum, the
+- [x] UI-1 The wire carries surface keys, the installation state enum, the
   auth state enum, and config field descriptors; one golden fixture pins it.
-  — PARTIAL: the wire carries surfaces (`RebornExtensionSurface`) and
-  setup field/secret descriptors (`reborn_services/types.rs`,
-  `RebornExtensionSetupField`/`RebornExtensionSetupSecret`), but the
-  installation state rides as an `activation_status` string and auth
-  state as `connected: Option<bool>` — the two shared enums on the wire
-  and the single golden fixture remain (see AUTH-9).
+  — the wire carries surfaces (`RebornExtensionSurface`), the §6.1
+  `InstallationState` enum (`RebornExtensionInfo.installation_state`, replacing
+  the `activation_status` string), the §6.3 auth-account enum via the
+  per-vendor accounts list (`RebornAuthAccount.state`, replacing
+  `connected: Option<bool>`), and setup field/secret descriptors
+  (`reborn_services/types.rs`). One golden fixture pins the full shape:
+  `list_extensions_golden_wire_multi_surface_extension_freezes_accounts_list`
+  (`reborn_services_contract.rs`) freezes an arbitrary channel on a
+  multi-surface (tool + channel + auth) extension — the surface keys, the
+  installation-state string, the accounts list, each surface's
+  `resolved_account_id` + binding source, and the connection `display_name`.
 - [ ] UI-2 The channels tab renders every channel surface with the same
   components; the acme fixture channel renders, configures, and connects with
   no frontend source change. — PARTIAL: since P6 S5 every channel surface
-  renders through the same generic sections — connect sections derive
-  solely from the wire connection strategy (`c6bb695ec`, channels-tab +
-  configure-modal). The acme renders/configures/connects browser proof
-  (no frontend source change) remains owed.
+  renders through the same generic sections, now driven by the P7a wire —
+  affordances derive from `installation_state` + the accounts-list auth state +
+  config completeness with no per-extension logic (source-scan
+  `chat_omits_connect_action_while_extensions_render_generic_connect_ui`,
+  `assets.rs`; frontend `vitest` 639/639 green after the wire swap). The acme
+  fixture channel *browser* render/configure/connect proof (Python e2e, no
+  frontend source change) is NOT run in this session — it rides the existing
+  `tests/e2e` harness and remains owed (flagged in the PR).
 - [x] UI-3 Config forms are schema-driven; secret fields mask and never echo
   stored values. — The configure modal renders wire-projected
   `[channel.config]` field + secret descriptors generically
@@ -818,9 +846,15 @@ Rules — kept short on purpose:
 
 ## 10. Migration and compatibility (MIG)
 
-- [ ] MIG-1 OAuth grant/account storage is reused (vendor id strings
+- [x] MIG-1 OAuth grant/account storage is reused (vendor id strings
   unchanged); live grants backfill to `connected`; no re-auth required for
-  existing users.
+  existing users. — no storage change: the accounts-list projection reuses the
+  existing per-caller connection signal and maps a live grant to the
+  `connected` auth-account state (`vendor_auth_accounts`,
+  `reborn_services/extensions.rs`), frozen by the golden fixture
+  `list_extensions_golden_wire_multi_surface_extension_freezes_accounts_list`
+  (a connected account projects `state = "connected"`). Vendor id strings and
+  grant records are untouched, so existing users need no re-auth.
 - [x] MIG-2 Slack setup slots migrate to config/client-credential handles
   (idempotent, dry-run supported). — H.3 load-time fold
   (`composition/src/extension_host/channel_state_folds.rs`, wired in
