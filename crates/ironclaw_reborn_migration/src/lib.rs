@@ -61,6 +61,7 @@ pub async fn plan_migration(
     let source = source::V1Source::open(&options.source).await?;
     let source_schema_version = source.schema_version().await?;
     let inventory = collect_inventory(options, &source).await?;
+    let project_document_count = source.project_documents().await?.len() as u64;
     // Fingerprint after every planning read has completed. libSQL may update
     // connection-local WAL bookkeeping while opening a snapshot; apply runs
     // the same read sequence before comparing the sealed fingerprint.
@@ -80,6 +81,10 @@ pub async fn plan_migration(
             checkpoint.warnings.push(warning.clone());
         }
     }
+    let project_checkpoint = domains.entry(Domain::Project).or_default();
+    project_checkpoint.planned = project_checkpoint
+        .planned
+        .saturating_add(project_document_count);
 
     let target = target_descriptor(&options.target)?;
     // Local existence is observable without opening a target. PostgreSQL

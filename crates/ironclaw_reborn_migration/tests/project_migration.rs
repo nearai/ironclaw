@@ -143,6 +143,15 @@ async fn migrates_both_project_layouts_and_replay_conflicts_fail_closed() {
 
     let migration_options = options(source.clone(), target.clone());
     let manifest = plan_migration(&migration_options).await.expect("plan");
+    assert_eq!(
+        manifest
+            .domains
+            .get(&Domain::Project)
+            .expect("project checkpoint")
+            .planned,
+        2,
+        "planning must count supported engine-v2 project documents"
+    );
     let report = apply_migration(
         migration_options,
         &manifest,
