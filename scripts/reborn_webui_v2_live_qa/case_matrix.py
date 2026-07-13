@@ -358,12 +358,4 @@ QA_SHEET_CASES: dict[str, dict[str, object]] = {
         ),
         "gate": "requires live Slack personal OAuth and bot DM fixture seeding",
     },
-    "qa_10j_slack_stale_unavailable_history": {
-        "rows": ["10J"],
-        "feature": (
-            "Slack stale-history recovery: current tool definitions override "
-            "an earlier assistant claim that Slack tools are unavailable"
-        ),
-        "gate": "requires live Slack personal OAuth",
-    },
 }

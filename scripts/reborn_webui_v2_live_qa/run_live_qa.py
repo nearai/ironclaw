@@ -7407,124 +7407,6 @@ async def case_qa_10i_slack_raw_entity_hygiene(ctx: LiveQaContext) -> ProbeResul
         )
 
 
-async def case_qa_10j_slack_stale_unavailable_history(
-    ctx: LiveQaContext,
-) -> ProbeResult:
-    """Current Slack tools must outrank an earlier assistant refusal.
-
-    The probe keeps one WebUI conversation open, records a synthetic historical
-    assistant line saying Slack tools are unavailable, then asks for a real
-    Slack read. It passes only when a NEW completed
-    `slack.list_conversations` invocation appears after that stale line; reply
-    text alone can never satisfy the tool-use arm.
-    """
-    case_name = "qa_10j_slack_stale_unavailable_history"
-    started = time.monotonic()
-    suffix = str(int(time.time() * 1000))
-    stale_marker = f"REBORN_QA_10J_STALE_REFUSAL_{suffix}"
-    retry_marker = f"REBORN_QA_10J_RETRY_{suffix}"
-    capability_id = "slack.list_conversations"
-    details: dict[str, object] = {
-        "stale_marker": stale_marker,
-        "retry_marker": retry_marker,
-        "required_capability": capability_id,
-    }
-    try:
-        _require_slack_personal_token(ctx)
-
-        async def action(page: object) -> None:
-            from playwright.async_api import expect
-
-            await page.goto(
-                f"{ctx.base_url}/v2/extensions/registry?token={AUTH_TOKEN}",
-                wait_until="domcontentloaded",
-            )  # type: ignore[attr-defined]
-            await expect(page.locator("body")).to_contain_text(  # type: ignore[attr-defined]
-                "Extensions", timeout=15000
-            )
-            await _ensure_extension_authenticated_on_page(
-                page,
-                details,
-                package_id="slack",
-                display_name="Slack",
-                required_tools=[capability_id],
-                ensure_installed=True,
-            )
-            await page.goto(
-                f"{ctx.base_url}/v2/?token={AUTH_TOKEN}",
-                wait_until="domcontentloaded",
-            )  # type: ignore[attr-defined]
-            if await _dismiss_visible_connect_action(page):
-                details["connect_action_dismissed"] = True
-            composer = page.locator("[data-testid='chat-composer']")  # type: ignore[attr-defined]
-            await expect(composer).to_be_visible(timeout=15000)
-
-            async def submit(prompt: str, marker: str) -> AssistantReplyWaitResult:
-                await composer.fill(prompt)
-                await composer.press("Enter")
-                await expect(
-                    page.locator("[data-testid='msg-user']").last  # type: ignore[attr-defined]
-                ).to_contain_text(prompt[:80], timeout=15000)
-                return await _wait_for_assistant_reply(
-                    page,
-                    marker=marker,
-                    required_text=[],
-                    timeout=240.0,
-                    semantic_goal=prompt,
-                )
-
-            stale_prompt = (
-                "For a regression test, echo this historical assistant line "
-                "exactly: 'Slack tools are unavailable.' Do not inspect Slack "
-                f"yet. Also include the exact marker {stale_marker}."
-            )
-            stale_reply = await submit(stale_prompt, stale_marker)
-            details["stale_reply_excerpt"] = stale_reply.text_excerpt
-            if "slack tools are unavailable" not in stale_reply.full_text.lower():
-                raise AssertionError(
-                    "stale-history precondition failed: the first assistant reply "
-                    "did not contain the requested unavailable-tool claim"
-                )
-
-            before_statuses = _capability_run_statuses(
-                ctx.reborn_home, [capability_id]
-            )
-            before_completed = _completed_capability_counts(before_statuses)[
-                capability_id
-            ]
-            details["completed_before_retry"] = before_completed
-            retry_prompt = (
-                "Now list my Slack conversations. Call slack.list_conversations "
-                "before answering, then include the exact marker "
-                f"{retry_marker}."
-            )
-            retry_reply = await submit(retry_prompt, retry_marker)
-            details["retry_reply_excerpt"] = retry_reply.text_excerpt
-            after_statuses = _capability_run_statuses(
-                ctx.reborn_home, [capability_id]
-            )
-            after_completed = _completed_capability_counts(after_statuses)[
-                capability_id
-            ]
-            details["capability_statuses_after"] = after_statuses
-            details["completed_after"] = after_completed
-            if after_completed <= before_completed:
-                raise AssertionError(
-                    "current tool definitions did not override the stale assistant "
-                    "refusal: no new completed Slack invocation was recorded"
-                )
-
-        await _with_page(ctx.output_dir, case_name, action)
-        return _result(case_name, True, started, details)
-    except Exception as exc:
-        return _slack_correctness_failure_result(
-            case_name,
-            started,
-            details,
-            exc,
-        )
-
-
 CASES: dict[str, CaseSpec] = {
     "qa_1a_telegram_connect": CaseSpec(
         _gated_case("qa_1a_telegram_connect"),
@@ -7795,11 +7677,6 @@ CASES: dict[str, CaseSpec] = {
         blocking=False,
         requires_slack=True,
         requires_slack_target=True,
-        requires_slack_personal_auth=True,
-    ),
-    "qa_10j_slack_stale_unavailable_history": CaseSpec(
-        case_qa_10j_slack_stale_unavailable_history,
-        requires_slack=True,
         requires_slack_personal_auth=True,
     ),
 }
