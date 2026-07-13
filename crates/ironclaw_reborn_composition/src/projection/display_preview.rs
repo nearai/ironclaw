@@ -186,7 +186,7 @@ impl CapabilityDisplayPreviewStore {
         let input_summary = input_summary(tool_name, arguments);
         let input = CapabilityDisplayInputPreview {
             title: bounded_display_text(
-                capability_input_title(tool_name),
+                capability_title(tool_name, CapabilityTitleFallback::FullId),
                 CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
             )
             .text,
@@ -247,7 +247,13 @@ impl CapabilityDisplayPreviewStore {
         let title = input
             .as_ref()
             .map(|input| input.title.clone())
-            .unwrap_or_else(|| capability_result_title(result.capability_id.as_str()).to_string());
+            .unwrap_or_else(|| {
+                capability_title(
+                    result.capability_id.as_str(),
+                    CapabilityTitleFallback::ShortName,
+                )
+                .to_string()
+            });
         let output = output_preview_for_capability(
             result.capability_id.as_str(),
             result.output,
@@ -310,7 +316,10 @@ impl CapabilityDisplayPreviewStore {
         let title = input
             .as_ref()
             .map(|input| input.title.clone())
-            .unwrap_or_else(|| capability_result_title(capability_id.as_str()).to_string());
+            .unwrap_or_else(|| {
+                capability_title(capability_id.as_str(), CapabilityTitleFallback::ShortName)
+                    .to_string()
+            });
         let bounded = bounded_display_text(summary, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES);
         let record = CapabilityDisplayPreviewRecord {
             timeline_message_id: None,
@@ -823,6 +832,24 @@ fn capability_matches(capability_id: &str, short_name: &str) -> bool {
             .is_some_and(|prefix| prefix.ends_with('.') || prefix.ends_with("__"))
 }
 
+fn capability_short_name(capability_id: &str) -> &str {
+    let dotted = capability_id.rsplit_once('.').map(|(_, suffix)| suffix);
+    let double_underscored = capability_id.rsplit_once("__").map(|(_, suffix)| suffix);
+    match (dotted, double_underscored) {
+        (Some(dotted), Some(double_underscored)) => {
+            // The shortest suffix follows the rightmost supported provider separator.
+            if dotted.len() <= double_underscored.len() {
+                dotted
+            } else {
+                double_underscored
+            }
+        }
+        (Some(dotted), None) => dotted,
+        (None, Some(double_underscored)) => double_underscored,
+        (None, None) => capability_id,
+    }
+}
+
 fn string_arg<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
     keys.iter()
         .find_map(|key| value.get(*key).and_then(serde_json::Value::as_str))
@@ -934,33 +961,31 @@ impl RoutineCapability {
     }
 }
 
-const ROUTINE_CAPABILITIES: [(&str, RoutineCapability); 5] = [
-    ("trigger_create", RoutineCapability::Create),
-    ("trigger_list", RoutineCapability::List),
-    ("trigger_remove", RoutineCapability::Remove),
-    ("trigger_pause", RoutineCapability::Pause),
-    ("trigger_resume", RoutineCapability::Resume),
-];
-
 fn routine_capability(capability_id: &str) -> Option<RoutineCapability> {
-    ROUTINE_CAPABILITIES
-        .iter()
-        .copied()
-        .find_map(|(short_name, operation)| {
-            capability_matches(capability_id, short_name).then_some(operation)
-        })
+    match capability_short_name(capability_id) {
+        "trigger_create" => Some(RoutineCapability::Create),
+        "trigger_list" => Some(RoutineCapability::List),
+        "trigger_remove" => Some(RoutineCapability::Remove),
+        "trigger_pause" => Some(RoutineCapability::Pause),
+        "trigger_resume" => Some(RoutineCapability::Resume),
+        _ => None,
+    }
 }
 
-fn capability_input_title(capability_id: &str) -> &str {
-    routine_capability(capability_id)
-        .map(RoutineCapability::title)
-        .unwrap_or(capability_id)
+#[derive(Debug, Clone, Copy)]
+enum CapabilityTitleFallback {
+    FullId,
+    ShortName,
 }
 
-fn capability_result_title(capability_id: &str) -> &str {
-    routine_capability(capability_id)
-        .map(RoutineCapability::title)
-        .unwrap_or_else(|| safe_capability_title(capability_id))
+fn capability_title(capability_id: &str, fallback: CapabilityTitleFallback) -> &str {
+    if let Some(title) = routine_capability(capability_id).map(RoutineCapability::title) {
+        return title;
+    }
+    match fallback {
+        CapabilityTitleFallback::FullId => capability_id,
+        CapabilityTitleFallback::ShortName => safe_capability_title(capability_id),
+    }
 }
 
 fn routine_input_summary(
@@ -995,6 +1020,9 @@ fn routine_input_summary(
         }
     }
 
+    // Explicit display allowlist: only these user-facing top-level fields are
+    // read. Prompt, action, ids, delivery metadata, and nested wrapper values
+    // must never be traversed into the activity preview.
     let mut summary = SummaryBuilder::default();
     if let Some(name) = string_arg(value, &["name"]) {
         let name = bounded_summary_value(name);
@@ -1107,19 +1135,26 @@ fn routine_list_preview_lines(value: &serde_json::Value, truncated: &mut bool) -
         };
         let name = bounded_summary_value(name);
         *truncated |= name.truncated;
-        let mut details = Vec::with_capacity(2);
-        if let Some(state) = routine_state_label(trigger.get("state")) {
-            details.push(state);
+        let state = routine_state_label(trigger.get("state"));
+        let schedule = routine_schedule_label(trigger.get("schedule"));
+        let mut line = name.text;
+        if state.is_some() || schedule.is_some() {
+            let detail_bytes = state.map_or(0, str::len)
+                + schedule.map_or(0, str::len)
+                + usize::from(state.is_some() && schedule.is_some()) * 2;
+            line.reserve(3 + detail_bytes);
+            line.push_str(" — ");
+            if let Some(state) = state {
+                line.push_str(state);
+            }
+            if let Some(schedule) = schedule {
+                if state.is_some() {
+                    line.push_str(", ");
+                }
+                line.push_str(schedule);
+            }
         }
-        if let Some(schedule) = routine_schedule_label(trigger.get("schedule")) {
-            details.push(schedule);
-        }
-        let suffix = if details.is_empty() {
-            String::new()
-        } else {
-            format!(" — {}", details.join(", "))
-        };
-        lines.push(format!("{}{}", name.text, suffix));
+        lines.push(line);
     }
     if triggers.len() > ROUTINE_LIST_PREVIEW_LIMIT {
         *truncated = true;
@@ -1154,14 +1189,20 @@ fn routine_state_label(state: Option<&serde_json::Value>) -> Option<&'static str
 /// values are intentionally omitted because this preview field is advisory;
 /// the authoritative trigger record remains unchanged.
 fn format_utc_datetime(value: &str) -> Option<String> {
-    chrono::DateTime::parse_from_rfc3339(value)
-        .ok()
-        .map(|datetime| {
-            datetime
-                .with_timezone(&chrono::Utc)
-                .format("%Y-%m-%d %H:%M UTC")
-                .to_string()
-        })
+    let datetime = match chrono::DateTime::parse_from_rfc3339(value) {
+        Ok(datetime) => datetime,
+        Err(_) => {
+            // Do not attach the raw host-provided value: it is not trusted for logs.
+            tracing::warn!("routine display preview omitted malformed next_run_at");
+            return None;
+        }
+    };
+    Some(
+        datetime
+            .with_timezone(&chrono::Utc)
+            .format("%Y-%m-%d %H:%M UTC")
+            .to_string(),
+    )
 }
 
 fn safe_path_subtitle(value: &serde_json::Value) -> Option<String> {

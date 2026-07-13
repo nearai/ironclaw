@@ -46,6 +46,7 @@ mod display_preview;
 mod display_preview_runtime;
 mod failure_explanation;
 mod live_progress_stream;
+mod routine_display_preview;
 mod runtime_stream;
 mod turn_stream;
 mod turn_stream_auth;
