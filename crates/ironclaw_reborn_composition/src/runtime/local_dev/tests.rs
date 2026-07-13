@@ -2662,6 +2662,301 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_dev_result_read_rejects_malformed_arguments_matrix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+            "local-dev-result-read-validation-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let runtime = services.host_runtime.clone().expect("host runtime");
+        let local_runtime = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate");
+        let fallback_user_id = UserId::new("result-read-validation-owner").expect("user id");
+        let run_context = run_context("result-read-validation").await;
+        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
+        let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
+        let factory = LocalDevLoopCapabilityPortFactory {
+            runtime,
+            fallback_user_id,
+            policy: Arc::clone(&local_runtime.capability_policy),
+            workspace_mounts: local_runtime.workspace_mounts.clone(),
+            memory_mounts: local_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: local_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
+            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            input_resolver,
+            result_writer,
+            milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            skill_activation_source: None,
+            project_service: Arc::clone(&local_runtime.project_service),
+            thread_service: Arc::new(InMemorySessionThreadService::default()),
+            trajectory_observer: None,
+            outbound_preferences_facade: None,
+            outbound_delivery_target_set_requires_approval: false,
+            approval_settings: Arc::new(
+                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
+            ),
+            approval_requests: local_runtime.approval_requests.clone(),
+            capability_leases: local_runtime.capability_leases.clone(),
+            external_tool_catalog: std::sync::Arc::new(
+                ironclaw_turns::InMemoryExternalToolCatalog::new(),
+            ),
+        };
+        let port = factory
+            .create_capability_port(&run_context)
+            .await
+            .expect("capability port");
+
+        // `parse_result_read_input` runs before any thread lookup, so every
+        // case below never touches storage. Each pins one validation arm by
+        // its exact `safe_summary` -- not just the failure kind -- so a
+        // dropped/loosened check (e.g. deleting the unsupported-field guard)
+        // can't hide behind the handler's other, unrelated `InvalidInput`
+        // fallback (the "reference unavailable" path). All cases must stay a
+        // model-recoverable `Failed(InvalidInput)`, never an `Err` that would
+        // terminate the run (agent-loop-capabilities.md).
+        let valid_ref = "result:matrix-target";
+        let cases: &[(&str, serde_json::Value, &str)] = &[
+            (
+                "unsupported extra field",
+                serde_json::json!({"result_ref": valid_ref, "offset": 0, "max_bytes": 8, "extra": "x"}),
+                "result_read arguments contain an unsupported field",
+            ),
+            (
+                "missing result_ref",
+                serde_json::json!({"offset": 0, "max_bytes": 8}),
+                "result_read requires a result_ref string",
+            ),
+            (
+                "non-string result_ref",
+                serde_json::json!({"result_ref": 1, "offset": 0, "max_bytes": 8}),
+                "result_read requires a result_ref string",
+            ),
+            (
+                "missing offset",
+                serde_json::json!({"result_ref": valid_ref, "max_bytes": 8}),
+                "result_read requires a non-negative offset",
+            ),
+            (
+                "negative offset",
+                serde_json::json!({"result_ref": valid_ref, "offset": -1, "max_bytes": 8}),
+                "result_read requires a non-negative offset",
+            ),
+            (
+                "max_bytes below RESULT_READ_MIN_BYTES",
+                serde_json::json!({"result_ref": valid_ref, "offset": 0, "max_bytes": 1}),
+                "result_read max_bytes is outside the allowed range",
+            ),
+            (
+                "max_bytes above RESULT_READ_MAX_BYTES",
+                serde_json::json!({
+                    "result_ref": valid_ref,
+                    "offset": 0,
+                    "max_bytes": ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES as u64 + 1,
+                }),
+                "result_read max_bytes is outside the allowed range",
+            ),
+        ];
+
+        for (index, (label, arguments, expected_summary)) in cases.iter().enumerate() {
+            let mut call = provider_tool_call_with_name("builtin__result_read", arguments.clone());
+            call.id = format!("call-result-read-invalid-{index}");
+            let candidate = port
+                .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{label}: call must stage for model recovery, got {error:?}")
+                });
+            let outcome = port
+                .invoke_capability(invocation_for_candidate(&candidate))
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{label}: must stay model-recoverable, got Err({error:?})")
+                });
+            assert!(
+                matches!(
+                    outcome,
+                    CapabilityOutcome::Failed(ref failure)
+                        if failure.error_kind == CapabilityFailureKind::InvalidInput
+                            && failure.safe_summary == *expected_summary
+                ),
+                "{label}: expected Failed(InvalidInput, {expected_summary:?}), got {outcome:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn local_dev_result_read_denies_cross_thread_reference_access() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+            "local-dev-result-read-cross-thread-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let runtime = services.host_runtime.clone().expect("host runtime");
+        let local_runtime = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate");
+        let fallback_user_id = UserId::new("result-read-cross-thread-owner").expect("user id");
+
+        // Thread A and thread B share the same tenant/agent/project/owner
+        // scope -- only `thread_id` differs -- so this isolates the per-thread
+        // reference gate at result_read.rs:121-133, not a tenant/user scope check.
+        let tenant_id = TenantId::new("tenant-result-read-cross-thread").expect("tenant id");
+        let agent_id = AgentId::new("agent-result-read-cross-thread").expect("agent id");
+        let project_id = ProjectId::new("project-result-read-cross-thread").expect("project id");
+        let thread_a = ThreadId::new("thread-result-read-a").expect("thread id");
+        let thread_b = ThreadId::new("thread-result-read-b").expect("thread id");
+        let run_context_a = run_context_with_scope(TurnScope::new(
+            tenant_id.clone(),
+            Some(agent_id.clone()),
+            Some(project_id.clone()),
+            thread_a,
+        ))
+        .await;
+        let run_context_b = run_context_with_scope(TurnScope::new(
+            tenant_id,
+            Some(agent_id),
+            Some(project_id),
+            thread_b,
+        ))
+        .await;
+
+        let thread_scope = local_dev_thread_scope_for_run(&run_context_a, &fallback_user_id)
+            .expect("agent-scoped thread");
+        let backend = Arc::new(InMemoryBackend::new());
+        let filesystem = scoped_thread_filesystem(Arc::clone(&backend));
+        let thread_service = Arc::new(FilesystemSessionThreadService::new(filesystem));
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: thread_scope.clone(),
+                thread_id: Some(run_context_a.thread_id.clone()),
+                created_by_actor_id: "actor-a".into(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .expect("thread a exists");
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: thread_scope.clone(),
+                thread_id: Some(run_context_b.thread_id.clone()),
+                created_by_actor_id: "actor-b".into(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .expect("thread b exists");
+
+        // Persist and finalize the reference under thread A ONLY.
+        let result_ref = "result:cross-thread-target".to_string();
+        thread_service
+            .put_tool_result_record(PutToolResultRecordRequest {
+                scope: thread_scope.clone(),
+                thread_id: run_context_a.thread_id.clone(),
+                result_ref: result_ref.clone(),
+                content: b"secret to thread a only".to_vec(),
+            })
+            .await
+            .expect("raw result exists under thread a");
+        thread_service
+            .append_tool_result_reference(AppendToolResultReferenceRequest {
+                scope: thread_scope.clone(),
+                thread_id: run_context_a.thread_id.clone(),
+                turn_run_id: run_context_a.run_id.to_string(),
+                result_ref: result_ref.clone(),
+                safe_summary: ToolResultSafeSummary::new("tool completed").expect("summary"),
+                provider_call: None,
+                model_observation: None,
+            })
+            .await
+            .expect("canonical result reference exists under thread a");
+
+        // Reopen the production filesystem service before building the port,
+        // matching the sibling same-thread test: `result_read` must resolve
+        // the reference from durable storage, not an in-process cache.
+        let thread_service: Arc<dyn SessionThreadService> = Arc::new(
+            FilesystemSessionThreadService::new(scoped_thread_filesystem(backend)),
+        );
+        let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
+        let capability_io = Arc::new(LocalDevCapabilityIo::new_with_durable_previews(
+            display_previews,
+            thread_service.clone(),
+            fallback_user_id.clone(),
+        ));
+        let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
+        let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
+        let factory = LocalDevLoopCapabilityPortFactory {
+            runtime,
+            fallback_user_id,
+            policy: Arc::clone(&local_runtime.capability_policy),
+            workspace_mounts: local_runtime.workspace_mounts.clone(),
+            memory_mounts: local_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: local_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
+            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            input_resolver,
+            result_writer,
+            milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            skill_activation_source: None,
+            project_service: Arc::clone(&local_runtime.project_service),
+            thread_service: thread_service.clone(),
+            trajectory_observer: None,
+            outbound_preferences_facade: None,
+            outbound_delivery_target_set_requires_approval: false,
+            approval_settings: Arc::new(
+                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
+            ),
+            approval_requests: local_runtime.approval_requests.clone(),
+            capability_leases: local_runtime.capability_leases.clone(),
+            external_tool_catalog: Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new()),
+        };
+        // Build the port scoped to thread B's run context: the reference
+        // above was only finalized under thread A.
+        let port = factory
+            .create_capability_port(&run_context_b)
+            .await
+            .expect("capability port");
+
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__result_read",
+                    serde_json::json!({
+                        "result_ref": result_ref,
+                        "offset": 0,
+                        "max_bytes": 8,
+                    }),
+                ),
+            ))
+            .await
+            .expect("cross-thread result_read call stages");
+        let outcome = port
+            .invoke_capability(invocation_for_candidate(&candidate))
+            .await
+            .expect("cross-thread result_read remains model-recoverable");
+
+        assert!(
+            matches!(
+                outcome,
+                CapabilityOutcome::Failed(ref failure)
+                    if failure.error_kind == CapabilityFailureKind::InvalidInput
+                        && failure.safe_summary == "result reference is unavailable in this thread"
+            ),
+            "thread B must not see thread A's finalized reference, got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn local_dev_outbound_delivery_capabilities_use_provider_backed_facade() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
