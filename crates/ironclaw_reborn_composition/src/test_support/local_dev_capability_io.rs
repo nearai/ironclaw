@@ -21,8 +21,8 @@ pub fn local_dev_capability_io_for_test(
     thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
     fallback_user_id: ironclaw_host_api::UserId,
 ) -> (
-    std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
-    std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
+    std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
+    std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
 ) {
     crate::runtime::local_dev_capability_io_for_test(thread_service, fallback_user_id)
 }

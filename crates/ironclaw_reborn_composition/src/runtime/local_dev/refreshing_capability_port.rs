@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use ironclaw_authorization::CapabilityLeaseStore;
 use ironclaw_host_api::{CapabilityId, ExtensionId, MountView, UserId};
 use ironclaw_host_runtime::HostRuntime;
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
 };
 use ironclaw_product_workflow::{OutboundPreferencesProductFacade, ProjectService};
@@ -202,7 +202,7 @@ impl RefreshingLocalDevCapabilityPort {
             Arc::clone(&self.milestone_sink),
         )
         .with_execution_mounts(self.workspace_mounts.clone())
-        // Adapt the composition-owned observer to the loop-support substrate
+        // Adapt the composition-owned observer to the loop-host substrate
         // trait the capability port consumes (the input hook). The result hook
         // calls the composition trait directly from `LocalDevCapabilityIo`.
         .with_trajectory_observer(

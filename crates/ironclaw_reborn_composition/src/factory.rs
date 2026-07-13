@@ -83,7 +83,7 @@ use ironclaw_host_runtime::{
     builtin_first_party_package_for_process_backend,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_loop_support::FilesystemCheckpointStateStore;
+use ironclaw_loop_host::FilesystemCheckpointStateStore;
 use ironclaw_outbound::CommunicationPreferenceRepository;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_outbound::FilesystemOutboundStateStore;
@@ -690,7 +690,7 @@ impl RebornServices {
     #[cfg(feature = "test-support")]
     pub fn local_dev_attachment_test_support_for_test(&self) -> Option<AttachmentTestSupport> {
         let read_port = self.local_dev_workspace_attachment_reader_for_test()?
-            as Arc<dyn ironclaw_loop_support::LoopAttachmentReadPort>;
+            as Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>;
         let read_write_workspace_filesystem = self.read_write_workspace_filesystem()?;
         Some(AttachmentTestSupport {
             read_port,
@@ -930,7 +930,7 @@ fn active_extension_network_policy_for_test(
 #[cfg(feature = "test-support")]
 #[derive(Clone)]
 pub struct AttachmentTestSupport {
-    pub read_port: Arc<dyn ironclaw_loop_support::LoopAttachmentReadPort>,
+    pub read_port: Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>,
     pub lander: Arc<dyn ironclaw_product_workflow::InboundAttachmentLander>,
 }
 

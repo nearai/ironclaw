@@ -43,8 +43,8 @@ use super::HarnessResult;
 /// (issue #5838) uses this so both roles keep sharing one underlying object,
 /// matching production's `LocalDevCapabilityIo` invariant.
 pub(crate) fn default_capability_io_pair() -> (
-    Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
-    Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
+    Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
+    Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
 ) {
     let capability_io = Arc::new(ironclaw_reborn_composition::ProductLiveCapabilityIo::default());
     (capability_io.clone(), capability_io)

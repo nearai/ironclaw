@@ -1,6 +1,6 @@
 use crate::subagent::directions::DirectionId;
 use async_trait::async_trait;
-use ironclaw_loop_support::{SubagentDefinition, SubagentDefinitionResolver, SubagentKindId};
+use ironclaw_loop_host::{SubagentDefinition, SubagentDefinitionResolver, SubagentKindId};
 use ironclaw_turns::{RunProfileRequest, TurnRunId, run_profile::AgentLoopHostError};
 use serde::{Deserialize, Serialize};
 
@@ -139,14 +139,14 @@ pub fn lookup_flavor(id: SubagentFlavorId) -> Option<&'static SubagentFlavor> {
         .find(|flavor| flavor.id == id)
 }
 
-/// Returns one [`ironclaw_loop_support::SpawnSubagentFlavorDescriptor`] per
+/// Returns one [`ironclaw_loop_host::SpawnSubagentFlavorDescriptor`] per
 /// entry in [`BUILTIN_SUBAGENT_FLAVORS`], in registry order. Derived directly
 /// from the registry — single source of truth, no drift risk.
-pub fn builtin_flavor_catalog() -> Vec<ironclaw_loop_support::SpawnSubagentFlavorDescriptor> {
+pub fn builtin_flavor_catalog() -> Vec<ironclaw_loop_host::SpawnSubagentFlavorDescriptor> {
     BUILTIN_SUBAGENT_FLAVORS
         .iter()
-        .map(|f| ironclaw_loop_support::SpawnSubagentFlavorDescriptor {
-            id: ironclaw_loop_support::SubagentKindId::new(f.id.as_str())
+        .map(|f| ironclaw_loop_host::SpawnSubagentFlavorDescriptor {
+            id: ironclaw_loop_host::SubagentKindId::new(f.id.as_str())
                 .expect("valid SubagentKindId"), // safety: BUILTIN_SUBAGENT_FLAVORS ids are compile-time-constant valid SubagentKindId values
             summary: f.summary.to_string(),
         })
@@ -203,7 +203,7 @@ pub fn parse_flavor_id(value: &str) -> Option<SubagentFlavorId> {
 #[cfg(test)]
 mod tests {
     use crate::subagent::directions::direction_prompt;
-    use ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID;
+    use ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID;
 
     use super::*;
 
@@ -423,7 +423,7 @@ mod tests {
         use async_trait::async_trait;
         use ironclaw_agent_loop::test_support::test_run_context;
         use ironclaw_host_api::{CapabilityId, RuntimeKind};
-        use ironclaw_loop_support::{
+        use ironclaw_loop_host::{
             CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileFilter,
             CapabilitySurfaceProfileResolver, SubagentPromptMaterialSource,
         };
@@ -560,7 +560,7 @@ mod tests {
         async fn filter_for_flavor(
             flavor: SubagentFlavorId,
         ) -> (
-            ironclaw_loop_support::CapabilitySurfaceProfileFilter,
+            ironclaw_loop_host::CapabilitySurfaceProfileFilter,
             Arc<HostSurfaceSpy>,
         ) {
             filter_for_flavor_with_base(flavor, CapabilityAllowSet::All).await
@@ -570,7 +570,7 @@ mod tests {
             flavor: SubagentFlavorId,
             base_allow_set: CapabilityAllowSet,
         ) -> (
-            ironclaw_loop_support::CapabilitySurfaceProfileFilter,
+            ironclaw_loop_host::CapabilitySurfaceProfileFilter,
             Arc<HostSurfaceSpy>,
         ) {
             let goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
@@ -624,7 +624,7 @@ mod tests {
         }
 
         async fn visible_ids(
-            filter: &ironclaw_loop_support::CapabilitySurfaceProfileFilter,
+            filter: &ironclaw_loop_host::CapabilitySurfaceProfileFilter,
         ) -> Vec<String> {
             let mut ids = filter
                 .visible_capabilities(VisibleCapabilityRequest)
@@ -639,7 +639,7 @@ mod tests {
         }
 
         fn definition_ids(
-            filter: &ironclaw_loop_support::CapabilitySurfaceProfileFilter,
+            filter: &ironclaw_loop_host::CapabilitySurfaceProfileFilter,
         ) -> Vec<String> {
             let mut ids = filter
                 .tool_definitions()

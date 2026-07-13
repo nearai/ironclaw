@@ -303,7 +303,7 @@ flowchart TD
     Executor["ironclaw_agent_loop::CanonicalAgentLoopExecutor\ncanonical tick pipeline"]
     Family["LoopFamily\nsealed planner strategy composition"]
     Host["AgentLoopDriverHost\nprompt/model/capability/transcript/checkpoint ports"]
-    LoopSupport["ironclaw_loop_support\nhost-port adapters"]
+    LoopSupport["ironclaw_loop_host\nhost-port adapters"]
     HostRuntime["ironclaw_host_runtime\nCapabilityHost, dispatcher, processes, approvals"]
     LLM["ironclaw_llm / model gateway\nprovider boundary"]
     Threads["ironclaw_threads\nconversation transcript"]
@@ -341,7 +341,7 @@ flowchart TD
 | `ironclaw_runner` | Trusted worker-side control plane: claiming/heartbeat scheduler (`TurnRunScheduler`), per-run executor (`RebornTurnRunExecutor`), concrete loop driver registry, planned/text driver adapters, loop host factory, and exit-applier wiring. | Loop strategy internals, neutral turn contracts, product idempotency/binding policy, or host-runtime service implementation. |
 | `ironclaw_turns` | Turn/run IDs, scopes, coordinator API, runner transition ports, state machine contracts, loop-exit DTOs, run profiles, checkpoint contracts. | Runtime dispatch, product adapters, raw prompts/tool inputs/secrets. |
 | `ironclaw_agent_loop` | Canonical executor, loop families, sealed strategy composition, resumable loop state. | Host services, runtime lanes, product transport, provider auth. |
-| `ironclaw_loop_support` | Reusable adapters that implement loop host ports over threads, model gateways, capabilities, skills, checkpoints, cancellation, subagents. | Product-facing runtime facade or durable turn state ownership. |
+| `ironclaw_loop_host` | Reusable adapters that implement loop host ports over threads, model gateways, capabilities, skills, checkpoints, cancellation, subagents. | Product-facing runtime facade or durable turn state ownership. |
 | `ironclaw_host_runtime` | Kernel-facing host runtime services: capability host, dispatcher composition, approvals, resources, processes, secrets/network mediation. | Agent-loop planning or product conversation UX. |
 
 ## Dependency Direction
@@ -354,7 +354,7 @@ host_api / common / prompt_envelope
   -> filesystem / memory / events / projections / streams / resources / trust
   -> auth / authorization / approvals / run_state / runtime_policy / secrets / network
   -> host_runtime / dispatcher / processes / runtime lanes
-  -> turns / threads / loop_support / agent_loop / capabilities
+  -> turns / threads / loop_host / agent_loop / capabilities
   -> reborn / reborn_composition / product workflow / adapters
   -> reborn_cli / webui / gateway / TUI / product entry points
 ```
@@ -364,7 +364,7 @@ flowchart BT
     Entry["CLI / WebUI / product adapters"]
     Composition["ironclaw_reborn_composition"]
     Reborn["ironclaw_runner"]
-    LoopSupport["ironclaw_loop_support"]
+    LoopSupport["ironclaw_loop_host"]
     AgentLoop["ironclaw_agent_loop"]
     Turns["ironclaw_turns"]
     Runtime["ironclaw_host_runtime\n+ dispatcher/process lanes"]
@@ -702,7 +702,7 @@ Capability execution is deliberately indirect:
 ```text
 model tool call / loop capability candidate
   -> AgentLoopDriverHost::invoke_capability
-  -> loop-support capability port
+  -> loop-host capability port
   -> host runtime CapabilityHost
       -> extension/capability lookup
       -> authorization, approval, leases, resources, network/secrets policy

@@ -10,7 +10,7 @@ use ironclaw_host_api::{
     AgentId, CapabilityId, DispatchInputIssueCode, MissionId, ProjectId, ProviderToolName,
     ResourceScope, TenantId, ThreadId, UserId,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
     HostIdentityContextSource, HostIdentityMessageContent, HostManagedModelError,
     HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessageRole,

@@ -985,7 +985,7 @@ fn failure_explanation_request(input: &FailureExplanationInput) -> Option<System
 }
 
 fn failure_explanation_system_prompt() -> &'static str {
-    ironclaw_loop_support::FAILURE_EXPLANATION_SYSTEM_PROMPT
+    ironclaw_loop_host::FAILURE_EXPLANATION_SYSTEM_PROMPT
 }
 
 pub(super) fn failure_explanation_user_prompt(input: &FailureExplanationInput) -> String {

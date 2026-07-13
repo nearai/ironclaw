@@ -5,7 +5,7 @@ use chrono::Utc;
 use ironclaw_host_api::{
     AgentId, CapabilityId, InvocationId, ProjectId, TenantId, ThreadId, UserId,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     ACTIVE_TASK_COMPACTION_PROMPT_ID, HostManagedLoopCompactionPort,
     active_task_compaction_prompt_id,
 };

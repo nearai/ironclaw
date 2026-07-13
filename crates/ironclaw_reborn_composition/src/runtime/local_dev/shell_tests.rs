@@ -4,7 +4,7 @@ use ironclaw_host_api::{
     AgentId, CapabilityId, ProjectId, ProviderToolName, TenantId, ThreadId, UserId,
 };
 use ironclaw_host_runtime::SHELL_CAPABILITY_ID;
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
 };
 use ironclaw_turns::{

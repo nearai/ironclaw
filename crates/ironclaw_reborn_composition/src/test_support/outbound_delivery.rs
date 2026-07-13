@@ -42,9 +42,9 @@ pub struct OutboundDeliveryCapabilityTestParts {
     /// Run context the wrapped capabilities execute under.
     pub run_context: ironclaw_turns::run_profile::LoopRunContext,
     /// Input resolver for the wrapped capability port.
-    pub input_resolver: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
+    pub input_resolver: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
     /// Result writer for the wrapped capability port.
-    pub result_writer: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
+    pub result_writer: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
 }
 
 /// Test-support entry point for the two `outbound_delivery_*`

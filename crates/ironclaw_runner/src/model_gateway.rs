@@ -1,6 +1,6 @@
 //! LLM provider-backed Reborn model gateway wiring.
 //!
-//! The loop-support crate owns the host-facing model gateway contract. This
+//! The loop-host crate owns the host-facing model gateway contract. This
 //! adapter lives in the standalone Reborn composition crate because it bridges
 //! that contract to the shared `ironclaw_llm` provider abstraction.
 
@@ -23,7 +23,7 @@ use ironclaw_llm::{
     recover_codex_text_tool_calls_from_tool_names,
     vision_models::is_vision_model,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
     HostManagedModelResponse, HostManagedModelRouteSnapshot, HostManagedModelStreamSink,
@@ -2240,7 +2240,7 @@ fn validate_provider_replay_identity(
     expected: &ProviderReplayIdentity,
 ) -> Result<(), HostManagedModelError> {
     provider_call.validate().map_err(|error| {
-        ironclaw_loop_support::raw_host_managed_model_error(
+        ironclaw_loop_host::raw_host_managed_model_error(
             "provider_tool_replay",
             "validate_provider_call",
             HostManagedModelErrorKind::InvalidRequest,
@@ -2714,7 +2714,7 @@ mod tests {
 
     fn user_message_with_images(
         content: &str,
-        image_parts: Vec<ironclaw_loop_support::HostManagedModelImagePart>,
+        image_parts: Vec<ironclaw_loop_host::HostManagedModelImagePart>,
     ) -> HostManagedModelMessage {
         HostManagedModelMessage {
             role: HostManagedModelMessageRole::User,
@@ -2733,7 +2733,7 @@ mod tests {
     fn convert_messages_emits_image_url_parts_for_user_image_attachments() {
         let message = user_message_with_images(
             "what is in this image?",
-            vec![ironclaw_loop_support::HostManagedModelImagePart {
+            vec![ironclaw_loop_host::HostManagedModelImagePart {
                 mime_type: "image/png".to_string(),
                 bytes: vec![1, 2, 3, 4],
             }],
@@ -2775,7 +2775,7 @@ mod tests {
         // relies on the transcript's `<attachments>` pointer.
         let message = user_message_with_images(
             "what is in this image?",
-            vec![ironclaw_loop_support::HostManagedModelImagePart {
+            vec![ironclaw_loop_host::HostManagedModelImagePart {
                 mime_type: "image/png".to_string(),
                 bytes: vec![1, 2, 3, 4],
             }],

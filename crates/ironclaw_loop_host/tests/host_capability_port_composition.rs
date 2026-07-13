@@ -18,7 +18,7 @@ use ironclaw_host_runtime::{
     VisibleCapabilityRequest as HostVisibleCapabilityRequest,
     VisibleCapabilitySurface as HostVisibleCapabilitySurface,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     CapabilityResultWrite, CapabilityWriteResult, HostRuntimeLoopCapabilityPortFactory,
     LoopCapabilityInputResolver, LoopCapabilityResultWriter,
 };
@@ -51,7 +51,7 @@ fn host_capability_port_composition_rejects_external_raw_construction() {
 
     assert!(
         offenders.is_empty(),
-        "HostRuntimeLoopCapabilityPort must be constructed only inside ironclaw_loop_support; offenders: {offenders:#?}"
+        "HostRuntimeLoopCapabilityPort must be constructed only inside ironclaw_loop_host; offenders: {offenders:#?}"
     );
 }
 
@@ -457,6 +457,6 @@ fn visit_rs_files(root: &Path, visit: &mut impl FnMut(&Path)) {
 fn should_skip(path: &Path) -> bool {
     path.components().any(|component| {
         let name = component.as_os_str();
-        name == "ironclaw_loop_support" || name == "tests" || name == "target"
+        name == "ironclaw_loop_host" || name == "tests" || name == "target"
     })
 }

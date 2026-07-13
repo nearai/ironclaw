@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use ironclaw_host_api::{CapabilityDisplayOutputPreview, CapabilityId, InvocationId};
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     CapabilityResultWrite, DurablePersistence, LoopCapabilityInputResolver,
     LoopCapabilityResultWriter,
 };

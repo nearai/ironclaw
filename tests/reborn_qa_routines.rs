@@ -40,7 +40,7 @@ use ironclaw_host_runtime::{
     ECHO_CAPABILITY_ID, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
     TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelMessageRole,
     HostManagedModelRequest, HostManagedModelResponse, HostManagedToolResultContent,
 };

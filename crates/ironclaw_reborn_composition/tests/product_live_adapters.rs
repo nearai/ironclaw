@@ -16,7 +16,7 @@ use ironclaw_host_runtime::{
     SKILL_INSTALL_CAPABILITY_ID, SurfaceKind,
     VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     CapabilityResultWrite, CapabilityWriteResult, DurablePersistence, EmptyUserProfileSource,
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
     HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError, HostManagedModelError,
@@ -1200,7 +1200,7 @@ async fn adapter_bundle_wires_required_product_live_components() {
         .expect("turn-state cancellation factory should expose a live probe");
     assert_eq!(
         readiness,
-        ironclaw_loop_support::ProductLiveCancellationReadiness::ExternallyControllable
+        ironclaw_loop_host::ProductLiveCancellationReadiness::ExternallyControllable
     );
 
     let capability_port = adapters
@@ -1334,7 +1334,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
     let subagent_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
     let await_edge_resolver = Arc::new(AwaitEdgeResolver::new_unbound(
         Arc::clone(&await_edge_store),
-        subagent_goal_store.clone() as Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore>,
+        subagent_goal_store.clone() as Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
         turn_state.clone() as Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore>,
         adapters.capability_result_writer.clone(),
         Arc::clone(&thread_service),
@@ -1357,16 +1357,16 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
         capability_result_writer: adapters.capability_result_writer,
         subagent_goal_store,
         subagent_await_edge_writer: await_edge_driver
-            as Arc<dyn ironclaw_loop_support::AwaitEdgeWriter>,
+            as Arc<dyn ironclaw_loop_host::AwaitEdgeWriter>,
         subagent_await_edge_settler: await_edge_resolver
-            as Arc<dyn ironclaw_loop_support::AwaitEdgeSettler>,
+            as Arc<dyn ironclaw_loop_host::AwaitEdgeSettler>,
         subagent_await_edge_evidence: Arc::clone(&await_edge_store)
             as Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
             adapters.capability_input_resolver,
         )),
-        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+        subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
         loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
             thread_service,
             turn_state_for_evidence,

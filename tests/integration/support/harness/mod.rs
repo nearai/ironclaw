@@ -38,7 +38,7 @@ use ironclaw_host_api::{
     RuntimeHttpEgressRequest, RuntimeKind, SecretHandle, TenantId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{CapabilitySurfacePolicy, HostRuntime, SurfaceKind};
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     HostRuntimeLoopCapabilityPortFactory, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
     loop_driver_execution_extension_id,
@@ -85,7 +85,7 @@ pub(crate) type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + 
 pub(crate) type HarnessCapabilityParts = (
     Arc<dyn LoopCapabilityPortFactory>,
     Arc<dyn CapabilitySurfaceProfileResolver>,
-    Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
+    Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
     Arc<dyn LoopCapabilityResultWriter>,
     HarnessCapabilityRecorder,
 );
@@ -178,7 +178,7 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// #5838) can only run once the REAL group thread service exists, which
     /// is after this harness is already constructed and `Arc`'d -- see that
     /// method's doc for why.
-    io: Mutex<Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>>,
+    io: Mutex<Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>>,
     /// Result-writer half; see `io`'s doc -- always the SAME underlying
     /// object as `io`, coerced to the other trait.
     result_writer_io: Mutex<Arc<dyn LoopCapabilityResultWriter>>,
@@ -759,7 +759,7 @@ impl HostRuntimeCapabilityHarness {
 
     /// Current input-resolver half of this harness's capability io. See the
     /// `io` field's doc for the default-vs-durable shape.
-    fn input_resolver(&self) -> Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver> {
+    fn input_resolver(&self) -> Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver> {
         self.io.lock().unwrap().clone()
     }
 
@@ -1144,7 +1144,7 @@ impl HostRuntimeCapabilityHarness {
     /// inject into the model request. `Some` only for `skill_activation_tools()`.
     pub(crate) fn skill_context_source_for_test(
         &self,
-    ) -> Option<Arc<dyn ironclaw_loop_support::HostSkillContextSource>> {
+    ) -> Option<Arc<dyn ironclaw_loop_host::HostSkillContextSource>> {
         self.skill_activation_source
             .as_ref()
             .map(|source| source.context_source())
@@ -1313,7 +1313,7 @@ impl HostRuntimeCapabilityHarness {
         &self,
         port: Arc<dyn LoopCapabilityPort>,
         run_context: &LoopRunContext,
-        input_resolver: Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
+        input_resolver: Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
         result_writer: Arc<dyn LoopCapabilityResultWriter>,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         let mut port = port;

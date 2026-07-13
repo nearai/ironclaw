@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{InvocationId, UserId};
-use ironclaw_loop_support::{CapabilityResultWrite, DurablePersistence};
+use ironclaw_loop_host::{CapabilityResultWrite, DurablePersistence};
 use ironclaw_threads::{
     MessageKind, MessageStatus, ReadToolResultRecordRequest, SessionThreadError,
     SessionThreadService, TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadHistoryRequest,
@@ -37,8 +37,8 @@ pub(crate) fn wrap_result_read_capability_for_test(
     thread_service: Arc<dyn SessionThreadService>,
     fallback_user_id: UserId,
     run_context: ironclaw_turns::run_profile::LoopRunContext,
-    input_resolver: Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
-    result_writer: Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
+    input_resolver: Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
+    result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
 ) -> Result<Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>, AgentLoopHostError> {
     super::synthetic_capability::wrap_local_dev_synthetic_capabilities(
         inner,
