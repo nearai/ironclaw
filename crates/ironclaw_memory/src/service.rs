@@ -192,8 +192,12 @@ pub struct MemoryServiceReadResponse {
     pub word_count: usize,
 }
 
+/// Result of a metadata-only document read.
+///
+/// `metadata` is `None` when the scoped document does not exist.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MemoryServiceMetadataResponse {
+    /// Parsed document metadata without loading document content.
     pub metadata: Option<DocumentMetadata>,
 }
 
@@ -449,6 +453,9 @@ pub trait MemoryService: Send + Sync {
         Err(MemoryServiceError::unavailable())
     }
 
+    /// Read only a scoped document's metadata, returning `None` for a missing
+    /// document. Providers that do not implement this operation fail closed
+    /// with [`MemoryServiceErrorKind::Unavailable`].
     async fn read_metadata(
         &self,
         invocation: MemoryInvocation,

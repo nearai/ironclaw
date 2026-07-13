@@ -27,8 +27,10 @@ home, and backups until the migrated target has verified and been accepted.
 
 Install a release artifact containing both executables. Select the Reborn home
 and profile exactly as they will be used after cutover. The migrator resolves
-the target profile, database, tenant, agent, and target encryption key through
-the same Reborn configuration rules as the runtime.
+the target profile, database, tenant, and agent through the same Reborn
+configuration rules as the runtime. PostgreSQL key configuration is resolved
+without opening the database; local target-key creation is deferred until
+apply preconditions pass.
 
 For local and volume-backed profiles:
 
@@ -49,7 +51,11 @@ export MIGRATION_SOURCE_POSTGRES='postgresql://...'
 
 Remote PostgreSQL sources must use TLS; a remote URL with
 `sslmode=disable` is rejected. Local PostgreSQL snapshots may explicitly
-disable TLS.
+disable TLS. Migration source and target URLs must omit the PostgreSQL
+`options` connection parameter; locator fingerprinting rejects it rather than
+risk incorporating opaque or secret-bearing session options. PostgreSQL source
+sessions are forced read-only, and the sealed source fingerprint binds table
+contents rather than credentials.
 
 If encrypted v1 secrets should be converted, also export the old key:
 
@@ -86,6 +92,9 @@ ironclaw-reborn migrate v1 plan \
 with owner-only permissions; on other platforms, protect the manifest with the
 platform's filesystem ACLs. It contains hashed store locators, counts,
 dispositions, warnings, and blockers—not raw database URLs, tokens, or keys.
+Planning refuses to overwrite an existing manifest; choose a new path, or
+deliberately remove the old manifest before replanning.
+
 Use `--strict` when archive-only, re-auth, reinstall, unsupported, or blocked
 categories should make planning return failure after writing the reviewable
 manifest. Strict mode evaluates registered inventory entries by disposition,
@@ -156,8 +165,10 @@ ironclaw-reborn migrate v1 resume \
   --confirm-source-snapshot
 ```
 
-Source and target fingerprints must still match the sealed plan. A mismatch or
-divergent target collision fails closed instead of silently overwriting data.
+The source inventory/content fingerprint and the target backend, locator,
+profile, tenant, agent, and source-home seal must still match the plan.
+Divergent deterministic target records fail closed instead of being
+overwritten.
 Apply, resume, and verify also update the target-owned
 `$IRONCLAW_REBORN_HOME/.v1-migration-state.json` marker atomically. Runtime
 startup consults this canonical marker rather than assuming the manifest is at
@@ -184,6 +195,11 @@ ironclaw-reborn migrate v1 verify \
 ironclaw-reborn migrate v1 status \
   --manifest /secure/migration-v1.json
 ```
+
+`status` does not open the source or target database, but it re-resolves the
+current production target configuration to report `target_fingerprint_match`.
+Run it with the intended Reborn home/profile and configured target env inputs,
+including PostgreSQL URL and key variables when that profile requires them.
 
 Do not start Reborn unless status is `verified`. Current verification closes
 migration-owned handles and checks exact structural counts for users, projects,
@@ -218,12 +234,15 @@ terms:
   engine-v2 project documents, conversations, supported identity links, memory,
   secrets, and supported schedules are current migration candidates. Canonical
   deactivated or unknown user states map fail-closed to suspended, unknown roles
-  map to member, and synthesized users are active members with epoch timestamps;
-- typed settings, unsupported schedule sources, unsupported executable
-  artifacts, v1 home `projects/` content, and operational histories are
-  currently inventoried/reported rather than converted. Unsupported transcript
-  payloads are reported and retained in thread metadata only where the
-  converter explicitly supports that fallback;
+  map to member. Synthesized owners are members with epoch timestamps: older
+  schemas without a canonical users table produce active users, while owners
+  missing from an existing canonical table are suspended;
+- typed settings, engine-v2 plan/runtime documents without an explicit
+  converter, unsupported schedule sources, unsupported executable artifacts,
+  v1 home `projects/` content, and operational histories are currently
+  inventoried/reported rather than converted. Unsupported transcript payloads
+  are reported and retained in thread metadata only where the converter
+  explicitly supports that fallback;
 - API/session credentials require re-authentication;
 - unknown or incompatible executable extensions require reinstall and are
   never enabled as placeholders;

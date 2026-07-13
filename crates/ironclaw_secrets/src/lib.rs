@@ -1012,7 +1012,12 @@ pub trait SecretStore: Send + Sync {
         handle: &SecretHandle,
     ) -> Result<Option<SecretMetadata>, SecretStoreError>;
 
-    /// Compares candidate material with an existing secret without exposing stored material.
+    /// Compares candidate material with an existing secret without exposing
+    /// stored material.
+    ///
+    /// Returns `None` when the handle is absent, `Some(true)` when the stored
+    /// material matches, and `Some(false)` when it differs. Material is never
+    /// returned to the caller.
     async fn material_matches(
         &self,
         scope: &ResourceScope,

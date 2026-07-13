@@ -81,7 +81,9 @@ gateway. See [Running with the WebUI (`serve`)](#running-with-the-webui-serve).
 
 The v1 migration command uses a same-release companion installed beside the
 primary binary. It never searches `PATH`; PostgreSQL URLs and source/target
-master keys remain in environment variables. See
+master keys remain in environment variables. `run`, `repl`, `serve`, and the
+extension lifecycle fail closed while a target is quarantined by an applying,
+failed, applied, verifying, unknown, or invalid migration state. See
 [`docs/reborn/v1-migration.md`](reborn/v1-migration.md) before using it.
 
 ## Running with the WebUI (`serve`)
@@ -270,6 +272,9 @@ cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- extension remove gi
 ```
 
 The commands are scoped to Reborn boot/config resolution and do not create or read v1 state directories.
+They refuse to assemble extension services while migration state is
+quarantined or invalid; with otherwise valid target configuration, no marker,
+`planned`, and `verified` are activation-safe.
 
 Expected fields include:
 
@@ -325,9 +330,10 @@ Expected fields include:
 - `v1_migration_state`
 - `driver_registry: initialized`
 
-`v1_migration_state` is skipped for `not_detected`, `available`, or `planned`,
-passes for `verified`, and fails for an invalid or quarantined (`applying`,
-`failed`, `applied`, or `verifying`) target. The check may read the local
+`v1_migration_state` is skipped for `not_detected`, `available`,
+`explicitly_skipped`, or `planned`, passes for `verified`, and fails for an
+invalid or quarantined (`applying`, `failed`, `applied`, or `verifying`) target.
+The check may read the local
 migration marker, shared PostgreSQL quarantine state, and non-secret source
 evidence; it does not create state or start services.
 

@@ -158,6 +158,7 @@ Owns user-facing document operations:
 ```text
 read
 read_primary
+read metadata without document content
 exists
 write
 append

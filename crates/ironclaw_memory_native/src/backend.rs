@@ -133,6 +133,10 @@ pub trait MemoryBackend: Send + Sync {
         ))
     }
 
+    /// Read stored metadata without loading document content.
+    ///
+    /// Returns `None` when the scoped document is absent. The default fails
+    /// closed because metadata reads are an optional backend operation.
     async fn read_document_metadata(
         &self,
         context: &MemoryContext,

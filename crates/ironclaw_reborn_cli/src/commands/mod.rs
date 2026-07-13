@@ -43,7 +43,7 @@ pub(crate) enum Command {
     Hooks(hooks::HooksCommand),
     /// Inspect Reborn logs.
     Logs(logs::LogsCommand),
-    /// Plan, apply, resume, and verify migrations into Reborn.
+    /// Plan, apply, resume, verify, and inspect migrations into Reborn.
     Migrate(migrate::MigrateCommand),
     /// Inspect Reborn model slots and route status.
     Models(models::ModelsCommand),

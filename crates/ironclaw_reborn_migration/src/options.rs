@@ -28,7 +28,9 @@ pub struct MigrationOptions {
     /// New lifecycle callers must use [`MigrationSecretInputs`] so v1
     /// decryption and Reborn encryption resolve independently.
     pub secret_master_key: Option<SecretString>,
-    /// Report only; write nothing to the Reborn store.
+    /// Legacy compatibility flag used only by [`crate::run_migration`].
+    /// Explicit lifecycle callers use [`crate::plan_migration`] for the
+    /// non-writing phase.
     pub dry_run: bool,
 }
 
@@ -69,6 +71,8 @@ pub struct ApplyAcknowledgements {
 }
 
 impl ApplyAcknowledgements {
+    /// Assert both offline-apply preconditions for an operator-confirmed
+    /// stopped, consistent source snapshot.
     pub const fn offline_snapshot() -> Self {
         Self {
             source_is_stopped: true,
@@ -77,8 +81,9 @@ impl ApplyAcknowledgements {
     }
 }
 
-/// v1 source database selector. Mirrors `ironclaw::config::DatabaseConfig`
-/// enough to open a read connection via `ironclaw::db::connect_with_handles`.
+/// v1 source selector consumed by the crate's narrow read-only adapter.
+///
+/// Source opening must not use runtime constructors that run schema migrations.
 #[derive(Debug, Clone)]
 pub enum SourceDb {
     /// libSQL/SQLite file on disk.

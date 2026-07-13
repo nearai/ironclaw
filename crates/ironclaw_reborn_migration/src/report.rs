@@ -73,9 +73,13 @@ pub struct LossyItem {
 /// Per-domain counts of successfully converted source entities.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MigrationStats {
+    /// Canonical or synthesized users imported.
     pub users: usize,
+    /// Threads imported.
     pub threads: usize,
+    /// Messages imported.
     pub messages: usize,
+    /// Engine-v2 projects imported into the project repository.
     pub projects: usize,
     pub routines: usize,
     pub missions: usize,
@@ -97,7 +101,9 @@ pub struct MigrationStats {
 pub struct MigrationReport {
     /// True when the run was a dry run (nothing written to the Reborn store).
     pub dry_run: bool,
+    /// Successful conversion counts.
     pub stats: MigrationStats,
+    /// Per-record losses emitted only in the apply/resume report.
     pub lossy: Vec<LossyItem>,
     /// The lifecycle manifest that produced this report. Older callers may
     /// omit it while the compatibility wrapper is being retired.

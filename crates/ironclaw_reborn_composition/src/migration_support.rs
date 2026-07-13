@@ -28,18 +28,31 @@ use crate::{RebornCompositionProfile, input};
 /// migration crate (which itself depends on composition).
 #[derive(Clone)]
 pub enum RebornMigrationTargetStore {
+    /// Canonical local/volume-backed target database path.
     #[cfg(feature = "libsql")]
-    LibSql { path: PathBuf },
+    LibSql {
+        /// Database path selected by the production profile layout.
+        path: PathBuf,
+    },
+    /// Secret-bearing production PostgreSQL locator. Callers must not log or
+    /// serialize it into migration artifacts.
     #[cfg(feature = "postgres")]
-    Postgres { url: SecretMaterial },
+    Postgres {
+        /// Production target URL held in redacting secret material.
+        url: SecretMaterial,
+    },
 }
 
 /// Resolved migration target scope and encryption material.
 #[derive(Clone)]
 pub struct RebornMigrationTargetConfig {
+    /// Effective production profile.
     pub profile: RebornProfile,
+    /// Config-only target selector; resolving it does not open the store.
     pub store: RebornMigrationTargetStore,
+    /// Target tenant scope.
     pub tenant_id: TenantId,
+    /// Target agent scope.
     pub agent_id: AgentId,
     /// PostgreSQL resolves its configured key without opening the database.
     /// Local libSQL resolves/generates the cached production key only after

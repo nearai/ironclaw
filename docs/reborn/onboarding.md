@@ -22,8 +22,10 @@ Reborn binary. It currently:
 8. prints explicit remaining setup work.
 
 Detection never applies a migration. Without `--migrate-v1`, onboarding only
-records `available` and prints the explicit follow-up command. Normal `run` and
-`serve` startup never invokes migration.
+records `available` and prints the explicit follow-up command. Normal `run`,
+`repl`, and `serve` startup never invokes migration, and those runtime surfaces
+refuse quarantined targets until verification succeeds. Extension lifecycle
+commands enforce the same activation gate.
 
 The completion marker schema is:
 

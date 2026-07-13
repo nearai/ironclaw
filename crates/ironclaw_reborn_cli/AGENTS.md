@@ -19,6 +19,9 @@ This crate owns the standalone `ironclaw-reborn` command surface. Keep it small,
   non-secret source evidence and invoke the verified same-directory
   `ironclaw-reborn-migration` companion. Source reads stay in that companion's
   read-only adapters; neither binary may write v1 state.
+- Commands that assemble runtime or extension services must call the canonical
+  migration activation guard before composition so quarantined, unknown, or
+  invalid target state cannot be activated through a new command path.
 - Do not add workspace dependencies beyond `ironclaw_reborn_composition`, `ironclaw_reborn_config`, `ironclaw_reborn_traces`, and `ironclaw_reborn_webui_ingress` (host-owned WebUI serve lifecycle) without an architecture test update and explicit PR rationale. Provider registry/auth/model UX should enter through the Reborn composition provider-admin facade, not a separate CLI-only path.
 
 ## Adding a command
@@ -48,6 +51,14 @@ exposes the v2 surface is an explicit opt-in:
 cargo install --path crates/ironclaw_reborn_cli --features webui-v2-beta
 # or, from a workspace checkout
 cargo build -p ironclaw_reborn_cli --features webui-v2-beta --release
+```
+
+These examples build only the primary WebUI binary; they do not provide the
+required migration companion. For `migrate`, build both workspace packages so
+the same-version executables land beside each other:
+
+```bash
+cargo build -p ironclaw_reborn_cli -p ironclaw_reborn_migration --release
 ```
 
 The beta WebUI static crate runs the frontend bundler from Cargo build scripts,

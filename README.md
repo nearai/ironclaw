@@ -39,8 +39,8 @@
 
 ## IronClaw Reborn Quick Start
 
-IronClaw Reborn is the standalone runtime on the `reborn-integration` branch.
-It uses the separate `ironclaw-reborn` binary from the
+IronClaw Reborn is the standalone runtime in this workspace. It uses the
+separate `ironclaw-reborn` binary from the
 `ironclaw_reborn_cli` package and a separate Reborn state root. It does not use
 the legacy `ironclaw` state directory as its config root.
 
@@ -89,8 +89,9 @@ files.
 The Reborn Docker image includes a same-version migration companion. Source
 builds must build both executables into the same target directory. Native
 `cargo-dist` installers do not yet package the pair. Use the companion through
-the primary binary; normal `run`, `serve`, and container startup never import
-v1 automatically:
+the primary binary; normal `run`, `repl`, `serve`, extension lifecycle, and
+container startup never import v1 automatically. Runtime and extension
+activation refuse quarantined migration states until verification succeeds:
 
 ```bash
 ironclaw-reborn migrate v1 plan \
