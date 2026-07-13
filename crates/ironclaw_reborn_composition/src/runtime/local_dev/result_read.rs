@@ -28,9 +28,11 @@ use super::{
 /// `inner`, mirroring how `refreshing_capability_port.rs`'s `build_inner`
 /// wires it in production (unconditionally, via `wrap_local_dev_synthetic_capabilities`).
 /// `input_resolver`/`result_writer` MUST be the SAME shared io object the
-/// harness's capability port already uses -- see `wrap_project_create_capability_for_test`
-/// for the identical pattern this mirrors. Tests only -- gated behind
-/// `test-support`, ships zero bytes in production builds.
+/// harness's capability port already uses -- see
+/// `RefreshingLocalDevCapabilityPortTestParts::input_resolver` in
+/// `test_support/refreshing_capability_port.rs` for the identical
+/// same-object requirement. Tests only -- gated behind `test-support`,
+/// ships zero bytes in production builds.
 #[cfg(feature = "test-support")]
 pub(crate) fn wrap_result_read_capability_for_test(
     inner: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
