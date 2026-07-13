@@ -121,6 +121,7 @@ pub(super) async fn build_runtime_mounts(
             ChannelExtras {
                 classifier: Some(slack_inbound_classifier()),
                 preference_target_codec: Some(Arc::new(SlackPreferenceTargetCodec)),
+                subject_route_resolver: None,
                 storage_roots: Some(slack_legacy_workflow_storage_roots(&config.tenant_id)?),
                 registration: Some(ChannelIngressRegistration {
                     secrets: Arc::new(DynamicSlackIngressSecrets {

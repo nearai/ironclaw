@@ -33,8 +33,8 @@ use ironclaw_extension_host::ingress::{
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::recipe::IngressVerificationRecipe;
 use ironclaw_host_api::{
-    AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, ResourceScope,
-    SecretHandle, TenantId, ThreadId, UserId, VirtualPath,
+    AgentId, ExtensionId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId,
+    ResourceScope, SecretHandle, TenantId, ThreadId, UserId, VirtualPath,
 };
 use ironclaw_outbound::{
     CommunicationPreferenceRepository, DeliveredGateRouteStore, OutboundStateStore,
@@ -47,9 +47,9 @@ use ironclaw_product_workflow::{
     BlockedAuthFlowCancel, BlockedAuthPromptSource, ConversationBindingService,
     DefaultInboundTurnService, DefaultProductWorkflow, DeliveryCoordinator, IdempotencyLedger,
     PreferenceTargetCodec, ProductActorUserResolutionRequest, ProductActorUserResolver,
-    ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
-    RebornFilesystemIdempotencyLedger, RunDeliveryObserver, RunDeliveryServices,
-    RunDeliverySettings, StaticProductInstallationResolver,
+    ProductConversationSubjectRouteResolver, ProductInstallationKey, ProductInstallationScope,
+    ProductWorkflowError, RebornFilesystemIdempotencyLedger, RunDeliveryObserver,
+    RunDeliveryServices, RunDeliverySettings, StaticProductInstallationResolver,
 };
 use ironclaw_threads::SessionThreadService;
 use ironclaw_turns::{TurnCoordinator, TurnScope};
@@ -204,6 +204,11 @@ pub(crate) struct ChannelExtras {
     /// The vendor half of the triggered-delivery driver; consumed by the
     /// lane that builds the triggered hook.
     pub(crate) preference_target_codec: Option<Arc<dyn PreferenceTargetCodec>>,
+    /// Optional shared-channel subject-route resolver override. Absent, the
+    /// assembly installs the DEFAULT generic resolver over the extension's
+    /// `*_allowed_channels` / `*_subject_routes` `[channel.config]` values
+    /// when the manifest declares either handle.
+    pub(crate) subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
     /// Legacy storage-root override for the per-extension workflow state.
     pub(crate) storage_roots: Option<ChannelWorkflowStorageRoots>,
     /// Full lane-owned inbound wiring (verification secrets + sink + drain)
@@ -219,6 +224,7 @@ pub(crate) struct ChannelExtras {
 struct StoredChannelExtras {
     classifier: Option<Arc<InboundPayloadClassifier>>,
     preference_target_codec: Option<Arc<dyn PreferenceTargetCodec>>,
+    subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
     storage_roots: Option<ChannelWorkflowStorageRoots>,
     lane_registered: bool,
 }
@@ -336,6 +342,7 @@ impl GenericChannelHostAssembly {
         let ChannelExtras {
             classifier,
             preference_target_codec,
+            subject_route_resolver,
             storage_roots,
             registration,
         } = extras;
@@ -346,6 +353,7 @@ impl GenericChannelHostAssembly {
                 StoredChannelExtras {
                     classifier,
                     preference_target_codec,
+                    subject_route_resolver,
                     storage_roots,
                     lane_registered,
                 },
@@ -595,7 +603,21 @@ impl GenericChannelHostAssembly {
         let roots = match &extras.storage_roots {
             Some(roots) => roots.clone(),
             None => {
-                default_channel_workflow_storage_roots(&identity.tenant_id, &active.extension_id)?
+                // Sanctioned data-compat surface: an extension whose durable
+                // trees predate the generic root scheme keeps its legacy
+                // roots permanently (H.4b) — everything else gets the
+                // extension-keyed default.
+                match crate::extension_host::channel_state_folds::
+                    sanctioned_legacy_channel_workflow_storage_roots(
+                        &identity.tenant_id,
+                        &active.extension_id,
+                    ) {
+                    Some(roots) => roots,
+                    None => default_channel_workflow_storage_roots(
+                        &identity.tenant_id,
+                        &active.extension_id,
+                    )?,
+                }
             }
         };
         let ledger_scope = ResourceScope {
@@ -635,13 +657,55 @@ impl GenericChannelHostAssembly {
                 operator_user_id: identity.operator_user_id.clone(),
             }),
         };
-        let scope = ProductInstallationScope::with_default_scope(
+        let mut scope = ProductInstallationScope::with_default_scope(
             identity.tenant_id.clone(),
             identity.agent_id.clone(),
             identity.project_id.clone(),
         )
-        .with_default_subject_user_id(identity.operator_user_id.clone())
-        .with_actor_user_resolver(
+        .with_default_subject_user_id(identity.operator_user_id.clone());
+        // Generic shared-channel admission (§5.3): with a subject-route
+        // resolver installed, unrouted shared conversations fail closed —
+        // an extras override wins; otherwise a channel declaring the
+        // `*_allowed_channels` / `*_subject_routes` config convention gets
+        // the default resolver over its `[channel.config]` values.
+        let subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>> =
+            match &extras.subject_route_resolver {
+                Some(resolver) => Some(Arc::clone(resolver)),
+                None => {
+                    let handles = active
+                        .resolved
+                        .channel
+                        .as_ref()
+                        .map(|channel| {
+                            crate::extension_host::channel_subject_routes::
+                                shared_channel_admission_handles(&channel.config.fields)
+                        })
+                        .unwrap_or_default();
+                    if handles.declared() {
+                        let extension_id = ExtensionId::new(&active.extension_id)
+                            .map_err(|error| format!("invalid extension id: {error}"))?;
+                        Some(Arc::new(
+                            crate::extension_host::channel_subject_routes::
+                                ChannelConfigSubjectRouteResolver::new(
+                                    adapter_id.clone(),
+                                    installation_id.clone(),
+                                    identity.tenant_id.clone(),
+                                    extension_id,
+                                    handles,
+                                    Arc::clone(&self.deps.channel_config),
+                                ),
+                        ))
+                    } else {
+                        None
+                    }
+                }
+            };
+        if let Some(resolver) = subject_route_resolver {
+            scope = scope
+                .with_conversation_subject_route_resolver(resolver)
+                .without_default_subject_for_unrouted_shared_conversations();
+        }
+        let scope = scope.with_actor_user_resolver(
             actor_user_resolver,
             Arc::clone(&workflow_state.conversations)
                 as Arc<dyn ironclaw_conversations::ConversationActorPairingService>,

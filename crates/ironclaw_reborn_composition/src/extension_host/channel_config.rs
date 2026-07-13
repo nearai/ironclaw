@@ -217,6 +217,26 @@ impl ChannelConfigService {
             .map_err(storage_error)
     }
 
+    /// Read one stored non-secret `[channel.config]` value from the durable
+    /// installation config. Per-request read: a configure save takes effect
+    /// on the next resolution with no rewiring — shared-channel admission
+    /// resolves its routing values through this.
+    pub(crate) async fn non_secret_value(
+        &self,
+        extension_id: &ExtensionId,
+        handle: &str,
+    ) -> Result<Option<String>, ChannelConfigError> {
+        let values = self
+            .installation_store
+            .channel_config(extension_id)
+            .await
+            .map_err(storage_error)?;
+        Ok(values
+            .into_iter()
+            .find(|(stored, _)| stored == handle)
+            .map(|(_, value)| value))
+    }
+
     /// Resolve one auth-recipe client-credential handle from the operator's
     /// saved channel configuration: when an installed manifest declares the
     /// handle as a `[channel.config]` field, a secret field resolves through

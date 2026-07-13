@@ -22,6 +22,7 @@ pub(crate) mod channel_host;
 pub(crate) mod channel_identity;
 pub(crate) mod channel_identity_store;
 pub(crate) mod channel_state_folds;
+pub(crate) mod channel_subject_routes;
 pub(crate) mod extension_activation_credentials;
 pub(crate) mod extension_credential_requirements;
 pub(crate) mod extension_ingress;

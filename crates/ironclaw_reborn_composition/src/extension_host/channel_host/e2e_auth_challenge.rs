@@ -70,7 +70,11 @@ impl AuthChallengeProvider for FakeAuthChallengeProvider {
                 gate_ref.to_string(),
                 credential_requirements.to_vec(),
             ));
-        if owner_user_id.as_str() != USER || gate_ref != AUTH_GATE {
+        // Keyed by the gate only: DM runs own their gates as the bound user,
+        // admitted shared channels as their managed/configured subject — the
+        // engine serves the OAuth challenge either way (the channel-side
+        // suppression of the personal setup link is the behavior under test).
+        if gate_ref != AUTH_GATE {
             return Ok(None);
         }
         Ok(Some(AuthChallengeView {

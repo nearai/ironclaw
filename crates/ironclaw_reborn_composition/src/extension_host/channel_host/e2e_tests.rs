@@ -137,6 +137,9 @@ struct Harness {
     auths: Arc<RecordingAuthInteractionService>,
     route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
     identity_lookup: Arc<RecordingUserIdentityLookup>,
+    /// The production configure service backing the assembly — admission
+    /// scenarios save routing values through it mid-test.
+    channel_config: Arc<ChannelConfigService>,
     /// Keeps the harness extension host (and its published snapshot) alive.
     _host: Arc<ExtensionHost>,
     /// Keeps the assembly (and its reconcile loop + registrations) alive.
@@ -377,10 +380,11 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         UserId::new(USER).expect("user"), // safety: static test user id is valid.
     )]));
 
+    let channel_config = configured_channel_config().await;
     let deps = GenericChannelHostDeps {
         watch: host.snapshot_watch(),
         registry: Arc::clone(&ingress.registry),
-        channel_config: configured_channel_config().await,
+        channel_config: Arc::clone(&channel_config),
         workflow_state: Arc::new(FilesystemChannelWorkflowStateFactory::new(Arc::new(
             InMemoryBackend::new(),
         ))),
@@ -425,6 +429,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
             ChannelExtras {
                 classifier: Some(slack_gate_reply_classifier()),
                 preference_target_codec: Some(Arc::new(SlackPreferenceTargetCodec)),
+                subject_route_resolver: None,
                 storage_roots: None,
                 registration: None,
             },
@@ -446,6 +451,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         auths,
         route_store,
         identity_lookup,
+        channel_config,
         _host: host,
         assembly,
     }
@@ -506,10 +512,21 @@ async fn configured_channel_config() -> Arc<ChannelConfigService> {
     channel_config
         .save(
             &extension_id,
-            vec![("slack_signing_secret".to_string(), SECRET.to_string())],
+            vec![
+                ("slack_signing_secret".to_string(), SECRET.to_string()),
+                // Shared-channel admission (§5.3): the manifest declares the
+                // `*_allowed_channels` convention, so unrouted shared
+                // conversations fail closed — the harness admits the one
+                // channel its scenarios exercise, exactly as an operator
+                // would through the configure surface.
+                (
+                    "slack_allowed_channels".to_string(),
+                    r#"["C123"]"#.to_string(),
+                ),
+            ],
         )
         .await
-        .expect("save signing secret"); // safety: manifest declares the handle.
+        .expect("save channel config"); // safety: manifest declares the handles.
     channel_config
 }
 
@@ -2004,6 +2021,99 @@ async fn slack_dm_for_personally_bound_user_routes_through_reborn_identity() {
     );
 }
 
+/// Generic shared-channel admission (§5.3): an unconfigured shared channel
+/// fails closed (no turn, no reply, vendor still gets its 2xx); saving the
+/// channel into `slack_allowed_channels` admits the next event under the
+/// managed derived subject (the retired lane's `user:slack-channel:{sha16}`
+/// value shape); an explicit `slack_subject_routes` entry runs its channel
+/// as the configured subject. Saves take effect per request — no rebuild.
+#[tokio::test]
+async fn shared_channel_admission_follows_saved_channel_config() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "channel reply".into(),
+    })
+    .await;
+    let extension_id = ExtensionId::new("slack").expect("extension id"); // safety: static id is valid.
+
+    // C777 is not in the harness's saved allowed list: fail closed.
+    let refused = harness.post_event(SHARED_CHANNEL_UNROUTED).await;
+    assert_eq!(refused.status(), StatusCode::OK, "vendor keeps its 2xx");
+    harness.drain().await;
+    assert_eq!(
+        harness.coordinator.submitted_turn_count(),
+        0,
+        "an unrouted shared channel must not reach the turn coordinator"
+    );
+    assert!(
+        harness.slack_messages().is_empty(),
+        "no reply may leak into an unadmitted shared channel"
+    );
+
+    // The operator admits C777 (fresh event id: the refused event settled
+    // terminally in the durable idempotency ledger).
+    harness
+        .channel_config
+        .save(
+            &extension_id,
+            vec![(
+                "slack_allowed_channels".to_string(),
+                r#"["C123","C777"]"#.to_string(),
+            )],
+        )
+        .await
+        .expect("save allowed channels"); // safety: manifest declares the handle.
+    let admitted = harness.post_event(SHARED_CHANNEL_ALLOWED).await;
+    assert_eq!(admitted.status(), StatusCode::OK);
+    harness.drain().await;
+    let scopes = harness.coordinator.submitted_scopes();
+    assert_eq!(scopes.len(), 1, "the admitted channel submits one turn");
+    let expected_managed_subject =
+        crate::extension_host::channel_subject_routes::managed_channel_subject_user_id(
+            ADAPTER,
+            &TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
+            &ironclaw_product_adapters::AdapterInstallationId::new(INSTALLATION)
+                .expect("installation"), // safety: static test installation id is valid.
+            Some(TEAM),
+            "C777",
+        )
+        .expect("managed subject derivation");
+    assert_eq!(
+        scopes[0].thread_owner.explicit_owner_user_id(),
+        Some(&expected_managed_subject),
+        "an allowed channel runs under the managed derived subject"
+    );
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["channel"], "C777");
+    assert_eq!(messages[0]["text"], "channel reply");
+
+    // An explicit subject route wins for its channel.
+    harness
+        .channel_config
+        .save(
+            &extension_id,
+            vec![(
+                "slack_subject_routes".to_string(),
+                r#"{"C888":"user:ops-agent"}"#.to_string(),
+            )],
+        )
+        .await
+        .expect("save subject routes"); // safety: manifest declares the handle.
+    let routed = harness.post_event(SHARED_CHANNEL_ROUTED).await;
+    assert_eq!(routed.status(), StatusCode::OK);
+    harness.drain().await;
+    let scopes = harness.coordinator.submitted_scopes();
+    assert_eq!(scopes.len(), 2);
+    assert_eq!(
+        scopes[1]
+            .thread_owner
+            .explicit_owner_user_id()
+            .map(|user| user.as_str()),
+        Some("user:ops-agent"),
+        "an explicit subject route runs its channel as the configured subject"
+    );
+}
+
 #[tokio::test]
 async fn slack_dm_retry_delivery_is_idempotent() {
     let harness = build_harness(TurnMode::Complete {
@@ -2343,6 +2453,7 @@ struct RecordingTurnState {
     active_run_id: Option<TurnRunId>,
     blocked_run_id: Option<TurnRunId>,
     submitted_turn_count: usize,
+    submitted_scopes: Vec<TurnScope>,
 }
 
 impl RecordingTurnCoordinator {
@@ -2353,6 +2464,7 @@ impl RecordingTurnCoordinator {
                 active_run_id: None,
                 blocked_run_id: None,
                 submitted_turn_count: 0,
+                submitted_scopes: Vec::new(),
             })),
             threads,
             mode,
@@ -2378,6 +2490,16 @@ impl RecordingTurnCoordinator {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .submitted_turn_count
+    }
+
+    /// Scopes of submitted turns in submission order — shared-channel
+    /// admission assertions read the resolved subject (thread owner) here.
+    fn submitted_scopes(&self) -> Vec<TurnScope> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .submitted_scopes
+            .clone()
     }
 
     async fn cancel_blocked_run(&self) -> Result<TurnRunId, ProductWorkflowError> {
@@ -2641,6 +2763,7 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.submitted_turn_count += 1;
+        state.submitted_scopes.push(run_state.scope.clone());
         state.active_run_id = Some(run_id);
         if matches!(
             status,
@@ -2731,7 +2854,9 @@ async fn append_final_assistant_message(
                 reason: "missing agent id in fake turn scope".into(),
             })?,
         project_id: scope.project_id.clone(),
-        owner_user_id: Some(UserId::new(USER).expect("user")), // safety: static test user id is valid.
+        // The run's own thread owner: DM turns run as the bound user,
+        // admitted shared channels as their configured/managed subject.
+        owner_user_id: scope.thread_owner.explicit_owner_user_id().cloned(),
         mission_id: None,
     };
     let message = threads
@@ -3248,6 +3373,35 @@ const DM_AUTH: &str = r#"{
   "event_id":"Ev-auth",
 	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"needs auth","ts":"1710000000.000007"}
 	}"#;
+
+// ── Shared-channel admission fixtures ────────────────────────────────────────
+// Used by `shared_channel_admission_follows_saved_channel_config`. C777/C888
+// are outside the harness's default allowed list; distinct event ids keep
+// the terminally-settled refusal out of the admitted replays.
+
+const SHARED_CHANNEL_UNROUTED: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-shared-unrouted",
+  "event":{"type":"app_mention","user":"U123","channel":"C777","text":"<@UBOT> hello","ts":"1710000003.000001"}
+}"#;
+
+const SHARED_CHANNEL_ALLOWED: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-shared-allowed",
+  "event":{"type":"app_mention","user":"U123","channel":"C777","text":"<@UBOT> hello again","ts":"1710000003.000002"}
+}"#;
+
+const SHARED_CHANNEL_ROUTED: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-shared-routed",
+  "event":{"type":"app_mention","user":"U123","channel":"C888","text":"<@UBOT> route me","ts":"1710000003.000003"}
+}"#;
 
 const APP_MENTION_AUTH: &str = r#"{
   "type":"event_callback",

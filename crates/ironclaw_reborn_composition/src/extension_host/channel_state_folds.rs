@@ -58,6 +58,40 @@ const TARGET_BOT_TOKEN_HANDLE: &str = "slack_bot_token";
 const TARGET_SIGNING_SECRET_HANDLE: &str = "slack_signing_secret";
 const TARGET_OAUTH_CLIENT_SECRET_HANDLE: &str = "slack_oauth_client_secret";
 
+/// Sanctioned legacy storage roots (extension-runtime H.4b): extensions
+/// whose durable conversation-binding and idempotency trees predate the
+/// generic extension-keyed root scheme keep reading and writing their
+/// original roots — a **permanent data-compat surface**, not a pending
+/// migration. LLM data is never deleted (repo law), and resetting or
+/// re-rooting the idempotency tree would risk duplicate replays of
+/// already-settled inbound events, so these trees are never folded.
+///
+/// One entry today: the retired Slack channel lane.
+pub(crate) fn sanctioned_legacy_channel_workflow_storage_roots(
+    tenant_id: &ironclaw_host_api::TenantId,
+    extension_id: &str,
+) -> Option<crate::extension_host::channel_host::ChannelWorkflowStorageRoots> {
+    if extension_id != FOLDED_EXTENSION_ID {
+        return None;
+    }
+    let tenant = crate::resource_scope_path_segment(tenant_id.as_str());
+    let root = |path: String| match VirtualPath::new(path) {
+        Ok(path) => Some(path),
+        Err(error) => {
+            tracing::warn!(%error, "invalid sanctioned legacy storage root; using generic root");
+            None
+        }
+    };
+    Some(
+        crate::extension_host::channel_host::ChannelWorkflowStorageRoots {
+            idempotency: root(format!(
+                "/tenants/{tenant}/shared/slack-product-workflow/idempotency"
+            ))?,
+            conversations: root(format!("/tenants/{tenant}/shared/slack-conversations"))?,
+        },
+    )
+}
+
 /// Everything the fold reads and writes. The retired lane's secrets live at
 /// `legacy_secret_scope` (the operator scope its setup service used); the
 /// `[channel.config]` secret home is `channel_config_secret_scope` (the
@@ -1159,6 +1193,52 @@ supports_threads = true
             config_value(&values, "slack_team_id").as_deref(),
             Some("T-OPERATOR"),
             "operator-saved values win over retired setup values"
+        );
+    }
+
+    /// H.4b: the sanctioned table maps exactly the retired lane's roots and
+    /// nothing else — every other extension gets the generic root scheme.
+    #[test]
+    fn sanctioned_legacy_roots_cover_only_the_retired_lane() {
+        let tenant = ironclaw_host_api::TenantId::new(TENANT).expect("tenant");
+        let roots = sanctioned_legacy_channel_workflow_storage_roots(&tenant, "slack")
+            .expect("slack keeps its legacy trees");
+        assert_eq!(
+            roots.idempotency.as_str(),
+            format!("/tenants/{TENANT}/shared/slack-product-workflow/idempotency")
+        );
+        assert_eq!(
+            roots.conversations.as_str(),
+            format!("/tenants/{TENANT}/shared/slack-conversations")
+        );
+        assert!(
+            sanctioned_legacy_channel_workflow_storage_roots(&tenant, "telegram").is_none(),
+            "no other extension carries a legacy-root sanction"
+        );
+        assert!(sanctioned_legacy_channel_workflow_storage_roots(&tenant, "acmechat").is_none());
+    }
+
+    /// Value-shape parity: the generic managed-subject derivation reproduces
+    /// the retired lane's `user:slack-channel:{sha16}` scheme for the slack
+    /// extension id — the SAME prefix this fold classifies managed routes by.
+    #[test]
+    fn generic_managed_subject_derivation_matches_the_fold_classification_prefix() {
+        let tenant = ironclaw_host_api::TenantId::new(TENANT).expect("tenant");
+        let installation =
+            ironclaw_product_adapters::AdapterInstallationId::new(RETIRED_INSTALLATION_ID)
+                .expect("installation");
+        let derived =
+            crate::extension_host::channel_subject_routes::managed_channel_subject_user_id(
+                FOLDED_EXTENSION_ID,
+                &tenant,
+                &installation,
+                Some("T123"),
+                "C1",
+            )
+            .expect("derivation");
+        assert!(
+            derived.as_str().starts_with(MANAGED_CHANNEL_SUBJECT_PREFIX),
+            "generic derivation must keep the retired managed-subject shape: {derived}"
         );
     }
 
