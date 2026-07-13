@@ -91,27 +91,63 @@ async fn trigger_create_preview_reads_only_allowlisted_top_level_display_fields(
 
 #[tokio::test]
 async fn routine_preview_uses_handler_result_fields_and_bounds_list_output() {
-    for (provider_name, capability_id, output_field) in [
+    for (provider_name, capability_id, output_field, success_summary) in [
         (
             "builtin__trigger_remove",
             "builtin.trigger_remove",
             "removed",
+            "Routine removed",
         ),
-        ("builtin__trigger_pause", "builtin.trigger_pause", "updated"),
+        (
+            "builtin__trigger_pause",
+            "builtin.trigger_pause",
+            "updated",
+            "Routine paused",
+        ),
         (
             "builtin__trigger_resume",
             "builtin.trigger_resume",
             "updated",
+            "Routine resumed",
         ),
     ] {
-        let preview = completed_preview_for_input_and_output(
+        let not_found = completed_preview_for_input_and_output(
             provider_name,
             capability_id,
             serde_json::json!({"trigger_id": "internal-id"}),
             serde_json::json!({(output_field): false}),
         )
         .await;
-        assert_eq!(preview.output_summary.as_deref(), Some("Routine not found"));
+        assert_eq!(
+            not_found.output_summary.as_deref(),
+            Some("Routine not found")
+        );
+
+        let confirmed = completed_preview_for_input_and_output(
+            provider_name,
+            capability_id,
+            serde_json::json!({"trigger_id": "internal-id"}),
+            serde_json::json!({(output_field): true}),
+        )
+        .await;
+        assert_eq!(confirmed.output_summary.as_deref(), Some(success_summary));
+
+        for unavailable_output in [
+            serde_json::json!({}),
+            serde_json::json!({(output_field): "not-a-boolean"}),
+        ] {
+            let unavailable = completed_preview_for_input_and_output(
+                provider_name,
+                capability_id,
+                serde_json::json!({"trigger_id": "internal-id"}),
+                unavailable_output,
+            )
+            .await;
+            assert_eq!(
+                unavailable.output_summary.as_deref(),
+                Some("Routine status unavailable")
+            );
+        }
     }
 
     let pause_with_remove_field = completed_preview_for_input_and_output(
@@ -123,8 +159,8 @@ async fn routine_preview_uses_handler_result_fields_and_bounds_list_output() {
     .await;
     assert_eq!(
         pause_with_remove_field.output_summary.as_deref(),
-        Some("Routine paused"),
-        "pause must read the handler's updated field, not remove's removed field"
+        Some("Routine status unavailable"),
+        "pause must fail closed when the handler's updated field is absent"
     );
 
     let triggers = (0..12)

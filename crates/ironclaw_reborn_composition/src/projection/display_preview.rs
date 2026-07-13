@@ -932,15 +932,18 @@ impl RoutineCapability {
     }
 
     fn output_summary(self, value: &serde_json::Value) -> &'static str {
-        if self
-            .mutation_presence_field()
-            .and_then(|field| value.get(field))
-            .and_then(serde_json::Value::as_bool)
-            == Some(false)
-        {
-            return "Routine not found";
+        if let Some(field) = self.mutation_presence_field() {
+            return match value.get(field).and_then(serde_json::Value::as_bool) {
+                Some(true) => self.successful_output_summary(),
+                Some(false) => "Routine not found",
+                None => "Routine status unavailable",
+            };
         }
 
+        self.successful_output_summary()
+    }
+
+    fn successful_output_summary(self) -> &'static str {
         match self {
             Self::Create => "Routine created",
             Self::List => "Routines listed",
