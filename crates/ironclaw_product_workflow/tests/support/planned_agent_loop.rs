@@ -14,7 +14,7 @@ use ironclaw_host_api::{
     TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{CapabilitySurfacePolicy, SurfaceKind};
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     EmptyLoopCapabilityPort, EmptyUserProfileSource, HostIdentityContextBuildError,
     HostIdentityContextCandidate, HostIdentityContextSource, HostInputBatch, HostInputQueue,
@@ -346,7 +346,7 @@ impl ProductLiveAgentLoopHarness {
         );
         let await_edge_resolver = Arc::new(AwaitEdgeResolver::new_unbound(
             Arc::clone(&await_edge_store),
-            await_edge_goal_store.clone() as Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore>,
+            await_edge_goal_store.clone() as Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
             turn_store.clone() as Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore>,
             capability_result_writer.clone(),
             Arc::new(thread_service.clone()),
@@ -369,9 +369,9 @@ impl ProductLiveAgentLoopHarness {
             capability_result_writer,
             subagent_goal_store: await_edge_goal_store,
             subagent_await_edge_writer: await_edge_driver
-                as Arc<dyn ironclaw_loop_support::AwaitEdgeWriter>,
+                as Arc<dyn ironclaw_loop_host::AwaitEdgeWriter>,
             subagent_await_edge_settler: await_edge_resolver
-                as Arc<dyn ironclaw_loop_support::AwaitEdgeSettler>,
+                as Arc<dyn ironclaw_loop_host::AwaitEdgeSettler>,
             subagent_await_edge_evidence: Arc::clone(&await_edge_store)
                 as Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
             subagent_definition_resolver: Arc::new(
@@ -380,7 +380,7 @@ impl ProductLiveAgentLoopHarness {
             subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(Arc::new(
                 ProductLiveCapabilityIo::default(),
             ))),
-            subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+            subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
             loop_exit_evidence: Arc::new(
                 ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
                     Arc::new(thread_service.clone()),
@@ -915,6 +915,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             terminate_hint: self.capability.terminate_hint,
             byte_len: 0,
             output_digest: None,
+            model_observation: None,
         }))
     }
 

@@ -601,5 +601,6 @@ fn no_change_result(result_ref: &str) -> CapabilityOutcome {
         terminate_hint: false,
         byte_len: 0,
         output_digest: None,
+        model_observation: None,
     })
 }

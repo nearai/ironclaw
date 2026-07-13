@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{InvocationId, UserId};
-use ironclaw_loop_support::CapabilityResultWrite;
+use ironclaw_loop_host::{CapabilityResultWrite, DurablePersistence};
 use ironclaw_product_workflow::{
     ProjectCaller, ProjectService, ProjectServiceError, RebornCreateProjectRequest,
 };
@@ -30,8 +30,8 @@ pub(crate) fn wrap_project_create_capability_for_test(
     project_service: Arc<dyn ProjectService>,
     fallback_user_id: UserId,
     run_context: LoopRunContext,
-    input_resolver: Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
-    result_writer: Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
+    input_resolver: Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
+    result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
 ) -> Result<Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>, AgentLoopHostError> {
     super::synthetic_capability::wrap_local_dev_synthetic_capabilities(
         inner,
@@ -136,6 +136,7 @@ impl LocalDevSyntheticCapabilityHandler for ProjectCreateHandler {
                 capability_id: &invocation.request.capability_id,
                 output,
                 display_preview: None,
+                durable_persistence: DurablePersistence::Persist,
             })
             .await?;
         Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
@@ -145,6 +146,7 @@ impl LocalDevSyntheticCapabilityHandler for ProjectCreateHandler {
             terminate_hint: false,
             byte_len: write_result.byte_len,
             output_digest: write_result.output_digest,
+            model_observation: write_result.model_observation,
         }))
     }
 }

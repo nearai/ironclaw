@@ -46,6 +46,34 @@ pub(crate) async fn file_tools_requiring_approval() -> HarnessResult<HostRuntime
     file_tools_requiring_approval_profile()?.build().await
 }
 
+/// Same capability set as [`file_tools`], but opts the harness into the real
+/// `LocalDevCapabilityIo` (durable tool-result projection seam, issue #5838)
+/// instead of the ephemeral `ProductLiveCapabilityIo` test double, so
+/// `read_file`'s large output is persisted durably and `result_read` can page
+/// through it. Auto-approve on, like `file_tools`.
+pub(crate) fn file_tools_with_durable_capability_io_profile() -> HarnessResult<ToolsProfile> {
+    let mut profile = file_tools_with_runtime_policy(Some(
+        ironclaw_reborn_composition::local_dev_yolo_runtime_policy(true)?,
+    ))?
+    .with_auto_approve_default(true);
+    profile.options = std::mem::take(&mut profile.options).with_durable_capability_io();
+    // Grants the synthetic `result_read` id so
+    // `apply_synthetic_capability_wrappers` wraps it onto this harness's
+    // port (mirrors `project_create`'s `PROJECT_CREATE_CAPABILITY_ID`
+    // opt-in pattern -- see `profiles/project.rs`).
+    profile.capability_ids.push(CapabilityId::new(
+        ironclaw_reborn_composition::test_support::RESULT_READ_CAPABILITY_ID,
+    )?);
+    Ok(profile)
+}
+
+pub(crate) async fn file_tools_with_durable_capability_io()
+-> HarnessResult<HostRuntimeCapabilityHarness> {
+    file_tools_with_durable_capability_io_profile()?
+        .build()
+        .await
+}
+
 pub(crate) fn write_only_profile() -> HarnessResult<ToolsProfile> {
     Ok(ToolsProfile {
         capability_ids: vec![CapabilityId::new(WRITE_FILE_CAPABILITY_ID)?],

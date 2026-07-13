@@ -7,7 +7,7 @@ use ironclaw_host_api::{
     Action, ApprovalRequest, ApprovalRequestId, CapabilityGrantId, CapabilityId, CorrelationId,
     InvocationFingerprint, InvocationId, Principal, ResourceEstimate, ResourceScope, UserId,
 };
-use ironclaw_loop_support::CapabilityResultWrite;
+use ironclaw_loop_host::{CapabilityResultWrite, DurablePersistence};
 use ironclaw_product_workflow::{
     OutboundPreferencesProductFacade, RebornOutboundDeliveryTargetId, RebornServicesError,
     RebornServicesErrorCode, WebUiAuthenticatedCaller,
@@ -541,6 +541,7 @@ async fn write_completed_result(
             capability_id: &invocation.request.capability_id,
             output,
             display_preview: None,
+            durable_persistence: DurablePersistence::Persist,
         })
         .await?;
     Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
@@ -550,6 +551,7 @@ async fn write_completed_result(
         terminate_hint: false,
         byte_len: write_result.byte_len,
         output_digest: write_result.output_digest,
+        model_observation: write_result.model_observation,
     }))
 }
 
@@ -771,7 +773,7 @@ fn approval_denied(safe_summary: &str) -> Result<CapabilityDenied, AgentLoopHost
 }
 
 fn approval_store_error(operation: &'static str, error: RunStateError) -> AgentLoopHostError {
-    ironclaw_loop_support::raw_agent_loop_host_error(
+    ironclaw_loop_host::raw_agent_loop_host_error(
         "local_dev_outbound_delivery",
         operation,
         AgentLoopHostErrorKind::Unavailable,
@@ -803,15 +805,13 @@ fn approval_lease_outcome(
         ),
         CapabilityLeaseError::Persistence { .. }
         | CapabilityLeaseError::VersionMismatch
-        | CapabilityLeaseError::CasExhausted => {
-            Err(ironclaw_loop_support::raw_agent_loop_host_error(
-                "local_dev_outbound_delivery",
-                operation,
-                AgentLoopHostErrorKind::Unavailable,
-                "outbound delivery approval lease operation failed",
-                error,
-            ))
-        }
+        | CapabilityLeaseError::CasExhausted => Err(ironclaw_loop_host::raw_agent_loop_host_error(
+            "local_dev_outbound_delivery",
+            operation,
+            AgentLoopHostErrorKind::Unavailable,
+            "outbound delivery approval lease operation failed",
+            error,
+        )),
     }
 }
 

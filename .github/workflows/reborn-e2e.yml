@@ -201,6 +201,9 @@ jobs:
       - name: Enable pnpm
         run: corepack enable pnpm
 
+      - name: Check Reborn Responses API E2E inventory
+        run: python3 scripts/ci/check-reborn-responses-e2e-manifest.py
+
       - name: Install WebUI frontend dependencies
         run: |
           cd crates/ironclaw_webui_v2/frontend
@@ -216,8 +219,11 @@ jobs:
         run: >-
           cargo build
           -p ironclaw_reborn_cli
-          --features webui-v2-beta,slack-v2-host-beta
+          --features openai-compat-beta,slack-v2-host-beta
           --bin ironclaw-reborn
+
+      - name: Mark OpenAI-compatible binary feature set
+        run: touch target/debug/.ironclaw-reborn-openai-compat-beta.stamp
 
       - name: Install Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -241,6 +247,17 @@ jobs:
       - name: Run Reborn WebUI v2 smoke
         run: pytest tests/e2e/scenarios/test_reborn_webui_v2_smoke.py -v --timeout=120
 
+      - name: Run Reborn Responses API E2E
+        run: |
+          mapfile -t responses_tests < <(
+            sed -e 's/#.*//' -e '/^[[:space:]]*$/d' tests/e2e/reborn_responses_e2e_tests.txt
+          )
+          if ((${#responses_tests[@]} == 0)); then
+            echo "No Reborn Responses API E2E tests selected"
+            exit 1
+          fi
+          pytest "${responses_tests[@]}" -v --timeout=120
+
       - name: Package live-canary binary
         id: live_canary_binary
         run: |
@@ -255,7 +272,7 @@ jobs:
           )
           jq -n \
             --arg product_ref "${product_ref}" \
-            --arg features "webui-v2-beta,slack-v2-host-beta" \
+            --argjson features '["openai-compat-beta","slack-v2-host-beta","webui-v2-beta"]' \
             '{format_version: 1, product_ref: $product_ref, features: $features}' \
             > "${artifact_dir}/manifest.json"
           echo "product_ref=${product_ref}" >> "${GITHUB_OUTPUT}"

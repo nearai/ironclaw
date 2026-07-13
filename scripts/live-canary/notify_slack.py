@@ -1241,6 +1241,27 @@ def fallback_payload(reports: list[LaneReport], run_url: str | None) -> dict:
     return {"text": text}
 
 
+def google_oauth_preflight_report(status: str) -> LaneReport | None:
+    status = status.strip()
+    if not status or status == "healthy":
+        return None
+    return LaneReport(
+        lane="reborn-webui-v2-google-oauth-preflight",
+        provider="google-oauth",
+        failed=1,
+        tests=1,
+        status="fail",
+        reason=f"Google OAuth refresh failed: {status}",
+        test_name="google_oauth_refresh_preflight",
+        error=status,
+        root_cause="The live Google refresh token could not mint an access token.",
+        fix=(
+            "Re-authorize the dedicated QA account with the configured OAuth client "
+            "and rotate AUTH_LIVE_GOOGLE_REFRESH_TOKEN."
+        ),
+    )
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--artifacts-dir", default="artifacts/live-canary",
@@ -1290,7 +1311,10 @@ def main() -> int:
 
     artifacts_root = Path(args.artifacts_dir)
     lane_dirs = discover_lane_dirs(artifacts_root)
-    if not lane_dirs:
+    preflight_report = google_oauth_preflight_report(
+        os.environ.get("REBORN_GOOGLE_OAUTH_PREFLIGHT_STATUS", "")
+    )
+    if not lane_dirs and preflight_report is None:
         print(f"[notify_slack] no lane artifacts under {artifacts_root}", file=sys.stderr)
         return 0
 
@@ -1328,6 +1352,14 @@ def main() -> int:
     else:
         print("[notify_slack] no ANTHROPIC_API_KEY — skipping haiku enrichment",
               file=sys.stderr)
+
+    if preflight_report is not None:
+        reports.append(preflight_report)
+        print(
+            "[notify_slack] added Reborn Google OAuth infrastructure failure: "
+            f"{preflight_report.error}",
+            file=sys.stderr,
+        )
 
     # Second-pass categorization across all failed lanes — only fires
     # when there are 2+ failures since one failure is already obvious

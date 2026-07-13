@@ -1,4 +1,4 @@
-//! Loop support services for IronClaw Reborn.
+//! Loop host adapters for IronClaw Reborn.
 //!
 //! This crate adapts durable Reborn support boundaries (threads/transcripts plus
 //! host-managed model gateways) into the narrow `AgentLoopHost` ports. It does
@@ -60,7 +60,7 @@ pub use capability_allow_set::{
 };
 pub use capability_port::{
     CapabilityResultWrite, CapabilityTrajectoryObserver, CapabilityWriteResult,
-    DecoratingLoopCapabilityPortFactory, HostRuntimeLoopCapabilityPort,
+    DecoratingLoopCapabilityPortFactory, DurablePersistence, HostRuntimeLoopCapabilityPort,
     HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityPortDecorator,
     LoopCapabilityPortFactory, LoopCapabilityResultWriter, concurrency_hint_from_effects,
     loop_driver_execution_extension_id,
@@ -161,13 +161,14 @@ use serde::{Deserialize, Serialize};
 const EMPTY_SURFACE_VERSION: &str = "empty:v1";
 const LOOP_SYSTEM_ROLE: &str = "system";
 
-fn trace_loop_support_latency_ok(
+fn trace_loop_host_latency_ok(
     operation: &'static str,
     context: &LoopRunContext,
     started_at: Option<Instant>,
     max_messages: usize,
     message_count: usize,
 ) {
+    // Keep the pre-rename component label stable for dashboard continuity.
     ironclaw_observability::live_latency_trace_ok!(
         "loop_support",
         operation,
@@ -386,7 +387,7 @@ where
                 })
                 .await
                 .map_err(context_read_error)?;
-            trace_loop_support_latency_ok(
+            trace_loop_host_latency_ok(
                 "context_load_window",
                 &self.run_context,
                 started_at,
@@ -398,7 +399,7 @@ where
                 cache
                     .store(self.thread_scope.clone(), max_messages, context.clone())
                     .await;
-                trace_loop_support_latency_ok(
+                trace_loop_host_latency_ok(
                     "context_cache_store",
                     &self.run_context,
                     started_at,
@@ -418,7 +419,7 @@ where
                 }
                 None => Vec::new(),
             };
-            trace_loop_support_latency_ok(
+            trace_loop_host_latency_ok(
                 "context_skill_snippets",
                 &self.run_context,
                 started_at,
@@ -453,7 +454,7 @@ where
                     }
                     None => (Vec::new(), Vec::new()),
                 };
-            trace_loop_support_latency_ok(
+            trace_loop_host_latency_ok(
                 "context_identity_messages",
                 &self.run_context,
                 started_at,
@@ -477,7 +478,7 @@ where
             context.messages,
             self.prompt_context_budget,
         );
-        trace_loop_support_latency_ok(
+        trace_loop_host_latency_ok(
             "context_select_messages",
             &self.run_context,
             started_at,
@@ -879,7 +880,7 @@ where
     }
 }
 
-/// Empty capability surface for the text-only loop-support MVP.
+/// Empty capability surface for the text-only loop-host MVP.
 #[derive(Debug, Clone, Default)]
 pub struct EmptyLoopCapabilityPort;
 
@@ -1514,7 +1515,7 @@ where
                 )
                 .await
         {
-            trace_loop_support_latency_ok(
+            trace_loop_host_latency_ok(
                 "model_context_cache_hit",
                 &self.run_context,
                 started_at,
@@ -1523,7 +1524,7 @@ where
             );
             return Ok(context);
         }
-        trace_loop_support_latency_ok(
+        trace_loop_host_latency_ok(
             "model_context_cache_miss",
             &self.run_context,
             started_at,
@@ -1541,7 +1542,7 @@ where
             })
             .await
             .map_err(context_read_error)?;
-        trace_loop_support_latency_ok(
+        trace_loop_host_latency_ok(
             "model_context_load_window",
             &self.run_context,
             started_at,
@@ -1647,7 +1648,7 @@ pub struct HostManagedModelRequest {
 
 /// Boundary alias for the route snapshot carried from turn/run state into
 /// host-managed model requests. This intentionally preserves the turn-owned
-/// wire shape across the loop-support boundary instead of defining a duplicate
+/// wire shape across the loop-host boundary instead of defining a duplicate
 /// snapshot DTO here.
 pub type HostManagedModelRouteSnapshot = ironclaw_turns::run_profile::LoopModelRouteSnapshot;
 

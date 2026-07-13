@@ -4741,7 +4741,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             workflow,
         )
         self.assertIn("(authorized trigger)", workflow)
-        self.assertIn("needs: prepare-reborn-webui-v2-live-qa", match.group("body"))
+        self.assertIn("- prepare-reborn-webui-v2-live-qa", match.group("body"))
+        self.assertIn(
+            "- preflight-reborn-webui-v2-google-oauth",
+            match.group("body"),
+        )
         self.assertIn("always() &&", match.group("body"))
         self.assertIn(
             "needs.prepare-reborn-webui-v2-live-qa.result == 'success'",
@@ -4759,6 +4763,57 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIn("cache: pip", match.group("body"))
         self.assertNotIn("Build WASM channels", match.group("body"))
         self.assertNotIn("Setup OVH sccache", match.group("body"))
+        self.assertIn(
+            "Suppress Google cases after OAuth preflight failure",
+            match.group("body"),
+        )
+        self.assertIn(
+            "Mint fresh Google OAuth access token for selected cases",
+            match.group("body"),
+        )
+        self.assertIn("REBORN_WEBUI_V2_GOOGLE_CASES", match.group("body"))
+        self.assertEqual(
+            len(re.findall(r"^    env:\s*$", match.group("body"), re.M)),
+            1,
+            "the job must have one env mapping so Google-case gating is not overwritten",
+        )
+        self.assertEqual(
+            match.group("body").count(".github/scripts/google_oauth_cases.py"),
+            3,
+            "preflight filtering, mint selection, and mint-failure filtering "
+            "must use the same executable case classifier",
+        )
+        self.assertNotIn("google_cases='", match.group("body"))
+        self.assertIn(
+            "steps.mint_reborn_webui_v2_google_token.outputs.skip_shard != '1'",
+            match.group("body"),
+        )
+        self.assertIn(
+            "AUTH_LIVE_GOOGLE_ACCESS_TOKEN_PATH=${access_token_path}",
+            match.group("body"),
+        )
+
+        google_preflight_match = re.search(
+            r"(?ms)^  preflight-reborn-webui-v2-google-oauth:\n"
+            r"(?P<body>.*?)^  prepare-reborn-webui-v2-live-qa:",
+            workflow,
+        )
+        self.assertIsNotNone(
+            google_preflight_match,
+            "shared Google OAuth preflight job missing",
+        )
+        google_preflight_body = google_preflight_match.group("body")
+        self.assertIn("refresh_google_oauth.py", google_preflight_body)
+        self.assertIn("continue-on-error: true", google_preflight_body)
+        self.assertIn(
+            "Google-dependent cases will be skipped; non-Google cases will continue",
+            google_preflight_body,
+        )
+        self.assertIn(
+            "REBORN_GOOGLE_OAUTH_PREFLIGHT_STATUS: "
+            "${{ needs.preflight-reborn-webui-v2-google-oauth.outputs.status }}",
+            workflow,
+        )
 
         prepare_match = re.search(
             r"(?ms)^  prepare-reborn-webui-v2-live-qa:\n(?P<body>.*?)^  reborn-webui-v2-live-qa:",
@@ -4771,6 +4826,14 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIn("Build fallback Reborn WebUI v2 binary once", prepare_body)
         self.assertIn("if ! (", prepare_body)
         self.assertIn("validate_reborn_binary_artifact.py", prepare_body)
+        self.assertIn(
+            "--features webui-v2-beta,slack-v2-host-beta",
+            prepare_body,
+        )
+        self.assertIn(
+            "webui-v2-beta,slack-v2-host-beta",
+            prepare_body,
+        )
         self.assertIn("using the canary fallback build", prepare_body)
         self.assertIn("prepared-reborn-webui-v2-binary-${{ steps.target.outputs.checkout_ref }}", prepare_body)
         self.assertIn("path: artifacts/prepared-reborn-webui-v2-binary/", prepare_body)
@@ -4784,7 +4847,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             reborn_e2e,
         )
         self.assertIn(
-            "--features webui-v2-beta,slack-v2-host-beta",
+            "--features openai-compat-beta,slack-v2-host-beta",
+            reborn_e2e,
+        )
+        self.assertIn(
+            '["openai-compat-beta","slack-v2-host-beta","webui-v2-beta"]',
             reborn_e2e,
         )
         self.assertIn(

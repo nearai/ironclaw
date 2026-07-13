@@ -28,8 +28,8 @@ pub struct RefreshingLocalDevCapabilityPortTestParts {
     /// `Arc::clone`s of the SAME shared io object — production assigns one
     /// `LocalDevCapabilityIo` to both roles so input-ref/result-ref
     /// correlation by `call_id` works; never source them independently.
-    pub input_resolver: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
-    pub result_writer: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
+    pub input_resolver: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
+    pub result_writer: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
     pub milestone_sink: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopHostMilestoneSink>,
     /// Opaque handle built by
     /// `test_support::build_local_dev_skill_context_source_for_test`. Wraps
@@ -41,6 +41,10 @@ pub struct RefreshingLocalDevCapabilityPortTestParts {
     pub skill_activation_source:
         Option<std::sync::Arc<crate::test_support::SkillActivationTestSource>>,
     pub project_service: std::sync::Arc<dyn ironclaw_product_workflow::ProjectService>,
+    /// Backs the `result_read` synthetic capability's durable tool-result
+    /// reads; production wires the runtime's session thread service
+    /// (`local_dev.rs` `create_capability_port`).
+    pub thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
     pub trajectory_observer: Option<std::sync::Arc<dyn crate::RebornTrajectoryObserver>>,
     pub outbound_preferences_facade:
         Option<std::sync::Arc<dyn ironclaw_product_workflow::OutboundPreferencesProductFacade>>,
