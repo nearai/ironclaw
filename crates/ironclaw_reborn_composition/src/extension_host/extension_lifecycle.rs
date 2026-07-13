@@ -967,23 +967,26 @@ impl RebornLocalExtensionManagementPort {
                 // the private tool tenant-wide when the registering owner IS
                 // the operator (design point 5: no membership for registered
                 // packages).
-                let new_owner = match registration_owner(&available.package.manifest.source) {
-                    Some(owner) => {
-                        // `available.package.manifest.source` was resolved
-                        // via this caller's own tenant-owner scope (never a
-                        // foreign one — `resolve_available_for_scope`), so
-                        // it always carries `scope`'s tenant and user; the
-                        // existing row's effective scope must match BOTH,
-                        // not just the user id (T2 cross-tenant follow-up).
-                        let existing_effective_scope =
-                            installation_effective_owner_scope(&self.installation_store, &existing)
-                                .await?;
+                //
+                // Whether the EXISTING row is registered must be decided
+                // from the row's OWN stored manifest via
+                // `installation_effective_owner_scope`, never from
+                // `available.package.manifest.source` — a same-id
+                // shared-catalog package resolved for a foreign caller (who
+                // cannot see the owner's registered descriptor) carries a
+                // `HostBundled` source, which would silently make the guard
+                // vanish and fall through to `decide_install_on_existing`
+                // (item 1 regression).
+                let existing_effective_scope =
+                    installation_effective_owner_scope(&self.installation_store, &existing).await?;
+                let new_owner = match existing_effective_scope {
+                    Some(_) => {
                         ensure_registered_row_owner_match(
                             &available.package.id,
                             existing_effective_scope,
                             (scope.tenant_id.clone(), scope.user_id.clone()),
                         )?;
-                        owner
+                        existing.owner().clone()
                     }
                     None => decide_install_on_existing(
                         &available.package.id,
