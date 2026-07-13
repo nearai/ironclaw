@@ -120,6 +120,7 @@ const CONNECT_GMAIL: QaPhrase = QaPhrase {
 
 const SLACK_CHANNEL_MEMBERSHIP_FIXTURE: &str = "slack_channel_membership";
 const SLACK_RECENT_MESSAGE_FIXTURE: &str = "slack_recent_message";
+const SLACK_MENTION_ENCODING_FIXTURE: &str = "slack_mention_encoding";
 const SLACK_ENTITY_HYGIENE_FIXTURE: &str = "slack_entity_hygiene";
 
 // --- Tier 1: recorders (live API, manual) ----------------------------------
@@ -388,6 +389,44 @@ async fn contract_slack_recent_message_reads_the_synthetic_conversation() {
     );
     assert_tool_not_called(&trace, "slack.search_messages");
     assert_tool_not_called(&trace, "builtin.outbound_delivery_targets_list");
+}
+
+#[tokio::test]
+async fn contract_slack_mention_encoding_uses_exact_conversation_lookup() {
+    let trace = load_qa_trace(SLACK_MENTION_ENCODING_FIXTURE);
+    assert_tool_sequence(
+        &trace,
+        &[
+            "builtin.extension_search",
+            "builtin.extension_install",
+            "builtin.extension_activate",
+            "slack.get_conversation_info",
+            "slack.send_message",
+        ],
+    );
+    assert_tool_call_groups(
+        &trace,
+        &[
+            &["builtin.extension_search"][..],
+            &["builtin.extension_install"][..],
+            &["builtin.extension_activate"][..],
+            &["slack.get_conversation_info"][..],
+            &["slack.send_message"][..],
+        ],
+    );
+    assert_tool_argument_string_field_eq(
+        &trace,
+        "slack.get_conversation_info",
+        "channel",
+        "D0CANARY",
+    );
+    assert_tool_argument_string_field_eq(&trace, "slack.send_message", "channel", "D0CANARY");
+    assert_tool_called_with(
+        &trace,
+        "slack.send_message",
+        &["<@U0CANARY>", "MENTION_CANARY"],
+    );
+    assert_tool_not_called(&trace, "slack.list_conversations");
 }
 
 #[tokio::test]

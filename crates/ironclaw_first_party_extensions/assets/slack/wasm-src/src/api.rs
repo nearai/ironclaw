@@ -304,6 +304,38 @@ fn resolve_user_display_names(
     names
 }
 
+/// Map Slack's conversation object into the extension's stable output shape.
+/// Both list and exact lookup use this mapper so their DM identity semantics
+/// cannot drift apart.
+fn conversation_from_value(value: &serde_json::Value) -> Conversation {
+    Conversation {
+        id: value["id"].as_str().unwrap_or("").to_string(),
+        name: value["name"].as_str().map(|name| name.to_string()),
+        is_channel: value["is_channel"].as_bool().unwrap_or(false),
+        is_private: value["is_private"].as_bool().unwrap_or(false),
+        is_im: value["is_im"].as_bool().unwrap_or(false),
+        is_mpim: value["is_mpim"].as_bool().unwrap_or(false),
+        // Absent when Slack omits it (DMs have no membership axis) — never
+        // fabricated.
+        is_member: value["is_member"].as_bool(),
+        user: value["user"].as_str().map(|user| user.to_string()),
+        user_display_name: None,
+    }
+}
+
+/// Resolve a DM counterpart's display name without making the exact
+/// conversation lookup fail when `users.info` is unavailable.
+fn enrich_conversation_counterpart(conversation: &mut Conversation) {
+    if !conversation.is_im {
+        return;
+    }
+    let Some(user_id) = conversation.user.clone() else {
+        return;
+    };
+    let names = resolve_user_display_names([user_id.clone()]);
+    conversation.user_display_name = names.get(&user_id).cloned();
+}
+
 /// List conversations visible to the user token (channels, DMs, group DMs);
 /// `is_member` marks which channels the connected account belongs to.
 pub fn list_conversations(
@@ -324,23 +356,7 @@ pub fn list_conversations(
 
     let mut conversations: Vec<Conversation> = parsed["channels"]
         .as_array()
-        .map(|arr| {
-            arr.iter()
-                .map(|c| Conversation {
-                    id: c["id"].as_str().unwrap_or("").to_string(),
-                    name: c["name"].as_str().map(|s| s.to_string()),
-                    is_channel: c["is_channel"].as_bool().unwrap_or(false),
-                    is_private: c["is_private"].as_bool().unwrap_or(false),
-                    is_im: c["is_im"].as_bool().unwrap_or(false),
-                    is_mpim: c["is_mpim"].as_bool().unwrap_or(false),
-                    // Absent when Slack omits it (DMs have no membership axis)
-                    // — never fabricated.
-                    is_member: c["is_member"].as_bool(),
-                    user: c["user"].as_str().map(|s| s.to_string()),
-                    user_display_name: None,
-                })
-                .collect()
-        })
+        .map(|arr| arr.iter().map(conversation_from_value).collect())
         .unwrap_or_default();
 
     // DMs carry no `name`; resolve the counterpart's display name so output
@@ -367,6 +383,20 @@ pub fn list_conversations(
         ok: true,
         conversations,
         next_cursor,
+    })
+}
+
+/// Retrieve one exact Slack conversation by ID. Unlike
+/// `list_conversations`, this response cannot be hidden beyond a model-output
+/// preview boundary or confused with another same-name DM.
+pub fn get_conversation_info(channel: &str) -> Result<GetConversationInfoResult, String> {
+    let url = format!("conversations.info?channel={}", url_encode(channel));
+    let parsed = slack_api_call("GET", &url, None)?;
+    let mut conversation = conversation_from_value(&parsed["channel"]);
+    enrich_conversation_counterpart(&mut conversation);
+    Ok(GetConversationInfoResult {
+        ok: true,
+        conversation,
     })
 }
 

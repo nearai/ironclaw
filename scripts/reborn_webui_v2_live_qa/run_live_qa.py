@@ -220,6 +220,7 @@ SLACK_EXTENSION_REQUIREMENT = {
     "display_name": "Slack",
     "required_tools": [
         "slack.list_conversations",
+        "slack.get_conversation_info",
         "slack.get_conversation_history",
     ],
 }
@@ -6823,6 +6824,9 @@ async def case_qa_10f_slack_mention_encoding(ctx: LiveQaContext) -> ProbeResult:
     """Mention-encoding probe: a posted @-mention must be <@U…>-encoded in
     the message's RAW text so the target is actually notified.
 
+    The prompt supplies an exact DM conversation ID, so a completed
+    slack.get_conversation_info lookup is required before the verified write.
+
     Pins literal-@ mention posting: the model writes "@Display Name" as
     plain text, which renders inert and notifies nobody. Ground truth is
     API-computed after the turn — the marker message authored by the
@@ -6863,7 +6867,7 @@ async def case_qa_10f_slack_mention_encoding(ctx: LiveQaContext) -> ProbeResult:
             ),
             answer_marker=answer_marker,
             extra_details=details,
-            expected_capability="slack.send_message",
+            expected_capability="slack.get_conversation_info",
         )
         if not chat.success:
             return chat

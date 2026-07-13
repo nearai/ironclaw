@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- *(slack)* resolve known DM conversation IDs through an exact Slack lookup before encoding mentions, avoiding wrong-target posts when conversation lists are long or display names are ambiguous.
 - *(reborn)* allow `builtin.time` parse, convert, format, and diff operations to consume JSON numbers or numeric strings containing Unix seconds, integral Unix milliseconds, and fractional Slack timestamps in addition to ISO 8601 strings.
 
 ### Changed

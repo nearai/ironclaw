@@ -1410,6 +1410,9 @@ fn slack_assets() -> Vec<AvailableExtensionAsset> {
         slack_schema_asset!("list_conversations.input.v1.json"),
         slack_schema_asset!("list_conversations.output.v1.json"),
         slack_prompt_asset!("list_conversations"),
+        slack_schema_asset!("get_conversation_info.input.v1.json"),
+        slack_schema_asset!("get_conversation_info.output.v1.json"),
+        slack_prompt_asset!("get_conversation_info"),
         slack_schema_asset!("get_conversation_history.input.v1.json"),
         slack_schema_asset!("get_conversation_history.output.v1.json"),
         slack_prompt_asset!("get_conversation_history"),
@@ -2390,10 +2393,30 @@ mod tests {
             send_message.description.contains("Never guess")
                 && send_message
                     .description
-                    .contains("slack.list_conversations")
-                && send_message.description.contains("DM entry's user field"),
+                    .contains("slack.get_conversation_info")
+                && send_message
+                    .description
+                    .contains("conversation's user field"),
             "send_message description must explain how to resolve the real mention target instead of deriving a user id from a conversation id: {}",
             send_message.description
+        );
+
+        let get_conversation_info = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "slack.get_conversation_info")
+            .expect("slack manifest declares slack.get_conversation_info");
+        assert!(
+            get_conversation_info
+                .description
+                .contains("exact conversation ID")
+                && get_conversation_info
+                    .description
+                    .contains("authoritative mention target"),
+            "get_conversation_info must advertise exact lookup and the authoritative DM mention target: {}",
+            get_conversation_info.description
         );
 
         let list_conversations = package
@@ -2425,6 +2448,7 @@ mod tests {
         for capability_id in [
             "slack.search_messages",
             "slack.list_conversations",
+            "slack.get_conversation_info",
             "slack.get_conversation_history",
             "slack.get_thread_replies",
             "slack.get_user_info",

@@ -2963,6 +2963,58 @@ async fn slack_list_conversations_surfaces_membership_and_pagination() {
     );
 }
 
+/// QA-10F exact-target regression: when the prompt already supplies a DM
+/// conversation ID, the capability must query that ID directly instead of
+/// scanning a potentially truncated conversation list and guessing among
+/// same-name users. Dispatch the real bundled WASM through HostRuntime so the
+/// capability-id routing, HTTP request, response mapping, and name enrichment
+/// are all covered together.
+#[tokio::test]
+async fn slack_get_conversation_info_resolves_exact_dm_counterpart() {
+    let capability_id = CapabilityId::new("slack.get_conversation_info").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = UrlKeyedSlackEgress::new(vec![
+        (
+            "conversations.info?channel=D0FIRAT",
+            200,
+            r#"{"ok":true,"channel":{"id":"D0FIRAT","is_channel":false,"is_private":true,"is_im":true,"is_mpim":false,"user":"U0BBB"}}"#,
+        ),
+        ("users.info?user=U0BBB", 200, SLACK_USER_BBB_BODY),
+    ]);
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id,
+            scope,
+            json!({"channel": "D0FIRAT"}),
+        ))
+        .await
+        .unwrap();
+
+    let output = match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => completed.output,
+        other => panic!("expected completed outcome, got {other:?}"),
+    };
+    assert_eq!(output["conversation"]["id"], json!("D0FIRAT"));
+    assert_eq!(output["conversation"]["user"], json!("U0BBB"));
+    assert_eq!(
+        output["conversation"]["user_display_name"],
+        json!("Ada Lovelace")
+    );
+
+    let requests = network.requests();
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.url.ends_with("conversations.info?channel=D0FIRAT")),
+        "exact conversation lookup was not sent: {requests:#?}"
+    );
+}
+
 /// Slack rejects `limit=1000` (the real maximum is 999). The guest must clamp
 /// out-of-range limits instead of letting the read fail on an avoidable
 /// invalid_limit round-trip.

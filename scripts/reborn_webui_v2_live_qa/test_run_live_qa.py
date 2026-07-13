@@ -2014,6 +2014,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "display_name": "Slack",
                 "required_tools": [
                     "slack.list_conversations",
+                    "slack.get_conversation_info",
                     "slack.get_conversation_history",
                 ],
             },
@@ -2179,6 +2180,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "display_name": "Slack",
                 "required_tools": [
                     "slack.list_conversations",
+                    "slack.get_conversation_info",
                     "slack.get_conversation_history",
                 ],
                 "ensure_installed": True,
@@ -2836,7 +2838,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "qa_10c_slack_thread_replies": "slack.get_thread_replies",
                 "qa_10d_slack_channel_membership": "slack.list_conversations",
                 "qa_10e_slack_error_honesty": "slack.get_conversation_history",
-                "qa_10f_slack_mention_encoding": "slack.send_message",
+                "qa_10f_slack_mention_encoding": "slack.get_conversation_info",
                 "qa_10g_slack_last_message_sent": "slack.get_conversation_history",
                 "qa_10h_slack_email_hallucination_guard": "slack.get_user_info",
             },

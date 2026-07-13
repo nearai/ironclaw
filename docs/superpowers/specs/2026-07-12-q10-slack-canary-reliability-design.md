@@ -104,6 +104,19 @@ read error is infrastructure/inconclusive; it must not be converted into a
   the generic outbound-delivery surface remains integration-neutral while
   directing read requests to the corresponding integration.
 
+#### 10F: notifying a known DM counterpart
+
+When the prompt already supplies a DM conversation ID, require a completed
+`slack.get_conversation_info` call for that exact ID before the write. The
+capability calls Slack's exact `conversations.info` endpoint and returns the DM
+counterpart's authoritative `user` field for `<@U…>` mention encoding.
+
+Keep `slack.list_conversations` as the discovery path only when no conversation
+ID is known. This avoids making the model scan a long, preview-truncated list or
+choose among multiple users with the same display name. QA-10F still verifies
+the actual authored message in the requested DM after the turn, so a completed
+lookup without the correct external side effect cannot pass.
+
 #### 10G: most recently sent message
 
 Split the current ambiguous journey:
@@ -171,6 +184,8 @@ Update and pin these descriptions:
   the single newest message when conversation history is available.
 - `slack.list_conversations` returns visible conversations, not only membership;
   `is_member` is the membership source of truth.
+- `slack.get_conversation_info` is the exact lookup for a known conversation ID;
+  a DM response's `user` field is the authoritative mention target.
 - Slack read tools tell the model to use humanized message text,
   `user_display_name`, and `is_current_user` in prose, while retaining raw IDs
   only for subsequent tool calls.
@@ -199,6 +214,8 @@ Replace or augment source-string pins with direct tests that drive:
 
 - Slack prerequisite activation through the shared chat caller;
 - 10D success/failure based on completed `slack.list_conversations` calls;
+- 10F success/failure based on completed `slack.get_conversation_info` calls
+  plus the existing requested-DM readback;
 - scoped versus global 10G classification;
 - 10I raw-ID detection and artifact redaction;
 - finalized replies whose synthetic marker was reformatted;
@@ -222,6 +239,8 @@ Add scrubbed Q-10 fixtures and assertions for the tool-choice/request-shape
 contracts that can be replayed hermetically:
 
 - membership uses `slack.list_conversations`;
+- mention encoding for a known DM uses `slack.get_conversation_info` before
+  `slack.send_message` and does not scan `slack.list_conversations`;
 - scoped recent-message retrieval uses conversation history rather than indexed
   search;
 - entity output uses display names, and capability-call IDs remain usable.
