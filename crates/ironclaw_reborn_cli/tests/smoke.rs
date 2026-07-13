@@ -1,3 +1,5 @@
+// arch-exempt: large_file, split smoke coverage by command and deployment surface, plan #8513
+
 #[cfg(feature = "webui-v2-beta")]
 use std::io::BufRead;
 use std::{

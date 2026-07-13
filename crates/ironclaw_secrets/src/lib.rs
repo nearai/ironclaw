@@ -7,6 +7,8 @@
 //! composition slice consumes these primitives.
 #![warn(unreachable_pub)]
 
+// arch-exempt: large_file, split secret contracts into owned modules without changing exports, plan #8513
+
 mod crypto;
 mod filesystem_store;
 pub mod keychain;
