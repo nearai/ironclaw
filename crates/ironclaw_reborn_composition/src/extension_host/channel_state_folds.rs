@@ -708,10 +708,14 @@ async fn fold_dm_targets(
                         continue;
                     }
                 }
-                let payload = serde_json::json!({
-                    "team_id": target.team_id,
-                    "dm_channel_id": target.dm_channel_id,
-                });
+                // Canonical generic payload: the DM's external ref
+                // (space = the retired record's team, conversation = its DM
+                // channel) — the same shape fresh generic provisioning
+                // writes.
+                let payload = crate::extension_host::channel_dm_targets::dm_target_payload(
+                    Some(&target.team_id),
+                    &target.dm_channel_id,
+                );
                 match inputs
                     .dm_targets
                     .upsert(FOLDED_EXTENSION_ID, &user_id, target.slack_user_id, payload)
@@ -1131,8 +1135,8 @@ supports_threads = true
             .expect("dm target load")
             .expect("dm target folded");
         assert_eq!(dm.external_actor_id, "U777");
-        assert_eq!(dm.target["team_id"], "T123");
-        assert_eq!(dm.target["dm_channel_id"], "D42");
+        assert_eq!(dm.target["space_id"], "T123");
+        assert_eq!(dm.target["conversation_id"], "D42");
 
         // Idempotence: a second run changes nothing.
         let second = fold_retired_slack_channel_state(&fixture.inputs).await;

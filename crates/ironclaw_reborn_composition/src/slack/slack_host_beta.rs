@@ -422,18 +422,46 @@ impl SlackHostBetaMounts {
         &self,
         runtime: &RebornRuntime,
     ) -> ChannelIdentityBindingConfig {
-        self.channel_identity_binding_config_with_store(runtime_installation_store(runtime))
+        // Generic DM-target provisioning for discovered (non-lane) channel
+        // extensions: post-bind, the caller's direct conversation opens
+        // through the extension's own adapter into the generic store.
+        let post_bind_factory = match (
+            runtime.services().channel_delivery_resolver(),
+            runtime
+                .services()
+                .local_runtime
+                .as_ref()
+                .and_then(|local_runtime| local_runtime.channel_dm_target_store.clone()),
+        ) {
+            (Some(delivery), Some(store)) => Some(Arc::new(
+                crate::extension_host::channel_dm_provisioning::ChannelDmTargetProvisioning::new(
+                    delivery, store,
+                ),
+            )
+                as Arc<
+                    dyn crate::extension_host::channel_identity::ChannelIdentityPostBindFactory,
+                >),
+            _ => None,
+        };
+        self.channel_identity_binding_config_with_store(
+            runtime_installation_store(runtime),
+            post_bind_factory,
+        )
     }
 
     pub(crate) fn channel_identity_binding_config_with_store(
         &self,
         installation_store: Option<Arc<dyn ironclaw_extensions::ExtensionInstallationStore>>,
+        post_bind_factory: Option<
+            Arc<dyn crate::extension_host::channel_identity::ChannelIdentityPostBindFactory>,
+        >,
     ) -> ChannelIdentityBindingConfig {
         ChannelIdentityBindingConfig {
             tenant_id: self.tenant_id.clone(),
             installation_store,
             binding_store: Arc::clone(&self.user_identity_binding_store),
             rollback_store: Arc::clone(&self.user_identity_delete_store),
+            post_bind_factory,
             overrides: vec![ChannelIdentityOverride {
                 extension_id: SLACK_EXTENSION_ID.to_string(),
                 provider: ironclaw_auth::SLACK_PROVIDER_ID.to_string(),
@@ -1318,6 +1346,11 @@ pub fn build_webui_services_with_slack_host_beta_mounts(
         .product_auth
         .clone()
         .map(|services| services as Arc<dyn ChannelCredentialCleanup>);
+    let generic_dm_target_store = runtime
+        .services()
+        .local_runtime
+        .as_ref()
+        .and_then(|local_runtime| local_runtime.channel_dm_target_store.clone());
     let channel_connection = slack_mounts.map(|mounts| {
         Arc::new(GenericChannelConnectionFacade::new(
             mounts.tenant_id.clone(),
@@ -1326,6 +1359,7 @@ pub fn build_webui_services_with_slack_host_beta_mounts(
             Arc::clone(&mounts.user_identity_lookup),
             Arc::clone(&mounts.user_identity_delete_store),
             credential_cleanup,
+            generic_dm_target_store,
         )) as Arc<dyn ironclaw_product_workflow::ChannelConnectionFacade>
     });
     crate::webui::facade::build_webui_services_with_channel_connection(
@@ -1765,7 +1799,7 @@ mod tests {
         .expect("runtime builds");
 
         let mounts = build_slack_host_beta_mounts(&runtime, config()).expect("mounts build");
-        let _channel_identity = mounts.channel_identity_binding_config_with_store(None);
+        let _channel_identity = mounts.channel_identity_binding_config_with_store(None, None);
 
         assert_eq!(mounts.events.descriptors.len(), 1);
         assert!(
@@ -1790,7 +1824,7 @@ mod tests {
         )
         .await
         .expect("dynamic mounts build");
-        let _channel_identity = mounts.channel_identity_binding_config_with_store(None);
+        let _channel_identity = mounts.channel_identity_binding_config_with_store(None, None);
 
         assert_eq!(mounts.events.descriptors.len(), 1);
         assert!(
@@ -4190,7 +4224,7 @@ mod tests {
     /// channel-identity hook, configured exactly as serve wires it (the
     /// Slack lane override), invoked with a proven Slack OAuth identity.
     async fn bind_slack_oauth_user(mounts: &SlackHostBetaMounts) {
-        let config = mounts.channel_identity_binding_config_with_store(None);
+        let config = mounts.channel_identity_binding_config_with_store(None, None);
         let identity = ironclaw_auth::OAuthProviderIdentity::new(
             SLACK_USER,
             Some(TEAM.to_string()),

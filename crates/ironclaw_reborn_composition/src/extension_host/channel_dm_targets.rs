@@ -3,10 +3,10 @@
 //!
 //! One record per `(extension, user)` under
 //! `/tenant-shared/channel-dm-targets/{extension}/{user}.json`: the proven
-//! external actor id plus an opaque vendor payload the extension's
-//! preference-target codec interprets (delivery address, workspace refs,
-//! …). The host never inspects the payload — it is vendor data carried for
-//! the extension's outbound-target surface.
+//! external actor id plus the direct conversation's external ref in the
+//! canonical payload shape ([`dm_target_payload`]). The extension's
+//! outbound-target surface encodes reply-target binding refs from it —
+//! vendor knowledge stays in the adapters and codecs, never here.
 
 use std::sync::Arc;
 
@@ -25,6 +25,32 @@ use crate::extension_host::channel_identity_store::path_segment;
 
 const CHANNEL_DM_TARGET_ALIAS: &str = "/tenant-shared/channel-dm-targets";
 
+/// Canonical DM-target payload keys: the direct conversation's external
+/// ref. One shape for folded and freshly-provisioned records — vendor
+/// knowledge stays in the adapters that produce the ref and the codecs
+/// that encode reply-target binding refs from it.
+pub(crate) const DM_TARGET_SPACE_ID_KEY: &str = "space_id";
+pub(crate) const DM_TARGET_CONVERSATION_ID_KEY: &str = "conversation_id";
+
+/// Build the canonical DM-target payload for one direct conversation.
+pub(crate) fn dm_target_payload(
+    space_id: Option<&str>,
+    conversation_id: &str,
+) -> serde_json::Value {
+    let mut payload = serde_json::Map::new();
+    if let Some(space_id) = space_id {
+        payload.insert(
+            DM_TARGET_SPACE_ID_KEY.to_string(),
+            serde_json::Value::String(space_id.to_string()),
+        );
+    }
+    payload.insert(
+        DM_TARGET_CONVERSATION_ID_KEY.to_string(),
+        serde_json::Value::String(conversation_id.to_string()),
+    );
+    serde_json::Value::Object(payload)
+}
+
 /// One user's DM target for one channel extension.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ChannelDmTargetRecord {
@@ -32,8 +58,8 @@ pub(crate) struct ChannelDmTargetRecord {
     pub(crate) user_id: String,
     /// The proven external actor id the target was provisioned for.
     pub(crate) external_actor_id: String,
-    /// Opaque vendor payload (delivery address, workspace refs, …)
-    /// interpreted by the extension's preference-target codec.
+    /// The direct conversation's external ref in the canonical
+    /// [`dm_target_payload`] shape.
     pub(crate) target: serde_json::Value,
     pub(crate) created_at: DateTime<Utc>,
     pub(crate) updated_at: DateTime<Utc>,
@@ -170,11 +196,9 @@ impl FilesystemChannelDmTargetStore {
         Ok(record)
     }
 
-    /// Delete one user's DM target for an extension (idempotent).
-    #[allow(
-        dead_code,
-        reason = "the generic disconnect-cleanup extras consume this when the channel lane cuts over"
-    )]
+    /// Delete one user's DM target for an extension (idempotent) — the
+    /// generic disconnect cleanup drops the caller's provisioned target so
+    /// outbound targets never offer a stale direct conversation.
     pub(crate) async fn delete(
         &self,
         extension_id: &str,

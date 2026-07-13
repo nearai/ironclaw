@@ -31,6 +31,7 @@ use ironclaw_product_workflow::{
     ChannelConnectionFacade, RebornServicesError, WebUiAuthenticatedCaller,
 };
 
+use crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore;
 use crate::extension_host::channel_identity::{
     ChannelConnectionScope, ChannelConnectionScopeSource, channel_config_connection_scope_source,
     discover_channel_extensions,
@@ -107,6 +108,10 @@ pub(crate) struct GenericChannelConnectionFacade {
     /// minted a personal vendor credential in the first place, so there is
     /// nothing to revoke on disconnect.
     credential_cleanup: Option<Arc<dyn ChannelCredentialCleanup>>,
+    /// Generic DM-target store: discovered entries get a disconnect cleanup
+    /// that drops the caller's provisioned DM target. `None` when the
+    /// composed runtime carries no durable channel storage.
+    dm_target_store: Option<Arc<FilesystemChannelDmTargetStore>>,
 }
 
 impl GenericChannelConnectionFacade {
@@ -117,6 +122,7 @@ impl GenericChannelConnectionFacade {
         identity_lookup: Arc<dyn RebornUserIdentityLookup>,
         identity_delete_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
         credential_cleanup: Option<Arc<dyn ChannelCredentialCleanup>>,
+        dm_target_store: Option<Arc<FilesystemChannelDmTargetStore>>,
     ) -> Self {
         Self {
             tenant_id,
@@ -125,6 +131,7 @@ impl GenericChannelConnectionFacade {
             identity_lookup,
             identity_delete_store,
             credential_cleanup,
+            dm_target_store,
         }
     }
 
@@ -145,6 +152,12 @@ impl GenericChannelConnectionFacade {
             let Ok(extension_id) = ExtensionId::new(&extension.extension_id) else {
                 continue;
             };
+            let disconnect_cleanup = self.dm_target_store.as_ref().map(|store| {
+                Arc::new(ChannelDmTargetDisconnectCleanup {
+                    extension_id: extension.extension_id.clone(),
+                    store: Arc::clone(store),
+                }) as Arc<dyn ChannelDisconnectCleanup>
+            });
             entries.push(ChannelConnectionEntry {
                 extension_id: extension.extension_id,
                 providers: extension.providers,
@@ -152,7 +165,7 @@ impl GenericChannelConnectionFacade {
                     Arc::clone(installation_store),
                     extension_id,
                 ),
-                disconnect_cleanup: None,
+                disconnect_cleanup,
             });
         }
         Ok(entries)
@@ -230,6 +243,28 @@ impl GenericChannelConnectionFacade {
                 .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
         }
         Ok(())
+    }
+}
+
+/// Generic disconnect cleanup for discovered channel extensions: drop the
+/// caller's provisioned DM target so outbound targets no longer offer a
+/// stale direct conversation after disconnect.
+struct ChannelDmTargetDisconnectCleanup {
+    extension_id: String,
+    store: Arc<FilesystemChannelDmTargetStore>,
+}
+
+#[async_trait]
+impl ChannelDisconnectCleanup for ChannelDmTargetDisconnectCleanup {
+    async fn cleanup_disconnected_caller(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        _scope: &ChannelConnectionScope,
+    ) -> Result<(), String> {
+        self.store
+            .delete(&self.extension_id, &caller.user_id)
+            .await
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -392,6 +427,7 @@ mod tests {
             identity_store.clone(),
             identity_store,
             credential_cleanup,
+            None,
         )
     }
 
@@ -631,6 +667,183 @@ mod tests {
             .expect("unknown channel disconnect is a no-op");
         assert!(credential_cleanup.requests().is_empty());
         assert_eq!(identity_store.deletes(), Vec::new());
+    }
+
+    /// Discovered-extension disconnect: the generic DM-target cleanup drops
+    /// the caller's provisioned direct-conversation record between the
+    /// credential revoke and the binding delete.
+    #[tokio::test]
+    async fn discovered_extension_disconnect_drops_the_callers_dm_target() {
+        use ironclaw_extensions::{
+            ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
+            ExtensionManifestRecord, ExtensionManifestRef, InMemoryExtensionInstallationStore,
+            ManifestSource,
+        };
+        use ironclaw_filesystem::InMemoryBackend;
+
+        const DISCOVERED_FIXTURE_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "acmechat"
+name = "AcmeChat"
+version = "0.1.0"
+description = "discovered disconnect fixture"
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "acmechat.extension/v1"
+
+[[tools]]
+id = "acmechat.read_messages"
+description = "Read AcmeChat messages"
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/acmechat/read_messages.input.v1.json"
+
+[[tools.credentials]]
+handle = "acmechat_user_token"
+vendor = "acmechat"
+scopes = ["messages.read"]
+audience = { scheme = "https", host = "api.acmechat.example" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[channel]
+id = "messages"
+display_name = "AcmeChat messages"
+inbound = true
+outbound = true
+conversation_model = "continuous"
+
+[channel.ingress]
+route_suffix = "events"
+method = "post"
+body_limit_bytes = 1048576
+
+[channel.ingress.verification]
+kind = "shared_secret_header"
+secret_handle = "acmechat_webhook_secret"
+header = "X-AcmeChat-Secret"
+
+[channel.config]
+fields = [
+  { handle = "acmechat_webhook_secret", label = "Webhook secret", secret = true },
+  { handle = "acmechat_team_id", label = "Workspace ID", secret = false },
+]
+
+[channel.presentation]
+supports_markdown = false
+supports_threads = false
+
+[auth.acmechat]
+method = "oauth2_code"
+display_name = "AcmeChat account"
+authorization_endpoint = "https://auth.acmechat.example/authorize"
+token_endpoint = "https://auth.acmechat.example/token"
+scopes = ["messages.read"]
+client_credentials = { client_id_handle = "acmechat_oauth_client_id" }
+
+[auth.acmechat.token_response]
+access_token = "/access_token"
+
+[auth.acmechat.identity]
+account_id = "/authed_user/id"
+team_id = "/team/id"
+"#;
+
+        let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
+        let record = ExtensionManifestRecord::from_toml(
+            DISCOVERED_FIXTURE_MANIFEST,
+            ManifestSource::HostBundled,
+            &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
+            None,
+            &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+        )
+        .expect("fixture manifest parses");
+        let extension_id = ExtensionId::new(EXTENSION).expect("extension id");
+        installation_store
+            .upsert_manifest_and_installation(
+                record,
+                ExtensionInstallation::new(
+                    ExtensionInstallationId::new("install-alpha".to_string())
+                        .expect("installation id"),
+                    extension_id.clone(),
+                    ExtensionActivationState::Enabled,
+                    ExtensionManifestRef::new(extension_id.clone(), None),
+                    Vec::new(),
+                    chrono::Utc::now(),
+                )
+                .expect("installation"),
+            )
+            .await
+            .expect("persist install");
+        // Connection scoping is configured (fail-closed otherwise).
+        installation_store
+            .set_channel_config(
+                &extension_id,
+                vec![("acmechat_team_id".to_string(), "T123".to_string())],
+            )
+            .await
+            .expect("save scoping value");
+
+        let identity_store = bound_identity_store("install-alpha");
+        let dm_store = Arc::new(FilesystemChannelDmTargetStore::new(
+            Arc::new(InMemoryBackend::new()),
+            tenant(),
+            UserId::new("user:operator").expect("user"),
+        ));
+        let caller = caller();
+        dm_store
+            .upsert(
+                EXTENSION,
+                &caller.user_id,
+                "U123".to_string(),
+                crate::extension_host::channel_dm_targets::dm_target_payload(Some("T123"), "DM-9"),
+            )
+            .await
+            .expect("seed DM target");
+
+        let facade = GenericChannelConnectionFacade::new(
+            tenant(),
+            Vec::new(),
+            Some(installation_store as Arc<dyn ExtensionInstallationStore>),
+            identity_store.clone(),
+            identity_store.clone(),
+            None,
+            Some(Arc::clone(&dm_store)),
+        );
+
+        // Discovered + bound: connected.
+        assert_eq!(
+            facade
+                .caller_channel_connections(caller.clone())
+                .await
+                .expect("connection lookup"),
+            HashMap::from([(EXTENSION.to_string(), true)])
+        );
+
+        facade
+            .disconnect_channel_for_caller(caller.clone(), EXTENSION)
+            .await
+            .expect("disconnect succeeds");
+
+        assert!(
+            dm_store
+                .load(EXTENSION, &caller.user_id)
+                .await
+                .expect("load")
+                .is_none(),
+            "disconnect must drop the caller's provisioned DM target"
+        );
+        assert_eq!(
+            identity_store.deletes(),
+            vec![(
+                VENDOR.to_string(),
+                caller.user_id,
+                Some("install-alpha:".to_string())
+            )],
+            "bindings delete last, prefix-scoped to the installation"
+        );
     }
 
     struct StaticScopeSource(Option<ChannelConnectionScope>);

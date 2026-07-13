@@ -16,6 +16,7 @@ pub(crate) mod bundled_skills;
 pub(crate) mod channel_config;
 pub(crate) mod channel_connection;
 pub(crate) mod channel_delivery;
+pub(crate) mod channel_dm_provisioning;
 pub(crate) mod channel_dm_targets;
 pub(crate) mod channel_egress;
 pub(crate) mod channel_host;

@@ -98,6 +98,16 @@ pub(crate) trait ChannelIdentityPostBind: Send + Sync {
     fn provision_after_bind(&self, user_id: UserId, external_actor_id: &str);
 }
 
+/// Builds per-extension post-bind provisioning for generically-discovered
+/// channel extensions (a lane override carries its own `post_bind`; the
+/// generic DM-target provisioning implements this).
+pub(crate) trait ChannelIdentityPostBindFactory: Send + Sync {
+    fn post_bind_for_extension(
+        &self,
+        extension_id: &str,
+    ) -> Option<Arc<dyn ChannelIdentityPostBind>>;
+}
+
 /// Per-extension override for a channel lane whose configure surface
 /// predates `[channel.config]`: the lane names the provider it binds under
 /// and supplies its own scope source (and optional post-bind provisioning).
@@ -125,6 +135,9 @@ pub struct ChannelIdentityBindingConfig {
     /// so it must not survive a completion failure that already deleted the
     /// token material.
     pub(crate) rollback_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
+    /// Post-bind provisioning for generically-discovered extensions (e.g.
+    /// DM-target provisioning). `None` = discovered binds provision nothing.
+    pub(crate) post_bind_factory: Option<Arc<dyn ChannelIdentityPostBindFactory>>,
     pub(crate) overrides: Vec<ChannelIdentityOverride>,
 }
 
@@ -143,6 +156,7 @@ impl ChannelIdentityBindingConfig {
             installation_store: Some(installation_store),
             binding_store,
             rollback_store,
+            post_bind_factory: None,
             overrides: Vec::new(),
         }
     }
@@ -420,13 +434,17 @@ async fn channel_identity_targets(
                 Ok(extension_id) => extension_id,
                 Err(_) => continue,
             };
+            let post_bind = config
+                .post_bind_factory
+                .as_ref()
+                .and_then(|factory| factory.post_bind_for_extension(&extension.extension_id));
             targets.push(ChannelIdentityTarget {
                 extension_id: extension.extension_id,
                 scope_source: channel_config_connection_scope_source(
                     Arc::clone(installation_store),
                     extension_id,
                 ),
-                post_bind: None,
+                post_bind,
             });
         }
     }
@@ -720,6 +738,7 @@ app_id = "/app_id"
             ),
             binding_store: identity_store.clone(),
             rollback_store: identity_store.clone(),
+            post_bind_factory: None,
             overrides: Vec::new(),
         };
         Fixture {
@@ -731,8 +750,14 @@ app_id = "/app_id"
 
     #[tokio::test]
     async fn matching_identity_binds_installation_scoped_and_rollback_undoes_it() {
-        let fixture = fixture().await;
+        let mut fixture = fixture().await;
         store_scoping_values(&fixture.installation_store).await;
+        // Generic post-bind provisioning: the factory serves discovered
+        // extensions; a successful bind must hand it the caller + subject.
+        let post_bind = Arc::new(RecordingPostBind::default());
+        fixture.config.post_bind_factory = Some(Arc::new(StaticPostBindFactory {
+            post_bind: post_bind.clone(),
+        }));
 
         let rollback = bind_channel_identities_for_callback(
             &fixture.config,
@@ -755,6 +780,12 @@ app_id = "/app_id"
                 user_id: UserId::new("user-alice").expect("user"),
             }],
             "the binding must be keyed by the installation-scoped composite id"
+        );
+
+        assert_eq!(
+            post_bind.calls(),
+            vec![(UserId::new("user-alice").expect("user"), "U123".to_string())],
+            "a discovered-extension bind must fire the factory's post-bind provisioning"
         );
 
         // The returned rollback (callback completion failed afterwards) must
@@ -911,6 +942,7 @@ app_id = "/app_id"
             installation_store: None,
             binding_store: identity_store.clone(),
             rollback_store: identity_store.clone(),
+            post_bind_factory: None,
             overrides: vec![ChannelIdentityOverride {
                 extension_id: "acmechat".to_string(),
                 provider: "acmechat".to_string(),
@@ -955,6 +987,7 @@ app_id = "/app_id"
             installation_store: None,
             binding_store: identity_store.clone(),
             rollback_store: identity_store.clone(),
+            post_bind_factory: None,
             overrides: vec![ChannelIdentityOverride {
                 extension_id: "acmechat".to_string(),
                 provider: "acmechat".to_string(),
@@ -1013,6 +1046,20 @@ app_id = "/app_id"
     }
 
     struct StaticScopeSource(Option<ChannelConnectionScope>);
+
+    /// Serves one recording post-bind for every discovered extension.
+    struct StaticPostBindFactory {
+        post_bind: Arc<RecordingPostBind>,
+    }
+
+    impl ChannelIdentityPostBindFactory for StaticPostBindFactory {
+        fn post_bind_for_extension(
+            &self,
+            _extension_id: &str,
+        ) -> Option<Arc<dyn ChannelIdentityPostBind>> {
+            Some(Arc::clone(&self.post_bind) as Arc<dyn ChannelIdentityPostBind>)
+        }
+    }
 
     #[async_trait]
     impl ChannelConnectionScopeSource for StaticScopeSource {
