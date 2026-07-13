@@ -1,8 +1,9 @@
-//! Review-comment fix on PR #5916: one owner's storage-layer error must not
-//! abort `list_all`/boot restore for every other owner. Distinct from
+//! Blast-radius coverage for the registered extension store: one entry's or
+//! one owner's storage-layer error must not abort boot restore or the
+//! installed listing for everyone else. Distinct from
 //! `extension_lifecycle_registered_store_tests`'s corrupt-manifest coverage
 //! (a per-entry TOML parse failure inside `load_filesystem_packages`) — this
-//! pins a directory-level `fs.list_dir` error on one owner's registered root.
+//! pins directory-level `fs.list_dir` errors.
 
 use std::sync::Arc;
 
@@ -33,9 +34,7 @@ use crate::extension_host::available_extensions::{
 use crate::extension_host::extension_lifecycle::{
     ActiveExtensionPublisher, RebornLocalExtensionManagementPort, restore_extension_lifecycle_state,
 };
-use crate::extension_host::registered_extension_store::{
-    RegisteredExtensionStore, resolve_registered_for_scope,
-};
+use crate::extension_host::registered_extension_store::resolve_registered_for_scope;
 
 const HEALTHY_OWNER_USER_ID: &str = "c3333333-7fe5-474c-965a-67cb69df3d06";
 const BROKEN_OWNER_USER_ID: &str = "d4444444-7fe5-474c-965a-67cb69df3d07";
@@ -102,65 +101,6 @@ fn seed_registered_manifest(storage_root: &std::path::Path, owner: &str, extensi
         .expect("write registered manifest"); // safety: test-only fixture setup.
 }
 
-/// Pins the `list_all` fix: `RegisteredExtensionStore::list_for_owner`'s
-/// `fs.list_dir` erroring for one owner (broken owner's directory) must be
-/// skipped-and-logged, not `?`-propagated — the healthy owner's packages
-/// must still come back. RED before the fix (whole call returned `Err`).
-#[tokio::test]
-async fn list_all_skips_owner_whose_directory_listing_errors() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let storage_root = dir.path().join("local-dev");
-    std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
-    seed_registered_manifest(&storage_root, HEALTHY_OWNER_USER_ID, HEALTHY_EXTENSION_ID);
-    // The broken owner still needs a directory entry under the registered
-    // root (so `list_all`'s top-level scan reports it as a directory and
-    // descends into it) — its own contents are irrelevant since `list_dir`
-    // on it is intercepted.
-    std::fs::create_dir_all(
-        storage_root
-            .join("system/extensions/registered")
-            .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
-            .join(BROKEN_OWNER_USER_ID),
-    )
-    .expect("broken owner dir");
-
-    let mut local_filesystem = LocalFilesystem::new();
-    local_filesystem
-        .mount_local(
-            VirtualPath::new("/system/extensions").expect("valid virtual path"),
-            HostPath::from_path_buf(storage_root.join("system/extensions")),
-        )
-        .expect("mount system extensions");
-
-    let broken_owner_root = VirtualPath::new(format!(
-        "/system/extensions/registered/{}/{BROKEN_OWNER_USER_ID}",
-        ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID
-    ))
-    .expect("valid virtual path");
-    let filesystem = FailListDirFilesystem {
-        inner: local_filesystem,
-        fail_path: broken_owner_root,
-    };
-
-    let packages = RegisteredExtensionStore::list_all(&filesystem)
-        .await
-        .expect(
-            "list_all must skip the owner whose directory listing errors, not propagate the \
-             error for every owner (RED until skip-and-log lands)",
-        );
-    assert_eq!(
-        packages.len(),
-        1,
-        "the healthy owner's package must still be returned despite the broken owner's \
-         directory-listing error"
-    );
-    assert_eq!(
-        packages[0].package_ref,
-        LifecyclePackageRef::new(LifecyclePackageKind::Extension, HEALTHY_EXTENSION_ID)
-            .expect("valid package ref")
-    );
-}
-
 /// Pins the `restore_extension_lifecycle_state` fix: an installation whose
 /// registered manifest is gone (deleted/corrupted on disk, but still on
 /// record in the installation store) must be skipped via the registered-store
@@ -192,7 +132,7 @@ async fn restore_continues_past_installation_whose_registered_fallback_errors() 
     // seeded, matching a real "registered then reinstalled/deleted" history),
     // but its `manifest.toml` no longer exists anywhere on disk. `catalog.resolve()`
     // misses (static catalog never holds `UserRegistered` packages) and
-    // `resolve_any_owner_for_restore` also misses, since no owner directory
+    // the row-owner-keyed `resolve_registered_for_owner` also misses, since no owner directory
     // has this extension id — the missing-manifest scenario this fix targets.
     let missing_extension_id = ExtensionId::new("missing-mcp").expect("valid extension id");
     let missing_manifest_hash = ManifestHash::new(sha256_digest_token(b"missing-mcp-placeholder"))
@@ -397,7 +337,7 @@ impl RootFilesystem for OwnerBFirstFilesystem {
 /// independently register descriptors under the SAME bare extension id with
 /// different manifest content (different runtime URL). The installation row
 /// belongs to owner A. An any-owner directory scan (the old
-/// `resolve_any_owner_for_restore`, order-dependent) can find owner B's
+/// `resolve_any_owner_for_restore` helper, order-dependent) could find owner B's
 /// descriptor first and serve IT for owner A's row — publishing the wrong
 /// endpoint under A's installation (or, since A's row pins the manifest hash
 /// it was installed with, tripping a hash-mismatch that aborts the ENTIRE

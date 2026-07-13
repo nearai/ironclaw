@@ -1,6 +1,12 @@
-//! Owner-scoped storage and catalog composition for user-registered MCP
-//! extensions. Descriptors live at
-//! `/system/extensions/registered/<tenant>/<owner>/<id>/manifest.toml`.
+//! Owner-scoped storage for user-registered MCP extensions, wired into
+//! `extension_lifecycle.rs`'s search/install/projection paths and boot
+//! restore. Descriptors are sharded at
+//! `/system/extensions/registered/<tenant>/<owner>/<id>/manifest.toml` —
+//! that path sharding IS the visibility filter for the live scoped readers.
+//! Manifest provenance (`ManifestSource::UserRegistered { tenant_id, owner }`)
+//! records who registered a descriptor, while the installation ROW's
+//! `InstallationOwner` is authoritative for who holds the install — the two
+//! are paired by `extension_lifecycle::effective_owner_scope`.
 //!
 //! **Boot-leak invariant (do not weaken):** the shared, process-wide
 //! `AvailableExtensionCatalog` must never contain a `UserRegistered` package.
@@ -9,15 +15,6 @@
 //! the owner overlay separately and merges at the call site.
 //!
 //! The write side (`put`/`delete`) lands with the register verb in T3.
-//!
-//! This module is landed unwired: `extension_lifecycle.rs`'s
-//! `search`/`install`/`activate`/`remove` do not yet consult these helpers.
-//! That wiring — plus stamping `InstallationOwner::user(owner)` on a
-//! registered package's installation row — lands in the T1 install/list/
-//! search/activate/remove integration commit. Until then every item here is
-//! read-only-reachable from its own unit tests only, hence the blanket
-//! `dead_code` allow.
-#![allow(dead_code)]
 
 use ironclaw_extensions::ManifestSource;
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
@@ -44,10 +41,6 @@ pub(crate) fn is_owner_registered(source: &ManifestSource) -> bool {
 pub(crate) struct RegisteredExtensionStore;
 
 impl RegisteredExtensionStore {
-    fn registered_root() -> Result<VirtualPath, ProductWorkflowError> {
-        VirtualPath::new(REGISTERED_ROOT).map_err(map_binding_error)
-    }
-
     /// `/system/extensions/registered/<tenant>/<owner>` — the directory
     /// [`load_filesystem_packages`] lists for one tenant-owner's registered
     /// set.
@@ -83,87 +76,6 @@ impl RegisteredExtensionStore {
         )
         .await
     }
-
-    /// Every tenant's every owner's registered packages. No longer backs the
-    /// boot restore fallback (that's row-owner-keyed via
-    /// [`resolve_registered_for_owner`] now); kept as a general any-owner
-    /// listing utility for callers that genuinely need one, and exercised
-    /// directly by its own blast-radius tests. Never call this from the live
-    /// search/install path, which must stay scoped to the calling
-    /// tenant-owner via [`list_for_scope`].
-    pub(crate) async fn list_all<F>(
-        fs: &F,
-    ) -> Result<Vec<AvailableExtensionPackage>, ProductWorkflowError>
-    where
-        F: RootFilesystem + ?Sized,
-    {
-        let root = Self::registered_root()?;
-        let tenant_entries = match fs.list_dir(&root).await {
-            Ok(entries) => entries,
-            Err(FilesystemError::NotFound { .. }) | Err(FilesystemError::MountNotFound { .. }) => {
-                return Ok(Vec::new());
-            }
-            Err(error) => {
-                return Err(ProductWorkflowError::Transient {
-                    reason: format!("failed to list registered extension tenants: {error}"),
-                });
-            }
-        };
-        let mut packages = Vec::new();
-        for tenant_entry in tenant_entries {
-            if tenant_entry.file_type != FileType::Directory {
-                continue;
-            }
-            let Ok(tenant_id) = TenantId::new(tenant_entry.name.clone()) else {
-                continue;
-            };
-            let tenant_root = VirtualPath::new(format!("{REGISTERED_ROOT}/{}", tenant_id.as_str()))
-                .map_err(map_binding_error)?;
-            let owner_entries = match fs.list_dir(&tenant_root).await {
-                Ok(entries) => entries,
-                Err(FilesystemError::NotFound { .. })
-                | Err(FilesystemError::MountNotFound { .. }) => continue,
-                Err(error) => {
-                    // Skip-and-log, not `?`: this feeds boot-time
-                    // `resolve_any_owner_for_restore` for every tenant, so one
-                    // tenant's transient directory error must not abort every
-                    // other tenant's restore (cross-tenant DoS).
-                    tracing::debug!(
-                        tenant = tenant_id.as_str(),
-                        %error,
-                        "skipping tenant's registered extensions: directory listing failed"
-                    );
-                    continue;
-                }
-            };
-            for entry in owner_entries {
-                if entry.file_type != FileType::Directory {
-                    continue;
-                }
-                let Ok(owner) = UserId::new(entry.name.clone()) else {
-                    continue;
-                };
-                let mut scope = ResourceScope::local_default(owner.clone(), InvocationId::new())
-                    .map_err(map_binding_error)?;
-                scope.tenant_id = tenant_id.clone();
-                // Skip-and-log, not `?`: one tenant-owner's transient
-                // directory error must not abort every other tenant-owner's
-                // restore (cross-tenant DoS).
-                match Self::list_for_scope(fs, &scope).await {
-                    Ok(owner_packages) => packages.extend(owner_packages),
-                    Err(error) => {
-                        tracing::debug!(
-                            tenant = tenant_id.as_str(),
-                            owner = owner.as_str(),
-                            %error,
-                            "skipping owner's registered extensions: directory listing failed"
-                        );
-                    }
-                }
-            }
-        }
-        Ok(packages)
-    }
 }
 
 /// One-shot boot-time migration of the PRE-TENANT descriptor layout
@@ -178,7 +90,7 @@ impl RegisteredExtensionStore {
 /// level below an owner). In the tenant-scoped layout the manifest is two
 /// levels below the depth-1 (tenant) dir, so healthy tenant dirs never match.
 /// Best-effort per entry: one broken legacy dir must not abort boot restore
-/// for everyone else (same skip-and-log stance as [`RegisteredExtensionStore::list_all`]).
+/// for everyone else (same skip-and-log stance as boot restore).
 pub(crate) async fn migrate_legacy_owner_layout<F>(fs: &F) -> Result<(), ProductWorkflowError>
 where
     F: RootFilesystem + ?Sized,

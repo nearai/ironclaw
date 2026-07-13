@@ -228,17 +228,16 @@ const CORRUPT_MANIFEST_TOML: &str = "[runtime\nkind = \"mcp\"\n";
 /// unparseable `manifest.toml` in a directory scan, hard-failing the whole
 /// listing. Once T3 makes `/system/extensions/registered/<owner>/` end-user
 /// writable, one corrupt descriptor under owner A is a cross-tenant DoS:
-/// `RegisteredExtensionStore::list_for_owner`/`list_all` both go through the
-/// loop, and `list_all` backs `resolve_any_owner_for_restore`, the boot-order
-/// fallback every owner's restore can hit. This pins the real blast radius,
+/// `RegisteredExtensionStore::list_for_scope` goes through that loop, and it
+/// backs both live scoped reads and `resolve_registered_for_owner`, the
+/// row-owner-keyed boot-restore fallback. This pins the real blast radius,
 /// not just "owner A's own listing survives its own corrupt entry":
 ///   (i)  owner A's OTHER registered entries still list despite the corrupt
 ///        sibling, and
 ///   (ii) owner B — a wholly unrelated owner — still gets a successful boot
 ///        restore (`restore_extension_lifecycle_state` /
-///        `resolve_any_owner_for_restore`) with their extension published,
-///        even though owner A's directory (scanned as part of the any-owner
-///        restore fallback) contains a corrupt manifest.
+///        `resolve_registered_for_owner`) with their extension published,
+///        even though owner A's directory contains a corrupt manifest.
 /// Pins the skip-and-log fix: the corrupt entry is skipped rather than
 /// propagating a `ProductWorkflowError` for the whole directory.
 #[tokio::test]
@@ -408,8 +407,8 @@ async fn corrupt_manifest_under_one_owner_does_not_break_other_owners_listing_or
 
 /// Legacy-fs migration (pre-tenant layout): descriptors written by pre-tenant
 /// builds live at `/system/extensions/registered/<owner>/<id>/manifest.toml`
-/// (no tenant segment). The tenant-scoped walkers (`list_for_scope`,
-/// `list_all`) cannot see that layout, so without migration a pre-tenant
+/// (no tenant segment). The tenant-scoped walker (`list_for_scope`)
+/// cannot see that layout, so without migration a pre-tenant
 /// registration silently vanishes from listing AND from boot restore. Boot
 /// restore must migrate the legacy tree into the local default tenant —
 /// mirroring the wire-format serde default in

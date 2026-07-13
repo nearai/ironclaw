@@ -1705,9 +1705,9 @@ where
             //
             // Log level is source-conditional: this loop is shared by every
             // owner's registered-store listing
-            // (`RegisteredExtensionStore::list_for_scope`/`list_all`, reached
-            // from both the live search path and boot-time
-            // `resolve_any_owner_for_restore`) as well as the boot-time
+            // (`RegisteredExtensionStore::list_for_scope`, reached from both
+            // the live search path and the boot-time row-owner-keyed
+            // `resolve_registered_for_owner` fallback) as well as the boot-time
             // shared catalog scan. `warn!` on a live/foreground search path
             // corrupts the REPL/TUI (CLAUDE.md); `UserRegistered` sources use
             // `debug!` instead so one owner's corrupt `manifest.toml` stays a
