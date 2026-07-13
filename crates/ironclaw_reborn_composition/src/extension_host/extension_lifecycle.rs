@@ -539,7 +539,11 @@ impl RebornLocalExtensionManagementPort {
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let caller = &scope.user_id;
         let (_, installation_id) = extension_ids_from_package_ref(&package_ref)?;
-        let installation = self
+        let available = self
+            .resolve_available_for_scope(&package_ref, scope)
+            .await?
+            .ok_or_else(available_extension_not_found)?;
+        let mut installation = self
             .installation_store
             .get_installation(&installation_id)
             .await
@@ -547,6 +551,21 @@ impl RebornLocalExtensionManagementPort {
             // A foreign user-private install projects as not-installed for
             // this caller — same masking as search/list (#5459 P1).
             .filter(|installation| installation.owner().visible_to(caller));
+        // Same row-authoritative tenant check `search_summary`/`installed_summaries`
+        // apply: the row has no tenant axis, so a foreign tenant's row of the
+        // same extension id must not project as installed against this
+        // caller's own tenant-scoped registered descriptor.
+        if let Some(found) = installation.as_ref()
+            && is_owner_registered(&available.package.manifest.source)
+        {
+            let effective_tenant =
+                installation_effective_owner_scope(&self.installation_store, found)
+                    .await?
+                    .map(|(tenant_id, _)| tenant_id);
+            if effective_tenant.as_ref() != Some(&scope.tenant_id) {
+                installation = None;
+            }
+        }
         let phase = installation
             .as_ref()
             .map(|installation| phase_for_activation_state(installation.activation_state()))
@@ -554,11 +573,7 @@ impl RebornLocalExtensionManagementPort {
         let install_scope = installation
             .as_ref()
             .map(|installation| install_scope_for_owner(installation.owner()));
-        let summary = self
-            .resolve_available_for_scope(&package_ref, scope)
-            .await?
-            .ok_or_else(available_extension_not_found)?
-            .summary();
+        let summary = available.summary();
         Ok(response_with_payload(
             Some(package_ref),
             phase,
@@ -684,6 +699,21 @@ impl RebornLocalExtensionManagementPort {
                 Some(available) => available,
                 None => continue,
             };
+            // The installation row has no tenant axis (flat map keyed by
+            // extension id), so the SAME user's own registration under this
+            // caller's tenant can otherwise be paired with a DIFFERENT
+            // tenant's install row of the same id (search_summary's #5525
+            // fix applies here identically): require the row's own
+            // registered tenant to match this scope's tenant, or skip it.
+            if is_owner_registered(&available.package.manifest.source) {
+                let effective_tenant =
+                    installation_effective_owner_scope(&self.installation_store, &installation)
+                        .await?
+                        .map(|(tenant_id, _)| tenant_id);
+                if effective_tenant.as_ref() != Some(&scope.tenant_id) {
+                    continue;
+                }
+            }
             summaries.push(LifecycleInstalledExtensionSummary {
                 summary: available.summary(),
                 phase: phase_for_activation_state(installation.activation_state()),
@@ -9413,6 +9443,93 @@ url = "http://127.0.0.1:9/mcp"
         assert!(
             extensions[0].installation_phase.is_none(),
             "must not report tenant-b's installation phase for a descriptor never installed in this tenant"
+        );
+    }
+
+    /// Regression sibling of `search_does_not_report_foreign_tenants_installation_phase`
+    /// for the LIST surface: `installed_summaries` currently masks rows by
+    /// `UserId` only, so the same user's OWN registration under their own
+    /// tenant gets paired with a foreign-tenant install row of the same
+    /// extension id and reported as installed. Must apply the same
+    /// row-authoritative tenant check `search_summary` does. RED until fixed.
+    #[tokio::test]
+    async fn list_installed_does_not_report_foreign_tenants_installation_as_installed() {
+        let installed_scope = resource_scope_for("tenant-b", "owner-a");
+        let uninstalled_scope = resource_scope_for("default", "owner-a");
+        let (dir, port, _package_ref, _active_registry, _installation_store) =
+            user_registered_isolation_fixture(&installed_scope, true).await;
+
+        // Register (not install) the same extension id under the caller's OWN
+        // tenant — a distinct registration that has never been installed.
+        let uninstalled_descriptor_dir = dir
+            .path()
+            .join("local-dev/system/extensions/registered")
+            .join(uninstalled_scope.tenant_id.as_str())
+            .join(uninstalled_scope.user_id.as_str())
+            .join("acme-mcp-registered");
+        std::fs::create_dir_all(&uninstalled_descriptor_dir)
+            .expect("uninstalled registered descriptor dir");
+        std::fs::write(
+            uninstalled_descriptor_dir.join("manifest.toml"),
+            REGISTERED_ISOLATION_MANIFEST_TOML,
+        )
+        .expect("write uninstalled registered descriptor");
+
+        let list = port
+            .list_installed(&uninstalled_scope)
+            .await
+            .expect("list under the uninstalled tenant runs");
+        let Some(LifecycleProductPayload::ExtensionList { count, .. }) = list.payload else {
+            panic!("expected extension list payload");
+        };
+        assert_eq!(
+            count, 0,
+            "must not report tenant-b's install row as installed under the caller's own tenant"
+        );
+    }
+
+    /// Regression sibling of `search_does_not_report_foreign_tenants_installation_phase`
+    /// for the PROJECT surface: `project()` must apply the same
+    /// row-authoritative tenant check before returning phase/install_scope
+    /// derived from a foreign-tenant install row. RED until fixed.
+    #[tokio::test]
+    async fn project_does_not_report_foreign_tenants_installation_as_installed() {
+        let installed_scope = resource_scope_for("tenant-b", "owner-a");
+        let uninstalled_scope = resource_scope_for("default", "owner-a");
+        let (dir, port, package_ref, _active_registry, _installation_store) =
+            user_registered_isolation_fixture(&installed_scope, true).await;
+
+        let uninstalled_descriptor_dir = dir
+            .path()
+            .join("local-dev/system/extensions/registered")
+            .join(uninstalled_scope.tenant_id.as_str())
+            .join(uninstalled_scope.user_id.as_str())
+            .join("acme-mcp-registered");
+        std::fs::create_dir_all(&uninstalled_descriptor_dir)
+            .expect("uninstalled registered descriptor dir");
+        std::fs::write(
+            uninstalled_descriptor_dir.join("manifest.toml"),
+            REGISTERED_ISOLATION_MANIFEST_TOML,
+        )
+        .expect("write uninstalled registered descriptor");
+
+        let projection = port
+            .project(package_ref, &uninstalled_scope)
+            .await
+            .expect("project under the uninstalled tenant runs");
+        assert_eq!(
+            projection.phase,
+            LifecyclePhase::Discovered,
+            "must project as discovered/not-installed, not tenant-b's installed phase"
+        );
+        let Some(LifecycleProductPayload::ExtensionList { extensions, .. }) = projection.payload
+        else {
+            panic!("expected extension list payload");
+        };
+        assert_eq!(extensions.len(), 1);
+        assert!(
+            extensions[0].install_scope.is_none(),
+            "must not surface tenant-b's install_scope for this tenant's projection"
         );
     }
 
