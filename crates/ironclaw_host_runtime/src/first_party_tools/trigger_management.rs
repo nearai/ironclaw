@@ -35,9 +35,8 @@ pub const TRIGGER_REMOVE_CAPABILITY_ID: &str = "builtin.trigger_remove";
 pub const TRIGGER_PAUSE_CAPABILITY_ID: &str = "builtin.trigger_pause";
 pub const TRIGGER_RESUME_CAPABILITY_ID: &str = "builtin.trigger_resume";
 
-const TRIGGER_CREATE_DESCRIPTION: &str = "Create a caller-scoped scheduled trigger (one-time or recurring). The prompt is the full task each fire performs; when the task is to message someone or post somewhere, say so in the prompt and pin the exact recipient conversation ids, resolved while the user is present \u{2014} never leave a recipient as a name to look up at fire time. Do not tell the prompt to send results back to the requesting user; each fire's final reply is delivered automatically \u{2014} to this trigger's delivery_target_id when set, otherwise to the user's default outbound delivery target at fire time. Asks like 'send me the result' are delivery routing, not a task step: satisfy them with delivery_target_id alone and keep every send-to-requester step \u{2014} even one with a pinned conversation id \u{2014} out of the prompt. When the user asks for this trigger's results on a specific product or channel, pass delivery_target_id with an id from builtin__outbound_delivery_targets_list; builtin__outbound_delivery_target_set changes only the user-wide default shared by everything else. In the user-facing reply, call it a routine and summarize its name, task, plain-language schedule, and delivery only; never expose trigger, agent, project, or delivery-target ids, raw cron, stored prompts, internal capability names, result references, or host metadata.";
-
-const TRIGGER_LIST_DESCRIPTION: &str = "List scheduled triggers owned by the current caller scope. Use returned ids and raw schedule fields only as internal inputs for follow-up trigger capabilities. In the user-facing reply, call them routines and summarize names, status, tasks, and schedules in plain language; never expose trigger, agent, project, or delivery-target ids, raw cron, stored prompts, internal capability names, result references, or host metadata.";
+const TRIGGER_CREATE_DESCRIPTION: &str = include_str!("prompts/trigger_create.md");
+const TRIGGER_LIST_DESCRIPTION: &str = include_str!("prompts/trigger_list.md");
 
 pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![

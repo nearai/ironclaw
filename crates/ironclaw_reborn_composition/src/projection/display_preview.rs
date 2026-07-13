@@ -24,6 +24,7 @@ use super::capability_activity_status_wire;
 
 pub(crate) const SANITIZE_JSON_MAX_DEPTH: usize = 32;
 const COMPLETED_PREVIEW_PENDING_TIMEOUT_SECONDS: i64 = 10;
+const ROUTINE_LIST_PREVIEW_LIMIT: usize = 10;
 
 #[async_trait]
 pub(super) trait CapabilityDisplayPreviewSource: Send + Sync {
@@ -817,10 +818,9 @@ impl SummaryBuilder {
 
 fn capability_matches(capability_id: &str, short_name: &str) -> bool {
     capability_id == short_name
-        || capability_id == format!("builtin.{short_name}")
-        || capability_id == format!("builtin__{short_name}")
-        || capability_id.ends_with(&format!(".{short_name}"))
-        || capability_id.ends_with(&format!("__{short_name}"))
+        || capability_id
+            .strip_suffix(short_name)
+            .is_some_and(|prefix| prefix.ends_with('.') || prefix.ends_with("__"))
 }
 
 fn string_arg<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
@@ -905,43 +905,50 @@ impl RoutineCapability {
     }
 
     fn output_summary(self, value: &serde_json::Value) -> &'static str {
+        if self
+            .mutation_presence_field()
+            .and_then(|field| value.get(field))
+            .and_then(serde_json::Value::as_bool)
+            == Some(false)
+        {
+            return "Routine not found";
+        }
+
         match self {
             Self::Create => "Routine created",
             Self::List => "Routines listed",
-            Self::Remove
-                if value.get("removed").and_then(serde_json::Value::as_bool) == Some(false) =>
-            {
-                "Routine not found"
-            }
             Self::Remove => "Routine removed",
-            Self::Pause
-                if value.get("updated").and_then(serde_json::Value::as_bool) == Some(false) =>
-            {
-                "Routine not found"
-            }
             Self::Pause => "Routine paused",
-            Self::Resume
-                if value.get("updated").and_then(serde_json::Value::as_bool) == Some(false) =>
-            {
-                "Routine not found"
-            }
             Self::Resume => "Routine resumed",
+        }
+    }
+
+    /// Mirrors the first-party trigger handler result contract: removal uses
+    /// "removed", while pause/resume state transitions use "updated".
+    fn mutation_presence_field(self) -> Option<&'static str> {
+        match self {
+            Self::Remove => Some("removed"),
+            Self::Pause | Self::Resume => Some("updated"),
+            Self::Create | Self::List => None,
         }
     }
 }
 
+const ROUTINE_CAPABILITIES: [(&str, RoutineCapability); 5] = [
+    ("trigger_create", RoutineCapability::Create),
+    ("trigger_list", RoutineCapability::List),
+    ("trigger_remove", RoutineCapability::Remove),
+    ("trigger_pause", RoutineCapability::Pause),
+    ("trigger_resume", RoutineCapability::Resume),
+];
+
 fn routine_capability(capability_id: &str) -> Option<RoutineCapability> {
-    [
-        ("trigger_create", RoutineCapability::Create),
-        ("trigger_list", RoutineCapability::List),
-        ("trigger_remove", RoutineCapability::Remove),
-        ("trigger_pause", RoutineCapability::Pause),
-        ("trigger_resume", RoutineCapability::Resume),
-    ]
-    .into_iter()
-    .find_map(|(short_name, operation)| {
-        capability_matches(capability_id, short_name).then_some(operation)
-    })
+    ROUTINE_CAPABILITIES
+        .iter()
+        .copied()
+        .find_map(|(short_name, operation)| {
+            capability_matches(capability_id, short_name).then_some(operation)
+        })
 }
 
 fn capability_input_title(capability_id: &str) -> &str {
@@ -1082,12 +1089,15 @@ fn routine_list_preview_lines(value: &serde_json::Value, truncated: &mut bool) -
     let Some(triggers) = value.get("triggers").and_then(serde_json::Value::as_array) else {
         return vec!["Routines listed".to_string()];
     };
-    let mut lines = vec![match triggers.len() {
+    let visible_count = triggers.len().min(ROUTINE_LIST_PREVIEW_LIMIT);
+    let overflow_count = usize::from(triggers.len() > ROUTINE_LIST_PREVIEW_LIMIT);
+    let mut lines = Vec::with_capacity(visible_count + overflow_count + 1);
+    lines.push(match triggers.len() {
         0 => "No routines found".to_string(),
         1 => "1 routine found".to_string(),
         count => format!("{count} routines found"),
-    }];
-    for trigger in triggers {
+    });
+    for trigger in triggers.iter().take(ROUTINE_LIST_PREVIEW_LIMIT) {
         let Some(name) = trigger
             .get("name")
             .and_then(serde_json::Value::as_str)
@@ -1097,7 +1107,7 @@ fn routine_list_preview_lines(value: &serde_json::Value, truncated: &mut bool) -
         };
         let name = bounded_summary_value(name);
         *truncated |= name.truncated;
-        let mut details = Vec::new();
+        let mut details = Vec::with_capacity(2);
         if let Some(state) = routine_state_label(trigger.get("state")) {
             details.push(state);
         }
@@ -1111,9 +1121,18 @@ fn routine_list_preview_lines(value: &serde_json::Value, truncated: &mut bool) -
         };
         lines.push(format!("{}{}", name.text, suffix));
     }
+    if triggers.len() > ROUTINE_LIST_PREVIEW_LIMIT {
+        *truncated = true;
+        lines.push(format!(
+            "Showing first {ROUTINE_LIST_PREVIEW_LIMIT} routines"
+        ));
+    }
     lines
 }
 
+/// Reads the first-party trigger output shape with kind "cron" or "once".
+/// Missing or non-string kinds are omitted; unknown string kinds degrade to
+/// the safe generic "scheduled" label instead of exposing raw schedule data.
 fn routine_schedule_label(schedule: Option<&serde_json::Value>) -> Option<&'static str> {
     match schedule?.get("kind").and_then(serde_json::Value::as_str)? {
         "cron" => Some("recurring"),
@@ -1127,10 +1146,13 @@ fn routine_state_label(state: Option<&serde_json::Value>) -> Option<&'static str
         "scheduled" => Some("active"),
         "paused" => Some("paused"),
         "completed" => Some("completed"),
-        _ => None,
+        _ => Some("unknown"),
     }
 }
 
+/// Formats an optional backend RFC 3339 timestamp for display. Malformed
+/// values are intentionally omitted because this preview field is advisory;
+/// the authoritative trigger record remains unchanged.
 fn format_utc_datetime(value: &str) -> Option<String> {
     chrono::DateTime::parse_from_rfc3339(value)
         .ok()

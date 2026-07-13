@@ -30,6 +30,21 @@ async fn completed_preview_for_input(
     capability_id: &str,
     arguments: serde_json::Value,
 ) -> CapabilityDisplayPreviewView {
+    completed_preview_for_input_and_output(
+        tool_name,
+        capability_id,
+        arguments,
+        serde_json::json!({"ok": true}),
+    )
+    .await
+}
+
+async fn completed_preview_for_input_and_output(
+    tool_name: &str,
+    capability_id: &str,
+    arguments: serde_json::Value,
+    output: serde_json::Value,
+) -> CapabilityDisplayPreviewView {
     let run_id = TurnRunId::new();
     let capability = CapabilityId::new(capability_id).unwrap();
     let input_ref = preview_input_ref(&format!("preview-input-{tool_name}"));
@@ -41,7 +56,7 @@ async fn completed_preview_for_input(
         invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
         capability_id: &capability,
         result_ref: "result:preview",
-        output: &serde_json::json!({"ok": true}),
+        output: &output,
         output_bytes: 12,
     });
     store
@@ -511,6 +526,150 @@ async fn trigger_create_preview_fails_closed_for_wrapped_internal_input() {
             "preview leaked {internal}: {rendered}"
         );
     }
+}
+
+#[tokio::test]
+async fn capability_matching_accepts_supported_provider_names_without_partial_matches() {
+    for capability_id in [
+        "shell",
+        "builtin.shell",
+        "builtin__shell",
+        "extension.shell",
+        "extension__shell",
+    ] {
+        let preview = completed_preview_for_input(
+            capability_id,
+            "builtin.shell",
+            serde_json::json!({"command": "printf hello"}),
+        )
+        .await;
+        assert_eq!(
+            preview.subtitle.as_deref(),
+            Some("printf hello"),
+            "expected {capability_id:?} to match"
+        );
+    }
+    for capability_id in ["shell_extra", "notshell", "extension_shell"] {
+        let preview = completed_preview_for_input(
+            capability_id,
+            "builtin.shell",
+            serde_json::json!({"command": "printf hello"}),
+        )
+        .await;
+        assert_eq!(
+            preview.subtitle, None,
+            "expected {capability_id:?} not to match"
+        );
+    }
+}
+
+#[tokio::test]
+async fn routine_preview_uses_handler_result_fields_and_bounds_list_output() {
+    for (provider_name, capability_id, output_field) in [
+        (
+            "builtin__trigger_remove",
+            "builtin.trigger_remove",
+            "removed",
+        ),
+        ("builtin__trigger_pause", "builtin.trigger_pause", "updated"),
+        (
+            "builtin__trigger_resume",
+            "builtin.trigger_resume",
+            "updated",
+        ),
+    ] {
+        let preview = completed_preview_for_input_and_output(
+            provider_name,
+            capability_id,
+            serde_json::json!({"trigger_id": "internal-id"}),
+            serde_json::json!({(output_field): false}),
+        )
+        .await;
+        assert_eq!(preview.output_summary.as_deref(), Some("Routine not found"));
+    }
+
+    let pause_with_remove_field = completed_preview_for_input_and_output(
+        "builtin__trigger_pause",
+        "builtin.trigger_pause",
+        serde_json::json!({"trigger_id": "internal-id"}),
+        serde_json::json!({"removed": false}),
+    )
+    .await;
+    assert_eq!(
+        pause_with_remove_field.output_summary.as_deref(),
+        Some("Routine paused"),
+        "pause must read the handler's updated field, not remove's removed field"
+    );
+
+    let triggers = (0..12)
+        .map(|index| {
+            serde_json::json!({
+                "trigger_id": format!("internal-{index}"),
+                "name": format!("Routine {index}"),
+                "state": if index == 0 { "future_state" } else { "scheduled" },
+                "schedule": { "kind": "cron", "expression": "0 8 * * *" }
+            })
+        })
+        .collect::<Vec<_>>();
+    let output = completed_preview_for_input_and_output(
+        "builtin__trigger_list",
+        "builtin.trigger_list",
+        serde_json::json!({}),
+        serde_json::json!({"triggers": triggers}),
+    )
+    .await;
+    let preview = output
+        .output_preview
+        .as_deref()
+        .expect("routine list preview");
+
+    assert_eq!(output.output_summary.as_deref(), Some("Routines listed"));
+    assert!(output.truncated);
+    assert!(preview.contains("12 routines found"));
+    assert!(preview.contains("Routine 0 — unknown, recurring"));
+    assert!(preview.contains("Routine 9 — active, recurring"));
+    assert!(!preview.contains("Routine 10 —"));
+    assert!(preview.contains("Showing first 10 routines"));
+    assert!(!preview.contains("internal-"));
+    assert!(!preview.contains("0 8 * * *"));
+}
+
+#[tokio::test]
+async fn routine_optional_display_fields_degrade_safely() {
+    let list = completed_preview_for_input_and_output(
+        "builtin__trigger_list",
+        "builtin.trigger_list",
+        serde_json::json!({}),
+        serde_json::json!({
+            "triggers": [{
+                "name": "Future routine",
+                "state": "future_state",
+                "schedule": {"kind": "future_kind", "expression": "internal"}
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(
+        list.output_preview.as_deref(),
+        Some("1 routine found\nFuture routine — unknown, scheduled")
+    );
+
+    let create = completed_preview_for_input_and_output(
+        "builtin__trigger_create",
+        "builtin.trigger_create",
+        serde_json::json!({"name": "Malformed timestamp"}),
+        serde_json::json!({
+            "trigger": {
+                "name": "Malformed timestamp",
+                "schedule": {"kind": "once"},
+                "next_run_at": "not-a-timestamp"
+            }
+        }),
+    )
+    .await;
+    let create_preview = create.output_preview.as_deref().expect("create preview");
+    assert!(create_preview.contains("Schedule: one-time"));
+    assert!(!create_preview.contains("Next run:"));
 }
 
 #[tokio::test]
