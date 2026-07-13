@@ -257,7 +257,7 @@ pub use slack::slack_serve::{
 pub use slack::slack_setup::SlackPersonalSetupServiceSlot;
 pub use web_access::register_bundled_web_access_first_party_handlers;
 #[cfg(feature = "webui-v2-beta")]
-pub use webui::facade::ProductAuthWebuiRouteMountConfig;
+pub use webui::facade::{ProductAuthWebuiRouteMountConfig, ProductAuthWebuiRouteMountError};
 pub use webui::facade::{RebornWebuiBundle, build_webui_services};
 
 /// Re-exported identity vocabulary host binaries need to construct

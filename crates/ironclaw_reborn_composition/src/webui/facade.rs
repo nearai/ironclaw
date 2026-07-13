@@ -5,9 +5,10 @@ use chrono::Utc;
 
 use async_trait::async_trait;
 use ironclaw_extensions::{InstallationOwner, SharedExtensionRegistry};
+#[cfg(feature = "webui-v2-beta")]
+use ironclaw_host_api::{AgentId, ProjectId, TenantId};
 use ironclaw_host_api::{
-    AgentId, EffectKind, ExtensionId, InvocationId, ProjectId, ResourceScope, RuntimeKind,
-    TenantId, UserId,
+    EffectKind, ExtensionId, InvocationId, ResourceScope, RuntimeKind, UserId,
 };
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
@@ -24,7 +25,7 @@ use ironclaw_product_workflow::{
 #[cfg(feature = "webui-v2-beta")]
 use ironclaw_auth::GoogleOAuthRouteConfig;
 #[cfg(feature = "webui-v2-beta")]
-use ironclaw_reborn_webui_ingress::{WebuiGatewayBundle, WebuiRouteMount};
+use ironclaw_reborn_webui_ingress::{WebuiGatewayBundle, WebuiRouteMount, WebuiServeConfig};
 use ironclaw_triggers::TriggerRepository;
 
 use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
@@ -181,8 +182,18 @@ impl RebornWebuiBundle {
     pub fn product_auth_route_mount(
         &self,
         config: ProductAuthWebuiRouteMountConfig,
-    ) -> Option<WebuiRouteMount> {
-        let product_auth = Arc::clone(self.product_auth.as_ref()?);
+        webui_config: &WebuiServeConfig,
+    ) -> Result<Option<WebuiRouteMount>, ProductAuthWebuiRouteMountError> {
+        let Some(product_auth) = self.product_auth.as_ref().map(Arc::clone) else {
+            return Ok(None);
+        };
+        if !webui_config.matches_authenticated_caller_scope(
+            &config.tenant_id,
+            config.default_agent_id.as_ref(),
+            config.default_project_id.as_ref(),
+        ) {
+            return Err(ProductAuthWebuiRouteMountError::ScopeMismatch);
+        }
         let mut state = crate::product_auth::serve::ProductAuthRouteState::new(
             product_auth,
             config.tenant_id,
@@ -201,10 +212,19 @@ impl RebornWebuiBundle {
         if let Some(slack_personal_oauth_binding) = config.slack_personal_oauth_binding {
             state = state.with_slack_personal_oauth_binding(slack_personal_oauth_binding);
         }
-        Some(crate::product_auth::serve::product_auth_webui_route_mount(
-            state,
+        Ok(Some(
+            crate::product_auth::serve::product_auth_webui_route_mount(state),
         ))
     }
+}
+
+#[cfg(feature = "webui-v2-beta")]
+#[derive(Debug, thiserror::Error)]
+pub enum ProductAuthWebuiRouteMountError {
+    #[error(
+        "product-auth route tenant/default-agent/default-project scope does not match the WebUI authenticated-caller scope"
+    )]
+    ScopeMismatch,
 }
 
 #[cfg(feature = "webui-v2-beta")]

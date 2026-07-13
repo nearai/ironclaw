@@ -451,6 +451,19 @@ impl WebuiServeConfig {
         self
     }
 
+    /// Return whether a host-owned route scope exactly matches the scope
+    /// stamped onto authenticated WebUI callers.
+    pub fn matches_authenticated_caller_scope(
+        &self,
+        tenant_id: &TenantId,
+        default_agent_id: Option<&AgentId>,
+        default_project_id: Option<&ProjectId>,
+    ) -> bool {
+        &self.tenant_id == tenant_id
+            && self.default_agent_id.as_ref() == default_agent_id
+            && self.default_project_id.as_ref() == default_project_id
+    }
+
     /// Set the canonical host for WebSocket same-origin checks. See
     /// [`Self::canonical_host`] for why this is more robust than
     /// trusting the request's `Host` header.

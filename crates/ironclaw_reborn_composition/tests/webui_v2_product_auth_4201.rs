@@ -305,21 +305,23 @@ fn build_fixture() -> AppFixture {
     let tenant_id = TenantId::new(TENANT).expect("tenant");
     let agent_id = AgentId::new(AGENT).expect("agent");
     let project_id = ProjectId::new(PROJECT).expect("project");
-    let product_auth_mount = bundle
-        .product_auth_route_mount(ProductAuthWebuiRouteMountConfig::new(
-            tenant_id.clone(),
-            Some(agent_id.clone()),
-            Some(project_id.clone()),
-        ))
-        .expect("product auth route mount");
-    let config = WebuiServeConfig::new(
+    let product_auth_mount_config = ProductAuthWebuiRouteMountConfig::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        Some(project_id.clone()),
+    );
+    let mut config = WebuiServeConfig::new(
         tenant_id,
         Arc::new(OnlyValidToken),
         vec![HeaderValue::from_static("http://localhost:1234")],
     )
     .with_default_agent_id(agent_id)
-    .with_default_project_id(project_id)
-    .with_route_mount(product_auth_mount);
+    .with_default_project_id(project_id);
+    let product_auth_mount = bundle
+        .product_auth_route_mount(product_auth_mount_config, &config)
+        .expect("matching product auth route scope")
+        .expect("product auth route mount");
+    config = config.with_route_mount(product_auth_mount);
     let app = webui_v2_app(bundle.gateway_bundle(), config).expect("webui v2 app");
     AppFixture { app, shared }
 }

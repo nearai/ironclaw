@@ -628,7 +628,9 @@ impl ServeCommand {
                         slack_mounts.channel_routes,
                     ));
             }
-            if let Some(product_auth_mount) = bundle.product_auth_route_mount(product_auth_mount_config)
+            if let Some(product_auth_mount) = bundle
+                .product_auth_route_mount(product_auth_mount_config, &serve_config)
+                .context("product-auth route scope does not match WebUI scope")?
             {
                 serve_config = serve_config.with_route_mount(product_auth_mount);
             }

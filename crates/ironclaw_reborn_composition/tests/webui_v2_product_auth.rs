@@ -43,9 +43,9 @@ use ironclaw_product_workflow::{
     WebUiSetupExtensionRequest, rejecting_reborn_services_error,
 };
 use ironclaw_reborn_composition::{
-    GoogleOAuthRouteConfig, ProductAuthWebuiRouteMountConfig, RebornAuthContinuationDispatcher,
-    RebornProductAuthServices, RebornReadiness, RebornWebuiBundle, WebuiAuthentication,
-    WebuiAuthenticator, WebuiServeConfig, webui_v2_app,
+    GoogleOAuthRouteConfig, ProductAuthWebuiRouteMountConfig, ProductAuthWebuiRouteMountError,
+    RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness,
+    RebornWebuiBundle, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app,
 };
 use serde_json::json;
 use tower::ServiceExt;
@@ -549,18 +549,53 @@ fn build_app_with_product_auth_service_config_and_extensions(
     if let Some(google_oauth) = google_oauth {
         product_auth_mount_config = product_auth_mount_config.with_google_oauth(google_oauth);
     }
-    let product_auth_mount = bundle
-        .product_auth_route_mount(product_auth_mount_config)
-        .expect("product auth route mount");
-    let config = WebuiServeConfig::new(
+    let mut config = WebuiServeConfig::new(
         tenant_id,
         Arc::new(OnlyValidToken),
         vec![HeaderValue::from_static("http://localhost:1234")],
     )
     .with_default_agent_id(agent_id)
-    .with_default_project_id(project_id)
-    .with_route_mount(product_auth_mount);
+    .with_default_project_id(project_id);
+    let product_auth_mount = bundle
+        .product_auth_route_mount(product_auth_mount_config, &config)
+        .expect("matching product auth route scope")
+        .expect("product auth route mount");
+    config = config.with_route_mount(product_auth_mount);
     webui_v2_app(bundle.gateway_bundle(), config).expect("webui v2 app")
+}
+
+#[test]
+fn product_auth_route_mount_rejects_mismatched_webui_scope() {
+    let bundle = RebornWebuiBundle {
+        api: Arc::new(UnusedServices::with_installed_extensions(&[])),
+        product_auth: Some(Arc::new(RebornProductAuthServices::from_shared(
+            Arc::new(InMemoryAuthProductServices::new()),
+            Arc::new(RecordingAuthDispatcher::default()),
+        ))),
+        readiness: RebornReadiness::disabled(),
+    };
+    let agent_id = AgentId::new(AGENT).expect("agent");
+    let project_id = ProjectId::new(PROJECT).expect("project");
+    let webui_config = WebuiServeConfig::new(
+        TenantId::new(TENANT).expect("tenant"),
+        Arc::new(OnlyValidToken),
+        vec![HeaderValue::from_static("http://localhost:1234")],
+    )
+    .with_default_agent_id(agent_id.clone())
+    .with_default_project_id(project_id.clone());
+    let result = bundle.product_auth_route_mount(
+        ProductAuthWebuiRouteMountConfig::new(
+            TenantId::new("different-tenant").expect("different tenant"),
+            Some(agent_id),
+            Some(project_id),
+        ),
+        &webui_config,
+    );
+
+    assert!(matches!(
+        result,
+        Err(ProductAuthWebuiRouteMountError::ScopeMismatch)
+    ));
 }
 
 fn google_oauth_route_config() -> GoogleOAuthRouteConfig {
@@ -2231,17 +2266,18 @@ mod slack_personal_oauth_serve {
         )
         .with_slack_personal_oauth(slack_personal_slot().await)
         .with_slack_personal_oauth_binding(binding);
-        let product_auth_mount = bundle
-            .product_auth_route_mount(product_auth_mount_config)
-            .expect("product auth route mount");
-        let config = WebuiServeConfig::new(
+        let mut config = WebuiServeConfig::new(
             tenant_id,
             Arc::new(OnlyValidToken),
             vec![HeaderValue::from_static("http://localhost:1234")],
         )
         .with_default_agent_id(agent_id)
-        .with_default_project_id(project_id)
-        .with_route_mount(product_auth_mount);
+        .with_default_project_id(project_id);
+        let product_auth_mount = bundle
+            .product_auth_route_mount(product_auth_mount_config, &config)
+            .expect("matching product auth route scope")
+            .expect("product auth route mount");
+        config = config.with_route_mount(product_auth_mount);
         webui_v2_app(bundle.gateway_bundle(), config).expect("webui v2 app")
     }
 
