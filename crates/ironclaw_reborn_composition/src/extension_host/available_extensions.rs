@@ -48,7 +48,6 @@ const GOOGLE_SHEETS_MANIFEST: &str =
 const GOOGLE_SHEETS_WASM_MODULE: &[u8] = include_bytes!(
     "../../../ironclaw_first_party_extensions/assets/google-sheets/wasm/google_sheets_tool.wasm"
 );
-#[cfg(feature = "slack-v2-host-beta")]
 const SLACK_MANIFEST: &str =
     include_str!("../../../ironclaw_first_party_extensions/assets/slack/manifest.toml");
 #[cfg(feature = "slack-v2-host-beta")]
@@ -699,7 +698,6 @@ pub(crate) fn web_access_manifest_digest() -> String {
 /// the Slack Events host-ingress route. `slack_serve` projects the route
 /// descriptor from here; the tools package manifest (`SLACK_MANIFEST`)
 /// carries only WASM tool capabilities, not channel ingress.
-#[cfg(feature = "slack-v2-host-beta")]
 pub(crate) fn slack_manifest_toml() -> &'static str {
     SLACK_MANIFEST
 }

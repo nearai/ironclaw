@@ -271,22 +271,13 @@ fn migrate_retired_slack_bot_identity(state: &mut WireState) -> bool {
         .iter()
         .any(|record| record.raw_toml.contains("\nid = \"slack\""));
     if !has_unified_record {
-        #[cfg(feature = "slack-v2-host-beta")]
-        {
-            state.manifests.push(WireManifestRecord {
-                raw_toml: super::available_extensions::slack_manifest_toml().to_string(),
-                source: WireManifestSource::HostBundled,
-                manifest_hash: None,
-                // Compiled by the backfill path on this same load.
-                resolved: None,
-            });
-        }
-        #[cfg(not(feature = "slack-v2-host-beta"))]
-        {
-            // Without the Slack feature the unified manifest is not bundled;
-            // drop the orphaned installation instead of failing the load.
-            return changed;
-        }
+        state.manifests.push(WireManifestRecord {
+            raw_toml: super::available_extensions::slack_manifest_toml().to_string(),
+            source: WireManifestSource::HostBundled,
+            manifest_hash: None,
+            // Compiled by the backfill path on this same load.
+            resolved: None,
+        });
     }
     if let Some(existing) = state
         .installations

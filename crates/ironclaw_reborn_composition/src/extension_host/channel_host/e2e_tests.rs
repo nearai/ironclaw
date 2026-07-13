@@ -1,12 +1,25 @@
-//! Minimal Slack Reborn E2E routing tests.
+//! Slack-fixture E2E tests of the GENERIC channel host assembly (P6 S6.4).
 //!
-//! These drive the real Slack route, native adapter runner, ProductWorkflow,
-//! preconfigured actor binding, and final-reply observer with fake downstream
-//! turn/outbound ports. They intentionally do not reuse the legacy Slack channel
-//! or legacy pairing store.
+//! Ported from the retired `slack_serve/e2e_tests.rs` suite: the 24
+//! behavioral scenarios (signed event -> turn -> coordinated reply, gate
+//! routing, OAuth-identity actor resolution, triggered delivery, ...) now
+//! drive the PRODUCTION assembly path — a real `ExtensionHost` activation of
+//! the bundled slack manifest, `[channel.config]` configuration through
+//! `ChannelConfigService`, `GenericChannelHostAssembly` building the inbound
+//! graph (durable workflow state, provider-identity actor resolution,
+//! run-delivery observer), and the MIG-5 legacy alias mount forwarding into
+//! the generic ingress router. Scripted turn/approval/auth/egress fakes fill
+//! exactly the seams the production factory fills.
+//!
+//! One production-shape delta from the retired suite: the assembly wires the
+//! SAME delivered-gate-route store into the workflow and the observer (the
+//! retired harness could split them), so observer-recorded routes are always
+//! visible to the workflow's fallback resolution — tests seed records over
+//! the observer's auto-recorded ones where a scenario needs a specific
+//! route.
 
-// arch-exempt: large_file, triggered Slack gate-route e2e coverage stays with
-// the existing Slack harness; decomposition tracked in
+// arch-exempt: large_file, the ported gate-route e2e coverage stays one
+// suite; decomposition tracked in
 // docs/plans/2026-07-02-reborn-internal-module-refactor.md.
 
 use std::num::NonZeroUsize;
@@ -19,8 +32,16 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
-use ironclaw_conversations::InMemoryConversationServices;
-use ironclaw_host_api::{AgentId, ApprovalRequestId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_extensions::{
+    ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
+    ExtensionInstallationStore as _, ExtensionManifestRecord, ExtensionManifestRef,
+    InMemoryExtensionInstallationStore, ManifestSource,
+};
+use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_host_api::{
+    AgentId, ApprovalRequestId, ExtensionId, InvocationId, ProjectId, ResourceScope, TenantId,
+    ThreadId, UserId,
+};
 use ironclaw_outbound::{
     CommunicationPreferenceRecord, CommunicationPreferenceRepository, DeliveredGateRouteStore,
     DeliveryDefaultScope, InMemoryOutboundStateStore, InMemoryTriggeredRunDeliveryStore,
@@ -35,16 +56,18 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
     ApprovalInteractionService, AuthInteractionDecision, AuthInteractionService,
-    ConversationBindingService, DefaultInboundTurnService, DefaultProductWorkflow,
-    InMemoryIdempotencyLedger, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
-    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse,
-    PendingApprovalInteractionView, ProductActorUserResolver, ProductConversationBindingService,
-    ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ConversationBindingService, DeliveryCoordinator, DeliveryRetryPolicy,
+    ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
+    ListPendingAuthInteractionsResponse, NoReplyContext, PendingApprovalInteractionView,
+    ProductWorkflowError, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, ResolveBindingRequest,
-    ResolvedBinding, StaticProductActorUserResolver, StaticProductInstallationResolver,
+    ResolvedBinding, RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
+    TriggeredRunDeliveryRequest,
 };
-use ironclaw_slack_v2_adapter::SLACK_USER_ACTOR_KIND;
+use ironclaw_secrets::InMemorySecretStore;
+use ironclaw_slack_v2_adapter::{
+    SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID, SlackPreferenceTargetCodec,
+};
 use ironclaw_threads::{
     AppendAssistantDraftRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
     SessionThreadService, ThreadScope,
@@ -58,24 +81,25 @@ use ironclaw_turns::{
 };
 use tower::ServiceExt;
 
-use super::*;
+use ironclaw_extension_host::ExtensionHost;
+use ironclaw_extension_host::egress::{ApprovedChannelEgress, ChannelEgressTransport};
+
+use super::{
+    ChannelExtras, ChannelHostDeliveryDeps, ChannelHostIdentity,
+    FilesystemChannelWorkflowStateFactory, GenericChannelHostAssembly, GenericChannelHostDeps,
+};
+use crate::extension_host::channel_config::{ChannelConfigReactivation, ChannelConfigService};
 use crate::extension_host::channel_delivery::{
     IngressReplyContextSource, SnapshotChannelDeliveryResolver,
 };
 use crate::extension_host::extension_ingress::{
-    ChannelInboundSinkConfig, ChannelIngressDrain, GenericChannelInboundSink, StaticIngressSecrets,
+    ExtensionIngressParts, InboundPayloadClassifier, PostAdmissionObserver, build_extension_ingress,
 };
+use crate::extension_host::legacy_ingress_aliases::legacy_channel_ingress_alias_mounts;
 use crate::extension_host::run_delivery_ports::ProductAuthBlockedAuthPromptSource;
-use crate::slack::slack_host_beta::SlackPreferenceTargetCodec;
 use crate::webui::webui_serve::PublicRouteMount;
 use crate::{AuthChallengeProvider, RebornUserIdentityLookup, RebornUserIdentityLookupError};
-use ironclaw_extension_host::egress::{ApprovedChannelEgress, ChannelEgressTransport};
-use ironclaw_extension_host::ingress::{InMemoryReplyContextStore, ReplyContextStore};
-use ironclaw_product_workflow::{
-    BlockedAuthPromptSource, DeliveryCoordinator, DeliveryRetryPolicy, NoReplyContext,
-    RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
-    TriggeredRunDeliveryRequest,
-};
+use ironclaw_product_workflow::BlockedAuthPromptSource;
 
 #[path = "e2e_auth_challenge.rs"]
 mod e2e_auth_challenge;
@@ -85,7 +109,8 @@ const TENANT: &str = "tenant:slack";
 const AGENT: &str = "agent:slack";
 const PROJECT: &str = "project:slack";
 const USER: &str = "user:slack-alice";
-const ADAPTER: &str = "slack_v2";
+/// The generic assembly keys the inbound graph by EXTENSION id.
+const ADAPTER: &str = "slack";
 const INSTALLATION: &str = "install_alpha";
 const TEAM: &str = "T-A";
 const SLACK_USER: &str = "U123";
@@ -96,17 +121,26 @@ const SECRET: &str = "topsecret";
 const GATE: &str = "gate:approval-00000000-0000-0000-0000-000000000001";
 const GATE_B: &str = "gate:approval-00000000-0000-0000-0000-000000000002";
 const AUTH_GATE: &str = "gate:auth-slack";
+/// The MIG-5 legacy alias path the fixtures post to (the alias forwards into
+/// the same generic router as the canonical
+/// `/webhooks/extensions/slack/events` route).
+const SLACK_EVENTS_PATH: &str = "/webhooks/slack/events";
 
 struct Harness {
     mount: PublicRouteMount,
-    sink: Arc<GenericChannelInboundSink>,
+    /// The generic ingress registry: `drain()` settles every route-owned
+    /// in-flight task (the assembly registered the sink's drain with it).
+    ingress: ExtensionIngressParts,
     egress: RecordingEgress,
     coordinator: Arc<RecordingTurnCoordinator>,
     approvals: Arc<RecordingApprovalInteractionService>,
     auths: Arc<RecordingAuthInteractionService>,
     route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
+    identity_lookup: Arc<RecordingUserIdentityLookup>,
     /// Keeps the harness extension host (and its published snapshot) alive.
-    _host: Arc<ironclaw_extension_host::ExtensionHost>,
+    _host: Arc<ExtensionHost>,
+    /// Keeps the assembly (and its reconcile loop + registrations) alive.
+    assembly: Arc<GenericChannelHostAssembly>,
 }
 
 type HmacSha256 = Hmac<sha2::Sha256>;
@@ -179,7 +213,7 @@ impl Harness {
     }
 
     async fn drain(&self) {
-        ChannelIngressDrain::drain(self.sink.as_ref()).await;
+        self.ingress.registry.drain().await;
     }
 
     /// Ensure a foreign-scope thread exists in the harness thread service.
@@ -220,155 +254,276 @@ impl Harness {
     }
 }
 
+/// Options every harness variant composes; the core builder is the single
+/// place the production assembly is stood up.
+struct HarnessOptions {
+    mode: TurnMode,
+    max_wait: Duration,
+    auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
+    /// Wrap the recording approval service in [`ForeignScopeApprovalService`]
+    /// (empty `list_pending`) so bare gate replies exercise the
+    /// delivered-gate-route fallback.
+    foreign_scope_approvals: bool,
+}
+
+impl HarnessOptions {
+    fn new(mode: TurnMode) -> Self {
+        Self {
+            mode,
+            max_wait: Duration::from_secs(2),
+            auth_challenges: None,
+            foreign_scope_approvals: false,
+        }
+    }
+}
+
 async fn build_harness(mode: TurnMode) -> Harness {
-    build_harness_with_max_wait(mode, Duration::from_secs(2)).await
+    build_harness_with_options(HarnessOptions::new(mode)).await
 }
 
 async fn build_harness_with_max_wait(mode: TurnMode, max_wait: Duration) -> Harness {
-    build_harness_with_actor_user_resolver_and_max_wait(
-        mode,
-        static_personal_actor_user_resolver(),
-        max_wait,
-    )
-    .await
+    let mut options = HarnessOptions::new(mode);
+    options.max_wait = max_wait;
+    build_harness_with_options(options).await
 }
 
-async fn build_harness_with_actor_user_resolver(
+async fn build_harness_with_auth_challenges(
     mode: TurnMode,
-    actor_user_resolver: Arc<dyn ProductActorUserResolver>,
-) -> Harness {
-    build_harness_with_actor_user_resolver_and_auth_challenges(mode, actor_user_resolver, None)
-        .await
-}
-
-async fn build_harness_with_actor_user_resolver_and_max_wait(
-    mode: TurnMode,
-    actor_user_resolver: Arc<dyn ProductActorUserResolver>,
-    max_wait: Duration,
-) -> Harness {
-    build_harness_with_full_settings(mode, actor_user_resolver, None, max_wait).await
-}
-
-async fn build_harness_with_actor_user_resolver_and_auth_challenges(
-    mode: TurnMode,
-    actor_user_resolver: Arc<dyn ProductActorUserResolver>,
     auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
 ) -> Harness {
-    build_harness_with_full_settings(
-        mode,
-        actor_user_resolver,
-        auth_challenges,
-        Duration::from_secs(2),
-    )
-    .await
+    let mut options = HarnessOptions::new(mode);
+    options.auth_challenges = auth_challenges;
+    build_harness_with_options(options).await
 }
 
 async fn build_harness_with_full_settings(
     mode: TurnMode,
-    actor_user_resolver: Arc<dyn ProductActorUserResolver>,
     auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
     max_wait: Duration,
 ) -> Harness {
-    let conversations = Arc::new(InMemoryConversationServices::default());
-    let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
-        conversations.clone();
-    let actor_pairings: Arc<dyn ironclaw_conversations::ConversationActorPairingService> =
-        conversations.clone();
+    let mut options = HarnessOptions::new(mode);
+    options.auth_challenges = auth_challenges;
+    options.max_wait = max_wait;
+    build_harness_with_options(options).await
+}
 
-    let adapter_id = ironclaw_product_adapters::ProductAdapterId::new(ADAPTER).expect("adapter id"); // safety: static test adapter id is valid.
-    let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation id"); // safety: static test installation id is valid.
+/// Harness for the delivered-gate-route scenarios: `list_pending` always
+/// returns empty (the blocked run lives on a foreign thread scope), driving
+/// `dispatch_scoped_approval_resolution` through the conversation-fingerprint
+/// route index. Returns the inner recording approval service for request
+/// assertions.
+async fn build_harness_for_delivered_route_tests()
+-> (Harness, Arc<RecordingApprovalInteractionService>) {
+    let mut options = HarnessOptions::new(TurnMode::BlockApproval);
+    options.foreign_scope_approvals = true;
+    let harness = build_harness_with_options(options).await;
+    let approvals = Arc::clone(&harness.approvals);
+    (harness, approvals)
+}
 
-    let scope = ProductInstallationScope::with_default_scope(
-        TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
-        AgentId::new(AGENT).expect("agent"),    // safety: static test agent id is valid.
-        Some(
-            ProjectId::new(PROJECT).expect("project"), // safety: static test project id is valid.
-        ),
-    )
-    .with_default_subject_user_id(UserId::new(USER).expect("user")) // safety: static test user id is valid.
-    .with_actor_user_resolver(actor_user_resolver, actor_pairings);
-    let resolver = StaticProductInstallationResolver::new([(
-        ProductInstallationKey::new(adapter_id, installation_id.clone()),
-        scope,
-    )]);
-    let binding = ProductConversationBindingService::new(conversation_port, resolver);
+/// The production wiring shape: with the generic assembly the observer and
+/// the workflow ALWAYS share one delivered-gate-route store, so the
+/// "unified" scenario is simply the delivered-route harness.
+async fn build_harness_for_unified_delivered_route_test()
+-> (Harness, Arc<RecordingApprovalInteractionService>) {
+    build_harness_for_delivered_route_tests().await
+}
 
+/// The core builder: real host + real manifest + `[channel.config]` saves +
+/// the production `GenericChannelHostAssembly`, with scripted downstream
+/// fakes at exactly the seams the production factory fills.
+async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     let threads = InMemorySessionThreadService::default();
-    let coordinator = RecordingTurnCoordinator::new(threads.clone(), mode);
+    let coordinator = RecordingTurnCoordinator::new(threads.clone(), options.mode.clone());
     let approvals = Arc::new(RecordingApprovalInteractionService::new(
         coordinator.clone(),
         threads.clone(),
     ));
     let auths = Arc::new(RecordingAuthInteractionService::new(coordinator.clone()));
+    let approval_interaction: Arc<dyn ApprovalInteractionService> =
+        if options.foreign_scope_approvals {
+            Arc::new(ForeignScopeApprovalService {
+                inner: approvals.clone(),
+            })
+        } else {
+            approvals.clone()
+        };
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
         Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
-
-    let inbound = Arc::new(DefaultInboundTurnService::new(
-        binding.clone(),
-        threads.clone(),
-        coordinator.clone(),
-    ));
-    let workflow = Arc::new(
-        DefaultProductWorkflow::new(
-            inbound,
-            Arc::new(InMemoryIdempotencyLedger::new()),
-            Arc::new(binding.clone()),
-        )
-        .with_approval_interaction_service(approvals.clone())
-        .with_auth_interaction_service(auths.clone())
-        .with_delivered_gate_routes(route_store.clone()),
-    );
-
     let outbound = Arc::new(InMemoryOutboundStateStore::default());
     let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
     let egress = RecordingEgress::default();
+
     let host = slack_test_extension_host().await;
-    let reply_store = Arc::new(InMemoryReplyContextStore::default());
-    let delivery_coordinator = delivery_coordinator_over(
-        &host,
-        &egress,
+    let ingress = build_extension_ingress(host.snapshot_watch());
+    let delivery_coordinator = Arc::new(DeliveryCoordinator::new(
         Arc::clone(&outbound_store),
-        Arc::clone(&reply_store) as Arc<dyn ReplyContextStore>,
-    );
-    let observer = Arc::new(RunDeliveryObserver::with_settings(
-        RunDeliveryServices {
-            binding_service: Arc::new(binding),
-            thread_service: Arc::new(threads),
-            turn_coordinator: Arc::new(coordinator.clone()),
-            outbound_store,
-            route_store: route_store.clone(),
-            communication_preferences: preferences,
+        Arc::new(SnapshotChannelDeliveryResolver::new(
+            host.snapshot_watch(),
+            Arc::new(egress.clone()),
+        )),
+        Arc::new(IngressReplyContextSource::new(Arc::clone(
+            &ingress.reply_context,
+        ))),
+        DeliveryRetryPolicy {
+            max_attempts: 2,
+            backoff: Duration::ZERO,
+        },
+    ));
+
+    let identity_lookup = Arc::new(RecordingUserIdentityLookup::new([(
+        format!("{INSTALLATION}:{SLACK_USER}"),
+        UserId::new(USER).expect("user"), // safety: static test user id is valid.
+    )]));
+
+    let deps = GenericChannelHostDeps {
+        watch: host.snapshot_watch(),
+        registry: Arc::clone(&ingress.registry),
+        channel_config: configured_channel_config().await,
+        workflow_state: Arc::new(FilesystemChannelWorkflowStateFactory::new(Arc::new(
+            InMemoryBackend::new(),
+        ))),
+        thread_service: Arc::new(threads.clone()),
+        turn_coordinator: Arc::new(coordinator.clone()),
+        approval_interaction: Some(approval_interaction),
+        auth_interaction: Some(auths.clone() as Arc<dyn AuthInteractionService>),
+        identity: ChannelHostIdentity {
+            tenant_id: TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
+            agent_id: AgentId::new(AGENT).expect("agent"), // safety: static test agent id is valid.
+            project_id: Some(ProjectId::new(PROJECT).expect("project")), // safety: static test project id is valid.
+            operator_user_id: UserId::new(USER).expect("user"), // safety: static test user id is valid.
+        },
+        identity_lookup: Some(Arc::clone(&identity_lookup)
+            as Arc<dyn crate::provider_identity::RebornUserIdentityLookup>),
+        delivery: Some(ChannelHostDeliveryDeps {
             coordinator: delivery_coordinator,
-            extension_id: "slack".to_string(),
-            fallback_notice_scope: test_fallback_notice_scope(),
+            outbound_store,
+            route_store: Arc::clone(&route_store),
+            communication_preferences: preferences,
             approval_context: None,
-            blocked_auth_prompts: auth_challenges.map(|provider| {
+            blocked_auth_prompts: options.auth_challenges.map(|provider| {
                 Arc::new(ProductAuthBlockedAuthPromptSource::new(Some(provider)))
                     as Arc<dyn BlockedAuthPromptSource>
             }),
             auth_flow_cancel: None,
-        },
-        RunDeliverySettings {
-            poll_interval: Duration::from_millis(1),
-            max_wait,
-            max_concurrent_deliveries: std::num::NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
-            max_pending_deliveries: std::num::NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
-        },
-    ));
+            settings: RunDeliverySettings {
+                poll_interval: Duration::from_millis(1),
+                max_wait: options.max_wait,
+                max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
+                max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
+            },
+        }),
+    };
+    let assembly = GenericChannelHostAssembly::start(deps);
+    // Vendor extras exactly as the binary's native slack registration feeds
+    // them: the gate-reply classifier and the preference-target codec — no
+    // storage-root override, no lane-owned registration.
+    assembly
+        .register_extras(
+            "slack",
+            ChannelExtras {
+                classifier: Some(slack_gate_reply_classifier()),
+                preference_target_codec: Some(Arc::new(SlackPreferenceTargetCodec)),
+                storage_roots: None,
+                registration: None,
+            },
+        )
+        .await;
 
-    let (mount, ingress_sink) =
-        slack_ingress_transport(workflow, observer, &host, reply_store).await;
+    let mount = legacy_channel_ingress_alias_mounts(&ingress.router, None)
+        .expect("alias mounts build") // safety: bundled manifest projects a valid alias descriptor.
+        .into_iter()
+        .next()
+        .expect("slack alias mount exists"); // safety: the alias table carries the slack entry.
 
     Harness {
         mount,
-        sink: ingress_sink,
+        ingress,
         egress,
         coordinator: Arc::new(coordinator),
         approvals,
         auths,
         route_store,
+        identity_lookup,
         _host: host,
+        assembly,
+    }
+}
+
+/// Slack's gate-resolution reclassification for the generic sink — the same
+/// closure the binary-side native registration provides.
+fn slack_gate_reply_classifier() -> Arc<InboundPayloadClassifier> {
+    Arc::new(|message| {
+        ironclaw_slack_v2_adapter::classify_interaction_resolution(&message.text, message.trigger)
+    })
+}
+
+/// `[channel.config]` configured through the production configure service:
+/// the REAL slack manifest is installed into a durable installation store
+/// and the ingress verification secret is saved under its manifest handle.
+async fn configured_channel_config() -> Arc<ChannelConfigService> {
+    let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
+    let record = ExtensionManifestRecord::from_toml(
+        crate::extension_host::available_extensions::slack_manifest_toml(),
+        ManifestSource::HostBundled,
+        &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"), // safety: default catalog is valid in tests.
+        None,
+        &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"), // safety: default registry is valid in tests.
+    )
+    .expect("bundled channel manifest resolves"); // safety: compile-time bundled manifest is valid.
+    let extension_id = ExtensionId::new("slack").expect("extension id"); // safety: static id is valid.
+    installation_store
+        .upsert_manifest_and_installation(
+            record,
+            ExtensionInstallation::new(
+                ExtensionInstallationId::new(INSTALLATION.to_string()).expect("installation id"), // safety: static id is valid.
+                extension_id.clone(),
+                ExtensionActivationState::Enabled,
+                ExtensionManifestRef::new(extension_id.clone(), None),
+                Vec::new(),
+                chrono::Utc::now(),
+            )
+            .expect("installation"), // safety: static installation record is valid.
+        )
+        .await
+        .expect("persist install"); // safety: in-memory store should not fail.
+    let scope = ResourceScope {
+        tenant_id: TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
+        user_id: UserId::new(USER).expect("user"),         // safety: static test user id is valid.
+        agent_id: None,
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    };
+    let channel_config = Arc::new(ChannelConfigService::new(
+        installation_store,
+        Arc::new(InMemorySecretStore::default()),
+        scope,
+        Arc::new(NoopChannelConfigReactivation),
+    ));
+    channel_config
+        .save(
+            &extension_id,
+            vec![("slack_signing_secret".to_string(), SECRET.to_string())],
+        )
+        .await
+        .expect("save signing secret"); // safety: manifest declares the handle.
+    channel_config
+}
+
+/// The configure surface's reactivation cycle is a no-op here: the harness
+/// activates the host exactly once before configuration.
+struct NoopChannelConfigReactivation;
+
+#[async_trait]
+impl ChannelConfigReactivation for NoopChannelConfigReactivation {
+    async fn reactivate_if_active(
+        &self,
+        _extension_id: &ExtensionId,
+    ) -> Result<(), ProductWorkflowError> {
+        Ok(())
     }
 }
 
@@ -451,28 +606,6 @@ async fn slack_test_extension_host() -> Arc<ironclaw_extension_host::ExtensionHo
     host
 }
 
-/// The delivery coordinator over the given host snapshot + recording
-/// transport — the SAME construction shape as the production factory.
-fn delivery_coordinator_over(
-    host: &ironclaw_extension_host::ExtensionHost,
-    transport: &RecordingEgress,
-    outbound_store: Arc<dyn OutboundStateStore>,
-    reply_store: Arc<dyn ReplyContextStore>,
-) -> Arc<DeliveryCoordinator> {
-    Arc::new(DeliveryCoordinator::new(
-        outbound_store,
-        Arc::new(SnapshotChannelDeliveryResolver::new(
-            host.snapshot_watch(),
-            Arc::new(transport.clone()),
-        )),
-        Arc::new(IngressReplyContextSource::new(reply_store)),
-        DeliveryRetryPolicy {
-            max_attempts: 2,
-            backoff: Duration::ZERO,
-        },
-    ))
-}
-
 fn test_fallback_notice_scope() -> TurnScope {
     TurnScope::new_with_owner(
         TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
@@ -480,62 +613,6 @@ fn test_fallback_notice_scope() -> TurnScope {
         Some(ProjectId::new(PROJECT).expect("project")), // safety: static test project id is valid.
         ThreadId::new("slack-channel-notices").expect("thread"), // safety: static literal is valid.
         Some(UserId::new(USER).expect("user")), // safety: static test user id is valid.
-    )
-}
-
-async fn slack_ingress_transport(
-    workflow: Arc<DefaultProductWorkflow>,
-    observer: Arc<RunDeliveryObserver>,
-    host: &ironclaw_extension_host::ExtensionHost,
-    reply_store: Arc<InMemoryReplyContextStore>,
-) -> (PublicRouteMount, Arc<GenericChannelInboundSink>) {
-    use ironclaw_extension_host::ingress::{
-        ExtensionIngressRouter, ExtensionIngressRouterDeps, InboundSink, IngressRouterConfig,
-        VerificationCandidate,
-    };
-
-    let sink = Arc::new(GenericChannelInboundSink::new(ChannelInboundSinkConfig {
-        adapter_id: ProductAdapterId::new(ADAPTER).expect("adapter id"), // safety: static test adapter id is valid.
-        evidence: super::slack_evidence_mint(),
-        classifier: Some(super::slack_inbound_classifier()),
-        workflow,
-        observer: Some(Arc::new(super::RunDeliveryObserverAdapter(observer))),
-    }));
-    let router = Arc::new(ExtensionIngressRouter::new(
-        host.snapshot_watch(),
-        ExtensionIngressRouterDeps {
-            secrets: Arc::new(StaticIngressSecrets::new(vec![VerificationCandidate {
-                installation_id: INSTALLATION.to_string(),
-                secret: SECRET.as_bytes().to_vec(),
-            }])),
-            sink: Arc::clone(&sink) as Arc<dyn InboundSink>,
-            reply_context: reply_store,
-        },
-        IngressRouterConfig::default(),
-    ));
-    let mount = super::slack_events_alias_mount(
-        router,
-        Some(Arc::clone(&sink) as Arc<dyn ChannelIngressDrain>),
-    )
-    .expect("alias mount builds"); // safety: bundled manifest projects a valid alias descriptor.
-    (mount, sink)
-}
-
-fn static_personal_actor_user_resolver() -> Arc<dyn ProductActorUserResolver> {
-    Arc::new(StaticProductActorUserResolver::new([(
-        ExternalActorRef::new(SLACK_USER_ACTOR_KIND, SLACK_USER, None::<String>).expect("actor"), // safety: static Slack actor ref is valid.
-        UserId::new(USER).expect("user"), // safety: static test user id is valid.
-    )]))
-}
-
-fn user_identity_actor_user_resolver() -> Arc<dyn ProductActorUserResolver> {
-    Arc::new(
-        crate::slack::slack_host_beta::runtime_setup::slack_provider_identity_actor_resolver(
-            Arc::new(RecordingUserIdentityLookup::new([(
-                format!("{INSTALLATION}:{SLACK_USER}"),
-                UserId::new(USER).expect("user"), // safety: static test user id is valid.
-            )])),
-        ),
     )
 }
 
@@ -568,154 +645,6 @@ impl ApprovalInteractionService for ForeignScopeApprovalService {
     ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
         self.inner.resolve(request).await
     }
-}
-
-/// Builds a harness where `list_pending` always returns empty, driving
-/// `dispatch_scoped_approval_resolution` through the delivered-gate-route
-/// fallback path. Returns the harness (with `route_store` accessible) and the
-/// underlying recording approval service for request assertions.
-///
-/// By default, two separate `InMemoryDeliveredGateRouteStore` instances are used:
-///
-/// - `workflow_route_store` (exposed via `harness.route_store`): the store the
-///   workflow queries when resolving delivered-gate-route fallback paths.  Tests
-///   seed records here to control which routes the workflow sees.
-/// - `observer_route_store`: the store the delivery observer writes to when it
-///   auto-records a gate route after posting an approval prompt.  It is not
-///   exposed because tests never need to read it — it intentionally stays
-///   separate so auto-created routes cannot pollute the workflow's view and
-///   accidentally turn a `Miss` into a `Single` or `Ambiguous`.
-///
-/// The unified-store regression harness below opts into sharing the same store
-/// across observer and workflow to verify the production wiring shape.
-async fn build_harness_for_delivered_route_tests()
--> (Harness, Arc<RecordingApprovalInteractionService>) {
-    build_harness_for_delivered_route_tests_with_store_mode(false).await
-}
-
-async fn build_harness_for_unified_delivered_route_test()
--> (Harness, Arc<RecordingApprovalInteractionService>) {
-    build_harness_for_delivered_route_tests_with_store_mode(true).await
-}
-
-async fn build_harness_for_delivered_route_tests_with_store_mode(
-    share_observer_and_workflow_route_store: bool,
-) -> (Harness, Arc<RecordingApprovalInteractionService>) {
-    let conversations = Arc::new(InMemoryConversationServices::default());
-    let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
-        conversations.clone();
-    let actor_pairings: Arc<dyn ironclaw_conversations::ConversationActorPairingService> =
-        conversations.clone();
-
-    let adapter_id = ironclaw_product_adapters::ProductAdapterId::new(ADAPTER).expect("adapter id"); // safety: static test adapter id is valid.
-    let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation id"); // safety: static test installation id is valid.
-
-    let scope = ProductInstallationScope::with_default_scope(
-        TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
-        AgentId::new(AGENT).expect("agent"),    // safety: static test agent id is valid.
-        Some(
-            ProjectId::new(PROJECT).expect("project"), // safety: static test project id is valid.
-        ),
-    )
-    .with_default_subject_user_id(UserId::new(USER).expect("user")) // safety: static test user id is valid.
-    .with_actor_user_resolver(static_personal_actor_user_resolver(), actor_pairings);
-    let resolver = StaticProductInstallationResolver::new([(
-        ProductInstallationKey::new(adapter_id, installation_id.clone()),
-        scope,
-    )]);
-    let binding = ProductConversationBindingService::new(conversation_port, resolver);
-
-    let threads = InMemorySessionThreadService::default();
-    let coordinator = RecordingTurnCoordinator::new(threads.clone(), TurnMode::BlockApproval);
-    let inner_approvals = Arc::new(RecordingApprovalInteractionService::new(
-        coordinator.clone(),
-        threads.clone(),
-    ));
-    let foreign_approvals: Arc<dyn ApprovalInteractionService> =
-        Arc::new(ForeignScopeApprovalService {
-            inner: inner_approvals.clone(),
-        });
-    let auths = Arc::new(RecordingAuthInteractionService::new(coordinator.clone()));
-
-    // workflow_route_store: queried by the workflow during delivered-route fallback.
-    // Tests seed records here to control the outcome (Miss / Single / Ambiguous).
-    let workflow_route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
-    // observer_route_store: written by the delivery observer when it auto-records a
-    // gate route after posting an approval prompt.  Kept separate so auto-created
-    // routes never bleed into the workflow's index.
-    let observer_route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        if share_observer_and_workflow_route_store {
-            workflow_route_store.clone()
-        } else {
-            Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default())
-        };
-
-    let inbound = Arc::new(DefaultInboundTurnService::new(
-        binding.clone(),
-        threads.clone(),
-        coordinator.clone(),
-    ));
-    let workflow = Arc::new(
-        DefaultProductWorkflow::new(
-            inbound,
-            Arc::new(InMemoryIdempotencyLedger::new()),
-            Arc::new(binding.clone()),
-        )
-        .with_approval_interaction_service(foreign_approvals)
-        .with_auth_interaction_service(auths.clone())
-        .with_delivered_gate_routes(workflow_route_store.clone()),
-    );
-
-    let outbound = Arc::new(InMemoryOutboundStateStore::default());
-    let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
-    let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
-    let egress = RecordingEgress::default();
-    let host = slack_test_extension_host().await;
-    let reply_store = Arc::new(InMemoryReplyContextStore::default());
-    let delivery_coordinator = delivery_coordinator_over(
-        &host,
-        &egress,
-        Arc::clone(&outbound_store),
-        Arc::clone(&reply_store) as Arc<dyn ReplyContextStore>,
-    );
-    let observer = Arc::new(RunDeliveryObserver::with_settings(
-        RunDeliveryServices {
-            binding_service: Arc::new(binding),
-            thread_service: Arc::new(threads),
-            turn_coordinator: Arc::new(coordinator.clone()),
-            outbound_store,
-            route_store: observer_route_store,
-            communication_preferences: preferences,
-            coordinator: delivery_coordinator,
-            extension_id: "slack".to_string(),
-            fallback_notice_scope: test_fallback_notice_scope(),
-            approval_context: None,
-            blocked_auth_prompts: None,
-            auth_flow_cancel: None,
-        },
-        RunDeliverySettings {
-            poll_interval: Duration::from_millis(1),
-            max_wait: Duration::from_secs(2),
-            max_concurrent_deliveries: std::num::NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
-            max_pending_deliveries: std::num::NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
-        },
-    ));
-
-    let (mount, ingress_sink) =
-        slack_ingress_transport(workflow, observer, &host, reply_store).await;
-
-    let harness = Harness {
-        mount,
-        sink: ingress_sink,
-        egress,
-        coordinator: Arc::new(coordinator),
-        approvals: inner_approvals.clone(),
-        auths,
-        route_store: workflow_route_store,
-        _host: host,
-    };
-    (harness, inner_approvals)
 }
 
 /// Returns the conversation fingerprint for the DM channel used in the E2E
@@ -965,7 +894,7 @@ fn dm_reply_target_binding_ref() -> ReplyTargetBindingRef {
     }
     let raw = format!(
         "{}{}{}{}{}{}{}{}{}",
-        seg("adapter", ADAPTER),
+        seg("adapter", SLACK_V2_ADAPTER_ID),
         seg("installation", INSTALLATION),
         seg("agent", AGENT),
         seg("project", ""),
@@ -975,17 +904,22 @@ fn dm_reply_target_binding_ref() -> ReplyTargetBindingRef {
         seg("actor_kind", SLACK_USER_ACTOR_KIND),
         seg("actor", SLACK_USER),
     );
-    crate::slack::slack_preference_targets::slack_reply_target_binding_ref_from_raw(raw)
+    ironclaw_slack_v2_adapter::slack_reply_target_binding_ref_from_raw(raw)
         .expect("DM reply target binding ref") // safety: static test binding ref is valid.
 }
 
-/// Poll the shared delivered-gate-route store until the driver records a route
-/// for `(tenant, user, gate_ref)`, then return it. Times out after 5 s.
-async fn wait_for_gate_route(
+/// Poll the shared delivered-gate-route store until the driver records a
+/// route for `(tenant, user, gate_ref)` matching `matches`, then return it.
+/// Times out after 5 s. The predicate matters under the production-unified
+/// store: the inbound observer auto-records a route for the same gate ref
+/// when it posts the DM approval prompt, so waits for the DRIVER's record
+/// must match on its distinguishing scope rather than mere existence.
+async fn wait_for_gate_route_matching(
     route_store: &dyn DeliveredGateRouteStore,
     tenant: &TenantId,
     user: &UserId,
     gate_ref: &str,
+    matches: impl Fn(&ironclaw_outbound::DeliveredGateRouteRecord) -> bool,
 ) -> ironclaw_outbound::DeliveredGateRouteRecord {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -993,7 +927,9 @@ async fn wait_for_gate_route(
                 .load_delivered_gate_route(tenant, user, gate_ref)
                 .await
                 .expect("load gate route"); // safety: test-only poll loop
-            if let Some(record) = loaded {
+            if let Some(record) = loaded
+                && matches(&record)
+            {
                 return record;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -1289,7 +1225,14 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
     // The driver recorded a delivered gate route into the shared store, keyed by
     // the creator, on the triggered run's foreign scope, and carrying the DM
     // conversation fingerprint the inbound approve keys on.
-    let route = wait_for_gate_route(harness.route_store.as_ref(), &tenant, &user, GATE).await;
+    let route = wait_for_gate_route_matching(
+        harness.route_store.as_ref(),
+        &tenant,
+        &user,
+        GATE,
+        |record| record.scope.thread_id == foreign_run_scope().thread_id,
+    )
+    .await;
     assert_eq!(route.run_id, blocked_run_id);
     assert_eq!(
         route.scope.thread_id,
@@ -1379,7 +1322,7 @@ fn non_dm_channel_reply_target_binding_ref() -> ReplyTargetBindingRef {
     const NON_DM_CHANNEL: &str = "C123";
     let raw = format!(
         "{}{}{}{}{}{}{}{}{}",
-        seg("adapter", ADAPTER),
+        seg("adapter", SLACK_V2_ADAPTER_ID),
         seg("installation", INSTALLATION),
         seg("agent", AGENT),
         seg("project", ""),
@@ -1389,7 +1332,7 @@ fn non_dm_channel_reply_target_binding_ref() -> ReplyTargetBindingRef {
         seg("actor_kind", SLACK_USER_ACTOR_KIND),
         seg("actor", SLACK_USER),
     );
-    crate::slack::slack_preference_targets::slack_reply_target_binding_ref_from_raw(raw)
+    ironclaw_slack_v2_adapter::slack_reply_target_binding_ref_from_raw(raw)
         .expect("channel reply target binding ref") // safety: static test binding ref is valid.
 }
 
@@ -2037,12 +1980,9 @@ async fn slack_dm_delivers_final_reply_after_immediate_ack() {
 
 #[tokio::test]
 async fn slack_dm_for_personally_bound_user_routes_through_reborn_identity() {
-    let harness = build_harness_with_actor_user_resolver(
-        TurnMode::Complete {
-            assistant_text: "hello personal Slack binding".into(),
-        },
-        user_identity_actor_user_resolver(),
-    )
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "hello personal Slack binding".into(),
+    })
     .await;
 
     let response = harness.post_event(dm_message("Ev-identity", "hello")).await;
@@ -2055,6 +1995,13 @@ async fn slack_dm_for_personally_bound_user_routes_through_reborn_identity() {
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["channel"], CHANNEL);
     assert_eq!(messages[0]["text"], "hello personal Slack binding");
+    // The generic assembly resolved the verified actor through the
+    // channel-identity binding store with the installation-scoped key.
+    assert_eq!(
+        harness.identity_lookup.calls(),
+        vec![("slack".to_string(), format!("{INSTALLATION}:{SLACK_USER}"))],
+        "inbound actor resolution must consult the identity lookup"
+    );
 }
 
 #[tokio::test]
@@ -2265,12 +2212,8 @@ async fn gate_prompt_is_posted_exactly_once_when_approval_ack_races_live_deliver
 async fn slack_dm_delivers_auth_prompt_with_setup_link_after_immediate_ack() {
     let auth_provider = Arc::new(FakeAuthChallengeProvider::default());
     let auth_challenges: Arc<dyn AuthChallengeProvider> = auth_provider.clone();
-    let harness = build_harness_with_actor_user_resolver_and_auth_challenges(
-        TurnMode::BlockAuth,
-        static_personal_actor_user_resolver(),
-        Some(auth_challenges),
-    )
-    .await;
+    let harness =
+        build_harness_with_auth_challenges(TurnMode::BlockAuth, Some(auth_challenges)).await;
 
     let response = harness
         .post_event(dm_message("Ev-auth", "needs auth"))
@@ -2293,12 +2236,8 @@ async fn slack_dm_delivers_auth_prompt_with_setup_link_after_immediate_ack() {
 async fn slack_channel_auth_prompt_omits_setup_link_after_immediate_ack() {
     let auth_challenges: Arc<dyn AuthChallengeProvider> =
         Arc::new(FakeAuthChallengeProvider::default());
-    let harness = build_harness_with_actor_user_resolver_and_auth_challenges(
-        TurnMode::BlockAuth,
-        static_personal_actor_user_resolver(),
-        Some(auth_challenges),
-    )
-    .await;
+    let harness =
+        build_harness_with_auth_challenges(TurnMode::BlockAuth, Some(auth_challenges)).await;
 
     let response = harness
         .post_event(app_mention_message("Ev-auth-channel", "needs auth"))
@@ -2322,12 +2261,8 @@ async fn slack_channel_auth_prompt_omits_setup_link_after_immediate_ack() {
 async fn slack_dm_delivers_final_reply_after_auth_completes_outside_slack() {
     let auth_provider = Arc::new(FakeAuthChallengeProvider::default());
     let auth_challenges: Arc<dyn AuthChallengeProvider> = auth_provider.clone();
-    let harness = build_harness_with_actor_user_resolver_and_auth_challenges(
-        TurnMode::BlockAuth,
-        static_personal_actor_user_resolver(),
-        Some(auth_challenges),
-    )
-    .await;
+    let harness =
+        build_harness_with_auth_challenges(TurnMode::BlockAuth, Some(auth_challenges)).await;
 
     let response = harness
         .post_event(dm_message("Ev-auth", "needs auth"))
@@ -3145,13 +3080,22 @@ fn stable_slack_test_ts(body: &[u8]) -> String {
 #[derive(Debug, Default)]
 struct RecordingUserIdentityLookup {
     bindings: std::collections::HashMap<String, UserId>,
+    calls: Mutex<Vec<(String, String)>>,
 }
 
 impl RecordingUserIdentityLookup {
     fn new(bindings: impl IntoIterator<Item = (String, UserId)>) -> Self {
         Self {
             bindings: bindings.into_iter().collect(),
+            calls: Mutex::new(Vec::new()),
         }
+    }
+
+    fn calls(&self) -> Vec<(String, String)> {
+        self.calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 }
 
@@ -3162,6 +3106,10 @@ impl RebornUserIdentityLookup for RecordingUserIdentityLookup {
         provider: &str,
         provider_user_id: &str,
     ) -> Result<Option<UserId>, RebornUserIdentityLookupError> {
+        self.calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push((provider.to_string(), provider_user_id.to_string()));
         if provider != "slack" {
             return Ok(None);
         }
@@ -3444,120 +3392,27 @@ fn auth_resolution_allowed_envelope(callback_ref: &str) -> ProductInboundEnvelop
     ProductInboundEnvelope::from_trusted_parse(context, parsed).expect("envelope") // safety: static test envelope is valid.
 }
 
-/// Build a harness for auth-fanout tests and return the observer alongside it.
+/// Build a harness for auth-fanout tests and return the assembly-registered
+/// post-admission observer alongside it.
 ///
-/// The observer is needed because `AuthResolution(Allowed)` does not arrive via
-/// Slack text — it arrives from the WebUI gate-resolve path which calls
-/// `observe_workflow_ack` directly. Exposing the observer lets the test inject
-/// the resolution ack without going through the Slack route.
+/// The observer is needed because `AuthResolution(Allowed)` does not arrive
+/// via a channel text command — it arrives from the WebUI gate-resolve path,
+/// which drives the SAME observer instance the registered sink runs.
 async fn build_harness_for_auth_fanout_test(
     max_wait: Duration,
-) -> (Harness, Arc<RunDeliveryObserver>) {
+) -> (Harness, Arc<dyn PostAdmissionObserver>) {
     let auth_provider = Arc::new(FakeAuthChallengeProvider::default());
-    let auth_challenges: Arc<dyn AuthChallengeProvider> = auth_provider;
-
-    let conversations = Arc::new(InMemoryConversationServices::default());
-    let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
-        conversations.clone();
-    let actor_pairings: Arc<dyn ironclaw_conversations::ConversationActorPairingService> =
-        conversations.clone();
-
-    let adapter_id = ProductAdapterId::new(ADAPTER).expect("adapter id"); // safety: static test adapter id is valid.
-    let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation id"); // safety: static test installation id is valid.
-
-    let scope = ProductInstallationScope::with_default_scope(
-        TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
-        AgentId::new(AGENT).expect("agent"),    // safety: static test agent id is valid.
-        Some(ProjectId::new(PROJECT).expect("project")), // safety: static test project id is valid.
-    )
-    .with_default_subject_user_id(UserId::new(USER).expect("user")) // safety: static test user id is valid.
-    .with_actor_user_resolver(static_personal_actor_user_resolver(), actor_pairings);
-    let resolver = StaticProductInstallationResolver::new([(
-        ProductInstallationKey::new(adapter_id, installation_id.clone()),
-        scope,
-    )]);
-    let binding = ProductConversationBindingService::new(conversation_port, resolver);
-
-    let threads = InMemorySessionThreadService::default();
-    let coordinator = RecordingTurnCoordinator::new(threads.clone(), TurnMode::BlockAuth);
-    let approvals = Arc::new(RecordingApprovalInteractionService::new(
-        coordinator.clone(),
-        threads.clone(),
-    ));
-    let auths = Arc::new(RecordingAuthInteractionService::new(coordinator.clone()));
-    let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
-
-    let inbound = Arc::new(DefaultInboundTurnService::new(
-        binding.clone(),
-        threads.clone(),
-        coordinator.clone(),
-    ));
-    let workflow = Arc::new(
-        DefaultProductWorkflow::new(
-            inbound,
-            Arc::new(InMemoryIdempotencyLedger::new()),
-            Arc::new(binding.clone()),
-        )
-        .with_approval_interaction_service(approvals.clone())
-        .with_auth_interaction_service(auths.clone())
-        .with_delivered_gate_routes(route_store.clone()),
-    );
-
-    let outbound = Arc::new(InMemoryOutboundStateStore::default());
-    let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
-    let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
-    let egress = RecordingEgress::default();
-    let host = slack_test_extension_host().await;
-    let reply_store = Arc::new(InMemoryReplyContextStore::default());
-    let delivery_coordinator = delivery_coordinator_over(
-        &host,
-        &egress,
-        Arc::clone(&outbound_store),
-        Arc::clone(&reply_store) as Arc<dyn ReplyContextStore>,
-    );
-    let observer = Arc::new(RunDeliveryObserver::with_settings(
-        RunDeliveryServices {
-            binding_service: Arc::new(binding),
-            thread_service: Arc::new(threads),
-            turn_coordinator: Arc::new(coordinator.clone()),
-            outbound_store,
-            route_store: route_store.clone(),
-            communication_preferences: preferences,
-            coordinator: delivery_coordinator,
-            extension_id: "slack".to_string(),
-            fallback_notice_scope: test_fallback_notice_scope(),
-            approval_context: None,
-            blocked_auth_prompts: Some(Arc::new(ProductAuthBlockedAuthPromptSource::new(Some(
-                auth_challenges,
-            ))) as Arc<dyn BlockedAuthPromptSource>),
-            auth_flow_cancel: None,
-        },
-        RunDeliverySettings {
-            poll_interval: Duration::from_millis(1),
-            max_wait,
-            max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: 4 is non-zero.
-            max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: 16 is non-zero.
-        },
-    ));
-
-    let (mount, ingress_sink) =
-        slack_ingress_transport(workflow, observer.clone(), &host, reply_store).await;
-
-    let harness = Harness {
-        mount,
-        sink: ingress_sink,
-        egress,
-        coordinator: Arc::new(coordinator),
-        approvals,
-        auths,
-        route_store,
-        _host: host,
-    };
+    let mut options = HarnessOptions::new(TurnMode::BlockAuth);
+    options.max_wait = max_wait;
+    options.auth_challenges = Some(auth_provider as Arc<dyn AuthChallengeProvider>);
+    let harness = build_harness_with_options(options).await;
+    let observer = harness
+        .assembly
+        .post_admission_observer_for_extension_for_test("slack")
+        .expect("assembly registered the slack observer"); // safety: harness delivery deps are always present.
     (harness, observer)
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 #[tokio::test]
 async fn auth_prompt_is_posted_exactly_once_when_auth_resolution_ack_races_live_delivery_loop() {
     // Long max_wait keeps L1 alive (polling) when the auth-resolution ack arrives.
@@ -3721,7 +3576,6 @@ async fn slack_approval_then_auth_resume_completes_without_second_approval() {
     // Long max_wait keeps L1 alive while we drive coordinator state transitions.
     let harness = build_harness_with_full_settings(
         TurnMode::BlockApprovalThenAuth,
-        static_personal_actor_user_resolver(),
         Some(auth_challenges),
         Duration::from_secs(10),
     )

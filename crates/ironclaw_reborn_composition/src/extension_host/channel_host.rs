@@ -275,6 +275,10 @@ enum ReconciledChannel {
     Generic {
         active: Arc<ActiveExtension>,
         binding: Arc<dyn ConversationBindingService>,
+        /// The post-admission observer registered with the sink (test seam:
+        /// gate-resolution acks arriving from non-channel surfaces are
+        /// injected through the SAME observer instance the sink drives).
+        observer: Option<Arc<dyn PostAdmissionObserver>>,
     },
     /// Nothing registered for this entry (foreign lane-owned registration,
     /// no verification recipe, or a build failure already logged); skipped
@@ -448,7 +452,7 @@ impl GenericChannelHostAssembly {
                 continue;
             }
             match self.build_generic_graph(&active, &extras).await {
-                Ok(Some((registration, binding))) => {
+                Ok(Some((registration, binding, observer))) => {
                     match self
                         .deps
                         .registry
@@ -460,7 +464,11 @@ impl GenericChannelHostAssembly {
                             }
                             reconciled.insert(
                                 extension_id.clone(),
-                                ReconciledChannel::Generic { active, binding },
+                                ReconciledChannel::Generic {
+                                    active,
+                                    binding,
+                                    observer,
+                                },
                             );
                         }
                         ManagedRegistrationOutcome::SkippedUnmanaged => {
@@ -509,6 +517,7 @@ impl GenericChannelHostAssembly {
         Option<(
             ChannelIngressRegistration,
             Arc<dyn ConversationBindingService>,
+            Option<Arc<dyn PostAdmissionObserver>>,
         )>,
         String,
     > {
@@ -565,14 +574,14 @@ impl GenericChannelHostAssembly {
             evidence,
             classifier: extras.classifier.clone(),
             workflow: Arc::new(workflow),
-            observer,
+            observer: observer.clone(),
         }));
         let registration = ChannelIngressRegistration {
             secrets,
             sink: Arc::clone(&sink) as Arc<dyn ironclaw_extension_host::ingress::InboundSink>,
             drain: Some(sink as Arc<dyn ChannelIngressDrain>),
         };
-        Ok(Some((registration, binding)))
+        Ok(Some((registration, binding, observer)))
     }
 
     /// The per-extension conversation-binding service over durable state at
@@ -710,6 +719,22 @@ impl GenericChannelHostAssembly {
             _ => None,
         }
     }
+
+    /// The post-admission observer the assembly registered for one extension
+    /// — the SAME instance the registered sink drives, so an ack injected
+    /// from a non-channel surface (WebUI gate resolve) exercises the exact
+    /// single-flight guard production runs.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn post_admission_observer_for_extension_for_test(
+        &self,
+        extension_id: &str,
+    ) -> Option<Arc<dyn PostAdmissionObserver>> {
+        let reconciled = self.reconciled.try_lock().ok()?;
+        match reconciled.get(extension_id)? {
+            ReconciledChannel::Generic { observer, .. } => observer.clone(),
+            _ => None,
+        }
+    }
 }
 
 impl Drop for GenericChannelHostAssembly {
@@ -803,6 +828,9 @@ impl PostAdmissionObserver for RunDeliveryPostAdmissionObserver {
         self.0.observe_error(envelope, error).await;
     }
 }
+
+#[cfg(all(test, feature = "webui-v2-beta"))]
+mod e2e_tests;
 
 #[cfg(test)]
 mod tests {

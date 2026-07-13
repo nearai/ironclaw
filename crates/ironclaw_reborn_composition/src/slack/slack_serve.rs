@@ -94,6 +94,3 @@ pub(crate) fn slack_events_alias_mount(
         reason: "legacy channel ingress alias table has no slack entry".to_string(),
     })
 }
-
-#[cfg(test)]
-mod e2e_tests;

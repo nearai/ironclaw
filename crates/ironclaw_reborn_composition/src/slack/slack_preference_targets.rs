@@ -846,6 +846,7 @@ fn slack_personal_dm_reply_target_binding_ref(
     .map_err(|_| slack_target_backend_error())
 }
 
+#[cfg(test)]
 pub(crate) fn slack_reply_target_binding_ref_from_raw(
     raw: String,
 ) -> Result<ReplyTargetBindingRef, RebornServicesError> {

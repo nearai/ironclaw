@@ -53,7 +53,7 @@ pub use product_auth::api::auth_prompt::{
 };
 #[cfg(feature = "slack-v2-host-beta")]
 mod delivered_gate_routing;
-#[cfg(feature = "slack-v2-host-beta")]
+#[cfg(feature = "webui-v2-beta")]
 mod host_ingress;
 mod provider_identity;
 mod readiness;
