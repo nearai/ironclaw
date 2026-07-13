@@ -1213,6 +1213,59 @@ async fn owner_remove_of_registered_install_tears_down_without_residue() {
     );
 }
 
+/// Item 2 regression: `remove`'s orphan-cleanup branch (row present,
+/// lifecycle package absent) never runs `ensure_registered_row_tenant_match`
+/// — that tenant-axis check lives only in `remove_locked`, which the orphan
+/// branch does not call. A same-user-id caller from a FOREIGN tenant reaches
+/// `ensure_caller_may_operate` (user-axis only, passes for a same-user-id
+/// row) and deletes the orphaned registered row outright. Red before the
+/// fix: this call succeeds and tears the row down.
+#[tokio::test]
+async fn remove_of_orphaned_registered_row_rejects_foreign_tenant_same_user_id() {
+    let owner_scope = resource_scope_for("tenant-a", "owner-a");
+    let foreign_tenant_scope = resource_scope_for("tenant-b", "owner-a");
+    let (_dir, port, package_ref, _active_registry, installation_store) =
+        user_registered_isolation_fixture(&owner_scope, true).await;
+
+    // Orphan the row: drop it from the lifecycle registry while leaving the
+    // installation row and its stored manifest in place, matching the
+    // `installation.is_some() && !lifecycle_package_present` branch in
+    // `remove`.
+    let extension_id = ExtensionId::new("acme-mcp-registered").expect("valid extension id");
+    port.lifecycle_service
+        .lock()
+        .await
+        .remove(&extension_id)
+        .await
+        .expect("drop lifecycle package to orphan the row");
+
+    let error = port
+        .remove(
+            package_ref,
+            &foreign_tenant_scope,
+            Some(&foreign_tenant_scope.user_id),
+        )
+        .await
+        .expect_err(
+            "a foreign-tenant caller with the same user id must not remove another tenant's \
+             orphaned registered row",
+        );
+    assert!(
+        error.to_string().contains("is not installed"),
+        "must use the masked not-installed denial, got: {error}"
+    );
+
+    let row = installation_store
+        .get_installation(&ExtensionInstallationId::new("acme-mcp-registered").expect("valid id"))
+        .await
+        .expect("store read")
+        .expect("orphaned registered row must survive the rejected foreign-tenant remove");
+    assert!(
+        row.owner().visible_to(&owner_scope.user_id),
+        "the orphaned row must remain the real owner's, untouched by the foreign-tenant attempt"
+    );
+}
+
 /// Item A regression: a registered install is never materialized under
 /// `/system/extensions/<id>/` (mirrors the remove path's `is_owner_registered`
 /// guard), so a DB failure during `persist_install_plan` must not delete

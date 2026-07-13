@@ -1438,6 +1438,22 @@ impl RebornLocalExtensionManagementPort {
             let installation = self.search_installation(&extension_id).await?;
             if let Some(installation) = installation.as_ref() {
                 ensure_caller_may_operate(installation, caller)?;
+                // Tenant axis companion to the user-id check above (T2
+                // cross-tenant follow-up): `remove_locked` runs this same
+                // check, but the orphan-cleanup branch below (row present,
+                // lifecycle package absent) never reaches `remove_locked`,
+                // so it must be hoisted here to run unconditionally for
+                // both branches — otherwise a same-user-id foreign-tenant
+                // caller tears down an orphaned registered row outright
+                // (item 2 regression).
+                let existing_effective_scope =
+                    installation_effective_owner_scope(&self.installation_store, installation)
+                        .await?;
+                ensure_registered_row_tenant_match(
+                    &extension_id,
+                    existing_effective_scope,
+                    &removal_scope.tenant_id,
+                )?;
                 ensure_caller_may_mutate_tenant_installation(
                     installation,
                     caller,
