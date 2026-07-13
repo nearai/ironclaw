@@ -6,7 +6,7 @@
   "required": ["channel", "text"],
   "properties": {
     "channel": { "type": "string", "description": "Channel ID or name (#general or C123...), or a DM conversation ID." },
-    "text": { "type": "string", "description": "Message text (Slack mrkdwn). To notify someone, mention them as <@U…> with their real user id (e.g. <@U0123ABCD>) — a plain @name does not notify." },
+    "text": { "type": "string", "description": "Message text (Slack mrkdwn). To notify someone, mention them as <@U…> with their real user id (e.g. <@U0123ABCD>) — a plain @name does not notify. Never guess or derive a user id from a channel or DM conversation id; resolve it from slack.list_conversations and use the matching DM entry's user field." },
     "thread_ts": { "type": "string", "description": "Optional thread timestamp to reply in a thread." }
   },
   "additionalProperties": false

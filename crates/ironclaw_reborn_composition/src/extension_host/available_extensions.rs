@@ -2379,6 +2379,30 @@ mod tests {
             "send_message description must document the <@U…> mention encoding: {}",
             send_message.description
         );
+        assert!(
+            send_message.description.contains("Never guess")
+                && send_message
+                    .description
+                    .contains("slack.list_conversations")
+                && send_message.description.contains("DM entry's user field"),
+            "send_message description must explain how to resolve the real mention target instead of deriving a user id from a conversation id: {}",
+            send_message.description
+        );
+
+        let list_conversations = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "slack.list_conversations")
+            .expect("slack manifest declares slack.list_conversations");
+        assert!(
+            list_conversations
+                .description
+                .contains("raw counterpart user id"),
+            "list_conversations description must advertise the authoritative DM mention target: {}",
+            list_conversations.description
+        );
     }
 
     /// Model-visible Slack-read contract: steer the model to the correct read
