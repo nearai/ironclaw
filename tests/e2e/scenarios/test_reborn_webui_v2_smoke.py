@@ -486,6 +486,7 @@ async def test_reborn_v2_disconnected_run_shows_status_and_stops_typing(
 
         await context.set_offline(True)
         await expect(connection_status).to_have_text("Reconnecting...", timeout=5000)
+        await expect(connection_status).to_have_css("position", "absolute")
         await context.set_offline(False)
         await expect(connection_status).to_have_count(0, timeout=5000)
 
