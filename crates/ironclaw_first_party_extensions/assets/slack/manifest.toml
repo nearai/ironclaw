@@ -133,11 +133,26 @@ fields = [
   { handle = "slack_signing_secret", label = "Signing secret", secret = true },
   # Connection-scoping values for the generic post-OAuth identity binding
   # (handle-suffix convention: *_team_id / *_app_id map onto the proven
-  # identity claims). The Slack setup surface still owns these values until
-  # its configure lane folds into [channel.config]; the manifest declares
-  # their durable home.
+  # identity claims).
   { handle = "slack_team_id", label = "Workspace (team) ID", secret = false },
   { handle = "slack_api_app_id", label = "App ID", secret = false },
+  # Operator installation identity + inbound-subject defaults (previously
+  # carried by the retired Slack setup surface).
+  { handle = "slack_installation_id", label = "Installation ID", secret = false },
+  { handle = "slack_bot_user_id", label = "Bot user ID", secret = false },
+  { handle = "slack_shared_subject_user_id", label = "Shared subject user ID (optional)", secret = false },
+  # Deployment OAuth client material for [auth.slack]: the recipe's
+  # client_credentials handles resolve through this channel configuration.
+  { handle = "slack_oauth_client_id", label = "OAuth client ID", secret = false },
+  { handle = "slack_oauth_client_secret", label = "OAuth client secret", secret = true },
+  # Channel admission + routing, JSON-valued:
+  #  - slack_allowed_channels: JSON array of Slack channel IDs, e.g.
+  #    ["C0123ALPHA", "C0456BETA"].
+  #  - slack_subject_routes: JSON object mapping Slack channel ID to the
+  #    subject user id turns in that channel run as, e.g.
+  #    {"C0123ALPHA": "subject-user-1"}.
+  { handle = "slack_allowed_channels", label = "Allowed channels (JSON array of Slack channel IDs)", secret = false },
+  { handle = "slack_subject_routes", label = "Subject routes (JSON object: channel ID -> subject user ID)", secret = false },
 ]
 
 [[channel.egress]]

@@ -8,8 +8,6 @@ pub(crate) mod slack_host_beta;
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) mod slack_host_state;
 #[cfg(feature = "slack-v2-host-beta")]
-pub(crate) mod slack_personal_oauth;
-#[cfg(feature = "slack-v2-host-beta")]
 pub(crate) mod slack_preference_targets;
 #[cfg(feature = "slack-v2-host-beta")]
 pub mod slack_serve;

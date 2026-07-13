@@ -1138,10 +1138,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "slack",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/slack/slack_personal_oauth.rs",
-        "slack",
-    ),
-    (
         "crates/ironclaw_reborn_composition/src/slack/slack_serve.rs",
         "slack",
     ),

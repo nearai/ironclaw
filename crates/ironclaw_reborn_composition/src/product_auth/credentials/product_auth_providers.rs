@@ -23,6 +23,7 @@ use ironclaw_secrets::SecretStore;
 use secrecy::SecretString;
 
 use crate::RebornBuildError;
+use crate::extension_host::channel_config::ChannelConfigService;
 use crate::input::{OAuthDcrCallbackConfig, OAuthProviderBackendConfig};
 use crate::product_auth::oauth::oauth_gate::OAuthGateFlowDriver;
 use crate::product_auth::oauth::staged_egress::ObligationStagedAuthEgress;
@@ -47,23 +48,49 @@ pub(crate) struct OAuthProviderComposition {
 #[derive(Clone)]
 pub(crate) enum ClientCredentialValue {
     Static(SecretString),
-    /// Resolved at request time (e.g. operator-entered setup secrets that
-    /// arrive after startup).
-    Dynamic(Arc<dyn DynamicClientCredentialLookup>),
 }
 
-/// Request-time lookup for one client-credential handle.
-#[async_trait]
-pub(crate) trait DynamicClientCredentialLookup: Send + Sync + fmt::Debug {
-    async fn resolve(&self) -> Result<SecretString, AuthProductError>;
+/// Deferred handle source over the operator channel configuration
+/// (`[channel.config]`): the configure service is built after the auth
+/// engine (its durable stores land later in factory assembly), so the
+/// engine holds this slot and resolves handles through it at request time.
+/// Unfilled (startup window, or a composition path without the configure
+/// surface) it resolves nothing — the engine's existing not-configured
+/// path applies.
+#[derive(Clone, Default)]
+pub(crate) struct ChannelConfigCredentialSlot {
+    inner: Arc<std::sync::OnceLock<Arc<ChannelConfigService>>>,
+}
+
+impl ChannelConfigCredentialSlot {
+    pub(crate) fn fill(&self, service: Arc<ChannelConfigService>) {
+        let _ = self.inner.set(service);
+    }
+
+    fn get(&self) -> Option<Arc<ChannelConfigService>> {
+        self.inner.get().cloned()
+    }
+}
+
+impl fmt::Debug for ChannelConfigCredentialSlot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChannelConfigCredentialSlot")
+            .field("filled", &self.inner.get().is_some())
+            .finish()
+    }
 }
 
 /// Handle-keyed deployment client-credential data. Recipes name their
 /// `client_credentials` handles; composition registers values for those
-/// handles (env config, setup services) — data, never a vendor code path.
+/// handles (env config) — data, never a vendor code path. Handles without a
+/// registered value fall back to the operator channel configuration, so
+/// recipe client material saved through the generic configure surface
+/// resolves with no per-vendor wiring.
 #[derive(Clone, Default)]
 pub(crate) struct CompositionClientCredentials {
     values: BTreeMap<String, ClientCredentialValue>,
+    channel_config: Option<ChannelConfigCredentialSlot>,
 }
 
 impl CompositionClientCredentials {
@@ -72,21 +99,30 @@ impl CompositionClientCredentials {
             .insert(handle.into(), ClientCredentialValue::Static(value));
     }
 
-    pub(crate) fn register_dynamic(
-        &mut self,
-        handle: impl Into<String>,
-        lookup: Arc<dyn DynamicClientCredentialLookup>,
-    ) {
-        self.values
-            .insert(handle.into(), ClientCredentialValue::Dynamic(lookup));
+    /// Attach the operator channel-config fallback for unregistered handles.
+    pub(crate) fn with_channel_config_fallback(&mut self, slot: ChannelConfigCredentialSlot) {
+        self.channel_config = Some(slot);
     }
 
     async fn resolve_handle(&self, handle: &str) -> Result<Option<SecretString>, AuthProductError> {
         match self.values.get(handle) {
-            None => Ok(None),
-            Some(ClientCredentialValue::Static(value)) => Ok(Some(value.clone())),
-            Some(ClientCredentialValue::Dynamic(lookup)) => lookup.resolve().await.map(Some),
+            Some(ClientCredentialValue::Static(value)) => return Ok(Some(value.clone())),
+            None => {}
         }
+        let Some(service) = self.channel_config.as_ref().and_then(|slot| slot.get()) else {
+            return Ok(None);
+        };
+        service
+            .credential_handle_value(handle)
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    %error,
+                    handle,
+                    "operator channel-config client-credential lookup failed"
+                );
+                AuthProductError::BackendUnavailable
+            })
     }
 }
 
@@ -138,6 +174,7 @@ pub(crate) fn compose_provider_client(
     dcr_callback: Option<OAuthDcrCallbackConfig>,
     secret_store: Arc<dyn SecretStore>,
     runtime_ports: ProductAuthProviderRuntimePorts,
+    channel_config_credentials: ChannelConfigCredentialSlot,
     #[cfg(feature = "slack-v2-host-beta")] slack_personal_oauth_slot: Option<
         SlackPersonalSetupServiceSlot,
     >,
@@ -154,20 +191,13 @@ pub(crate) fn compose_provider_client(
     for config in &configs {
         register_vendor_client_config(&mut client_credentials, recipes.as_ref(), config);
     }
+    client_credentials.with_channel_config_fallback(channel_config_credentials);
     #[cfg(feature = "slack-v2-host-beta")]
     let slack_slot_redirect = slack_personal_oauth_slot
         .as_ref()
         .map(|slot| slot.redirect_uri().as_str().to_string());
     #[cfg(not(feature = "slack-v2-host-beta"))]
     let slack_slot_redirect: Option<String> = None;
-    #[cfg(feature = "slack-v2-host-beta")]
-    if let Some(slot) = slack_personal_oauth_slot {
-        crate::slack::slack_personal_oauth::register_slack_personal_client_credentials(
-            &mut client_credentials,
-            recipes.as_ref(),
-            slot,
-        );
-    }
 
     let callback_base = dcr_callback
         .map(|dcr| {

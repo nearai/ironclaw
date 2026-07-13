@@ -1746,11 +1746,18 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     services = apply_runtime_process_binding(services, runtime_process_binding);
     services = attach_hosted_mcp_runtime(services)?;
     let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
+    // The auth engine's client-credential fallback over the operator channel
+    // configuration: the configure service is built after the engine (its
+    // durable stores land below), so the engine holds a slot filled once the
+    // service exists.
+    let channel_config_credential_slot =
+        crate::product_auth::credentials::product_auth_providers::ChannelConfigCredentialSlot::default();
     let provider_composition = compose_provider_client(
         oauth_provider_configs,
         oauth_dcr_callback,
         Arc::clone(&secret_store),
         product_auth_runtime_ports.clone(),
+        channel_config_credential_slot.clone(),
         #[cfg(feature = "slack-v2-host-beta")]
         slack_personal_oauth_lazy_slot,
         #[cfg(not(feature = "slack-v2-host-beta"))]
@@ -1942,6 +1949,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                 as Arc<dyn crate::extension_host::channel_config::ChannelConfigReactivation>,
         ),
     );
+    channel_config_credential_slot.fill(Arc::clone(&channel_config_service));
     if let Some(local_runtime) = Arc::get_mut(&mut store_graph.local_runtime) {
         local_runtime.extension_management = Some(Arc::clone(&extension_management));
         local_runtime.channel_config = Some(channel_config_service);
@@ -4973,11 +4981,14 @@ where
     .with_turn_run_wake_notifier_dyn(production_wiring.turn_run_wake_notifier);
     let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
     let services = attach_hosted_mcp_runtime(services)?;
+    // The production-shaped path has no `[channel.config]` configure service
+    // yet; the engine's fallback slot stays unfilled (resolves nothing).
     let provider_composition = compose_provider_client(
         oauth_provider_configs,
         oauth_dcr_callback,
         Arc::clone(&secret_store),
         product_auth_runtime_ports.clone(),
+        crate::product_auth::credentials::product_auth_providers::ChannelConfigCredentialSlot::default(),
         #[cfg(feature = "slack-v2-host-beta")]
         slack_personal_oauth_lazy_slot,
         #[cfg(not(feature = "slack-v2-host-beta"))]

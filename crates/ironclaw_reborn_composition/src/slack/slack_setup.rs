@@ -11,7 +11,7 @@ use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ironclaw_auth::{OAuthClientId, OAuthRedirectUri};
+use ironclaw_auth::OAuthRedirectUri;
 use ironclaw_common::hashing::sha256_hex;
 use ironclaw_host_api::{
     AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
@@ -128,8 +128,6 @@ pub(crate) enum SlackSetupError {
     StoreUnavailable,
     #[error("Slack secret store unavailable: {reason}")]
     SecretStoreUnavailable { reason: &'static str },
-    #[error("Slack personal OAuth client credentials not configured")]
-    OAuthClientNotConfigured,
 }
 
 #[async_trait]
@@ -257,6 +255,7 @@ impl SlackSetupService {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn save(
         &self,
         update: SlackInstallationSetupUpdate,
@@ -374,31 +373,6 @@ impl SlackSetupService {
         setup: &SlackInstallationSetup,
     ) -> Result<SecretMaterial, SlackSetupError> {
         self.secret_material(&setup.bot_token_handle).await
-    }
-
-    /// Returns `(client_id, client_secret)` for Slack personal OAuth.
-    /// Fails with `OAuthClientNotConfigured` when the operator has not yet
-    /// saved OAuth credentials via the setup UI.
-    pub(crate) async fn oauth_credentials(
-        &self,
-    ) -> Result<(OAuthClientId, SecretString), SlackSetupError> {
-        let setup = self
-            .current_setup()
-            .await?
-            .ok_or(SlackSetupError::OAuthClientNotConfigured)?;
-        let client_id_raw = setup
-            .oauth_client_id
-            .ok_or(SlackSetupError::OAuthClientNotConfigured)?;
-        let client_id =
-            OAuthClientId::new(client_id_raw).map_err(|reason| SlackSetupError::InvalidField {
-                field: "oauth_client_id",
-                reason: reason.to_string(),
-            })?;
-        let secret_handle = setup
-            .oauth_client_secret_handle
-            .ok_or(SlackSetupError::OAuthClientNotConfigured)?;
-        let client_secret = self.secret_material(&secret_handle).await?;
-        Ok((client_id, client_secret))
     }
 
     fn validated_setup(
@@ -728,10 +702,6 @@ impl SlackPersonalSetupServiceSlot {
 
     pub(crate) fn fill(&self, service: Arc<SlackSetupService>) {
         let _ = self.slot.set(service);
-    }
-
-    pub(crate) fn get(&self) -> Option<Arc<SlackSetupService>> {
-        self.slot.get().cloned()
     }
 
     pub fn redirect_uri(&self) -> &OAuthRedirectUri {

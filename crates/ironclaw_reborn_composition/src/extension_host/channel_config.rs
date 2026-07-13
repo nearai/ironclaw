@@ -217,6 +217,56 @@ impl ChannelConfigService {
             .map_err(storage_error)
     }
 
+    /// Resolve one auth-recipe client-credential handle from the operator's
+    /// saved channel configuration: when an installed manifest declares the
+    /// handle as a `[channel.config]` field, a secret field resolves through
+    /// the scoped secret store and a non-secret field through the durable
+    /// installation config. `None` when no installed manifest declares the
+    /// handle or no value was saved yet. Per-request read: a configure save
+    /// takes effect on the next OAuth start with no rewiring.
+    pub(crate) async fn credential_handle_value(
+        &self,
+        handle: &str,
+    ) -> Result<Option<secrecy::SecretString>, ChannelConfigError> {
+        let manifests = self
+            .installation_store
+            .list_manifests()
+            .await
+            .map_err(storage_error)?;
+        for record in manifests {
+            let Some(channel) = record.resolved().channel.as_ref() else {
+                continue;
+            };
+            let Some(field) = channel
+                .config
+                .fields
+                .iter()
+                .find(|field| field.handle.as_str() == handle)
+            else {
+                continue;
+            };
+            if field.secret {
+                let material = self.secret_material(&field.handle).await?;
+                return Ok(material.map(|material| {
+                    secrecy::SecretString::from(
+                        secrecy::ExposeSecret::expose_secret(&material).to_string(),
+                    )
+                }));
+            }
+            let extension_id = record.resolved().id.clone();
+            let values = self
+                .installation_store
+                .channel_config(&extension_id)
+                .await
+                .map_err(storage_error)?;
+            return Ok(values
+                .into_iter()
+                .find(|(stored, _)| stored == handle)
+                .map(|(_, value)| secrecy::SecretString::from(value)));
+        }
+        Ok(None)
+    }
+
     /// Per-field presence for the extension's `[channel.config]` fields
     /// (§6.4 derived config completeness). Secret fields report
     /// `provided` only — stored values are never echoed back.
@@ -757,6 +807,68 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
                 .expect("read config")
                 .len(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_handle_value_resolves_declared_fields_only() {
+        let fixture = channel_fixture(RecordingReactivation::new()).await;
+
+        // Declared but not yet saved: no value, not an error.
+        assert!(
+            fixture
+                .service
+                .credential_handle_value("acmechat_api_token")
+                .await
+                .expect("declared-but-unsaved lookup succeeds")
+                .is_none()
+        );
+
+        fixture
+            .service
+            .save(
+                &fixture.extension_id,
+                vec![
+                    ("acmechat_api_token".to_string(), "tok-123".to_string()),
+                    (
+                        "acmechat_public_url".to_string(),
+                        "https://x.example".to_string(),
+                    ),
+                ],
+            )
+            .await
+            .expect("save succeeds");
+
+        // Secret field -> scoped secret store material.
+        let secret = fixture
+            .service
+            .credential_handle_value("acmechat_api_token")
+            .await
+            .expect("secret lookup succeeds")
+            .expect("stored secret resolves");
+        assert_eq!(secrecy::ExposeSecret::expose_secret(&secret), "tok-123");
+
+        // Non-secret field -> durable installation config value.
+        let non_secret = fixture
+            .service
+            .credential_handle_value("acmechat_public_url")
+            .await
+            .expect("non-secret lookup succeeds")
+            .expect("stored value resolves");
+        assert_eq!(
+            secrecy::ExposeSecret::expose_secret(&non_secret),
+            "https://x.example"
+        );
+
+        // A handle no installed manifest declares resolves to nothing —
+        // the auth engine falls through to its not-configured path.
+        assert!(
+            fixture
+                .service
+                .credential_handle_value("undeclared_handle")
+                .await
+                .expect("undeclared lookup succeeds")
+                .is_none()
         );
     }
 

@@ -4222,7 +4222,7 @@ mod tests {
         let rollback =
             crate::extension_host::channel_identity::bind_channel_identities_for_callback(
                 &config,
-                crate::slack::slack_personal_oauth::SLACK_VENDOR_ID,
+                "slack",
                 &slack_oauth_callback_scope(),
                 Some(&identity),
             )
