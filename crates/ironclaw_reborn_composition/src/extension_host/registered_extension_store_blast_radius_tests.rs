@@ -106,7 +106,7 @@ fn seed_registered_manifest(storage_root: &std::path::Path, owner: &str, extensi
 /// Pins the `restore_extension_lifecycle_state` fix: an installation whose
 /// registered manifest is gone (deleted/corrupted on disk, but still on
 /// record in the installation store) must be skipped via the registered-store
-/// fallback's (`resolve_registered_for_owner`) miss, not abort the whole boot
+/// fallback's (`list_for_owner`) miss, not abort the whole boot
 /// restore — a second, healthy installation must still restore and publish.
 /// RED before the fix (the whole restore returned `Err` on the first broken
 /// installation).
@@ -127,7 +127,7 @@ async fn restore_continues_past_installation_whose_registered_fallback_errors() 
     // seeded, matching a real "registered then reinstalled/deleted" history),
     // but its `manifest.toml` no longer exists anywhere on disk. `catalog.resolve()`
     // misses (static catalog never holds `UserRegistered` packages) and
-    // the row-owner-keyed `resolve_registered_for_owner` also misses, since no owner directory
+    // the row-owner-keyed `list_for_owner` also misses, since no owner directory
     // has this extension id — the missing-manifest scenario this fix targets.
     let (missing_extension_id, _) = seed_registered_installation(
         &installation_store,
@@ -589,4 +589,169 @@ async fn list_installed_survives_one_entry_whose_registered_resolution_errors() 
     };
     assert_eq!(count, 1, "the catalog-backed summary must survive");
     assert_eq!(extensions[0].summary.package_ref.id.as_str(), "catalog-mcp");
+}
+
+/// Wraps a real `LocalFilesystem`, counting `list_dir` calls against exactly
+/// one owner directory. Boot restore's catalog-miss fallback must load a
+/// given (tenant, owner)'s registered set at most ONCE per boot, no matter
+/// how many of that owner's installations miss the shared catalog — before
+/// the fix, `resolve_registered_for_owner` (via `list_for_scope`, a full
+/// directory walk + manifest parse) was called once PER catalog-miss
+/// installation.
+struct CountingListDirFilesystem {
+    inner: LocalFilesystem,
+    counted_path: VirtualPath,
+    count: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl RootFilesystem for CountingListDirFilesystem {
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        if path == &self.counted_path {
+            self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        self.inner.read_file(path).await
+    }
+}
+
+/// Boot-scaling regression: two registered installations owned by the SAME
+/// (tenant, owner), both missing the shared catalog, must load that owner's
+/// registered directory ONCE during restore, not once per installation.
+/// RED before the fix: `count` was 2 (one `list_dir` per catalog-miss
+/// installation via `resolve_registered_for_owner`).
+#[tokio::test]
+async fn restore_loads_each_owners_registered_set_once_for_multiple_installations() {
+    const OWNER_USER_ID: &str = "a1111111-7fe5-474c-965a-67cb69df3d10";
+    const FIRST_EXTENSION_ID: &str = "owner-first-mcp";
+    const SECOND_EXTENSION_ID: &str = "owner-second-mcp";
+    const FIRST_MANIFEST_TOML: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "owner-first-mcp"
+name = "Owner First MCP"
+version = "0.1.0"
+description = "First registered MCP under a shared owner (boot-scaling fixture)"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "http://127.0.0.1:9/mcp"
+"#;
+    const SECOND_MANIFEST_TOML: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "owner-second-mcp"
+name = "Owner Second MCP"
+version = "0.1.0"
+description = "Second registered MCP under the same shared owner (boot-scaling fixture)"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "http://127.0.0.1:9/mcp"
+"#;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage_root = dir.path().join("local-dev");
+    seed_registered_manifest(&storage_root, OWNER_USER_ID, FIRST_EXTENSION_ID);
+    std::fs::write(
+        storage_root
+            .join("system/extensions/registered")
+            .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
+            .join(OWNER_USER_ID)
+            .join(FIRST_EXTENSION_ID)
+            .join("manifest.toml"),
+        FIRST_MANIFEST_TOML,
+    )
+    .expect("write first registered descriptor");
+    let second_dir = storage_root
+        .join("system/extensions/registered")
+        .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
+        .join(OWNER_USER_ID)
+        .join(SECOND_EXTENSION_ID);
+    std::fs::create_dir_all(&second_dir).expect("second registered descriptor dir");
+    std::fs::write(second_dir.join("manifest.toml"), SECOND_MANIFEST_TOML)
+        .expect("write second registered descriptor");
+
+    let local_filesystem = mounted_local_filesystem(&storage_root);
+    let owner_root = VirtualPath::new(format!(
+        "/system/extensions/registered/{}/{}",
+        ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID,
+        OWNER_USER_ID
+    ))
+    .expect("valid virtual path");
+    let counting_filesystem = Arc::new(CountingListDirFilesystem {
+        inner: local_filesystem,
+        counted_path: owner_root,
+        count: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let filesystem: Arc<dyn RootFilesystem> = counting_filesystem.clone();
+
+    let default_tenant =
+        TenantId::from_trusted(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string());
+    let installation_store: Arc<dyn ExtensionInstallationStore> =
+        Arc::new(InMemoryExtensionInstallationStore::default());
+    let owner = UserId::new(OWNER_USER_ID).expect("valid owner id");
+    let (first_extension_id, _) = seed_registered_installation(
+        &installation_store,
+        FIRST_MANIFEST_TOML,
+        &default_tenant,
+        &owner,
+        FIRST_EXTENSION_ID,
+        None,
+    )
+    .await;
+    let (second_extension_id, _) = seed_registered_installation(
+        &installation_store,
+        SECOND_MANIFEST_TOML,
+        &default_tenant,
+        &owner,
+        SECOND_EXTENSION_ID,
+        None,
+    )
+    .await;
+
+    let empty_catalog = AvailableExtensionCatalog::from_packages(Vec::new());
+    let boot = fresh_boot_fixture();
+
+    restore_extension_lifecycle_state(
+        &empty_catalog,
+        &filesystem,
+        &installation_store,
+        &boot.lifecycle_service,
+        &boot.active_extensions,
+    )
+    .await
+    .expect("restore of two same-owner registered installations must succeed");
+
+    let snapshot = boot.active_registry.snapshot();
+    assert!(
+        snapshot.get_extension(&first_extension_id).is_some(),
+        "first installation must still restore and publish"
+    );
+    assert!(
+        snapshot.get_extension(&second_extension_id).is_some(),
+        "second installation must still restore and publish"
+    );
+
+    assert_eq!(
+        counting_filesystem
+            .count
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the owner's registered directory must be loaded once per boot, not once per \
+         catalog-miss installation (RED before batching: this was 2)"
+    );
 }

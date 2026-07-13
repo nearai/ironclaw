@@ -298,26 +298,27 @@ where
         .find(|package| &package.package_ref == package_ref))
 }
 
-/// Boot-only restore fallback, reached on a `catalog.resolve()` miss during
+/// One (tenant, owner)'s full registered set, read ONCE. Boot-only restore
+/// fallback, reached on a `catalog.resolve()` miss during
 /// `restore_extension_lifecycle_state`. Row-owner-keyed: the caller derives
 /// `(tenant_id, owner)` from the installation row (`effective_owner_scope`)
-/// and this does a direct lookup at that owner's shard — never a
-/// cross-owner scan, which could otherwise serve a DIFFERENT owner's
-/// descriptor depending on directory listing order. Callers that cannot
-/// establish a row owner must skip-and-log rather than guess a scope.
-pub(crate) async fn resolve_registered_for_owner<F>(
+/// and this loads that owner's shard directly — never a cross-owner scan,
+/// which could otherwise serve a DIFFERENT owner's descriptor depending on
+/// directory listing order. Restore groups installations by owner and calls
+/// this at most once per distinct (tenant, owner) per boot, since multiple
+/// installations frequently share an owner and each call is a full directory
+/// walk + manifest parse. Callers that cannot establish a row owner must
+/// skip-and-log rather than guess a scope.
+pub(crate) async fn list_for_owner<F>(
     fs: &F,
     tenant_id: &TenantId,
     owner: &UserId,
-    package_ref: &LifecyclePackageRef,
-) -> Result<AvailableExtensionPackage, ProductWorkflowError>
+) -> Result<Vec<AvailableExtensionPackage>, ProductWorkflowError>
 where
     F: RootFilesystem + ?Sized,
 {
     let mut scope = ResourceScope::local_default(owner.clone(), InvocationId::new())
         .map_err(map_binding_error)?;
     scope.tenant_id = tenant_id.clone();
-    resolve_registered_for_scope(fs, &scope, package_ref)
-        .await?
-        .ok_or_else(available_extension_not_found)
+    RegisteredExtensionStore::list_for_scope(fs, &scope).await
 }

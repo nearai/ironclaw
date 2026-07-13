@@ -91,9 +91,8 @@ use crate::extension_host::mcp_discovery::{
     HostedMcpDiscoveryError, discover_hosted_mcp_package, is_hosted_http_mcp_package,
 };
 use crate::extension_host::registered_extension_store::{
-    RegisteredExtensionStore, available_extension_not_found, is_owner_registered,
-    migrate_legacy_owner_layout, resolve_registered_for_owner, resolve_registered_for_scope,
-    search_with_owner_overlay_for_scope,
+    RegisteredExtensionStore, available_extension_not_found, is_owner_registered, list_for_owner,
+    migrate_legacy_owner_layout, resolve_registered_for_scope, search_with_owner_overlay_for_scope,
 };
 
 pub(crate) use active_publication::ActiveExtensionPublisher;
@@ -212,6 +211,16 @@ pub(crate) async fn restore_extension_lifecycle_state(
     // before the tenant-scoped walkers below run, or those registrations
     // silently vanish from restore and listing.
     migrate_legacy_owner_layout(filesystem.as_ref()).await?;
+    // Per-boot batching (no cross-boot caching): a catalog-miss installation
+    // falls back to its row's owner-scoped registered set, and multiple
+    // installations can share the same (tenant, owner). Load each owner's
+    // set at most ONCE for this restore pass instead of once per catalog-miss
+    // installation, mirroring `installed_summaries`' `registered_packages_by_id`
+    // batching for the live listing path.
+    let mut registered_by_owner: std::collections::HashMap<
+        (TenantId, UserId),
+        std::collections::HashMap<String, AvailableExtensionPackage>,
+    > = std::collections::HashMap::new();
     for installation in installation_store
         .list_installations()
         .await
@@ -237,20 +246,38 @@ pub(crate) async fn restore_extension_lifecycle_state(
             Err(_) => {
                 match installation_effective_owner_scope(installation_store, &installation).await {
                     Ok(Some((tenant_id, owner))) => {
-                        match resolve_registered_for_owner(
-                            filesystem.as_ref(),
-                            &tenant_id,
-                            &owner,
-                            &package_ref,
-                        )
-                        .await
+                        let owner_key = (tenant_id.clone(), owner.clone());
+                        if !registered_by_owner.contains_key(&owner_key) {
+                            match list_for_owner(filesystem.as_ref(), &tenant_id, &owner).await {
+                                Ok(packages) => {
+                                    let by_id = packages
+                                        .into_iter()
+                                        .map(|package| {
+                                            (package.package_ref.id.as_str().to_string(), package)
+                                        })
+                                        .collect();
+                                    registered_by_owner.insert(owner_key.clone(), by_id);
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        extension_id = installation.extension_id().as_str(),
+                                        installation_id = installation.installation_id().as_str(),
+                                        %error,
+                                        "skipping extension installation restore: failed to load its row-owned registered set"
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
+                        match registered_by_owner
+                            .get(&owner_key)
+                            .and_then(|by_id| by_id.get(package_ref.id.as_str()))
                         {
-                            Ok(available) => Arc::new(available),
-                            Err(error) => {
+                            Some(available) => Arc::new(available.clone()),
+                            None => {
                                 tracing::warn!(
                                     extension_id = installation.extension_id().as_str(),
                                     installation_id = installation.installation_id().as_str(),
-                                    %error,
                                     "skipping extension installation restore: not available in the catalog or its row-owned registered store"
                                 );
                                 continue;
