@@ -7,7 +7,7 @@ import {
 } from "../../../lib/api";
 import { queryClient } from "../../../lib/query-client";
 import { normalizeSidebarTitle } from "../../../lib/thread-title";
-import { upsertThreadInCache } from "../lib/thread-cache";
+import { removeThreadList, upsertThreadInCache } from "../lib/thread-cache";
 
 export function useThreads() {
   // No polling: the sidebar is kept current by local cache writes after
@@ -59,6 +59,7 @@ export function useThreads() {
       if (activeThreadId === threadId) {
         setActiveThreadId(null);
       }
+      queryClient.setQueryData(["threads"], (data) => removeThreadList(data, threadId));
       queryClient.invalidateQueries({ queryKey: ["threads"] });
     },
     [activeThreadId]
