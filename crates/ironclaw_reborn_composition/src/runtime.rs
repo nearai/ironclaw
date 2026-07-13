@@ -656,6 +656,7 @@ pub struct RebornRuntime {
     turn_state_flush: Option<Arc<LocalDevTurnStateStore>>,
     turn_tree_store: Arc<dyn TurnSpawnTreeStateStore>,
     thread_service: Arc<dyn SessionThreadService>,
+    input_enqueue: Arc<dyn ironclaw_loop_support::HostInputEnqueuePort>,
     thread_scope: ThreadScope,
     turn_scheduler: RuntimeTurnScheduler,
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
@@ -1670,6 +1671,12 @@ impl RebornRuntime {
 
     pub(crate) fn webui_turn_coordinator(&self) -> Arc<dyn TurnCoordinator> {
         self.turn_coordinator.clone()
+    }
+
+    pub(crate) fn webui_input_enqueue(
+        &self,
+    ) -> Arc<dyn ironclaw_loop_support::HostInputEnqueuePort> {
+        Arc::clone(&self.input_enqueue)
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
@@ -3729,6 +3736,60 @@ pub async fn build_reborn_runtime(
         .map_err(|error| RebornRuntimeError::MalformedConfig {
             reason: format!("await-edge resolver result writer bind failed: {error}"),
         })?;
+    // Steering/followup input queue. When a local runtime is composed (local-dev
+    // with libSQL/Postgres), it carries a durable run-scoped filesystem, so use
+    // the durable `FilesystemHostInputQueue`: a message queued while a run is
+    // busy then survives a daemon restart — the scheduler re-claims the run from
+    // its checkpoint and drains the persisted input.
+    //
+    // DEGRADATION (not silent): the production-graph path (`local_runtime: None`)
+    // does not expose a durable filesystem handle in this composition facade
+    // yet, so it falls back to the in-memory queue even under the
+    // libSQL/Postgres build. In-memory queuing still delivers follow-ups within
+    // a single daemon lifetime; only messages queued-but-undrained across a
+    // restart are lost. This mirrors the same `Some(local_runtime) => real /
+    // None => degraded` deferral the identity/profile sources use below, and is
+    // owned by the production durable-composition follow-up (host
+    // runtime/event-store wiring; see the production_runtime_parts note and
+    // #5013). Failing closed here is deliberately NOT done — it would reject all
+    // busy-thread follow-ups in production rather than degrade gracefully.
+    let (host_input_queue_reader, host_input_enqueue): (
+        Arc<dyn ironclaw_loop_support::HostInputQueue>,
+        Arc<dyn ironclaw_loop_support::HostInputEnqueuePort>,
+    ) = {
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        {
+            if let Some(local_runtime) = local_runtime {
+                let owner_scope = ResourceScope {
+                    tenant_id: thread_scope.tenant_id.clone(),
+                    user_id: actor_user_id.clone(),
+                    agent_id: Some(thread_scope.agent_id.clone()),
+                    project_id: thread_scope.project_id.clone(),
+                    mission_id: None,
+                    thread_id: None,
+                    invocation_id: InvocationId::new(),
+                };
+                let durable = Arc::new(ironclaw_loop_support::FilesystemHostInputQueue::new(
+                    Arc::clone(&local_runtime.subagent_goal_filesystem),
+                    owner_scope,
+                    Arc::clone(&thread_service),
+                ));
+                (durable.clone(), durable)
+            } else {
+                let queue = Arc::new(ironclaw_loop_support::InMemoryHostInputQueue::new(
+                    Arc::clone(&thread_service),
+                ));
+                (queue.clone(), queue)
+            }
+        }
+        #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+        {
+            let queue = Arc::new(ironclaw_loop_support::InMemoryHostInputQueue::new(
+                Arc::clone(&thread_service),
+            ));
+            (queue.clone(), queue)
+        }
+    };
 
     let planned_runtime_parts = DefaultPlannedRuntimeParts {
         turn_state: Arc::clone(&turn_state_store),
@@ -3778,7 +3839,7 @@ pub async fn build_reborn_runtime(
         model_route_resolver: None,
         cancellation_factory: None,
         skill_context_source,
-        input_queue: None,
+        input_queue: Some(host_input_queue_reader),
         identity_context_source: match local_runtime {
             Some(local_runtime) => Arc::new(
                 // Local-dev seeding validates the prompt path first, so non-file prompt paths fail
@@ -4050,6 +4111,7 @@ pub async fn build_reborn_runtime(
         turn_state_flush,
         turn_tree_store: turn_state_store,
         thread_service,
+        input_enqueue: host_input_enqueue,
         thread_scope,
         turn_scheduler: RuntimeTurnScheduler::new(composition.scheduler_handle, scheduler_notifier),
         trigger_poller_handle,
@@ -10909,7 +10971,7 @@ output_schema_ref = "schemas/write.output.json"
     /// harness provides; moving it would require duplicating that harness. Decomposition of
     /// runtime.rs is tracked in plan #4471.
     #[tokio::test]
-    async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
+    async fn deferred_busy_message_not_auto_submitted_after_run_cancellation() {
         let root = tempfile::tempdir().expect("tempdir");
         let gateway = Arc::new(RecordingGateway {
             reply: "busy-drain ok".to_string(),
@@ -10985,7 +11047,7 @@ output_schema_ref = "schemas/write.output.json"
             run_id: run_id_a, ..
         } = submitted_a;
 
-        // Submit message B through the WebUI path — thread is busy, must get RejectedBusy.
+        // Submit message B through the WebUI path — thread is busy, must get queued.
         let response_b = bundle
             .api
             .submit_turn(
@@ -11000,25 +11062,30 @@ output_schema_ref = "schemas/write.output.json"
             .await
             .expect("message B submit should not error");
 
-        let RebornSubmitTurnResponse::RejectedBusy {
+        let RebornSubmitTurnResponse::DeferredBusy {
             notice: notice_b,
             active_run_id: busy_run_id,
+            status: status_b,
             ..
         } = response_b
         else {
-            panic!("expected RejectedBusy for message B, got {response_b:?}");
+            panic!("expected DeferredBusy for message B, got {response_b:?}");
         };
         assert_eq!(
-            busy_run_id,
-            Some(run_id_a),
-            "RejectedBusy should report run A as the active run"
+            busy_run_id, run_id_a,
+            "DeferredBusy should report run A as the active run"
+        );
+        assert_eq!(
+            status_b,
+            TurnStatus::Queued,
+            "message B should be queued into run A"
         );
         assert!(
             !notice_b.is_empty(),
-            "RejectedBusy response must carry a non-empty notice"
+            "DeferredBusy response must carry a non-empty notice"
         );
 
-        // Verify message B is stored with RejectedBusy status.
+        // Verify message B is stored with queued status.
         let history = runtime
             .thread_service
             .list_thread_history(ThreadHistoryRequest {
@@ -11027,23 +11094,23 @@ output_schema_ref = "schemas/write.output.json"
             })
             .await
             .expect("thread history after B");
-        let rejected_messages: Vec<_> = history
+        let queued_messages: Vec<_> = history
             .messages
             .iter()
-            .filter(|m| matches!(m.status, MessageStatus::RejectedBusy))
+            .filter(|m| matches!(m.status, MessageStatus::Queued))
             .collect();
         assert_eq!(
-            rejected_messages.len(),
+            queued_messages.len(),
             1,
-            "exactly one message should be stored as RejectedBusy after thread-busy submit"
+            "exactly one message should be stored as queued after thread-busy submit"
         );
         assert_eq!(
-            rejected_messages[0].kind,
+            queued_messages[0].kind,
             MessageKind::User,
-            "the RejectedBusy message must be of kind User"
+            "the queued message must be of kind User"
         );
 
-        // Cancel run A — this is the terminal event that (must NOT) auto-resubmit B.
+        // Cancel run A — this is the terminal event that must not submit B as a separate run.
         runtime
             .cancel_run(
                 &scope,
@@ -11054,7 +11121,7 @@ output_schema_ref = "schemas/write.output.json"
             .await
             .expect("run A cancellation succeeds");
 
-        // B must remain RejectedBusy — no auto-resubmission should have fired.
+        // B must remain the same row and no auto-resubmission should have fired.
         let history_after_cancel = runtime
             .thread_service
             .list_thread_history(ThreadHistoryRequest {
@@ -11064,10 +11131,10 @@ output_schema_ref = "schemas/write.output.json"
             .await
             .expect("thread history after cancel");
         // Identify message B by the message_id we captured from the pre-cancel history.
-        // Using the stable message_id (rather than a simple RejectedBusy count) ensures
-        // a regression that leaves the RejectedBusy row AND adds a Submitted row for the
-        // same message cannot slip past as "still one RejectedBusy".
-        let msg_b_id = rejected_messages[0].message_id;
+        // Using the stable message_id (rather than a simple queued count) ensures
+        // a regression that leaves the queued row AND adds a Submitted row for the
+        // same message cannot slip past as "still one queued message".
+        let msg_b_id = queued_messages[0].message_id;
 
         let msg_b_after_cancel: Vec<_> = history_after_cancel
             .messages
@@ -11081,8 +11148,8 @@ output_schema_ref = "schemas/write.output.json"
         );
         assert_eq!(
             msg_b_after_cancel[0].status,
-            MessageStatus::RejectedBusy,
-            "message B must still be RejectedBusy after run A is cancelled — no auto-resubmission"
+            MessageStatus::Queued,
+            "message B must still be queued after run A is cancelled — no auto-resubmission"
         );
         // Guard: no additional Submitted row must have been created for message B's message_id.
         let submitted_for_b: Vec<_> = history_after_cancel

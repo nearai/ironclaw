@@ -650,6 +650,7 @@ struct SlackHostBetaRuntimeParts {
     local_runtime: Arc<crate::factory::RebornLocalRuntimeServices>,
     thread_service: Arc<dyn SessionThreadService>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
+    input_enqueue: Arc<dyn ironclaw_loop_support::HostInputEnqueuePort>,
     approval_interaction_service: Arc<dyn ApprovalInteractionService>,
     auth_interaction_service: Arc<dyn AuthInteractionService>,
     auth_challenge_provider: Option<Arc<dyn crate::AuthChallengeProvider>>,
@@ -673,6 +674,7 @@ impl SlackHostBetaRuntimeParts {
             local_runtime: Arc::clone(local_runtime),
             thread_service: runtime.webui_thread_service(),
             turn_coordinator: runtime.webui_turn_coordinator(),
+            input_enqueue: runtime.webui_input_enqueue(),
             approval_interaction_service,
             auth_interaction_service: runtime.webui_auth_interaction_service(),
             auth_challenge_provider: runtime.auth_challenge_provider(),
@@ -1139,11 +1141,14 @@ fn build_slack_installation_record_with_resolvers(
     )]);
     let binding = ProductConversationBindingService::new(conversation_port, installation_resolver);
 
-    let inbound = Arc::new(DefaultInboundTurnService::new(
-        binding.clone(),
-        Arc::clone(&parts.thread_service),
-        Arc::clone(&parts.turn_coordinator),
-    ));
+    let inbound = Arc::new(
+        DefaultInboundTurnService::new(
+            binding.clone(),
+            Arc::clone(&parts.thread_service),
+            Arc::clone(&parts.turn_coordinator),
+        )
+        .with_input_enqueue(Arc::clone(&parts.input_enqueue)),
+    );
     let route_store: Arc<dyn DeliveredGateRouteStore> =
         Arc::clone(&parts.local_runtime.delivered_gate_routes);
     let workflow = Arc::new(

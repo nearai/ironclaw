@@ -304,6 +304,14 @@ pub enum RebornSubmitTurnResponse {
         event_cursor: Option<EventCursor>,
         notice: String,
     },
+    DeferredBusy {
+        thread_id: ThreadId,
+        accepted_message_ref: AcceptedMessageRef,
+        active_run_id: TurnRunId,
+        status: TurnStatus,
+        event_cursor: EventCursor,
+        notice: String,
+    },
     AlreadySubmitted {
         thread_id: ThreadId,
         accepted_message_ref: AcceptedMessageRef,
