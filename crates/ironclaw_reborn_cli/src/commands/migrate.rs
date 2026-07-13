@@ -395,12 +395,11 @@ fn read_shared_target_state(
 ) -> anyhow::Result<Option<MigrationStateRecord>> {
     use ironclaw_reborn_composition::RebornMigrationTargetStore;
 
-    let target = match ironclaw_reborn_composition::resolve_reborn_migration_target(
-        context.boot_config(),
-    ) {
-        Ok(target) => target,
-        Err(_) => return Ok(None),
-    };
+    let target =
+        match ironclaw_reborn_composition::resolve_reborn_migration_target(context.boot_config()) {
+            Ok(target) => target,
+            Err(_) => return Ok(None),
+        };
     match target.store {
         #[cfg(feature = "postgres")]
         RebornMigrationTargetStore::Postgres { url } => crate::runtime::block_on_cli(async move {

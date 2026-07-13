@@ -2024,7 +2024,9 @@ fn run_fails_closed_for_a_non_default_applied_migration_manifest() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("migration target inspection requires a binary built with libsql or postgres"),
+        stderr.contains(
+            "migration target inspection requires a binary built with libsql or postgres"
+        ),
         "stderr: {stderr}"
     );
 }
@@ -2120,7 +2122,10 @@ fn doctor_reports_unverifiable_migration_state_without_a_storage_backend() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("v1_migration_state: invalid"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("v1_migration_state: invalid"),
+        "stdout: {stdout}"
+    );
 }
 
 #[test]
