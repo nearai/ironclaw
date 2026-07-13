@@ -336,6 +336,67 @@ async fn tool_result_records_are_scope_bound_idempotent_and_bounded() {
     );
 }
 
+/// PR #5902 review: `tool_result_records_are_scope_bound_idempotent_and_bounded`
+/// only proves sequential retries are idempotent. Concurrent writers of the
+/// SAME result content must also converge on CAS without a lost result or a
+/// spurious conflict.
+#[tokio::test]
+async fn concurrent_duplicate_tool_result_writes_converge_without_conflict() {
+    let service = InMemorySessionThreadService::default();
+    let owner_scope = scope("durable-tool-result-concurrent");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: owner_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-durable-tool-result-concurrent").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let result_ref = "result:durable-tool-result-concurrent".to_string();
+    let content = br#"{"message":"concurrent-write"}"#.to_vec();
+
+    let writes = (0..8).map(|_| {
+        let service = service.clone();
+        let thread_id = thread.thread_id.clone();
+        let owner_scope = owner_scope.clone();
+        let result_ref = result_ref.clone();
+        let content = content.clone();
+        async move {
+            service
+                .put_tool_result_record(PutToolResultRecordRequest {
+                    scope: owner_scope,
+                    thread_id,
+                    result_ref,
+                    content,
+                })
+                .await
+        }
+    });
+
+    let outcomes = join_all(writes).await;
+    for outcome in outcomes {
+        outcome.expect("concurrent identical writes must converge, not conflict");
+    }
+
+    let chunk = service
+        .read_tool_result_record(ReadToolResultRecordRequest {
+            scope: owner_scope,
+            thread_id: thread.thread_id,
+            result_ref,
+            offset: 0,
+            max_bytes: 128,
+        })
+        .await
+        .expect("read succeeds")
+        .expect("stored result exists");
+    assert_eq!(
+        chunk.content, content,
+        "concurrent duplicate writes must not lose or corrupt the result"
+    );
+}
+
 #[tokio::test]
 async fn tool_result_record_validation_enforces_write_and_read_boundaries() {
     const TOOL_RESULT_RECORD_MAX_BYTES: usize = 4 * 1024 * 1024;

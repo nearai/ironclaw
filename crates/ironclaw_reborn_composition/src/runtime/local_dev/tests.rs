@@ -1113,6 +1113,109 @@ mod tests {
         );
     }
 
+    /// PR #5902 review: `update_capability_result` must overwrite the durable
+    /// raw record (readable through `SessionThreadService`), and
+    /// `delete_capability_result` must leave that durable record intact and
+    /// only clear the transient staging copy — pinning the retention
+    /// invariant `37fe3ac04` fixed at the `LocalDevCapabilityIo` level
+    /// directly, rather than only through a rollback-path mock.
+    #[tokio::test]
+    async fn update_and_delete_capability_result_preserve_durable_record() {
+        let run_context = run_context("durable-update-delete").await;
+        let fallback_user_id = UserId::new("durable-update-delete-owner").expect("user id");
+        let thread_scope = local_dev_thread_scope_for_run(&run_context, &fallback_user_id)
+            .expect("run scope has an agent");
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: thread_scope.clone(),
+                thread_id: Some(run_context.thread_id.clone()),
+                created_by_actor_id: "actor-a".into(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .expect("thread exists");
+        let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
+        let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+            Arc::clone(&display_previews),
+            thread_service.clone(),
+            fallback_user_id,
+        );
+        let input_ref = capability_io
+            .register_provider_tool_call_input(
+                &run_context,
+                &provider_tool_call(serde_json::json!({"message": "hello"})),
+            )
+            .await
+            .expect("input stages");
+        let invocation_id = InvocationId::new();
+        let capability_id = CapabilityId::new("builtin.echo").expect("capability id");
+        let write = capability_io
+            .write_capability_result(CapabilityResultWrite {
+                run_context: &run_context,
+                input_ref: &input_ref,
+                invocation_id,
+                capability_id: &capability_id,
+                output: serde_json::json!({"content": "original"}),
+                display_preview: None,
+            })
+            .await
+            .expect("initial durable write succeeds");
+
+        capability_io
+            .update_capability_result(
+                &run_context,
+                &write.result_ref,
+                serde_json::json!({"content": "updated"}),
+            )
+            .await
+            .expect("update succeeds");
+        let updated_record = thread_service
+            .read_tool_result_record(ironclaw_threads::ReadToolResultRecordRequest {
+                scope: thread_scope.clone(),
+                thread_id: run_context.thread_id.clone(),
+                result_ref: write.result_ref.as_str().to_string(),
+                offset: 0,
+                max_bytes: 128,
+            })
+            .await
+            .expect("durable read succeeds")
+            .expect("durable record exists after update");
+        assert_eq!(
+            updated_record.content,
+            serde_json::to_vec(&serde_json::json!({"content": "updated"})).unwrap(),
+            "the durable raw record must reflect the update"
+        );
+
+        capability_io
+            .delete_capability_result(&run_context, &write.result_ref)
+            .await
+            .expect("delete succeeds");
+        assert!(
+            capability_io
+                .result_output(write.result_ref.as_str())
+                .expect("staging lookup succeeds")
+                .is_none(),
+            "delete must clear the transient staging copy"
+        );
+        let record_after_delete = thread_service
+            .read_tool_result_record(ironclaw_threads::ReadToolResultRecordRequest {
+                scope: thread_scope,
+                thread_id: run_context.thread_id,
+                result_ref: write.result_ref.as_str().to_string(),
+                offset: 0,
+                max_bytes: 128,
+            })
+            .await
+            .expect("durable read after delete succeeds");
+        assert!(
+            record_after_delete.is_some(),
+            "delete_capability_result must retain the durable LLM tool result; \
+             only the transient staging copy may be evicted"
+        );
+    }
+
     /// Issue #5838: a result under the preview cap gets an inline first-look
     /// preview covering the whole serialized output, with no truncation
     /// markers, so the model does not need a follow-up `result_read` call.
