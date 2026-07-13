@@ -8,9 +8,12 @@ IronClaw connects to [Model Context Protocol](https://modelcontextprotocol.io/) 
 > **Binary scope:** the `ironclaw mcp ...` commands and
 > `~/.ironclaw/mcp-servers.json` configuration below apply to the v1 `ironclaw`
 > binary. Reborn does not spawn stdio MCP servers. `ironclaw-reborn` supports
-> host-mediated HTTPS MCP providers and installed-local HTTP MCP manifests only
+> host-bundled HTTPS MCP providers and installed-local HTTP MCP manifests only
 > when the URL host is a literal IPv4 loopback address (`127.0.0.0/8`). It rejects
-> `localhost`, private LAN addresses, and plaintext remote endpoints.
+> `localhost`, IPv6 loopback, private LAN addresses, plaintext remote endpoints,
+> URL userinfo, queries, and fragments. The manifest endpoint is matched exactly;
+> an omitted HTTP port is pinned to port 80 rather than widening to every local
+> service.
 
 ---
 

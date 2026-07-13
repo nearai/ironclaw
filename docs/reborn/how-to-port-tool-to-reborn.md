@@ -295,8 +295,17 @@ prompt_doc_ref = "prompt/search-issues.md"
 
 - Manifest metadata selects transport and endpoint/command.
 - Runtime input shapes MCP arguments only; it must not choose transport, URL, credentials, or network policy.
-- HTTP/SSE must use host-mediated runtime egress.
-- Stdio MCP remains process-backed and requires the process/sandbox posture to be ready before production use.
+- HTTP must use host-mediated runtime egress; current production composition
+  does not admit SSE manifests.
+- Current Reborn HTTP dispatch accepts remote HTTPS only for `HostBundled`
+  packages. `InstalledLocal` may use plaintext HTTP only at the exact literal
+  IPv4 loopback endpoint declared by the manifest; `localhost`, IPv6, private
+  LAN, remote plaintext, and `RegistryInstalled` endpoints are rejected. An
+  omitted HTTP port is pinned to 80, and runtime requests must match the
+  manifest scheme, host, effective port, and normalized path.
+- Installed-local MCP manifests declare capability schemas statically; live
+  `tools/list` discovery remains host-bundled-only.
+- Stdio MCP remains blocked until the mediated process/sandbox posture is ready.
 
 ### MCP checklist
 

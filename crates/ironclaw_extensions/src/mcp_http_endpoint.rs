@@ -1,9 +1,24 @@
+//! Canonical parser and matcher for manifest-declared MCP HTTP endpoints.
+//!
+//! HTTPS endpoints may use any syntactically valid host. Plaintext HTTP is
+//! accepted only for literal IPv4 loopback hosts; DNS names, IPv6, and
+//! non-loopback addresses are rejected. Parsing establishes endpoint identity;
+//! manifest-source authorization and egress policy remain host concerns.
+
+/// Scheme accepted for a validated MCP HTTP endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpHttpScheme {
+    /// Plaintext HTTP on a literal IPv4 loopback host.
     Http,
+    /// HTTPS on a syntactically valid URL host.
     Https,
 }
 
+/// Canonical manifest-declared MCP HTTP endpoint.
+///
+/// Parsing rejects userinfo, queries, and fragments. Matching compares the
+/// scheme, canonical host, explicit port, and path after trailing-slash
+/// normalization.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpHttpEndpoint {
     scheme: McpHttpScheme,
@@ -13,6 +28,7 @@ pub struct McpHttpEndpoint {
 }
 
 impl McpHttpEndpoint {
+    /// Parses an HTTPS endpoint or a literal IPv4 loopback HTTP endpoint.
     pub fn parse(url: &str) -> Option<Self> {
         let parsed = url::Url::parse(url).ok()?;
         if !parsed.username().is_empty()
@@ -35,22 +51,27 @@ impl McpHttpEndpoint {
         })
     }
 
+    /// Returns the validated endpoint scheme.
     pub fn scheme(&self) -> McpHttpScheme {
         self.scheme
     }
 
+    /// Returns the canonical lowercase host.
     pub fn host(&self) -> &str {
         &self.host
     }
 
+    /// Returns the explicitly declared port, if any.
     pub fn port(&self) -> Option<u16> {
         self.port
     }
 
+    /// Returns whether this is a plaintext literal IPv4 loopback endpoint.
     pub fn is_literal_ipv4_loopback_http(&self) -> bool {
         self.scheme == McpHttpScheme::Http
     }
 
+    /// Returns whether `url` resolves to this same canonical endpoint.
     pub fn matches_url(&self, url: &str) -> bool {
         Self::parse(url).is_some_and(|candidate| candidate == *self)
     }

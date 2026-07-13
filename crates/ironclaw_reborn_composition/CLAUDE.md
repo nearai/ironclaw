@@ -53,6 +53,11 @@
   `ironclaw_runner::thread_scope::ThreadScopeResolver::resolve_for_turn` before
   calling `SessionThreadService`; do not append with the runtime/base
   `ThreadScope` directly in multi-user WebUI paths.
+- Keep host-bundled remote MCP HTTPS-only. Plaintext MCP HTTP is allowed only
+  for `InstalledLocal` manifests at their exact literal IPv4 loopback endpoint;
+  pin an omitted port to 80, derive the grant and egress target from the same
+  parsed manifest URL, and never extend the exception to `localhost`, IPv6,
+  LAN/private non-loopback, remote, `RegistryInstalled`, or stdio shapes.
 
 ## WebUI v2 native surface (`webui-v2-beta` feature)
 

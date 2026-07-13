@@ -13,6 +13,7 @@
 
 - Declarative extension manifest, registry, lifecycle, and trust inputs (no execution, network, secrets, or WASM/script/MCP inspection), currently:
 - Manifest discovery/validation and asset-path containment: `ExtensionError`, `ExtensionAssetPath` (`lib.rs`); the in-memory `ExtensionRegistry` (`registry`).
+- Canonical MCP HTTP endpoint parsing/matching (`McpHttpEndpoint`): HTTPS generally, plus plaintext HTTP only for literal IPv4 loopback hosts; execution policy remains composition-owned.
 - Lifecycle: `ExtensionLifecycleEvent`, `ExtensionLifecycleEventSink`, `ExtensionLifecycleService` (`lifecycle`).
 - The v2 manifest schema (`v2`): `ExtensionManifestV2`, `CapabilityDeclV2`, `ExtensionRuntimeV2`, `ManifestSource`, `CapabilityVisibility`, `ManifestV2Error`, and the schema-version/size constants.
 - The host-API manifest contract projection (`v2`): `HostApiContractRegistry`, `HostApiManifestContract`, `HostApiRefV2`, `HostApiManifestProjection`; plus the capability-provider host-API contract (`host_api/capability_provider`).

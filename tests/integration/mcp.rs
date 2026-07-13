@@ -131,6 +131,21 @@ async fn installed_local_mcp_dispatches_through_production_composition() {
             .all(|request| request.authorization.is_none()),
         "public installed-local MCP should not require a test-injected credential"
     );
+
+    let recorded = server.recorded_requests();
+    eprintln!("installed-local MCP endpoint: {}", server.mcp_url());
+    for request in &recorded {
+        eprintln!(
+            "wire request: method={} authorization={} params={}",
+            request.method,
+            request.authorization.as_deref().unwrap_or("none"),
+            request
+                .params
+                .as_ref()
+                .map_or_else(|| "null".to_string(), serde_json::Value::to_string)
+        );
+    }
+    eprintln!("persisted final assistant reply contains: done");
 }
 
 /// Twin of `mcp_tool_call_reaches_mock_server`: same client `Accept:
