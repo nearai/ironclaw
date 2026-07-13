@@ -5,7 +5,7 @@ use ironclaw_auth::{AuthContinuationEvent, AuthContinuationRef, AuthProductError
 use ironclaw_product_workflow::{
     LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductAction,
     LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
-    LifecycleProductSurfaceContext,
+    LifecycleProductSurfaceContext, LifecycleReadinessBlocker,
 };
 
 use crate::RebornAuthContinuationDispatcher;
@@ -66,8 +66,8 @@ impl RebornAuthContinuationDispatcher for LifecycleAuthContinuationDispatcher {
                 tracing::warn!(%error, flow_id = %event.flow_id, "OAuth completed but extension activation failed");
                 AuthProductError::BackendUnavailable
             })?;
-        if response.phase != LifecyclePhase::Active
-            || !matches!(
+        if response.phase == LifecyclePhase::Active
+            && matches!(
                 response.payload,
                 Some(LifecycleProductPayload::ExtensionActivate {
                     activated: true,
@@ -75,14 +75,33 @@ impl RebornAuthContinuationDispatcher for LifecycleAuthContinuationDispatcher {
                 })
             )
         {
-            tracing::warn!(
-                flow_id = %event.flow_id,
-                phase = ?response.phase,
-                "OAuth lifecycle continuation did not produce an active extension"
-            );
-            return Err(AuthProductError::BackendUnavailable);
+            return self.inner.dispatch_auth_continuation(event).await;
         }
-        Ok(())
+        if matches!(
+            response.payload,
+            Some(LifecycleProductPayload::ExtensionActivate {
+                activated: false,
+                ..
+            })
+        ) && !response.blockers.is_empty()
+            && response
+                .blockers
+                .iter()
+                .all(|blocker| matches!(blocker, LifecycleReadinessBlocker::Credential { .. }))
+        {
+            tracing::debug!(
+                flow_id = %event.flow_id,
+                remaining_credentials = response.blockers.len(),
+                "OAuth credential completed; extension activation is waiting on other credentials"
+            );
+            return Ok(());
+        }
+        tracing::warn!(
+            flow_id = %event.flow_id,
+            phase = ?response.phase,
+            "OAuth lifecycle continuation did not produce an active extension"
+        );
+        Err(AuthProductError::BackendUnavailable)
     }
 
     async fn dispatch_canceled_auth_continuation(
@@ -90,5 +109,151 @@ impl RebornAuthContinuationDispatcher for LifecycleAuthContinuationDispatcher {
         event: AuthContinuationEvent,
     ) -> Result<(), AuthProductError> {
         self.inner.dispatch_canceled_auth_continuation(event).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use ironclaw_auth::{
+        AuthFlowId, AuthProductScope, AuthProviderId, AuthSurface,
+        LifecyclePackageRef as AuthPackageRef,
+    };
+    use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
+    use ironclaw_product_workflow::{
+        LifecycleBlockerRef, LifecycleProductResponse, ProductWorkflowError,
+    };
+
+    use super::*;
+
+    struct StaticLifecycleFacade {
+        response: LifecycleProductResponse,
+    }
+
+    #[async_trait]
+    impl LifecycleProductFacade for StaticLifecycleFacade {
+        async fn execute(
+            &self,
+            _context: LifecycleProductContext,
+            _action: LifecycleProductAction,
+        ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+            Ok(self.response.clone())
+        }
+
+        async fn project_package(
+            &self,
+            _context: LifecycleProductContext,
+            _package_ref: LifecyclePackageRef,
+        ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+            Ok(self.response.clone())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingInnerDispatcher {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl RebornAuthContinuationDispatcher for RecordingInnerDispatcher {
+        async fn dispatch_auth_continuation(
+            &self,
+            _event: AuthContinuationEvent,
+        ) -> Result<(), AuthProductError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn dispatch_canceled_auth_continuation(
+            &self,
+            _event: AuthContinuationEvent,
+        ) -> Result<(), AuthProductError> {
+            Ok(())
+        }
+    }
+
+    fn event() -> AuthContinuationEvent {
+        AuthContinuationEvent {
+            flow_id: AuthFlowId::new(),
+            scope: AuthProductScope::new(
+                ResourceScope::local_default(
+                    UserId::new("alice").expect("user"),
+                    InvocationId::new(),
+                )
+                .expect("scope"),
+                AuthSurface::Callback,
+            ),
+            continuation: AuthContinuationRef::LifecycleActivation {
+                package_ref: AuthPackageRef::new("slack").expect("package ref"),
+            },
+            provider: AuthProviderId::new("slack_personal").expect("provider"),
+            credential_account_id: None,
+            emitted_at: chrono::Utc::now(),
+        }
+    }
+
+    fn dispatcher(
+        response: LifecycleProductResponse,
+    ) -> (
+        LifecycleAuthContinuationDispatcher,
+        Arc<RecordingInnerDispatcher>,
+    ) {
+        let inner = Arc::new(RecordingInnerDispatcher::default());
+        let slot: LifecycleProductFacadeSlot = Arc::new(OnceLock::new());
+        assert!(
+            slot.set(Arc::new(StaticLifecycleFacade { response }))
+                .is_ok()
+        );
+        (
+            LifecycleAuthContinuationDispatcher::new(inner.clone(), slot),
+            inner,
+        )
+    }
+
+    #[tokio::test]
+    async fn successful_activation_delegates_to_blocked_auth_fanout() {
+        let (dispatcher, inner) = dispatcher(LifecycleProductResponse {
+            package_ref: None,
+            phase: LifecyclePhase::Active,
+            blockers: Vec::new(),
+            message: None,
+            payload: Some(LifecycleProductPayload::ExtensionActivate {
+                activated: true,
+                visible_capability_ids: vec!["slack.search_messages".to_string()],
+                connection_required: None,
+            }),
+        });
+
+        dispatcher
+            .dispatch_auth_continuation(event())
+            .await
+            .expect("dispatch continuation");
+
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn remaining_credentials_settle_without_fanout_or_failure() {
+        let (dispatcher, inner) = dispatcher(LifecycleProductResponse {
+            package_ref: None,
+            phase: LifecyclePhase::Installed,
+            blockers: vec![LifecycleReadinessBlocker::Credential {
+                ref_id: Some(LifecycleBlockerRef::new("google").expect("blocker ref")),
+            }],
+            message: None,
+            payload: Some(LifecycleProductPayload::ExtensionActivate {
+                activated: false,
+                visible_capability_ids: Vec::new(),
+                connection_required: None,
+            }),
+        });
+
+        dispatcher
+            .dispatch_auth_continuation(event())
+            .await
+            .expect("incomplete credentials are not an activation failure");
+
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 0);
     }
 }

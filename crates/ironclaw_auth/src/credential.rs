@@ -18,10 +18,24 @@ use crate::{
 /// account, so metadata-only account updates do not suppress cleanup while a
 /// later reconnect or token refresh remains protected from a stale callback.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+#[serde(try_from = "String", into = "String")]
 pub struct CredentialSecretFingerprint(String);
 
 impl CredentialSecretFingerprint {
+    pub fn new(value: impl Into<String>) -> Result<Self, AuthProductError> {
+        let value = value.into();
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(AuthProductError::invalid_request(
+                "credential secret fingerprint must be 64 lowercase hexadecimal characters",
+            ));
+        }
+        Ok(Self(value))
+    }
+
     pub fn from_handles(
         access_secret: Option<&SecretHandle>,
         refresh_secret: Option<&SecretHandle>,
@@ -32,7 +46,22 @@ impl CredentialSecretFingerprint {
         let access = access_secret.map(SecretHandle::as_str).unwrap_or_default();
         let refresh = refresh_secret.map(SecretHandle::as_str).unwrap_or_default();
         let material = format!("{}:{access}{}:{refresh}", access.len(), refresh.len());
+        // `sha256_hex` is canonical lowercase hex by contract.
         Self(ironclaw_common::hashing::sha256_hex(material.as_bytes()))
+    }
+}
+
+impl TryFrom<String> for CredentialSecretFingerprint {
+    type Error = AuthProductError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<CredentialSecretFingerprint> for String {
+    fn from(value: CredentialSecretFingerprint) -> Self {
+        value.0
     }
 }
 
@@ -1111,6 +1140,30 @@ mod tests {
     };
     use chrono::Utc;
     use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
+
+    #[test]
+    fn credential_secret_fingerprint_deserialization_requires_canonical_sha256_hex() {
+        for invalid in [
+            "".to_string(),
+            "a".repeat(63),
+            "a".repeat(65),
+            "g".repeat(64),
+            "A".repeat(64),
+        ] {
+            let wire = serde_json::to_string(&invalid).expect("serialize test input");
+            assert!(
+                serde_json::from_str::<CredentialSecretFingerprint>(&wire).is_err(),
+                "invalid persisted fingerprint must be rejected: {invalid}"
+            );
+        }
+
+        let canonical = "0123456789abcdef".repeat(4);
+        let parsed: CredentialSecretFingerprint = serde_json::from_str(
+            &serde_json::to_string(&canonical).expect("serialize canonical fingerprint"),
+        )
+        .expect("canonical fingerprint");
+        assert_eq!(String::from(parsed), canonical);
+    }
 
     /// Build a minimal CredentialAccount using the same idiom as domain.rs tests.
     fn make_account(scope: AuthProductScope) -> CredentialAccount {

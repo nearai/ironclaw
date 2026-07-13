@@ -4331,6 +4331,213 @@ async fn filesystem_continuation_failure_is_durable_and_fenced() {
     assert_eq!(stale, AuthProductError::FlowAlreadyTerminal);
 }
 
+#[tokio::test]
+async fn filesystem_continuation_claim_has_one_owner_across_service_instances() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let scope = test_scope();
+    let first_service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
+    let second_service = test_service(filesystem, secret_store);
+    let account = first_service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("claim-owner-before").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let completed =
+        complete_bound_oauth_generation(&first_service, &scope, &account, "claim-owner").await;
+    let claimed_at = Utc::now();
+
+    let (first, second) = tokio::join!(
+        first_service.claim_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchClaimInput {
+                flow_id: completed.id,
+                claimed_at,
+            },
+        ),
+        second_service.claim_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchClaimInput {
+                flow_id: completed.id,
+                claimed_at,
+            },
+        )
+    );
+
+    assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+    let loser = first
+        .err()
+        .or_else(|| second.err())
+        .expect("one losing claim");
+    assert!(matches!(
+        loser,
+        AuthProductError::BackendUnavailable | AuthProductError::BackendConflict
+    ));
+}
+
+#[tokio::test]
+async fn filesystem_continuation_recovery_fences_the_stale_lease_owner() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let scope = test_scope();
+    let stale_service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
+    let recovery_service = test_service(filesystem, secret_store);
+    let account = stale_service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("stale-owner-before").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let completed =
+        complete_bound_oauth_generation(&stale_service, &scope, &account, "stale-owner").await;
+    let stale_claim = stale_service
+        .claim_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchClaimInput {
+                flow_id: completed.id,
+                claimed_at: Utc::now()
+                    - Duration::seconds(
+                        ironclaw_auth::AUTH_CONTINUATION_DISPATCH_LEASE_SECONDS + 1,
+                    ),
+            },
+        )
+        .await
+        .expect("stale lease claim");
+    let recovered_claim = recovery_service
+        .claim_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchClaimInput {
+                flow_id: completed.id,
+                claimed_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("recover expired lease");
+
+    let stale_settlement = stale_service
+        .settle_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchSettlementInput {
+                flow_id: completed.id,
+                expected_claimed_at: stale_claim.updated_at,
+                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::Dispatched {
+                    emitted_at: Utc::now(),
+                },
+            },
+        )
+        .await
+        .expect_err("stale lease owner must be fenced");
+    assert_eq!(stale_settlement, AuthProductError::FlowAlreadyTerminal);
+
+    recovery_service
+        .settle_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchSettlementInput {
+                flow_id: completed.id,
+                expected_claimed_at: recovered_claim.updated_at,
+                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::Dispatched {
+                    emitted_at: Utc::now(),
+                },
+            },
+        )
+        .await
+        .expect("current lease owner settles");
+}
+
+#[tokio::test]
+async fn filesystem_oauth_compensation_converges_when_account_is_already_absent() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let scope = test_scope();
+    let service = test_service(Arc::clone(&filesystem), secret_store);
+    let account = service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("already-absent-before").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let completed =
+        complete_bound_oauth_generation(&service, &scope, &account, "already-absent").await;
+    let expected_secret_fingerprint = completed
+        .credential_secret_fingerprint
+        .clone()
+        .expect("completed secret fingerprint");
+    let claim = service
+        .claim_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchClaimInput {
+                flow_id: completed.id,
+                claimed_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("continuation claim");
+    service
+        .settle_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchSettlementInput {
+                flow_id: completed.id,
+                expected_claimed_at: claim.updated_at,
+                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
+                    error: AuthErrorCode::BackendUnavailable,
+                },
+            },
+        )
+        .await
+        .expect("continuation failure");
+    let account_path = super::paths::account_path(&scope, account.id).expect("account path");
+    filesystem
+        .delete(&scope.resource, &account_path)
+        .await
+        .expect("remove account before compensation");
+
+    let outcome = service
+        .compensate_oauth_completion(OAuthCompletionCompensationRequest {
+            scope: scope.clone(),
+            flow_id: completed.id,
+            provider: google_provider(),
+            credential_account_id: account.id,
+            expected_secret_fingerprint,
+        })
+        .await
+        .expect("already-absent compensation converges");
+    assert_eq!(outcome, OAuthCompletionCompensationOutcome::AlreadyAbsent);
+    let converged = service
+        .get_flow(&scope, completed.id)
+        .await
+        .expect("flow read")
+        .expect("failed flow retained");
+    assert!(converged.credential_secret_fingerprint.is_none());
+}
+
 async fn complete_bound_oauth_generation(
     service: &FilesystemAuthProductServices<InMemoryBackend>,
     scope: &AuthProductScope,

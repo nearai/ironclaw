@@ -1868,10 +1868,14 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         reason: format!("extension lifecycle state could not be restored: {error}"),
     })?;
     #[cfg(feature = "slack-v2-host-beta")]
-    let removal_cleanup_adapters: Vec<Arc<dyn ExtensionRemovalCleanupAdapter>> =
-        vec![Arc::new(SlackPersonalConnectionCleanupAdapter::new(
-            Arc::clone(&store_graph.local_runtime.channel_connection_facade_slot),
-        ))];
+    let removal_cleanup_adapters: Vec<Arc<dyn ExtensionRemovalCleanupAdapter>> = vec![Arc::new(
+        SlackPersonalConnectionCleanupAdapter::new(Arc::clone(
+            &store_graph.local_runtime.channel_connection_facade_slot,
+        ))
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("Slack extension removal cleanup could not be built: {error}"),
+        })?,
+    )];
     #[cfg(not(feature = "slack-v2-host-beta"))]
     let removal_cleanup_adapters: Vec<Arc<dyn ExtensionRemovalCleanupAdapter>> = Vec::new();
     let removal_cleanup = Arc::new(

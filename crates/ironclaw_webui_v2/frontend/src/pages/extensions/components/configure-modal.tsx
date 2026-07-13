@@ -55,7 +55,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     // Broadcast channel-connected (same event pairing redemption sends) so an
     // open chat card for this channel clears and its parked request resumes —
     // connecting from the Extensions page must not strand the chat surface.
-    if (isChannelExtensionKind(extension?.kind) && channelId) {
+    if ((isChannelExtensionKind(extension?.kind) || isSlackToolsExtension) && channelId) {
       try {
         await notifyChannelConnected({ channel: channelId, source: "extensions-oauth" });
       } catch {
@@ -64,7 +64,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     }
     if (onSaved) onSaved();
     onClose();
-  }, [channelId, extension?.kind, onClose, onSaved, packageId, queryClient]);
+  }, [channelId, extension?.kind, isSlackToolsExtension, onClose, onSaved, packageId, queryClient]);
   const oauthMutation = useOauthSetup(extension?.packageRef, {
     onConfigured: handleOauthConfigured,
   });

@@ -607,11 +607,6 @@ pub struct RebornProductAuthServices {
     provider_client: Arc<dyn AuthProviderClient>,
     cleanup_service: Arc<dyn SecretCleanupService>,
     continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
-    /// Serializes lifecycle continuation dispatch through claim, external
-    /// activation, and fenced settlement. Clones share this lock, so a lease
-    /// takeover cannot terminalize while an older in-process claimant can
-    /// still commit the extension side effect.
-    lifecycle_continuation_dispatch_lock: Arc<tokio::sync::Mutex<()>>,
     security_audit_sink: Option<Arc<dyn SecurityAuditSink>>,
     /// Secret store forwarded to the inline-refresh margin check (A2).
     secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
@@ -662,7 +657,6 @@ impl std::fmt::Debug for RebornProductAuthServices {
                 "continuation_dispatcher",
                 &"Arc<dyn RebornAuthContinuationDispatcher>",
             )
-            .field("lifecycle_continuation_dispatch_lock", &"Arc<Mutex<()>>")
             .field("security_audit_sink", &self.security_audit_sink.is_some())
             .field("secret_store", &"<wired>")
             .field(
@@ -701,7 +695,6 @@ impl RebornProductAuthServices {
             provider_client,
             cleanup_service,
             continuation_dispatcher,
-            lifecycle_continuation_dispatch_lock: Arc::new(tokio::sync::Mutex::new(())),
             security_audit_sink: None,
             secret_store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
             host_managed_nearai_credential_scope: None,
@@ -1345,6 +1338,17 @@ impl RebornProductAuthServices {
                 .map(|completed| (completed, true))
                 .map_err(RebornOAuthCallbackError::from)?,
             RebornOAuthCallbackOutcome::Malformed => {
+                self.flow_manager
+                    .fail_oauth_callback(
+                        &request.scope,
+                        OAuthCallbackFailureInput {
+                            flow_id: request.flow_id,
+                            opaque_state_hash: request.opaque_state_hash,
+                            error: AuthErrorCode::MalformedCallback,
+                        },
+                    )
+                    .await
+                    .map_err(RebornOAuthCallbackError::from)?;
                 return Err(AuthProductError::MalformedCallback.into());
             }
         };
@@ -1426,7 +1430,7 @@ impl RebornProductAuthServices {
             })
             .await?;
         if outcome == OAuthCompletionCompensationOutcome::Superseded {
-            tracing::info!(
+            tracing::debug!(
                 flow_id = %flow.id,
                 "skipped stale OAuth compensation because newer credential material exists"
             );
@@ -1476,20 +1480,20 @@ impl RebornProductAuthServices {
         }
     }
 
-    /// Read a scoped flow's durable lifecycle status for the origin-independent
-    /// OAuth flow-status poll.
+    /// Reconcile a scoped OAuth flow's pending lifecycle work.
     ///
     /// Ownership is enforced by `get_flow`'s full-scope match: a flow owned by a
     /// different scope surfaces as `CrossScopeDenied`, which we deliberately
-    /// remap to the same not-found signal as an unknown flow so the read cannot
-    /// be used as a cross-user existence oracle. The poll also idempotently
-    /// resumes a stale lifecycle dispatch or its exact compensation journal;
-    /// this is how a browser watcher converges after a service restart.
+    /// remap to the same not-found signal as an unknown flow so the command
+    /// cannot be used as a cross-user existence oracle. The command
+    /// idempotently resumes a stale lifecycle dispatch or its exact
+    /// compensation journal after a service restart. Observational reads use
+    /// [`Self::flow_record_for_status`] instead.
     #[allow(
         dead_code,
-        reason = "used by the webui-v2-beta OAuth flow-status poll route"
+        reason = "used by the webui-v2-beta OAuth reconciliation command"
     )]
-    pub(crate) async fn flow_status(
+    pub(crate) async fn reconcile_oauth_flow(
         &self,
         scope: &AuthProductScope,
         flow_id: AuthFlowId,
@@ -1764,11 +1768,6 @@ impl RebornProductAuthServices {
             completed.continuation,
             AuthContinuationRef::LifecycleActivation { .. }
         );
-        let _lifecycle_dispatch_guard = if lifecycle {
-            Some(self.lifecycle_continuation_dispatch_lock.lock().await)
-        } else {
-            None
-        };
         let completed = if lifecycle {
             self.flow_manager
                 .get_flow(&completed.scope, completed.id)
@@ -2184,6 +2183,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn malformed_oauth_callback_terminalizes_the_known_flow() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let scope = test_auth_product_scope();
+        let state_hash = OpaqueStateHash::new("a".repeat(64)).expect("state hash");
+        let expires_at = Utc::now() + chrono::Duration::minutes(5);
+        let flow = shared
+            .create_flow(NewAuthFlow {
+                id: None,
+                scope: scope.clone(),
+                kind: AuthFlowKind::IntegrationCredential,
+                provider: AuthProviderId::new("google").expect("provider"),
+                challenge: AuthChallenge::OAuthUrl {
+                    authorization_url: OAuthAuthorizationUrl::new(
+                        "https://provider.example/authorize",
+                    )
+                    .expect("authorization URL"),
+                    expires_at,
+                },
+                continuation: AuthContinuationRef::SetupOnly,
+                update_binding: None,
+                opaque_state_hash: Some(state_hash.clone()),
+                pkce_verifier_hash: None,
+                expires_at,
+            })
+            .await
+            .expect("create flow");
+        let services = RebornProductAuthServices::from_shared(
+            shared.clone(),
+            Arc::new(NoopAuthContinuationDispatcher),
+        );
+
+        let error = services
+            .handle_oauth_callback(RebornOAuthCallbackRequest {
+                scope: scope.clone(),
+                flow_id: flow.id,
+                opaque_state_hash: state_hash,
+                outcome: RebornOAuthCallbackOutcome::Malformed,
+            })
+            .await
+            .expect_err("malformed callback remains a route failure");
+
+        assert_eq!(error.code, AuthErrorCode::MalformedCallback);
+        let persisted = shared
+            .get_flow(&scope, flow.id)
+            .await
+            .expect("load flow")
+            .expect("flow exists");
+        assert_eq!(persisted.status, AuthFlowStatus::Failed);
+        assert_eq!(persisted.error, Some(AuthErrorCode::MalformedCallback));
+    }
+
+    #[tokio::test]
     async fn abandoned_lifecycle_lease_can_terminalize_and_compensate() {
         let shared = Arc::new(InMemoryAuthProductServices::new());
         let scope = test_auth_product_scope();
@@ -2292,7 +2343,7 @@ mod tests {
 
         assert_eq!(
             services
-                .flow_status(&scope, completed.id)
+                .reconcile_oauth_flow(&scope, completed.id)
                 .await
                 .expect("stale lease recovery"),
             AuthFlowStatus::Failed

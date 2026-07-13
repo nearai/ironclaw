@@ -37,6 +37,79 @@ impl<'de> Deserialize<'de> for ManifestHash {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct ExtensionRemovalCleanupAdapterId(String);
+
+impl ExtensionRemovalCleanupAdapterId {
+    pub fn new(value: impl Into<String>) -> Result<Self, ExtensionInstallationError> {
+        validate_cleanup_id(value.into(), "cleanup adapter").map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ExtensionRemovalCleanupAdapterId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct ExtensionRemovalChannelId(String);
+
+impl ExtensionRemovalChannelId {
+    pub fn new(value: impl Into<String>) -> Result<Self, ExtensionInstallationError> {
+        validate_cleanup_id(value.into(), "cleanup channel").map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ExtensionRemovalChannelId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+pub enum ExtensionRemovalCleanupBinding {
+    ChannelConnection { channel: ExtensionRemovalChannelId },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionRemovalCleanupRequirement {
+    pub adapter_id: ExtensionRemovalCleanupAdapterId,
+    pub binding: ExtensionRemovalCleanupBinding,
+}
+
+impl ExtensionRemovalCleanupRequirement {
+    pub fn channel_connection(
+        adapter_id: ExtensionRemovalCleanupAdapterId,
+        channel: ExtensionRemovalChannelId,
+    ) -> Self {
+        Self {
+            adapter_id,
+            binding: ExtensionRemovalCleanupBinding::ChannelConnection { channel },
+        }
+    }
+}
+
 /// Product-agnostic extension manifest record.
 ///
 /// Domain crates can project their own host-api sections from `raw_toml` and
@@ -46,6 +119,7 @@ pub struct ExtensionManifestRecord {
     raw_toml: String,
     manifest: ExtensionManifestV2,
     manifest_hash: Option<ManifestHash>,
+    removal_cleanup_requirements: Vec<ExtensionRemovalCleanupRequirement>,
 }
 
 impl ExtensionManifestRecord {
@@ -83,7 +157,19 @@ impl ExtensionManifestRecord {
             raw_toml,
             manifest,
             manifest_hash,
+            removal_cleanup_requirements: Vec::new(),
         })
+    }
+
+    /// Attach host-trusted declarative cleanup metadata to the persisted
+    /// manifest record. These requirements are never parsed from extension
+    /// supplied TOML; catalog construction is the only production writer.
+    pub fn with_removal_cleanup_requirements(
+        mut self,
+        requirements: Vec<ExtensionRemovalCleanupRequirement>,
+    ) -> Self {
+        self.removal_cleanup_requirements = requirements;
+        self
     }
 
     pub fn manifest(&self) -> &ExtensionManifestV2 {
@@ -100,6 +186,10 @@ impl ExtensionManifestRecord {
 
     pub fn manifest_hash(&self) -> Option<&ManifestHash> {
         self.manifest_hash.as_ref()
+    }
+
+    pub fn removal_cleanup_requirements(&self) -> &[ExtensionRemovalCleanupRequirement] {
+        &self.removal_cleanup_requirements
     }
 }
 
@@ -1236,4 +1326,31 @@ fn validate_nonempty_noncontrol(
         });
     }
     Ok(())
+}
+
+fn validate_cleanup_id(
+    value: String,
+    label: &'static str,
+) -> Result<String, ExtensionInstallationError> {
+    let valid = !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
+        })
+        && value
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && value
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_alphanumeric);
+    if valid {
+        Ok(value)
+    } else {
+        Err(ExtensionInstallationError::InvalidValue {
+            field: label,
+            reason: "must be a bounded lowercase identifier".to_string(),
+        })
+    }
 }

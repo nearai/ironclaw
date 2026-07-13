@@ -4509,6 +4509,101 @@ test("useChat: Slack OAuth completion consumes the in-chat connection card", asy
   assert.equal(sendBodies[0].content, channelConnectionContinuationMessage("slack"));
 });
 
+test("useChat: a late flow A status cannot complete or fail newer flow B", async () => {
+  const threadId = "thread-chat-oauth-generation-fence";
+  const sourceMessageId = "tool-slack-oauth-generation-fence";
+  const stateUpdates = [];
+  const sendBodies = [];
+  const intervalCallbacks = [];
+  const storage = {
+    getItem: () => null,
+    setItem: () => {},
+  };
+  let startCount = 0;
+  let resolveFlowAStatus;
+  const flowAStatus = new Promise((resolve) => {
+    resolveFlowAStatus = resolve;
+  });
+  const popups = [
+    { closed: false, close() { this.closed = true; }, location: { href: "about:blank" } },
+    { closed: false, close() { this.closed = true; }, location: { href: "about:blank" } },
+  ];
+  const windowObject = {
+    open: () => popups[startCount],
+    localStorage: storage,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    setInterval: (callback) => {
+      intervalCallbacks.push(callback);
+      return intervalCallbacks.length;
+    },
+    clearInterval: () => {},
+  };
+  const context = channelConnectionContext({
+    threadId,
+    messages: [channelConnectionRequiredCard({ id: sourceMessageId })],
+    stateUpdates,
+    storage,
+    initialByIndex: new Map([
+      [
+        STATE_SLOT.pendingOnboarding,
+        {
+          extensionName: "slack",
+          state: "pairing_required",
+          threadId,
+          sourceMessageId,
+          strategy: "oauth",
+        },
+      ],
+    ]),
+    fetchExtensionSetup: async () => ({
+      secrets: [
+        {
+          provider: "slack_personal",
+          setup: { kind: "oauth", invocation_id: "invocation-slack" },
+        },
+      ],
+    }),
+    startExtensionOauth: async () => {
+      startCount += 1;
+      return {
+        flow_id: startCount === 1 ? "flow-a" : "flow-b",
+        callback_scope: { invocation_id: `invocation-${startCount}` },
+        authorization_url: "https://slack.com/oauth/v2/authorize?client_id=client",
+      };
+    },
+    fetchOauthFlowStatus: async (flowId) =>
+      flowId === "flow-a" ? flowAStatus : { status: "completed" },
+    sendMessage: async (body) => {
+      sendBodies.push(body);
+      return { run_id: "run-continue", status: "queued", thread_id: body.threadId };
+    },
+    windowObject,
+  });
+
+  runUseChatSource(context);
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  await chat.startOnboardingOAuth();
+  for (const callback of intervalCallbacks) callback();
+  await chat.startOnboardingOAuth();
+
+  resolveFlowAStatus({ status: "failed" });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.ok(
+    !stateUpdates.some(
+      (update) =>
+        update.index === STATE_SLOT.pendingOnboarding &&
+        typeof update.value?.oauthError === "string",
+    ),
+    "flow A must not stamp an error onto flow B",
+  );
+  assert.equal(sendBodies.length, 0, "flow A must not resume the chat");
+
+  for (const callback of intervalCallbacks) callback();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(sendBodies.length, 1, "flow B can still complete normally");
+});
+
 test("useChat: a failed Slack OAuth signal surfaces a retryable error on the connection card", async () => {
   const threadId = "thread-chat-oauth-failed";
   const sourceMessageId = "tool-slack-oauth-failed";

@@ -620,8 +620,15 @@ fn slack_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     package
         .cleanup_requirements
         .push(ExtensionRemovalCleanupRequirement::channel_connection(
-            ExtensionRemovalCleanupAdapterId::new(SLACK_PERSONAL_CONNECTION_CLEANUP_ADAPTER_ID)?,
-            ExtensionRemovalChannelId::new(SLACK_EXTENSION_REMOVAL_CHANNEL_ID)?,
+            ExtensionRemovalCleanupAdapterId::new(SLACK_PERSONAL_CONNECTION_CLEANUP_ADAPTER_ID)
+                .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+                    reason: error.to_string(),
+                })?,
+            ExtensionRemovalChannelId::new(SLACK_EXTENSION_REMOVAL_CHANNEL_ID).map_err(
+                |error| ProductWorkflowError::InvalidBindingRequest {
+                    reason: error.to_string(),
+                },
+            )?,
         ));
     Ok(package)
 }

@@ -347,6 +347,18 @@ fn slack_personal_oauth_abandon_hook(
                 | RebornOAuthCallbackFailureStage::ContinuationCompensation
         ) {
             if let Err(error) = config
+                .lifecycle_store
+                .begin_failed_connection_cleanup(&connection_owner, connection_epoch)
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    flow_id = %flow_id,
+                    "failed to fence terminal Slack OAuth epoch before identity cleanup"
+                );
+                return Err(ProductAuthRouteFailure::backend_unavailable());
+            }
+            if let Err(error) = config
                 .binding_rollback_store
                 .delete_user_identity_bindings_for_user_at_epoch(
                     crate::slack::slack_actor_identity::SLACK_IDENTITY_PROVIDER,
@@ -363,12 +375,19 @@ fn slack_personal_oauth_abandon_hook(
                 );
                 return Err(ProductAuthRouteFailure::backend_unavailable());
             }
-            return abandon_slack_connection_epoch(
-                config.lifecycle_store.as_ref(),
-                &callback_scope,
-                flow_id,
-            )
-            .await;
+            if let Err(error) = config
+                .lifecycle_store
+                .complete_failed_connection_cleanup(&connection_owner, connection_epoch)
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    flow_id = %flow_id,
+                    "failed to settle terminal Slack OAuth epoch after identity cleanup"
+                );
+                return Err(ProductAuthRouteFailure::backend_unavailable());
+            }
+            return Ok(());
         }
         match config
             .binding_rollback_store

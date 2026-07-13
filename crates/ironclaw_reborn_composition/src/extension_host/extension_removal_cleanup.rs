@@ -4,6 +4,12 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use async_trait::async_trait;
+#[cfg(any(feature = "slack-v2-host-beta", test))]
+pub(crate) use ironclaw_extensions::ExtensionRemovalChannelId;
+pub(crate) use ironclaw_extensions::{
+    ExtensionRemovalCleanupAdapterId, ExtensionRemovalCleanupBinding,
+    ExtensionRemovalCleanupRequirement,
+};
 use ironclaw_host_api::{ResourceScope, UserId};
 #[cfg(any(feature = "slack-v2-host-beta", test))]
 use ironclaw_product_workflow::{ChannelConnectionFacade, WebUiAuthenticatedCaller};
@@ -13,120 +19,6 @@ use ironclaw_product_workflow::{ProductWorkflowError, RebornServicesError};
 pub(crate) const SLACK_PERSONAL_CONNECTION_CLEANUP_ADAPTER_ID: &str = "slack.personal_connection";
 #[cfg(any(feature = "slack-v2-host-beta", test))]
 pub(crate) const SLACK_EXTENSION_REMOVAL_CHANNEL_ID: &str = "slack";
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct ExtensionRemovalCleanupAdapterId(String);
-
-impl ExtensionRemovalCleanupAdapterId {
-    #[cfg_attr(
-        not(feature = "slack-v2-host-beta"),
-        allow(
-            dead_code,
-            reason = "typed cleanup ids are constructed by trusted feature-gated extension catalogs"
-        )
-    )]
-    pub(crate) fn new(value: impl Into<String>) -> Result<Self, ProductWorkflowError> {
-        validate_cleanup_id(value.into(), "cleanup adapter").map(Self)
-    }
-
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct ExtensionRemovalChannelId(String);
-
-impl ExtensionRemovalChannelId {
-    #[cfg_attr(
-        not(feature = "slack-v2-host-beta"),
-        allow(
-            dead_code,
-            reason = "typed cleanup ids are constructed by trusted feature-gated extension catalogs"
-        )
-    )]
-    pub(crate) fn new(value: impl Into<String>) -> Result<Self, ProductWorkflowError> {
-        validate_cleanup_id(value.into(), "cleanup channel").map(Self)
-    }
-
-    #[cfg_attr(
-        not(feature = "slack-v2-host-beta"),
-        allow(
-            dead_code,
-            reason = "typed cleanup channels are read by trusted feature-gated cleanup adapters"
-        )
-    )]
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-#[cfg_attr(
-    not(feature = "slack-v2-host-beta"),
-    allow(
-        dead_code,
-        reason = "typed cleanup ids are constructed by trusted feature-gated extension catalogs"
-    )
-)]
-fn validate_cleanup_id(value: String, label: &'static str) -> Result<String, ProductWorkflowError> {
-    let valid = !value.is_empty()
-        && value.len() <= 128
-        && value.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
-        })
-        && value
-            .as_bytes()
-            .first()
-            .is_some_and(u8::is_ascii_alphanumeric)
-        && value
-            .as_bytes()
-            .last()
-            .is_some_and(u8::is_ascii_alphanumeric);
-    if valid {
-        Ok(value)
-    } else {
-        Err(ProductWorkflowError::InvalidBindingRequest {
-            reason: format!("invalid extension removal {label} id"),
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum ExtensionRemovalCleanupBinding {
-    #[cfg_attr(
-        not(feature = "slack-v2-host-beta"),
-        allow(
-            dead_code,
-            reason = "channel cleanup bindings are supplied by trusted feature-gated extension catalogs"
-        )
-    )]
-    ChannelConnection { channel: ExtensionRemovalChannelId },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct ExtensionRemovalCleanupRequirement {
-    pub(crate) adapter_id: ExtensionRemovalCleanupAdapterId,
-    pub(crate) binding: ExtensionRemovalCleanupBinding,
-}
-
-impl ExtensionRemovalCleanupRequirement {
-    #[cfg_attr(
-        not(feature = "slack-v2-host-beta"),
-        allow(
-            dead_code,
-            reason = "channel cleanup bindings are supplied by trusted feature-gated extension catalogs"
-        )
-    )]
-    pub(crate) fn channel_connection(
-        adapter_id: ExtensionRemovalCleanupAdapterId,
-        channel: ExtensionRemovalChannelId,
-    ) -> Self {
-        Self {
-            adapter_id,
-            binding: ExtensionRemovalCleanupBinding::ChannelConnection { channel },
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExtensionRemovalCleanupContext {
@@ -225,13 +117,24 @@ impl ExtensionRemovalCleanupRegistry {
 
 #[cfg(any(feature = "slack-v2-host-beta", test))]
 pub(crate) struct SlackPersonalConnectionCleanupAdapter {
+    adapter_id: ExtensionRemovalCleanupAdapterId,
     channel_connection: Arc<OnceLock<Arc<dyn ChannelConnectionFacade>>>,
 }
 
 #[cfg(any(feature = "slack-v2-host-beta", test))]
 impl SlackPersonalConnectionCleanupAdapter {
-    pub(crate) fn new(channel_connection: Arc<OnceLock<Arc<dyn ChannelConnectionFacade>>>) -> Self {
-        Self { channel_connection }
+    pub(crate) fn new(
+        channel_connection: Arc<OnceLock<Arc<dyn ChannelConnectionFacade>>>,
+    ) -> Result<Self, ProductWorkflowError> {
+        let adapter_id =
+            ExtensionRemovalCleanupAdapterId::new(SLACK_PERSONAL_CONNECTION_CLEANUP_ADAPTER_ID)
+                .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+                    reason: error.to_string(),
+                })?;
+        Ok(Self {
+            adapter_id,
+            channel_connection,
+        })
     }
 }
 
@@ -239,7 +142,7 @@ impl SlackPersonalConnectionCleanupAdapter {
 #[cfg(any(feature = "slack-v2-host-beta", test))]
 impl ExtensionRemovalCleanupAdapter for SlackPersonalConnectionCleanupAdapter {
     fn adapter_id(&self) -> ExtensionRemovalCleanupAdapterId {
-        ExtensionRemovalCleanupAdapterId(SLACK_PERSONAL_CONNECTION_CLEANUP_ADAPTER_ID.to_string())
+        self.adapter_id.clone()
     }
 
     async fn cleanup(
@@ -488,8 +391,9 @@ mod tests {
     fn slack_registry(facade: Arc<dyn ChannelConnectionFacade>) -> ExtensionRemovalCleanupRegistry {
         let slot = Arc::new(OnceLock::new());
         assert!(slot.set(facade).is_ok(), "facade slot starts empty");
-        let adapter: Arc<dyn ExtensionRemovalCleanupAdapter> =
-            Arc::new(SlackPersonalConnectionCleanupAdapter::new(slot));
+        let adapter: Arc<dyn ExtensionRemovalCleanupAdapter> = Arc::new(
+            SlackPersonalConnectionCleanupAdapter::new(slot).expect("valid Slack cleanup adapter"),
+        );
         ExtensionRemovalCleanupRegistry::try_from_adapters(vec![adapter])
             .expect("Slack adapter is unique")
     }
@@ -509,6 +413,29 @@ mod tests {
             .expect_err("Slack adapter must reject a foreign channel binding");
 
         assert!(matches!(error, ProductWorkflowError::Transient { .. }));
+    }
+
+    #[tokio::test]
+    async fn slack_adapter_fails_closed_when_late_bound_facade_is_unset() {
+        let adapter: Arc<dyn ExtensionRemovalCleanupAdapter> = Arc::new(
+            SlackPersonalConnectionCleanupAdapter::new(Arc::new(OnceLock::new()))
+                .expect("valid Slack cleanup adapter"),
+        );
+        let registry = ExtensionRemovalCleanupRegistry::try_from_adapters(vec![adapter])
+            .expect("Slack adapter is unique");
+
+        let error = registry
+            .cleanup_requirements(
+                &[requirement("slack.personal_connection", "slack")],
+                &cleanup_context(),
+            )
+            .await
+            .expect_err("an unwired required cleanup facade must fail closed");
+
+        let ProductWorkflowError::Transient { reason } = error else {
+            panic!("missing late-bound facade must remain retryable");
+        };
+        assert!(reason.contains("slack.personal_connection"));
     }
 
     #[tokio::test]

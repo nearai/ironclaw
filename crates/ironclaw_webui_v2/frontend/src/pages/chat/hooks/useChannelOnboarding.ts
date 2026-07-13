@@ -207,16 +207,11 @@ export function useChannelOnboarding(
 ) {
   const [pendingOnboarding, setPendingOnboardingState] = React.useState(null);
   const pendingOnboardingRef = React.useRef(pendingOnboarding);
-  // Known limitation: single in-flight onboarding-OAuth flow per useChat
-  // instance. This hook is one non-remounted instance across thread switches
-  // (chat.tsx keys nothing on threadId), so starting OAuth in thread A and then
-  // thread B (same channel) before A completes overwrites this ref with B's
-  // flow — A's later callback no longer matches `pending.flowId` and its
-  // resume is dropped. Keying the pending flow by flow_id (a Map) would fix it
-  // but also has to make `pollServerState` (channel-keyed) fan out over every
-  // in-flight flow — out of scope here. Practically bounded: an OAuth popup is
-  // near-modal, so two concurrent pending flows on one channel is rare.
+  // This surface owns one current onboarding OAuth flow. A monotonically
+  // increasing generation fences every async setup/start/status response, so
+  // a late response from flow A cannot complete, fail, or clear newer flow B.
   const pendingOnboardingOauthFlowRef = React.useRef(null);
+  const onboardingOauthGenerationRef = React.useRef(0);
   // Source tool-message ids whose pairing panel the user dismissed. Keyed by
   // the durable `tool-<invocation_id>`, so a dismissal survives re-renders and
   // timeline reloads and the still-present activation tool-result does not
@@ -338,13 +333,28 @@ export function useChannelOnboarding(
       typeof window !== "undefined" ? window : globalThis?.window || null;
     if (!browserWindow) return;
     let serverCheckInFlight = false;
+    const flowSnapshotIsCurrent = (snapshot) => {
+      const current = pendingOnboardingOauthFlowRef.current;
+      return Boolean(
+        snapshot &&
+          current &&
+          snapshot.generation === current.generation &&
+          snapshot.flowId === current.flowId,
+      );
+    };
     // Reads the pending flow from the REF (not a caller-captured copy) so a
     // completion arriving via the broadcast subscription and one arriving via
     // the interval poll cannot both pass the `completing` guard with stale
     // objects and double-send the continuation.
-    const finishCompletion = async () => {
+    const finishCompletion = async (expectedFlow = null) => {
       const pending = pendingOnboardingOauthFlowRef.current;
-      if (!pending || pending.completing) return;
+      if (
+        !pending ||
+        pending.completing ||
+        (expectedFlow && !flowSnapshotIsCurrent(expectedFlow))
+      ) {
+        return;
+      }
       pendingOnboardingOauthFlowRef.current = { ...pending, completing: true };
       const onboarding = pendingOnboardingRef.current;
       const threadForResume =
@@ -364,14 +374,18 @@ export function useChannelOnboarding(
               bypassPendingOnboarding: true,
             },
           );
+          if (!flowSnapshotIsCurrent(pending)) return;
           if (!continuation || continuation.outcome === "rejected_busy") {
-            pendingOnboardingOauthFlowRef.current = pending;
+            if (flowSnapshotIsCurrent(pending)) {
+              pendingOnboardingOauthFlowRef.current = pending;
+            }
             return;
           }
         }
         clearOnboardingAfterChannelConnected(onboarding);
         sourceCleared = true;
       }
+      if (!flowSnapshotIsCurrent(pending)) return;
       pendingOnboardingOauthFlowRef.current = null;
       await notifyChannelConnected({
         channel: pending.channel,
@@ -383,6 +397,7 @@ export function useChannelOnboarding(
     // stamps a retryable error onto the still-mounted card, so the user gets a
     // visible way out instead of a spinner the popup can no longer resolve.
     const failOauthFlow = (pending, message) => {
+      if (!flowSnapshotIsCurrent(pending)) return;
       pendingOnboardingOauthFlowRef.current = null;
       setPendingOnboarding((current) =>
         current &&
@@ -406,8 +421,10 @@ export function useChannelOnboarding(
         return;
       }
       if (!completionMatchesFlow(payload, pending.flowId)) return;
-      Promise.resolve(finishCompletion()).catch(() => {
-        pendingOnboardingOauthFlowRef.current = pending;
+      Promise.resolve(finishCompletion(pending)).catch(() => {
+        if (flowSnapshotIsCurrent(pending)) {
+          pendingOnboardingOauthFlowRef.current = pending;
+        }
       });
     };
     const pollServerState = () => {
@@ -419,20 +436,21 @@ export function useChannelOnboarding(
         : Promise.resolve(null);
       flowStatus
         .then((result) => {
-          if (result?.status === "completed") return finishCompletion();
-          if (result?.status === "failed") {
+          if (!flowSnapshotIsCurrent(pending)) return null;
+          if (result?.status === "completed") return finishCompletion(pending);
+          if (["failed", "canceled", "expired"].includes(result?.status)) {
             failOauthFlow(pending, CHAT_OAUTH_FAILED_MESSAGE);
             return null;
           }
           return fetchExtensions();
         })
         .then((snapshot) => {
-          if (!snapshot) return null;
+          if (!snapshot || !flowSnapshotIsCurrent(pending)) return null;
           const extensions = Array.isArray(snapshot)
             ? snapshot
             : snapshot?.extensions || [];
           if (channelConnectionIsSatisfied(extensions, pending.channel)) {
-            return finishCompletion();
+            return finishCompletion(pending);
           }
           return null;
         })
@@ -598,6 +616,8 @@ export function useChannelOnboarding(
   );
 
   const startOnboardingOAuth = React.useCallback(async () => {
+    const generation = onboardingOauthGenerationRef.current + 1;
+    onboardingOauthGenerationRef.current = generation;
     const onboarding = pendingOnboardingRef.current;
     if (!onboarding) {
       throw new Error("connection is no longer pending");
@@ -626,6 +646,10 @@ export function useChannelOnboarding(
               queryFn: () => fetchExtensionSetup(packageRef),
             })
           : await fetchExtensionSetup(packageRef);
+      if (generation !== onboardingOauthGenerationRef.current) {
+        if (popup && !popup.closed) popup.close();
+        return null;
+      }
       const secret = (setup?.secrets || []).find(
         (item) => (item?.setup?.kind || "manual_token") === "oauth",
       );
@@ -633,6 +657,10 @@ export function useChannelOnboarding(
         throw new Error("OAuth setup is unavailable for this channel");
       }
       const response = await startExtensionOauth(packageRef, secret);
+      if (generation !== onboardingOauthGenerationRef.current) {
+        if (popup && !popup.closed) popup.close();
+        return null;
+      }
       if (response?.success === false) {
         throw new Error(response.message || "OAuth setup failed");
       }
@@ -655,6 +683,7 @@ export function useChannelOnboarding(
         current?.oauthError ? { ...current, oauthError: null } : current,
       );
       pendingOnboardingOauthFlowRef.current = {
+        generation,
         flowId: response.flow_id,
         invocationId:
           response?.callback_scope?.invocation_id ||
@@ -674,6 +703,7 @@ export function useChannelOnboarding(
   const dismissOnboardingPairing = React.useCallback(() => {
     // Dismissing the card also abandons any in-flight OAuth flow it started —
     // otherwise the watcher keeps polling the server for a card that is gone.
+    onboardingOauthGenerationRef.current += 1;
     pendingOnboardingOauthFlowRef.current = null;
     const onboarding = pendingOnboardingRef.current;
     if (onboarding) {

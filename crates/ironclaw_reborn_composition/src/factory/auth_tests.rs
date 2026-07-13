@@ -440,6 +440,8 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
         first_scope.clone(),
         actor.clone(),
         "first",
+        "github",
+        "github",
     )
     .await;
     let second_run = submit_and_block_provider_auth_run(
@@ -448,6 +450,8 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
         second_scope.clone(),
         actor.clone(),
         "second",
+        "github",
+        "github",
     )
     .await;
     let auth_scope = auth_scope_for_turn(&first_scope, &actor);
@@ -718,6 +722,11 @@ async fn slack_oauth_callback_activates_and_publishes_all_personal_tools() {
     .await
     .expect("local-dev services build");
     let product_auth = services.product_auth.as_ref().expect("product auth");
+    let turn_coordinator = services
+        .turn_coordinator
+        .as_ref()
+        .expect("turn coordinator");
+    let local_runtime = services.local_runtime.as_ref().expect("local runtime");
     let extension_management = services
         .local_runtime
         .as_ref()
@@ -736,6 +745,17 @@ async fn slack_oauth_callback_activates_and_publishes_all_personal_tools() {
         &turn_scope(),
         &TurnActor::new(UserId::new("alice").unwrap()),
     );
+    let blocked_scope = turn_scope();
+    let blocked_run = submit_and_block_provider_auth_run(
+        turn_coordinator.as_ref(),
+        local_runtime.turn_state.as_ref(),
+        blocked_scope.clone(),
+        TurnActor::new(UserId::new("alice").unwrap()),
+        "slack-lifecycle",
+        ironclaw_auth::SLACK_PERSONAL_PROVIDER_ID,
+        "slack",
+    )
+    .await;
     let slack_provider = AuthProviderId::new(ironclaw_auth::SLACK_PERSONAL_PROVIDER_ID)
         .expect("Slack personal provider");
     let flow_id = create_provider_flow(
@@ -791,6 +811,15 @@ async fn slack_oauth_callback_activates_and_publishes_all_personal_tools() {
             "slack.whoami",
         ]
     );
+    let blocked_state = turn_coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: blocked_scope,
+            run_id: blocked_run,
+        })
+        .await
+        .expect("blocked Slack run after OAuth");
+    assert_eq!(blocked_state.status, TurnStatus::Queued);
+    assert_eq!(blocked_state.gate_ref, None);
 }
 
 #[tokio::test]
@@ -826,7 +855,7 @@ async fn failed_lifecycle_activation_is_not_projected_as_completed_oauth() {
 
     assert_eq!(
         product_auth
-            .flow_status(&auth_scope, flow_id)
+            .reconcile_oauth_flow(&auth_scope, flow_id)
             .await
             .expect("sanitized flow status"),
         ironclaw_auth::AuthFlowStatus::Failed,
@@ -911,13 +940,15 @@ fn in_memory_product_auth_ports() -> RebornProductAuthServicePorts {
     RebornProductAuthServicePorts::from_shared(Arc::new(InMemoryAuthProductServices::new()))
 }
 
-#[cfg(all(test, feature = "libsql"))]
+#[cfg(test)]
 async fn submit_and_block_provider_auth_run(
     turn_coordinator: &dyn TurnCoordinator,
     transition: &dyn TurnRunTransitionPort,
     scope: TurnScope,
     actor: TurnActor,
     suffix: &str,
+    provider: &str,
+    requester_extension: &str,
 ) -> TurnRunId {
     let submit = turn_coordinator
         .submit_turn(SubmitTurnRequest {
@@ -963,13 +994,16 @@ async fn submit_and_block_provider_auth_run(
                 credential_requirements: vec![
                     ironclaw_host_api::RuntimeCredentialAuthRequirement {
                         provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new(
-                            "github",
+                            provider,
                         )
                         .unwrap(),
                         setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
                             scopes: Vec::new(),
                         },
-                        requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
+                        requester_extension: ironclaw_host_api::ExtensionId::new(
+                            requester_extension,
+                        )
+                        .unwrap(),
                         provider_scopes: Vec::new(),
                     },
                 ],

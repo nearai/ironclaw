@@ -288,7 +288,7 @@ test("ConfigureModal does not show a generic activate action beside Slack OAuth"
   assert.doesNotMatch(body, /extensions\.activate/);
 });
 
-test("ConfigureModal does not issue a duplicate Slack activation after atomic OAuth completion", async () => {
+test("ConfigureModal broadcasts public wasm-tool Slack OAuth completion without duplicate activation", async () => {
   const slackOauthSecret = {
     name: "slack_personal_oauth",
     provider: "slack_personal",
@@ -303,7 +303,7 @@ test("ConfigureModal does not issue a duplicate Slack activation after atomic OA
   };
   let closed = false;
   const { calls, invalidations, notifications, oauthSetupArgs } = renderModal({
-    kind: "channel",
+    kind: "wasm_tool",
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
