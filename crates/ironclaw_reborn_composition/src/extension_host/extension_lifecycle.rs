@@ -13,6 +13,8 @@ use ironclaw_extensions::{
     InstallationOwner, ManifestHash, ManifestSource,
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
+#[cfg(test)]
+use ironclaw_host_api::InvocationId;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, NetworkTargetPattern,
     PermissionMode, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement,
@@ -98,7 +100,8 @@ pub(crate) use active_publication::ActiveExtensionPublisher;
 use active_publication::extension_trust_policy_input;
 use install_policy::{
     RemoveDecision, decide_install_on_existing, decide_remove, derive_owner,
-    ensure_caller_may_operate, ensure_registered_row_owner_match, install_scope_for_owner,
+    ensure_caller_may_operate, ensure_registered_row_owner_match,
+    ensure_registered_row_tenant_match, install_scope_for_owner,
 };
 
 const RETIRED_SLACK_USER_EXTENSION_ID: &str = "slack_user";
@@ -231,9 +234,7 @@ pub(crate) async fn restore_extension_lifecycle_state(
         let available = match catalog.resolve(&package_ref) {
             Ok(available) => available,
             Err(_) => {
-                match resolve_registered_restore_owner_scope(installation_store, &installation)
-                    .await
-                {
+                match installation_effective_owner_scope(installation_store, &installation).await {
                     Some((tenant_id, owner)) => {
                         match resolve_registered_for_owner(
                             filesystem.as_ref(),
@@ -310,13 +311,15 @@ pub(crate) async fn restore_extension_lifecycle_state(
     Ok(())
 }
 
-/// The row-authoritative registered-store owner scope to key a boot restore
-/// fallback lookup on: the row's stored manifest record must exist and be
-/// `UserRegistered`, and `effective_owner_scope` must resolve one singleton
-/// owner from it. `None` means the row cannot be pinned to one owner (no
-/// stored manifest, non-registered source, or a non-singleton owner set) —
-/// callers must skip-and-log rather than guess an owner to scan.
-async fn resolve_registered_restore_owner_scope(
+/// The row-authoritative registered-store owner scope for an installation:
+/// the row's stored manifest record must exist and be `UserRegistered`, and
+/// `effective_owner_scope` must resolve one singleton owner from it. `None`
+/// means the row cannot be pinned to one owner (no stored manifest,
+/// non-registered source, or a non-singleton owner set). Shared by the boot
+/// restore fallback (row-owner-keyed lookup) and the install/activate/remove
+/// mutation guards (row-owner-and-tenant match) — one source of truth for
+/// "whose registered row is this."
+async fn installation_effective_owner_scope(
     installation_store: &Arc<dyn ExtensionInstallationStore>,
     installation: &ExtensionInstallation,
 ) -> Option<(TenantId, UserId)> {
@@ -835,10 +838,19 @@ impl RebornLocalExtensionManagementPort {
                 // packages).
                 let new_owner = match registration_owner(&available.package.manifest.source) {
                     Some(owner) => {
+                        // `available.package.manifest.source` was resolved
+                        // via this caller's own tenant-owner scope (never a
+                        // foreign one — `resolve_available_for_scope`), so
+                        // it always carries `scope`'s tenant and user; the
+                        // existing row's effective scope must match BOTH,
+                        // not just the user id (T2 cross-tenant follow-up).
+                        let existing_effective_scope =
+                            installation_effective_owner_scope(&self.installation_store, &existing)
+                                .await;
                         ensure_registered_row_owner_match(
                             &available.package.id,
-                            existing.owner(),
-                            &owner,
+                            existing_effective_scope,
+                            (scope.tenant_id.clone(), scope.user_id.clone()),
                         )?;
                         owner
                     }
@@ -958,10 +970,10 @@ impl RebornLocalExtensionManagementPort {
         &self,
         package_ref: LifecyclePackageRef,
         mode: ExtensionActivationMode,
-        caller: &UserId,
+        scope: &ResourceScope,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let credential_gate = UnavailableExtensionActivationCredentialGate;
-        self.activate_inner(package_ref, mode, &credential_gate, caller)
+        self.activate_inner(package_ref, mode, &credential_gate, scope)
             .await
     }
 
@@ -970,9 +982,9 @@ impl RebornLocalExtensionManagementPort {
         package_ref: LifecyclePackageRef,
         mode: ExtensionActivationMode,
         credential_gate: impl ExtensionActivationCredentialGate,
-        caller: &UserId,
+        scope: &ResourceScope,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        self.activate_inner(package_ref, mode, &credential_gate, caller)
+        self.activate_inner(package_ref, mode, &credential_gate, scope)
             .await
     }
 
@@ -984,8 +996,10 @@ impl RebornLocalExtensionManagementPort {
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let credential_gate =
             crate::extension_host::extension_activation_credentials::PrecheckedExtensionActivationCredentialGate;
-        let caller = self.tenant_operator_user_id.clone();
-        self.activate_inner(package_ref, mode, &credential_gate, &caller)
+        let scope =
+            ResourceScope::local_default(self.tenant_operator_user_id.clone(), InvocationId::new())
+                .expect("valid local scope");
+        self.activate_inner(package_ref, mode, &credential_gate, &scope)
             .await
     }
 
@@ -994,8 +1008,9 @@ impl RebornLocalExtensionManagementPort {
         package_ref: LifecyclePackageRef,
         mode: ExtensionActivationMode,
         credential_gate: &dyn ExtensionActivationCredentialGate,
-        caller: &UserId,
+        scope: &ResourceScope,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        let caller = &scope.user_id;
         let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
 
         let discovery = {
@@ -1004,6 +1019,18 @@ impl RebornLocalExtensionManagementPort {
                 .load_installation(&extension_id, &installation_id)
                 .await?;
             ensure_caller_may_operate(&installation, caller)?;
+            // `ensure_caller_may_operate` only checks the row's owner USER
+            // ids; a registered row is also tenant-scoped, and the same
+            // `UserId` can be valid in a different tenant (T2 cross-tenant
+            // follow-up) — check that axis too before the caller may act on
+            // this row.
+            let existing_effective_scope =
+                installation_effective_owner_scope(&self.installation_store, &installation).await;
+            ensure_registered_row_tenant_match(
+                &extension_id,
+                existing_effective_scope,
+                &scope.tenant_id,
+            )?;
             ensure_caller_may_mutate_tenant_installation(
                 &installation,
                 caller,
@@ -1084,6 +1111,22 @@ impl RebornLocalExtensionManagementPort {
                 extension_id = %extension_id.as_str(),
                 installation_id = %installation_id.as_str(),
                 "hosted MCP activation caller ownership changed during discovery"
+            );
+            hosted_mcp_changed_during_discovery_error()
+        })?;
+        let existing_effective_scope =
+            installation_effective_owner_scope(&self.installation_store, &installation).await;
+        ensure_registered_row_tenant_match(
+            &extension_id,
+            existing_effective_scope,
+            &scope.tenant_id,
+        )
+        .map_err(|error| {
+            tracing::debug!(
+                %error,
+                extension_id = %extension_id.as_str(),
+                installation_id = %installation_id.as_str(),
+                "hosted MCP activation caller tenant changed during discovery"
             );
             hosted_mcp_changed_during_discovery_error()
         })?;
@@ -1339,7 +1382,8 @@ impl RebornLocalExtensionManagementPort {
                 .get_extension(&extension_id)
                 .is_some();
             let response = if installation.is_some() && lifecycle_package_present {
-                self.remove_locked(package_ref.clone(), caller).await
+                self.remove_locked(package_ref.clone(), &removal_scope.tenant_id, caller)
+                    .await
             } else {
                 if let Some(installation) = installation.as_ref() {
                     self.installation_store
@@ -1631,6 +1675,7 @@ impl RebornLocalExtensionManagementPort {
     async fn remove_locked(
         &self,
         package_ref: LifecyclePackageRef,
+        tenant_id: &TenantId,
         caller: &UserId,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
@@ -1638,6 +1683,11 @@ impl RebornLocalExtensionManagementPort {
             .load_installation(&extension_id, &installation_id)
             .await?;
         ensure_caller_may_operate(&installation, caller)?;
+        // Tenant axis companion to the user-id check above (T2 cross-tenant
+        // follow-up) — see the identical comment at the activate chokepoint.
+        let existing_effective_scope =
+            installation_effective_owner_scope(&self.installation_store, &installation).await;
+        ensure_registered_row_tenant_match(&extension_id, existing_effective_scope, tenant_id)?;
         ensure_caller_may_mutate_tenant_installation(
             &installation,
             caller,
@@ -4464,7 +4514,7 @@ output_schema_ref = "schemas/run.output.json"
                     runtime_http_egress: Arc::new(HostedMcpDiscoveryEgress::default()),
                 },
                 credential_gate,
-                &lifecycle_owner(),
+                &lifecycle_owner_scope(),
             )
             .await
             .expect_err("post-discovery credential recheck should fail activation");
@@ -4618,7 +4668,7 @@ output_schema_ref = "schemas/run.output.json"
             .activate(
                 package_ref,
                 ExtensionActivationMode::Static,
-                &lifecycle_owner(),
+                &lifecycle_owner_scope(),
             )
             .await
             .expect_err("activation-state persistence failure is reported");
@@ -4662,7 +4712,7 @@ output_schema_ref = "schemas/run.output.json"
             .activate(
                 package_ref,
                 ExtensionActivationMode::Static,
-                &lifecycle_owner(),
+                &lifecycle_owner_scope(),
             )
             .await
             .expect_err("publish failure is reported");
@@ -5993,7 +6043,7 @@ output_schema_ref = "schemas/run.output.json"
             .activate(
                 package_ref,
                 ExtensionActivationMode::Static,
-                &lifecycle_owner(),
+                &lifecycle_owner_scope(),
             )
             .await
             .expect_err("activation requires an installation record");
@@ -8780,11 +8830,7 @@ url = "http://127.0.0.1:9/mcp"
             user_registered_isolation_fixture(&owner_scope, true).await;
 
         let error = port
-            .activate(
-                package_ref,
-                ExtensionActivationMode::Static,
-                &other_scope.user_id,
-            )
+            .activate(package_ref, ExtensionActivationMode::Static, &other_scope)
             .await
             .expect_err("a foreign caller must not activate another owner's registered install");
 
@@ -8816,6 +8862,68 @@ url = "http://127.0.0.1:9/mcp"
                 .get_extension(&ExtensionId::new("acme-mcp-registered").expect("valid id"))
                 .is_some(),
             "extension must remain published after a rejected foreign remove"
+        );
+    }
+
+    /// T2 cross-tenant follow-up: the row's `InstallationOwner` carries only
+    /// USER ids, so the SAME user id arriving under a DIFFERENT tenant scope
+    /// passes `ensure_caller_may_operate` — the guards must also compare the
+    /// caller's tenant against the manifest's `UserRegistered.tenant_id`.
+    /// Install already fails via the caller-sharded overlay (not-found);
+    /// activate and remove need the explicit tenant check (RED before it:
+    /// both succeeded cross-tenant).
+    #[tokio::test]
+    async fn registered_mutations_reject_same_user_in_foreign_tenant_scope() {
+        let owner_scope = resource_scope_for("tenant-b", "owner-a");
+        // Same user id, different tenant scope.
+        let cross_tenant_scope = resource_scope_for("default", "owner-a");
+        let (_dir, port, package_ref, active_registry, installation_store) =
+            user_registered_isolation_fixture(&owner_scope, true).await;
+
+        let install_error = port
+            .install(package_ref.clone(), &cross_tenant_scope)
+            .await
+            .expect_err("cross-tenant caller must not install the registered package");
+        let activate_error = port
+            .activate(
+                package_ref.clone(),
+                ExtensionActivationMode::Static,
+                &cross_tenant_scope,
+            )
+            .await
+            .expect_err("cross-tenant caller must not activate the registered install");
+        let remove_error = port
+            .remove(
+                package_ref,
+                &cross_tenant_scope,
+                Some(&cross_tenant_scope.user_id),
+            )
+            .await
+            .expect_err("cross-tenant caller must not remove the registered install");
+        for error in [install_error, activate_error, remove_error] {
+            let rendered = error.to_string();
+            assert!(
+                rendered.contains("is not installed") || rendered.contains("was not found"),
+                "cross-tenant denial must be masked, got: {rendered}"
+            );
+        }
+        assert!(
+            active_registry
+                .snapshot()
+                .get_extension(&ExtensionId::new("acme-mcp-registered").expect("valid id"))
+                .is_some(),
+            "extension must remain published for its real tenant-owner"
+        );
+        let row = installation_store
+            .get_installation(
+                &ExtensionInstallationId::new("acme-mcp-registered").expect("valid id"),
+            )
+            .await
+            .expect("store read")
+            .expect("registered row present");
+        assert!(
+            row.owner().visible_to(&owner_scope.user_id) && !row.owner().is_tenant(),
+            "cross-tenant attempts must not mutate the registered row"
         );
     }
 

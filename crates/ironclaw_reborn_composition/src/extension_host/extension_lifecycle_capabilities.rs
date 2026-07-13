@@ -202,7 +202,7 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                         package_ref,
                         mode,
                         credential_gate,
-                        &request.scope.user_id,
+                        &request.scope,
                     )
                     .await
                     .map_err(lifecycle_error)

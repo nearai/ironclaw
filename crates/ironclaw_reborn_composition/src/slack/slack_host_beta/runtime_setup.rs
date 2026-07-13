@@ -268,7 +268,7 @@ impl SlackChannelSetupActivation for DynamicSlackChannelSetupActivation {
         // activate path (WebUI activateExtension after the connect flow),
         // which routes through activate_with_credential_gate.
         self.extension_management
-            .activate(package_ref, ExtensionActivationMode::Static, &caller)
+            .activate(package_ref, ExtensionActivationMode::Static, &caller_scope)
             .await
             .map_err(slack_setup_activation_error)?;
         Ok(())

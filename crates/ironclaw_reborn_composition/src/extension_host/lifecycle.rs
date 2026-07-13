@@ -379,6 +379,7 @@ impl RebornLocalLifecycleFacade {
                         &caller,
                     )
                     .await?;
+                let scope = lifecycle_resource_scope(&context)?;
                 if extension_management
                     .package_requires_hosted_mcp_discovery(&package_ref)
                     .await?
@@ -391,10 +392,9 @@ impl RebornLocalLifecycleFacade {
                             ),
                         });
                     };
-                    let scope = lifecycle_resource_scope(&context)?;
                     let mode =
                         crate::extension_host::extension_lifecycle::ExtensionActivationMode::HostedMcpDiscovery {
-                            scope,
+                            scope: scope.clone(),
                             runtime_http_egress,
                         };
                     return match credential_gate {
@@ -404,13 +404,13 @@ impl RebornLocalLifecycleFacade {
                                     package_ref,
                                     mode,
                                     credential_gate,
-                                    &caller,
+                                    &scope,
                                 )
                                 .await
                         }
                         None => {
                             extension_management
-                                .activate(package_ref, mode, &caller)
+                                .activate(package_ref, mode, &scope)
                                 .await
                         }
                     };
@@ -424,13 +424,13 @@ impl RebornLocalLifecycleFacade {
                                 package_ref,
                                 mode,
                                 credential_gate,
-                                &caller,
+                                &scope,
                             )
                             .await
                     }
                     None => {
                         extension_management
-                            .activate(package_ref, mode, &caller)
+                            .activate(package_ref, mode, &scope)
                             .await
                     }
                 }
