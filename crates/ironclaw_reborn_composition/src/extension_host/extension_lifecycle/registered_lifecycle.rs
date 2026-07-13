@@ -1,0 +1,240 @@
+//! Owner-registered lifecycle slice, extracted from the parent module
+//! (behavior-preserving move; no logic changes) to keep
+//! `extension_lifecycle.rs` from growing further: the row-authoritative
+//! owner-scope helpers, the live (non-boot) registered resolution path, the
+//! registered-vs-scope tenant guard, and boot restore's per-owner-batched
+//! registered fallback. Mirrors the `install_policy.rs` precedent (pure
+//! decisions extracted alongside the lifecycle I/O that calls them) — the
+//! I/O (installation store reads, filesystem walks) still lives here since
+//! these helpers ARE that I/O, but the store/service wiring and every other
+//! lifecycle concern stays in the parent.
+
+use std::{collections::HashMap, sync::Arc};
+
+use ironclaw_extensions::{ExtensionInstallation, ExtensionInstallationStore, ManifestSource};
+use ironclaw_filesystem::RootFilesystem;
+use ironclaw_host_api::{ResourceScope, TenantId, UserId};
+use ironclaw_product_workflow::{LifecyclePackageRef, ProductWorkflowError};
+
+use crate::extension_host::available_extensions::AvailableExtensionPackage;
+use crate::extension_host::registered_extension_store::{
+    RegisteredExtensionStore, is_owner_registered, list_for_owner,
+};
+
+use super::{
+    RebornLocalExtensionManagementPort, extension_ids_from_package_ref,
+    map_extension_installation_error,
+};
+
+/// Effective owner scope (tenant + user) of a registered installation,
+/// ROW-AUTHORITATIVE on the user axis: the row's `InstallationOwner`
+/// singleton member wins over a disagreeing `UserRegistered.owner` (a stale
+/// re-registered manifest must not re-point the install). Tenant has no row
+/// counterpart, so it comes from manifest provenance. `None` for
+/// non-registered sources or a non-singleton owner set.
+pub(super) fn effective_owner_scope(
+    installation: &ExtensionInstallation,
+    source: &ManifestSource,
+) -> Option<(TenantId, UserId)> {
+    let ManifestSource::UserRegistered { tenant_id, .. } = source else {
+        return None;
+    };
+    let members = installation.owner().members()?;
+    let mut members = members.iter();
+    let row_owner = members.next()?;
+    if members.next().is_some() {
+        return None;
+    }
+    Some((tenant_id.clone(), row_owner.clone()))
+}
+
+/// The row-authoritative registered-store owner scope for an installation.
+/// `Ok(None)` is a genuine miss (no stored manifest, non-registered source,
+/// or non-singleton owner set); `Err` is a real store I/O failure and must
+/// never collapse into `Ok(None)`, or a mutation guard's `None` arm fails
+/// OPEN on a transient read error. Boot restore skips-and-logs on `Err`;
+/// install/activate/remove guards propagate it.
+pub(super) async fn installation_effective_owner_scope(
+    installation_store: &Arc<dyn ExtensionInstallationStore>,
+    installation: &ExtensionInstallation,
+) -> Result<Option<(TenantId, UserId)>, ProductWorkflowError> {
+    let stored_manifest = match installation_store
+        .get_manifest(installation.extension_id())
+        .await
+        .map_err(map_extension_installation_error)?
+    {
+        Some(record) => record,
+        None => return Ok(None),
+    };
+    Ok(effective_owner_scope(
+        installation,
+        &stored_manifest.manifest().source,
+    ))
+}
+
+/// Boot restore's row-provenance-wins registered lookup (review item 1):
+/// called only once the caller has already determined the row's stored
+/// manifest source is `UserRegistered` (`installation_effective_owner_scope`
+/// returned `Some`). Batches each distinct (tenant, owner)'s registered set
+/// into `registered_by_owner` at most once per boot — multiple installations
+/// frequently share an owner, and each load is a full directory walk +
+/// manifest parse. `Ok(None)` means the caller must skip-and-log-and-continue
+/// this one installation (already logged here); `Ok(Some(_))` is the
+/// resolved package to restore.
+pub(super) async fn resolve_registered_installation_for_restore(
+    filesystem: &Arc<dyn RootFilesystem>,
+    registered_by_owner: &mut HashMap<
+        (TenantId, UserId),
+        HashMap<String, AvailableExtensionPackage>,
+    >,
+    tenant_id: &TenantId,
+    owner: &UserId,
+    installation: &ExtensionInstallation,
+    package_ref: &LifecyclePackageRef,
+) -> Result<Option<Arc<AvailableExtensionPackage>>, ProductWorkflowError> {
+    let owner_key = (tenant_id.clone(), owner.clone());
+    if !registered_by_owner.contains_key(&owner_key) {
+        match list_for_owner(filesystem.as_ref(), tenant_id, owner).await {
+            Ok(packages) => {
+                let by_id = packages
+                    .into_iter()
+                    .map(|package| (package.package_ref.id.as_str().to_string(), package))
+                    .collect();
+                registered_by_owner.insert(owner_key.clone(), by_id);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    extension_id = installation.extension_id().as_str(),
+                    installation_id = installation.installation_id().as_str(),
+                    %error,
+                    "skipping extension installation restore: failed to load its row-owned registered set"
+                );
+                return Ok(None);
+            }
+        }
+    }
+    match registered_by_owner
+        .get(&owner_key)
+        .and_then(|by_id| by_id.get(package_ref.id.as_str()))
+    {
+        Some(available) => Ok(Some(Arc::new(available.clone()))),
+        None => {
+            tracing::warn!(
+                extension_id = installation.extension_id().as_str(),
+                installation_id = installation.installation_id().as_str(),
+                "skipping extension installation restore: row is registered-scoped but its descriptor is not in its row-owned registered store"
+            );
+            Ok(None)
+        }
+    }
+}
+
+impl RebornLocalExtensionManagementPort {
+    /// True unless `source` is a registered package whose installation row's
+    /// own stored-manifest tenant diverges from `scope`'s tenant. The
+    /// installation store has no tenant axis (one flat map keyed by extension
+    /// id), so a registered row must be re-checked against its OWN effective
+    /// tenant before it's allowed to project as installed for this scope;
+    /// non-registered sources have no such row to diverge from and always
+    /// match.
+    pub(super) async fn registered_row_matches_scope_tenant(
+        &self,
+        source: &ManifestSource,
+        installation: &ExtensionInstallation,
+        scope: &ResourceScope,
+    ) -> Result<bool, ProductWorkflowError> {
+        if !is_owner_registered(source) {
+            return Ok(true);
+        }
+        let effective_tenant =
+            installation_effective_owner_scope(&self.installation_store, installation)
+                .await?
+                .map(|(tenant_id, _)| tenant_id);
+        Ok(effective_tenant.as_ref() == Some(&scope.tenant_id))
+    }
+
+    /// The caller's registered packages, read once and keyed by extension id
+    /// — the batched replacement for calling `resolve_registered_for_scope`
+    /// (which internally lists the caller's entire registered directory) once
+    /// per catalog-miss in a listing loop. A read failure is logged and
+    /// treated as an empty registered set for this request (list-shaped
+    /// callers stay resilient, matching `resolve_registered_for_scope`'s
+    /// per-entry blast-radius stance).
+    pub(super) async fn registered_packages_by_id(
+        &self,
+        scope: &ResourceScope,
+    ) -> HashMap<String, Arc<AvailableExtensionPackage>> {
+        match RegisteredExtensionStore::list_for_scope(self.filesystem.as_ref(), scope).await {
+            Ok(packages) => packages
+                .into_iter()
+                .map(|package| {
+                    (
+                        package.package_ref.id.as_str().to_string(),
+                        Arc::new(package),
+                    )
+                })
+                .collect(),
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    "skipping registered extension listing for installed summaries: batched read failed"
+                );
+                HashMap::new()
+            }
+        }
+    }
+
+    /// `Ok(Some(_))` only when an installation row exists for `package_ref`'s
+    /// id, its stored manifest source is `UserRegistered`, AND `scope`'s
+    /// caller may see that row — the row-provenance-wins case
+    /// `resolve_available_for_scope` must resolve before ever consulting the
+    /// shared catalog. The visibility check keeps this from becoming a
+    /// resolution oracle for a foreign caller: without it, a foreign owner's
+    /// private registered row would resolve successfully here (row-provenance
+    /// consults the ROW's own owner, not the caller's), undoing the
+    /// masked-as-not-found behavior every ownership-aware caller relies on.
+    /// Reuses `installation_effective_owner_scope` (row-authoritative on the
+    /// user axis) to derive the row's OWN tenant-owner scope, then
+    /// `list_for_owner` (the same helper boot restore batches by owner) to
+    /// locate the descriptor — never the caller's scope for the LOOKUP
+    /// (which may legitimately differ in tenant from the row for a T2
+    /// cross-tenant caller sharing a user id, handled by the visibility
+    /// check above). `Ok(None)` when there is no row, the row isn't
+    /// registered-sourced, the caller cannot see it, or the row's own
+    /// registered descriptor cannot be found (a genuine miss, not a catalog
+    /// fallback — the row's provenance already ruled the catalog out).
+    pub(super) async fn resolve_registered_row_for_package_ref(
+        &self,
+        package_ref: &LifecyclePackageRef,
+        scope: &ResourceScope,
+    ) -> Result<Option<Arc<AvailableExtensionPackage>>, ProductWorkflowError> {
+        let (_, installation_id) = extension_ids_from_package_ref(package_ref)?;
+        let Some(installation) = self
+            .installation_store
+            .get_installation(&installation_id)
+            .await
+            .map_err(map_extension_installation_error)?
+        else {
+            return Ok(None);
+        };
+        if !installation.owner().visible_to(&scope.user_id) {
+            return Ok(None);
+        }
+        let Some((tenant_id, owner)) =
+            installation_effective_owner_scope(&self.installation_store, &installation).await?
+        else {
+            return Ok(None);
+        };
+        if tenant_id != scope.tenant_id {
+            // T2 cross-tenant follow-up: the row's owner user id matched, but
+            // its own registered tenant does not match this scope's tenant —
+            // never resolve across tenants.
+            return Ok(None);
+        }
+        Ok(list_for_owner(self.filesystem.as_ref(), &tenant_id, &owner)
+            .await?
+            .into_iter()
+            .find(|package| &package.package_ref == package_ref)
+            .map(Arc::new))
+    }
+}
