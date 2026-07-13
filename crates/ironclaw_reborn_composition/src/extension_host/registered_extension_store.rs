@@ -120,6 +120,11 @@ where
             continue;
         };
         if let Err(error) = migrate_legacy_owner_dir(fs, &owner).await {
+            // silent-ok: a failed migration leaves that owner's legacy
+            // descriptors in place (unmigrated, not deleted or corrupted) —
+            // no data loss, and every other owner's migration still runs;
+            // the un-migrated owner is simply invisible to the tenant-scoped
+            // walkers until a later boot retries.
             tracing::debug!(
                 owner = owner.as_str(),
                 %error,

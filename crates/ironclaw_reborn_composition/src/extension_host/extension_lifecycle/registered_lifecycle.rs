@@ -225,6 +225,10 @@ impl RebornLocalExtensionManagementPort {
                 .map(|package| (package.package.id.clone(), Arc::new(package)))
                 .collect(),
             Err(error) => {
+                // silent-ok: a read failure here only degrades one request's
+                // listing to catalog-only entries (registered rows silently
+                // absent from `installed_summaries`); it never mutates state
+                // or masks an ownership decision, so failing open is safe.
                 tracing::debug!(
                     %error,
                     "skipping registered extension listing for installed summaries: batched read failed"
