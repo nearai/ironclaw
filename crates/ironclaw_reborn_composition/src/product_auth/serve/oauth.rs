@@ -120,14 +120,14 @@ fn oauth_flow_scope(
     query: OAuthFlowStatusQuery,
 ) -> Result<(AuthProductScope, AuthFlowId), ProductAuthRouteFailure> {
     let flow_id = AuthFlowId::from_uuid(
-        Uuid::parse_str(&flow_id).map_err(|_| ProductAuthRouteFailure::malformed_callback())?,
+        Uuid::parse_str(flow_id).map_err(|_| ProductAuthRouteFailure::malformed_callback())?,
     );
     let fields = ScopeFields {
         session_id: None,
         thread_id: None,
         invocation_id: query.invocation_id,
     };
-    let scope = scope_from_authenticated_caller_parts_requiring_invocation(&caller, &fields)?;
+    let scope = scope_from_authenticated_caller_parts_requiring_invocation(caller, &fields)?;
     Ok((scope, flow_id))
 }
 
