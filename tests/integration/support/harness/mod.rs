@@ -1399,52 +1399,16 @@ impl HostRuntimeCapabilityHarness {
         // Two config extensions Change 1 added (plus `capability_id_filter`
         // below = three total): per-capability execution-mount overrides and
         // additional provider-trust entries. Both inert/empty at production's
-        // sole call site; this harness is the ONLY populator.
-        let mut additional_provider_trust = BTreeMap::new();
-        // Restores the old harness's primary-provider trust entry
-        // (`ProductLiveVisibleCapabilityRequestConfig::new(...)
-        // .with_provider_trust_for_effects(self.provider_id.clone(), ...,
-        // self.effect_kinds.clone())`, the very first authority builder call
-        // pre-seam). The production factory's provider trust only comes from
-        // the builtin baseline plus real extension activations
-        // (`LocalDevExtensionSurfaceSource`), so an ad-hoc test-only
-        // `HostRuntime` backend (mock MCP, GitHub/web-access WASM — none of
-        // which activate a real extension) would otherwise never get its
-        // provider trusted, and `tool_definitions()` silently omits every
-        // capability from an untrusted provider. Skipped for the `builtin`
-        // provider: `additional_provider_trust` OVERWRITES same-id baseline
-        // entries, and a profile's narrow `effect_kinds` (e.g. file tools'
-        // filesystem-only list) would clobber the production builtin ceiling
-        // and break builtin dispatch — the baseline already trusts `builtin`
-        // with the full production effect set.
-        if self.provider_id.as_str() != ironclaw_host_runtime::BUILTIN_FIRST_PARTY_PROVIDER {
-            additional_provider_trust.insert(
-                self.provider_id.clone(),
-                ironclaw_trust::TrustDecision {
-                    effective_trust: EffectiveTrustClass::user_trusted(),
-                    authority_ceiling: ironclaw_trust::AuthorityCeiling {
-                        allowed_effects: self.effect_kinds.clone(),
-                        max_resource_ceiling: None,
-                    },
-                    provenance: ironclaw_trust::TrustProvenance::AdminConfig,
-                    evaluated_at: chrono::Utc::now(),
-                },
-            );
-        }
-        for (provider, effects) in &self.additional_provider_trust {
-            additional_provider_trust.insert(
-                provider.clone(),
-                ironclaw_trust::TrustDecision {
-                    effective_trust: EffectiveTrustClass::user_trusted(),
-                    authority_ceiling: ironclaw_trust::AuthorityCeiling {
-                        allowed_effects: effects.clone(),
-                        max_resource_ceiling: None,
-                    },
-                    provenance: ironclaw_trust::TrustProvenance::AdminConfig,
-                    evaluated_at: chrono::Utc::now(),
-                },
-            );
-        }
+        // sole call site; this harness is the ONLY populator. Pulled into a
+        // pure helper (`build_additional_provider_trust`) so the CodeRabbit
+        // PR #6026 invariant it encodes is directly unit-testable — see that
+        // function's doc comment and the `harness_trust_tests` module below.
+        let additional_provider_trust = Self::build_additional_provider_trust(
+            &self.provider_id,
+            &self.effect_kinds,
+            &self.additional_provider_trust,
+            self.reborn_services.is_some(),
+        );
         // Hand-mint a grant for every id in this harness's `capability_ids`
         // allowlist (ad-hoc test-only `HostRuntime` backends never get a real
         // builtin/extension grant otherwise). Excludes the synthetic-capability
@@ -1649,6 +1613,95 @@ impl HostRuntimeCapabilityHarness {
             },
         }
     }
+
+    /// Builds the composition-facing `additional_provider_trust` map this
+    /// harness forwards to `RefreshingLocalDevCapabilityPortTestParts` on
+    /// every capability-port refresh (`create_recording_capability_port`
+    /// calls this and passes the result straight through).
+    ///
+    /// Two independent entries, minted under two independent conditions:
+    ///
+    /// 1. `provider_id`'s own entry (this harness's primary provider,
+    ///    `effect_kinds` its full authority) — restores the old harness's
+    ///    primary-provider trust entry
+    ///    (`ProductLiveVisibleCapabilityRequestConfig::new(...)
+    ///    .with_provider_trust_for_effects(...)`, the very first authority
+    ///    builder call pre-seam). Skipped for the `builtin` provider:
+    ///    `additional_provider_trust` OVERWRITES same-id baseline entries,
+    ///    and a profile's narrow `effect_kinds` (e.g. file tools'
+    ///    filesystem-only list) would clobber the production builtin ceiling
+    ///    and break builtin dispatch — the baseline already trusts `builtin`
+    ///    with the full production effect set.
+    /// 2. `additional_provider_trust`'s ad-hoc list (e.g.
+    ///    `bundled_extension_provider_trust()`) — an ad-hoc test-only
+    ///    `HostRuntime` backend (mock MCP, standalone GitHub/web-access WASM
+    ///    — none of which ever activate a real extension) would otherwise
+    ///    never get its provider trusted, and `tool_definitions()` silently
+    ///    omits every capability from an untrusted provider.
+    ///
+    /// Security (CodeRabbit, PR #6026): entry (2) is ONLY safe to mint when
+    /// this harness has NO wired extension_management — i.e.
+    /// `has_reborn_services` is `false` (the mock-mcp / standalone github /
+    /// standalone web-access harnesses, none of which ever activate a real
+    /// extension, so no production decision can ever exist for their
+    /// provider to clobber). Every current `provider_trust_override` caller
+    /// (`extension_lifecycle_tools_profile`, `file_and_github_auth_tools_profile`,
+    /// `extension_visibility_probe_tools_profile`) instead builds through
+    /// `new_with_options`, which unconditionally sets `reborn_services` and
+    /// therefore wires the SAME `extension_management`
+    /// (`create_recording_capability_port` passes
+    /// `self.reborn_services.as_ref().and_then(build_local_dev_extension_management_for_test)`
+    /// straight to `build_inner`) these providers would otherwise clobber.
+    /// Those providers (`gmail`, `github`, `visprobe`, ...) are exactly the
+    /// bundled/fixture extensions those profiles install/activate or publish
+    /// for real during the test — before activation the capability is
+    /// unreachable anyway (fails closed at registry-publication, never
+    /// reaching this trust check), and after activation
+    /// `extension_surface.provider_trust()` supplies the authoritative
+    /// production ceiling, which this harness entry must not overwrite
+    /// (`additional_provider_trust` OVERWRITES same-id entries — pinned by
+    /// `additional_provider_trust_is_forwarded_to_visible_request` in
+    /// `refreshing_capability_port_test_support.rs`). So: skip entry (2)
+    /// entirely whenever `has_reborn_services` is `true`; only a
+    /// `None`-services (genuinely ad-hoc, non-activation-backed) harness
+    /// mints it. See `harness_trust_tests` below for the regression pin.
+    fn build_additional_provider_trust(
+        provider_id: &ExtensionId,
+        effect_kinds: &[EffectKind],
+        additional_provider_trust: &[(ExtensionId, Vec<EffectKind>)],
+        has_reborn_services: bool,
+    ) -> BTreeMap<ExtensionId, ironclaw_trust::TrustDecision> {
+        let mut result = BTreeMap::new();
+        if provider_id.as_str() != ironclaw_host_runtime::BUILTIN_FIRST_PARTY_PROVIDER {
+            result.insert(
+                provider_id.clone(),
+                Self::admin_config_trust_decision(effect_kinds.to_vec()),
+            );
+        }
+        if !has_reborn_services {
+            for (provider, effects) in additional_provider_trust {
+                result.insert(
+                    provider.clone(),
+                    Self::admin_config_trust_decision(effects.clone()),
+                );
+            }
+        }
+        result
+    }
+
+    fn admin_config_trust_decision(
+        allowed_effects: Vec<EffectKind>,
+    ) -> ironclaw_trust::TrustDecision {
+        ironclaw_trust::TrustDecision {
+            effective_trust: EffectiveTrustClass::user_trusted(),
+            authority_ceiling: ironclaw_trust::AuthorityCeiling {
+                allowed_effects,
+                max_resource_ceiling: None,
+            },
+            provenance: ironclaw_trust::TrustProvenance::AdminConfig,
+            evaluated_at: chrono::Utc::now(),
+        }
+    }
 }
 
 struct HostRuntimeHarnessSurfaceResolver;
@@ -1730,4 +1783,83 @@ fn turn_state_root_filesystem(
         backend,
     )?;
     Ok(Arc::new(root))
+}
+
+/// Regression coverage for the CodeRabbit PR #6026 security finding:
+/// `HostRuntimeCapabilityHarness::build_additional_provider_trust` must never
+/// mint a synthetic `additional_provider_trust` entry for a provider that a
+/// wired `extension_management` could supply a real (potentially narrower)
+/// production trust decision for — such an entry would silently OVERWRITE
+/// that decision (`additional_provider_trust` extends the base map AFTER
+/// `extension_surface.provider_trust()`, last-writer-wins). Pure unit tests
+/// against the extracted helper, independent of the full async harness/tokio
+/// runtime, so the invariant is pinned even without a live extension-activation
+/// scenario.
+#[cfg(test)]
+mod harness_trust_tests {
+    use super::*;
+
+    /// The exact shape `extension_lifecycle_tools_profile_for_user` builds:
+    /// a blanket `bundled_extension_provider_trust()`-style entry for
+    /// `gmail` (the provider CodeRabbit's finding named), on a harness with
+    /// `reborn_services` wired (`has_reborn_services = true`, matching every
+    /// current `provider_trust_override` caller, all of which build through
+    /// `new_with_options`). Before the fix this test would have observed an
+    /// unbounded `gmail` entry here; the fix must make it absent so the
+    /// activation-backed production decision (computed downstream, not
+    /// visible to this pure helper) is free to pass through untouched.
+    #[test]
+    fn activation_backed_provider_gets_no_synthetic_trust_entry() {
+        let builtin_provider =
+            ExtensionId::new(ironclaw_host_runtime::BUILTIN_FIRST_PARTY_PROVIDER)
+                .expect("builtin provider id");
+        let gmail_provider = ExtensionId::new("gmail").expect("gmail provider id");
+        let blanket_additional = vec![(gmail_provider.clone(), local_dev_all_effects())];
+
+        let result = HostRuntimeCapabilityHarness::build_additional_provider_trust(
+            &builtin_provider,
+            &local_dev_all_effects(),
+            &blanket_additional,
+            /* has_reborn_services */ true,
+        );
+
+        assert!(
+            !result.contains_key(&gmail_provider),
+            "an activation-backed harness (reborn_services wired) must never mint a \
+             synthetic trust entry for a bundled-extension provider like `gmail` -- \
+             production's `extension_surface.provider_trust()` must be the sole \
+             source of `gmail`'s ceiling once it is activated, and this entry would \
+             silently overwrite it: {result:?}"
+        );
+    }
+
+    /// The genuinely ad-hoc case (mock-mcp / standalone github / standalone
+    /// web-access harnesses): `reborn_services` is never wired for these, so
+    /// there is no production decision to ever clobber, and the entry IS
+    /// needed (no other path trusts these providers at all).
+    #[test]
+    fn ad_hoc_provider_without_reborn_services_still_gets_trust_entry() {
+        let builtin_provider =
+            ExtensionId::new(ironclaw_host_runtime::BUILTIN_FIRST_PARTY_PROVIDER)
+                .expect("builtin provider id");
+        let mock_mcp_provider = ExtensionId::new("mock-mcp").expect("mock-mcp provider id");
+        let effects = vec![EffectKind::DispatchCapability, EffectKind::Network];
+        let additional = vec![(mock_mcp_provider.clone(), effects.clone())];
+
+        let result = HostRuntimeCapabilityHarness::build_additional_provider_trust(
+            &builtin_provider,
+            &effects,
+            &additional,
+            /* has_reborn_services */ false,
+        );
+
+        assert_eq!(
+            result
+                .get(&mock_mcp_provider)
+                .map(|decision| &decision.authority_ceiling.allowed_effects),
+            Some(&effects),
+            "a harness with no wired extension_management must still mint its ad-hoc \
+             provider's trust entry, or that provider's capabilities become invisible: {result:?}"
+        );
+    }
 }
