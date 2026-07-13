@@ -590,6 +590,7 @@ fn validate_model_observation_detail(value: &serde_json::Value) -> Result<(), St
                     "preview",
                     "total_bytes",
                     "next_offset",
+                    "item_count",
                 ],
                 "model observation detail",
             )?;
@@ -599,7 +600,7 @@ fn validate_model_observation_detail(value: &serde_json::Value) -> Result<(), St
                 MODEL_OBSERVATION_TEXT_MAX_BYTES,
             )?;
             required_u64(object, "byte_len", "model observation detail")?;
-            for field in ["total_bytes", "next_offset"] {
+            for field in ["total_bytes", "next_offset", "item_count"] {
                 if let Some(value) = object.get(field)
                     && value.as_u64().is_none()
                 {

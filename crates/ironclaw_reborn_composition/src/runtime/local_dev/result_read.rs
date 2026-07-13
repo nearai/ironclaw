@@ -271,17 +271,14 @@ struct ResultReadInput {
     max_bytes: u64,
 }
 
-/// Builds an `InvalidInput` `CapabilityFailure` — the sole error shape
-/// `parse_result_read_input` returns. `issue` is `None` for arms whose prose
-/// summary already states the constraint in-line.
-fn invalid_input_failure(
-    safe_summary: &str,
-    issue: Option<CapabilityInputIssue>,
-) -> CapabilityFailure {
+/// Builds the `InvalidInput` `CapabilityFailure` every
+/// `parse_result_read_input` error arm returns, carrying one structured
+/// repair issue.
+fn invalid_input_failure(safe_summary: &str, issue: CapabilityInputIssue) -> CapabilityFailure {
     CapabilityFailure {
         error_kind: CapabilityFailureKind::InvalidInput,
         safe_summary: safe_summary.to_string(),
-        detail: issue.map(|issue| CapabilityFailureDetail::InvalidInput {
+        detail: Some(CapabilityFailureDetail::InvalidInput {
             issues: vec![issue],
         }),
     }
@@ -300,34 +297,45 @@ fn json_value_kind(value: &serde_json::Value) -> &'static str {
     }
 }
 
+/// Model-controlled text echoed into a `CapabilityInputIssue` must be
+/// secret-redacted first, or the persistence-side content scan drops the
+/// whole observation for exactly the inputs that need repair guidance most.
+fn sanitized_issue_text(value: impl Into<String>) -> String {
+    sanitize_model_visible_text(value)
+}
+
 fn parse_result_read_input(
     value: &serde_json::Value,
 ) -> Result<ResultReadInput, CapabilityFailure> {
     let object = value.as_object().ok_or_else(|| {
         invalid_input_failure(
             "result_read arguments must be an object",
-            Some(CapabilityInputIssue {
+            CapabilityInputIssue {
                 path: "root".to_string(),
                 code: DispatchInputIssueCode::TypeMismatch,
                 expected: Some("object".to_string()),
                 received: Some(json_value_kind(value).to_string()),
                 schema_path: Some("root".to_string()),
-            }),
+            },
         )
     })?;
     if let Some(unexpected) = object
         .keys()
         .find(|key| *key != "result_ref" && *key != "offset" && *key != "max_bytes")
     {
+        let path = match unexpected.as_str() {
+            "" => "root".to_string(),
+            key => sanitized_issue_text(key),
+        };
         return Err(invalid_input_failure(
             "result_read arguments contain an unsupported field",
-            Some(CapabilityInputIssue {
-                path: unexpected.clone(),
+            CapabilityInputIssue {
+                path,
                 code: DispatchInputIssueCode::UnexpectedField,
                 expected: Some("declared field".to_string()),
                 received: Some("unexpected field".to_string()),
                 schema_path: Some("additionalProperties".to_string()),
-            }),
+            },
         ));
     }
     let result_ref_value = object.get("result_ref");
@@ -348,13 +356,13 @@ fn parse_result_read_input(
             };
             return Err(invalid_input_failure(
                 "result_read requires a result_ref string",
-                Some(CapabilityInputIssue {
+                CapabilityInputIssue {
                     path: "result_ref".to_string(),
                     code,
                     expected,
                     received,
                     schema_path: Some("properties/result_ref".to_string()),
-                }),
+                },
             ));
         }
     };
@@ -362,13 +370,13 @@ fn parse_result_read_input(
         tracing::debug!(validation_error = %error, "result reader result reference validation failed");
         invalid_input_failure(
             "result_read result_ref is invalid",
-            Some(CapabilityInputIssue {
+            CapabilityInputIssue {
                 path: "result_ref".to_string(),
                 code: DispatchInputIssueCode::InvalidValue,
                 expected: Some("valid result reference format".to_string()),
-                received: Some(result_ref.clone()),
+                received: Some(sanitized_issue_text(result_ref.clone())),
                 schema_path: Some("properties/result_ref".to_string()),
-            }),
+            },
         )
     })?;
     let offset_value = object.get("offset");
@@ -384,47 +392,49 @@ fn parse_result_read_input(
                 Some(other) => (
                     DispatchInputIssueCode::InvalidValue,
                     Some("non-negative integer".to_string()),
-                    Some(other.to_string()),
+                    Some(sanitized_issue_text(other.to_string())),
                 ),
             };
             return Err(invalid_input_failure(
                 "result_read requires a non-negative offset",
-                Some(CapabilityInputIssue {
+                CapabilityInputIssue {
                     path: "offset".to_string(),
                     code,
                     expected,
                     received,
                     schema_path: Some("properties/offset".to_string()),
-                }),
+                },
             ));
         }
     };
     let max_bytes_value = object.get("max_bytes");
+    let Some(max_bytes_value) = max_bytes_value else {
+        return Err(invalid_input_failure(
+            "result_read requires a max_bytes integer",
+            CapabilityInputIssue {
+                path: "max_bytes".to_string(),
+                code: DispatchInputIssueCode::MissingRequired,
+                expected: Some("required field".to_string()),
+                received: None,
+                schema_path: Some("properties/max_bytes".to_string()),
+            },
+        ));
+    };
     let max_bytes = match max_bytes_value
-        .and_then(serde_json::Value::as_u64)
+        .as_u64()
         .filter(|value| (RESULT_READ_MIN_BYTES..=RESULT_READ_MAX_BYTES).contains(value))
     {
         Some(value) => value,
         None => {
-            // Absent is `MissingRequired` (matching `result_ref`/`offset`
-            // above); present-but-out-of-range or wrong-typed stays
-            // `InvalidValue` -- the allowed-range prose applies to both.
-            let (code, received) = match max_bytes_value {
-                None => (DispatchInputIssueCode::MissingRequired, None),
-                Some(value) => (
-                    DispatchInputIssueCode::InvalidValue,
-                    Some(value.to_string()),
-                ),
-            };
             return Err(invalid_input_failure(
                 "result_read max_bytes is outside the allowed range",
-                Some(CapabilityInputIssue {
+                CapabilityInputIssue {
                     path: "max_bytes".to_string(),
-                    code,
+                    code: DispatchInputIssueCode::InvalidValue,
                     expected: Some(format!("{RESULT_READ_MIN_BYTES}..={RESULT_READ_MAX_BYTES}")),
-                    received,
+                    received: Some(sanitized_issue_text(max_bytes_value.to_string())),
                     schema_path: Some("properties/max_bytes".to_string()),
-                }),
+                },
             ));
         }
     };

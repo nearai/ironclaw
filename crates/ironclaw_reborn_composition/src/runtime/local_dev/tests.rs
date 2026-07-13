@@ -1390,10 +1390,16 @@ mod tests {
             ironclaw_turns::run_profile::ToolObservationDetail::ResultReference {
                 preview: Some(preview),
                 next_offset: Some(next_offset),
+                item_count: None,
                 ..
             } => (preview.clone(), *next_offset),
             detail => panic!("expected a truncated result reference preview, got {detail:?}"),
         };
+        assert!(
+            !observation.summary.contains("Full result is"),
+            "a non-array result must not claim an array item count: {}",
+            observation.summary
+        );
         assert!(
             preview.is_char_boundary(preview.len()),
             "preview must end on a UTF-8 char boundary"
@@ -3052,6 +3058,22 @@ mod tests {
                 }),
             ),
             (
+                // Model-controlled text echoed into `received` must be
+                // secret-redacted, or the downstream persistence scan drops
+                // the whole observation for exactly the inputs that need
+                // repair guidance most.
+                "secret-shaped result_ref is echoed redacted",
+                serde_json::json!({"result_ref": "sk-live-secret123", "offset": 0, "max_bytes": 8}),
+                "result_read result_ref is invalid",
+                Some(CapabilityInputIssue {
+                    path: "result_ref".to_string(),
+                    code: DispatchInputIssueCode::InvalidValue,
+                    expected: Some("valid result reference format".to_string()),
+                    received: Some("[redacted]".to_string()),
+                    schema_path: Some("properties/result_ref".to_string()),
+                }),
+            ),
+            (
                 "missing offset",
                 serde_json::json!({"result_ref": valid_ref, "max_bytes": 8}),
                 "result_read requires a non-negative offset",
@@ -3078,11 +3100,11 @@ mod tests {
             (
                 "missing max_bytes",
                 serde_json::json!({"result_ref": valid_ref, "offset": 0}),
-                "result_read max_bytes is outside the allowed range",
+                "result_read requires a max_bytes integer",
                 Some(CapabilityInputIssue {
                     path: "max_bytes".to_string(),
                     code: DispatchInputIssueCode::MissingRequired,
-                    expected: Some(max_bytes_range.clone()),
+                    expected: Some("required field".to_string()),
                     received: None,
                     schema_path: Some("properties/max_bytes".to_string()),
                 }),

@@ -653,12 +653,71 @@ async fn result_read_out_of_range_max_bytes_surfaces_repair_guidance_impl() {
         .await
         .expect("turn completes");
 
-    h.assert_conversation_history_role_contains(MessageKind::ToolResultReference, "max_bytes")
-        .await
-        .expect("model-visible observation names the offending field");
     h.assert_conversation_history_role_contains(MessageKind::ToolResultReference, "invalid_value")
         .await
         .expect("model-visible observation carries a structured issue code, not just prose");
+    h.assert_conversation_history_role_contains(
+        MessageKind::ToolResultReference,
+        "\"expected\":\"4..=2048\"",
+    )
+    .await
+    .expect("model-visible issue states the allowed range");
+    h.assert_conversation_history_role_contains(
+        MessageKind::ToolResultReference,
+        "\"received\":\"2049\"",
+    )
+    .await
+    .expect("model-visible issue echoes the offending value");
+}
+
+/// Persistence half of the truncated-array `item_count` fix: the observation
+/// minted by `write_capability_result` must survive the strict
+/// `ToolResultReferenceEnvelope` validation gate — an allowlist that rejects
+/// `item_count` silently drops the ENTIRE observation (preview and
+/// continuation offsets included), degrading the model to a bare safe
+/// summary. `builtin.json` `parse` is the granted capability whose output is
+/// a top-level JSON array.
+#[test]
+fn truncated_array_result_persists_item_count_to_model_transcript() {
+    run_async_test_with_stack(
+        "truncated_array_result_persists_item_count_to_model_transcript",
+        truncated_array_result_persists_item_count_to_model_transcript_impl,
+    );
+}
+
+async fn truncated_array_result_persists_item_count_to_model_transcript_impl() {
+    let items: Vec<String> = (0..600).map(|i| format!("item-{i:04}")).collect();
+    let array_json = serde_json::to_string(&items).expect("array fixture serializes");
+    assert!(
+        array_json.len() > 2048,
+        "fixture must exceed the preview cap so the truncated branch runs"
+    );
+    let h = RebornIntegrationHarness::test_default()
+        .with_durable_capability_io_file_tools()
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.json",
+                json!({"operation": "parse", "data": array_json}),
+            ),
+            RebornScriptedReply::text("parsed"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn("parse the item list")
+        .await
+        .expect("turn completes");
+
+    h.assert_conversation_history_role_contains(
+        MessageKind::ToolResultReference,
+        "\"item_count\":600",
+    )
+    .await
+    .expect("persisted observation carries the structured item count");
+    h.assert_conversation_history_role_contains(MessageKind::ToolResultReference, "600 items")
+        .await
+        .expect("persisted summary names the array's element count");
 }
 
 /// Spawns the async test body on a thread with a larger-than-default OS

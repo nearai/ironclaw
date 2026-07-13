@@ -3,7 +3,9 @@
 //! internal tail. See `harness/options.rs` for the `ToolsProfile` pattern.
 
 use ironclaw_host_api::{CapabilityId, EffectKind, MountPermissions, UserId};
-use ironclaw_host_runtime::{READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID};
+use ironclaw_host_runtime::{
+    JSON_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
+};
 
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
 use super::super::{HarnessResult, HostRuntimeCapabilityHarness, workspace_mounts};
@@ -83,6 +85,13 @@ pub(crate) fn file_tools_with_durable_capability_io_profile() -> HarnessResult<T
     profile.capability_ids.push(CapabilityId::new(
         ironclaw_reborn_composition::test_support::RESULT_READ_CAPABILITY_ID,
     )?);
+    // `builtin.json` (`parse`) is the minimal granted capability whose output
+    // is a top-level JSON array, needed to drive the truncated-array
+    // `item_count` observation through this durable-io seam.
+    profile
+        .capability_ids
+        .push(CapabilityId::new(JSON_CAPABILITY_ID)?);
+    profile.effect_kinds.push(EffectKind::DispatchCapability);
     Ok(profile)
 }
 
