@@ -124,11 +124,14 @@ pub fn resolve_reborn_migration_target(
                     .map_err(|error| RebornBuildError::InvalidConfig {
                         reason: format!("invalid migration composition profile: {error}"),
                     })?;
-                let (url, key) = input::resolve_postgres_migration_target(
+                let target = input::resolve_postgres_migration_target(
                     composition_profile,
                     config_file.as_ref(),
                 )?;
-                (RebornMigrationTargetStore::Postgres { url }, Some(key))
+                (
+                    RebornMigrationTargetStore::Postgres { url: target.url },
+                    Some(target.secret_master_key),
+                )
             }
             #[cfg(not(feature = "postgres"))]
             {

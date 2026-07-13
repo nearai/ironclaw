@@ -1,3 +1,4 @@
+use anyhow::Context as _;
 use clap::Args;
 use ironclaw_reborn_composition::{
     RebornRuntimeComponentStatus, reborn_runtime_readiness_snapshot,
@@ -228,14 +229,16 @@ impl Renderable for DoctorDto {
 }
 
 fn migration_check(context: &RebornCliContext) -> DoctorCheck {
-    let detail = migration_state(context).unwrap_or_else(|| {
-        if context.v1_migration_source_candidate().is_some() {
-            "available".to_string()
-        } else {
-            "not_detected".to_string()
-        }
-    });
-    let outcome = match detail.as_str() {
+    let detail = match migration_state(context) {
+        Ok(Some(detail)) => detail,
+        Ok(None) if context.v1_migration_source_candidate().is_some() => "available".to_string(),
+        Ok(None) => "not_detected".to_string(),
+        Err(error) => format!("invalid: {error}"),
+    };
+    let outcome = match detail
+        .split_once(':')
+        .map_or(detail.as_str(), |(state, _)| state)
+    {
         "invalid" | "applying" | "failed" | "applied" | "verifying" => CheckOutcome::Fail,
         "not_detected" | "available" | "planned" => CheckOutcome::Skip,
         "verified" => CheckOutcome::Pass,
@@ -249,42 +252,57 @@ fn migration_check(context: &RebornCliContext) -> DoctorCheck {
     }
 }
 
-fn migration_state(context: &RebornCliContext) -> Option<String> {
+fn migration_state(context: &RebornCliContext) -> anyhow::Result<Option<String>> {
     match crate::commands::migrate::read_activation_state_status(context) {
-        Ok(Some(status)) => return Some(status),
-        Err(_) => return Some("invalid".to_string()),
+        Ok(Some(status)) => return Ok(Some(status.as_str().to_string())),
+        Err(error) => {
+            return Err(error).context("failed to inspect target migration quarantine state");
+        }
         Ok(None) => {}
     }
 
     let marker = crate::commands::onboard::onboarding_marker_path(context.boot_config().home());
-    let body = std::fs::read_to_string(marker).ok()?;
-    let document: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let body = match std::fs::read_to_string(&marker) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("failed to read onboarding marker at {}", marker.display())
+            });
+        }
+    };
+    let document: serde_json::Value = serde_json::from_str(&body)
+        .with_context(|| format!("invalid onboarding marker at {}", marker.display()))?;
     let recorded = document
         .pointer("/v1_migration/state")
         .and_then(serde_json::Value::as_str)
-        .map(ToOwned::to_owned)?;
+        .map(ToOwned::to_owned);
+    let Some(recorded) = recorded else {
+        return Ok(None);
+    };
     let Some(manifest_path) = document
         .pointer("/v1_migration/manifest")
         .and_then(serde_json::Value::as_str)
     else {
-        return Some(recorded);
+        return Ok(Some(recorded));
     };
-    status_from_document(std::path::Path::new(manifest_path)).or(Some(recorded))
+    Ok(status_from_document(std::path::Path::new(manifest_path))?
+        .map(|status| status.as_str().to_string())
+        .or(Some(recorded)))
 }
 
-fn status_from_document(path: &std::path::Path) -> Option<String> {
-    let body = std::fs::read_to_string(path).ok()?;
-    let document = serde_json::from_str::<serde_json::Value>(&body).ok()?;
+fn status_from_document(
+    path: &std::path::Path,
+) -> anyhow::Result<Option<crate::commands::migrate::MigrationLifecycleStatus>> {
+    let body = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read migration manifest at {}", path.display()))?;
+    let document = serde_json::from_str::<serde_json::Value>(&body)
+        .with_context(|| format!("invalid migration manifest at {}", path.display()))?;
     document
         .get("status")
         .and_then(serde_json::Value::as_str)
-        .filter(|status| {
-            matches!(
-                *status,
-                "planned" | "applying" | "failed" | "applied" | "verifying" | "verified"
-            )
-        })
-        .map(ToOwned::to_owned)
+        .map(crate::commands::migrate::MigrationLifecycleStatus::parse)
+        .transpose()
 }
 
 #[cfg(test)]
@@ -340,6 +358,57 @@ mod tests {
             let check = migration_check(&context);
             assert_eq!(check.outcome, CheckOutcome::Fail, "status {status}");
         }
+    }
+
+    #[test]
+    fn doctor_reports_corrupt_onboarding_migration_state() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        let marker = crate::commands::onboard::onboarding_marker_path(context.boot_config().home());
+        std::fs::create_dir_all(context.boot_config().home().path()).expect("create home");
+        std::fs::write(&marker, "not-json").expect("write corrupt marker");
+
+        let check = migration_check(&context);
+
+        assert_eq!(check.outcome, CheckOutcome::Fail);
+        assert!(check.detail.contains("invalid"), "detail: {}", check.detail);
+        assert!(
+            check.detail.contains("onboarding"),
+            "detail: {}",
+            check.detail
+        );
+    }
+
+    #[test]
+    fn doctor_reports_missing_recorded_migration_manifest() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        let marker = crate::commands::onboard::onboarding_marker_path(context.boot_config().home());
+        let missing_manifest = context
+            .boot_config()
+            .home()
+            .path()
+            .join("missing-manifest.json");
+        std::fs::create_dir_all(context.boot_config().home().path()).expect("create home");
+        std::fs::write(
+            &marker,
+            serde_json::json!({
+                "v1_migration": {
+                    "state": "planned",
+                    "manifest": missing_manifest,
+                }
+            })
+            .to_string(),
+        )
+        .expect("write marker");
+
+        let check = migration_check(&context);
+
+        assert_eq!(check.outcome, CheckOutcome::Fail);
+        assert!(check.detail.contains("invalid"), "detail: {}", check.detail);
+        assert!(
+            check.detail.contains("manifest"),
+            "detail: {}",
+            check.detail
+        );
     }
 
     #[test]

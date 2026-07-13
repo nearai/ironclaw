@@ -89,7 +89,8 @@ dispositions, warnings, and blockers—not raw database URLs, tokens, or keys.
 Use `--strict` when archive-only, re-auth, reinstall, unsupported, or blocked
 categories should make planning return failure after writing the reviewable
 manifest. Strict mode evaluates registered inventory entries by disposition,
-including zero-count categories.
+but absent zero-count categories do not constitute data loss. Blockers remain
+strict failures regardless of their recorded count.
 
 `--source-home` must name the actual v1 home (or its matching rehearsal
 snapshot), independently of where a database backup was placed. The final plan

@@ -815,9 +815,9 @@ struct ResolvedPostgresStorage {
 }
 
 #[cfg(feature = "postgres")]
-struct ResolvedPostgresTargetConfig {
-    url: ironclaw_secrets::SecretMaterial,
-    secret_master_key: ironclaw_secrets::SecretMaterial,
+pub(crate) struct ResolvedPostgresTargetConfig {
+    pub(crate) url: ironclaw_secrets::SecretMaterial,
+    pub(crate) secret_master_key: ironclaw_secrets::SecretMaterial,
 }
 
 #[cfg(feature = "postgres")]
@@ -924,15 +924,8 @@ fn resolve_postgres_target_config(
 pub(crate) fn resolve_postgres_migration_target(
     profile: RebornCompositionProfile,
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
-) -> Result<
-    (
-        ironclaw_secrets::SecretMaterial,
-        ironclaw_secrets::SecretMaterial,
-    ),
-    RebornBuildError,
-> {
-    let resolved = resolve_postgres_target_config(profile, config_file)?;
-    Ok((resolved.url, resolved.secret_master_key))
+) -> Result<ResolvedPostgresTargetConfig, RebornBuildError> {
+    resolve_postgres_target_config(profile, config_file)
 }
 
 #[cfg(feature = "postgres")]

@@ -1,5 +1,8 @@
 use std::process::Command;
 
+#[cfg(feature = "libsql")]
+use std::path::Path;
+
 fn companion_bin() -> &'static str {
     env!("CARGO_BIN_EXE_ironclaw-reborn-migration")
 }
@@ -72,5 +75,66 @@ fn companion_can_emit_a_machine_readable_error_envelope() {
             .as_str()
             .is_some_and(|message| message.contains("failed to read migration manifest")),
         "error: {error}"
+    );
+}
+
+#[cfg(feature = "libsql")]
+async fn seed_empty_v1_source(path: &Path) {
+    let database = libsql::Builder::new_local(path)
+        .build()
+        .await
+        .expect("build source");
+    let connection = database.connect().expect("connect source");
+    connection
+        .execute_batch(
+            "CREATE TABLE settings (
+                user_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                PRIMARY KEY (user_id, key)
+             );",
+        )
+        .await
+        .expect("seed empty source");
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn strict_plan_ignores_empty_lossy_categories() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let source_home = directory.path().join("v1-home");
+    let reborn_home = directory.path().join("reborn-home");
+    let source = source_home.join("ironclaw.db");
+    let manifest = directory.path().join("migration.json");
+    std::fs::create_dir_all(&source_home).expect("create source home");
+    seed_empty_v1_source(&source).await;
+
+    let output = Command::new(companion_bin())
+        .args([
+            "v1",
+            "plan",
+            "--source-libsql",
+            source.to_str().expect("UTF-8 source path"),
+            "--source-home",
+            source_home.to_str().expect("UTF-8 source home"),
+            "--manifest",
+            manifest.to_str().expect("UTF-8 manifest path"),
+            "--strict",
+        ])
+        .env_clear()
+        .env("HOME", directory.path())
+        .env("IRONCLAW_REBORN_HOME", reborn_home)
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev")
+        .output()
+        .expect("run strict migration plan");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        manifest.exists(),
+        "strict plan should still write its manifest"
     );
 }

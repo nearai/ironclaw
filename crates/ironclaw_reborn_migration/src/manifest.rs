@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::error::MigrationError;
 use crate::report::Domain;
 
-pub const MANIFEST_SCHEMA_VERSION: u32 = 2;
+pub const MANIFEST_SCHEMA_VERSION: u32 = 3;
 pub const MIGRATION_PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,9 +36,9 @@ pub enum StoreBackend {
 
 /// A store locator safe for reports and logs.
 ///
-/// `locator_fingerprint` is a one-way hash of the path/URL. It is sufficient
-/// for equality checks without serializing credentials, usernames, hosts, or
-/// home-directory paths.
+/// `locator_fingerprint` is a one-way hash of a local path or credential-free
+/// PostgreSQL locator components. It is sufficient for equality checks without
+/// serializing credentials, usernames, hosts, or home-directory paths.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RedactedStoreDescriptor {
     pub backend: StoreBackend,

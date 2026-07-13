@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::error::MigrationError;
 use crate::report::MigrationReport;
 
-const MIGRATION_ID_SCHEMA: &str = "ironclaw-v1-to-reborn/v1";
+const MIGRATION_ID_SCHEMA: &str = "ironclaw-v1-to-reborn/v2";
 const MIGRATION_NAMESPACE: Uuid = Uuid::from_u128(0xd735d0a7_891d_4e57_ba2e_368f2a36a82c);
 
 #[derive(Debug, Clone)]
@@ -79,11 +79,22 @@ impl MigrationIdentity {
         tenant_id: &str,
         agent_id: &str,
     ) -> Uuid {
-        let seed = format!(
-            "{MIGRATION_ID_SCHEMA}\0{}\0{}\0{domain}\0{source_primary_id}\0{tenant_id}\0{agent_id}",
-            self.manifest_schema_version, self.source_fingerprint
-        );
-        Uuid::new_v5(&MIGRATION_NAMESPACE, seed.as_bytes())
+        let manifest_schema_version = self.manifest_schema_version.to_string();
+        let mut seed = Vec::new();
+        for field in [
+            MIGRATION_ID_SCHEMA,
+            manifest_schema_version.as_str(),
+            self.source_fingerprint.as_str(),
+            domain,
+            source_primary_id,
+            tenant_id,
+            agent_id,
+        ] {
+            seed.extend_from_slice(field.len().to_string().as_bytes());
+            seed.push(b':');
+            seed.extend_from_slice(field.as_bytes());
+        }
+        Uuid::new_v5(&MIGRATION_NAMESPACE, &seed)
     }
 
     #[cfg(test)]
@@ -138,6 +149,16 @@ mod tests {
                 .trigger_id("routine", "routine-1", &tenant, &agent)
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn scoped_ids_are_injective_across_field_boundaries() {
+        let identity = MigrationIdentity::for_test("source-a");
+
+        let first = identity.scoped_uuid("routine\0legacy", "item", "tenant", "agent");
+        let second = identity.scoped_uuid("routine", "legacy\0item", "tenant", "agent");
+
+        assert_ne!(first, second);
     }
 
     #[test]

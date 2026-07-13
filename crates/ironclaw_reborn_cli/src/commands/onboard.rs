@@ -9,6 +9,31 @@ use crate::file_write::{FileWriteAction, write_atomic};
 
 const ONBOARDING_MARKER_FILE: &str = ".onboard-completed.json";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OnboardingMigrationState {
+    ExplicitlySkipped,
+    Planned,
+    Available,
+    NotDetected,
+}
+
+impl OnboardingMigrationState {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExplicitlySkipped => "explicitly_skipped",
+            Self::Planned => "planned",
+            Self::Available => "available",
+            Self::NotDetected => "not_detected",
+        }
+    }
+}
+
+impl std::fmt::Display for OnboardingMigrationState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Initialize the standalone Reborn home and first-run setup marker.
 #[derive(Debug, Args)]
 pub(crate) struct OnboardCommand {
@@ -65,7 +90,7 @@ impl OnboardCommand {
 
         let outcome = write_default_config_files(home, self.force, ExistingConfigPolicy::Preserve)?;
         let migration_state = if self.skip_v1_migration {
-            "explicitly_skipped"
+            OnboardingMigrationState::ExplicitlySkipped
         } else if migration_requested {
             let source = source.ok_or_else(|| {
                 anyhow::anyhow!(
@@ -76,11 +101,11 @@ impl OnboardCommand {
                 anyhow::anyhow!("could not resolve the v1 source home for migration planning")
             })?;
             crate::commands::migrate::plan_detected_v1(source, &source_home, &manifest_path)?;
-            "planned"
+            OnboardingMigrationState::Planned
         } else if source_detected {
-            "available"
+            OnboardingMigrationState::Available
         } else {
-            "not_detected"
+            OnboardingMigrationState::NotDetected
         };
         let marker_action = write_onboarding_marker(
             home,
@@ -114,15 +139,17 @@ impl OnboardCommand {
             "- run `ironclaw-reborn models set-provider <provider> --model <model>` as needed"
         );
         match migration_state {
-            "available" => println!(
+            OnboardingMigrationState::Available => println!(
                 "- v1 data detected; review `ironclaw-reborn migrate v1 plan --help` before cutover"
             ),
-            "planned" => println!(
+            OnboardingMigrationState::Planned => println!(
                 "- review the v1 migration plan at {} before stopping v1 and applying",
                 manifest_path.display()
             ),
-            "explicitly_skipped" => println!("- v1 migration explicitly skipped"),
-            _ => println!("- no v1 installation detected"),
+            OnboardingMigrationState::ExplicitlySkipped => {
+                println!("- v1 migration explicitly skipped")
+            }
+            OnboardingMigrationState::NotDetected => println!("- no v1 installation detected"),
         }
         Ok(())
     }
@@ -192,7 +219,7 @@ fn write_onboarding_marker(
     home: &RebornHome,
     marker_path: &Path,
     force: bool,
-    migration_state: &'static str,
+    migration_state: OnboardingMigrationState,
     manifest_path: &Path,
 ) -> anyhow::Result<FileWriteAction> {
     if marker_path.exists() && !force {
@@ -213,7 +240,7 @@ fn write_onboarding_marker(
         "steps_pending": pending_steps(migration_state),
         "v1_state": "not-used",
         "v1_migration": {
-            "state": migration_state,
+            "state": migration_state.as_str(),
             "manifest": manifest_path,
         }
     }))?;
@@ -225,9 +252,12 @@ fn write_onboarding_marker(
     )
 }
 
-fn pending_steps(migration_state: &str) -> Vec<&'static str> {
+fn pending_steps(migration_state: OnboardingMigrationState) -> Vec<&'static str> {
     let mut steps = vec!["llm_credentials", "model_selection", "channel_setup"];
-    if matches!(migration_state, "available" | "planned") {
+    if matches!(
+        migration_state,
+        OnboardingMigrationState::Available | OnboardingMigrationState::Planned
+    ) {
         steps.push("v1_migration");
     }
     steps

@@ -591,14 +591,15 @@ fn persist_report_manifest(
 fn manifest_has_strict_loss(manifest: &MigrationManifest) -> bool {
     manifest.inventory.iter().any(|entry| {
         entry.blocker.is_some()
-            || matches!(
-                entry.disposition,
-                Disposition::ArchiveOnly
-                    | Disposition::RequiresReauth
-                    | Disposition::RequiresReinstall
-                    | Disposition::Unsupported
-                    | Disposition::UnsupportedUnknown
-            )
+            || (entry.count > 0
+                && matches!(
+                    entry.disposition,
+                    Disposition::ArchiveOnly
+                        | Disposition::RequiresReauth
+                        | Disposition::RequiresReinstall
+                        | Disposition::Unsupported
+                        | Disposition::UnsupportedUnknown
+                ))
     })
 }
 

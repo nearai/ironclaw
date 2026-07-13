@@ -18,6 +18,54 @@ const COMPANION_ERROR_FORMAT_ENV: &str = "IRONCLAW_REBORN_MIGRATION_ERROR_FORMAT
 pub(crate) const MIGRATION_STATE_MARKER_FILE: &str = ".v1-migration-state.json";
 const MIGRATION_STATE_MARKER_SCHEMA: &str = "ironclaw.reborn.migration-state/v1";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MigrationLifecycleStatus {
+    Planned,
+    Applying,
+    Failed,
+    Applied,
+    Verifying,
+    Verified,
+}
+
+impl MigrationLifecycleStatus {
+    pub(crate) fn parse(status: &str) -> anyhow::Result<Self> {
+        match status {
+            "planned" => Ok(Self::Planned),
+            "applying" => Ok(Self::Applying),
+            "failed" => Ok(Self::Failed),
+            "applied" => Ok(Self::Applied),
+            "verifying" => Ok(Self::Verifying),
+            "verified" => Ok(Self::Verified),
+            _ => anyhow::bail!(
+                "Reborn target is quarantined because v1 migration status `{status}` is unknown"
+            ),
+        }
+    }
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Planned => "planned",
+            Self::Applying => "applying",
+            Self::Failed => "failed",
+            Self::Applied => "applied",
+            Self::Verifying => "verifying",
+            Self::Verified => "verified",
+        }
+    }
+
+    const fn is_quarantined(self) -> bool {
+        matches!(
+            self,
+            Self::Applying | Self::Failed | Self::Applied | Self::Verifying
+        )
+    }
+
+    const fn is_activation_safe(self) -> bool {
+        matches!(self, Self::Planned | Self::Verified)
+    }
+}
+
 /// Migrate persisted state into Reborn.
 #[derive(Debug, Args)]
 pub(crate) struct MigrateCommand {
@@ -188,12 +236,12 @@ pub(crate) fn ensure_activation_allowed(context: &RebornCliContext) -> anyhow::R
     let Some(status) = status else {
         return Ok(());
     };
-    activation_status_allowed(&status)
+    activation_status_allowed(status)
 }
 
 pub(crate) fn read_activation_state_status(
     context: &RebornCliContext,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<Option<MigrationLifecycleStatus>> {
     let marker = context
         .boot_config()
         .home()
@@ -204,18 +252,21 @@ pub(crate) fn read_activation_state_status(
     Ok(most_restrictive_status(local, shared))
 }
 
-fn most_restrictive_status(local: Option<String>, shared: Option<String>) -> Option<String> {
-    let quarantined =
-        |status: &str| matches!(status, "applying" | "failed" | "applied" | "verifying");
+fn most_restrictive_status(
+    local: Option<MigrationLifecycleStatus>,
+    shared: Option<MigrationLifecycleStatus>,
+) -> Option<MigrationLifecycleStatus> {
     match (local, shared) {
-        (Some(_), Some(shared)) if quarantined(&shared) => Some(shared),
-        (Some(local), Some(_)) if quarantined(&local) => Some(local),
+        (Some(_), Some(shared)) if shared.is_quarantined() => Some(shared),
+        (Some(local), Some(_)) if local.is_quarantined() => Some(local),
         (_, Some(shared)) => Some(shared),
         (local, None) => local,
     }
 }
 
-fn read_local_target_state_status(marker: &Path) -> anyhow::Result<Option<String>> {
+fn read_local_target_state_status(
+    marker: &Path,
+) -> anyhow::Result<Option<MigrationLifecycleStatus>> {
     let body = match fs::read_to_string(marker) {
         Ok(body) => body,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -246,7 +297,7 @@ fn read_local_target_state_status(marker: &Path) -> anyhow::Result<Option<String
         .get("status")
         .and_then(serde_json::Value::as_str)
         .context("v1 migration state marker has no status")?;
-    Ok(Some(validate_state_status(status)?.to_owned()))
+    Ok(Some(MigrationLifecycleStatus::parse(status)?))
 }
 
 fn validate_state_header(schema: Option<&str>, protocol: Option<u64>) -> anyhow::Result<()> {
@@ -261,31 +312,21 @@ fn validate_state_header(schema: Option<&str>, protocol: Option<u64>) -> anyhow:
     Ok(())
 }
 
-fn validate_state_status(status: &str) -> anyhow::Result<&str> {
-    ensure!(
-        matches!(
-            status,
-            "planned" | "applying" | "failed" | "applied" | "verifying" | "verified"
-        ),
-        "Reborn target is quarantined because v1 migration status `{status}` is unknown"
-    );
-    Ok(status)
-}
-
-fn activation_status_allowed(status: &str) -> anyhow::Result<()> {
-    match status {
-        "planned" | "verified" => Ok(()),
-        "applying" | "failed" | "applied" | "verifying" => anyhow::bail!(
-            "Reborn target is quarantined because v1 migration status is `{status}`; do not start live workers or ingress until migration verification records `verified`"
-        ),
-        _ => anyhow::bail!(
-            "Reborn target is quarantined because v1 migration status `{status}` is unknown"
-        ),
+fn activation_status_allowed(status: MigrationLifecycleStatus) -> anyhow::Result<()> {
+    if status.is_activation_safe() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "Reborn target is quarantined because v1 migration status is `{}`; do not start live workers or ingress until migration verification records `verified`",
+            status.as_str()
+        )
     }
 }
 
 #[cfg(feature = "postgres")]
-fn read_shared_target_state_status(context: &RebornCliContext) -> anyhow::Result<Option<String>> {
+fn read_shared_target_state_status(
+    context: &RebornCliContext,
+) -> anyhow::Result<Option<MigrationLifecycleStatus>> {
     use ironclaw_reborn_composition::RebornMigrationTargetStore;
 
     let target =
@@ -311,7 +352,7 @@ fn read_shared_target_state_status(context: &RebornCliContext) -> anyhow::Result
             .try_get(0)
             .context("invalid shared PostgreSQL migration quarantine schema result")?;
         if relation.is_none() {
-            return Ok::<Option<String>, anyhow::Error>(None);
+            return Ok::<Option<MigrationLifecycleStatus>, anyhow::Error>(None);
         }
         let row = client
             .query_opt(
@@ -334,12 +375,16 @@ fn read_shared_target_state_status(context: &RebornCliContext) -> anyhow::Result
         let protocol = u64::try_from(protocol)
             .context("shared PostgreSQL migration quarantine protocol version is negative")?;
         validate_state_header(Some(&schema), Some(protocol))?;
-        Ok::<Option<String>, anyhow::Error>(Some(validate_state_status(&status)?.to_owned()))
+        Ok::<Option<MigrationLifecycleStatus>, anyhow::Error>(Some(
+            MigrationLifecycleStatus::parse(&status)?,
+        ))
     })
 }
 
 #[cfg(not(feature = "postgres"))]
-fn read_shared_target_state_status(_context: &RebornCliContext) -> anyhow::Result<Option<String>> {
+fn read_shared_target_state_status(
+    _context: &RebornCliContext,
+) -> anyhow::Result<Option<MigrationLifecycleStatus>> {
     Ok(None)
 }
 
@@ -646,19 +691,19 @@ mod tests {
 
         ensure_activation_allowed(&context).expect("compatible verified marker should activate");
         assert_eq!(
-            read_activation_state_status(&context)
-                .expect("read marker")
-                .as_deref(),
-            Some("verified")
+            read_activation_state_status(&context).expect("read marker"),
+            Some(MigrationLifecycleStatus::Verified)
         );
     }
 
     #[test]
     fn shared_quarantine_dominates_stale_local_verified_state() {
         assert_eq!(
-            most_restrictive_status(Some("verified".to_string()), Some("applying".to_string()))
-                .as_deref(),
-            Some("applying")
+            most_restrictive_status(
+                Some(MigrationLifecycleStatus::Verified),
+                Some(MigrationLifecycleStatus::Applying)
+            ),
+            Some(MigrationLifecycleStatus::Applying)
         );
     }
 }

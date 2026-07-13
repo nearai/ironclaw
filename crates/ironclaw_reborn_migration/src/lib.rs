@@ -27,6 +27,7 @@ use std::path::{Component, Path, PathBuf};
 
 use chrono::Utc;
 use ironclaw_common::hashing::sha256_hex;
+#[cfg(feature = "postgres")]
 use secrecy::ExposeSecret as _;
 
 pub use error::MigrationError;
@@ -43,7 +44,9 @@ pub use report::{Domain, LossReason, LossyItem, MigrationReport, MigrationStats}
 /// Compare a currently resolved target with a manifest without serializing or
 /// returning the target locator. Intended for `status`/`doctor` read paths.
 pub fn manifest_target_matches(target: &TargetStore, manifest: &MigrationManifest) -> bool {
-    let current = target_descriptor(target);
+    let Ok(current) = target_descriptor(target) else {
+        return false;
+    };
     current.backend == manifest.target.backend
         && current.locator_fingerprint == manifest.target.locator_fingerprint
 }
@@ -78,7 +81,7 @@ pub async fn plan_migration(
         }
     }
 
-    let target = target_descriptor(&options.target);
+    let target = target_descriptor(&options.target)?;
     // Local existence is observable without opening a target. PostgreSQL
     // emptiness is deliberately deferred until apply so planning never makes
     // a target connection.
@@ -93,7 +96,7 @@ pub async fn plan_migration(
         release_version: env!("CARGO_PKG_VERSION").to_string(),
         run_id: uuid::Uuid::new_v4(),
         status: MigrationStatus::Planned,
-        source: source_descriptor(&options.source),
+        source: source_descriptor(&options.source)?,
         target,
         source_schema_version,
         source_fingerprint,
@@ -413,14 +416,14 @@ async fn validate_manifest_source(
             manifest.manifest_schema_version, manifest.migration_protocol_version
         )));
     }
-    let current_target = target_descriptor(&options.target);
+    let current_target = target_descriptor(&options.target)?;
     let current_source_home_fingerprint = options
         .source_home
         .as_deref()
         .map(canonicalish)
         .as_deref()
         .map(locator_hash);
-    if source_descriptor(&options.source) != manifest.source
+    if source_descriptor(&options.source)? != manifest.source
         || current_target.backend != manifest.target.backend
         || current_target.locator_fingerprint != manifest.target.locator_fingerprint
         || options.profile != manifest.scope.profile
@@ -501,8 +504,8 @@ fn inventory_checksum(inventory: &[InventoryEntry]) -> Result<String, MigrationE
     Ok(sha256_hex(&serde_json::to_vec(inventory)?))
 }
 
-fn source_descriptor(source: &SourceDb) -> RedactedStoreDescriptor {
-    match source {
+fn source_descriptor(source: &SourceDb) -> Result<RedactedStoreDescriptor, MigrationError> {
+    Ok(match source {
         SourceDb::LibSql { path } => RedactedStoreDescriptor {
             backend: StoreBackend::Libsql,
             locator_fingerprint: locator_hash(&canonicalish(path)),
@@ -510,14 +513,14 @@ fn source_descriptor(source: &SourceDb) -> RedactedStoreDescriptor {
         },
         SourceDb::Postgres { url } => RedactedStoreDescriptor {
             backend: StoreBackend::Postgres,
-            locator_fingerprint: locator_hash(Path::new(url.expose_secret())),
+            locator_fingerprint: postgres_locator_fingerprint(url)?,
             exists: None,
         },
-    }
+    })
 }
 
-fn target_descriptor(target: &TargetStore) -> RedactedStoreDescriptor {
-    match target {
+fn target_descriptor(target: &TargetStore) -> Result<RedactedStoreDescriptor, MigrationError> {
+    Ok(match target {
         TargetStore::LibSql { path } => RedactedStoreDescriptor {
             backend: StoreBackend::Libsql,
             locator_fingerprint: locator_hash(&canonicalish(path)),
@@ -525,14 +528,92 @@ fn target_descriptor(target: &TargetStore) -> RedactedStoreDescriptor {
         },
         TargetStore::Postgres { url } => RedactedStoreDescriptor {
             backend: StoreBackend::Postgres,
-            locator_fingerprint: locator_hash(Path::new(url.expose_secret())),
+            locator_fingerprint: postgres_locator_fingerprint(url)?,
             exists: None,
         },
-    }
+    })
 }
 
 fn locator_hash(locator: &Path) -> String {
     sha256_hex(locator.as_os_str().as_encoded_bytes())
+}
+
+#[cfg(feature = "postgres")]
+fn postgres_locator_fingerprint(locator: &secrecy::SecretString) -> Result<String, MigrationError> {
+    use tokio_postgres::config::Host;
+
+    let config = locator
+        .expose_secret()
+        .parse::<tokio_postgres::Config>()
+        .map_err(|_| {
+            MigrationError::InvalidInput(
+                "PostgreSQL locator is invalid (connection details redacted)".to_string(),
+            )
+        })?;
+    if config.get_options().is_some() {
+        return Err(MigrationError::InvalidInput(
+            "PostgreSQL connection options are not supported for migration locator identity; remove `options` and re-plan (connection details redacted)"
+                .to_string(),
+        ));
+    }
+    let mut material = Vec::new();
+    append_locator_field(&mut material, b"schema", b"postgres-locator-v1");
+    append_locator_field(
+        &mut material,
+        b"database",
+        config
+            .get_dbname()
+            .or_else(|| config.get_user())
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    for (index, host) in config.get_hosts().iter().enumerate() {
+        let label = format!("host-{index}");
+        match host {
+            Host::Tcp(host) => {
+                append_locator_field(&mut material, label.as_bytes(), host.as_bytes())
+            }
+            #[cfg(unix)]
+            Host::Unix(path) => append_locator_field(
+                &mut material,
+                label.as_bytes(),
+                path.as_os_str().as_encoded_bytes(),
+            ),
+        }
+        let port = config.get_ports().get(index).copied().unwrap_or(5432);
+        append_locator_field(
+            &mut material,
+            format!("port-{index}").as_bytes(),
+            port.to_string().as_bytes(),
+        );
+    }
+    for (index, address) in config.get_hostaddrs().iter().enumerate() {
+        append_locator_field(
+            &mut material,
+            format!("hostaddr-{index}").as_bytes(),
+            address.to_string().as_bytes(),
+        );
+    }
+    Ok(sha256_hex(&material))
+}
+
+#[cfg(not(feature = "postgres"))]
+fn postgres_locator_fingerprint(
+    _locator: &secrecy::SecretString,
+) -> Result<String, MigrationError> {
+    Err(MigrationError::InvalidInput(
+        "PostgreSQL support is not compiled into this migrator".to_string(),
+    ))
+}
+
+#[cfg(feature = "postgres")]
+fn append_locator_field(material: &mut Vec<u8>, label: &[u8], value: &[u8]) {
+    material.extend_from_slice(label.len().to_string().as_bytes());
+    material.push(b':');
+    material.extend_from_slice(label);
+    material.extend_from_slice(value.len().to_string().as_bytes());
+    material.push(b':');
+    material.extend_from_slice(value);
 }
 
 fn validate_distinct_stores(source: &SourceDb, target: &TargetStore) -> Result<(), MigrationError> {
@@ -541,7 +622,7 @@ fn validate_distinct_stores(source: &SourceDb, target: &TargetStore) -> Result<(
             canonicalish(source) == canonicalish(target)
         }
         (SourceDb::Postgres { url: source }, TargetStore::Postgres { url: target }) => {
-            source.expose_secret() == target.expose_secret()
+            postgres_locator_fingerprint(source)? == postgres_locator_fingerprint(target)?
         }
         _ => false,
     };
@@ -592,4 +673,76 @@ fn canonicalish(path: &Path) -> PathBuf {
         resolved.push(component);
     }
     resolved
+}
+
+#[cfg(all(test, feature = "postgres"))]
+mod tests {
+    use secrecy::SecretString;
+
+    use super::{SourceDb, TargetStore, postgres_locator_fingerprint, validate_distinct_stores};
+
+    #[test]
+    fn postgres_locator_fingerprint_excludes_password_but_binds_database() {
+        let first = SecretString::from(
+            "postgresql://migration:password-one@database.example:5433/ironclaw",
+        );
+        let rotated = SecretString::from(
+            "postgresql://migration:password-two@database.example:5433/ironclaw",
+        );
+        let rotated_user =
+            SecretString::from("postgresql://new-user:password-two@database.example:5433/ironclaw");
+        let other_database =
+            SecretString::from("postgresql://migration:password-one@database.example:5433/other");
+
+        let first_fingerprint = postgres_locator_fingerprint(&first).expect("first fingerprint");
+        assert_eq!(
+            first_fingerprint,
+            postgres_locator_fingerprint(&rotated).expect("rotated fingerprint")
+        );
+        assert_eq!(
+            first_fingerprint,
+            postgres_locator_fingerprint(&rotated_user).expect("rotated user fingerprint")
+        );
+        assert_ne!(
+            first_fingerprint,
+            postgres_locator_fingerprint(&other_database).expect("other database fingerprint")
+        );
+        assert!(!first_fingerprint.contains("password-one"));
+        assert!(!first_fingerprint.contains("database.example"));
+    }
+
+    #[test]
+    fn postgres_store_identity_rejects_credential_only_differences() {
+        let source = SourceDb::Postgres {
+            url: SecretString::from(
+                "postgresql://source-user:source-password@database.example/ironclaw",
+            ),
+        };
+        let target = TargetStore::Postgres {
+            url: SecretString::from(
+                "postgresql://target-user:target-password@database.example/ironclaw",
+            ),
+        };
+
+        let error = validate_distinct_stores(&source, &target)
+            .expect_err("different credentials must not disguise the same database");
+        assert!(error.to_string().contains("must be different stores"));
+        assert!(!error.to_string().contains("password"));
+        assert!(!error.to_string().contains("database.example"));
+    }
+
+    #[test]
+    fn postgres_locator_options_fail_closed_without_echoing_values() {
+        let locator = SecretString::from(
+            "postgresql://migration:password@database.example/ironclaw?options=-c%20secret.option%3Dcanary",
+        );
+
+        let error = postgres_locator_fingerprint(&locator)
+            .expect_err("connection options must not enter manifest hashes");
+        let rendered = error.to_string();
+        assert!(rendered.contains("options"));
+        assert!(!rendered.contains("canary"));
+        assert!(!rendered.contains("password"));
+        assert!(!rendered.contains("database.example"));
+    }
 }

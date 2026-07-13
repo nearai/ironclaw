@@ -205,7 +205,12 @@ impl V1Source {
                 Err(error) if is_missing_table_error(&error.to_string()) => return Ok(None),
                 Err(error) => return Err(source_read_error("schema", error)),
             };
-            return Ok(row.and_then(|row| row.try_get::<_, Option<String>>(0).ok().flatten()));
+            return match row {
+                Some(row) => row
+                    .try_get::<_, Option<String>>(0)
+                    .map_err(|error| source_read_error("schema", error)),
+                None => Ok(None),
+            };
         }
         Ok(None)
     }
