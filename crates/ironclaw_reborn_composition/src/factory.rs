@@ -218,6 +218,24 @@ const LOCAL_DEV_LEGACY_SKILLS_BACKFILL_MAX_DEPTH: usize = 64;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 const LOCAL_DEV_SECRETS_MASTER_KEY_PATH: &str = ".reborn-local-dev-secrets-master-key";
 
+/// The ONE construction seam for host HTTP egress: policy enforcement over
+/// the reqwest transport, honoring the env-gated test-only host rewrite map
+/// ([`ironclaw_network::TEST_HTTP_REWRITE_MAP_ENV`]). Every composition path
+/// builds its vendor egress here so test runs redirect ALL vendor calls
+/// identically. Fail-closed: a set-but-invalid map refuses composition.
+fn default_host_http_egress() -> Result<
+    ironclaw_network::PolicyNetworkHttpEgress<
+        ironclaw_network::RewriteNetworkTransport<ironclaw_network::ReqwestNetworkTransport>,
+    >,
+    RebornBuildError,
+> {
+    ironclaw_network::default_policy_http_egress().map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        }
+    })
+}
+
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone)]
 struct TestNetworkHttpEgress(Arc<dyn ironclaw_network::NetworkHttpEgress>);
@@ -1690,17 +1708,13 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         )?
     } else {
         services.try_with_host_http_egress_with_body_store(
-            ironclaw_network::PolicyNetworkHttpEgress::new(
-                ironclaw_network::ReqwestNetworkTransport::default(),
-            ),
+            default_host_http_egress()?,
             http_body_filesystem,
         )?
     };
     #[cfg(not(any(test, feature = "test-support")))]
     let services = services.try_with_host_http_egress_with_body_store(
-        ironclaw_network::PolicyNetworkHttpEgress::new(
-            ironclaw_network::ReqwestNetworkTransport::default(),
-        ),
+        default_host_http_egress()?,
         http_body_filesystem,
     )?;
     let mut services = services
@@ -4644,9 +4658,11 @@ where
 
     let services = services
         .try_with_host_http_egress_with_body_store(
-            ironclaw_network::PolicyNetworkHttpEgress::new(
-                ironclaw_network::ReqwestNetworkTransport::default(),
-            ),
+            default_host_http_egress().map_err(|error| {
+                crate::RebornCompositionError::InvalidConfig {
+                    reason: error.to_string(),
+                }
+            })?,
             Arc::clone(&scoped_filesystem),
         )
         .map_err(crate::RebornCompositionError::from)?;
@@ -4920,9 +4936,7 @@ where
     .with_credential_broker(stores.secret_credentials.credential_broker)
     .with_security_audit_sink(Arc::new(ironclaw_events::TracingSecurityAuditSink))
     .try_with_host_http_egress_with_body_store(
-        ironclaw_network::PolicyNetworkHttpEgress::new(
-            ironclaw_network::ReqwestNetworkTransport::default(),
-        ),
+        default_host_http_egress()?,
         Arc::clone(&stores.scoped_filesystem),
     )?
     .with_resource_governor(Arc::clone(&resource_governor))
