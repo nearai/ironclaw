@@ -315,21 +315,13 @@ fn normalized_model_observation(
     match validate_model_observation(&model_observation) {
         Ok(()) => Some(model_observation),
         Err(error) => {
-            let removed_result_preview = model_observation
-                .as_object_mut()
-                .and_then(|observation| observation.get_mut("detail"))
-                .and_then(serde_json::Value::as_object_mut)
-                .filter(|detail| {
-                    detail.get("kind").and_then(serde_json::Value::as_str)
-                        == Some("result_reference")
-                })
-                .and_then(|detail| detail.remove("preview"))
-                .is_some();
-            if removed_result_preview && validate_model_observation(&model_observation).is_ok() {
+            let repaired = strip_unsafe_result_reference_preview(&mut model_observation)
+                || strip_unsafe_invalid_input_issue_text(&mut model_observation);
+            if repaired && validate_model_observation(&model_observation).is_ok() {
                 tracing::warn!(
                     reason = %error,
                     result_ref = %result_ref,
-                    "dropping an unsafe tool-result preview while preserving its result reference"
+                    "scrubbed unsafe model-observation fields while preserving the observation"
                 );
                 Some(model_observation)
             } else {
@@ -346,6 +338,62 @@ fn normalized_model_observation(
             }
         }
     }
+}
+
+fn observation_detail_of_kind<'a>(
+    observation: &'a mut serde_json::Value,
+    kind: &str,
+) -> Option<&'a mut serde_json::Map<String, serde_json::Value>> {
+    observation
+        .as_object_mut()
+        .and_then(|observation| observation.get_mut("detail"))
+        .and_then(serde_json::Value::as_object_mut)
+        .filter(|detail| detail.get("kind").and_then(serde_json::Value::as_str) == Some(kind))
+}
+
+fn strip_unsafe_result_reference_preview(observation: &mut serde_json::Value) -> bool {
+    observation_detail_of_kind(observation, "result_reference")
+        .and_then(|detail| detail.remove("preview"))
+        .is_some()
+}
+
+/// Scrubs untrusted echoed text out of `invalid_input` issues: an unsafe
+/// `received` is dropped (it is optional), an unsafe `path` is replaced with
+/// a fixed placeholder (it is required), so the structured repair guidance
+/// survives instead of the whole observation being dropped.
+fn strip_unsafe_invalid_input_issue_text(observation: &mut serde_json::Value) -> bool {
+    let Some(issues) = observation_detail_of_kind(observation, "invalid_input")
+        .and_then(|detail| detail.get_mut("issues"))
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return false;
+    };
+    let mut changed = false;
+    for issue in issues {
+        let Some(issue) = issue.as_object_mut() else {
+            continue;
+        };
+        let received_is_unsafe = issue
+            .get("received")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|text| validate_model_observation_text(text).is_err());
+        if received_is_unsafe {
+            issue.remove("received");
+            changed = true;
+        }
+        let path_is_unsafe = issue
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|text| validate_model_observation_text(text).is_err());
+        if path_is_unsafe {
+            issue.insert(
+                "path".to_string(),
+                serde_json::Value::String("unexpected_field".to_string()),
+            );
+            changed = true;
+        }
+    }
+    changed
 }
 
 fn validate_tool_result_ref(value: &str) -> Result<(), String> {
@@ -1283,6 +1331,106 @@ mod tests {
             envelope.model_visible_content_or_safe_summary(),
             "tool completed"
         );
+    }
+
+    fn invalid_input_observation_with_issue(issue: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 1,
+            "status": "error",
+            "summary": "Tool input failed schema validation.",
+            "detail": {
+                "kind": "invalid_input",
+                "issues": [issue]
+            },
+            "trust": "untrusted_tool_output"
+        })
+    }
+
+    /// A control character in an issue's `received` echo must be repaired by
+    /// dropping just that field — the structured repair guidance
+    /// (path/code/expected) survives instead of the whole observation
+    /// falling back to the safe summary.
+    #[test]
+    fn best_effort_observation_repairs_control_char_issue_received() {
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            "result:control-char-received",
+            ToolResultSafeSummary::new("tool failed").expect("summary"),
+            Some(invalid_input_observation_with_issue(serde_json::json!({
+                "path": "result_ref",
+                "code": "invalid_value",
+                "expected": "valid result reference format",
+                "received": "bad\u{0}ref",
+                "schema_path": "properties/result_ref"
+            }))),
+        )
+        .expect("envelope construction is fail-open");
+
+        let observation = envelope
+            .model_observation
+            .expect("repaired observation is retained, not dropped whole");
+        let issue = &observation["detail"]["issues"][0];
+        assert!(
+            issue.get("received").is_none(),
+            "unsafe received is dropped"
+        );
+        assert_eq!(issue["path"], "result_ref");
+        assert_eq!(issue["code"], "invalid_value");
+        assert_eq!(issue["expected"], "valid result reference format");
+    }
+
+    /// Same repair for sensitive marker phrases the token-based producer
+    /// sanitizer cannot redact (e.g. "api key" across two tokens).
+    #[test]
+    fn best_effort_observation_repairs_marker_phrase_issue_received() {
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            "result:marker-received",
+            ToolResultSafeSummary::new("tool failed").expect("summary"),
+            Some(invalid_input_observation_with_issue(serde_json::json!({
+                "path": "result_ref",
+                "code": "invalid_value",
+                "expected": "valid result reference format",
+                "received": "please share the api key",
+                "schema_path": "properties/result_ref"
+            }))),
+        )
+        .expect("envelope construction is fail-open");
+
+        let observation = envelope
+            .model_observation
+            .expect("repaired observation is retained, not dropped whole");
+        let issue = &observation["detail"]["issues"][0];
+        assert!(
+            issue.get("received").is_none(),
+            "unsafe received is dropped"
+        );
+        assert_eq!(issue["code"], "invalid_value");
+        assert_eq!(issue["expected"], "valid result reference format");
+    }
+
+    /// An unsafe `path` (a model-authored field name) is replaced with a
+    /// fixed placeholder rather than dropped — `path` is required.
+    #[test]
+    fn best_effort_observation_replaces_unsafe_issue_path() {
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            "result:unsafe-path",
+            ToolResultSafeSummary::new("tool failed").expect("summary"),
+            Some(invalid_input_observation_with_issue(serde_json::json!({
+                "path": "system prompt",
+                "code": "unexpected_field",
+                "expected": "declared field",
+                "received": "unexpected field",
+                "schema_path": "additionalProperties"
+            }))),
+        )
+        .expect("envelope construction is fail-open");
+
+        let observation = envelope
+            .model_observation
+            .expect("repaired observation is retained, not dropped whole");
+        let issue = &observation["detail"]["issues"][0];
+        assert_eq!(issue["path"], "unexpected_field");
+        assert_eq!(issue["code"], "unexpected_field");
+        assert_eq!(issue["received"], "unexpected field");
     }
 
     #[test]
