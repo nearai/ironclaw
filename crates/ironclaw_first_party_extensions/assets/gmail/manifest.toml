@@ -115,6 +115,12 @@ scopes = ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googlea
 extra_authorize_params = { access_type = "offline", include_granted_scopes = "true", prompt = "consent" }
 client_credentials = { client_id_handle = "google_oauth_client_id", client_secret_handle = "google_oauth_client_secret" }
 
+[auth.google.refresh]
+# Google refresh tokens for apps in "testing" publishing status expire after
+# 7 days of inactivity; the host auth engine's keepalive sweep proactively
+# refreshes idle accounts well before this vendor lifetime.
+keepalive_idle_seconds = 604800
+
 [auth.google.token_response]
 access_token = "/access_token"
 refresh_token = "/refresh_token"

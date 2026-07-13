@@ -18,7 +18,7 @@ use ironclaw_reborn_composition::host_api::{AgentId, TenantId};
 #[cfg(feature = "postgres")]
 use ironclaw_reborn_composition::hosted_single_tenant_runtime_policy;
 use ironclaw_reborn_composition::{
-    CredentialRefreshSettings, OAuthClientConfig, OperatorLogLayer, PollSettings, RebornBuildInput,
+    KeepaliveSweepSettings, OAuthClientConfig, OperatorLogLayer, PollSettings, RebornBuildInput,
     RebornCompositionProfile, RebornLocalRuntimeProfileOptions, RebornRuntimeIdentity,
     RebornRuntimeInput, TurnRunnerSettings, build_reborn_runtime,
     local_runtime_build_input_with_options, nearai_mcp_bootstrap_config_from_env,
@@ -496,8 +496,9 @@ pub(crate) fn build_runtime_input(
         .map(|b| b.inner)
 }
 
-/// Build [`CredentialRefreshSettings`] for the proactive Google OAuth keepalive
-/// worker.
+/// Build [`KeepaliveSweepSettings`] for the engine-owned credential keepalive
+/// sweep (vendors opt in by declaring `refresh.keepalive_idle_seconds` in
+/// their auth recipe).
 ///
 /// Enabled by default on the local `serve` surface (so refresh tokens stay warm
 /// for long-running deployments) and disabled for every other caller, mirroring
@@ -506,11 +507,11 @@ pub(crate) fn build_runtime_input(
 /// present-but-blank value falls through to the caller default.
 fn credential_refresh_settings(
     caller: RuntimeInputCaller,
-) -> anyhow::Result<CredentialRefreshSettings> {
+) -> anyhow::Result<KeepaliveSweepSettings> {
     let base = if caller == RuntimeInputCaller::Serve {
-        CredentialRefreshSettings::enabled()
+        KeepaliveSweepSettings::enabled()
     } else {
-        CredentialRefreshSettings::default()
+        KeepaliveSweepSettings::default()
     };
     apply_credential_refresh_override(base, std::env::var("IRONCLAW_CREDENTIAL_REFRESH_ENABLED"))
 }
@@ -519,9 +520,9 @@ fn credential_refresh_settings(
 /// settings value. Pure (env lookup is passed in) so the override semantics are
 /// unit-testable without mutating process-global environment state.
 fn apply_credential_refresh_override(
-    mut settings: CredentialRefreshSettings,
+    mut settings: KeepaliveSweepSettings,
     raw: Result<String, std::env::VarError>,
-) -> anyhow::Result<CredentialRefreshSettings> {
+) -> anyhow::Result<KeepaliveSweepSettings> {
     match raw {
         Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
             "" => {}
@@ -666,7 +667,7 @@ pub(crate) fn build_services_input_with_options(
         hosted_domain_hint: _hosted_domain_hint,
     }) = resolve_google_oauth_config_from_env()?
     {
-        services_input = services_input.with_google_oauth_backend(client);
+        services_input = services_input.with_vendor_oauth_client("google", client);
     }
     #[cfg(feature = "slack-v2-host-beta")]
     let slack_personal_lazy_slot =
@@ -1239,7 +1240,7 @@ mod tests {
     use std::collections::HashMap;
 
     use ironclaw_reborn_composition::{
-        CredentialRefreshSettings, RebornCompositionProfile, TurnStatus,
+        KeepaliveSweepSettings, RebornCompositionProfile, TurnStatus,
         test_support::assistant_reply_without_text_for_test,
     };
     #[cfg(feature = "webui-v2-beta")]
@@ -1680,14 +1681,14 @@ mod tests {
     fn credential_refresh_override_keeps_caller_default_without_env() {
         // Serve base is enabled; absent env leaves it enabled.
         let serve = apply_credential_refresh_override(
-            CredentialRefreshSettings::enabled(),
+            KeepaliveSweepSettings::enabled(),
             Err(std::env::VarError::NotPresent),
         )
         .expect("absent env is valid");
         assert!(serve.enabled, "Serve default stays on when env unset");
         // Non-Serve base is disabled; absent env leaves it disabled.
         let other = apply_credential_refresh_override(
-            CredentialRefreshSettings::default(),
+            KeepaliveSweepSettings::default(),
             Err(std::env::VarError::NotPresent),
         )
         .expect("absent env is valid");
@@ -1698,7 +1699,7 @@ mod tests {
     fn credential_refresh_override_kill_switch_disables() {
         for raw in ["0", "false", "FALSE", " 0 "] {
             let out = apply_credential_refresh_override(
-                CredentialRefreshSettings::enabled(),
+                KeepaliveSweepSettings::enabled(),
                 Ok(raw.to_string()),
             )
             .expect("valid kill-switch value");
@@ -1710,7 +1711,7 @@ mod tests {
     fn credential_refresh_override_force_on_enables() {
         for raw in ["1", "true", "TRUE", " true "] {
             let out = apply_credential_refresh_override(
-                CredentialRefreshSettings::default(),
+                KeepaliveSweepSettings::default(),
                 Ok(raw.to_string()),
             )
             .expect("valid force-on value");
@@ -1721,7 +1722,7 @@ mod tests {
     #[test]
     fn credential_refresh_override_blank_falls_through_to_base() {
         let out = apply_credential_refresh_override(
-            CredentialRefreshSettings::enabled(),
+            KeepaliveSweepSettings::enabled(),
             Ok("   ".to_string()),
         )
         .expect("blank value is valid");
@@ -1731,7 +1732,7 @@ mod tests {
     #[test]
     fn credential_refresh_override_invalid_value_is_error() {
         let result = apply_credential_refresh_override(
-            CredentialRefreshSettings::default(),
+            KeepaliveSweepSettings::default(),
             Ok("maybe".to_string()),
         );
         assert!(result.is_err(), "invalid value must be a hard error");

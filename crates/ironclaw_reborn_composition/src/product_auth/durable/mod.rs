@@ -534,18 +534,18 @@ where
         }
     }
 
-    /// Enumerate all Google OAuth accounts eligible for proactive keepalive
-    /// refresh across all tenants, users, agents, and projects.
+    /// Enumerate all durable credential accounts across all tenants, users,
+    /// agents, and projects.
     ///
-    /// Filters in-memory to provider == `GOOGLE_PROVIDER_ID`, status ==
-    /// `Configured`, and `refresh_secret.is_some()`. Idle-threshold filtering
-    /// (by `updated_at`) is left to the caller (the credential-refresh worker).
-    /// Returns an empty vec when the root filesystem was not wired (local-dev /
-    /// test path). The returned `CredentialAccount` records carry the
-    /// `access_secret`/`refresh_secret` *handles* (opaque references, never the
-    /// raw token material) because the worker needs them to drive the refresh.
-    /// Callers MUST NOT log or serialize these records; only the handle is ever
-    /// present, and it must stay internal to the refresh path.
+    /// Eligibility filtering (status, refresh handle) lives in
+    /// `list_refresh_candidates`; idle-threshold filtering (by `updated_at`
+    /// against the vendor's recipe-declared lifetime) is the engine keepalive
+    /// sweep's job. Returns an empty vec when the root filesystem was not
+    /// wired (local-dev / test path). The returned `CredentialAccount` records
+    /// carry the `access_secret`/`refresh_secret` *handles* (opaque
+    /// references, never the raw token material) because the refresh path
+    /// needs them. Callers MUST NOT log or serialize these records; only the
+    /// handle is ever present, and it must stay internal to the refresh path.
     ///
     /// # Owner-scope enumeration
     ///
@@ -559,8 +559,8 @@ where
     ///
     /// For each discovered owner scope, the canonical `account_records_for_owner`
     /// reader is reused (it already enumerates surfaces + sessions, applies the
-    /// per-root record cap, and deduplicates). This function then filters to
-    /// Google + Configured + has refresh secret and deduplicates the combined set.
+    /// per-root record cap, and deduplicates). This function deduplicates the
+    /// combined set; callers apply eligibility filters on top.
     ///
     /// Per-directory and per-owner errors are silently skipped (annotated below)
     /// so one bad subtree never aborts the sweep.
@@ -769,8 +769,8 @@ where
                 }
 
                 // For each discovered owner scope, use the canonical reader to
-                // enumerate all surfaces + sessions, then filter to keepalive
-                // candidates (Google + Configured + has refresh secret).
+                // enumerate all surfaces + sessions; callers filter to
+                // keepalive candidates (Configured + has refresh secret).
                 for owner in owner_scopes {
                     let records = match self.account_records_for_owner(&owner).await {
                         Ok(r) => r,
@@ -796,15 +796,17 @@ where
         candidates
     }
 
-    /// Google keepalive candidates: Configured accounts with a refresh
-    /// secret handle, filtered from the full durable-account sweep.
+    /// Keepalive candidates: Configured accounts with a refresh secret
+    /// handle, filtered from the full durable-account sweep. Vendor-blind by
+    /// design — idle lifetimes are per-vendor recipe data
+    /// (`refresh.keepalive_idle_seconds`) applied by the engine-owned sweep,
+    /// never a hardcoded vendor filter here.
     pub(crate) async fn list_refresh_candidates(&self) -> Vec<CredentialAccount> {
         self.sweep_all_accounts()
             .await
             .into_iter()
             .filter(|account| {
-                account.provider.as_str() == ironclaw_auth::GOOGLE_PROVIDER_ID
-                    && account.status == CredentialAccountStatus::Configured
+                account.status == CredentialAccountStatus::Configured
                     && account.refresh_secret.is_some()
             })
             .collect()
@@ -889,3 +891,17 @@ where
 }
 
 use ironclaw_auth::{credential_status_for_completed_flow, is_terminal_status, scope_matches};
+
+/// Production candidate source for the engine keepalive sweep
+/// (`ironclaw_auth::keepalive`): the durable store enumerates every
+/// `Configured`+refresh account across all owners; the sweep applies each
+/// vendor's recipe-declared idle lifetime.
+#[async_trait::async_trait]
+impl<F> ironclaw_auth::KeepaliveCandidateSource for FilesystemAuthProductServices<F>
+where
+    F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
+{
+    async fn list_keepalive_candidates(&self) -> Vec<CredentialAccount> {
+        FilesystemAuthProductServices::list_refresh_candidates(self).await
+    }
+}

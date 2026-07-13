@@ -492,28 +492,31 @@ pub struct RebornServices {
         Option<Arc<crate::extension_host::channel_egress::BridgedChannelEgressCredentials>>,
 }
 
-/// Whether the background credential keepalive worker can be started, with its
-/// dependencies bundled so they cannot be partially wired.
+/// Whether the engine-owned credential keepalive sweep
+/// (`ironclaw_auth::keepalive`) can be started, with its dependencies bundled
+/// so they cannot be partially wired.
 ///
-/// The dependencies (cross-owner candidate enumeration + deployment-wide leader
-/// lock + refresh port) are only ever produced together on the durable
-/// production path. Bundling them into one `Ready` variant makes the
-/// half-configured state — which would silently disable proactive refresh —
-/// unrepresentable, so the runtime spawn site is a clean two-arm match with no
-/// "enabled but deps missing" branch to forget about.
+/// The dependencies (cross-owner candidate enumeration + recipe data +
+/// deployment-wide leader lock + refresh port) are only ever produced together
+/// on the durable production path. Bundling them into one `Ready` variant
+/// makes the half-configured state — which would silently disable proactive
+/// refresh — unrepresentable, so the runtime spawn site is a clean two-arm
+/// match with no "enabled but deps missing" branch to forget about.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) enum CredentialRefreshWorkerReady {
     /// Deps fully wired (durable production path). The only state that can start
-    /// the worker; the `enabled` policy flag still gates the actual spawn.
+    /// the sweep; the `enabled` policy flag still gates the actual spawn.
     Ready {
-        candidate_source:
-            Arc<dyn crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshCandidateSource>,
+        candidate_source: Arc<dyn ironclaw_auth::KeepaliveCandidateSource>,
+        /// Active recipe data — declares which vendors carry an idle lifetime
+        /// (`refresh.keepalive_idle_seconds`).
+        recipes: Arc<dyn ironclaw_auth::AuthRecipeResolver>,
         leader_lock: crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock,
         refresh_port: Arc<RebornProductAuthServices>,
     },
     /// Deps intentionally absent: local-dev (single-user, no cross-owner
     /// enumeration), `disabled()`, or a caller-supplied `product_auth_ports`
-    /// override/test path. The worker never starts.
+    /// override/test path. The sweep never starts.
     Absent,
 }
 
@@ -1227,11 +1230,11 @@ fn compose_product_auth_services(
     if let Some(sink) = security_audit_sink {
         services = services.with_security_audit_sink(sink);
     }
-    if let Some(registry) = provider_composition.dcr_registry {
-        services = services.with_dcr_oauth_registry(registry);
+    if let Some(engine) = provider_composition.engine {
+        services = services.with_auth_engine(engine);
     }
-    if let Some(registry) = provider_composition.gate_registry {
-        services = services.with_oauth_gate_registry(registry);
+    if let Some(driver) = provider_composition.gate_driver {
+        services = services.with_oauth_gate_driver(driver);
     }
     if let Some(scope) = nearai_mcp_host_managed_scope {
         services = services.with_host_managed_nearai_credential_scope(scope)?;
@@ -1271,7 +1274,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         runtime_process_binding,
         product_auth_ports,
         oauth_provider_configs,
-        oauth_dcr_provider_configs,
+        oauth_dcr_callback,
         #[cfg(feature = "slack-v2-host-beta")]
         slack_personal_oauth_lazy_slot,
         nearai_mcp_bootstrap_config,
@@ -1612,7 +1615,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
     let provider_composition = compose_provider_client(
         oauth_provider_configs,
-        oauth_dcr_provider_configs,
+        oauth_dcr_callback,
         Arc::clone(&secret_store),
         product_auth_runtime_ports.clone(),
         #[cfg(feature = "slack-v2-host-beta")]
@@ -1673,12 +1676,12 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                 )
                 .with_provider_client(Arc::clone(&provider_client))
                 .with_flow_record_source(durable_services);
-                let services = match provider_composition.dcr_registry.clone() {
-                    Some(registry) => services.with_dcr_oauth_registry(registry),
+                let services = match provider_composition.engine.clone() {
+                    Some(engine) => services.with_auth_engine(engine),
                     None => services,
                 };
-                let services = match provider_composition.gate_registry.clone() {
-                    Some(registry) => services.with_oauth_gate_registry(registry),
+                let services = match provider_composition.gate_driver.clone() {
+                    Some(driver) => services.with_oauth_gate_driver(driver),
                     None => services,
                 };
                 let services = match security_audit_sink.clone() {
@@ -1703,21 +1706,16 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                     Some(provider_client) => services.with_provider_client(provider_client),
                     None => services,
                 };
-                let services = match provider_composition.dcr_registry.clone() {
-                    Some(registry) => services.with_dcr_oauth_registry(registry),
+                let services = match provider_composition.engine.clone() {
+                    Some(engine) => services.with_auth_engine(engine),
                     None => services,
                 };
                 let services = match security_audit_sink.clone() {
                     Some(sink) => services.with_security_audit_sink(sink),
                     None => services,
                 };
-                let services = match provider_composition.gate_registry.clone() {
-                    Some(registry) => services.with_oauth_gate_registry(registry),
-                    None => services,
-                };
-                #[cfg(feature = "slack-v2-host-beta")]
-                let services = match provider_composition.slack_gate_registry.clone() {
-                    Some(registry) => services.with_slack_oauth_gate_registry(registry),
+                let services = match provider_composition.gate_driver.clone() {
+                    Some(driver) => services.with_oauth_gate_driver(driver),
                     None => services,
                 };
                 Arc::new(services.with_host_managed_nearai_credential_scope(
@@ -4056,7 +4054,7 @@ async fn build_production_shaped(
             network_http_egress_for_test: _,
         product_auth_ports,
         oauth_provider_configs,
-        oauth_dcr_provider_configs,
+        oauth_dcr_callback,
         #[cfg(feature = "slack-v2-host-beta")]
         slack_personal_oauth_lazy_slot,
         nearai_mcp_bootstrap_config: _,
@@ -4081,7 +4079,7 @@ async fn build_production_shaped(
         local_runtime_identity,
         product_auth_ports,
         oauth_provider_configs,
-        oauth_dcr_provider_configs,
+        oauth_dcr_callback,
         turn_state_store_limits,
     );
     #[cfg(feature = "slack-v2-host-beta")]
@@ -4134,7 +4132,7 @@ async fn build_production_shaped(
                 production_wiring,
                 product_auth_ports,
                 oauth_provider_configs,
-                oauth_dcr_provider_configs,
+                oauth_dcr_callback,
                 #[cfg(feature = "slack-v2-host-beta")]
                 slack_personal_oauth_lazy_slot,
                 owner_id,
@@ -4181,7 +4179,7 @@ async fn build_production_shaped(
                 production_wiring,
                 product_auth_ports,
                 oauth_provider_configs,
-                oauth_dcr_provider_configs,
+                oauth_dcr_callback,
                 #[cfg(feature = "slack-v2-host-beta")]
                 slack_personal_oauth_lazy_slot,
                 owner_id,
@@ -4226,7 +4224,7 @@ struct RebornProductionBuildContext {
     production_wiring: RebornProductionWiring,
     product_auth_ports: Option<RebornProductAuthServicePorts>,
     oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
-    oauth_dcr_provider_configs: Vec<crate::input::OAuthDcrProviderBackendConfig>,
+    oauth_dcr_callback: Option<crate::input::OAuthDcrCallbackConfig>,
     #[cfg(feature = "slack-v2-host-beta")]
     slack_personal_oauth_lazy_slot:
         Option<crate::slack::slack_setup::SlackPersonalSetupServiceSlot>,
@@ -4711,7 +4709,7 @@ where
         production_wiring,
         product_auth_ports,
         oauth_provider_configs,
-        oauth_dcr_provider_configs,
+        oauth_dcr_callback,
         #[cfg(feature = "slack-v2-host-beta")]
         slack_personal_oauth_lazy_slot,
         owner_id,
@@ -4826,7 +4824,7 @@ where
     let services = attach_hosted_mcp_runtime(services)?;
     let provider_composition = compose_provider_client(
         oauth_provider_configs,
-        oauth_dcr_provider_configs,
+        oauth_dcr_callback,
         Arc::clone(&secret_store),
         product_auth_runtime_ports.clone(),
         #[cfg(feature = "slack-v2-host-beta")]
@@ -4842,13 +4840,13 @@ where
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
         Arc::new(services.turn_coordinator_for_production()?);
-    // B1: track the durable FilesystemAuthProductServices so the credential-
-    // refresh worker can enumerate candidates across all owners.  When a
+    // B1: track the durable FilesystemAuthProductServices so the engine
+    // keepalive sweep can enumerate candidates across all owners. When a
     // caller pre-supplies product_auth_ports, we do not create a durable
-    // instance here, so the candidate source is None (worker finds no
+    // instance here, so the candidate source is None (sweep finds no
     // candidates, which is safe for override/test callers).
     let credential_refresh_candidate_source: Option<
-        Arc<dyn crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshCandidateSource>,
+        Arc<dyn ironclaw_auth::KeepaliveCandidateSource>,
     >;
     let product_auth_ports = match product_auth_ports {
         Some(ports) => {
@@ -4871,8 +4869,8 @@ where
                     "migrated retired slack_personal credential accounts to provider `slack`"
                 );
             }
-            credential_refresh_candidate_source = Some(Arc::clone(&durable)
-                as Arc<dyn crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshCandidateSource>);
+            credential_refresh_candidate_source =
+                Some(Arc::clone(&durable) as Arc<dyn ironclaw_auth::KeepaliveCandidateSource>);
             RebornProductAuthServicePorts::from_shared_with_provider(
                 durable,
                 provider_composition
@@ -4882,6 +4880,13 @@ where
             )
         }
     };
+    // The sweep resolves per-vendor idle lifetimes through the same recipe
+    // data the auth engine executes; capture it before `provider_composition`
+    // moves into `compose_product_auth_services`.
+    let keepalive_recipes = provider_composition
+        .engine
+        .as_ref()
+        .map(|engine| Arc::clone(engine.recipes()));
     let product_auth_services = compose_product_auth_services(
         product_auth_ports,
         turn_coordinator.clone(),
@@ -4898,17 +4903,19 @@ where
         // preserves this builder's prior behavior of never attaching it.
         None,
     )?;
-    // Bundle the keepalive worker deps so they are wired all-or-nothing. The
+    // Bundle the keepalive sweep deps so they are wired all-or-nothing. The
     // candidate source is present only when this path built a durable instance
-    // (no caller-supplied product_auth_ports); the leader lock and refresh port
-    // are always available here.
-    let credential_refresh_worker = match credential_refresh_candidate_source {
-        Some(candidate_source) => CredentialRefreshWorkerReady::Ready {
+    // (no caller-supplied product_auth_ports); recipes are present only when
+    // the auth engine was composed; the leader lock and refresh port are
+    // always available here.
+    let credential_refresh_worker = match (credential_refresh_candidate_source, keepalive_recipes) {
+        (Some(candidate_source), Some(recipes)) => CredentialRefreshWorkerReady::Ready {
             candidate_source,
+            recipes,
             leader_lock,
             refresh_port: Arc::clone(&product_auth_services),
         },
-        None => CredentialRefreshWorkerReady::Absent,
+        _ => CredentialRefreshWorkerReady::Absent,
     };
     let product_auth_ready = true;
     // Wire ProductAuthAccount runtime credential resolver before

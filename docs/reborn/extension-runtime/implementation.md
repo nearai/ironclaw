@@ -246,7 +246,12 @@ branch anywhere in dispatch (`tests/integration/extension_runtime.rs`).
   parameter carries the vendor id and is resolved via `AuthRecipeResolver` —
   never a match arm.
 - Refresh is on-demand at credential-injection time with single-flight per
-  account; there is no background refresher job.
+  account. A recipe may additionally declare an idle keepalive threshold
+  (`refresh.keepalive_idle_seconds` — a vendor lifetime constraint for vendors
+  that expire refresh tokens after a fixed idle window); the engine executes
+  it once as a generic, vendor-blind background sweep (leader-locked per
+  deployment tick, due at half the declared lifetime, soonest-death-first
+  under the per-tick cap). There is no per-vendor refresher code.
 - Shared vendors: unify recipes at activation (identical except
   `scopes`/`display_name`, else conflict); scope union and incremental
   re-consent keep today's behavior; grants are vendor-scoped and survive

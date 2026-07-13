@@ -18,6 +18,7 @@ pub mod entrypoint;
 pub mod ingress;
 pub mod lifecycle;
 pub mod loaders;
+pub mod recipes;
 pub mod resolver;
 pub mod state;
 pub mod store;
@@ -36,6 +37,7 @@ pub use lifecycle::{
     RemovalContext, RemovalHooks, RestoreReport, SnapshotWatch,
 };
 pub use loaders::{ExtensionLoader, LoadContext, LoadedExtension, NativeExtensionFactory};
+pub use recipes::{SnapshotAuthRecipeResolver, VendorRecipeConflict, unified_vendor_recipes};
 pub use resolver::SnapshotToolResolver;
 pub use state::{AuthAccountState, InstallationState};
 pub use store::{

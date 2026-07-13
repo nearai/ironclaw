@@ -247,48 +247,132 @@ Rules — kept short on purpose:
 
 ## 5. Auth engine (AUTH)
 
-- [ ] AUTH-1 One engine implements `oauth2_code` and `api_key`; there is no
+- [x] AUTH-1 One engine implements `oauth2_code` and `api_key`; there is no
   auth trait in the extension ABI and no per-vendor code path (grep gate: no
-  vendor-conditional in auth crates/composition).
-- [ ] AUTH-2 The authorize URL is host-constructed; recipes cannot supply or
+  vendor-conditional in auth crates/composition). — `ironclaw_auth::AuthEngine`
+  is the only `AuthProviderClient` composition builds
+  (`compose_provider_client`,
+  `crates/ironclaw_reborn_composition/src/product_auth/credentials/product_auth_providers.rs`);
+  the specificity scanner allowlist shrank by 19 entries with the deleted
+  per-vendor modules (`reborn_generic_code_names_no_concrete_extension`).
+- [x] AUTH-2 The authorize URL is host-constructed; recipes cannot supply or
   override `state`, `redirect_uri`, PKCE, `client_id`, `response_type`, or the
-  scope parameter.
-- [ ] AUTH-3 State/CSRF, PKCE, TTL, and callback replay are enforced; exactly
-  one transition consumes a callback.
-- [ ] AUTH-4 Requested scopes intersect the recipe ceiling; widening is
-  rejected before the vendor call.
-- [ ] AUTH-5 Token exchange supports `post_body` and `basic`; response fields
-  extract via bounded JSON pointers, including `fallback_to_requested` scope.
-- [ ] AUTH-6 Refresh runs on-demand at injection with single-flight and honors
+  scope parameter. — `authorize_url_is_host_constructed_for_every_oauth_vendor_row`,
+  `recipes_cannot_supply_or_override_reserved_authorize_params`,
+  `authorization_endpoint_predefining_reserved_params_is_rejected`
+  (`crates/ironclaw_auth/tests/auth_engine_contract.rs`).
+- [x] AUTH-3 State/CSRF, PKCE, TTL, and callback replay are enforced; exactly
+  one transition consumes a callback. — `exactly_one_transition_consumes_a_callback`,
+  `cross_flow_callbacks_are_rejected` (`auth_engine_contract.rs`); state-hash /
+  PKCE-hash / TTL validation stays in the durable `AuthFlowManager`
+  (`crates/ironclaw_reborn_composition/src/product_auth/durable/tests.rs`).
+- [x] AUTH-4 Requested scopes intersect the recipe ceiling; widening is
+  rejected before the vendor call. —
+  `scope_widening_is_rejected_before_any_vendor_call` (`auth_engine_contract.rs`).
+- [x] AUTH-5 Token exchange supports `post_body` and `basic`; response fields
+  extract via bounded JSON pointers, including `fallback_to_requested` scope. —
+  `token_exchange_supports_post_body_and_basic_client_auth`,
+  `pointer_extraction_reads_nested_fields_and_scope_fallback`,
+  `missing_scope_without_fallback_fails_the_exchange` (`auth_engine_contract.rs`).
+- [x] AUTH-6 Refresh runs on-demand at injection with single-flight and honors
   `rotates_refresh_token` both ways; revoke is idempotent; vendor response
-  bodies are size-capped and redacted from errors and logs.
-- [ ] AUTH-7 Identity extracts from the token response or the declared
-  identity endpoint and is validated against the flow before storage.
-- [ ] AUTH-8 Grants/secrets are encrypted at rest; stored secrets are never
-  echoed to UI or adapters.
+  bodies are size-capped and redacted from errors and logs. —
+  `refresh_honors_rotates_refresh_token_both_ways`,
+  `revoke_is_idempotent_and_best_effort`,
+  `vendor_error_responses_are_size_capped_and_never_echoed`
+  (`auth_engine_contract.rs`); on-demand-at-injection single-flight is the
+  per-account refresh lock in `ProviderBackedCredentialAccountService`
+  (`crates/ironclaw_auth/src/credential.rs`) driven by the inline
+  injection-time refresh in `runtime_credentials.rs`. KEEPALIVE LEG (owner
+  call, resolves the #6008 owner note): a recipe may declare an idle
+  keepalive threshold (`refresh.keepalive_idle_seconds`, a vendor lifetime
+  constraint — implementation §7); the engine executes one generic
+  vendor-blind background sweep (leader-locked, due at half the declared
+  lifetime, soonest-death-first under the per-tick cap), replacing the
+  composition-owned Google-specific worker. —
+  `keepalive_sweep_refreshes_due_accounts_of_declaring_vendors_only`,
+  `keepalive_sweep_skips_the_tick_when_not_leader`,
+  `keepalive_refresh_failure_follows_engine_account_state_rules`,
+  `google_manifests_declare_the_keepalive_idle_lifetime_identically`
+  (`auth_engine_contract.rs`); vendor-blind candidate enumeration on both
+  DB-gated builds (`list_refresh_candidates_covers_agent_and_project_scopes`,
+  composition `product_auth/durable/tests.rs`); recipe-field validation +
+  shared-vendor conflict coverage in `ironclaw_host_api` `recipe.rs` tests.
+- [x] AUTH-7 Identity extracts from the token response or the declared
+  identity endpoint and is validated against the flow before storage. —
+  `pointer_extraction_reads_nested_fields_and_scope_fallback` (token response),
+  `identity_extracts_from_declared_endpoint_with_fresh_credential` (endpoint,
+  incl. rejection failing the exchange) (`auth_engine_contract.rs`).
+- [x] AUTH-8 Grants/secrets are encrypted at rest; stored secrets are never
+  echoed to UI or adapters. — token material lives only behind
+  `ironclaw_secrets::SecretStore` handles (encryption is the store's
+  property, unchanged here); redaction pinned by
+  `vendor_error_responses_are_size_capped_and_never_echoed`
+  (`auth_engine_contract.rs`) and the existing
+  `serde_redaction_contract.rs` suite.
 - [ ] AUTH-9 The auth account state machine is one shared enum
   (`disconnected/authenticating/connected/expired/revoking` + typed
   `last_error`); no vendor- or extension-specific state exists; the wire
-  exposes exactly this enum. — enum + wire form defined and pinned
-  (`AuthAccountState`, `crates/ironclaw_extension_host/src/state.rs`,
-  `auth_account_state_wire_form_matches_str`); the engine that drives its
-  transitions and the wire exposure land in P3.
-- [ ] AUTH-10 Flow TTL expiry and vendor denial land in `disconnected` with
-  a typed reason; refresh failure lands in `expired`.
+  exposes exactly this enum. — enum + typed `last_error` + transitions now
+  live with the engine (`crates/ironclaw_auth/src/account_state.rs`,
+  `legal_transitions_only`, `auth_account_state_wire_form_matches_str`;
+  re-exported by `ironclaw_extension_host::state`); the engine +
+  `project_auth_account_state` drive it; wire exposure of the projection
+  (accounts list / extension surfaces) is still pending (P6 UI work).
+- [x] AUTH-10 Flow TTL expiry and vendor denial land in `disconnected` with
+  a typed reason; refresh failure lands in `expired`. —
+  `projection_prefers_live_flow_then_account_status`
+  (`crates/ironclaw_auth/src/account_state.rs`).
 - [ ] AUTH-11 `api_key` renders from recipe fields, runs the optional
   validation probe through restricted egress, and uses the same state machine.
-- [ ] AUTH-12 All five current vendors (Slack, Google, Notion, GitHub,
+  — probe + storage + state machine proven engine-tier
+  (`api_key_probe_validates_through_host_egress_before_storing`,
+  `api_key_probe_failure_stores_nothing`, `api_key_without_probe_stores_directly`,
+  `auth_engine_contract.rs`); recipe-driven form rendering is P6 frontend work.
+- [x] AUTH-12 All five current vendors (Slack, Google, Notion, GitHub,
   NEAR AI) are expressed as recipes and pass the engine suite as table rows —
-  no vendor-specific test suite exists.
-- [ ] AUTH-13 Callback route keeps the existing
+  no vendor-specific test suite exists. — rows loaded from the real bundled
+  manifests (`all_five_vendors_load_as_recipe_rows_from_their_manifests` and
+  the rows across `auth_engine_contract.rs`); the legacy per-vendor suites
+  (`oauth_provider_client/tests.rs`, the Google/Slack gate-provider tests,
+  the DCR provider suite) were deleted with their production code.
+- [x] AUTH-13 Callback route keeps the existing
   `/api/reborn/product-auth/oauth/{provider}/callback` shape; `{provider}` is
-  resolved as data (vendor-registered redirect URLs unchanged).
+  resolved as data (vendor-registered redirect URLs unchanged). — one axum
+  route (`VENDOR_OAUTH_CALLBACK_PATH`) resolves `{provider}` through the
+  engine's `AuthRecipeResolver`; the Google/Slack URLs are served by the same
+  generic route (`vendor_oauth_callback_completes_a_started_flow`,
+  `crates/ironclaw_reborn_composition/src/product_auth/serve/mod.rs`; the
+  google/slack callback tests in `tests/webui_v2_product_auth.rs` drive the
+  unchanged URLs end-to-end).
 - [ ] AUTH-14 Slack end-to-end: blocked tool → gate → scripted callback →
   grant stored → tool resumes (extends the existing oauth-connect integration
-  test).
-- [ ] AUTH-15 Engine flow/grant persistence passes on both DBs.
-- [ ] AUTH-16 The provider string multiplexor, provider spec constants, and
-  Slack OAuth branches are deleted.
+  test). — PARTIAL: the generic round trip is proven at the composed-services
+  tier with the recipe-driven driver and the `{provider}` callback route
+  (`vendor_oauth_callback_resumes_blocked_turn_gate`,
+  `crates/ironclaw_reborn_composition/src/product_auth/serve/mod.rs`), and the
+  callback→coordinator resume is pinned by
+  `local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator`
+  (`crates/ironclaw_reborn_composition/src/factory/auth_tests.rs`). The
+  Slack-package blocked-TOOL leg through the integration harness needs the P4
+  channel wiring (the harness has no Slack OAuth client credentials seam yet).
+- [ ] AUTH-15 Engine flow/grant persistence passes on both DBs. — PARTIAL:
+  the engine reuses the backend-generic `FilesystemAuthProductServices`
+  store; the connect flow is pinned on the in-memory backend and on a real
+  libSQL root filesystem (`oauth_connect_flow_persists_credential_account`,
+  `oauth_connect_flow_persists_credential_account_on_libsql`,
+  `tests/integration/oauth_connect.rs`). A direct Postgres-rooted leg is
+  still owed (the store has no backend-specific code; the leg needs a
+  Postgres root-filesystem bundle in test support).
+- [x] AUTH-16 The provider string multiplexor, provider spec constants, and
+  Slack OAuth branches are deleted. — `MultiplexAuthProviderClient` /
+  `compose_provider_clients`, `HostOAuthProviderSpec`, `TokenResponseShape`,
+  `google_provider_spec` / `notion_provider_spec` /
+  `slack_personal_provider_spec`, the per-vendor gate providers + registries,
+  the DCR provider modules, the Slack/Google serve handlers and start
+  branches, and `ironclaw_auth`'s legacy vendor URL builders /
+  per-vendor callback-state kinds are all deleted; the blocked-turn
+  `OAuthGateFlowDriver` survives, re-pointed at the engine.
 
 ## 6. Channel ingress (ING)
 

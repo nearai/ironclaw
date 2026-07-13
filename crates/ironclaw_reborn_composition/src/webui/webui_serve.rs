@@ -45,7 +45,6 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use ironclaw_auth::GoogleOAuthRouteConfig;
 use ironclaw_host_api::ingress::IngressRouteDescriptor;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_webui_v2::{
@@ -57,8 +56,6 @@ use tower_http::cors::{AllowHeaders, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 
-#[cfg(feature = "slack-v2-host-beta")]
-use crate::product_auth::serve::SlackPersonalOAuthBindingConfig;
 use crate::product_auth::serve::{ProductAuthRouteState, product_auth_route_mount};
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::slack::slack_channel_routes::{
@@ -69,6 +66,8 @@ use crate::slack::slack_personal_binding_serve::{
     SlackPersonalBindingRouteConfig, SlackPersonalBindingRouteState,
     slack_personal_binding_route_mount,
 };
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::slack::slack_personal_oauth::SlackPersonalOAuthBindingConfig;
 use crate::webui::facade::RebornWebuiBundle;
 use crate::webui::webui_body_limit::{build_body_limit_state, enforce_body_limit};
 use crate::webui::webui_operator_auth::{
@@ -252,13 +251,6 @@ pub struct WebuiServeConfig {
     /// inside the bearer auth layer. These receive the same authenticated
     /// caller extensions and descriptor-driven policy enforcement as WebUI v2.
     pub(crate) protected_mounts: Vec<ProtectedRouteMount>,
-    /// Optional Google OAuth setup config for Reborn product-auth
-    /// credential onboarding. When absent, the mounted Google setup
-    /// route fails closed with a sanitized service-unavailable response.
-    pub(crate) google_oauth: Option<GoogleOAuthRouteConfig>,
-    #[cfg(feature = "slack-v2-host-beta")]
-    pub(crate) slack_personal_oauth:
-        Option<crate::slack::slack_setup::SlackPersonalSetupServiceSlot>,
     /// Optional host hook that binds a successful Slack personal OAuth identity
     /// to the authenticated Reborn user.
     #[cfg(feature = "slack-v2-host-beta")]
@@ -376,9 +368,7 @@ impl WebuiServeConfig {
             default_project_id: None,
             public_mounts: Vec::new(),
             protected_mounts: Vec::new(),
-            google_oauth: None,
             #[cfg(feature = "slack-v2-host-beta")]
-            slack_personal_oauth: None,
             #[cfg(feature = "slack-v2-host-beta")]
             slack_personal_oauth_binding: None,
             #[cfg(feature = "slack-v2-host-beta")]
@@ -386,21 +376,6 @@ impl WebuiServeConfig {
             #[cfg(feature = "slack-v2-host-beta")]
             slack_channel_routes: None,
         }
-    }
-
-    pub fn with_google_oauth(mut self, config: GoogleOAuthRouteConfig) -> Self {
-        self.google_oauth = Some(config);
-        self
-    }
-
-    /// Slack personal (user-token) OAuth lazy slot for the WebUI setup flow.
-    #[cfg(feature = "slack-v2-host-beta")]
-    pub fn with_slack_personal_oauth(
-        mut self,
-        slot: crate::slack::slack_setup::SlackPersonalSetupServiceSlot,
-    ) -> Self {
-        self.slack_personal_oauth = Some(slot);
-        self
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
@@ -616,16 +591,14 @@ pub fn webui_v2_app_with_lifecycle(
             config.default_agent_id.clone(),
             config.default_project_id.clone(),
         );
-        if let Some(google_oauth) = config.google_oauth.clone() {
-            state = state.with_google_oauth(google_oauth);
-        }
-        #[cfg(feature = "slack-v2-host-beta")]
-        if let Some(slack_personal_oauth) = config.slack_personal_oauth.clone() {
-            state = state.with_slack_personal_oauth(slack_personal_oauth);
-        }
         #[cfg(feature = "slack-v2-host-beta")]
         if let Some(slack_personal_oauth_binding) = config.slack_personal_oauth_binding.clone() {
-            state = state.with_slack_personal_oauth_binding(slack_personal_oauth_binding);
+            state = state.with_vendor_identity_hook(
+                crate::slack::slack_personal_oauth::SLACK_VENDOR_ID,
+                crate::slack::slack_personal_oauth::slack_personal_identity_hook_factory(
+                    slack_personal_oauth_binding,
+                ),
+            );
         }
         product_auth_route_mount(state)
     });

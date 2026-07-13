@@ -2053,10 +2053,12 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
-            // Product auth is a Reborn contract/facade vocabulary. It may
-            // describe behavior-compatible v1 inventory, but implementation
-            // code must not reach into v1 routes, extension managers, secret
-            // stores, runtimes, or channel-specific stacks.
+            // Product auth is a Reborn contract/facade vocabulary plus the
+            // recipe-driven auth engine (extension-runtime workstream D). The
+            // engine owns token secret storage, so the Reborn-native
+            // `ironclaw_secrets` store is allowed; implementation code must
+            // still not reach into v1 routes, extension managers, runtimes,
+            // or channel-specific stacks.
             crate_name: "ironclaw_auth",
             forbidden: vec![
                 "ironclaw",
@@ -2092,7 +2094,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
                 "ironclaw_scripts",
-                "ironclaw_secrets",
                 "ironclaw_skills",
                 "ironclaw_storage",
                 "ironclaw_threads",

@@ -42,7 +42,6 @@ use crate::extension_host::run_delivery_ports::{
     ProjectionApprovalPromptContextSource,
 };
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
-use crate::product_auth::serve::SlackPersonalOAuthBindingConfig;
 use crate::provider_identity::RebornUserIdentityLookup;
 use crate::provider_identity::{
     RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingStore,
@@ -56,6 +55,7 @@ use crate::slack::slack_personal_binding::{
     SlackPersonalUserBindingError, SlackPersonalUserBindingRequest,
     SlackPersonalUserBindingService,
 };
+use crate::slack::slack_personal_oauth::SlackPersonalOAuthBindingConfig;
 use crate::slack::slack_preference_targets::{
     SlackConfiguredChannelRoute, SlackHostBetaOutboundTargetProvider,
     SlackOutboundTargetProviderConfig, SlackPersonalDmTarget, SlackPersonalDmTargetError,
