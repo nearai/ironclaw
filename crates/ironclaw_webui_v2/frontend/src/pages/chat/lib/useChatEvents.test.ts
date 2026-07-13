@@ -1616,6 +1616,68 @@ test("useChatEvents: parent completion after resumed auth cancel clears typing a
   ]);
 });
 
+test("useChatEvents: stale parent success after resumed auth cancel preserves current failure banner", () => {
+  const parentRunId = "turn-run-after-auth-cancel-with-current-failure";
+  const authRunId = "auth-run-cancelled-current-failure";
+  const gateRef = "gate:auth-token";
+  const harness = createUseChatEventsHarness({
+    locallyResolvedGatesRef: {
+      current: new Map([
+        [
+          `${authRunId}\n${gateRef}`,
+          { resolution: "cancelled", outcome: "resumed" },
+        ],
+      ]),
+    },
+  });
+  harness.setCurrentActiveRun({
+    runId: authRunId,
+    threadId: "thread-1",
+    status: "awaiting_gate",
+  });
+  harness.replaceMessages([
+    {
+      id: `err-${authRunId}`,
+      role: "error",
+      content: "The resumed run failed.",
+      timestamp: "2026-06-03T11:44:43Z",
+    },
+  ]);
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: authRunId, status: "blocked_auth" } },
+        ],
+      },
+    },
+  });
+  assert.equal(harness.isProcessing, true);
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: parentRunId, status: "completed" } },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.isProcessing, false);
+  assert.equal(harness.pendingGate, null);
+  assert.equal(harness.activeRun, null);
+  assert.deepEqual(harness.settledRuns, [
+    { runId: parentRunId, success: true },
+  ]);
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, `err-${authRunId}`);
+  assert.equal(harness.messages[0].content, "The resumed run failed.");
+});
+
 test("useChatEvents: failed parent terminal after resumed auth cancel clears typing and shows error", () => {
   const parentRunId = "turn-run-after-auth-cancel-failed";
   const authRunId = "auth-run-cancelled-before-failure";

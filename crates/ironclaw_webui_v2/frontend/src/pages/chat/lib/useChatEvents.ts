@@ -687,9 +687,7 @@ function settleTerminalRunAfterResolvedPrompt({
     promptRunIdRef.current = null;
   }
   settleRun(settledRunsRef, onRunSettled, runId, success);
-  if (success) {
-    clearRunFailureMessages(setMessages);
-  } else if (status === "failed" || status === "recovery_required") {
+  if (status === "failed" || status === "recovery_required") {
     appendRunFailureMessage(setMessages, {
       runId,
       status,
