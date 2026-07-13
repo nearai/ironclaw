@@ -3295,6 +3295,103 @@ output_schema_ref = "schemas/run.output.json"
     }
 
     #[tokio::test]
+    async fn non_final_member_remove_runs_actor_cleanup_and_keeps_other_member_installed() {
+        // safety: test-only facade calls are independent lifecycle requests, not database writes.
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
+        let github = fixture_github_package_with_cleanup(removal_cleanup_requirement(
+            "fixture.cleanup",
+            "github",
+        ));
+
+        let external_cleanup = Arc::new(RecordingExtensionRemovalCleanupAdapter::new(
+            "fixture.cleanup",
+        ));
+        let external_cleanup_adapter: Arc<dyn ExtensionRemovalCleanupAdapter> =
+            external_cleanup.clone();
+        let external_cleanup_registry = Arc::new(
+            ExtensionRemovalCleanupRegistry::try_from_adapters(vec![external_cleanup_adapter])
+                .expect("unique cleanup adapter"),
+        );
+        let credential_cleanup = Arc::new(RecordingExtensionCredentialCleanup::default());
+        let (_dir, storage_root, facade, _active_registry, installation_store) =
+            extension_lifecycle_fixture_with_all_cleanup(
+                AvailableExtensionCatalog::from_packages(vec![github]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+                Some(credential_cleanup.clone() as Arc<dyn ExtensionCredentialCleanup>),
+                external_cleanup_registry,
+            );
+        external_cleanup.set_probe(&storage_root, installation_store.clone(), "github");
+
+        for member in ["alice", "bob"] {
+            facade
+                .execute(
+                    lifecycle_surface_context_for_user(member),
+                    LifecycleProductAction::ExtensionInstall {
+                        package_ref: package_ref.clone(),
+                    },
+                )
+                .await
+                .expect("member installs github");
+        }
+
+        facade
+            .execute(
+                lifecycle_surface_context_for_user("alice"),
+                LifecycleProductAction::ExtensionRemove {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("alice leaves github");
+
+        let calls = external_cleanup.calls();
+        assert_eq!(calls.len(), 1, "external cleanup runs for the leaving user");
+        assert_eq!(calls[0].context.authenticated_actor.as_str(), "alice");
+        assert_eq!(calls[0].context.scope.user_id.as_str(), "alice");
+        assert!(calls[0].package_files_present);
+        assert!(calls[0].manifest_present);
+        assert!(calls[0].installation_present);
+
+        let credential_request = {
+            let credential_requests = credential_cleanup
+                .requests
+                .lock()
+                .expect("credential cleanup lock");
+            assert_eq!(credential_requests.len(), 1);
+            credential_requests[0].clone()
+        };
+        assert_eq!(
+            credential_request
+                .provider
+                .as_ref()
+                .map(AuthProviderId::as_str),
+            Some("github")
+        );
+        assert_eq!(credential_request.scope.resource.user_id.as_str(), "alice");
+
+        let installation = installation_store
+            .get_installation(
+                &ExtensionInstallationId::new("github").expect("valid installation id"),
+            )
+            .await
+            .expect("installation lookup")
+            .expect("bob keeps the installation");
+        let alice = UserId::new("alice").expect("alice");
+        let bob = UserId::new("bob").expect("bob");
+        assert!(!installation.owner().visible_to(&alice));
+        assert!(installation.owner().visible_to(&bob));
+        assert!(storage_root.join("system/extensions/github").exists());
+        assert!(
+            installation_store
+                .get_manifest(&ExtensionId::new("github").expect("extension id"))
+                .await
+                .expect("manifest lookup")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
     async fn extension_remove_dispatches_only_declared_adapter_with_trusted_scope_before_deletion()
     {
         let matching = Arc::new(RecordingExtensionRemovalCleanupAdapter::new(
@@ -7018,6 +7115,26 @@ output_schema_ref = "schemas/run.output.json"
         Arc<SharedExtensionRegistry>,
         Arc<InMemoryExtensionInstallationStore>,
     ) {
+        extension_lifecycle_fixture_with_all_cleanup(
+            catalog,
+            lifecycle_service,
+            credential_cleanup,
+            Arc::new(ExtensionRemovalCleanupRegistry::empty()),
+        )
+    }
+
+    fn extension_lifecycle_fixture_with_all_cleanup(
+        catalog: AvailableExtensionCatalog,
+        lifecycle_service: ExtensionLifecycleService,
+        credential_cleanup: Option<Arc<dyn ExtensionCredentialCleanup>>,
+        removal_cleanup: Arc<ExtensionRemovalCleanupRegistry>,
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
+        Arc<SharedExtensionRegistry>,
+        Arc<InMemoryExtensionInstallationStore>,
+    ) {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
@@ -7051,18 +7168,21 @@ output_schema_ref = "schemas/run.output.json"
         );
         let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
         let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
-        let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
-            root_filesystem,
-            catalog,
-            installation_store.clone(),
-            Arc::new(Mutex::new(lifecycle_service)),
-            test_active_extension_publisher(
-                Arc::clone(&active_registry),
-                test_extension_trust_policy(),
-            ),
-            credential_cleanup,
-            lifecycle_owner(),
-        ));
+        let extension_management = Arc::new(
+            RebornLocalExtensionManagementPort::new(
+                root_filesystem,
+                catalog,
+                installation_store.clone(),
+                Arc::new(Mutex::new(lifecycle_service)),
+                test_active_extension_publisher(
+                    Arc::clone(&active_registry),
+                    test_extension_trust_policy(),
+                ),
+                credential_cleanup,
+                lifecycle_owner(),
+            )
+            .with_removal_cleanup_registry(removal_cleanup),
+        );
         let facade =
             crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(skill_management)
                 .with_extension_management(extension_management);
@@ -7923,6 +8043,38 @@ credential_handle = "{id}_bot_token"
         requirement: ExtensionRemovalCleanupRequirement,
     ) -> AvailableExtensionPackage {
         let mut package = fixture_external_channel_package(id, name);
+        package.cleanup_requirements = vec![requirement];
+        package
+    }
+
+    fn fixture_github_package_with_cleanup(
+        requirement: ExtensionRemovalCleanupRequirement,
+    ) -> AvailableExtensionPackage {
+        let manifest = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "github"
+name = "GitHub"
+version = "0.1.0"
+description = "GitHub cleanup fixture"
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/github.wasm"
+
+[[capabilities]]
+id = "github.read"
+description = "Read GitHub data"
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/read.input.json"
+output_schema_ref = "schemas/read.output.json"
+"#;
+        let mut package = fixture_extension_package_from_manifest_with_root(manifest, "github");
         package.cleanup_requirements = vec![requirement];
         package
     }

@@ -3129,8 +3129,9 @@ pub(crate) async fn open_local_dev_extension_installation_store_for_test(
 }
 
 /// Migration seam: open the extension installation store over a caller-supplied
-/// [`RootFilesystem`] at the default installation state path, returning the
-/// boxed trait object so the migration tool never touches the concrete
+/// [`RootFilesystem`] at either the legacy default path or a hosted
+/// tenant-qualified path, returning the boxed trait object so the migration
+/// tool never touches the concrete
 /// `pub(crate)` `FilesystemExtensionInstallationStore`. Mirrors the production
 /// binding in [`build_reborn_services`] (the `extension_installation_store`
 /// construction via `FilesystemExtensionInstallationStore::load_at`); gated
@@ -3144,13 +3145,22 @@ pub(crate) async fn open_local_dev_extension_installation_store_for_test(
 #[cfg(feature = "migration-support")]
 pub async fn extension_installation_store_for_migration(
     filesystem: Arc<dyn RootFilesystem>,
+    tenant_id: Option<&ironclaw_host_api::TenantId>,
 ) -> Result<Arc<dyn ExtensionInstallationStore>, RebornBuildError> {
-    let state_path =
-        FilesystemExtensionInstallationStore::default_state_path().map_err(|error| {
+    let state_path = match tenant_id {
+        Some(tenant_id) => VirtualPath::new(format!(
+            "/tenants/{}/system/extensions/.installations/state.json",
+            tenant_id.as_str()
+        ))
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("extension installation state path invalid: {error}"),
+        })?,
+        None => FilesystemExtensionInstallationStore::default_state_path().map_err(|error| {
             RebornBuildError::InvalidConfig {
                 reason: format!("extension installation state path invalid: {error}"),
             }
-        })?;
+        })?,
+    };
     let store = FilesystemExtensionInstallationStore::load_at(filesystem, state_path)
         .await
         .map_err(|error| RebornBuildError::InvalidConfig {

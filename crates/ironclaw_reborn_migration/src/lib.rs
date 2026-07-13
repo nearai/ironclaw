@@ -20,6 +20,12 @@ mod target;
 mod v2_model;
 
 mod convert;
+mod extension_ownership;
+
+pub use extension_ownership::{
+    ExtensionOwnershipMigrationOptions, ExtensionOwnershipMigrationReport,
+    run_extension_ownership_migration,
+};
 
 pub use error::MigrationError;
 pub use options::{MigrationOptions, SourceDb, TargetStore};

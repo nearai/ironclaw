@@ -22,6 +22,10 @@ dist = false
 name = "ironclaw-reborn-migration"
 path = "src/main.rs"
 
+[[bin]]
+name = "ironclaw-reborn-extension-ownership-migration"
+path = "src/extension_ownership_main.rs"
+
 [features]
 default = ["libsql", "postgres"]
 # Each backend feature forwards into the v1 read stack (root `ironclaw` crate)
