@@ -805,6 +805,7 @@ async fn slack_oauth_callback_activates_and_publishes_all_personal_tools() {
         slack_capabilities,
         vec![
             "slack.get_conversation_history",
+            "slack.get_conversation_info",
             "slack.get_thread_replies",
             "slack.get_user_info",
             "slack.list_conversations",

@@ -3697,7 +3697,7 @@ output_schema_ref = "schemas/run.output.json"
         let first_ref = package_ref.clone();
         let first_start = Arc::clone(&start);
         let first = tokio::spawn(async move {
-            let scope = hosted_mcp_scope("first-remover");
+            let scope = hosted_mcp_scope("lifecycle-owner");
             let actor = scope.user_id.clone();
             first_start.wait().await;
             first_port.remove(first_ref, &scope, Some(&actor)).await
@@ -3705,7 +3705,7 @@ output_schema_ref = "schemas/run.output.json"
         let second_port = Arc::clone(&port);
         let second_start = Arc::clone(&start);
         let second = tokio::spawn(async move {
-            let scope = hosted_mcp_scope("second-remover");
+            let scope = hosted_mcp_scope("lifecycle-owner");
             let actor = scope.user_id.clone();
             second_start.wait().await;
             second_port.remove(package_ref, &scope, Some(&actor)).await
