@@ -150,8 +150,16 @@ pub use local_runtime_profile::{
     local_dev_runtime_policy, local_dev_yolo_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options,
 };
+/// Re-exported for the migration companion's local apply path so it can use
+/// production key resolution without depending on composition internals. The
+/// `reborn_crate_dependency_boundaries_hold` architecture test constrains the
+/// companion to this non-activating facade.
 #[cfg(all(feature = "migration-support", feature = "libsql"))]
 pub use migration_support::resolve_local_migration_target_key;
+/// Re-exported for the Reborn CLI and migration companion so target selection
+/// follows production composition without either caller opening the runtime.
+/// `composition_public_pub_use_surface_matches_snapshot` pins this intentional
+/// facade surface.
 #[cfg(feature = "migration-support")]
 pub use migration_support::{
     RebornMigrationTargetConfig, RebornMigrationTargetStore, resolve_reborn_migration_target,
