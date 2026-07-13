@@ -933,6 +933,59 @@ async def test_reborn_v2_thread_list_and_delete(reborn_v2_server):
         assert keep_id in remaining, "untouched thread must remain in the list"
 
 
+async def test_reborn_v2_ui_delete_removes_sidebar_thread_without_refetch(
+    reborn_v2_server, reborn_v2_browser
+):
+    """A successful delete updates the rendered sidebar before list revalidation returns."""
+    headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
+    async with httpx.AsyncClient(headers=headers) as client:
+        keep_id = await _create_thread(client, reborn_v2_server)
+        drop_id = await _create_thread(client, reborn_v2_server)
+
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+    release_refetch = asyncio.Event()
+    refetch_started = asyncio.Event()
+    refetch_finished = asyncio.Event()
+
+    async def delay_thread_list_refetch(route, _request):
+        refetch_started.set()
+        try:
+            await release_refetch.wait()
+            await route.continue_()
+        finally:
+            refetch_finished.set()
+
+    async def accept_delete_dialog(dialog):
+        await dialog.accept()
+
+    try:
+        await page.goto(f"{reborn_v2_server}/v2/?token={REBORN_V2_AUTH_TOKEN}")
+        await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(timeout=15000)
+
+        keep_button = page.locator(SEL_V2["thread_delete_for"].format(id=keep_id))
+        drop_button = page.locator(SEL_V2["thread_delete_for"].format(id=drop_id))
+        await expect(keep_button).to_have_count(1, timeout=15000)
+        await expect(drop_button).to_have_count(1, timeout=15000)
+
+        # Hold the delete-triggered list revalidation open. The deleted row must
+        # disappear from the local React Query cache before this request returns.
+        thread_list_pattern = "**/api/webchat/v2/threads"
+        await page.route(thread_list_pattern, delay_thread_list_refetch)
+        page.once("dialog", accept_delete_dialog)
+        await drop_button.click()
+        await asyncio.wait_for(refetch_started.wait(), timeout=5)
+
+        await expect(drop_button).to_have_count(0, timeout=2000)
+        await expect(keep_button).to_have_count(1)
+    finally:
+        release_refetch.set()
+        if refetch_started.is_set():
+            await asyncio.wait_for(refetch_finished.wait(), timeout=5)
+        await page.unroute("**/api/webchat/v2/threads", delay_thread_list_refetch)
+        await context.close()
+
+
 async def test_reborn_v2_timeline_pagination(reborn_v2_server):
     """Timeline honors `limit` and pages older messages via the opaque `next_cursor`."""
     headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
