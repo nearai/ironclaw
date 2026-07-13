@@ -106,6 +106,10 @@ pub(crate) enum StorageReopen {
     LibSql {
         db_path: PathBuf,
     },
+    // Constructed (and read) only when the `postgres` feature compiles the
+    // testcontainer path below; the variant itself stays unconditional so
+    // `StorageMode::Postgres` rstest cases compile on every clippy lane.
+    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
     Postgres {
         database_url: String,
         // Boxed: the container handle dwarfs the other variants
@@ -936,6 +940,7 @@ impl RebornIntegrationHarness {
     /// re-instantiates the service over the same in-process handle — asserts
     /// re-instantiation only, not durability (nothing on disk to read back).
     pub async fn assert_reply_persists_after_reopen(&self, text: &str) -> HarnessResult<()> {
+        #[cfg(feature = "postgres")]
         if let StorageReopen::Postgres { database_url, .. } = &self._shared.storage_reopen {
             // A genuinely fresh pool + composite over the same database —
             // independent of the live `Arc` (migrations are idempotent and
@@ -1806,6 +1811,15 @@ pub(crate) async fn build_storage_composite(
                 db_path: dir.join(ironclaw_reborn_composition::test_support::LOCAL_DEV_DB_FILENAME),
             }
         }
+        #[cfg(not(feature = "postgres"))]
+        StorageMode::Postgres => {
+            return Err(
+                "StorageMode::Postgres requires the `postgres` cargo feature (this build \
+                 compiled without it); a Postgres skip is a failure per REL-3"
+                    .into(),
+            );
+        }
+        #[cfg(feature = "postgres")]
         StorageMode::Postgres => {
             let (container, database_url) = start_postgres_testcontainer().await?;
             let filesystem = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(
@@ -1831,6 +1845,7 @@ pub(crate) async fn build_storage_composite(
 /// Start a per-`build()` PostgreSQL testcontainer. A provisioning failure is
 /// a test failure (REL-3): in CI it panics with the docker context; locally
 /// the message names the fix.
+#[cfg(feature = "postgres")]
 async fn start_postgres_testcontainer() -> HarnessResult<(
     testcontainers_modules::testcontainers::ContainerAsync<
         testcontainers_modules::postgres::Postgres,
@@ -1872,6 +1887,7 @@ async fn start_postgres_testcontainer() -> HarnessResult<(
     ))
 }
 
+#[cfg(feature = "postgres")]
 pub(crate) fn postgres_pool(database_url: &str) -> HarnessResult<deadpool_postgres::Pool> {
     let config: tokio_postgres::Config = database_url
         .parse()
