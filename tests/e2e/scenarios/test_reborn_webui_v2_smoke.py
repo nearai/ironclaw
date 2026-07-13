@@ -223,6 +223,9 @@ async def test_reborn_v2_light_theme_semantic_colors_have_readable_contrast(
         restore_toggle = reborn_v2_page.get_by_role("button", name=restore_label).first
         if await restore_toggle.count():
             await restore_toggle.click()
+            await expect(
+                reborn_v2_page.get_by_role("button", name=original_label).first
+            ).to_be_visible(timeout=15000)
 
 
 async def test_reborn_v2_text_turn_persists(reborn_v2_server):
