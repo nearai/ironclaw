@@ -2647,6 +2647,102 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             {capability_id: ["completed"]},
         )
 
+    def test_current_turn_capability_evidence_reports_sqlite_read_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reborn_home = Path(tmpdir)
+            db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+            db_path.parent.mkdir(parents=True)
+            db_path.touch()
+
+            with patch.object(
+                run_live_qa.sqlite3,
+                "connect",
+                side_effect=sqlite3.OperationalError("database is locked"),
+            ) as connect:
+                evidence = run_live_qa._current_turn_capability_evidence(
+                    reborn_home,
+                    {
+                        "accepted_message_ref": "msg:current",
+                        "thread_id": "thread-current",
+                        "turn_id": "turn-current",
+                        "run_id": "run-current",
+                    },
+                    ["slack.get_conversation_history"],
+                    {"completed"},
+                )
+
+        connection_target, = connect.call_args.args
+        self.assertTrue(str(connection_target).startswith("file:"))
+        self.assertIn("mode=ro", str(connection_target))
+        self.assertTrue(connect.call_args.kwargs["uri"])
+        self.assertEqual(evidence["read_error"], "database is locked")
+        self.assertEqual(
+            evidence["statuses"],
+            {"slack.get_conversation_history": []},
+        )
+
+    def test_slack_correctness_evidence_read_failure_is_inconclusive(self):
+        async def fake_live_chat_case(_ctx, **kwargs):
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=True,
+                latency_ms=1,
+                details={
+                    "full_reply_text": "Slack result",
+                    "submission_identity": {
+                        "accepted_message_ref": "msg:current",
+                        "thread_id": "thread-current",
+                        "turn_id": "turn-current",
+                        "run_id": "run-current",
+                    },
+                },
+            )
+
+        evidence = {
+            "accepted_message_ref": "msg:current",
+            "thread_id": "thread-current",
+            "turn_id": "turn-current",
+            "run_id": "run-current",
+            "invocation_ids": {"slack.get_conversation_history": []},
+            "statuses": {"slack.get_conversation_history": []},
+            "read_error": "database is locked",
+        }
+        with (
+            patch.object(
+                run_live_qa,
+                "_live_chat_case",
+                side_effect=fake_live_chat_case,
+            ),
+            patch.object(
+                run_live_qa,
+                "_current_turn_capability_evidence",
+                return_value=evidence,
+            ),
+        ):
+            chat, reply_text = asyncio.run(
+                run_live_qa._slack_correctness_chat_reply(
+                    self._dummy_ctx(),
+                    case_name="qa_10_evidence_read_failure_test",
+                    started=run_live_qa.time.monotonic(),
+                    prompt="Read Slack.",
+                    answer_marker="ANSWER_MARKER",
+                    extra_details={},
+                    expected_capability="slack.get_conversation_history",
+                )
+            )
+
+        self.assertFalse(chat.success)
+        self.assertEqual(reply_text, "Slack result")
+        self.assertEqual(chat.details["failure_class"], "infrastructure")
+        self.assertEqual(
+            chat.details["failure_category"],
+            "capability_evidence_unavailable",
+        )
+        self.assertEqual(chat.details["failure_status"], "inconclusive")
+        self.assertTrue(chat.details["inconclusive"])
+        self.assertFalse(chat.details["blocking"])
+
     def test_qa_10e_prompt_echo_without_current_turn_history_call_fails(self):
         captured: dict[str, object] = {}
 
@@ -5253,6 +5349,25 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 f"{case_name} is promoted (delivery-routing fixes merged and "
                 "live-verified green) and must run in bare local default runs",
             )
+
+    def test_qa_9_contracts_block_but_digest_prose_is_behavioral(self):
+        for case_name in (
+            "qa_9a_slack_connect",
+            "qa_9b_routine_dm_delivery_exactly_once",
+            "qa_9d_routine_per_trigger_delivery_target",
+        ):
+            spec = run_live_qa.CASES[case_name]
+            self.assertEqual(spec.tier, "contract", case_name)
+            self.assertTrue(spec.blocking, case_name)
+
+        digest_spec = run_live_qa.CASES["qa_9c_slack_digest_names_not_ids"]
+        self.assertEqual(digest_spec.tier, "behavioral")
+        self.assertFalse(
+            digest_spec.blocking,
+            "9C evaluates stochastic final prose without a deterministic "
+            "capability-call contract, so it must stay visible without making "
+            "the live-QA job randomly red",
+        )
 
     def test_exc_text_preserves_type_for_empty_str_exceptions(self):
         self.assertEqual(run_live_qa._exc_text(ValueError("boom")), "boom")

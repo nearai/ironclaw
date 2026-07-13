@@ -61,6 +61,9 @@ notification, but do not masquerade as deterministic code regressions.
 Infrastructure and precondition failures remain non-successful and are rendered
 as their own incident classes. For exact-PR validation, infrastructure failures
 are inconclusive and must be rerun; they are never counted as product passes.
+QA-9C and QA-10I evaluate stochastic final-answer entity rendering rather than
+a deterministic capability contract, so both are behavioral/nonblocking while
+retaining their failed observation and trace artifacts.
 
 ### 2. Separate extension lifecycle from Slack correctness
 
@@ -75,6 +78,9 @@ membership, history, status, thread, and entity assertions.
 Each correctness case that depends on a specific capability records the actual
 capability run statuses and fails if the expected capability did not complete.
 A lucky or fabricated final answer is not a pass.
+The evidence store is opened read-only. A lock, schema mismatch, or other SQLite
+read error is infrastructure/inconclusive; it must not be converted into a
+`missing_expected_capability` model-quality failure.
 
 ### 3. Journey-specific changes
 

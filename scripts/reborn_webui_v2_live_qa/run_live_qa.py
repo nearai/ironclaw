@@ -3232,7 +3232,8 @@ def _current_turn_capability_evidence(
     if not db_path.exists():
         return evidence
     try:
-        with closing(sqlite3.connect(db_path)) as db:
+        database_uri = f"{db_path.resolve().as_uri()}?mode=ro"
+        with closing(sqlite3.connect(database_uri, uri=True)) as db:
             event_rows = db.execute(
                 """
                 SELECT payload
@@ -3249,7 +3250,8 @@ def _current_turn_capability_evidence(
                   AND path LIKE '%/run-state/%'
                 """
             ).fetchall()
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        evidence["read_error"] = _exc_text(exc)
         return evidence
 
     wanted = set(capability_ids)
@@ -6147,7 +6149,23 @@ async def _slack_correctness_chat_reply(
             if isinstance(statuses, dict)
             else []
         )
-        if not matching_statuses:
+        evidence_read_error = evidence.get("read_error")
+        if evidence_read_error:
+            chat.success = False
+            chat.details.update(
+                {
+                    "error": (
+                        "Slack capability evidence could not be read: "
+                        f"{evidence_read_error}"
+                    ),
+                    "failure_class": "infrastructure",
+                    "failure_category": "capability_evidence_unavailable",
+                    "failure_status": "inconclusive",
+                    "inconclusive": True,
+                    "blocking": False,
+                }
+            )
+        elif not matching_statuses:
             chat.success = False
             chat.details.update(
                 {
@@ -7205,6 +7223,11 @@ CASES: dict[str, CaseSpec] = {
     ),
     "qa_9c_slack_digest_names_not_ids": CaseSpec(
         case_qa_9c_slack_digest_names_not_ids,
+        # This probe evaluates stochastic final prose. It does not assert a
+        # deterministic capability call, so keep the signal visible without
+        # turning model-output variance into a blocking harness failure.
+        tier="behavioral",
+        blocking=False,
         requires_slack=True,
         requires_slack_personal_auth=True,
     ),

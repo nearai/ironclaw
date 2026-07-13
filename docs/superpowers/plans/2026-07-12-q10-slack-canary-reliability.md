@@ -289,6 +289,8 @@ def _is_blocking_failure(result: ProbeResult) -> bool:
 ~~~
 
 Exit 1 only for blocking failures. Classify provider outages from structured category, append explicit inconclusive results for remaining cases, and break.
+Keep QA-9C behavioral/nonblocking because it judges stochastic digest prose;
+QA-9A, QA-9B, and QA-9D remain blocking contracts.
 
 - [ ] **Step 4: Write and run failing notifier tests**
 
@@ -369,6 +371,9 @@ Expected: preactivation, expected-capability, scoped/global, and raw-entity test
 Fold extension setup into _live_chat_case and make _live_chat_with_extensions_case delegate to it. _slack_correctness_chat_reply passes the Slack requirement, sets enforce_marker=False, and compares expected capability completed counts before and after chat.
 
 Classify missing capability as model_quality, answer/ground-truth mismatch as product, terminal provider errors as infrastructure, and invalid fixtures as precondition.
+Open the capability-evidence SQLite store read-only and classify any evidence
+read failure as nonblocking infrastructure/inconclusive rather than missing
+model capability evidence.
 
 - [ ] **Step 5: Register scoped/global 10G and strict 10I**
 

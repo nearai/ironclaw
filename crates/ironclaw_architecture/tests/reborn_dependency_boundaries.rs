@@ -1163,6 +1163,44 @@ fn composition_runtime_has_no_slack_output_policy() {
         "cfg(not(test)) modules are production code and must remain visible to the neutrality scan"
     );
 
+    for production_cfg_module in [
+        r#"
+            #[cfg(all(unix, any(test, feature = "test-support")))]
+            mod nested_test_support {
+                fn production_runtime_policy() {}
+            }
+        "#,
+        r#"
+            #[cfg(all(unix, /* future,test,arm */ feature = "runtime-policy"))]
+            mod commented_cfg_terms {
+                fn production_runtime_policy() {}
+            }
+        "#,
+        r#"
+            #[cfg(all(unix, feature = "future,test,arm"))]
+            mod comma_delimited_feature_name {
+                fn production_runtime_policy() {}
+            }
+        "#,
+    ] {
+        let production = source_without_cfg_test_modules(production_cfg_module);
+        assert!(
+            production.contains("production_runtime_policy"),
+            "only a direct positive test conjunct may make a cfg(all(...)) module test-only"
+        );
+    }
+
+    let positive_test_conjunct = r#"
+        #[cfg(all(unix, test))]
+        mod unix_tests {
+            fn test_only_policy() {}
+        }
+    "#;
+    assert!(
+        !source_without_cfg_test_modules(positive_test_conjunct).contains("test_only_policy"),
+        "a direct positive test conjunct must still be removed from the production scan"
+    );
+
     let root = workspace_root();
     let composition_sources = production_composition_sources(&root);
     let violations = composition_sources
@@ -1290,13 +1328,10 @@ fn cfg_attribute_is_test_only(attribute: &str) -> bool {
     if !attribute.starts_with("#[cfg(") {
         return false;
     }
-    let compact = attribute
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect::<String>();
-    let Some(expression) = compact
+    let Some(expression) = attribute
         .strip_prefix("#[cfg(")
         .and_then(|value| value.strip_suffix(")]"))
+        .map(str::trim)
     else {
         return false;
     };
@@ -1304,12 +1339,152 @@ fn cfg_attribute_is_test_only(attribute: &str) -> bool {
         return true;
     }
     let Some(all_terms) = expression
-        .strip_prefix("all(")
+        .strip_prefix("all")
+        .map(str::trim_start)
+        .and_then(|value| value.strip_prefix('('))
         .and_then(|value| value.strip_suffix(')'))
     else {
         return false;
     };
-    all_terms.split(',').any(|term| term == "test")
+    cfg_all_has_direct_test_conjunct(all_terms)
+}
+
+fn cfg_all_has_direct_test_conjunct(all_terms: &str) -> bool {
+    let bytes = all_terms.as_bytes();
+    let mut index = 0;
+    let mut parenthesis_depth = 0_usize;
+    let mut normalized_term = Vec::new();
+
+    while index < bytes.len() {
+        if bytes[index..].starts_with(b"/*") {
+            let Some(comment_end) = nested_block_comment_end(bytes, index) else {
+                return false;
+            };
+            index = comment_end;
+            continue;
+        }
+        if bytes[index..].starts_with(b"//") {
+            return false;
+        }
+        if let Some((quote_index, hash_count)) = raw_string_delimiter(bytes, index) {
+            if parenthesis_depth == 0 {
+                normalized_term.push(b'"');
+            }
+            let Some(string_end) = raw_string_end(bytes, quote_index, hash_count) else {
+                return false;
+            };
+            index = string_end;
+            continue;
+        }
+        if matches!(bytes[index], b'"' | b'\'') {
+            if parenthesis_depth == 0 {
+                normalized_term.push(bytes[index]);
+            }
+            let Some(string_end) = quoted_literal_end(bytes, index, bytes[index]) else {
+                return false;
+            };
+            index = string_end;
+            continue;
+        }
+
+        match bytes[index] {
+            b'(' => {
+                if parenthesis_depth == 0 {
+                    normalized_term.push(b'(');
+                }
+                parenthesis_depth += 1;
+            }
+            b')' => {
+                let Some(next_depth) = parenthesis_depth.checked_sub(1) else {
+                    return false;
+                };
+                parenthesis_depth = next_depth;
+                if parenthesis_depth == 0 {
+                    normalized_term.push(b')');
+                }
+            }
+            b',' if parenthesis_depth == 0 => {
+                if normalized_term == b"test" {
+                    return true;
+                }
+                normalized_term.clear();
+            }
+            byte if parenthesis_depth == 0 && !byte.is_ascii_whitespace() => {
+                normalized_term.push(byte);
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+
+    parenthesis_depth == 0 && normalized_term == b"test"
+}
+
+fn nested_block_comment_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut index = start + 2;
+    let mut depth = 1_usize;
+    while index < bytes.len() {
+        if bytes[index..].starts_with(b"/*") {
+            depth += 1;
+            index += 2;
+        } else if bytes[index..].starts_with(b"*/") {
+            depth -= 1;
+            index += 2;
+            if depth == 0 {
+                return Some(index);
+            }
+        } else {
+            index += 1;
+        }
+    }
+    None
+}
+
+fn raw_string_delimiter(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
+    let mut index = start;
+    if bytes.get(index) == Some(&b'b') {
+        index += 1;
+    }
+    if bytes.get(index) != Some(&b'r') {
+        return None;
+    }
+    index += 1;
+    let hash_start = index;
+    while bytes.get(index) == Some(&b'#') {
+        index += 1;
+    }
+    (bytes.get(index) == Some(&b'"')).then_some((index, index - hash_start))
+}
+
+fn raw_string_end(bytes: &[u8], quote_index: usize, hash_count: usize) -> Option<usize> {
+    let mut index = quote_index + 1;
+    while index < bytes.len() {
+        if bytes[index] == b'"'
+            && bytes
+                .get(index + 1..index + 1 + hash_count)
+                .is_some_and(|hashes| hashes.iter().all(|byte| *byte == b'#'))
+        {
+            return Some(index + 1 + hash_count);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn quoted_literal_end(bytes: &[u8], quote_index: usize, quote: u8) -> Option<usize> {
+    let mut index = quote_index + 1;
+    let mut escaped = false;
+    while index < bytes.len() {
+        if escaped {
+            escaped = false;
+        } else if bytes[index] == b'\\' {
+            escaped = true;
+        } else if bytes[index] == quote {
+            return Some(index + 1);
+        }
+        index += 1;
+    }
+    None
 }
 
 fn source_has_slack_specific_model_output_policy(source: &str) -> bool {

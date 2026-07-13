@@ -3282,10 +3282,14 @@ mod tests {
             "list tool description should steer delivery requests before trigger creation"
         );
         assert!(
+            list_tool.description.contains("cannot read conversations"),
+            "list tool description must distinguish delivery routing from integration reads"
+        );
+        assert!(
             list_tool
                 .description
-                .contains("cannot read Slack conversations"),
-            "list tool description must distinguish delivery routing from Slack reads"
+                .contains("corresponding integration's read capabilities"),
+            "list tool description must route reads through the owning integration"
         );
         let set_tool = tool_definitions
             .iter()
