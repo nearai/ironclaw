@@ -126,8 +126,8 @@ pub use projects::{
     RebornRemoveMemberRequest, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
 };
 pub use types::{
-    RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
-    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAccountBindingSource, RebornAttachmentBytes, RebornAttachmentRequest, RebornAuthAccount,
+    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
     RebornChannelConnectStrategy, RebornCreateThreadResponse, RebornDeleteThreadRequest,
@@ -159,7 +159,7 @@ pub use types::{
     RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornStreamEventsSubscription, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse,
+    RebornTimelineResponse, RebornVendorAuthAccounts,
 };
 
 type SkillActivationRecorder =

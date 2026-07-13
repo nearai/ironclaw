@@ -60,7 +60,6 @@ test("channelSurface and channelConnection extract the typed channel surface", (
     kind: "channel",
     inbound: true,
     outbound: true,
-    connected: false,
     connection,
   };
   const item = {

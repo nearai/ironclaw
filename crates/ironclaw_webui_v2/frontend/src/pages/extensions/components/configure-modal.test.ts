@@ -115,8 +115,8 @@ function renderModal({
     extensionLifecycleState: (extension) =>
       extension?.onboarding_state ||
       extension?.onboardingState ||
-      extension?.activation_status ||
-      extension?.activationStatus ||
+      extension?.installation_state ||
+      extension?.installationState ||
       (extension?.active ? "active" : "installed"),
     setupReadyForActivation: () => setupReady,
     // The real surface-taxonomy helpers: modal routing must key off declared

@@ -64,8 +64,8 @@ function extensionListItemIsConfigured(extension) {
   const state =
     extension.onboarding_state ||
     extension.onboardingState ||
-    extension.activation_status ||
-    extension.activationStatus ||
+    extension.installation_state ||
+    extension.installationState ||
     (extension.active ? "active" : null);
   return (state === "active" || state === "ready") && extension.needs_setup !== true;
 }
@@ -163,7 +163,7 @@ export function useExtensions() {
             // Freshly installed: the caller has not connected/paired yet.
             authenticated: false,
             active: false,
-            activationStatus: "setup_required",
+            installationState: "installed",
             onboardingState: "setup_required",
           });
         }

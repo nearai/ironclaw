@@ -19,11 +19,11 @@ use ironclaw_approvals::{
 };
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{CredentialAccountId, CredentialAccountProjection};
-use ironclaw_host_api::CapabilitySurfaceKind;
 use ironclaw_host_api::{
     AgentId, ApprovalRequestId, CapabilityId, EffectKind, ExtensionId, InvocationId,
     PermissionMode, Principal, ProjectId, ResourceScope, SecretHandle, TenantId, ThreadId, UserId,
 };
+use ironclaw_host_api::{CapabilitySurfaceKind, InstallationState};
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductOutboundEnvelope, ProductWorkflowRejectionKind, ProjectionCursor,
     ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
@@ -34,10 +34,10 @@ use ironclaw_product_workflow::{
     AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, ApprovalInteractionActionView,
     ApprovalInteractionDecision, ApprovalInteractionScope, ApprovalInteractionService,
     AuthInteractionDecision, AuthInteractionService, AutomationListRequest, AutomationName,
-    AutomationProductFacade, ChannelConfigFacade, ChannelConnectionRequirement, CodexLoginStart,
-    ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
-    ExtensionCredentialSubmitRequest, InboundAttachmentLander, InboundAttachmentReader,
-    LifecycleChannelDirections, LifecycleExtensionCredentialRequirement,
+    AutomationProductFacade, ChannelConfigFacade, ChannelConnectionFacade,
+    ChannelConnectionRequirement, CodexLoginStart, ExtensionCredentialSetupService,
+    ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, InboundAttachmentLander,
+    InboundAttachmentReader, LifecycleChannelDirections, LifecycleExtensionCredentialRequirement,
     LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
     LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductAction,
@@ -5224,6 +5224,7 @@ async fn list_extensions_projects_channel_surface_with_directions_and_connection
     });
     summary.channel_connection = Some(ChannelConnectionRequirement {
         channel: "slack".to_string(),
+        display_name: "Slack".to_string(),
         strategy: RebornChannelConnectStrategy::OAuth,
         instructions: "Connect Slack with OAuth.".to_string(),
         input_placeholder: String::new(),
@@ -5269,6 +5270,152 @@ async fn list_extensions_projects_channel_surface_with_directions_and_connection
     let connection = channel.2.expect("connect affordance carried");
     assert_eq!(connection.strategy, RebornChannelConnectStrategy::OAuth);
     assert_eq!(connection.submit_label, "Connect Slack");
+    // S5 wire gap: the connect affordance now carries the manifest display name
+    // so the frontend never derives a label from the channel id.
+    assert_eq!(connection.display_name, "Slack");
+    // §6.1 installation-state enum replaces the activation_status string.
+    assert_eq!(info.installation_state, InstallationState::Active);
+}
+
+/// A caller-scoped channel-connection facade that reports a fixed set of
+/// connected channels (mirrors the production port shape the composition crate
+/// wires; the default `StaticChannelConnectionFacade` reports none).
+struct ConnectedChannelConnectionFacade {
+    connections: std::collections::HashMap<String, bool>,
+}
+
+#[async_trait]
+impl ChannelConnectionFacade for ConnectedChannelConnectionFacade {
+    async fn caller_channel_connections(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<std::collections::HashMap<String, bool>, RebornServicesError> {
+        Ok(self.connections.clone())
+    }
+}
+
+/// Golden wire fixture (UI-1 / UI-2 / AUTH-9): an arbitrary channel on a
+/// multi-surface extension freezes the exact shape the frontend renders — the
+/// §6.1 installation-state enum, the per-vendor accounts list carrying the §6.3
+/// auth-account state enum (`account_id` / `label` / `state` / `is_default`),
+/// each surface's `resolved_account_id` + binding source, and the connection
+/// requirement's `display_name`. Vendor-neutral on purpose: `acme` proves no
+/// concrete product is needed. The retired stopgap fields (the
+/// `activation_status` string and the `connected` bool) are gone from the wire.
+#[tokio::test]
+async fn list_extensions_golden_wire_multi_surface_extension_freezes_accounts_list() {
+    let mut summary = extension_summary(
+        "acme",
+        vec![LifecycleExtensionCredentialRequirement {
+            name: "acme_oauth_token".to_string(),
+            provider: "acme".to_string(),
+            required: true,
+            setup: LifecycleExtensionCredentialSetup::ManualToken,
+        }],
+        None,
+    );
+    summary.surface_kinds = vec![
+        CapabilitySurfaceKind::Tool,
+        CapabilitySurfaceKind::Channel,
+        CapabilitySurfaceKind::Auth,
+    ];
+    summary.channel_directions = Some(LifecycleChannelDirections {
+        inbound: true,
+        outbound: true,
+    });
+    summary.channel_connection = Some(ChannelConnectionRequirement {
+        channel: "acme".to_string(),
+        display_name: "Acme Messenger".to_string(),
+        strategy: RebornChannelConnectStrategy::OAuth,
+        instructions: "Connect Acme Messenger with OAuth.".to_string(),
+        input_placeholder: String::new(),
+        submit_label: "Connect Acme Messenger".to_string(),
+        error_message: "Acme Messenger OAuth connection failed.".to_string(),
+    });
+
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_lifecycle_product_facade(Arc::new(ListingLifecycleFacade {
+        extension: LifecycleInstalledExtensionSummary {
+            summary,
+            phase: LifecyclePhase::Active,
+        },
+    }))
+    .with_channel_connection_facade(Arc::new(ConnectedChannelConnectionFacade {
+        connections: std::collections::HashMap::from([("acme".to_string(), true)]),
+    }));
+
+    let response = services
+        .list_extensions(caller())
+        .await
+        .expect("extensions response");
+    let info = response
+        .extensions
+        .iter()
+        .find(|extension| extension.package_ref.id.as_str() == "acme")
+        .expect("multi-surface extension listed");
+
+    // §6.1 installation-state enum on the wire (replaces the activation_status string).
+    assert_eq!(info.installation_state, InstallationState::Active);
+
+    // §6.4 / ADR 0001 accounts list — the frozen shape, named field for field.
+    // A live grant backfills to `connected` (MIG-1); one account per vendor,
+    // is_default (list length ≤ 1, shape only).
+    let accounts = serde_json::to_value(&info.auth_accounts).expect("auth_accounts serialize");
+    assert_eq!(
+        accounts,
+        json!([{
+            "vendor": "acme",
+            "accounts": [{
+                "account_id": "acme",
+                "label": "acme",
+                "state": "connected",
+                "is_default": true
+            }]
+        }]),
+        "the per-vendor accounts list freezes the account_id/label/state/is_default shape",
+    );
+
+    // Surface keys: tool / channel-with-resolved-account / auth, in declared order.
+    let surfaces = serde_json::to_value(&info.surfaces).expect("surfaces serialize");
+    assert_eq!(
+        surfaces,
+        json!([
+            { "kind": "tool" },
+            {
+                "kind": "channel",
+                "inbound": true,
+                "outbound": true,
+                "resolved_account_id": "acme",
+                "binding_source": "default",
+                "connection": {
+                    "channel": "acme",
+                    "display_name": "Acme Messenger",
+                    "strategy": "oauth",
+                    "instructions": "Connect Acme Messenger with OAuth.",
+                    "input_placeholder": "",
+                    "submit_label": "Connect Acme Messenger",
+                    "error_message": "Acme Messenger OAuth connection failed."
+                }
+            },
+            { "kind": "auth" }
+        ]),
+        "surface keys + the channel surface's resolved account + binding source + display_name are frozen",
+    );
+
+    // The retired stopgap fields are gone from the wire.
+    let info_json = serde_json::to_value(info).expect("info serialize");
+    assert!(
+        info_json.get("activation_status").is_none(),
+        "the activation_status string stopgap must be gone",
+    );
+    let channel_json = &surfaces.as_array().expect("surfaces array")[1];
+    assert!(
+        channel_json.get("connected").is_none(),
+        "the connected bool stopgap must be gone from the channel surface",
+    );
 }
 
 #[test]

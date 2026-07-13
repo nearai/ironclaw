@@ -193,7 +193,6 @@ test("ChannelConnectSections renders the same generic sections for every package
         kind: "channel",
         inbound: true,
         outbound: true,
-        connected: false,
         connection: { channel: "slack", strategy: "inbound_proof_code" },
       },
     ],
@@ -238,7 +237,7 @@ test("ChannelConnectSections renders inbound-proof-code surfaces as pairing with
   const view = channelConnectSectionsForTest({
     package_ref: { id: "telegram" },
     surfaces: [
-      { kind: "channel", inbound: true, outbound: true, connected: false, connection },
+      { kind: "channel", inbound: true, outbound: true, connection },
     ],
   });
 
@@ -285,14 +284,13 @@ test("ChannelsTab renders an installed OAuth-connect channel without pairing or 
   const slackItem = {
     package_ref: { id: "slack" },
     runtime: "first_party",
-    activation_status: "installed",
+    installation_state: "installed",
     surfaces: [
       { kind: "tool" },
       {
         kind: "channel",
         inbound: true,
         outbound: true,
-        connected: false,
         connection: { channel: "slack", strategy: "oauth" },
       },
     ],
@@ -371,9 +369,9 @@ test("ChannelsTab renders generic connect controls under installed channels", ()
   const telegramItem = {
     package_ref: { id: "telegram" },
     runtime: "wasm",
-    activation_status: "installed",
+    installation_state: "installed",
     surfaces: [
-      { kind: "channel", inbound: true, outbound: true, connected: false, connection },
+      { kind: "channel", inbound: true, outbound: true, connection },
     ],
   };
   const view = channelsTabForTest({ ...TAB_PROPS, channels: [telegramItem] });
@@ -399,14 +397,13 @@ test("ChannelsTab does not render duplicate fallback pairing when the channel su
   const surfaceOwned = {
     package_ref: { id: "telegram" },
     runtime: "wasm",
-    activation_status: "installed",
+    installation_state: "installed",
     onboarding_state: "pairing_required",
     surfaces: [
       {
         kind: "channel",
         inbound: true,
         outbound: true,
-        connected: false,
         connection: { channel: "telegram", strategy: "inbound_proof_code" },
       },
     ],
@@ -429,7 +426,7 @@ test("ChannelsTab falls back to pairing only when the surface connection did not
   const bareItem = {
     package_ref: { id: "telegram" },
     runtime: "wasm",
-    activation_status: "installed",
+    installation_state: "installed",
     onboarding_state: "pairing_required",
     surfaces: [{ kind: "channel", inbound: true, outbound: true }],
   };

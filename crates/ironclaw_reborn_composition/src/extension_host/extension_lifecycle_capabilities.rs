@@ -366,6 +366,7 @@ mod tests {
     fn slack_activation_response() -> LifecycleProductResponse {
         let requirement = ChannelConnectionRequirement {
             channel: "slack".to_string(),
+            display_name: "Slack".to_string(),
             strategy: RebornChannelConnectStrategy::OAuth,
             instructions: "Connect Slack with OAuth from the extension configuration.".to_string(),
             input_placeholder: String::new(),
@@ -421,6 +422,7 @@ mod tests {
         // or a broken match arm would otherwise be invisible to Rust tests.
         let requirement = ChannelConnectionRequirement {
             channel: "slack".to_string(),
+            display_name: "Slack".to_string(),
             strategy: RebornChannelConnectStrategy::OAuth,
             instructions: "Connect Slack with OAuth from the extension configuration.".to_string(),
             input_placeholder: String::new(),

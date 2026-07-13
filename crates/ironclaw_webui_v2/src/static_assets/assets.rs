@@ -781,7 +781,7 @@ mod tests {
         );
 
         let extension_card = source_text("pages/extensions/components/extension-card.tsx");
-        assert!(extension_card.contains("activationStatus: ext.activation_status"));
+        assert!(extension_card.contains("installationState: ext.installation_state"));
         assert!(extension_card.contains("onboardingState: ext.onboarding_state"));
 
         let configure_modal = source_text("pages/extensions/components/configure-modal.tsx");

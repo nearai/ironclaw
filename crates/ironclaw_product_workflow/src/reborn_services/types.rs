@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::ThreadId;
+use ironclaw_auth::{AuthAccountLastError, AuthAccountState};
+use ironclaw_host_api::{InstallationState, ThreadId};
 use ironclaw_product_adapters::{ProductOutboundEnvelope, ProjectionCursor};
 use ironclaw_threads::{SessionThreadRecord, SummaryArtifact, ThreadMessageRecord};
 use ironclaw_turns::{
@@ -1170,11 +1171,60 @@ pub enum RebornExtensionSurface {
     Channel {
         inbound: bool,
         outbound: bool,
+        /// The auth account this channel surface resolves to for its vendor,
+        /// when the surface binds a caller-scoped account. `None` until an
+        /// account exists. One account per vendor today (ADR 0001 keeps the
+        /// list shape); the id points into
+        /// [`RebornExtensionInfo::auth_accounts`].
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        connected: Option<bool>,
+        resolved_account_id: Option<String>,
+        /// How the resolved account was chosen: the per-(user, vendor) default
+        /// or an explicit per-extension binding. Always `Default` today — no
+        /// binding behavior ships until the multi-account follow-up.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        binding_source: Option<RebornAccountBindingSource>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         connection: Option<ChannelConnectionRequirement>,
     },
+}
+
+/// A vendor's connected accounts, as modeled on the extensions wire
+/// (overview §6.4, `adr/0001-multiple-accounts-per-vendor.md`). One account per
+/// vendor per user today; the list shape is frozen so the accepted
+/// multi-account follow-up extends behavior without a wire break. The connect
+/// card reads `accounts[0]`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornVendorAuthAccounts {
+    /// The credential-authority vendor id (the provider namespace a recipe
+    /// authenticates against).
+    pub vendor: String,
+    pub accounts: Vec<RebornAuthAccount>,
+}
+
+/// One connected account for a vendor. `state` is the shared §6.3 auth-account
+/// state machine, exposed exactly — no vendor- or extension-specific state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAuthAccount {
+    pub account_id: String,
+    /// User-facing label (defaulted from the recipe's identity claim — email,
+    /// workspace name — falling back to the extension display name until
+    /// identity extraction lands).
+    pub label: String,
+    pub state: AuthAccountState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<AuthAccountLastError>,
+    /// Exactly one account per (user, vendor) is the default whenever any
+    /// account exists. Always `true` today (list length ≤ 1).
+    pub is_default: bool,
+}
+
+/// How a surface's resolved account was chosen (ADR 0001). Always `Default`
+/// today — explicit per-extension bindings ship with the multi-account PR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornAccountBindingSource {
+    Default,
+    Explicit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1191,8 +1241,11 @@ pub struct RebornExtensionInfo {
     pub tools: Vec<String>,
     pub needs_setup: bool,
     pub has_auth: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub activation_status: Option<String>,
+    /// The installation lifecycle state (§6.1), exposed exactly. Richer facade
+    /// phases (configured / failed / upgrade-required) collapse into this enum;
+    /// the UI re-derives those distinctions from `needs_setup` + config
+    /// completeness + `activation_error`.
+    pub installation_state: InstallationState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1201,6 +1254,12 @@ pub struct RebornExtensionInfo {
     pub onboarding_state: Option<RebornExtensionOnboardingState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub onboarding: Option<RebornExtensionOnboardingPayload>,
+    /// Per-vendor connected accounts (§6.4, ADR 0001). Length ≤ 1 today; the
+    /// list shape is frozen for the multi-account follow-up. The connect card
+    /// reads `accounts[0]`; affordances derive from this state + the
+    /// installation state + config completeness.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auth_accounts: Vec<RebornVendorAuthAccounts>,
     /// Declared product surfaces (tool / auth / channel-with-direction).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub surfaces: Vec<RebornExtensionSurface>,

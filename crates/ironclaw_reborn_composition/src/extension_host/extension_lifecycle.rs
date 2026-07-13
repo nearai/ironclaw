@@ -18,8 +18,8 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, CapabilitySurfaceKind, EffectKind, ExtensionId,
-    PermissionMode, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement,
-    RuntimeHttpEgress, VirtualPath, sha256_digest_token,
+    PermissionMode, ResourceScope, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement,
+    RuntimeCredentialRequirement, RuntimeHttpEgress, VirtualPath, sha256_digest_token,
 };
 use ironclaw_product_adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use ironclaw_product_workflow::{
@@ -952,6 +952,7 @@ impl RebornLocalExtensionManagementPort {
             Some(channel_connection_requirement(
                 package_ref.id.as_str(),
                 active_package.manifest.name.as_str(),
+                channel_connect_strategy(&active_package),
             ))
         } else {
             None
@@ -1778,7 +1779,11 @@ fn activation_success_message(
 ) -> String {
     if package_declares_inbound_product_adapter(package) {
         let display_name = package.manifest.name.as_str();
-        let connection = channel_connection_requirement(package_ref.id.as_str(), display_name);
+        let connection = channel_connection_requirement(
+            package_ref.id.as_str(),
+            display_name,
+            channel_connect_strategy(package),
+        );
         let connect_guidance = match connection.strategy {
             RebornChannelConnectStrategy::OAuth => format!(
                 "If WebChat shows an account connection panel, tell the user to connect \
@@ -1856,31 +1861,65 @@ fn generic_host_error(error: ironclaw_extension_host::LifecycleError) -> Product
     }
 }
 
+/// The connect strategy for a channel surface, derived from the manifest's
+/// declared auth setup: OAuth when the extension declares an OAuth credential
+/// requirement, otherwise the generic inbound proof-code pairing. There is no
+/// per-extension branch — the manifest is the only input (DEL-4).
+pub(crate) fn channel_connect_strategy(package: &ExtensionPackage) -> RebornChannelConnectStrategy {
+    let uses_oauth = package_runtime_credential_auth_requirements(package)
+        .iter()
+        .any(|requirement| {
+            matches!(
+                requirement.setup,
+                RuntimeCredentialAccountSetup::OAuth { .. }
+            )
+        });
+    if uses_oauth {
+        RebornChannelConnectStrategy::OAuth
+    } else {
+        RebornChannelConnectStrategy::InboundProofCode
+    }
+}
+
+/// The structured connect affordance for a channel surface. Copy is generated
+/// generically from the manifest display name and the derived strategy — no
+/// per-extension branch and no inline vendor copy (DEL-4); the S5 `display_name`
+/// rides the wire so the frontend never re-derives a label from the channel id.
 pub(crate) fn channel_connection_requirement(
     channel_id: &str,
     display_name: &str,
+    strategy: RebornChannelConnectStrategy,
 ) -> ChannelConnectionRequirement {
-    if channel_id == "slack" {
-        ChannelConnectionRequirement {
-            channel: "slack".to_string(),
-            strategy: RebornChannelConnectStrategy::OAuth,
-            instructions: "Connect Slack with OAuth from the extension configuration, then message the Slack bot directly.".to_string(),
-            input_placeholder: String::new(),
-            submit_label: "Connect Slack".to_string(),
-            error_message: "Slack OAuth connection failed. Try configuring Slack again.".to_string(),
-        }
-    } else {
-        ChannelConnectionRequirement {
-            channel: channel_id.to_string(),
-            strategy: RebornChannelConnectStrategy::InboundProofCode,
-            instructions: format!(
-                "Open {}'s app or bot, get the pairing code, and paste it here.",
-                display_name
+    let (instructions, input_placeholder, submit_label, error_message) = match strategy {
+        RebornChannelConnectStrategy::OAuth => (
+            format!(
+                "Connect {display_name} with OAuth from the extension configuration, then \
+                 message {display_name} directly."
             ),
-            input_placeholder: "Enter pairing code".to_string(),
-            submit_label: "Connect".to_string(),
-            error_message: "Pairing failed. Check the code and try again.".to_string(),
-        }
+            String::new(),
+            format!("Connect {display_name}"),
+            format!(
+                "{display_name} OAuth connection failed. Try configuring {display_name} again."
+            ),
+        ),
+        RebornChannelConnectStrategy::InboundProofCode
+        | RebornChannelConnectStrategy::WebGeneratedCode
+        | RebornChannelConnectStrategy::QrCode
+        | RebornChannelConnectStrategy::AdminManagedChannels => (
+            format!("Open {display_name}'s app or bot, get the pairing code, and paste it here."),
+            "Enter pairing code".to_string(),
+            "Connect".to_string(),
+            "Pairing failed. Check the code and try again.".to_string(),
+        ),
+    };
+    ChannelConnectionRequirement {
+        channel: channel_id.to_string(),
+        display_name: display_name.to_string(),
+        strategy,
+        instructions,
+        input_placeholder,
+        submit_label,
+        error_message,
     }
 }
 
@@ -2279,79 +2318,49 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn extension_activate_returns_slack_oauth_guidance_for_external_channel_package() {
-        let (_dir, _storage_root, facade, _active_registry, _installation_store) =
-            extension_lifecycle_fixture_with_catalog_and_service(
-                AvailableExtensionCatalog::from_packages(vec![fixture_external_channel_package(
-                    "slack", "Slack",
-                )]),
-                ExtensionLifecycleService::new(ExtensionRegistry::new()),
-            );
-        let package_ref =
-            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("valid ref");
-        facade
-            .execute(
-                lifecycle_surface_context(),
-                LifecycleProductAction::ExtensionInstall {
-                    package_ref: package_ref.clone(),
-                },
-            )
-            .await
-            .expect("install slack channel");
+    #[test]
+    fn channel_connect_strategy_is_manifest_driven_not_name_based() {
+        // DEL-4: the connect strategy is derived from the manifest's declared
+        // auth setup, never from the extension id. The real Slack package
+        // declares an OAuth recipe (`[auth.slack]`), so it resolves to OAuth
+        // even though its channel ingress uses a bot token; a bot-token-only
+        // fixture — even one named "slack" — resolves to the generic
+        // proof-code pairing. That asymmetry is exactly what proves no name
+        // hardcode survives (the retired branch keyed OAuth off `id == "slack"`).
+        let slack =
+            crate::extension_host::available_extensions::slack_package().expect("slack package");
+        assert_eq!(
+            channel_connect_strategy(&slack.package),
+            RebornChannelConnectStrategy::OAuth,
+            "an extension declaring an OAuth recipe resolves to OAuth from the manifest",
+        );
 
-        let activate = facade
-            .execute(
-                lifecycle_surface_context(),
-                LifecycleProductAction::ExtensionActivate {
-                    package_ref: package_ref.clone(),
-                },
-            )
-            .await
-            .expect("activate slack channel");
+        let bot_token_named_slack = fixture_external_channel_package("slack", "Slack");
+        assert_eq!(
+            channel_connect_strategy(&bot_token_named_slack.package),
+            RebornChannelConnectStrategy::InboundProofCode,
+            "a bot-token-only channel resolves to proof-code regardless of its id",
+        );
 
-        assert_eq!(activate.phase, LifecyclePhase::Active);
-        let message = activate.message.as_deref().expect("activation message");
-        assert!(
-            message.contains("connect Slack via OAuth")
-                && message.contains("WebChat")
-                && message.contains("rather than pasting anything into normal chat")
-                && message.contains("continue the user's original request")
-                && message.contains("delivered by the host's outbound delivery"),
-            "Slack activation should guide the model into OAuth setup UI, got: {message}"
+        // The connect copy renders generically from the display name + the
+        // derived strategy — no inline vendor copy (DEL-4), and the S5
+        // `display_name` rides the requirement.
+        let requirement = channel_connection_requirement(
+            "slack",
+            "Slack",
+            channel_connect_strategy(&slack.package),
         );
-        assert!(
-            !message.contains("pairing"),
-            "Slack activation must not mention legacy manual-code flows: {message}"
-        );
-        let Some(LifecycleProductPayload::ExtensionActivate {
-            visible_capability_ids,
-            connection_required,
-            ..
-        }) = activate.payload.as_ref()
-        else {
-            panic!("expected extension activate payload");
-        };
-        assert!(
-            visible_capability_ids.is_empty(),
-            "Slack channel activation must not imply model-visible Slack read tools"
-        );
-        // The structured connect requirement is what drives the in-chat
-        // connection panel; the prose message above is model guidance only.
-        let requirement = connection_required
-            .as_ref()
-            .expect("slack channel activation must carry a structured connection requirement");
-        assert_eq!(requirement.channel, "slack");
         assert_eq!(requirement.strategy, RebornChannelConnectStrategy::OAuth);
+        assert_eq!(requirement.channel, "slack");
+        assert_eq!(requirement.display_name, "Slack");
         assert_eq!(requirement.input_placeholder, "");
         assert_eq!(requirement.submit_label, "Connect Slack");
-        assert_eq!(
-            requirement.instructions,
-            "Connect Slack with OAuth from the extension configuration, then message the Slack bot directly."
-        );
-        assert_eq!(
-            requirement.error_message,
-            "Slack OAuth connection failed. Try configuring Slack again."
+        assert!(
+            requirement
+                .instructions
+                .contains("Connect Slack with OAuth"),
+            "OAuth connect copy renders from the display name: {}",
+            requirement.instructions
         );
     }
 

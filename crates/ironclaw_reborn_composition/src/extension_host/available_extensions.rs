@@ -192,9 +192,11 @@ fn channel_connection_for_package(
     if !directions.inbound {
         return None;
     }
+    let strategy = super::extension_lifecycle::channel_connect_strategy(&package.package);
     Some(super::extension_lifecycle::channel_connection_requirement(
         package_ref.id.as_str(),
         &package.package.manifest.name,
+        strategy,
     ))
 }
 

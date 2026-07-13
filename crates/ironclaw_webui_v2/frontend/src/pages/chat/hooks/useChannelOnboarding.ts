@@ -181,8 +181,8 @@ function channelConnectionIsSatisfied(extensions, channel) {
   const state =
     extension.onboarding_state ||
     extension.onboardingState ||
-    extension.activation_status ||
-    extension.activationStatus;
+    extension.installation_state ||
+    extension.installationState;
   // Fail closed: an explicit backend connect card must not be suppressed by a
   // missing or unrecognized onboarding state. Treat the account as connected only
   // when it reports a state that is not a "needs connection" one.

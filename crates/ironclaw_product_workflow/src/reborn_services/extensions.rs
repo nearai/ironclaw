@@ -4,16 +4,18 @@ use std::{
 };
 
 use futures::{StreamExt, TryStreamExt, stream};
-use ironclaw_host_api::{CapabilitySurfaceKind, ExtensionId};
+use ironclaw_auth::AuthAccountState;
+use ironclaw_host_api::{CapabilitySurfaceKind, ExtensionId, InstallationState};
 
 use crate::{
     ChannelConnectionFacade, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
     LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductAction,
     LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
-    LifecycleProductResponse, LifecycleProductSurfaceContext, RebornExtensionActionResponse,
-    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionOnboardingState,
-    RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornExtensionSurface,
-    RebornServicesError, WebUiAuthenticatedCaller,
+    LifecycleProductResponse, LifecycleProductSurfaceContext, RebornAccountBindingSource,
+    RebornAuthAccount, RebornExtensionActionResponse, RebornExtensionInfo,
+    RebornExtensionListResponse, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
+    RebornExtensionRegistryResponse, RebornExtensionSurface, RebornServicesError,
+    RebornVendorAuthAccounts, WebUiAuthenticatedCaller,
 };
 
 use super::{
@@ -360,7 +362,12 @@ fn extension_info(
     } else {
         None
     };
-    let surfaces = wire_surfaces(&summary, connected);
+    let auth_accounts = vendor_auth_accounts(&summary, connected);
+    let resolved_account_id = auth_accounts
+        .first()
+        .and_then(|vendor| vendor.accounts.first())
+        .map(|account| account.account_id.clone());
+    let surfaces = wire_surfaces(&summary, resolved_account_id);
     RebornExtensionInfo {
         package_ref: summary.package_ref,
         display_name: summary.name,
@@ -376,11 +383,12 @@ fn extension_info(
                 LifecyclePhase::Installed | LifecyclePhase::Configured | LifecyclePhase::Failed
             ),
         has_auth,
-        activation_status: Some(phase_status(phase).to_string()),
+        installation_state: installation_state_from_phase(phase),
         activation_error: None,
         version: Some(summary.version),
         onboarding_state,
         onboarding: onboarding.onboarding,
+        auth_accounts,
         surfaces,
     }
 }
@@ -390,7 +398,7 @@ fn extension_info(
 /// (when a connections map applies), and the connect affordance.
 fn wire_surfaces(
     summary: &LifecycleExtensionSummary,
-    connected: Option<bool>,
+    resolved_account_id: Option<String>,
 ) -> Vec<RebornExtensionSurface> {
     summary
         .surface_kinds
@@ -407,7 +415,12 @@ fn wire_surfaces(
                     .channel_directions
                     .map(|directions| directions.outbound)
                     .unwrap_or(false),
-                connected,
+                // Length ≤ 1 today: the surface resolves to its vendor's single
+                // account through the default binding (ADR 0001, shape only).
+                binding_source: resolved_account_id
+                    .as_ref()
+                    .map(|_| RebornAccountBindingSource::Default),
+                resolved_account_id: resolved_account_id.clone(),
                 connection: summary.channel_connection.clone(),
             }),
             // Reserved kinds have no manifest section yet, so no wire form.
@@ -447,21 +460,74 @@ fn removable_channel_cleanup_for_summary(
     None
 }
 
-fn phase_status(phase: LifecyclePhase) -> &'static str {
+/// Project the facade's richer lifecycle phase onto the shared §6.1
+/// installation-state enum the wire exposes. The mapping is total: the facade
+/// phases that are not distinct installation-lifecycle states (configured /
+/// disabled / failed / upgrade-required / installing / discovered / unsupported)
+/// collapse to `Installed`, and the UI re-derives those distinctions from
+/// `needs_setup` + config completeness + `activation_error` + version (UI-4).
+/// `Deactivating`/`RemovalPending` are host-transient and never surface as a
+/// facade phase.
+fn installation_state_from_phase(phase: LifecyclePhase) -> InstallationState {
     match phase {
-        LifecyclePhase::Active => "active",
-        LifecyclePhase::Disabled => "disabled",
-        LifecyclePhase::Removed => "removed",
-        LifecyclePhase::Failed => "failed",
-        LifecyclePhase::Unsupported => "unsupported",
-        LifecyclePhase::Discovered => "available",
-        LifecyclePhase::Installing => "installing",
-        LifecyclePhase::Installed => "installed",
-        LifecyclePhase::Configured => "configured",
-        LifecyclePhase::Activating => "activating",
-        LifecyclePhase::UpgradeRequired => "upgrade_required",
-        LifecyclePhase::Removing => "removing",
+        LifecyclePhase::Active => InstallationState::Active,
+        LifecyclePhase::Activating => InstallationState::Activating,
+        LifecyclePhase::Removing => InstallationState::Removing,
+        LifecyclePhase::Removed => InstallationState::Removed,
+        LifecyclePhase::Discovered
+        | LifecyclePhase::Installing
+        | LifecyclePhase::Installed
+        | LifecyclePhase::Configured
+        | LifecyclePhase::Disabled
+        | LifecyclePhase::UpgradeRequired
+        | LifecyclePhase::Failed
+        | LifecyclePhase::Unsupported => InstallationState::Installed,
     }
+}
+
+/// The credential-authority vendor a channel/auth surface binds. Prefers the
+/// declared auth recipe vendor; falls back to the package id (today the two
+/// real channel package ids equal their vendor ids).
+fn channel_auth_vendor(summary: &LifecycleExtensionSummary) -> String {
+    summary
+        .credential_requirements
+        .first()
+        .map(|requirement| requirement.provider.clone())
+        .unwrap_or_else(|| summary.package_ref.id.as_str().to_string())
+}
+
+/// Per-vendor accounts list for the extensions wire (overview §6.4, ADR 0001).
+/// Shape only: one vendor, at most one account, derived from the caller's
+/// connection signal — a live grant backfills to `Connected` (MIG-1). Richer
+/// per-account state and multiple accounts arrive with the post-P7
+/// multi-account follow-up; the list shape is frozen so that lands without a
+/// wire break. `None` connection signal (no per-caller connection concept)
+/// yields no vendor entry.
+fn vendor_auth_accounts(
+    summary: &LifecycleExtensionSummary,
+    connected: Option<bool>,
+) -> Vec<RebornVendorAuthAccounts> {
+    let Some(is_connected) = connected else {
+        return Vec::new();
+    };
+    let vendor = channel_auth_vendor(summary);
+    let state = if is_connected {
+        AuthAccountState::Connected
+    } else {
+        AuthAccountState::Disconnected
+    };
+    vec![RebornVendorAuthAccounts {
+        vendor: vendor.clone(),
+        // One account per vendor today; its id is the vendor id until the
+        // multi-account follow-up wires real per-account identity.
+        accounts: vec![RebornAuthAccount {
+            account_id: vendor,
+            label: summary.name.clone(),
+            state,
+            last_error: None,
+            is_default: true,
+        }],
+    }]
 }
 
 fn action_response(

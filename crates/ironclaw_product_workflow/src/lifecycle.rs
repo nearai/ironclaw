@@ -301,6 +301,10 @@ impl LifecycleProductAction {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelConnectionRequirement {
     pub channel: String,
+    /// User-facing channel name from the manifest (S5 wire gap). The frontend
+    /// renders this instead of deriving a label from the channel id, so the
+    /// connect affordance carries no per-extension copy.
+    pub display_name: String,
     pub strategy: RebornChannelConnectStrategy,
     pub instructions: String,
     pub input_placeholder: String,

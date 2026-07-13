@@ -263,7 +263,7 @@ test("useOauthSetup waits for flow completion after the OAuth popup closes", asy
             authenticated: false,
             needs_setup: true,
             has_auth: true,
-            activation_status: "installed",
+            installation_state: "installed",
             onboarding_state: "auth_required",
           },
         ],
