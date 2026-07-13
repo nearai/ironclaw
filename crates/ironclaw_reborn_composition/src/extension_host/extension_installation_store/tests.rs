@@ -199,6 +199,48 @@ url = "https://example.com/mcp"
     );
 }
 
+/// Legacy pre-tenant state: persisted `user_registered` sources written
+/// before tenant-aware registrations carry no `tenant_id` field. They must
+/// deserialize with the documented serde default (`LOCAL_DEFAULT_TENANT_ID`),
+/// never fail the load or infer a tenant from the owner.
+#[tokio::test]
+async fn load_at_defaults_legacy_user_registered_source_to_local_default_tenant() {
+    let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+    let state_path = test_state_path();
+    let raw_toml = format!(
+        "schema_version = \"{}\"\nid = \"legacy-mcp\"\nname = \"Legacy MCP\"\nversion = \"0.1.0\"\ndescription = \"pre-tenant registered manifest\"\ntrust = \"third_party\"\n\n[runtime]\nkind = \"mcp\"\ntransport = \"http\"\nurl = \"https://example.com/mcp\"\n",
+        MANIFEST_SCHEMA_VERSION
+    );
+    let state = serde_json::json!({
+        "manifests": [{
+            "raw_toml": raw_toml,
+            "source": { "user_registered": { "owner": "legacy-owner" } },
+        }],
+        "installations": [],
+    });
+    filesystem
+        .write_file(&state_path, &serde_json::to_vec_pretty(&state).unwrap())
+        .await
+        .unwrap();
+
+    let store = FilesystemExtensionInstallationStore::load_at(filesystem, state_path)
+        .await
+        .expect("legacy tenant-less user_registered state loads");
+    let manifest = store
+        .get_manifest(&ExtensionId::new("legacy-mcp").unwrap())
+        .await
+        .expect("manifest read")
+        .expect("legacy manifest present");
+    assert_eq!(
+        manifest.manifest().source,
+        ManifestSource::UserRegistered {
+            tenant_id: TenantId::from_trusted(LOCAL_DEFAULT_TENANT_ID.to_string()),
+            owner: UserId::from_trusted("legacy-owner".to_string()),
+        },
+        "omitted tenant_id must default to LOCAL_DEFAULT_TENANT_ID"
+    );
+}
+
 #[tokio::test]
 async fn load_at_canonicalizes_duplicate_rows_and_preserves_complete_snapshot() {
     let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
