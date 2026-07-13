@@ -5,7 +5,7 @@ import { test } from "vitest";
 import vm from "node:vm";
 
 import { rememberChannelConnectionWaiter } from "../../../lib/channel-connection-events";
-import { hasChannelSurface } from "../lib/extensions-schema";
+import { connectsViaOauth, hasChannelSurface } from "../lib/extensions-schema";
 import { redeemPairingCode as realRedeemPairingCode } from "../lib/pairing-api";
 
 // Wire-shaped surface fixtures: a channel extension declares a channel
@@ -40,6 +40,7 @@ function renderModal({
   onClose = () => {},
   onSaved,
   activate = async () => {},
+  extensionActive = false,
   translate,
   redeemPairingCode,
   setupResult,
@@ -110,7 +111,7 @@ function renderModal({
       };
     },
     useSetupSubmit: () => ({ mutate() {}, isPending: false, error: null }),
-    extensionIsActive: () => false,
+    extensionIsActive: () => extensionActive,
     extensionLifecycleState: (extension) =>
       extension?.onboarding_state ||
       extension?.onboardingState ||
@@ -118,8 +119,9 @@ function renderModal({
       extension?.activationStatus ||
       (extension?.active ? "active" : "installed"),
     setupReadyForActivation: () => setupReady,
-    // The real surface-taxonomy helper: modal routing must key off declared
-    // channel surfaces, exactly as production does.
+    // The real surface-taxonomy helpers: modal routing must key off declared
+    // channel surfaces and connect strategies, exactly as production does.
+    connectsViaOauth,
     hasChannelSurface,
     redeemPairingCode: redeem,
     notifyChannelConnected: async (payload) => {
@@ -296,7 +298,7 @@ test("ConfigureModal does not show a generic activate action beside Slack OAuth"
   assert.doesNotMatch(body, /extensions\.activate/);
 });
 
-test("ConfigureModal activates the Slack extension after OAuth setup completes", async () => {
+test("ConfigureModal activates any not-yet-active extension after OAuth setup completes", async () => {
   const slackOauthSecret = {
     name: "slack_oauth",
     provider: "slack",
@@ -352,6 +354,72 @@ test("ConfigureModal activates the Slack extension after OAuth setup completes",
   assert.deepEqual(JSON.parse(JSON.stringify(notifications)), [
     { channel: "slack", source: "extensions-oauth" },
   ]);
+
+  // The auto-activate is generic: a non-channel tool extension gets the same
+  // best-effort activation after its OAuth connect (no per-extension branch).
+  const toolView = renderModal({
+    surfaces: toolSurfaces,
+    packageRef: { kind: "extension", id: "acme" },
+    channel: "acme",
+    displayName: "Acme",
+    onboardingState: "auth_required",
+    setupResult: {
+      secrets: [
+        {
+          name: "acme_oauth",
+          provider: "acme",
+          provided: false,
+          setup: { kind: "oauth", invocation_id: "invocation-beta" },
+        },
+      ],
+      fields: [],
+      onboarding: null,
+      isLoading: false,
+      error: null,
+    },
+  });
+  await toolView.oauthSetupArgs[0][1].onConfigured();
+  assert.deepEqual(JSON.parse(JSON.stringify(toolView.calls)), [
+    ["activate", { id: "acme" }],
+  ]);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(toolView.notifications)),
+    [],
+    "a tool-only extension broadcasts no channel-connected event",
+  );
+});
+
+test("ConfigureModal skips the post-OAuth activation for an already-active extension", async () => {
+  const { calls, oauthSetupArgs } = renderModal({
+    surfaces: channelSurfaces,
+    packageRef: { kind: "extension", id: "slack" },
+    channel: "slack",
+    displayName: "Slack",
+    onboardingState: "active",
+    extensionActive: true,
+    setupResult: {
+      secrets: [
+        {
+          name: "slack_oauth",
+          provider: "slack",
+          provided: true,
+          setup: { kind: "oauth", invocation_id: "invocation-alpha" },
+        },
+      ],
+      fields: [],
+      onboarding: null,
+      isLoading: false,
+      error: null,
+    },
+  });
+
+  await oauthSetupArgs[0][1].onConfigured();
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(calls)),
+    [],
+    "a reconnect on an active extension must not re-run activation",
+  );
 });
 
 test("ConfigureModal surfaces a failed OAuth flow as a retryable error", () => {

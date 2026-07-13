@@ -30,6 +30,31 @@ export function hasToolSurface(item) {
   return extensionSurfaces(item).some((surface) => surface?.kind === "tool");
 }
 
+// Channel discovery is extension-surface data: an extension's `surfaces`
+// carry a typed `channel` entry with direction (inbound/outbound), the
+// caller's connection state, and the connect affordance. There is no separate
+// connectable-channel registry.
+export function channelSurface(item) {
+  return extensionSurfaces(item).find((surface) => surface?.kind === "channel") || null;
+}
+
+export function channelConnection(item) {
+  return channelSurface(item)?.connection || null;
+}
+
+export function isInboundProofCodeConnection(connection) {
+  return connection?.strategy === "inbound_proof_code";
+}
+
+// A channel extension whose connect affordance is a browser OAuth relay:
+// connecting happens through the configure modal's OAuth secret, never a
+// paste-a-code pairing panel. Derived from the wire only — the surface
+// connection strategy, or an oauth-kind setup secret.
+export function connectsViaOauth(item, secrets = []) {
+  if (channelConnection(item)?.strategy === "oauth") return true;
+  return secrets.some((secret) => secret?.setup?.kind === "oauth");
+}
+
 export const STATE_TONES = {
   active: "success",
   ready: "success",
