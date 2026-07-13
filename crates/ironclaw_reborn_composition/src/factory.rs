@@ -527,6 +527,31 @@ impl RebornServices {
         Arc::clone(&self.secret_store)
     }
 
+    /// Fill the deferred per-caller channel-connection facade slot
+    /// (`RebornLocalRuntimeServices::channel_connection_facade_slot`) this
+    /// composition's local-dev runtime carries. Single owner of this recipe —
+    /// both `RebornRuntime::set_channel_connection_facade` (production Slack
+    /// host-beta wiring) and the test-only `set_channel_connection_facade_for_test`
+    /// accessor call it, so the two can never drift. Idempotent: returns
+    /// `false` when there is no local-dev runtime or the slot is already
+    /// filled, `true` on first set.
+    #[cfg_attr(
+        not(any(feature = "slack-v2-host-beta", feature = "test-support")),
+        allow(dead_code)
+    )]
+    pub(crate) fn fill_channel_connection_facade_slot(
+        &self,
+        facade: Arc<dyn ChannelConnectionFacade>,
+    ) -> bool {
+        let Some(local_runtime) = self.local_runtime.as_ref() else {
+            return false;
+        };
+        local_runtime
+            .channel_connection_facade_slot
+            .set(facade)
+            .is_ok()
+    }
+
     /// Read-write project-scoped workspace filesystem, built over
     /// `local_runtime.extension_filesystem` + `local_runtime.workspace_mounts`.
     /// `None` when no local runtime is composed.

@@ -1812,13 +1812,7 @@ impl RebornRuntime {
         &self,
         facade: Arc<dyn ironclaw_product_workflow::ChannelConnectionFacade>,
     ) -> bool {
-        let Some(local_runtime) = self.services.local_runtime.as_ref() else {
-            return false;
-        };
-        local_runtime
-            .channel_connection_facade_slot
-            .set(facade)
-            .is_ok()
+        self.services.fill_channel_connection_facade_slot(facade)
     }
 
     #[cfg(test)]

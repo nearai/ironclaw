@@ -23,7 +23,6 @@ mod scenario_activate_then_active_cross_thread;
 mod scenario_install_then_visible_cross_thread;
 mod scenario_install_unknown_extension_id_fails_safely;
 mod scenario_remove_channel_extension_disconnects_channel;
-mod scenario_remove_channel_extension_without_connection_skips_disconnect;
 mod scenario_remove_then_absent_cross_thread;
 mod scenario_same_run_activation_refresh_dispatches;
 mod scenario_uninstalled_tool_call_denied_until_activated;
@@ -84,16 +83,12 @@ async fn extensions_group_e2e() {
         scenario_same_run_activation_refresh_dispatches::run(&g).await,
     );
 
-    // Scenario 7 + 8 (extension-remove channel cleanup, #5851 int-tier
-    // salvage): positive (slack, Required) and negative
-    // (google-drive, IfConnectionFacadeSupportsChannel) companions.
+    // Scenario 7 (extension-remove channel cleanup, #5851 int-tier salvage):
+    // slack (Required) disconnects, google-drive
+    // (IfConnectionFacadeSupportsChannel, key absent) doesn't.
     report.record(
         "remove_channel_extension_disconnects_channel",
         scenario_remove_channel_extension_disconnects_channel::run(&g).await,
-    );
-    report.record(
-        "remove_channel_extension_without_connection_skips_disconnect",
-        scenario_remove_channel_extension_without_connection_skips_disconnect::run(&g).await,
     );
 
     report.assert_all_passed();

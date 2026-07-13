@@ -1,22 +1,11 @@
 //! Scenario 6 (harness-port-seam P2, A1): install -> activate -> dispatch a
-//! newly-activated capability, ALL WITHIN ONE RUN (one `submit_turn`) on one
-//! thread. Distinct from Scenario 5 (cross-RUN: rejected pre-activation, then
-//! dispatches on a SEPARATE later turn) — this closes the SAME-RUN gap.
-//!
-//! `builtin.extension_activate` clears `CapabilitySurfaceState`
-//! (`loop_driver_host.rs`'s `SurfaceTrackingLoopCapabilityPort`), forcing the
-//! next loop iteration's `visible_capabilities()` call through to production's
-//! `RefreshingLocalDevCapabilityPort::build_inner`, which rebuilds the port
-//! from the just-activated extension registry. Without that refresh, the
-//! third tool call's capability id would not resolve against the surface
-//! cached at turn start (pre-activation) and `assert_tool_invoked` below
-//! would fail — that absence is the discriminating proof, mirroring
-//! `scenario_uninstalled_tool_call_denied_until_activated`'s inverted check.
-//!
-//! Uses "google-calendar" (untouched by Scenarios 1-5) so activation starts
-//! genuinely fresh in this run — reusing an already-active extension would
-//! let the FIRST (turn-start) surface already contain the capability,
-//! defeating the point.
+//! newly-activated capability within ONE run, proving `builtin.extension_activate`
+//! clears `CapabilitySurfaceState` and forces production's
+//! `RefreshingLocalDevCapabilityPort::build_inner` to rebuild the port from
+//! the just-activated extension registry. Without that refresh the third
+//! tool call's capability id wouldn't resolve against the turn-start surface
+//! and `assert_tool_invoked` below would fail — that absence is the
+//! discriminating proof.
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
