@@ -36,21 +36,36 @@ async fn local_yolo_policy_mounts_confirmed_host_home_as_host() {
     assert_eq!(host_mount.target.as_str(), "/projects/host");
     assert_eq!(host_mount.permissions, MountPermissions::read_write());
 
-    let raw_host_home_alias = host_home
-        .canonicalize()
-        .expect("canonical host home")
-        .to_string_lossy()
-        .into_owned();
-    let raw_host_home_mount = local_runtime
-        .workspace_mounts
-        .mounts
-        .iter()
-        .find(|mount| mount.alias.as_str() == raw_host_home_alias)
-        .expect("raw host home mount exists");
-    assert_eq!(raw_host_home_mount.target.as_str(), "/projects/host");
+    #[cfg(unix)]
+    {
+        let raw_host_home_alias = host_home
+            .canonicalize()
+            .expect("canonical host home")
+            .to_string_lossy()
+            .into_owned();
+        let raw_host_home_mount = local_runtime
+            .workspace_mounts
+            .mounts
+            .iter()
+            .find(|mount| mount.alias.as_str() == raw_host_home_alias)
+            .expect("raw host home mount exists");
+        assert_eq!(raw_host_home_mount.target.as_str(), "/projects/host");
+        assert_eq!(
+            raw_host_home_mount.permissions,
+            MountPermissions::read_write()
+        );
+    }
+
+    #[cfg(windows)]
     assert_eq!(
-        raw_host_home_mount.permissions,
-        MountPermissions::read_write()
+        local_runtime
+            .workspace_mounts
+            .mounts
+            .iter()
+            .map(|mount| mount.alias.as_str())
+            .collect::<Vec<_>>(),
+        vec!["/workspace", "/host"],
+        "Windows must use virtual aliases instead of native paths"
     );
 }
 

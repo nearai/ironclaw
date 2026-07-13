@@ -335,6 +335,11 @@ must not look like a raw host path or URL unless an already-authorized local Mou
 explicitly includes that exact raw host prefix as a MountAlias
 ```
 
+Raw local aliases are supported only when the native host path already satisfies
+the POSIX-shaped `MountAlias` contract. Windows local runtimes expose native
+roots through `/workspace` and `/host` instead of registering drive paths as
+mount aliases.
+
 Rejected as `ScopedPath`:
 
 ```text

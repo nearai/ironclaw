@@ -3706,9 +3706,9 @@ impl LocalDevHostHomeRoot {
 /// for skill context, and a read-write workspace view for runtime operations.
 ///
 /// When `host_home_root` is present, the runtime view is the local-dev-yolo
-/// ambient coding-tool view: it grants raw workspace and host-home aliases so
-/// real local paths resolve through the same virtual roots as `/workspace` and
-/// `/host`.
+/// ambient coding-tool view. It always grants `/workspace` and `/host`; on
+/// Unix it also grants native workspace and host-home aliases, since those
+/// paths satisfy the POSIX `MountAlias` contract.
 fn build_workspace_filesystems(
     filesystem: Arc<LocalDevRootFilesystem>,
     workspace_root: &Path,

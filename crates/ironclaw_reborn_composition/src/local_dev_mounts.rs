@@ -22,7 +22,10 @@ pub(crate) fn workspace_mount_view(
 ///
 /// `workspace_aliases` is load-bearing for local-dev-yolo ambient coding tools:
 /// callers must pass it only under a yolo runtime policy. Non-yolo local-dev
-/// must pass an empty slice so raw host workspace paths stay denied.
+/// must pass an empty slice so raw host workspace paths stay denied. Native
+/// path aliases are only added on Unix, where they satisfy `MountAlias`'s
+/// POSIX path contract; other platforms keep the stable `/workspace` and
+/// `/host` aliases and translate those at the process boundary.
 pub(crate) fn ambient_workspace_mount_view(
     permissions: MountPermissions,
     workspace_aliases: &[&Path],
@@ -33,22 +36,26 @@ pub(crate) fn ambient_workspace_mount_view(
         WORKSPACE_TARGET,
         permissions.clone(),
     )?];
-    push_raw_alias_mounts(
-        &mut mounts,
-        workspace_aliases,
-        WORKSPACE_TARGET,
-        permissions.clone(),
-        "workspace alias",
-    )?;
-    if !host_home_aliases.is_empty() {
-        mounts.push(grant(HOST_ALIAS, HOST_TARGET, permissions.clone())?);
+    if cfg!(unix) {
         push_raw_alias_mounts(
             &mut mounts,
-            host_home_aliases,
-            HOST_TARGET,
+            workspace_aliases,
+            WORKSPACE_TARGET,
             permissions.clone(),
-            "confirmed host-home alias",
+            "workspace alias",
         )?;
+    }
+    if !host_home_aliases.is_empty() {
+        mounts.push(grant(HOST_ALIAS, HOST_TARGET, permissions.clone())?);
+        if cfg!(unix) {
+            push_raw_alias_mounts(
+                &mut mounts,
+                host_home_aliases,
+                HOST_TARGET,
+                permissions.clone(),
+                "confirmed host-home alias",
+            )?;
+        }
     }
     MountView::new(mounts)
 }
@@ -196,6 +203,7 @@ fn push_raw_alias_mounts(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn ambient_workspace_mount_rejects_invalid_workspace_alias() {
         let err = ambient_workspace_mount_view(
@@ -211,6 +219,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn workspace_mount_rejects_host_home_alias_that_is_not_mount_shaped() {
         let err = workspace_mount_view(
@@ -244,6 +253,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn workspace_mount_deduplicates_normalized_host_home_aliases() {
         let mounts = workspace_mount_view(
@@ -266,6 +276,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn ambient_workspace_mount_includes_raw_workspace_alias() {
         let mounts = ambient_workspace_mount_view(
