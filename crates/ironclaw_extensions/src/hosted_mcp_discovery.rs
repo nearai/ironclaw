@@ -99,12 +99,21 @@ fn valid_hosted_mcp_url(url: &str) -> bool {
     let Ok(parsed) = url::Url::parse(url) else {
         return false;
     };
-    parsed.scheme() == "https"
+    let allowed_scheme =
+        parsed.scheme() == "https" || (parsed.scheme() == "http" && literal_loopback_host(&parsed));
+    allowed_scheme
         && parsed.username().is_empty()
         && parsed.password().is_none()
         && parsed.host_str().is_some()
         && parsed.query().is_none()
         && parsed.fragment().is_none()
+}
+
+fn literal_loopback_host(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(_) | url::Host::Domain(_)) | None => false,
+    }
 }
 
 fn hosted_mcp_capability_template(
@@ -348,9 +357,30 @@ runtime_credentials = [
         );
     }
 
+    #[test]
+    fn hosted_mcp_recognizes_plaintext_only_for_literal_loopback() {
+        assert!(is_hosted_http_mcp_package(&notion_package_with_url(
+            "http://127.0.0.1:4321/mcp"
+        )));
+        assert!(!is_hosted_http_mcp_package(&notion_package_with_url(
+            "http://[::1]:4321/mcp"
+        )));
+        assert!(!is_hosted_http_mcp_package(&notion_package_with_url(
+            "http://localhost:4321/mcp"
+        )));
+        assert!(!is_hosted_http_mcp_package(&notion_package_with_url(
+            "http://192.168.1.10:4321/mcp"
+        )));
+    }
+
     fn notion_package() -> ExtensionPackage {
+        notion_package_with_url("https://mcp.notion.com/mcp")
+    }
+
+    fn notion_package_with_url(url: &str) -> ExtensionPackage {
+        let manifest_toml = NOTION_MANIFEST.replace("https://mcp.notion.com/mcp", url);
         let manifest = ExtensionManifest::parse(
-            NOTION_MANIFEST,
+            &manifest_toml,
             ManifestSource::HostBundled,
             &HostPortCatalog::default(),
         )

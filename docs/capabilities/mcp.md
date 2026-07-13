@@ -5,6 +5,13 @@ description: Connect your agent to Model Context Protocol (MCP) servers
 
 IronClaw connects to [Model Context Protocol](https://modelcontextprotocol.io/) servers, giving your agent access to external tools and data sources without writing custom integrations.
 
+> **Binary scope:** the `ironclaw mcp ...` commands and
+> `~/.ironclaw/mcp-servers.json` configuration below apply to the v1 `ironclaw`
+> binary. Reborn does not spawn stdio MCP servers. `ironclaw-reborn` supports
+> host-mediated HTTPS MCP providers and installed-local HTTP MCP manifests only
+> when the URL host is a literal IPv4 loopback address (`127.0.0.0/8`). It rejects
+> `localhost`, private LAN addresses, and plaintext remote endpoints.
+
 ---
 
 ## Quickstart

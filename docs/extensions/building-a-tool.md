@@ -494,15 +494,24 @@ transport = "http"
 url = "https://mcp.notion.com/mcp"
 ```
 
-For host-bundled hosted HTTP MCP, Reborn composition:
+For HTTP MCP, Reborn composition:
 
-- accepts only HTTPS endpoint URLs;
+- accepts HTTPS for host-bundled remote providers;
+- accepts plaintext HTTP only for a literal IPv4 loopback address. This supports
+  installed-local MCP packages and host-bundled local endpoints without making
+  `localhost` (DNS-rebindable), private LAN addresses, or remote HTTP valid;
 - rejects userinfo, query strings, fragments, wrong scheme, wrong host, and
   wrong path;
-- derives a locked network policy from the manifest endpoint;
+- derives a locked network policy from the manifest endpoint. For an
+  installed-local loopback MCP package, that exact scheme, IP, and port replace
+  any broader manifest targets and are the only private-range exception;
 - projects `runtime_credentials` to staged credential injections when the
   capability and endpoint audience match;
 - uses `RuntimeHttpEgress` instead of ambient MCP HTTP clients.
+
+Reborn still rejects stdio MCP dispatch. An installed-local HTTP MCP manifest
+must declare its capability schemas statically; live `tools/list` schema
+discovery remains the host-bundled provider path.
 
 Notion is the reference. Its manifest declares each MCP tool as a capability,
 with per-tool schemas and prompts, and a product-auth `notion` credential for

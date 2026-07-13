@@ -166,6 +166,21 @@ Transport-specific policy is a host adapter responsibility:
 - MCP protocol code consumes `RuntimeCredentialInjection` plans only; product
   auth account selection belongs to composition, not to the MCP crate.
 
+### Local HTTP transport
+
+Reborn may dispatch an `InstalledLocal` MCP package over plaintext HTTP only
+when the manifest URL host is a literal loopback IP. The endpoint parser accepts
+IPv4 loopback (`127.0.0.0/8`), rejects DNS names such as `localhost`, and rejects
+IPv6, private LAN, or remote HTTP targets. Composition
+derives both the capability grant and MCP egress plan from that exact runtime
+scheme, IP, and port; `deny_private_ip_ranges` is waived only for this pinned
+target. Registry-installed packages do not receive this exception.
+
+Remote host-bundled providers remain HTTPS-only with private-range denial.
+Host-bundled endpoints may also use the same literal-loopback HTTP exception for
+local development and schema discovery. Stdio remains unsupported until a
+mediated process transport exists.
+
 ## 7. Hosted schema discovery
 
 `McpClient::discover_tools(...)` performs the same hosted HTTP/SSE handshake as

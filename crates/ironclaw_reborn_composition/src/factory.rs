@@ -895,6 +895,13 @@ fn active_extension_network_policy_for_test(
     if let Some(policy) = gsuite_network_policy_for(&capability.provider) {
         return policy;
     }
+    if let Some(target) = &capability.local_mcp_loopback_target {
+        return NetworkPolicy {
+            allowed_targets: vec![target.clone()],
+            deny_private_ip_ranges: false,
+            max_egress_bytes: None,
+        };
+    }
 
     let mut targets = Vec::new();
     for credential in &capability.runtime_credentials {

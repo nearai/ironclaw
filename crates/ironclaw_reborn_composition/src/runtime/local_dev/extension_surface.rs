@@ -180,6 +180,16 @@ fn extension_network_policy(capability: &ActiveExtensionCapability) -> NetworkPo
     if let Some(policy) = gsuite_network_policy_for(&capability.provider) {
         return policy;
     }
+    if let Some(target) = &capability.local_mcp_loopback_target {
+        return NetworkPolicy {
+            allowed_targets: vec![target.clone()],
+            // This target was derived from an InstalledLocal MCP runtime URL
+            // whose host is a literal loopback IP. Keep its authority to that
+            // single endpoint while allowing the network layer to reach it.
+            deny_private_ip_ranges: false,
+            max_egress_bytes: None,
+        };
+    }
 
     let mut targets = Vec::new();
     // Manifest-declared egress allowlist — the keyless-but-networked path. A
@@ -256,6 +266,7 @@ mod tests {
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
             network_targets: Vec::new(),
+            local_mcp_loopback_target: None,
             owner,
         };
         let surface = LocalDevExtensionSurface::from_active_capabilities(vec![
@@ -319,6 +330,7 @@ mod tests {
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
             network_targets: Vec::new(),
+            local_mcp_loopback_target: None,
             owner: ironclaw_extensions::InstallationOwner::Tenant,
         };
 
@@ -345,6 +357,7 @@ mod tests {
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
             network_targets: Vec::new(),
+            local_mcp_loopback_target: None,
             owner: ironclaw_extensions::InstallationOwner::Tenant,
         };
 
@@ -377,6 +390,7 @@ mod tests {
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
             network_targets: Vec::new(),
+            local_mcp_loopback_target: None,
             owner: ironclaw_extensions::InstallationOwner::Tenant,
         };
 
@@ -406,6 +420,7 @@ mod tests {
                 host_pattern: "news.ycombinator.com".to_string(),
                 port: None,
             }],
+            local_mcp_loopback_target: None,
             owner: ironclaw_extensions::InstallationOwner::Tenant,
         };
 
@@ -423,6 +438,36 @@ mod tests {
             policy.deny_private_ip_ranges,
             "a tool with declared egress keeps the private-IP SSRF guard"
         );
+    }
+
+    #[test]
+    fn installed_local_mcp_loopback_endpoint_gets_exact_private_range_exception() {
+        let target = NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Http),
+            host_pattern: "127.0.0.2".to_string(),
+            port: Some(4321),
+        };
+        let capability = ActiveExtensionCapability {
+            id: CapabilityId::new("local-mcp.search").unwrap(),
+            provider: ExtensionId::new("local-mcp").unwrap(),
+            effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+            default_permission: PermissionMode::Ask,
+            runtime_credentials: Vec::new(),
+            // A local MCP runtime endpoint is authoritative; extra manifest
+            // targets must not widen the staged policy.
+            network_targets: vec![NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: "example.com".to_string(),
+                port: None,
+            }],
+            local_mcp_loopback_target: Some(target.clone()),
+            owner: ironclaw_extensions::InstallationOwner::Tenant,
+        };
+
+        let policy = extension_network_policy(&capability);
+
+        assert_eq!(policy.allowed_targets, vec![target]);
+        assert!(!policy.deny_private_ip_ranges);
     }
 
     #[test]
@@ -448,6 +493,7 @@ mod tests {
                 required: true,
             }],
             network_targets: Vec::new(),
+            local_mcp_loopback_target: None,
             owner: ironclaw_extensions::InstallationOwner::Tenant,
         };
 
@@ -471,6 +517,7 @@ mod tests {
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
             network_targets: Vec::new(),
+            local_mcp_loopback_target: None,
             owner: ironclaw_extensions::InstallationOwner::Tenant,
         };
 
@@ -493,6 +540,7 @@ mod tests {
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
             network_targets: Vec::new(),
+            local_mcp_loopback_target: None,
             owner: ironclaw_extensions::InstallationOwner::Tenant,
         };
 

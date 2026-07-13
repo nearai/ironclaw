@@ -104,31 +104,39 @@ impl McpHostHttpEgressPlanner for RegistryMcpEgressPlanner {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HostedMcpEndpoint {
+    scheme: NetworkScheme,
     host_pattern: String,
     port: Option<u16>,
     path: String,
+    is_loopback_http: bool,
 }
 
 impl HostedMcpEndpoint {
     fn parse(url: &str) -> Option<Self> {
         let parsed = url::Url::parse(url).ok()?;
-        if parsed.scheme() != "https"
-            || !parsed.username().is_empty()
+        if !parsed.username().is_empty()
             || parsed.password().is_some()
             || parsed.query().is_some()
             || parsed.fragment().is_some()
         {
             return None;
         }
+        let (scheme, is_loopback_http) = match parsed.scheme() {
+            "https" => (NetworkScheme::Https, false),
+            "http" if literal_loopback_host(&parsed) => (NetworkScheme::Http, true),
+            _ => return None,
+        };
         Some(Self {
+            scheme,
             host_pattern: parsed.host_str()?.to_ascii_lowercase(),
             port: parsed.port(),
             path: normalize_mcp_path(parsed.path()),
+            is_loopback_http,
         })
     }
 
     fn allows_target(&self, target: &NetworkTargetPattern) -> bool {
-        target.scheme == Some(NetworkScheme::Https)
+        target.scheme == Some(self.scheme)
             && target.host_pattern.eq_ignore_ascii_case(&self.host_pattern)
             && target.port == self.port
     }
@@ -136,12 +144,24 @@ impl HostedMcpEndpoint {
     fn matches_url(&self, url: &str) -> bool {
         Self::parse(url).is_some_and(|request_endpoint| request_endpoint == *self)
     }
+
+    fn network_target(&self) -> NetworkTargetPattern {
+        NetworkTargetPattern {
+            scheme: Some(self.scheme),
+            host_pattern: self.host_pattern.clone(),
+            // NetworkTargetPattern::port = None matches any port. Pin the HTTP
+            // default explicitly so a loopback exception never widens from
+            // port 80 to every service on the host.
+            port: if self.is_loopback_http {
+                Some(self.port.unwrap_or(80))
+            } else {
+                self.port
+            },
+        }
+    }
 }
 
 pub(crate) fn hosted_http_mcp_endpoint(package: &ExtensionPackage) -> Option<HostedMcpEndpoint> {
-    if package.manifest.source != ManifestSource::HostBundled {
-        return None;
-    }
     let ExtensionRuntime::Mcp {
         transport,
         command: None,
@@ -154,14 +174,36 @@ pub(crate) fn hosted_http_mcp_endpoint(package: &ExtensionPackage) -> Option<Hos
     if transport != "http" || !args.is_empty() {
         return None;
     }
-    HostedMcpEndpoint::parse(url)
+    let endpoint = HostedMcpEndpoint::parse(url)?;
+    match package.manifest.source {
+        ManifestSource::HostBundled => Some(endpoint),
+        ManifestSource::InstalledLocal if endpoint.is_loopback_http => Some(endpoint),
+        ManifestSource::InstalledLocal | ManifestSource::RegistryInstalled => None,
+    }
 }
 
-/// Returns `true` only when `url` has scheme `https`, a host that
-/// case-insensitively matches `endpoint.host_pattern`, and a path that
-/// (ignoring trailing slashes) matches `endpoint.path`.
+pub(crate) fn installed_local_mcp_loopback_target(
+    package: &ExtensionPackage,
+) -> Option<NetworkTargetPattern> {
+    (package.manifest.source == ManifestSource::InstalledLocal)
+        .then(|| hosted_http_mcp_endpoint(package))
+        .flatten()
+        .filter(|endpoint| endpoint.is_loopback_http)
+        .map(|endpoint| endpoint.network_target())
+}
+
+/// Returns `true` only when `url` exactly matches the endpoint scheme, host,
+/// port, and normalized path. Plaintext HTTP endpoints are parseable only for
+/// literal loopback IPs.
 fn hosted_mcp_url_allowed(url: &str, endpoint: &HostedMcpEndpoint) -> bool {
     endpoint.matches_url(url)
+}
+
+fn literal_loopback_host(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(_) | url::Host::Domain(_)) | None => false,
+    }
 }
 
 fn normalize_mcp_path(path: &str) -> String {
@@ -175,14 +217,11 @@ fn normalize_mcp_path(path: &str) -> String {
 
 fn hosted_mcp_network_policy(endpoint: &HostedMcpEndpoint) -> NetworkPolicy {
     NetworkPolicy {
-        allowed_targets: vec![NetworkTargetPattern {
-            scheme: Some(NetworkScheme::Https),
-            host_pattern: endpoint.host_pattern.clone(),
-            port: endpoint.port,
-        }],
-        // Matches the bundled manifest's deny_private_ip_ranges default.
-        // Dispatcher would reject anyway, but the plan must agree.
-        deny_private_ip_ranges: true,
+        allowed_targets: vec![endpoint.network_target()],
+        // The allowlist still pins one literal host and port. Waive the general
+        // private-range guard only for an endpoint already proven to be a
+        // literal loopback IP; remote providers retain the SSRF guard.
+        deny_private_ip_ranges: !endpoint.is_loopback_http,
         max_egress_bytes: Some(MCP_NETWORK_EGRESS_LIMIT),
     }
 }
@@ -274,6 +313,97 @@ mod tests {
         assert_eq!(
             plan.network_policy.allowed_targets[0].host_pattern,
             "fixture.example.com"
+        );
+    }
+
+    #[test]
+    fn planner_allows_installed_local_mcp_only_at_literal_loopback_endpoint() {
+        let registry = Arc::new(SharedExtensionRegistry::new(registry_with_provider_source(
+            "local-mcp",
+            "http://127.0.0.2:4321/mcp",
+            "local-mcp.search",
+            "local_mcp_token",
+            ManifestSource::InstalledLocal,
+        )));
+        let planner = RegistryMcpEgressPlanner::new(Arc::clone(&registry));
+        let provider = ExtensionId::new("local-mcp").unwrap();
+        let cap = CapabilityId::new("local-mcp.search").unwrap();
+        let scope = sample_scope();
+
+        let plan = planner.plan(sample_plan_request(
+            &provider,
+            &cap,
+            "http://127.0.0.2:4321/mcp",
+            &scope,
+        ));
+
+        assert_eq!(
+            plan.network_policy.allowed_targets,
+            vec![NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Http),
+                host_pattern: "127.0.0.2".to_string(),
+                port: Some(4321),
+            }]
+        );
+        assert!(!plan.network_policy.deny_private_ip_ranges);
+        assert_eq!(plan.response_body_limit, Some(MCP_RESPONSE_BODY_LIMIT));
+        let package = registry
+            .snapshot()
+            .get_extension(&provider)
+            .expect("local provider")
+            .clone();
+        assert_eq!(
+            installed_local_mcp_loopback_target(&package),
+            plan.network_policy.allowed_targets.first().cloned()
+        );
+    }
+
+    #[test]
+    fn planner_rejects_installed_local_mcp_for_non_loopback_or_hostname_http() {
+        let provider = ExtensionId::new("local-mcp").unwrap();
+        let cap = CapabilityId::new("local-mcp.search").unwrap();
+        let scope = sample_scope();
+
+        for url in [
+            "http://localhost:4321/mcp",
+            "http://192.168.1.10:4321/mcp",
+            "https://example.com/mcp",
+        ] {
+            let registry = Arc::new(SharedExtensionRegistry::new(registry_with_provider_source(
+                "local-mcp",
+                url,
+                "local-mcp.search",
+                "local_mcp_token",
+                ManifestSource::InstalledLocal,
+            )));
+            let planner = RegistryMcpEgressPlanner::new(registry);
+            let plan = planner.plan(sample_plan_request(&provider, &cap, url, &scope));
+
+            assert!(
+                plan.network_policy.allowed_targets.is_empty(),
+                "installed-local endpoint {url} must remain denied"
+            );
+        }
+    }
+
+    #[test]
+    fn installed_local_loopback_default_http_port_is_pinned() {
+        let registry = registry_with_provider_source(
+            "local-mcp",
+            "http://127.0.0.1/mcp",
+            "local-mcp.search",
+            "local_mcp_token",
+            ManifestSource::InstalledLocal,
+        );
+        let package = registry
+            .get_extension(&ExtensionId::new("local-mcp").unwrap())
+            .expect("local provider");
+
+        assert_eq!(
+            installed_local_mcp_loopback_target(package)
+                .expect("loopback target")
+                .port,
+            Some(80)
         );
     }
 
@@ -473,6 +603,22 @@ mod tests {
         capability_id: &str,
         credential_handle: &str,
     ) -> ironclaw_extensions::ExtensionRegistry {
+        registry_with_provider_source(
+            provider,
+            url,
+            capability_id,
+            credential_handle,
+            ManifestSource::HostBundled,
+        )
+    }
+
+    fn registry_with_provider_source(
+        provider: &str,
+        url: &str,
+        capability_id: &str,
+        credential_handle: &str,
+        source: ManifestSource,
+    ) -> ironclaw_extensions::ExtensionRegistry {
         let mut registry = ironclaw_extensions::ExtensionRegistry::new();
         let host = url::Url::parse(url)
             .unwrap()
@@ -488,7 +634,7 @@ mod tests {
                         name: provider.to_string(),
                         version: "0.1.0".to_string(),
                         description: "Hosted MCP".to_string(),
-                        source: ManifestSource::HostBundled,
+                        source,
                         requested_trust: ironclaw_host_api::RequestedTrustClass::ThirdParty,
                         descriptor_trust_default: TrustClass::Sandbox,
                         runtime: ironclaw_extensions::ExtensionRuntime::Mcp {
