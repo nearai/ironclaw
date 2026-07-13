@@ -1275,14 +1275,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_wasm_product_adapters/src/runner_immediate_ack.rs",
         "slack",
     ),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/components/slack-channel-picker.tsx",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/components/slack-setup-panel.tsx",
-        "slack",
-    ),
     ("crates/ironclaw_webui_v2/frontend/src/i18n/ar.ts", "github"),
     ("crates/ironclaw_webui_v2/frontend/src/i18n/ar.ts", "google"),
     ("crates/ironclaw_webui_v2/frontend/src/i18n/ar.ts", "slack"),
@@ -1335,56 +1327,8 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "slack",
     ),
     (
-        "crates/ironclaw_webui_v2/frontend/src/lib/channel-connection-events.ts",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/lib/slack-channels-api.ts",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/lib/slack-setup-api.ts",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/pages/automations/components/automation-delivery-defaults-panel.tsx",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/pages/chat/chat.tsx",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/pages/chat/components/auth-oauth-card.tsx",
-        "github",
-    ),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/pages/chat/components/auth-oauth-card.tsx",
-        "google",
-    ),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/pages/chat/components/auth-oauth-card.tsx",
-        "notion",
-    ),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/pages/chat/components/auth-oauth-card.tsx",
-        "slack",
-    ),
-    (
         "crates/ironclaw_webui_v2/frontend/src/pages/chat/lib/gates.ts",
         "github",
-    ),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/pages/extensions/components/channels-tab.tsx",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/pages/extensions/components/configure-modal.tsx",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/pages/extensions/lib/pairing-api.ts",
-        "slack",
     ),
     (
         "crates/ironclaw_webui_v2/frontend/src/pages/login/components/oauth-provider-buttons.tsx",
