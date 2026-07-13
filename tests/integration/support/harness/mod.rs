@@ -73,9 +73,9 @@ pub(crate) use super::doubles::{
 };
 pub(crate) use assembly::{
     LocalDevRootMounts, bundled_extension_provider_trust, capability_ids_from_strs,
-    copy_dir_recursive, host_runtime_storage_roots, http_test_policy, local_dev_all_effects,
-    local_dev_host_runtime_with_http_egress, local_dev_host_runtime_with_live_http_egress,
-    local_dev_host_runtime_with_real_egress_pipeline,
+    copy_dir_recursive, default_capability_io_pair, host_runtime_storage_roots, http_test_policy,
+    local_dev_all_effects, local_dev_host_runtime_with_http_egress,
+    local_dev_host_runtime_with_live_http_egress, local_dev_host_runtime_with_real_egress_pipeline,
     local_dev_host_runtime_with_registry_and_egress, local_dev_mount_descriptor,
     local_dev_root_filesystem, memory_mounts, qa_smoke_mounts, skill_mounts, wildcard_test_policy,
     workspace_mounts,
@@ -105,9 +105,17 @@ impl HarnessCapabilityMode {
         }
     }
 
+    /// `turn_thread_service` is the REAL `SessionThreadService` the caller's
+    /// turns dispatch against (`group.rs`'s `group_thread_harness.service`).
+    /// Only consumed by the `HostRuntime` arm, and only when that harness was
+    /// built with `.with_durable_capability_io()` -- see
+    /// `HostRuntimeCapabilityHarness::install_durable_capability_io`'s doc
+    /// for why the durable-io swap must happen here rather than at harness
+    /// construction (issue #5838).
     pub(crate) fn into_parts(
         self,
         milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
+        turn_thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
     ) -> HarnessResult<HarnessCapabilityParts> {
         match self {
             Self::Recording(port) => {
@@ -125,13 +133,18 @@ impl HarnessCapabilityMode {
                     HarnessCapabilityRecorder::Recording(port),
                 ))
             }
-            Self::HostRuntime(harness) => Ok((
-                harness.capability_factory(milestone_sink),
-                Arc::new(HostRuntimeHarnessSurfaceResolver),
-                harness.io.clone(),
-                harness.capability_result_writer(),
-                HarnessCapabilityRecorder::HostRuntime(harness),
-            )),
+            Self::HostRuntime(harness) => {
+                if harness.durable_capability_io_requested {
+                    harness.install_durable_capability_io(turn_thread_service);
+                }
+                Ok((
+                    harness.capability_factory(milestone_sink),
+                    Arc::new(HostRuntimeHarnessSurfaceResolver),
+                    harness.input_resolver(),
+                    harness.capability_result_writer(),
+                    HarnessCapabilityRecorder::HostRuntime(harness),
+                ))
+            }
         }
     }
 }
@@ -157,7 +170,31 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     approval_parts: Option<RebornLocalDevApprovalTestParts>,
     auto_approve_settings: Option<Arc<dyn ironclaw_approvals::AutoApproveSettingStore>>,
     pending_approval_scopes: Arc<Mutex<HashMap<ApprovalRequestId, ResourceScope>>>,
-    io: Arc<ProductLiveCapabilityIo>,
+    /// Input-resolver half of this harness's capability io. Default (every
+    /// existing constructor): the ephemeral `ProductLiveCapabilityIo` test
+    /// double, both halves coerced from ONE shared object (see
+    /// `default_capability_io_pair`). Interior-mutable (not a builder field)
+    /// because the durable swap (`install_durable_capability_io`, issue
+    /// #5838) can only run once the REAL group thread service exists, which
+    /// is after this harness is already constructed and `Arc`'d -- see that
+    /// method's doc for why.
+    io: Mutex<Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>>,
+    /// Result-writer half; see `io`'s doc -- always the SAME underlying
+    /// object as `io`, coerced to the other trait.
+    result_writer_io: Mutex<Arc<dyn LoopCapabilityResultWriter>>,
+    /// Set by `install_durable_capability_io`: the session thread service
+    /// backing `io`/`result_writer_io`. `None` until then (or forever, for
+    /// harnesses that never opt in). Also used to wrap the synthetic
+    /// `result_read` capability (`apply_synthetic_capability_wrappers`) so a
+    /// scripted `result_read` call can page through the durable record `io`
+    /// just persisted.
+    durable_capability_io_thread_service:
+        Mutex<Option<Arc<dyn ironclaw_threads::SessionThreadService>>>,
+    /// Set from `HostRuntimeHarnessOptions::with_durable_capability_io()` at
+    /// construction; read by the capability-mode assembly (`into_parts`) to
+    /// decide whether to call `install_durable_capability_io` once the real
+    /// thread service is available.
+    durable_capability_io_requested: bool,
     root: Arc<tempfile::TempDir>,
     workspace_root: PathBuf,
     mounts: MountView,
@@ -492,6 +529,7 @@ impl HostRuntimeCapabilityHarness {
             network_http_egress_for_test,
             activate_bundled_extensions_for_test,
             project_service_fault_injection,
+            durable_capability_io,
         } = options;
         let root = Arc::new(tempfile::tempdir()?);
         let storage_root = root.path().join("local-dev");
@@ -616,6 +654,13 @@ impl HostRuntimeCapabilityHarness {
             None => None,
         };
         let pending_approval_scopes = Arc::new(Mutex::new(HashMap::new()));
+        // Durable tool-result projection seam (issue #5838): capability io
+        // still defaults to the ephemeral `ProductLiveCapabilityIo` test
+        // double at construction, like every other harness -- the real swap
+        // (`install_durable_capability_io`) happens later, once the caller's
+        // ACTUAL turn thread service exists (see that method's doc for why
+        // it cannot happen here).
+        let (io, result_writer_io) = default_capability_io_pair();
         // `.clone()` (not a move) so `services` survives intact below —
         // `reborn_services_for_test` needs the WHOLE `RebornServices` value,
         // not just the pieces already extracted above.
@@ -632,7 +677,10 @@ impl HostRuntimeCapabilityHarness {
             approval_parts,
             auto_approve_settings,
             pending_approval_scopes,
-            io: Arc::new(ProductLiveCapabilityIo::default()),
+            io: Mutex::new(io),
+            result_writer_io: Mutex::new(result_writer_io),
+            durable_capability_io_thread_service: Mutex::new(None),
+            durable_capability_io_requested: durable_capability_io,
             root,
             workspace_root,
             mounts,
@@ -704,9 +752,58 @@ impl HostRuntimeCapabilityHarness {
         self: &Arc<Self>,
     ) -> Arc<dyn LoopCapabilityResultWriter> {
         Arc::new(RecordingCapabilityResultWriter {
-            inner: self.io.clone(),
+            inner: self.result_writer_io(),
             results: Arc::clone(&self.results),
         })
+    }
+
+    /// Current input-resolver half of this harness's capability io. See the
+    /// `io` field's doc for the default-vs-durable shape.
+    fn input_resolver(&self) -> Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver> {
+        self.io.lock().unwrap().clone()
+    }
+
+    /// Current result-writer half; see `input_resolver`.
+    fn result_writer_io(&self) -> Arc<dyn LoopCapabilityResultWriter> {
+        self.result_writer_io.lock().unwrap().clone()
+    }
+
+    /// Durable tool-result projection seam (issue #5838): swap this
+    /// harness's capability io for the REAL `LocalDevCapabilityIo`
+    /// (`ironclaw_reborn_composition::test_support::local_dev_capability_io_for_test`,
+    /// which mirrors production's `capability_wiring`), wired over
+    /// `thread_service`.
+    ///
+    /// `thread_service` MUST be the SAME `SessionThreadService` the calling
+    /// group's turns actually dispatch against (`group.rs`'s `into_group`
+    /// builds it as `group_thread_harness.service`, BEFORE this harness's
+    /// capability parts are assembled) -- `LocalDevCapabilityIo::write_capability_result`
+    /// resolves the run's thread scope and appends the durable record keyed
+    /// by `run_context.thread_id`; a different (e.g. this harness's own
+    /// local-dev-only) thread service would never have that thread and every
+    /// durable append would fail closed as `UnknownThread` ->
+    /// `AgentLoopHostErrorKind::Unavailable` -> a terminal
+    /// `HostUnavailable { stage: Capability }` for the whole run (see
+    /// `.claude/rules/agent-loop-capabilities.md`).
+    ///
+    /// Interior mutability (not a builder field) because that real thread
+    /// service is only constructed in `group.rs`'s `into_group`, AFTER
+    /// `RebornCapabilityBackend::install` has already produced this harness
+    /// (already `Arc`'d by then) -- called once, from
+    /// `HarnessCapabilityMode::into_parts`, before any run uses this
+    /// harness's capability port.
+    fn install_durable_capability_io(
+        &self,
+        thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
+    ) {
+        let (io, result_writer_io) =
+            ironclaw_reborn_composition::test_support::local_dev_capability_io_for_test(
+                thread_service.clone(),
+                self.user_id.clone(),
+            );
+        *self.io.lock().unwrap() = io;
+        *self.result_writer_io.lock().unwrap() = result_writer_io;
+        *self.durable_capability_io_thread_service.lock().unwrap() = Some(thread_service);
     }
 
     fn invocations(&self) -> Vec<CapabilityInvocation> {
@@ -1220,6 +1317,30 @@ impl HostRuntimeCapabilityHarness {
         result_writer: Arc<dyn LoopCapabilityResultWriter>,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         let mut port = port;
+        // result_read (durable tool-result projection seam, issue #5838):
+        // wrapped only when the harness opted into `.with_durable_capability_io()`
+        // (has a durable thread service) AND `result_read` is in the granted
+        // capability set. Mirrors production's unconditional wire-in
+        // (`refreshing_capability_port.rs`'s `build_inner`), scoped here to
+        // avoid destabilizing every other harness.
+        if let Some(thread_service) = self
+            .durable_capability_io_thread_service
+            .lock()
+            .unwrap()
+            .clone()
+            && self.capability_ids.iter().any(|id| {
+                id.as_str() == ironclaw_reborn_composition::test_support::RESULT_READ_CAPABILITY_ID
+            })
+        {
+            port = ironclaw_reborn_composition::test_support::wrap_result_read_capability_for_test(
+                port,
+                thread_service,
+                self.user_id.clone(),
+                run_context.clone(),
+                input_resolver.clone(),
+                result_writer.clone(),
+            )?;
+        }
         // project_create (E-PROJ): wrapped only for `project_tools`.
         if let Some(project_service) = &self.project_service
             && self.capability_ids.iter().any(|id| {
@@ -1400,13 +1521,13 @@ impl HostRuntimeCapabilityHarness {
             .map_err(host_runtime_harness_error)?;
         let milestone_sink: Arc<dyn LoopHostMilestoneSink> = milestone_sink.clone();
         let result_writer = Arc::new(RecordingCapabilityResultWriter {
-            inner: self.io.clone(),
+            inner: self.result_writer_io(),
             results: Arc::clone(&self.results),
         });
         let mut factory = HostRuntimeLoopCapabilityPortFactory::new(
             Arc::clone(&self.runtime),
             visible_request,
-            self.io.clone(),
+            self.input_resolver(),
             result_writer.clone(),
             milestone_sink,
         )
@@ -1420,7 +1541,7 @@ impl HostRuntimeCapabilityHarness {
         let port = self.apply_synthetic_capability_wrappers(
             port,
             run_context,
-            self.io.clone(),
+            self.input_resolver(),
             result_writer,
         )?;
         Ok(Arc::new(RecordingDelegatingCapabilityPort {

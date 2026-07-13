@@ -260,6 +260,10 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
             capability_id,
             output,
             display_preview,
+            // `ProductLiveCapabilityIo` is an ephemeral in-memory test fixture
+            // (see crate CLAUDE.md / #5902) that never durably persists a
+            // result, so the durable-vs-inline distinction does not apply here.
+            durable_persistence: _,
         } = write;
         let byte_len = serialized_json_len(&output, "capability result")?;
         let result_ref =
@@ -892,6 +896,7 @@ mod tests {
     use ironclaw_host_api::{
         AgentId, CapabilityDisplayOutputPreview, InvocationId, ProviderToolName, TenantId, ThreadId,
     };
+    use ironclaw_loop_support::DurablePersistence;
     use ironclaw_runner::planned_driver_factory::default_planned_run_profile_resolver;
     use ironclaw_turns::{
         RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
@@ -925,6 +930,7 @@ mod tests {
             capability_id: &capability_id,
             output: serde_json::json!({"content": "fn main() {}"}),
             display_preview: None,
+            durable_persistence: DurablePersistence::Persist,
         })
         .await
         .map(|_| ())
@@ -997,6 +1003,7 @@ mod tests {
             capability_id: &capability_id,
             output: serde_json::json!({"results": []}),
             display_preview: None,
+            durable_persistence: DurablePersistence::Persist,
         })
         .await
         .map(|_| ())
@@ -1047,6 +1054,7 @@ mod tests {
                 subtitle: Some("/workspace/main.rs".to_string()),
                 truncated: false,
             }),
+            durable_persistence: DurablePersistence::Persist,
         })
         .await
         .map(|_| ())
@@ -1085,6 +1093,7 @@ mod tests {
             capability_id: &capability_id,
             output: serde_json::json!({"reply": "ok"}),
             display_preview: None,
+            durable_persistence: DurablePersistence::Persist,
         })
         .await
         .map(|_| ())

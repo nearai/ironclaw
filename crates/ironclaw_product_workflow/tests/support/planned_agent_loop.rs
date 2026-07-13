@@ -915,6 +915,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             terminate_hint: self.capability.terminate_hint,
             byte_len: 0,
             output_digest: None,
+            model_observation: None,
         }))
     }
 

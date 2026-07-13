@@ -1,8 +1,10 @@
 mod cli;
 mod commands;
 mod context;
+mod dto;
 mod file_write;
 mod operator_env;
+mod render;
 mod runtime;
 
 fn main() -> anyhow::Result<()> {

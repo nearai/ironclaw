@@ -20,7 +20,9 @@ Or directly::
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -123,6 +125,47 @@ class ParseSummaryStatusTests(unittest.TestCase):
             notify.parse_summary_status(_SUMMARY_TEMPLATE.format(status="-1")),
             -1,
         )
+
+
+class GoogleOauthPreflightReportTests(unittest.TestCase):
+    def test_healthy_or_absent_preflight_adds_no_failure(self):
+        self.assertIsNone(notify.google_oauth_preflight_report(""))
+        self.assertIsNone(notify.google_oauth_preflight_report("healthy"))
+
+    def test_invalid_grant_becomes_one_actionable_infrastructure_failure(self):
+        report = notify.google_oauth_preflight_report("invalid_grant")
+
+        self.assertIsNotNone(report)
+        self.assertEqual(report.failed, 1)
+        self.assertEqual(report.tests, 1)
+        self.assertEqual(report.status, "fail")
+        self.assertEqual(report.error, "invalid_grant")
+        self.assertIn("AUTH_LIVE_GOOGLE_REFRESH_TOKEN", report.fix)
+
+    def test_main_reports_google_preflight_failure_without_lane_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            argv = [
+                "notify_slack.py",
+                "--artifacts-dir",
+                tmpdir,
+                "--dry-run",
+                "--run-url",
+                "https://github.com/nearai/ironclaw/actions/runs/1",
+                "--commit",
+                "abcdef0123456789",
+            ]
+            stdout = io.StringIO()
+            env = {"REBORN_GOOGLE_OAUTH_PREFLIGHT_STATUS": "invalid_grant"}
+            with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(
+                sys, "argv", argv
+            ), mock.patch("sys.stdout", stdout):
+                self.assertEqual(notify.main(), 0)
+
+        payload = json.loads(stdout.getvalue())
+        payload_text = json.dumps(payload)
+        self.assertIn("invalid_grant", payload_text)
+        self.assertIn("AUTH_LIVE_GOOGLE_REFRESH_TOKEN", payload_text)
+        self.assertEqual(payload_text.count("invalid_grant"), 1)
 
     def test_large_status_is_preserved(self):
         # Bash exit codes wrap at 256, but the regex is unbounded;

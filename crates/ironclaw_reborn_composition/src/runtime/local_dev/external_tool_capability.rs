@@ -25,7 +25,8 @@ use std::sync::{Arc, Mutex as StdMutex};
 use async_trait::async_trait;
 use ironclaw_host_api::{CapabilityId, InvocationId, ProviderToolName, RuntimeKind};
 use ironclaw_loop_support::{
-    CapabilityResultWrite, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
+    CapabilityResultWrite, DurablePersistence, LoopCapabilityInputResolver,
+    LoopCapabilityResultWriter,
 };
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityBatchOutcome,
@@ -210,6 +211,7 @@ impl ExternalToolCapabilityPort {
                     capability_id: &request.capability_id,
                     output,
                     display_preview: None,
+                    durable_persistence: DurablePersistence::Persist,
                 })
                 .await?;
             // The parked call is resolved: drop its pending-call record so a run
@@ -225,6 +227,7 @@ impl ExternalToolCapabilityPort {
                 terminate_hint: false,
                 byte_len: write.byte_len,
                 output_digest: write.output_digest,
+                model_observation: write.model_observation,
             }));
         }
         // No output yet → park and return control to the API client.

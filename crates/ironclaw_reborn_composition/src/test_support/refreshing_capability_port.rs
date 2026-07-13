@@ -41,6 +41,10 @@ pub struct RefreshingLocalDevCapabilityPortTestParts {
     pub skill_activation_source:
         Option<std::sync::Arc<crate::test_support::SkillActivationTestSource>>,
     pub project_service: std::sync::Arc<dyn ironclaw_product_workflow::ProjectService>,
+    /// Backs the `result_read` synthetic capability's durable tool-result
+    /// reads; production wires the runtime's session thread service
+    /// (`local_dev.rs` `create_capability_port`).
+    pub thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
     pub trajectory_observer: Option<std::sync::Arc<dyn crate::RebornTrajectoryObserver>>,
     pub outbound_preferences_facade:
         Option<std::sync::Arc<dyn ironclaw_product_workflow::OutboundPreferencesProductFacade>>,

@@ -614,6 +614,22 @@ impl RebornServices {
         Some(Arc::clone(&local_runtime.project_service))
     }
 
+    /// Test-support access to the local-dev session thread service (durable
+    /// tool-result projection seam, issue #5838). This is the SAME `Arc`
+    /// production's `capability_wiring` passes to
+    /// `LocalDevCapabilityIo::new_with_durable_previews` and to the
+    /// `result_read` synthetic capability, so a harness built over this
+    /// `RebornServices` can drive its own real `LocalDevCapabilityIo` through
+    /// `local_dev_capability_io_for_test`. Returns `None` for production-profile
+    /// compositions without a local-dev runtime.
+    #[cfg(feature = "test-support")]
+    pub fn local_dev_thread_service_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_threads::SessionThreadService>> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        Some(Arc::clone(&local_runtime.thread_service))
+    }
+
     /// Test-support access to the local-dev communication-preference repository
     /// (W6-COLD-SPOTS seam). This is the SAME `Arc` that `build_local_dev_store_graph`
     /// wires into `RebornLocalRuntimeServices::outbound_preferences` via

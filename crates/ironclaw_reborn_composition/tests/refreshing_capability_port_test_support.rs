@@ -45,7 +45,8 @@ use ironclaw_product_workflow::{
     RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
 };
 use ironclaw_reborn_composition::test_support::{
-    PROJECT_CREATE_CAPABILITY_ID, RefreshingLocalDevCapabilityPortTestParts,
+    PROJECT_CREATE_CAPABILITY_ID, RESULT_READ_CAPABILITY_ID,
+    RefreshingLocalDevCapabilityPortTestParts,
     create_refreshing_local_dev_capability_port_for_test,
 };
 use ironclaw_run_state::InMemoryApprovalRequestStore;
@@ -396,6 +397,7 @@ fn test_parts(
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
         skill_activation_source: None,
         project_service: Arc::new(StubProjectService),
+        thread_service: Arc::new(ironclaw_threads::InMemorySessionThreadService::default()),
         trajectory_observer: None,
         outbound_preferences_facade: None,
         outbound_delivery_target_set_requires_approval: false,
@@ -479,7 +481,11 @@ async fn capability_id_filter_narrows_visible_surface() {
     let builtin_ids: Vec<&str> = definitions
         .iter()
         .map(|definition| definition.capability_id.as_str())
-        .filter(|id| id.starts_with("builtin.") && *id != PROJECT_CREATE_CAPABILITY_ID)
+        .filter(|id| {
+            id.starts_with("builtin.")
+                && *id != PROJECT_CREATE_CAPABILITY_ID
+                && *id != RESULT_READ_CAPABILITY_ID
+        })
         .collect();
     assert_eq!(
         builtin_ids,
@@ -755,7 +761,11 @@ async fn multi_entry_collection_knobs_round_trip() {
     let mut builtin_ids: Vec<&str> = definitions
         .iter()
         .map(|definition| definition.capability_id.as_str())
-        .filter(|id| id.starts_with("builtin.") && *id != PROJECT_CREATE_CAPABILITY_ID)
+        .filter(|id| {
+            id.starts_with("builtin.")
+                && *id != PROJECT_CREATE_CAPABILITY_ID
+                && *id != RESULT_READ_CAPABILITY_ID
+        })
         .collect();
     builtin_ids.sort_unstable();
     assert_eq!(

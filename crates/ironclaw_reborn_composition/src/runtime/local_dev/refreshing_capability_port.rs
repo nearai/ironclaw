@@ -9,6 +9,7 @@ use ironclaw_loop_support::{
 };
 use ironclaw_product_workflow::{OutboundPreferencesProductFacade, ProjectService};
 use ironclaw_run_state::ApprovalRequestStore;
+use ironclaw_threads::SessionThreadService;
 use ironclaw_trust::TrustDecision;
 use ironclaw_turns::ExternalToolCatalog;
 use ironclaw_turns::run_profile::{
@@ -27,6 +28,7 @@ use crate::runtime::local_dev::extension_surface::LocalDevExtensionSurfaceSource
 use crate::runtime::local_dev::external_tool_capability::wrap_local_dev_external_tools;
 use crate::runtime::local_dev::outbound_delivery::outbound_delivery_capabilities;
 use crate::runtime::local_dev::project_create::project_create_capability;
+use crate::runtime::local_dev::result_read::result_read_capability;
 use crate::runtime::local_dev::skill_activation::skill_activation_capability;
 use crate::runtime::local_dev::surface_disclosure::wrap_local_dev_surface_disclosure;
 use crate::runtime::local_dev::synthetic_capability::wrap_local_dev_synthetic_capabilities;
@@ -51,6 +53,7 @@ pub(crate) struct RefreshingLocalDevCapabilityPortConfig {
     pub(super) milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     pub(super) skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
     pub(super) project_service: Arc<dyn ProjectService>,
+    pub(super) thread_service: Arc<dyn SessionThreadService>,
     pub(super) trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     pub(super) outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
     pub(super) outbound_delivery_target_set_requires_approval: bool,
@@ -99,6 +102,7 @@ pub(crate) async fn create_refreshing_local_dev_capability_port(
         milestone_sink: config.milestone_sink,
         skill_activation_source: config.skill_activation_source,
         project_service: config.project_service,
+        thread_service: config.thread_service,
         trajectory_observer: config.trajectory_observer,
         outbound_preferences_facade: config.outbound_preferences_facade,
         outbound_delivery_target_set_requires_approval: config
@@ -135,6 +139,7 @@ struct RefreshingLocalDevCapabilityPort {
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
     project_service: Arc<dyn ProjectService>,
+    thread_service: Arc<dyn SessionThreadService>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
     outbound_delivery_target_set_requires_approval: bool,
@@ -237,6 +242,10 @@ impl RefreshingLocalDevCapabilityPort {
         };
         synthetic_capabilities.push(project_create_capability(
             Arc::clone(&self.project_service),
+            self.fallback_user_id.clone(),
+        )?);
+        synthetic_capabilities.push(result_read_capability(
+            Arc::clone(&self.thread_service),
             self.fallback_user_id.clone(),
         )?);
         if let Some(outbound_preferences_facade) = &self.outbound_preferences_facade {
@@ -405,6 +414,7 @@ pub(crate) async fn create_refreshing_local_dev_capability_port_for_test(
         milestone_sink,
         skill_activation_source,
         project_service,
+        thread_service,
         trajectory_observer,
         outbound_preferences_facade,
         outbound_delivery_target_set_requires_approval,
@@ -449,6 +459,7 @@ pub(crate) async fn create_refreshing_local_dev_capability_port_for_test(
         milestone_sink,
         skill_activation_source,
         project_service,
+        thread_service,
         trajectory_observer,
         outbound_preferences_facade,
         outbound_delivery_target_set_requires_approval,

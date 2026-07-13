@@ -123,6 +123,18 @@ TRUNCATED_TOOL_CALL_TRIGGER = re.compile(
 EMPTY_REPLY_TRIGGER = re.compile(r"issue 1780 empty reply", re.IGNORECASE)
 LOOP_FOREVER_TRIGGER = re.compile(r"issue 1780 loop forever", re.IGNORECASE)
 MULTI_STEP_TRIGGER = re.compile(r"multi step echo then time", re.IGNORECASE)
+REBORN_EXTERNAL_TOOL_LOOP_TRIGGER = re.compile(
+    r"reborn external tool loop",
+    re.IGNORECASE,
+)
+REBORN_EXTERNAL_TOOL_FAILURE_TRIGGER = re.compile(
+    r"reborn external tool failure",
+    re.IGNORECASE,
+)
+REBORN_MIXED_INTERNAL_EXTERNAL_TRIGGER = re.compile(
+    r"reborn mixed internal external tools",
+    re.IGNORECASE,
+)
 
 # Lifecycle canary triggers for write+cleanup flows against real provider APIs.
 GITHUB_ISSUE_LIFECYCLE_TRIGGER = re.compile(
@@ -941,6 +953,7 @@ TOOL_CALL_PATTERNS = [
 # Set via POST /__mock/set_github_api_url with {"url": "http://..."}
 _github_api_url: str = "https://api.github.com"
 _last_chat_request: dict | None = None
+_chat_requests: list[dict] = []
 
 
 def _new_oauth_state() -> dict:
@@ -1617,6 +1630,83 @@ def _find_tool_result(messages: list[dict]) -> dict | None:
 def _find_named_tool_results(messages: list[dict], name: str) -> list[dict]:
     """Collect fresh tool results for one tool name."""
     return [result for result in _find_tool_results(messages) if result.get("name") == name]
+
+
+REBORN_SCRIPTED_TOOL_SCENARIOS = (
+    {
+        "trigger": REBORN_EXTERNAL_TOOL_LOOP_TRIGGER,
+        "batches": (
+            (("lookup_weather", {"city": "Boston"}),),
+            (("lookup_time", {"city": "Boston"}),),
+            (("lookup_fact", {"topic": "Boston"}),),
+        ),
+        "missing_text": "Reborn external tool loop missing tool definitions.",
+        "complete_prefix": "Reborn external tool loop complete: ",
+        "summary_order": ("lookup_weather", "lookup_time", "lookup_fact"),
+    },
+    {
+        "trigger": REBORN_EXTERNAL_TOOL_FAILURE_TRIGGER,
+        "batches": ((("lookup_weather", {"city": "Boston"}),),),
+        "missing_text": "Reborn external tool failure missing tool definitions.",
+        "complete_prefix": "Reborn external tool failure observed: ",
+        "summary_order": ("lookup_weather",),
+    },
+    {
+        "trigger": REBORN_MIXED_INTERNAL_EXTERNAL_TRIGGER,
+        "batches": (
+            (
+                ("builtin__echo", {"message": "mixed-internal-echo"}),
+                ("lookup_weather", {"city": "Boston"}),
+            ),
+        ),
+        "missing_text": "Reborn mixed tool run missing tool definitions.",
+        "complete_prefix": "Reborn mixed tool run complete: ",
+        "summary_order": ("builtin__echo", "lookup_weather"),
+    },
+)
+
+
+def match_reborn_scripted_tool_response(
+    messages: list[dict],
+    has_tools: bool,
+) -> dict | None:
+    """Run the matching table-driven Responses API tool scenario."""
+    scenario = next(
+        (
+            candidate
+            for candidate in REBORN_SCRIPTED_TOOL_SCENARIOS
+            if _conversation_has_user_trigger(messages, candidate["trigger"])
+        ),
+        None,
+    )
+    if scenario is None:
+        return None
+
+    result_by_name = {
+        result["name"]: result["content"] for result in _find_tool_results(messages)
+    }
+    for batch in scenario["batches"]:
+        missing_calls = [
+            {"tool_name": name, "arguments": arguments}
+            for name, arguments in batch
+            if name not in result_by_name
+        ]
+        if not missing_calls:
+            continue
+        if not result_by_name and not has_tools:
+            return {"type": "text", "text": scenario["missing_text"]}
+        return {
+            "type": "tool_call",
+            "tool_call": missing_calls[0] if len(missing_calls) == 1 else missing_calls,
+        }
+
+    summary = "; ".join(
+        f"{name}={result_by_name[name]}" for name in scenario["summary_order"]
+    )
+    return {
+        "type": "text",
+        "text": f"{scenario['complete_prefix']}{summary}",
+    }
 
 
 def _tool_results_include_denial(tool_results: list[dict]) -> bool:
@@ -2349,6 +2439,7 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
     global _last_chat_request
     body = await request.json()
     _last_chat_request = body
+    _chat_requests.append(body)
     messages = body.get("messages", [])
     stream = body.get("stream", False)
     tools = body.get("tools")
@@ -2409,6 +2500,12 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
             if not stream:
                 return _tool_call_response(cid, followup)
             return await _stream_tool_call(request, cid, followup)
+
+    reborn_scripted_tool = match_reborn_scripted_tool_response(messages, has_tools)
+    if reborn_scripted_tool:
+        return await _dispatch_special_response(
+            request, cid, stream, reborn_scripted_tool
+        )
     if (
         not tool_results
         and _conversation_uses_codeact(messages)
@@ -3166,14 +3263,19 @@ def main():
     async def get_last_chat_request(request: web.Request) -> web.Response:
         return web.json_response(_last_chat_request or {})
 
+    async def get_chat_requests(request: web.Request) -> web.Response:
+        return web.json_response({"requests": _chat_requests})
+
     async def reset_chat_requests(request: web.Request) -> web.Response:
         global _last_chat_request
         _last_chat_request = None
+        _chat_requests.clear()
         return web.json_response({"ok": True})
 
     app.router.add_post("/__mock/set_github_api_url", set_github_api_url)
     app.router.add_get("/__mock/github_api_url", get_github_api_url)
     app.router.add_get("/__mock/last_chat_request", get_last_chat_request)
+    app.router.add_get("/__mock/chat_requests", get_chat_requests)
     app.router.add_post("/__mock/chat_requests/reset", reset_chat_requests)
     # Mock MCP server endpoints
     app.router.add_post("/mcp", mcp_endpoint)

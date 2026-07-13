@@ -674,7 +674,10 @@ impl RebornIntegrationGroupBuilder {
             capability_input_resolver,
             capability_result_writer,
             capability_recorder,
-        ) = capability.mode().into_parts(milestone_sink.clone())?;
+        ) = capability.mode().into_parts(
+            milestone_sink.clone(),
+            group_thread_harness.service.clone() as Arc<dyn SessionThreadService>,
+        )?;
 
         // Enabler (b): production resolves `CapabilityAllowSet::All` for a
         // top-level user turn, making `CapabilitySurfaceProfileFilter` a no-op

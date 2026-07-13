@@ -61,6 +61,15 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// Only `project_tools_with_fault_injection()` sets this; every other
     /// harness leaves the real service unwrapped.
     pub(crate) project_service_fault_injection: bool,
+    /// Durable tool-result projection seam (issue #5838): when `true`, the
+    /// harness backs its capability io with the REAL `LocalDevCapabilityIo`
+    /// (via `ironclaw_reborn_composition::test_support::local_dev_capability_io_for_test`,
+    /// wired over this harness's own local-dev `thread_service`) instead of
+    /// the ephemeral `ProductLiveCapabilityIo` test double. Opt-in and
+    /// explicit rather than a profile default, so the ~100 other
+    /// `HostRuntimeCapabilityHarness`-based integration tests stay
+    /// byte-identical.
+    pub(crate) durable_capability_io: bool,
 }
 
 impl HostRuntimeHarnessOptions {
@@ -77,6 +86,7 @@ impl HostRuntimeHarnessOptions {
             network_http_egress_for_test: None,
             activate_bundled_extensions_for_test: Vec::new(),
             project_service_fault_injection: false,
+            durable_capability_io: false,
         }
     }
 
@@ -114,6 +124,14 @@ impl HostRuntimeHarnessOptions {
 
     pub(crate) fn with_project_service_fault_injection(mut self) -> Self {
         self.project_service_fault_injection = true;
+        self
+    }
+
+    /// Opt into the real `LocalDevCapabilityIo` (durable tool-result
+    /// projection seam, issue #5838) instead of the ephemeral
+    /// `ProductLiveCapabilityIo` test double.
+    pub(crate) fn with_durable_capability_io(mut self) -> Self {
+        self.durable_capability_io = true;
         self
     }
 }

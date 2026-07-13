@@ -1,5 +1,7 @@
 ---
 paths:
+  - "crates/ironclaw_skills/**"
+  - "crates/ironclaw_reborn_composition/src/extension_host/bundled_skills.rs"
   - "src/skills/**"
   - "skills/**"
 ---
@@ -39,7 +41,7 @@ requires:
 # Skill instructions here...
 ```
 
-Only the top-level `requires:` block is supported. The legacy nested shape
+Only the top-level `requires:` block is supported. The historical nested shape
 `metadata.openclaw.requires` is unsupported and ignored by the current parser,
 so older external skills must be migrated instead of relying on silent
 compatibility.

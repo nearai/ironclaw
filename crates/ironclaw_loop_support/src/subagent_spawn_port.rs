@@ -34,8 +34,8 @@ use ironclaw_turns::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CapabilityResultWrite, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
-    subagent_prompt_port::DEFAULT_SUBAGENT_GOAL_MAX_BYTES,
+    CapabilityResultWrite, DurablePersistence, LoopCapabilityInputResolver,
+    LoopCapabilityResultWriter, subagent_prompt_port::DEFAULT_SUBAGENT_GOAL_MAX_BYTES,
 };
 
 pub const DEFAULT_SUBAGENT_MAX_DEPTH: u32 = 1;
@@ -455,12 +455,6 @@ impl SpawnCompensationState {
         }
         if let Some((scope, run_id)) = self.goal_written.as_ref() {
             let _ = deps.goal_store.delete_goal(scope, *run_id).await;
-        }
-        if let Some(result_ref) = self.result_written.as_ref() {
-            let _ = deps
-                .result_writer
-                .delete_capability_result(run_context, result_ref)
-                .await;
         }
         if let Some((scope, tree_root)) = self.submitted_child_tree.as_ref() {
             // Idempotency key for the release-tree-descendants dedup guard
@@ -904,6 +898,7 @@ impl SubagentSpawnCapabilityPort {
                 capability_id: &self.spawn_id,
                 output: payload,
                 display_preview: None,
+                durable_persistence: DurablePersistence::Persist,
             })
             .await?;
         let result_ref = write_result.result_ref;
@@ -1073,6 +1068,7 @@ impl SubagentSpawnCapabilityPort {
             result_ref,
             safe_summary: safe_summary("subagent spawned; waiting for completion"),
             byte_len: write_result.byte_len,
+            model_observation: write_result.model_observation,
         })
     }
 
