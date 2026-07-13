@@ -91,8 +91,8 @@ use crate::extension_host::mcp_discovery::{
     HostedMcpDiscoveryError, discover_hosted_mcp_package, is_hosted_http_mcp_package,
 };
 use crate::extension_host::registered_extension_store::{
-    available_extension_not_found, is_owner_registered, migrate_legacy_owner_layout,
-    resolve_registered_for_owner, resolve_registered_for_scope,
+    RegisteredExtensionStore, available_extension_not_found, is_owner_registered,
+    migrate_legacy_owner_layout, resolve_registered_for_owner, resolve_registered_for_scope,
     search_with_owner_overlay_for_scope,
 };
 
@@ -634,6 +634,11 @@ impl RebornLocalExtensionManagementPort {
             .list_installations()
             .await
             .map_err(map_extension_installation_error)?;
+        // Per-request batching (no cross-request caching — explicitly
+        // deferred): load the caller's registered set ONCE up front instead
+        // of letting every catalog-miss below re-scan and re-parse the
+        // caller's entire registered directory via `list_for_scope`.
+        let registered_by_id = self.registered_packages_by_id(scope).await;
         let mut summaries = Vec::with_capacity(installations.len());
         for installation in installations {
             // #5459 P1: a caller's list is tenant-shared entries plus their
@@ -652,19 +657,18 @@ impl RebornLocalExtensionManagementPort {
                 continue;
             }
             // Blast-radius policy: the list must survive one entry's trouble.
-            // A genuine miss (foreign-owned or gone) stays silent; a real
-            // read error is logged so it's distinguishable, then skipped.
-            let available = match self.resolve_available_for_scope(&package_ref, scope).await {
-                Ok(Some(available)) => available,
-                Ok(None) => continue,
-                Err(error) => {
-                    tracing::debug!(
-                        extension_id = installation.extension_id().as_str(),
-                        %error,
-                        "skipping installed extension summary: package resolution failed"
-                    );
-                    continue;
-                }
+            // A genuine miss (foreign-owned or gone) stays silent.
+            let catalog_hit = {
+                let catalog = self.catalog.read().await;
+                catalog.resolve(&package_ref).ok()
+            };
+            let available = match catalog_hit.or_else(|| {
+                registered_by_id
+                    .get(installation.extension_id().as_str())
+                    .cloned()
+            }) {
+                Some(available) => available,
+                None => continue,
             };
             summaries.push(LifecycleInstalledExtensionSummary {
                 summary: available.summary(),
@@ -673,6 +677,37 @@ impl RebornLocalExtensionManagementPort {
             });
         }
         Ok(summaries)
+    }
+
+    /// The caller's registered packages, read once and keyed by extension id
+    /// — the batched replacement for calling `resolve_registered_for_scope`
+    /// (which internally lists the caller's entire registered directory) once
+    /// per catalog-miss in a listing loop. A read failure is logged and
+    /// treated as an empty registered set for this request (list-shaped
+    /// callers stay resilient, matching `resolve_registered_for_scope`'s
+    /// per-entry blast-radius stance).
+    async fn registered_packages_by_id(
+        &self,
+        scope: &ResourceScope,
+    ) -> std::collections::HashMap<String, Arc<AvailableExtensionPackage>> {
+        match RegisteredExtensionStore::list_for_scope(self.filesystem.as_ref(), scope).await {
+            Ok(packages) => packages
+                .into_iter()
+                .map(|package| {
+                    (
+                        package.package_ref.id.as_str().to_string(),
+                        Arc::new(package),
+                    )
+                })
+                .collect(),
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    "skipping registered extension listing for installed summaries: batched read failed"
+                );
+                std::collections::HashMap::new()
+            }
+        }
     }
 
     /// Resolve a package the way every live (non-boot) path must: the shared
@@ -8965,6 +9000,73 @@ url = "http://127.0.0.1:9/mcp"
             (0, 0),
             "another owner must not see the owner's registered installation"
         );
+
+        // Second registered install for the SAME owner: the listing loop's
+        // registered-store fallback must resolve both entries from the ONE
+        // batched read of the owner's registered set (installed_summaries),
+        // not a per-entry rescan — a second, distinctly-ided registration
+        // exercises the map lookup rather than a lucky single-entry pass.
+        let second_extension_id =
+            ExtensionId::new("acme-mcp-registered-two").expect("valid extension id");
+        let second_manifest_toml = REGISTERED_ISOLATION_MANIFEST_TOML
+            .replace("acme-mcp-registered", "acme-mcp-registered-two");
+        let second_descriptor_dir = _dir
+            .path()
+            .join("local-dev/system/extensions/registered")
+            .join(owner_scope.tenant_id.as_str())
+            .join(owner_scope.user_id.as_str())
+            .join("acme-mcp-registered-two");
+        std::fs::create_dir_all(&second_descriptor_dir).expect("second registered descriptor dir");
+        std::fs::write(
+            second_descriptor_dir.join("manifest.toml"),
+            &second_manifest_toml,
+        )
+        .expect("write second registered descriptor");
+        let second_source = ManifestSource::UserRegistered {
+            tenant_id: owner_scope.tenant_id.clone(),
+            owner: owner_scope.user_id.clone(),
+        };
+        installation_store
+            .upsert_manifest(fixture_manifest_record_with_source(
+                &second_manifest_toml,
+                second_source,
+                None,
+            ))
+            .await
+            .expect("seed second registered manifest record");
+        installation_store
+            .upsert_installation(
+                ExtensionInstallation::new(
+                    ExtensionInstallationId::new("acme-mcp-registered-two")
+                        .expect("valid installation id"),
+                    second_extension_id.clone(),
+                    ExtensionActivationState::Enabled,
+                    ExtensionManifestRef::new(second_extension_id.clone(), None),
+                    Vec::new(),
+                    chrono::Utc::now(),
+                    InstallationOwner::user(owner_scope.user_id.clone()),
+                )
+                .expect("second registered installation"),
+            )
+            .await
+            .expect("seed second registered installation");
+
+        let two_entry_list = port
+            .list_installed(&owner_scope)
+            .await
+            .expect("owner list with two registered installs");
+        let Some(LifecycleProductPayload::ExtensionList { extensions, count }) =
+            two_entry_list.payload
+        else {
+            panic!("expected extension list payload");
+        };
+        assert_eq!(count, 2, "both registered installs must be listed");
+        let mut ids: Vec<&str> = extensions
+            .iter()
+            .map(|entry| entry.summary.package_ref.id.as_str())
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["acme-mcp-registered", "acme-mcp-registered-two"]);
     }
 
     /// Review item 5 (list/project coverage): `project()` — the single-
