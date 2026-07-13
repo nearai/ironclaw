@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use super::time::UNIX_MILLIS_THRESHOLD;
+use crate::first_party_tools::time::UNIX_MILLIS_THRESHOLD;
 
 pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value> {
     Some(match reference {

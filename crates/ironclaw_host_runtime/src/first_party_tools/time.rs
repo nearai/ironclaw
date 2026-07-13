@@ -207,6 +207,8 @@ fn parse_unix_timestamp(input: &str) -> Option<DateTime<Utc>> {
 
     let input = input.trim();
     let normalized;
+    // Normalize exponent notation so the decimal parser below applies the same
+    // seconds, milliseconds, and fractional-precision rules to every numeric form.
     let input = if input.contains(['e', 'E']) {
         normalized = Decimal::from_scientific(input).ok()?.to_string();
         normalized.as_str()
@@ -249,6 +251,8 @@ fn parse_unix_timestamp(input: &str) -> Option<DateTime<Utc>> {
 
     let fractional_nanos = fraction.parse::<i128>().ok()?
         * 10_i128.pow(u32::try_from(9_usize.checked_sub(fraction.len())?).ok()?);
+    // Build the unsigned magnitude first, then apply the sign once so fractions
+    // such as -0.25 negate both the whole and fractional components.
     let total_nanos = whole
         .checked_mul(NANOS_PER_SECOND)?
         .checked_add(fractional_nanos)?;
@@ -257,6 +261,8 @@ fn parse_unix_timestamp(input: &str) -> Option<DateTime<Utc>> {
     } else {
         total_nanos
     };
+    // Euclidean division keeps nanos in [0, 1e9) for negative timestamps,
+    // matching DateTime::from_timestamp's normalized (seconds, nanos) shape.
     let seconds = i64::try_from(total_nanos.div_euclid(NANOS_PER_SECOND)).ok()?;
     let nanos = u32::try_from(total_nanos.rem_euclid(NANOS_PER_SECOND)).ok()?;
     DateTime::from_timestamp(seconds, nanos)
