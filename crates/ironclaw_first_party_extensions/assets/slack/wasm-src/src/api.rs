@@ -396,6 +396,11 @@ pub fn get_conversation_info(channel: &str) -> Result<GetConversationInfoResult,
     if conversation.id != channel {
         return Err("Slack API response did not contain the requested conversation".to_string());
     }
+    if conversation.is_im
+        && !matches!(conversation.user.as_deref(), Some(user_id) if !user_id.is_empty())
+    {
+        return Err("Slack API DM response did not contain a counterpart user".to_string());
+    }
     enrich_conversation_counterpart(&mut conversation);
     Ok(GetConversationInfoResult {
         ok: true,

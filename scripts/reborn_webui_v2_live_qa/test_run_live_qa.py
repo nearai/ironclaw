@@ -2539,6 +2539,35 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                         timestamp,
                     ),
                 )
+                preview = {
+                    "invocation_id": invocation_id,
+                    "capability_id": capability_id,
+                    "status": "completed",
+                    "input_summary": json.dumps(
+                        {"channel": "C0CURRENT1"}, indent=2
+                    ),
+                }
+                thread_message = {
+                    "message_id": f"message-{invocation_id}",
+                    "thread_id": thread_id,
+                    "kind": "capability_display_preview",
+                    "turn_run_id": run_id,
+                    "content": json.dumps(preview),
+                }
+                db.execute(
+                    """
+                    INSERT INTO root_filesystem_entries (
+                        path, contents, is_dir, created_at, updated_at,
+                        content_type, kind
+                    ) VALUES (?, ?, 0, ?, ?, 'application/json', 'thread_message')
+                    """,
+                    (
+                        f"/threads/{thread_id}/messages/{invocation_id}.json",
+                        json.dumps(thread_message),
+                        timestamp,
+                        timestamp,
+                    ),
+                )
                 db.commit()
 
         def drive(
@@ -2641,6 +2670,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "run_id": "run-current",
                 "invocation_ids": {capability_id: ["invocation-current"]},
                 "statuses": {capability_id: ["completed"]},
+                "input_arguments": {
+                    capability_id: [{"channel": "C_REDACTED"}]
+                },
                 "terminal_sequence": [
                     {
                         "seq": 1,
@@ -2771,7 +2803,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 },
             )
 
-        def drive(sequence: list[str]) -> run_live_qa.ProbeResult:
+        def drive(
+            sequence: list[str],
+            *,
+            lookup_channel: str = "D0EXPECTED1",
+        ) -> run_live_qa.ProbeResult:
             evidence = {
                 "accepted_message_ref": "msg:current",
                 "thread_id": "thread-current",
@@ -2784,6 +2820,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "statuses": {
                     "slack.get_conversation_info": ["completed"],
                     "slack.send_message": ["completed"],
+                },
+                "input_arguments": {
+                    "slack.get_conversation_info": [
+                        {"channel": lookup_channel}
+                    ],
+                    "slack.send_message": [{"channel": "D0EXPECTED1"}],
                 },
                 "terminal_sequence": [
                     {
@@ -2820,6 +2862,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                             "slack.get_conversation_info",
                             "slack.send_message",
                         ),
+                        expected_capability_arguments={
+                            "slack.get_conversation_info": {
+                                "channel": "D0EXPECTED1"
+                            }
+                        },
                     )
                 )
             return result
@@ -2830,12 +2877,21 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         reversed_order = drive(
             ["slack.send_message", "slack.get_conversation_info"]
         )
+        wrong_lookup = drive(
+            ["slack.get_conversation_info", "slack.send_message"],
+            lookup_channel="D0WRONG001",
+        )
 
         self.assertTrue(ordered.success)
         self.assertFalse(reversed_order.success)
         self.assertEqual(
             reversed_order.details["failure_category"],
             "unexpected_capability_order",
+        )
+        self.assertFalse(wrong_lookup.success)
+        self.assertEqual(
+            wrong_lookup.details["failure_category"],
+            "unexpected_capability_arguments",
         )
 
     def test_qa_10e_prompt_echo_without_current_turn_history_call_fails(self):

@@ -3051,6 +3051,42 @@ async fn slack_get_conversation_info_rejects_missing_conversation_identity() {
     );
 }
 
+/// A DM lookup without Slack's authoritative counterpart user cannot support
+/// a correct mention, even when the returned conversation ID is exact.
+#[tokio::test]
+async fn slack_get_conversation_info_rejects_dm_without_counterpart() {
+    let capability_id = CapabilityId::new("slack.get_conversation_info").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = UrlKeyedSlackEgress::new(vec![(
+        "conversations.info?channel=D0FIRAT",
+        200,
+        r#"{"ok":true,"channel":{"id":"D0FIRAT","is_channel":false,"is_private":true,"is_im":true,"is_mpim":false}}"#,
+    )]);
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let services = slack_enrichment_services_for_test!(network, Arc::clone(&secret_store));
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id,
+            scope,
+            json!({"channel": "D0FIRAT"}),
+        ))
+        .await
+        .unwrap();
+
+    let failure = match outcome {
+        RuntimeCapabilityOutcome::Failed(failure) => failure,
+        other => panic!("expected failed outcome, got {other:?}"),
+    };
+    assert_eq!(
+        failure.kind,
+        RuntimeFailureKind::OperationFailed,
+        "a DM without its authoritative counterpart must fail: {failure:?}"
+    );
+}
+
 /// Slack rejects `limit=1000` (the real maximum is 999). The guest must clamp
 /// out-of-range limits instead of letting the read fail on an avoidable
 /// invalid_limit round-trip.
