@@ -773,10 +773,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "slack",
     ),
     (
-        "crates/ironclaw_product_workflow/src/reborn_services/extensions.rs",
-        "slack",
-    ),
-    (
         "crates/ironclaw_product_workflow/src/reborn_services/llm_config.rs",
         "github",
     ),
@@ -1110,10 +1106,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "slack",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/slack/slack_channel_connection.rs",
-        "slack",
-    ),
-    (
         "crates/ironclaw_reborn_composition/src/slack/slack_channel_routes.rs",
         "slack",
     ),
@@ -1143,14 +1135,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     (
         "crates/ironclaw_reborn_composition/src/slack/slack_preference_targets.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/slack/slack_personal_binding.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/slack/slack_personal_binding_serve.rs",
         "slack",
     ),
     (

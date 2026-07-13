@@ -26,8 +26,6 @@ use super::{
 };
 
 const EXTENSION_READINESS_CONCURRENCY: usize = 8;
-const SLACK_EXTENSION_ID: &str = "slack";
-const SLACK_CHANNEL_ID: &str = "slack";
 
 pub(super) async fn list_extensions(
     facade: Arc<dyn LifecycleProductFacade>,
@@ -346,8 +344,8 @@ fn extension_info(
     let runtime = summary.runtime_kind.runtime_wire_name().to_string();
     let channel_unconnected = has_external_channel_surface
         && connections.get(summary.package_ref.id.as_str()) == Some(&false);
-    // A channel extension the calling user has not personally connected (for
-    // example, Slack OAuth) surfaces as `setup_required` so the WebUI shows the same
+    // A channel extension the calling user has not personally connected (via
+    // the vendor's OAuth) surfaces as `setup_required` so the WebUI shows the same
     // Configure affordance as a credential-gated extension. The per-user
     // connections map only contains channels with that concept; a connected
     // channel (value `true`) keeps its normal onboarding state, and this is
@@ -432,15 +430,18 @@ fn removable_channel_cleanup_for_summary(
             summary.package_ref.id.as_str().to_string(),
         ));
     }
+    // An extension without a channel surface can still hold the caller's
+    // per-channel connection when it authenticates against a vendor (for
+    // example, a tools package whose OAuth account is the channel's
+    // personal connection). Whether such a connection concept exists is
+    // the connection facade's call: it is consulted first and disconnect
+    // runs only when it reports this channel. The channel key is the
+    // package id — the same key the facade's connections map uses.
     if summary.package_ref.kind == LifecyclePackageKind::Extension
-        && summary.package_ref.id.as_str() == SLACK_EXTENSION_ID
-        && summary
-            .credential_requirements
-            .iter()
-            .any(|requirement| requirement.provider == ironclaw_auth::SLACK_PROVIDER_ID)
+        && !summary.credential_requirements.is_empty()
     {
         return Some(RemovableChannelCleanup::IfConnectionFacadeSupportsChannel(
-            SLACK_CHANNEL_ID.to_string(),
+            summary.package_ref.id.as_str().to_string(),
         ));
     }
     None
@@ -668,10 +669,7 @@ mod tests {
     async fn remove_action_disconnects_slack_when_removing_visible_slack_extension() {
         let facade = RemoveFacade::slack_tools_extension();
         let caller = caller();
-        let connections = Arc::new(TestConnections::with_connections(&[(
-            SLACK_CHANNEL_ID,
-            false,
-        )]));
+        let connections = Arc::new(TestConnections::with_connections(&[("slack", false)]));
         let channel_connections: Arc<dyn ChannelConnectionFacade> = connections.clone();
 
         let response = remove_extension(
@@ -713,6 +711,30 @@ mod tests {
             calls[1].1,
             LifecycleProductAction::ExtensionRemove { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn remove_action_disconnects_facade_reported_connection_for_credentialed_extension() {
+        // The companion-package rule is vendor-blind: ANY credential-bearing
+        // extension consults the connection facade on removal, and the
+        // caller's channel connection is cleared exactly when the facade
+        // reports that channel key (the package id).
+        let facade = RemoveFacade::non_channel();
+        let caller = caller();
+        let connections = Arc::new(TestConnections::with_connections(&[("fixture", true)]));
+        let channel_connections: Arc<dyn ChannelConnectionFacade> = connections.clone();
+
+        let response =
+            remove_extension(&facade, channel_connections, caller.clone(), package_ref())
+                .await
+                .expect("remove response");
+
+        assert!(response.success);
+        assert_eq!(
+            connections.disconnects(),
+            vec![(caller.user_id.clone(), "fixture".to_string())],
+            "a credentialed extension the facade reports as a channel gets the caller disconnect"
+        );
     }
 
     #[tokio::test]
