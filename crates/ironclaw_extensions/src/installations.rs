@@ -947,7 +947,10 @@ mod tests {
         store
             .set_channel_config(
                 &extension_id,
-                vec![("public_endpoint_url".to_string(), "https://x.example".to_string())],
+                vec![(
+                    "public_endpoint_url".to_string(),
+                    "https://x.example".to_string(),
+                )],
             )
             .await
             .expect("save config");
@@ -956,13 +959,19 @@ mod tests {
                 .channel_config(&extension_id)
                 .await
                 .expect("read config"),
-            vec![("public_endpoint_url".to_string(), "https://x.example".to_string())]
+            vec![(
+                "public_endpoint_url".to_string(),
+                "https://x.example".to_string()
+            )]
         );
         assert_eq!(
             store.channel_configs().await,
             vec![(
                 extension_id.clone(),
-                vec![("public_endpoint_url".to_string(), "https://x.example".to_string())]
+                vec![(
+                    "public_endpoint_url".to_string(),
+                    "https://x.example".to_string()
+                )]
             )]
         );
 

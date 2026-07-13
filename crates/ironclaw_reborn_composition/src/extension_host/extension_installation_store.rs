@@ -394,7 +394,9 @@ impl WireState {
         for config in self.channel_configs {
             let extension_id =
                 ExtensionId::new(&config.extension_id).map_err(invalid_installation_error)?;
-            store.set_channel_config(&extension_id, config.values).await?;
+            store
+                .set_channel_config(&extension_id, config.values)
+                .await?;
         }
         Ok(backfilled)
     }

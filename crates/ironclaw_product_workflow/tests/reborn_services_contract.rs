@@ -34,7 +34,7 @@ use ironclaw_product_workflow::{
     AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, ApprovalInteractionActionView,
     ApprovalInteractionDecision, ApprovalInteractionScope, ApprovalInteractionService,
     AuthInteractionDecision, AuthInteractionService, AutomationListRequest, AutomationName,
-    AutomationProductFacade, ChannelConnectionRequirement, CodexLoginStart,
+    AutomationProductFacade, ChannelConfigFacade, ChannelConnectionRequirement, CodexLoginStart,
     ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
     ExtensionCredentialSubmitRequest, InboundAttachmentLander, InboundAttachmentReader,
     LifecycleChannelDirections, LifecycleExtensionCredentialRequirement,
@@ -53,12 +53,13 @@ use ironclaw_product_workflow::{
     ProjectServiceError, RebornAddMemberRequest, RebornAttachmentRequest, RebornAutomationInfo,
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornCreateProjectRequest, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
-    RebornExtensionOnboardingState, RebornExtensionSurface, RebornGetProjectRequest,
-    RebornGetRunStateRequest, RebornListMembersRequest, RebornListMembersResponse,
-    RebornListProjectsRequest, RebornListProjectsResponse, RebornLogLevel, RebornLogQueryRequest,
-    RebornLogQueryResponse, RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigSetRequest,
+    RebornAutomationState, RebornChannelConfigField, RebornChannelConnectAction,
+    RebornChannelConnectStrategy, RebornCreateProjectRequest, RebornDeleteProjectRequest,
+    RebornDeleteThreadRequest, RebornExtensionOnboardingState, RebornExtensionSurface,
+    RebornGetProjectRequest, RebornGetRunStateRequest, RebornListMembersRequest,
+    RebornListMembersResponse, RebornListProjectsRequest, RebornListProjectsResponse,
+    RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigSetRequest,
     RebornOperatorLogsQuery, RebornOperatorSetupRequest, RebornOperatorSetupStatus,
     RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
     RebornOperatorStatusState, RebornOperatorSurfaceStatus, RebornOperatorToolCatalog,
@@ -8114,6 +8115,181 @@ async fn setup_extension_rejects_oauth_secret_via_manual_submit() {
 
     assert_setup_validation(err, "secrets", WebUiInboundValidationCode::InvalidValue);
     assert_eq!(credentials.status_count(), 0);
+    assert_eq!(credentials.submit_count(), 0);
+}
+
+/// One recorded configure-port save: the target extension id plus the
+/// submitted `(handle, value)` pairs.
+type RecordedChannelConfigSave = (String, Vec<(String, String)>);
+
+/// Recording fake of the channel-config configure port: serves a fixed
+/// field-status projection and records every save.
+#[derive(Default)]
+struct RecordingChannelConfigFacade {
+    fields: Vec<RebornChannelConfigField>,
+    saves: Mutex<Vec<RecordedChannelConfigSave>>,
+}
+
+impl RecordingChannelConfigFacade {
+    fn with_fields(fields: Vec<RebornChannelConfigField>) -> Self {
+        Self {
+            fields,
+            saves: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn saves(&self) -> Vec<RecordedChannelConfigSave> {
+        self.saves.lock().expect("saves lock").clone()
+    }
+}
+
+#[async_trait]
+impl ChannelConfigFacade for RecordingChannelConfigFacade {
+    async fn field_status(
+        &self,
+        _extension_id: &ExtensionId,
+    ) -> Result<Vec<RebornChannelConfigField>, RebornServicesError> {
+        Ok(self.fields.clone())
+    }
+
+    async fn save_values(
+        &self,
+        extension_id: &ExtensionId,
+        values: Vec<(String, String)>,
+    ) -> Result<(), RebornServicesError> {
+        self.saves
+            .lock()
+            .expect("saves lock")
+            .push((extension_id.as_str().to_string(), values));
+        Ok(())
+    }
+}
+
+fn channel_config_field(name: &str, label: &str, secret: bool) -> RebornChannelConfigField {
+    RebornChannelConfigField {
+        name: name.to_string(),
+        label: label.to_string(),
+        secret,
+        provided: false,
+    }
+}
+
+/// The setup facade renders manifest-declared channel-config fields (the
+/// non-secret descriptors in `fields`, the secret ones in the existing
+/// `secrets` shape, presence only) and routes submitted values to the
+/// configure port while credential secrets keep the credential path.
+#[tokio::test]
+async fn setup_extension_projects_and_routes_channel_config_values() {
+    let credentials = Arc::new(RecordingExtensionCredentialSetupService::default());
+    let channel_config = Arc::new(RecordingChannelConfigFacade::with_fields(vec![
+        channel_config_field("bot_token", "Bot token", true),
+        channel_config_field("public_url", "Public webhook URL", false),
+    ]));
+    let services =
+        setup_services_with_requirements(vec![manual_credential_requirement("api_token", false)])
+            .with_extension_credentials(credentials.clone())
+            .with_channel_config_facade(channel_config.clone());
+
+    // View: fields from the non-secret descriptors, secret channel fields in
+    // the secrets list (presence only, manual-token shape).
+    let view = services
+        .setup_extension(
+            caller(),
+            lifecycle_package_ref("github"),
+            WebUiSetupExtensionRequest::default(),
+        )
+        .await
+        .expect("setup view");
+    assert_eq!(view.fields.len(), 1);
+    assert_eq!(view.fields[0].name, "public_url");
+    assert_eq!(view.fields[0].prompt, "Public webhook URL");
+    assert!(view.fields[0].placeholder.is_none());
+    let bot_token = view
+        .secrets
+        .iter()
+        .find(|secret| secret.name == "bot_token")
+        .expect("secret channel field surfaces in the secrets shape");
+    assert!(!bot_token.provided);
+    assert!(
+        view.secrets.iter().any(|secret| secret.name == "api_token"),
+        "credential requirements keep their own entry"
+    );
+
+    // Submit: channel values route to the configure port; the credential
+    // secret stays on the credential path.
+    let response = services
+        .setup_extension(
+            caller(),
+            lifecycle_package_ref("github"),
+            WebUiSetupExtensionRequest {
+                action: Some("submit".to_string()),
+                payload: Some(json!({
+                    "secrets": {
+                        "bot_token": "xbt-123",
+                        "api_token": "cred-456"
+                    },
+                    "fields": {
+                        "public_url": "https://hooks.example.test/updates"
+                    }
+                })),
+            },
+        )
+        .await
+        .expect("setup submit");
+    assert_eq!(response.fields.len(), 1);
+    let saves = channel_config.saves();
+    assert_eq!(saves.len(), 1);
+    assert_eq!(saves[0].0, "github");
+    assert!(
+        saves[0]
+            .1
+            .contains(&("bot_token".to_string(), "xbt-123".to_string()))
+    );
+    assert!(saves[0].1.contains(&(
+        "public_url".to_string(),
+        "https://hooks.example.test/updates".to_string()
+    )));
+    assert!(
+        !saves[0].1.iter().any(|(name, _)| name == "api_token"),
+        "credential secrets must not leak into the channel-config port"
+    );
+    assert_eq!(
+        credentials.submit_count(),
+        1,
+        "the credential secret still reaches the credential path"
+    );
+}
+
+/// A submitted `fields` value that matches no declared non-secret handle is
+/// rejected before anything is stored.
+#[tokio::test]
+async fn setup_extension_rejects_unknown_channel_config_field() {
+    let credentials = Arc::new(RecordingExtensionCredentialSetupService::default());
+    let channel_config = Arc::new(RecordingChannelConfigFacade::with_fields(vec![
+        channel_config_field("public_url", "Public webhook URL", false),
+    ]));
+    let services = setup_services_with_requirements(Vec::new())
+        .with_extension_credentials(credentials.clone())
+        .with_channel_config_facade(channel_config.clone());
+
+    let err = services
+        .setup_extension(
+            caller(),
+            lifecycle_package_ref("github"),
+            WebUiSetupExtensionRequest {
+                action: Some("submit".to_string()),
+                payload: Some(json!({
+                    "fields": {
+                        "unknown_field": "value"
+                    }
+                })),
+            },
+        )
+        .await
+        .expect_err("unknown field handle is rejected");
+
+    assert_setup_validation(err, "fields", WebUiInboundValidationCode::InvalidValue);
+    assert!(channel_config.saves().is_empty());
     assert_eq!(credentials.submit_count(), 0);
 }
 

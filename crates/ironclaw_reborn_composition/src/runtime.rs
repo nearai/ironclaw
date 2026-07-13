@@ -670,7 +670,9 @@ pub struct RebornRuntime {
     /// `None` when the trigger poller is not enabled.
     #[cfg(feature = "slack-v2-host-beta")]
     post_submit_hook_slot: Option<
-        Arc<std::sync::OnceLock<Arc<dyn crate::automation::trigger_poller::PostSubmitDeliveryHook>>>,
+        Arc<
+            std::sync::OnceLock<Arc<dyn crate::automation::trigger_poller::PostSubmitDeliveryHook>>,
+        >,
     >,
     #[cfg(any(test, feature = "test-support"))]
     trigger_conversation_pairing:

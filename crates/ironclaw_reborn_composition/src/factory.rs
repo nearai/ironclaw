@@ -547,6 +547,19 @@ impl RebornServices {
         self.delivery_coordinator.clone()
     }
 
+    /// The generic `[channel.config]` configure port (extension-runtime
+    /// §6.4): the production surface the WebUI setup facade and the
+    /// lifecycle configure action route operator channel config through.
+    /// `None` without a local-dev runtime.
+    pub fn channel_config_facade(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_product_workflow::ChannelConfigFacade>> {
+        let service = self.local_runtime.as_ref()?.channel_config.clone()?;
+        Some(Arc::new(
+            crate::extension_host::channel_config::RebornChannelConfigFacade::new(service),
+        ))
+    }
+
     /// The snapshot-backed channel delivery resolver behind the coordinator.
     #[allow(dead_code)]
     pub(crate) fn channel_delivery_resolver(
@@ -816,27 +829,6 @@ impl RebornServices {
         )
     }
 
-    /// [`Self::publish_bundled_extension_for_test`] with non-secret operator
-    /// config on the installation record — the test stand-in for the
-    /// deferred production configure surface (P6/H). Channel extensions
-    /// whose activation hook reads `[channel.config]` values (e.g. a public
-    /// webhook URL consumed by vendor-side registration) need them present
-    /// when `host.activate` fires.
-    #[cfg(feature = "test-support")]
-    pub async fn publish_bundled_extension_with_config_for_test(
-        &self,
-        package: &ironclaw_extensions::ExtensionPackage,
-        resolved: Option<&ironclaw_extensions::ResolvedExtensionManifest>,
-        config: Vec<(String, String)>,
-    ) -> Option<Result<(), ironclaw_product_workflow::ProductWorkflowError>> {
-        let extension_management = self.local_runtime.as_ref()?.extension_management.as_ref()?;
-        Some(
-            extension_management
-                .publish_bundled_package_with_config_for_test(package, resolved, config)
-                .await,
-        )
-    }
-
     /// Register a static channel-egress credential mapping
     /// `(extension_id, handle) → material`, consulted ahead of the scoped
     /// secret store — the test stand-in for `[channel.config]` secret
@@ -998,6 +990,12 @@ pub(crate) struct RebornLocalRuntimeServices {
     // wiring need scoped storage/registry ownership before this is reused
     // outside local-dev composition. Tracked in #4091.
     pub(crate) extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
+    /// The generic `[channel.config]` configure service (extension-runtime
+    /// §6.4–§6.5). Built with `extension_management` over the shared scoped
+    /// secret store at the channel-egress credential scope; `None` on
+    /// composition paths without extension management.
+    pub(crate) channel_config:
+        Option<Arc<crate::extension_host::channel_config::ChannelConfigService>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub(crate) host_runtime_http_egress: Option<HostRuntimeHttpEgressPort>,
     pub(crate) skill_mounts: MountView,
@@ -1794,8 +1792,24 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     )
     .await?;
     nearai_mcp_bootstrap_outcome.log_completion();
+    // The generic `[channel.config]` configure service (extension-runtime
+    // §6.4–§6.5): non-secret values persist on the durable installation
+    // store; secret values land in the shared scoped secret store at the
+    // channel-egress credential scope, where the egress credential fallback
+    // resolves them with no bridge. The management port runs the §6.5
+    // reactivate cycle for saves against an active extension.
+    let channel_config_service = Arc::new(
+        crate::extension_host::channel_config::ChannelConfigService::new(
+            extension_management.installation_store_handle(),
+            Arc::clone(&secret_store),
+            channel_egress_scope.clone(),
+            Arc::clone(&extension_management)
+                as Arc<dyn crate::extension_host::channel_config::ChannelConfigReactivation>,
+        ),
+    );
     if let Some(local_runtime) = Arc::get_mut(&mut store_graph.local_runtime) {
         local_runtime.extension_management = Some(Arc::clone(&extension_management));
+        local_runtime.channel_config = Some(channel_config_service);
         local_runtime.runtime_http_egress = Some(product_auth_runtime_ports.runtime_http_egress());
         local_runtime.extension_registry = Arc::clone(&extension_registry);
         local_runtime.shared_extension_registry = Some(services.shared_extension_registry());
@@ -2480,6 +2494,7 @@ async fn build_local_dev_store_graph(
         budget_gate_store,
         skill_management,
         extension_management: None,
+        channel_config: None,
         runtime_http_egress: None,
         host_runtime_http_egress: None,
         skill_mounts,
@@ -2632,6 +2647,7 @@ async fn build_local_dev_store_graph(
         budget_gate_store,
         skill_management,
         extension_management: None,
+        channel_config: None,
         runtime_http_egress: None,
         host_runtime_http_egress: None,
         skill_mounts,
@@ -5441,6 +5457,7 @@ mod tests {
             budget_gate_store: Arc::clone(&base_runtime.budget_gate_store),
             skill_management: Arc::clone(&base_runtime.skill_management),
             extension_management: base_runtime.extension_management.clone(),
+            channel_config: base_runtime.channel_config.clone(),
             runtime_http_egress: base_runtime.runtime_http_egress.clone(),
             host_runtime_http_egress: base_runtime.host_runtime_http_egress.clone(),
             skill_mounts: base_runtime.skill_mounts.clone(),

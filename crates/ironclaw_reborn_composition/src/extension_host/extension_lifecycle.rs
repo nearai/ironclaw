@@ -386,28 +386,15 @@ impl RebornLocalExtensionManagementPort {
     /// `publish_to_generic_host`, without the durable install/credential
     /// legs). Direct registry publication alone would leave the package
     /// undispatchable now that extension dispatch resolves from the snapshot.
+    /// Operator `[channel.config]` values are NOT seeded here — they flow
+    /// exclusively through the production configure surface
+    /// (`ChannelConfigService`), and this seam reads whatever that surface
+    /// durably stored, exactly like the production publish path.
     #[cfg(feature = "test-support")]
     pub(crate) async fn publish_bundled_package_for_test(
         &self,
         package: &ExtensionPackage,
         resolved: Option<&ironclaw_extensions::ResolvedExtensionManifest>,
-    ) -> Result<(), ProductWorkflowError> {
-        self.publish_bundled_package_with_config_for_test(package, resolved, Vec::new())
-            .await
-    }
-
-    /// [`Self::publish_bundled_package_for_test`] with non-secret operator
-    /// config on the installation record — the stand-in for the deferred
-    /// production configure surface (P6/H): channel extensions whose
-    /// activation hook reads `[channel.config]` values (e.g. a public
-    /// webhook URL consumed by vendor-side registration) need them present
-    /// at `host.activate` time.
-    #[cfg(feature = "test-support")]
-    pub(crate) async fn publish_bundled_package_with_config_for_test(
-        &self,
-        package: &ExtensionPackage,
-        resolved: Option<&ironclaw_extensions::ResolvedExtensionManifest>,
-        config: Vec<(String, String)>,
     ) -> Result<(), ProductWorkflowError> {
         self.active_extensions.publish(package)?;
         let Some(host) = self.generic_host.get() else {
@@ -449,6 +436,11 @@ impl RebornLocalExtensionManagementPort {
         };
         let effective =
             crate::extension_host::generic_host::effective_resolved_for_package(&base, package);
+        let config = self
+            .installation_store
+            .channel_config(&package.id)
+            .await
+            .map_err(map_extension_installation_error)?;
         host.install(ironclaw_extension_host::InstallationRecord {
             extension_id: package.id.as_str().to_string(),
             installation_id: format!("{}-test-install", package.id.as_str()),
@@ -1579,6 +1571,53 @@ impl RebornLocalExtensionManagementPort {
             .map_err(|error| ProductWorkflowError::Transient {
                 reason: format!("failed to remove extension files: {error}"),
             })
+    }
+}
+
+/// §6.5: editing `[channel.config]` while Active runs an automatic
+/// deactivate → reactivate cycle through the generic host — adapters are
+/// rebuilt with the new values and `activate()` revalidates them. A no-op
+/// for inactive installations (activation picks the values up when it
+/// runs) and for compositions without an attached generic host. Failure
+/// surfaces the typed error and leaves the host record per §6.1
+/// (Installed + typed last error).
+#[async_trait]
+impl crate::extension_host::channel_config::ChannelConfigReactivation
+    for RebornLocalExtensionManagementPort
+{
+    async fn reactivate_if_active(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<(), ProductWorkflowError> {
+        let _operation_guard = self.operation_lock.lock().await;
+        let installations = self
+            .installation_store
+            .list_installations()
+            .await
+            .map_err(map_extension_installation_error)?;
+        let Some(installation) = installations
+            .into_iter()
+            .find(|installation| installation.extension_id() == extension_id)
+        else {
+            return Ok(());
+        };
+        if installation.activation_state() != ExtensionActivationState::Enabled {
+            return Ok(());
+        }
+        let Some(host) = self.generic_host.get() else {
+            return Ok(());
+        };
+        match host.deactivate(extension_id.as_str()).await {
+            Ok(()) | Err(ironclaw_extension_host::LifecycleError::NotInstalled { .. }) => {}
+            Err(error) => return Err(generic_host_error(error)),
+        }
+        let active_package = self.lifecycle_package(extension_id).await?;
+        self.publish_to_generic_host(
+            extension_id,
+            installation.installation_id(),
+            &active_package,
+        )
+        .await
     }
 }
 

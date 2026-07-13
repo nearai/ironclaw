@@ -19,16 +19,17 @@
 //!   through the REAL coordinator to `chat.postMessage`, with the §11
 //!   bridged bot token injected host-side (OUT-1/2/5, ING-11 read half).
 //! - The DEL-10 Telegram proof: the bundled telegram package (manifest +
-//!   adapter crate only, zero bespoke host code) installs → activates
-//!   (`setWebhook` over recorded egress with host-side path-placeholder
-//!   token substitution) → a signed update becomes a turn → the reply is
-//!   coordinated to `sendMessage` — the "addition test" for a second
-//!   production channel.
-//!
-//! Owner call flagged in the PR body: the telegram install rides the
-//! test-support publish-with-config seam because the production configure
-//! surface ([`channel.config`] operator values) is a P6/H deliverable; the
-//! Slack install/activate runs through the production lifecycle tools.
+//!   adapter crate only, zero bespoke host code) installs through the
+//!   production lifecycle tool, is configured through the PRODUCTION
+//!   `[channel.config]` configure port (bot token + webhook secret into
+//!   the scoped secret store, webhook URL into the durable installation
+//!   store — zero test-only config injection), activates (`setWebhook`
+//!   over recorded egress with host-side path-placeholder substitution of
+//!   the configured token) → a signed update becomes a turn → the reply
+//!   is coordinated to `sendMessage` — the "addition test" for a second
+//!   production channel. A config re-save while Active proves the §6.5
+//!   automatic deactivate → reactivate cycle (a second `setWebhook` with
+//!   the new URL).
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
@@ -609,11 +610,14 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
 }
 
 /// DEL-10: the bundled Telegram package — one manifest plus the adapter
-/// crate, zero bespoke host code — installs, activates (`setWebhook` over
-/// recorded egress with the bot token substituted host-side into the URL
-/// path placeholder), receives a signed update through the production
-/// router mount, runs a real turn, and delivers the reply through the
-/// generic observer → REAL coordinator → `sendMessage`.
+/// crate, zero bespoke host code — installs through the production
+/// lifecycle tool, is configured through the PRODUCTION `[channel.config]`
+/// configure port, activates (`setWebhook` over recorded egress with the
+/// CONFIGURED bot token substituted host-side into the URL path
+/// placeholder), receives a signed update through the production router
+/// mount, runs a real turn, delivers the reply through the generic
+/// observer → REAL coordinator → `sendMessage`, and re-runs activation on
+/// a config edit while Active (§6.5).
 #[rstest]
 #[case::libsql(StorageMode::LibSql)]
 #[case::postgres(StorageMode::Postgres)]
@@ -625,14 +629,6 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply(#[case] storage:
         .await
         .expect("delivery group builds on this backend");
     let services = reborn_services(&group);
-    assert!(
-        services.register_static_channel_egress_credentials_for_test(vec![(
-            "telegram".to_string(),
-            "telegram_bot_token".to_string(),
-            ironclaw_secrets::SecretMaterial::from(TELEGRAM_BOT_TOKEN.to_string()),
-        )]),
-        "the composed runtime must expose channel-egress credential bridging"
-    );
 
     // The inbound thread first: its wire baseline precedes activation, so
     // `captured_network_requests_for_test` sees the setWebhook call too.
@@ -643,41 +639,88 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply(#[case] storage:
         .await
         .expect("inbound thread builds");
 
-    // Install + activate the REAL bundled manifest through the generic host.
-    // Config rides the test-support seam (the production configure surface
-    // is a P6/H deliverable); activation itself is the REAL `host.activate`
-    // hook driving the REAL adapter against policy-enforced egress.
-    let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
-        std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("crates/ironclaw_first_party_extensions/assets/telegram/manifest.toml"),
-        )
-        .expect("bundled telegram manifest is readable"),
-        ironclaw_extensions::ManifestSource::HostBundled,
-        &ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
-        None,
-        &ironclaw_host_runtime::default_host_api_contract_registry().expect("host contracts"),
-    )
-    .expect("bundled telegram manifest parses");
-    let manifest = ironclaw_extensions::ExtensionManifest::try_from(record.manifest().clone())
-        .expect("telegram manifest converts");
-    let package = ironclaw_extensions::ExtensionPackage::from_manifest(
-        manifest,
-        ironclaw_host_api::VirtualPath::new("/system/extensions/telegram").expect("package root"),
-    )
-    .expect("telegram package builds");
-    services
-        .publish_bundled_extension_with_config_for_test(
-            &package,
-            Some(record.resolved()),
-            vec![(
-                "telegram_webhook_url".to_string(),
-                "https://hooks.example.test/webhooks/extensions/telegram/updates".to_string(),
-            )],
+    // Install through the production lifecycle tool (same handshake as the
+    // Slack proof), configure through the production port, THEN activate:
+    // the real operator order, with zero test-only config injection.
+    let lifecycle = group
+        .thread("conv-telegram-delivery-lifecycle")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.extension_install",
+                json!({"extension_id": "telegram"}),
+            ),
+            RebornScriptedReply::text("installed"),
+            RebornScriptedReply::tool_call(
+                "builtin.extension_activate",
+                json!({"extension_id": "telegram"}),
+            ),
+            RebornScriptedReply::text("activated"),
+        ])
+        .build()
+        .await
+        .expect("telegram lifecycle thread builds");
+    lifecycle
+        .submit_turn("install telegram")
+        .await
+        .expect("telegram install completes");
+    lifecycle
+        .assert_tool_result_contains("\"installed\":true")
+        .await
+        .expect("telegram install reported success");
+
+    // The production configure surface: secrets land in the scoped secret
+    // store (where channel egress resolves them), the webhook URL in the
+    // durable installation store.
+    let channel_config = services
+        .channel_config_facade()
+        .expect("the composed runtime exposes the channel-config configure port");
+    let telegram_id = ironclaw_host_api::ExtensionId::new("telegram").expect("extension id");
+    channel_config
+        .save_values(
+            &telegram_id,
+            vec![
+                (
+                    "telegram_webhook_url".to_string(),
+                    "https://hooks.example.test/webhooks/extensions/telegram/updates".to_string(),
+                ),
+                (
+                    "telegram_bot_token".to_string(),
+                    TELEGRAM_BOT_TOKEN.to_string(),
+                ),
+                (
+                    "telegram_webhook_secret".to_string(),
+                    TELEGRAM_WEBHOOK_SECRET.to_string(),
+                ),
+            ],
         )
         .await
-        .expect("local-dev runtime present")
-        .expect("telegram install + activate succeeds");
+        .expect("telegram configures through the production port");
+    // §6.4 config completeness: every field reports provided, secrets as
+    // presence only.
+    let status = channel_config
+        .field_status(&telegram_id)
+        .await
+        .expect("field status");
+    assert_eq!(status.len(), 3, "{status:?}");
+    assert!(
+        status.iter().all(|field| field.provided),
+        "all configured fields must report provided: {status:?}"
+    );
+    assert!(
+        status
+            .iter()
+            .any(|field| field.name == "telegram_bot_token" && field.secret),
+        "the bot token is a secret field: {status:?}"
+    );
+
+    lifecycle
+        .submit_turn("activate telegram")
+        .await
+        .expect("telegram activate completes");
+    lifecycle
+        .assert_tool_result_contains("\"activated\":true")
+        .await
+        .expect("telegram activation reported success");
 
     // Activation seam: setWebhook crossed the recorded wire with the bot
     // token substituted host-side into the URL path (the adapter only ever
@@ -813,4 +856,33 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply(#[case] storage:
 
     // Store seam: terminal Delivered attempt under the vendor scope.
     assert_delivered_attempt(services, &vendor_scope).await;
+
+    // §6.5: editing `[channel.config]` while Active runs the automatic
+    // deactivate → reactivate cycle through the REAL generic host — the
+    // rebuilt adapter re-registers the webhook with the NEW URL.
+    let updated_url = "https://hooks.example.test/webhooks/extensions/telegram/updates-v2";
+    channel_config
+        .save_values(
+            &telegram_id,
+            vec![("telegram_webhook_url".to_string(), updated_url.to_string())],
+        )
+        .await
+        .expect("config edit while Active saves and reactivates");
+    let requests = inbound.captured_network_requests_for_test();
+    let set_webhook_calls: Vec<_> = requests
+        .iter()
+        .filter(|request| request.url.ends_with("/setWebhook"))
+        .collect();
+    assert!(
+        set_webhook_calls.len() >= 2,
+        "the reactivate cycle must re-run the activation hook; got {} setWebhook calls",
+        set_webhook_calls.len()
+    );
+    let last_set_webhook = set_webhook_calls
+        .last()
+        .expect("at least one setWebhook call");
+    assert!(
+        String::from_utf8_lossy(&last_set_webhook.body).contains(updated_url),
+        "the re-run activation must register the NEW webhook URL"
+    );
 }
