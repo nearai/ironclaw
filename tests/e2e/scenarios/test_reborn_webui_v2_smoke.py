@@ -482,12 +482,16 @@ async def test_reborn_v2_disconnected_run_shows_status_and_stops_typing(
         await page.goto(f"{reborn_v2_server}/v2/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}")
         composer = page.locator(SEL_V2["chat_composer"])
         await expect(composer).to_be_visible(timeout=15000)
+        connection_status = page.locator(SEL_V2["connection_status"])
+
+        await context.set_offline(True)
+        await expect(connection_status).to_have_text("Reconnecting...", timeout=5000)
+        await context.set_offline(False)
+        await expect(connection_status).to_have_count(0, timeout=5000)
 
         await composer.fill("summarize 3 X/Twitter posts")
         await composer.press("Enter")
         await expect(page.locator(SEL_V2["typing_indicator"])).to_be_visible(timeout=5000)
-
-        connection_status = page.locator(SEL_V2["connection_status"])
 
         await page.evaluate("() => window.__failLatestV2Sse(0)")
         await expect(connection_status).to_have_text("Reconnecting...", timeout=5000)
