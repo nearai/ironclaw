@@ -3154,6 +3154,22 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
         instructions = str(action_body.get("instructions") or "")
         if not _slack_connect_instructions_look_valid(instructions):
             raise AssertionError(f"unexpected Slack connect instructions: {instructions!r}")
+        # Extension-scoped OAuth deliberately rejects an absent installation.
+        # Exercise the same global install transition as the product UI before
+        # probing the OAuth start surface; do not manufacture per-user setup
+        # state inside the canary.
+        install_body = await _webui_json(
+            page,
+            "POST",
+            "/api/webchat/v2/extensions/install",
+            {"package_ref": {"kind": "extension", "id": "slack"}},
+        )
+        if install_body.get("success") is not True:
+            raise AssertionError(f"Slack install did not succeed: {install_body!r}")
+        observed["slack_install_message"] = install_body.get("message")
+        observed["slack_install_onboarding_state"] = install_body.get(
+            "onboarding_state"
+        )
         account_scope = _slack_personal_auth_ready_account(personal_auth)
         invocation_id = str(account_scope.get("invocation_id") or "").strip()
         thread_id = str(account_scope.get("thread_id") or "").strip()

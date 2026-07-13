@@ -487,6 +487,16 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             payload: dict[str, object] | None = None,
         ) -> dict[str, object]:
             fetched_paths.append(path)
+            if method == "POST" and path == "/api/webchat/v2/extensions/install":
+                self.assertEqual(
+                    payload,
+                    {"package_ref": {"kind": "extension", "id": "slack"}},
+                )
+                return {
+                    "success": True,
+                    "message": "Slack installed",
+                    "onboarding_state": "auth_required",
+                }
             if method == "POST" and path == "/api/reborn/product-auth/accounts/list":
                 self.assertEqual(payload["provider"], "slack_personal")
                 self.assertEqual(payload["requester_extension"], "slack")
@@ -647,9 +657,15 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             fetched_paths,
             [
                 "/api/webchat/v2/channels/connectable",
+                "/api/webchat/v2/extensions/install",
                 "/api/reborn/product-auth/accounts/list",
                 "/api/webchat/v2/extensions/slack/setup/oauth/start",
             ],
+        )
+        self.assertEqual(result.details["slack_install_message"], "Slack installed")
+        self.assertEqual(
+            result.details["slack_install_onboarding_state"],
+            "auth_required",
         )
         self.assertEqual(result.details["slack_product_auth_account_count"], 1)
         self.assertEqual(
