@@ -2355,6 +2355,13 @@ mod tests {
             "send_message description must forbid self-delivery of the run's own answer: {}",
             send_message.description
         );
+        assert!(
+            send_message.description.contains(
+                "Never call this — or instruct a trigger to call it — for that run's own final reply"
+            ) && send_message.description.contains("delivery_target_id"),
+            "send_message description must front-load the trigger duplicate-delivery guard: {}",
+            send_message.description
+        );
         // Honesty: a per-trigger delivery_target_id can route the final reply
         // elsewhere, so the description must name the configured outbound
         // delivery target, not promise "the requesting user".

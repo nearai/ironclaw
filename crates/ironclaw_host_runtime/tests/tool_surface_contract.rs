@@ -695,6 +695,12 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
             .contains("pass delivery_target_id"),
         "trigger_create description should teach per-trigger delivery routing"
     );
+    assert!(
+        trigger_create.descriptor.description.contains(
+            "If delivery_target_id is set, never put a send, post, or deliver-results step"
+        ),
+        "trigger_create description should front-load the no-duplicate-delivery rule"
+    );
     let trigger_prompt_description = trigger_create
         .descriptor
         .parameters_schema
@@ -723,6 +729,12 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
     assert!(
         trigger_delivery_target_description.contains("builtin__outbound_delivery_targets_list"),
         "delivery_target_id schema should point at the target list capability"
+    );
+    assert!(
+        trigger_delivery_target_description.contains(
+            "Do not also put a send, post, or deliver-results step for that result in prompt"
+        ),
+        "delivery_target_id schema should forbid duplicate prompt delivery"
     );
 
     let http_schema = &surface
