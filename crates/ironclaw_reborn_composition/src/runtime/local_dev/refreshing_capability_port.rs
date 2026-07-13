@@ -69,32 +69,16 @@ pub(crate) struct RefreshingLocalDevCapabilityPortConfig {
     /// provider-trust map. Always empty at the sole production call site
     /// (`local_dev.rs`'s `create_capability_port`); populated only by the `test-support` constructor.
     pub(super) additional_provider_trust: BTreeMap<ExtensionId, TrustDecision>,
-    /// Narrows the FULL granted-capability set -- builtin grants AND any
-    /// activated extension grants `local_dev_visible_capability_request`
-    /// appended -- to this id set (empty = no filtering, production's
-    /// value). Applied in `build_inner` as a single `retain` AFTER
-    /// extension grants are appended, so callers that want an extension
-    /// capability visible must list its id explicitly; there is no
-    /// separate builtin-only carve-out (see the harness-port-seam plan's
-    /// "one narrowing input at the grants layer" design: this field is the
-    /// only narrowing surface, and it narrows everything a run could see).
-    /// Always empty at the sole production call site (`local_dev.rs`'s
-    /// `create_capability_port`); populated only by the `test-support`
-    /// constructor.
-    pub(super) capability_id_filter: HashSet<CapabilityId>,
+    /// Narrows the FULL granted-capability set (builtin grants plus any
+    /// appended extension grants) to this id set via `retain` in
+    /// `build_inner`. `None` = no filtering (production's value at the sole
+    /// call site, `local_dev.rs`'s `create_capability_port`); `Some(set)`
+    /// keeps exactly `set`, including `Some(empty)` = zero grants.
+    pub(super) capability_id_filter: Option<HashSet<CapabilityId>>,
     /// Synthetic grants for capability ids that neither the static builtin
-    /// policy nor `extension_surface_source` produces -- the ad-hoc test-only
-    /// `HostRuntime` backends (mock MCP, GitHub/web-access WASM wired directly
-    /// onto a standalone runtime rather than through a real `RebornServices`
-    /// extension activation) need a grant minted by hand, same as the
-    /// pre-seam harness's removed `capability_grants()` free function did for
-    /// every id in its allowlist. Grantees must match the execution principal
-    /// `local_dev_visible_capability_request` builds
-    /// (`Principal::Extension(loop_driver_execution_extension_id(..))`, the
-    /// same grantee `LocalDevExtensionSurface::grants` mints) or
-    /// authorization skips them. Applied in `build_inner` BEFORE
-    /// `capability_id_filter`'s retain, and only for ids not already granted
-    /// (never shadows or double-grants a real builtin/extension grant).
+    /// policy nor `extension_surface_source` produces (ad-hoc test-only
+    /// `HostRuntime` backends). Applied in `build_inner` before
+    /// `capability_id_filter`'s retain, only for ids not already granted.
     /// Always empty at the sole production call site (`local_dev.rs`'s
     /// `create_capability_port`); populated only by the `test-support`
     /// constructor.
@@ -167,7 +151,7 @@ struct RefreshingLocalDevCapabilityPort {
     external_tool_catalog: Arc<dyn ExternalToolCatalog>,
     capability_execution_mount_overrides: HashMap<CapabilityId, MountView>,
     additional_provider_trust: BTreeMap<ExtensionId, TrustDecision>,
-    capability_id_filter: HashSet<CapabilityId>,
+    capability_id_filter: Option<HashSet<CapabilityId>>,
     additional_capability_grants: Vec<ironclaw_host_api::CapabilityGrant>,
     current: StdMutex<Option<Arc<dyn LoopCapabilityPort>>>,
     refresh_lock: AsyncMutex<()>,
@@ -192,20 +176,10 @@ impl RefreshingLocalDevCapabilityPort {
                 extension_surface: &extension_surface,
             },
         )?;
-        // Test-support-only synthetic grants (empty in production, see the
-        // config field doc-comment). Two lanes, both skipping any id the
-        // extension surface owns (the manifest-derived credentials/network
-        // policy stay the single choke point, exactly like the old harness's
-        // active-authority replacement step):
-        //
-        // 1. OVERLAY network + secrets onto a same-id builtin-policy grant.
-        //    Authorization checks the grant's constraints, so keeping the
-        //    builtin grant's production-default network policy would silently
-        //    bypass the harness's allowlist (S1 real-egress coverage) — but
-        //    the builtin grant's mounts/effects stay authoritative (a full
-        //    replace clobbers e.g. the extension-lifecycle mount profile).
-        // 2. INSERT the whole synthetic grant when the id has no grant at all
-        //    (ad-hoc test-only runtimes: mock MCP, GitHub/web-access WASM).
+        // Test-support-only synthetic grants (empty in production; see the
+        // `additional_capability_grants` doc-comment for the invariant).
+        // Overlays network+secrets onto a same-id builtin grant, or inserts
+        // the whole synthetic grant when the id has no grant at all.
         if !self.additional_capability_grants.is_empty() {
             let mut missing: Vec<ironclaw_host_api::CapabilityGrant> = Vec::new();
             for synthetic in &self.additional_capability_grants {
@@ -232,12 +206,9 @@ impl RefreshingLocalDevCapabilityPort {
             visible_request.context.grants.grants.extend(missing);
         }
         // Test-support-only grant-constraint mount overrides (empty in
-        // production, see `capability_execution_mount_overrides`'s
-        // doc-comment): the pre-seam harness applied its per-capability mount
-        // overrides to the GRANT constraints as well as the execution mounts,
-        // and authorization checks the grant's mounts — overriding only the
-        // execution side would leave e.g. the memory capabilities granted
-        // against the wrong (workspace) view and denied at dispatch.
+        // production; see `capability_execution_mount_overrides`'s
+        // doc-comment). Authorization checks the grant's mounts, so this must
+        // apply to the grant constraints, not just execution mounts.
         if !self.capability_execution_mount_overrides.is_empty() {
             for grant in &mut visible_request.context.grants.grants {
                 if let Some(mounts) = self
@@ -248,17 +219,15 @@ impl RefreshingLocalDevCapabilityPort {
                 }
             }
         }
-        // Test-support-only narrowing (empty in production, see the config
-        // field doc-comment): restrict the FULL granted capability set --
-        // builtin grants plus any activated extension grants the call above
-        // just appended -- to `capability_id_filter`. Callers must list
-        // extension capability ids explicitly to keep them visible.
-        if !self.capability_id_filter.is_empty() {
+        // Test-support-only narrowing (`None` in production; see the config
+        // field doc-comment). `Some(set)` retains exactly `set`, including
+        // `Some(empty)` = zero grants.
+        if let Some(filter) = &self.capability_id_filter {
             visible_request
                 .context
                 .grants
                 .grants
-                .retain(|grant| self.capability_id_filter.contains(&grant.capability));
+                .retain(|grant| filter.contains(&grant.capability));
         }
         // Test-support-only extra provider-trust entries (empty in production,
         // see the config field doc-comment): merge after the canonical helper

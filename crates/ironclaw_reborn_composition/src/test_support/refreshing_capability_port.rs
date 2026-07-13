@@ -89,9 +89,9 @@ pub struct RefreshingLocalDevCapabilityPortTestParts {
     /// `RefreshingLocalDevCapabilityPortConfig::additional_provider_trust`.
     pub additional_provider_trust:
         std::collections::BTreeMap<ironclaw_host_api::ExtensionId, ironclaw_trust::TrustDecision>,
-    /// Test-only config extension (empty = production behavior, i.e. no
+    /// Test-only config extension (`None` = production behavior, i.e. no
     /// filtering). See `RefreshingLocalDevCapabilityPortConfig::capability_id_filter`.
-    pub capability_id_filter: std::collections::HashSet<ironclaw_host_api::CapabilityId>,
+    pub capability_id_filter: Option<std::collections::HashSet<ironclaw_host_api::CapabilityId>>,
     /// Test-only config extension (empty = production behavior). See
     /// `RefreshingLocalDevCapabilityPortConfig::additional_capability_grants`
     /// — hand-minted grants for capability ids an ad-hoc test-only

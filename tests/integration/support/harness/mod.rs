@@ -1445,27 +1445,11 @@ impl HostRuntimeCapabilityHarness {
                 },
             );
         }
-        // Harness-port-seam P1 follow-up: hand-mint a grant for every id in
-        // this harness's exhaustive `capability_ids` allowlist, exactly the
-        // way the pre-seam harness's now-removed `capability_grants()` free
-        // function did unconditionally. The production factory's grant set
-        // only comes from two sources — the static builtin policy and a real
-        // `RebornServices` extension activation (`extension_management`
-        // above) — so an ad-hoc test-only `HostRuntime` backend that wires a
-        // capability directly (mock MCP, GitHub/web-access WASM in
-        // `capability_backend.rs`, none of which go through a real extension
-        // activation) would otherwise never get a dispatchable grant.
-        // `create_refreshing_local_dev_capability_port_for_test` only adds
-        // one of these when the id isn't ALREADY granted by a real
-        // builtin/extension path, so this lane never shadows production
-        // behavior for the harnesses that DO activate a real extension.
-        // Excludes the local-dev synthetic-capability ids (E-PROJ/E-SKILL/
-        // C-SYNTH outbound): those are surfaced by
-        // `wrap_local_dev_synthetic_capabilities` wrapping the PORT directly,
-        // not by a runtime-dispatchable grant, so minting a raw grant for one
-        // of them here would make it look host-dispatchable and fail at
-        // `host_stage_unavailable_capability` instead of hitting the
-        // synthetic wrapper.
+        // Hand-mint a grant for every id in this harness's `capability_ids`
+        // allowlist (ad-hoc test-only `HostRuntime` backends never get a real
+        // builtin/extension grant otherwise). Excludes the synthetic-capability
+        // ids, which are surfaced by wrapping the port directly. See
+        // `additional_capability_grants` doc for the invariant.
         let synthetic_capability_ids: std::collections::HashSet<&str> = [
             ironclaw_reborn_composition::test_support::PROJECT_CREATE_CAPABILITY_ID,
             ironclaw_reborn_composition::test_support::SKILL_ACTIVATE_CAPABILITY_ID,
@@ -1587,10 +1571,11 @@ impl HostRuntimeCapabilityHarness {
                     .cloned()
                     .collect(),
                 additional_provider_trust,
-                // Whole-set narrowing over the FULL granted-capability set
-                // (builtin grants plus any activated extension grants) —
-                // matches this harness's exhaustive `capability_ids` allowlist.
-                capability_id_filter: self.capability_ids.iter().cloned().collect(),
+                // Whole-set narrowing over the FULL granted-capability set to
+                // this harness's exhaustive `capability_ids` allowlist,
+                // including the empty case (zero grants). See
+                // `additional_capability_grants` doc for the invariant.
+                capability_id_filter: Some(self.capability_ids.iter().cloned().collect()),
                 additional_capability_grants,
             };
         let port = ironclaw_reborn_composition::test_support::create_refreshing_local_dev_capability_port_for_test(parts)
