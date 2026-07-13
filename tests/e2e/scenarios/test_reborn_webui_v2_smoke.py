@@ -934,7 +934,7 @@ async def test_reborn_v2_thread_list_and_delete(reborn_v2_server):
 
 
 async def test_reborn_v2_ui_delete_removes_sidebar_thread_without_refetch(
-    reborn_v2_server, reborn_v2_browser
+    reborn_v2_server, reborn_v2_page
 ):
     """A successful delete updates the rendered sidebar before list revalidation returns."""
     headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
@@ -942,13 +942,16 @@ async def test_reborn_v2_ui_delete_removes_sidebar_thread_without_refetch(
         keep_id = await _create_thread(client, reborn_v2_server)
         drop_id = await _create_thread(client, reborn_v2_server)
 
-    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
-    page = await context.new_page()
+    page = reborn_v2_page
+    # The shared page is opened before this test creates its API fixtures, so
+    # reload once during setup to populate the sidebar. No reload occurs after
+    # deletion; the assertion below runs while list revalidation is blocked.
+    await page.reload()
     release_refetch = asyncio.Event()
     refetch_started = asyncio.Event()
     refetch_finished = asyncio.Event()
 
-    async def delay_thread_list_refetch(route, _request):
+    async def delay_thread_list_refetch(route, _request) -> None:
         refetch_started.set()
         try:
             await release_refetch.wait()
@@ -956,7 +959,7 @@ async def test_reborn_v2_ui_delete_removes_sidebar_thread_without_refetch(
         finally:
             refetch_finished.set()
 
-    async def accept_delete_dialog(dialog):
+    async def accept_delete_dialog(dialog) -> None:
         await dialog.accept()
 
     try:
@@ -983,7 +986,6 @@ async def test_reborn_v2_ui_delete_removes_sidebar_thread_without_refetch(
         if refetch_started.is_set():
             await asyncio.wait_for(refetch_finished.wait(), timeout=5)
         await page.unroute("**/api/webchat/v2/threads", delay_thread_list_refetch)
-        await context.close()
 
 
 async def test_reborn_v2_timeline_pagination(reborn_v2_server):
