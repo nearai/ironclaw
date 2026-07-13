@@ -1,11 +1,13 @@
 //! MCP-registration spec test #2 (per-user isolation): actor A registers an
-//! MCP server descriptor and can search/install it; actor B must not see it
-//! in search or be able to install it. T1 ships only the read side (the
-//! register verb — the production writer — lands with T3), so the descriptor
-//! is seeded by writing `manifest.toml` directly onto the harness's on-disk
-//! tenant-scoped `/system/extensions/registered/<tenant>/<owner>/<id>/` tree —
-//! the exact layout `RegisteredExtensionStore::list_for_scope` reads. Drives the
-//! AGENT path (`builtin.extension_search`/`builtin.extension_install` via real
+//! MCP server descriptor and can search/install/activate/remove it; actor B
+//! must not see it in search or be able to install, activate, or remove it.
+//! T1 ships only the read side (the register verb — the production writer —
+//! lands with T3), so the descriptor is seeded by writing `manifest.toml`
+//! directly onto the harness's on-disk tenant-scoped
+//! `/system/extensions/registered/<tenant>/<owner>/<id>/` tree — the exact
+//! layout `RegisteredExtensionStore::list_for_scope` reads. Drives the AGENT
+//! path (`builtin.extension_search`/`builtin.extension_install`/
+//! `builtin.extension_activate`/`builtin.extension_remove` via real
 //! `submit_turn`s) through `ExtensionLifecycleToolHandler::dispatch`
 //! (`extension_lifecycle_capabilities.rs`), the load-bearing caller the T1
 //! review flagged as easy to miss.
@@ -253,6 +255,111 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .assert_tool_error(ToolErrorClass::Failed, "invalid_input")
         .await
         .map_err(|e| format!("[B install must fail, not silently succeed] {e}"))?;
+
+    // ── A activates its own registered install: the successful owner path ──
+    let a_activate = g
+        .thread("conv-ext-reg-iso-a-activate")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.extension_activate",
+                json!({ "extension_id": REGISTERED_EXTENSION_ID }),
+            ),
+            RebornScriptedReply::text("activated"),
+        ])
+        .build()
+        .await?;
+    a_activate
+        .submit_turn(&format!("activate {REGISTERED_EXTENSION_ID}"))
+        .await
+        .map_err(|e| format!("[A activate submit] {e}"))?;
+    a_activate
+        .assert_tool_invoked("builtin.extension_activate")
+        .await
+        .map_err(|e| format!("[A activate invoked] {e}"))?;
+    a_activate
+        .assert_tool_result_contains("\"activated\":true")
+        .await
+        .map_err(|e| format!("[A activate must succeed for its own registered extension] {e}"))?;
+
+    // ── B activates A's package id: must fail, masked as not-found ──────────
+    let b_activate = g
+        .thread("conv-ext-reg-iso-b-activate")
+        .with_actor_id("reborn-actor-b")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.extension_activate",
+                json!({ "extension_id": REGISTERED_EXTENSION_ID }),
+            ),
+            RebornScriptedReply::text("activate attempted"),
+        ])
+        .build()
+        .await?;
+    b_activate
+        .submit_turn(&format!("activate {REGISTERED_EXTENSION_ID}"))
+        .await
+        .map_err(|e| format!("[B activate submit] {e}"))?;
+    b_activate
+        .assert_tool_invoked("builtin.extension_activate")
+        .await
+        .map_err(|e| format!("[B activate invoked] {e}"))?;
+    b_activate
+        .assert_tool_error(ToolErrorClass::Failed, "invalid_input")
+        .await
+        .map_err(|e| format!("[B activate must fail, not silently succeed] {e}"))?;
+
+    // ── B removes A's package id: must fail, masked as not-found ────────────
+    // Driven BEFORE A's own remove below, so A's install still exists for
+    // this denial to be meaningful (a genuinely-absent row would also
+    // deny, making the assertion vacuous).
+    let b_remove = g
+        .thread("conv-ext-reg-iso-b-remove")
+        .with_actor_id("reborn-actor-b")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.extension_remove",
+                json!({ "extension_id": REGISTERED_EXTENSION_ID }),
+            ),
+            RebornScriptedReply::text("remove attempted"),
+        ])
+        .build()
+        .await?;
+    b_remove
+        .submit_turn(&format!("remove {REGISTERED_EXTENSION_ID}"))
+        .await
+        .map_err(|e| format!("[B remove submit] {e}"))?;
+    b_remove
+        .assert_tool_invoked("builtin.extension_remove")
+        .await
+        .map_err(|e| format!("[B remove invoked] {e}"))?;
+    b_remove
+        .assert_tool_error(ToolErrorClass::Failed, "invalid_input")
+        .await
+        .map_err(|e| format!("[B remove must fail, not silently succeed] {e}"))?;
+
+    // ── A removes its own registered install: the successful owner path ────
+    let a_remove = g
+        .thread("conv-ext-reg-iso-a-remove")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.extension_remove",
+                json!({ "extension_id": REGISTERED_EXTENSION_ID }),
+            ),
+            RebornScriptedReply::text("removed"),
+        ])
+        .build()
+        .await?;
+    a_remove
+        .submit_turn(&format!("remove {REGISTERED_EXTENSION_ID}"))
+        .await
+        .map_err(|e| format!("[A remove submit] {e}"))?;
+    a_remove
+        .assert_tool_invoked("builtin.extension_remove")
+        .await
+        .map_err(|e| format!("[A remove invoked] {e}"))?;
+    a_remove
+        .assert_tool_result_contains("\"removed\":true")
+        .await
+        .map_err(|e| format!("[A remove must succeed for its own registered extension] {e}"))?;
 
     Ok(())
 }
