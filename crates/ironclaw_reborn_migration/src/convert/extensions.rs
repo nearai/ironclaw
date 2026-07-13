@@ -140,7 +140,6 @@ fn build_tool_store(src: &V1Source) -> Option<Arc<dyn WasmToolStore>> {
     }
     None
 }
-
 fn build_channel_store(src: &V1Source) -> Option<Arc<dyn WasmChannelStore>> {
     #[cfg(feature = "libsql")]
     if let Some(db) = src.handles.libsql_db.as_ref() {
@@ -156,4 +155,3 @@ fn build_channel_store(src: &V1Source) -> Option<Arc<dyn WasmChannelStore>> {
     }
     None
 }
-

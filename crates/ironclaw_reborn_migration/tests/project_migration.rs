@@ -42,8 +42,7 @@ async fn seed_source(path: &Path, project_a: Uuid, project_b: Uuid) {
         project_a,
         "Alpha",
         "First project",
-        "2024-01-02T03:04:05Z",
-        "2024-02-03T04:05:06Z",
+        ("2024-01-02T03:04:05Z", "2024-02-03T04:05:06Z"),
         None,
     )
     .await;
@@ -53,8 +52,7 @@ async fn seed_source(path: &Path, project_a: Uuid, project_b: Uuid) {
         project_b,
         "Beta",
         "Second project",
-        "2023-01-02T03:04:05Z",
-        "2023-02-03T04:05:06Z",
+        ("2023-01-02T03:04:05Z", "2023-02-03T04:05:06Z"),
         Some(Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap()),
     )
     .await;
@@ -66,10 +64,10 @@ async fn write_project(
     id: Uuid,
     name: &str,
     description: &str,
-    created_at: &str,
-    updated_at: &str,
+    timestamps: (&str, &str),
     agent_id: Option<Uuid>,
 ) {
+    let (created_at, updated_at) = timestamps;
     let document = database
         .get_or_create_document_by_path(USER, agent_id, path)
         .await
