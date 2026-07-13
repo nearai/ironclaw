@@ -45,16 +45,25 @@
 //!     the production `create_refreshing_local_dev_capability_port` factory
 //!     (all wrap layers) driven with harness-injectable parts (harness-port-seam
 //!     P1 seam).
+//! 13. [`local_dev_capability_io`] — `local_dev_capability_io_for_test`, the
+//!     production `LocalDevCapabilityIo` constructor (`capability_wiring`'s
+//!     `new_with_durable_previews` call), for durable tool-result projection
+//!     coverage (issue #5838).
+//! 14. [`result_read`] — `wrap_result_read_capability_for_test`, the
+//!     production `result_read` synthetic-capability wrap, for the same
+//!     durable tool-result projection coverage (issue #5838).
 
 mod automation;
 mod budget_gateway;
 mod durable;
 mod local_dev_boot;
+mod local_dev_capability_io;
 mod oauth_product_auth;
 mod outbound_delivery;
 mod project_create;
 mod projection;
 mod refreshing_capability_port;
+mod result_read;
 mod skill_activation;
 mod trace_capture;
 mod trigger_materializer;
@@ -81,6 +90,8 @@ pub use local_dev_boot::{
     build_default_local_dev_database_roots_for_test,
     build_local_dev_approval_gate_evidence_for_test, mount_local_dev_database_roots_for_test,
 };
+#[cfg(feature = "test-support")]
+pub use local_dev_capability_io::local_dev_capability_io_for_test;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use oauth_product_auth::build_google_oauth_product_auth_for_test;
 pub use oauth_product_auth::{
@@ -99,6 +110,8 @@ pub use projection::build_webui_event_stream_for_test;
 pub use refreshing_capability_port::{
     RefreshingLocalDevCapabilityPortTestParts, create_refreshing_local_dev_capability_port_for_test,
 };
+#[cfg(feature = "test-support")]
+pub use result_read::{RESULT_READ_CAPABILITY_ID, wrap_result_read_capability_for_test};
 #[cfg(feature = "test-support")]
 pub use skill_activation::{
     SKILL_ACTIVATE_CAPABILITY_ID, SkillActivationTestSource,

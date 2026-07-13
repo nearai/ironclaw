@@ -26,8 +26,8 @@ use ironclaw_runner::thread_scope::ThreadScopeResolver;
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_threads::{
     AppendCapabilityDisplayPreviewRequest, CapabilityDisplayPreviewEnvelope,
-    CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus,
-    SessionThreadService, TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadMessageId, ThreadScope,
+    CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus, SessionThreadService,
+    TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadMessageId, ThreadScope,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::{
@@ -74,17 +74,21 @@ pub(crate) use project_create::PROJECT_CREATE_CAPABILITY_ID;
 use refreshing_capability_port::{
     RefreshingLocalDevCapabilityPortConfig, create_refreshing_local_dev_capability_port,
 };
+#[cfg(feature = "test-support")]
+pub(crate) use result_read::RESULT_READ_CAPABILITY_ID_FOR_TEST;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use skill_activation::SKILL_ACTIVATE_CAPABILITY_ID;
 
-/// Test-only bridges (E-PROJ / E-SKILL seams), co-located with the capability
-/// each wraps and re-exported here for the `runtime` caller.
+/// Test-only bridges (E-PROJ / E-SKILL / result_read seams), co-located with
+/// the capability each wraps and re-exported here for the `runtime` caller.
 #[cfg(feature = "test-support")]
 pub(super) use outbound_delivery::wrap_outbound_delivery_capabilities_for_test;
 #[cfg(feature = "test-support")]
 pub(super) use project_create::wrap_project_create_capability_for_test;
 #[cfg(feature = "test-support")]
 pub(super) use refreshing_capability_port::create_refreshing_local_dev_capability_port_for_test;
+#[cfg(feature = "test-support")]
+pub(super) use result_read::wrap_result_read_capability_for_test;
 #[cfg(feature = "test-support")]
 pub(super) use skill_activation::wrap_skill_activation_capability_for_test;
 
@@ -520,6 +524,42 @@ impl LocalDevCapabilityIo {
         };
         Some(message.message_id)
     }
+}
+
+/// Test-support constructor exposing a real `LocalDevCapabilityIo`, wired
+/// exactly the way production's `capability_wiring` builds it above (see
+/// `new_with_durable_previews` at this function's sole production call site,
+/// `capability_wiring`, ~L142-151): durable previews over the caller's
+/// `thread_service` and `fallback_user_id`, no trajectory observer. Returns
+/// two `Arc` clones of ONE underlying io object -- input resolver and result
+/// writer MUST stay two views of the same object, mirroring the production
+/// invariant `RefreshingLocalDevCapabilityPortTestParts`'s doc-comment
+/// states, so a call's input-ref and result-ref correlate by `call_id`.
+///
+/// Lets the integration-test harness drive durable tool-result projection
+/// (`write_capability_result` -> `SessionThreadService::put_tool_result_record`,
+/// the `result_read` continuation path) instead of the ephemeral
+/// `ProductLiveCapabilityIo` test double, which never persists a durable
+/// record.
+///
+/// For tests only -- gated behind `test-support`, ships zero bytes in
+/// production builds.
+#[cfg(feature = "test-support")]
+pub(super) fn local_dev_capability_io_for_test(
+    thread_service: Arc<dyn SessionThreadService>,
+    fallback_user_id: UserId,
+) -> (
+    Arc<dyn LoopCapabilityInputResolver>,
+    Arc<dyn LoopCapabilityResultWriter>,
+) {
+    let io = Arc::new(LocalDevCapabilityIo::new_with_durable_previews(
+        Arc::new(CapabilityDisplayPreviewStore::default()),
+        thread_service,
+        fallback_user_id,
+    ));
+    let input_resolver: Arc<dyn LoopCapabilityInputResolver> = io.clone();
+    let result_writer: Arc<dyn LoopCapabilityResultWriter> = io;
+    (input_resolver, result_writer)
 }
 
 #[derive(Default)]

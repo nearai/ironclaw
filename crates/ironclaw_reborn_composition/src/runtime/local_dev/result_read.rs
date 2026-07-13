@@ -24,6 +24,38 @@ use super::{
     },
 };
 
+/// Test-support wrap: layers the synthetic `result_read` capability onto
+/// `inner`, mirroring how `refreshing_capability_port.rs`'s `build_inner`
+/// wires it in production (unconditionally, via `wrap_local_dev_synthetic_capabilities`).
+/// `input_resolver`/`result_writer` MUST be the SAME shared io object the
+/// harness's capability port already uses -- see `wrap_project_create_capability_for_test`
+/// for the identical pattern this mirrors. Tests only -- gated behind
+/// `test-support`, ships zero bytes in production builds.
+#[cfg(feature = "test-support")]
+pub(crate) fn wrap_result_read_capability_for_test(
+    inner: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    thread_service: Arc<dyn SessionThreadService>,
+    fallback_user_id: UserId,
+    run_context: ironclaw_turns::run_profile::LoopRunContext,
+    input_resolver: Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
+    result_writer: Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
+) -> Result<Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>, AgentLoopHostError> {
+    super::synthetic_capability::wrap_local_dev_synthetic_capabilities(
+        inner,
+        vec![result_read_capability(thread_service, fallback_user_id)?],
+        run_context,
+        input_resolver,
+        result_writer,
+        // trajectory_observer: None — not wired in the integration-test harness.
+        None,
+    )
+}
+
+/// Test-support export of the capability id, so integration tests can script
+/// a `result_read` tool call without hand-copying the literal.
+#[cfg(feature = "test-support")]
+pub(crate) const RESULT_READ_CAPABILITY_ID_FOR_TEST: &str = RESULT_READ_CAPABILITY_ID;
+
 pub(super) const RESULT_READ_CAPABILITY_ID: &str = "builtin.result_read";
 const RESULT_READ_PROVIDER_TOOL_NAME: &str = "builtin__result_read";
 const RESULT_READ_MIN_BYTES: u64 = 4;

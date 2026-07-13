@@ -516,6 +516,8 @@ mod test_support;
 
 #[cfg(feature = "test-support")]
 pub(crate) use local_dev::PROJECT_CREATE_CAPABILITY_ID;
+#[cfg(feature = "test-support")]
+pub(crate) use local_dev::RESULT_READ_CAPABILITY_ID_FOR_TEST;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use local_dev::SKILL_ACTIVATE_CAPABILITY_ID;
 
@@ -1084,6 +1086,32 @@ pub(crate) fn wrap_project_create_capability_for_test(
     )
 }
 
+/// Test-support forwarder for the `result_read` synthetic-capability wrap
+/// (durable tool-result projection seam, issue #5838). Bridges the private
+/// `local_dev` module to `test_support.rs`; mirrors the `project_create`
+/// forwarder above.
+#[cfg(feature = "test-support")]
+pub(crate) fn wrap_result_read_capability_for_test(
+    inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
+    fallback_user_id: ironclaw_host_api::UserId,
+    run_context: ironclaw_turns::run_profile::LoopRunContext,
+    input_resolver: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
+    result_writer: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
+) -> Result<
+    std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    ironclaw_turns::run_profile::AgentLoopHostError,
+> {
+    local_dev::wrap_result_read_capability_for_test(
+        inner,
+        thread_service,
+        fallback_user_id,
+        run_context,
+        input_resolver,
+        result_writer,
+    )
+}
+
 /// Test-support forwarder (E-SKILL seam): build the local-dev filesystem skill
 /// context source exactly as production does in [`build_reborn_runtime`], and
 /// hand back just the `HostSkillContextSource` (for prompt injection) plus the
@@ -1165,6 +1193,24 @@ pub(crate) async fn create_refreshing_local_dev_capability_port_for_test(
     ironclaw_turns::run_profile::AgentLoopHostError,
 > {
     local_dev::create_refreshing_local_dev_capability_port_for_test(parts).await
+}
+
+/// Test-support forwarder exposing production's real `LocalDevCapabilityIo`
+/// wiring (`local_dev.rs`'s `local_dev_capability_io_for_test`, which mirrors
+/// `capability_wiring`'s `new_with_durable_previews` call). Bridges the
+/// private `local_dev` module to `test_support`; mirrors the
+/// `create_refreshing_local_dev_capability_port_for_test` forwarder above.
+/// For tests only -- gated behind `test-support`, ships zero bytes in
+/// production builds.
+#[cfg(feature = "test-support")]
+pub(crate) fn local_dev_capability_io_for_test(
+    thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
+    fallback_user_id: ironclaw_host_api::UserId,
+) -> (
+    std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
+    std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
+) {
+    local_dev::local_dev_capability_io_for_test(thread_service, fallback_user_id)
 }
 
 #[async_trait::async_trait]

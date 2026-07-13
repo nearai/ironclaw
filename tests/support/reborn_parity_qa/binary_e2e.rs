@@ -759,7 +759,10 @@ impl RebornBinaryE2EHarness {
             capability_input_resolver,
             capability_result_writer,
             capability_recorder,
-        ) = capability_mode.into_parts(milestone_sink.clone())?;
+        ) = capability_mode.into_parts(
+            milestone_sink.clone(),
+            thread_harness.service.clone() as Arc<dyn SessionThreadService>,
+        )?;
         // Same shared `ScopedFilesystem` handle the turn store uses (`/turns`
         // mount) — the await-edge tree lives at
         // `/turns/subagent-await-edges/...`, a sibling prefix, per §4.5a's
