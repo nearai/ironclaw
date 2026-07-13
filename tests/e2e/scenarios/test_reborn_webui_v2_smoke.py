@@ -491,7 +491,7 @@ async def test_reborn_v2_disconnected_run_shows_status_and_stops_typing(
         await expect(connection_status).to_be_in_viewport()
 
         await page.set_viewport_size({"width": 390, "height": 844})
-        connection_status_label = page.get_by_test_id("connection-status-label")
+        connection_status_label = page.locator(SEL_V2["connection_status_label"])
         await expect(connection_status_label).to_be_hidden()
         await expect(connection_status).to_be_in_viewport()
 
@@ -501,8 +501,8 @@ async def test_reborn_v2_disconnected_run_shows_status_and_stops_typing(
         await expect(connection_status_label).to_have_css("position", "absolute")
         await expect(connection_status).to_be_in_viewport()
         await expect(connection_status_label).to_be_in_viewport()
-        await expect(page.get_by_test_id("header-logs-link")).to_be_visible()
-        await expect(page.get_by_test_id("header-docs-link")).to_be_visible()
+        await expect(page.locator(SEL_V2["header_logs_link"])).to_be_visible()
+        await expect(page.locator(SEL_V2["header_docs_link"])).to_be_visible()
 
         await page.set_viewport_size({"width": 1280, "height": 720})
         await context.set_offline(False)
