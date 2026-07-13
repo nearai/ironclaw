@@ -263,6 +263,7 @@ fn subagent_capability_outcomes_round_trip_model_observation() {
             preview: Some("first bounded chunk".to_string()),
             total_bytes: Some(4_096),
             next_offset: Some(2_048),
+            item_count: None,
         },
         artifacts: Vec::new(),
         recovery: None,

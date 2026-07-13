@@ -71,6 +71,7 @@ fn continuation_observation(
             preview: Some("first bounded chunk".to_string()),
             total_bytes: Some(byte_len * 2),
             next_offset: Some(byte_len),
+            item_count: None,
         },
         artifacts: Vec::new(),
         recovery: None,

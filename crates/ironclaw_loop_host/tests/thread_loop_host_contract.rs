@@ -2598,6 +2598,7 @@ async fn transcript_port_degrades_control_char_result_reference_preview_without_
             preview: Some("bad\u{0}null and \u{7}bell".to_string()),
             total_bytes: Some(16),
             next_offset: None,
+            item_count: None,
         },
         artifacts: Vec::new(),
         recovery: None,

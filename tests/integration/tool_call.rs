@@ -617,3 +617,72 @@ async fn result_read_continues_a_durable_result_byte_exactly() {
         "result_read must report the true total byte length of the durable record"
     );
 }
+
+/// Issue: an out-of-range `max_bytes` on `builtin.result_read` must surface a
+/// structured, model-visible `CapabilityInputIssue` (not just prose), so the
+/// model gets real repair guidance instead of having to guess the allowed
+/// range. `parse_result_read_input` validates before any storage lookup, so a
+/// well-formed but nonexistent `result_ref` is enough to exercise this path.
+#[test]
+fn result_read_out_of_range_max_bytes_surfaces_repair_guidance() {
+    run_async_test_with_stack(
+        "result_read_out_of_range_max_bytes_surfaces_repair_guidance",
+        result_read_out_of_range_max_bytes_surfaces_repair_guidance_impl,
+    );
+}
+
+async fn result_read_out_of_range_max_bytes_surfaces_repair_guidance_impl() {
+    let h = RebornIntegrationHarness::test_default()
+        .with_durable_capability_io_file_tools()
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.result_read",
+                json!({
+                    "result_ref": "result:matrix-target",
+                    "offset": 0,
+                    "max_bytes": ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES as u64 + 1,
+                }),
+            ),
+            RebornScriptedReply::text("noted"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn("read past the allowed window")
+        .await
+        .expect("turn completes");
+
+    h.assert_conversation_history_role_contains(MessageKind::ToolResultReference, "max_bytes")
+        .await
+        .expect("model-visible observation names the offending field");
+    h.assert_conversation_history_role_contains(MessageKind::ToolResultReference, "invalid_value")
+        .await
+        .expect("model-visible observation carries a structured issue code, not just prose");
+}
+
+/// Spawns the async test body on a thread with a larger-than-default OS
+/// stack. Established precedent: `project_create.rs`, `skill_activate.rs`,
+/// `outbound_target.rs` each carry the identical helper for the same reason
+/// -- this harness's decorator-chain call depth can overflow the 2MiB
+/// default test-thread stack on certain scripted-failure paths.
+fn run_async_test_with_stack<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio test runtime")
+                .block_on(test());
+        })
+        .expect("spawn stack-sized test thread");
+    if let Err(panic) = handle.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
