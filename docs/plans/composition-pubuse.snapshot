@@ -3,6 +3,7 @@ pub use product_auth::api::auth_prompt::{
 };
 pub use admin_token::AdminApiTokenMinter;
 pub use automation::facade::RebornAutomationProductFacade;
+pub use automation::trigger_poller::{NoopPostSubmitDeliveryHook, PostSubmitDeliveryHook};
 pub use error::RebornBuildError;
 pub use extension_host::extension_ingress::{
     ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
@@ -125,8 +126,8 @@ pub use runtime::{
     RebornSkillExecutionResult, RebornSkillSourceKind, build_reborn_runtime,
 };
 pub use runtime_input::{
-    CredentialRefreshSettings, DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL,
-    DEFAULT_TURN_RUNNER_POLL_INTERVAL, PollSettings, RebornRuntimeIdentity, RebornRuntimeInput,
+    DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL, DEFAULT_TURN_RUNNER_POLL_INTERVAL,
+    KeepaliveSweepSettings, PollSettings, RebornRuntimeIdentity, RebornRuntimeInput,
     TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
     TriggerFireAccessError, TriggerPollerSettings, TurnRunnerSettings,
 };
@@ -138,20 +139,6 @@ pub use slack::slack_channel_connection::build_webui_services_with_slack_host_be
 pub use slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH,
     WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH, WEBUI_V2_CHANNELS_SLACK_SUBJECTS_PATH,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_delivery::{
-    NoopPostSubmitDeliveryHook, PostSubmitDeliveryHook, TriggeredRunDeliveryDriver,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_delivery::{
-    SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
-    SlackFinalReplyDeliverySettings,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_egress::{
-    SlackEgressCredential, SlackEgressCredentialError, SlackEgressCredentialProvider,
-    SlackProtocolHttpEgress, StaticSlackEgressCredentialProvider,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_host_beta::{
