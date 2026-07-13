@@ -18,6 +18,16 @@
 //! `project_of_registered_package_masks_foreign_owner` in
 //! `extension_lifecycle.rs`, the only tier that can call `list_installed`/
 //! `project` directly).
+//!
+//! Tenant-axis seam limitation: the group harness resolves every actor's
+//! binding through ONE `ProductInstallationScope`, so every thread —
+//! `with_actor_id` included — shares the group's single run tenant; a second
+//! tenant_id cannot be expressed without a second product harness + runtime,
+//! which the one-runtime group deliberately does not support. Cross-tenant
+//! isolation (same user id, different tenant) is pinned at the crate tier
+//! instead: `registered_mutations_reject_same_user_in_foreign_tenant_scope`
+//! in `extension_lifecycle.rs` drives search/install/activate/remove on the
+//! facade with a second-tenant `ResourceScope`.
 
 use super::reborn_support::assertions::ToolErrorClass;
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};

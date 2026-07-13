@@ -8898,6 +8898,20 @@ url = "http://127.0.0.1:9/mcp"
         let (_dir, port, package_ref, active_registry, installation_store) =
             user_registered_isolation_fixture(&owner_scope, true).await;
 
+        // Search first: the overlay is path-sharded by (tenant, owner), so the
+        // same user id under another tenant must not even see the descriptor.
+        let search = port
+            .search("acme-mcp-registered", None, &cross_tenant_scope)
+            .await
+            .expect("cross-tenant search runs (and finds nothing)");
+        let Some(LifecycleProductPayload::ExtensionSearch { count, .. }) = search.payload else {
+            panic!("expected extension search payload");
+        };
+        assert_eq!(
+            count, 0,
+            "cross-tenant search must not surface another tenant's registered descriptor"
+        );
+
         let install_error = port
             .install(package_ref.clone(), &cross_tenant_scope)
             .await
