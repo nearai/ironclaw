@@ -2,6 +2,7 @@ use ironclaw_filesystem::{FileStat, FilesystemError, FilesystemOperation};
 use ironclaw_host_api::{RuntimeDispatchErrorKind, ScopedPath, VirtualPath};
 use ironclaw_safety::sensitive_paths::is_sensitive_path_str;
 use serde_json::Value;
+use tracing::debug;
 
 use super::{CodingCapabilityError, CodingCapabilityRequest};
 
@@ -52,22 +53,26 @@ fn resolve_path(
     // silently collapse to the generic category sentence. Summaries that
     // still fail validation (hostile file names) ride the model-visible
     // diagnostic detail channel instead of the summary.
-    let scoped_path = mounts.scoped_path(scoped_path_input(path)).map_err(|_| {
-        CodingCapabilityError::with_safe_summary(
-            RuntimeDispatchErrorKind::InputEncode,
-            format!(
-                "{} is not under an available scoped root (available roots: {})",
-                summary_path_hint(path),
-                available_roots(mounts)
-            ),
-        )
-    })?;
+    let scoped_path = mounts
+        .scoped_path(scoped_path_input(path))
+        .map_err(|error| {
+            debug!(error = %error, "coding capability rejected scoped path input");
+            CodingCapabilityError::with_safe_summary(
+                RuntimeDispatchErrorKind::InputEncode,
+                format!(
+                    "{} is not under an available scoped root (available roots: {})",
+                    summary_path_hint(path),
+                    available_roots(mounts)
+                ),
+            )
+        })?;
     if is_sensitive_scoped_path(scoped_path.as_str()) {
         return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
-    let (virtual_path, grant) = mounts.resolve_with_grant(&scoped_path).map_err(|_| {
+    let (virtual_path, grant) = mounts.resolve_with_grant(&scoped_path).map_err(|error| {
+        debug!(error = %error, "coding capability could not resolve scoped path");
         CodingCapabilityError::with_safe_summary(
             RuntimeDispatchErrorKind::FilesystemDenied,
             format!(

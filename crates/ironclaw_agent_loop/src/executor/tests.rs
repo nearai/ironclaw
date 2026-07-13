@@ -3129,10 +3129,9 @@ async fn availability_budget_above_old_executor_guard_reaches_strategy_abort() {
     // category and diagnostics — instead of falling through the loop to a
     // diagnostic-free generic ModelError exit.
     let attempts = 20u32;
-    let family = crate::families::default_with_overrides(crate::families::FamilyOverrides {
-        model_availability_attempts: Some(attempts),
-        ..crate::families::FamilyOverrides::default()
-    });
+    let family = crate::families::default_with_overrides(
+        crate::families::FamilyOverrides::default().set_model_availability_attempts(attempts),
+    );
     let diagnostic_ref = LoopDiagnosticRef::new("diag:model-outage").expect("valid");
     // Exactly attempts+1 scripted failures: the final one is the call where
     // the strategy's budget is exhausted and it aborts. Any extra call would

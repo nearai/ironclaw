@@ -3820,12 +3820,16 @@ pub async fn build_reborn_runtime(
                 "IRONCLAW_REBORN_PLANNED_DEFAULT_ITERATION_LIMIT",
             )?,
             planned_model_availability_retry_attempts: {
-                let from_env =
-                    optional_nonzero_u32_env("IRONCLAW_REBORN_MODEL_AVAILABILITY_RETRY_ATTEMPTS")?;
                 #[cfg(any(test, feature = "test-support"))]
-                let resolved = model_availability_retry_attempts_override.or(from_env);
+                let resolved = match model_availability_retry_attempts_override {
+                    Some(attempts) => Some(attempts),
+                    None => optional_nonzero_u32_env(
+                        "IRONCLAW_REBORN_MODEL_AVAILABILITY_RETRY_ATTEMPTS",
+                    )?,
+                };
                 #[cfg(not(any(test, feature = "test-support")))]
-                let resolved = from_env;
+                let resolved =
+                    optional_nonzero_u32_env("IRONCLAW_REBORN_MODEL_AVAILABILITY_RETRY_ATTEMPTS")?;
                 resolved
             },
         },

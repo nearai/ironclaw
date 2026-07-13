@@ -274,7 +274,7 @@ fn shell_error(error: shell_core::ShellExecutionError) -> FirstPartyCapabilityEr
             (RuntimeDispatchErrorKind::InputEncode, reason)
         }
         shell_core::ShellExecutionError::NotAuthorized(reason) => {
-            (RuntimeDispatchErrorKind::Client, reason)
+            (RuntimeDispatchErrorKind::PolicyDenied, reason)
         }
     };
     FirstPartyCapabilityError::with_safe_summary(kind, bounded_failure_reason(reason))

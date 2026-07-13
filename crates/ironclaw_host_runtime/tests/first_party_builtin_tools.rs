@@ -3440,7 +3440,7 @@ async fn builtin_shell_reuses_v1_shell_validation() {
     ] {
         let err = invoke_shell(input).await.unwrap_err();
 
-        assert_eq!(err, RuntimeFailureKind::Backend);
+        assert_eq!(err, RuntimeFailureKind::PolicyDenied);
     }
 }
 

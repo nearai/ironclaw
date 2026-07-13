@@ -9,10 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- *(reborn)* ride out transient model-provider outages with cancellation-aware availability retries, fail fast when no provider is configured, and preserve actionable shell/coding failure reasons for the model ([#5959](https://github.com/nearai/ironclaw/pull/5959)).
 - *(reborn)* allow `builtin.time` parse, convert, format, and diff operations to consume JSON numbers or numeric strings containing Unix seconds, integral Unix milliseconds, and fractional Slack timestamps in addition to ISO 8601 strings.
 
 ### Changed
 
+- *(reborn)* raise the default agent-loop runaway backstop from 256 to 1,024 iterations and the subagent ceiling from 16 to 256 ([#5959](https://github.com/nearai/ironclaw/pull/5959)).
 - *(reborn-cli)* document the standalone `config init` atomic-write dependency on `tempfile` and call out the default runner cadence change to 5s heartbeats / 200ms polling (down from 10s / 2s).
 - *(reborn)* expose runtime poll settings and document the standalone turn-runner cadence change for callers using `TurnRunnerSettings::default()`.
 - *(channels)* v1 Slack DM policy now defaults to `allowlist` (previously `pairing`); existing installs still configured with `dm_policy=pairing` fall through to `allowlist` as Slack relay pairing is retired ([#5604](https://github.com/nearai/ironclaw/pull/5604)).

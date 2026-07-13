@@ -64,10 +64,7 @@ pub fn default() -> LoopFamily {
 /// Intended for test and local harnesses that need to exercise the hard budget
 /// path without waiting for the production backstop of 1024 iterations.
 pub fn default_with_iteration_limit(iteration_limit: u32) -> LoopFamily {
-    default_with_overrides(FamilyOverrides {
-        iteration_limit: Some(iteration_limit),
-        ..FamilyOverrides::default()
-    })
+    default_with_overrides(FamilyOverrides::default().set_iteration_limit(iteration_limit))
 }
 
 /// Optional overrides for the default family's replay-relevant knobs. `None`
@@ -79,6 +76,18 @@ pub struct FamilyOverrides {
     /// Availability-class model retry budget
     /// (`DefaultRecoveryStrategy::max_model_availability_attempts`).
     pub model_availability_attempts: Option<u32>,
+}
+
+impl FamilyOverrides {
+    pub fn set_iteration_limit(mut self, iteration_limit: u32) -> Self {
+        self.iteration_limit = Some(iteration_limit);
+        self
+    }
+
+    pub fn set_model_availability_attempts(mut self, attempts: u32) -> Self {
+        self.model_availability_attempts = Some(attempts);
+        self
+    }
 }
 
 /// The default loop family with optional iteration-limit and model
@@ -164,17 +173,13 @@ mod tests {
         // The component-identity contract (family.rs): the digest identifies
         // replay-relevant configuration. Overriding a budget or retry knob is
         // replay-relevant, so it must change the digest.
-        let attempts_override = default_with_overrides(FamilyOverrides {
-            model_availability_attempts: Some(1),
-            ..FamilyOverrides::default()
-        });
+        let attempts_override =
+            default_with_overrides(FamilyOverrides::default().set_model_availability_attempts(1));
         assert_ne!(attempts_override.version().digest, DEFAULT_FAMILY_DIGEST);
         assert_eq!(attempts_override.version().id, "default");
 
-        let iteration_override = default_with_overrides(FamilyOverrides {
-            iteration_limit: Some(5),
-            ..FamilyOverrides::default()
-        });
+        let iteration_override =
+            default_with_overrides(FamilyOverrides::default().set_iteration_limit(5));
         assert_ne!(iteration_override.version().digest, DEFAULT_FAMILY_DIGEST);
         assert_ne!(
             iteration_override.version().digest,
@@ -182,10 +187,8 @@ mod tests {
         );
 
         // The digest is a pure function of the resolved configuration.
-        let attempts_override_again = default_with_overrides(FamilyOverrides {
-            model_availability_attempts: Some(1),
-            ..FamilyOverrides::default()
-        });
+        let attempts_override_again =
+            default_with_overrides(FamilyOverrides::default().set_model_availability_attempts(1));
         assert_eq!(
             attempts_override_again.version().digest,
             attempts_override.version().digest
@@ -197,12 +200,13 @@ mod tests {
 
         // Overrides that spell out the production defaults hash to the same
         // digest as the static const — identity is config-addressed.
-        let explicit_defaults = default_with_overrides(FamilyOverrides {
-            iteration_limit: Some(DEFAULT_ITERATION_BACKSTOP),
-            model_availability_attempts: Some(
-                DefaultRecoveryStrategy::default().max_model_availability_attempts,
-            ),
-        });
+        let explicit_defaults = default_with_overrides(
+            FamilyOverrides::default()
+                .set_iteration_limit(DEFAULT_ITERATION_BACKSTOP)
+                .set_model_availability_attempts(
+                    DefaultRecoveryStrategy::default().max_model_availability_attempts,
+                ),
+        );
         assert_eq!(explicit_defaults.version().digest, DEFAULT_FAMILY_DIGEST);
     }
 
@@ -213,10 +217,8 @@ mod tests {
             ModelErrorClass, ModelErrorSummary, RecoveryOutcome, SanitizedStrategySummary,
         };
 
-        let family = default_with_overrides(FamilyOverrides {
-            model_availability_attempts: Some(1),
-            ..FamilyOverrides::default()
-        });
+        let family =
+            default_with_overrides(FamilyOverrides::default().set_model_availability_attempts(1));
         let context = crate::test_support::test_run_context("default-family-attempts-override");
         let err = ModelErrorSummary {
             class: ModelErrorClass::Unavailable,
