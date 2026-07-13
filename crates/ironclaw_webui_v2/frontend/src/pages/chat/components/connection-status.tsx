@@ -1,19 +1,23 @@
 import { useT } from "../../../lib/i18n";
-import { CONNECTION_STATUS } from "../lib/connection-status";
+import { CONNECTION_STATUS, type ConnectionStatus } from "../lib/connection-status";
 
-const STATUS_STYLES = {
+type ConnectionStatusProps = {
+  status?: ConnectionStatus | null;
+};
+
+const STATUS_STYLES: Partial<Record<ConnectionStatus, string>> = {
   [CONNECTION_STATUS.RECONNECTING]: "bg-copper/20 text-copper border-copper/30",
   [CONNECTION_STATUS.DISCONNECTED]: "bg-red-500/20 text-red-200 border-red-400/30",
   [CONNECTION_STATUS.CONNECTING]: "bg-iron-700/50 text-iron-200 border-iron-700/50",
   [CONNECTION_STATUS.PAUSED]: "bg-iron-700/50 text-iron-200 border-iron-700/50",
 };
 
-const HIDDEN_STATUSES = new Set([
+const HIDDEN_STATUSES: ReadonlySet<ConnectionStatus> = new Set([
   CONNECTION_STATUS.IDLE,
   CONNECTION_STATUS.CONNECTED,
 ]);
 
-export function ConnectionStatus({ status }) {
+export function ConnectionStatus({ status }: ConnectionStatusProps) {
   const t = useT();
   if (!status || HIDDEN_STATUSES.has(status)) return null;
 
