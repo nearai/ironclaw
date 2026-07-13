@@ -16,7 +16,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use ironclaw_host_api::{TenantId, UserId};
-use ironclaw_reborn_composition::{WebuiAuthentication, WebuiAuthenticator};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -32,6 +31,8 @@ use std::collections::HashMap;
 use subtle::ConstantTimeEq;
 #[cfg(any(test, feature = "dev-in-memory-session"))]
 use uuid::Uuid;
+
+use crate::{WebuiAuthentication, WebuiAuthenticator};
 
 /// Non-secret session identifier — a UUID stamped at creation and
 /// safe to log, render in audit trails, or surface to operators. The

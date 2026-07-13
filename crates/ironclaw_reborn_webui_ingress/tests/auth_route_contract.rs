@@ -35,12 +35,10 @@ use axum::body::Body;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use chrono::Duration as ChronoDuration;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
-use ironclaw_reborn_composition::{
-    RebornReadiness, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig, webui_v2_app,
-};
 use ironclaw_reborn_webui_ingress::{
     EnvBearerAuthenticator, InMemorySessionStore, OidcAuthenticator, OidcAuthenticatorConfig,
-    SessionAuthenticator, SessionStore,
+    SessionAuthenticator, SessionStore, WebuiAuthenticator, WebuiGatewayBundle, WebuiServeConfig,
+    webui_v2_app,
 };
 use secrecy::{ExposeSecret, SecretString};
 use tower::ServiceExt;
@@ -71,10 +69,8 @@ const ENV_USER: &str = "operator-user";
 /// handler.
 fn compose(authenticator: Arc<dyn WebuiAuthenticator>) -> (axum::Router, Arc<StubServices>) {
     let services = Arc::new(StubServices::default());
-    let bundle = RebornWebuiBundle {
+    let bundle = WebuiGatewayBundle {
         api: services.clone(),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
     };
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
@@ -366,10 +362,8 @@ async fn session_minted_for_one_tenant_does_not_authenticate_another_deployment(
     let tenant_b_store: Arc<InMemorySessionStore> = Arc::new(InMemorySessionStore::new());
     let authenticator = Arc::new(SessionAuthenticator::new(tenant_b_store.clone()));
     let services = Arc::new(StubServices::default());
-    let bundle = RebornWebuiBundle {
+    let bundle = WebuiGatewayBundle {
         api: services.clone(),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
     };
     let config = WebuiServeConfig::new(
         TenantId::new("tenant-b").expect("tenant"),

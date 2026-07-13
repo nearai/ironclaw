@@ -43,9 +43,9 @@ use ironclaw_product_workflow::{
     WebUiSetupExtensionRequest, rejecting_reborn_services_error,
 };
 use ironclaw_reborn_composition::{
-    GoogleOAuthRouteConfig, RebornAuthContinuationDispatcher, RebornProductAuthServices,
-    RebornReadiness, RebornWebuiBundle, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig,
-    webui_v2_app,
+    GoogleOAuthRouteConfig, ProductAuthWebuiRouteMountConfig, RebornAuthContinuationDispatcher,
+    RebornProductAuthServices, RebornReadiness, RebornWebuiBundle, WebuiAuthentication,
+    WebuiAuthenticator, WebuiServeConfig, webui_v2_app,
 };
 use serde_json::json;
 use tower::ServiceExt;
@@ -538,17 +538,29 @@ fn build_app_with_product_auth_service_config_and_extensions(
         product_auth: Some(product_auth),
         readiness: RebornReadiness::disabled(),
     };
-    let mut config = WebuiServeConfig::new(
-        TenantId::new(TENANT).expect("tenant"),
+    let tenant_id = TenantId::new(TENANT).expect("tenant");
+    let agent_id = AgentId::new(AGENT).expect("agent");
+    let project_id = ProjectId::new(PROJECT).expect("project");
+    let mut product_auth_mount_config = ProductAuthWebuiRouteMountConfig::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        Some(project_id.clone()),
+    );
+    if let Some(google_oauth) = google_oauth {
+        product_auth_mount_config = product_auth_mount_config.with_google_oauth(google_oauth);
+    }
+    let product_auth_mount = bundle
+        .product_auth_route_mount(product_auth_mount_config)
+        .expect("product auth route mount");
+    let config = WebuiServeConfig::new(
+        tenant_id,
         Arc::new(OnlyValidToken),
         vec![HeaderValue::from_static("http://localhost:1234")],
     )
-    .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
-    .with_default_project_id(ProjectId::new(PROJECT).expect("project"));
-    if let Some(google_oauth) = google_oauth {
-        config = config.with_google_oauth(google_oauth);
-    }
-    webui_v2_app(bundle, config).expect("webui v2 app")
+    .with_default_agent_id(agent_id)
+    .with_default_project_id(project_id)
+    .with_route_mount(product_auth_mount);
+    webui_v2_app(bundle.gateway_bundle(), config).expect("webui v2 app")
 }
 
 fn google_oauth_route_config() -> GoogleOAuthRouteConfig {
@@ -2204,21 +2216,33 @@ mod slack_personal_oauth_serve {
             product_auth: Some(product_auth),
             readiness: RebornReadiness::disabled(),
         };
+        let tenant_id = TenantId::new(TENANT).expect("tenant");
+        let agent_id = AgentId::new(AGENT).expect("agent");
+        let project_id = ProjectId::new(PROJECT).expect("project");
         let binding = SlackPersonalOAuthBindingConfig::in_memory_for_tests(
-            TenantId::new(TENANT).expect("tenant"),
+            tenant_id.clone(),
             AdapterInstallationId::new("install-test").expect("installation"),
         )
         .expect("in-memory Slack OAuth binding config");
+        let product_auth_mount_config = ProductAuthWebuiRouteMountConfig::new(
+            tenant_id.clone(),
+            Some(agent_id.clone()),
+            Some(project_id.clone()),
+        )
+        .with_slack_personal_oauth(slack_personal_slot().await)
+        .with_slack_personal_oauth_binding(binding);
+        let product_auth_mount = bundle
+            .product_auth_route_mount(product_auth_mount_config)
+            .expect("product auth route mount");
         let config = WebuiServeConfig::new(
-            TenantId::new(TENANT).expect("tenant"),
+            tenant_id,
             Arc::new(OnlyValidToken),
             vec![HeaderValue::from_static("http://localhost:1234")],
         )
-        .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
-        .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-        .with_slack_personal_oauth(slack_personal_slot().await)
-        .with_slack_personal_oauth_binding(binding);
-        webui_v2_app(bundle, config).expect("webui v2 app")
+        .with_default_agent_id(agent_id)
+        .with_default_project_id(project_id)
+        .with_route_mount(product_auth_mount);
+        webui_v2_app(bundle.gateway_bundle(), config).expect("webui v2 app")
     }
 
     fn slack_oauth_start_body() -> serde_json::Value {

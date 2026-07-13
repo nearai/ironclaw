@@ -12,7 +12,7 @@
 //! - This middleware runs **before** auth so an oversized payload is
 //!   rejected without spending a bearer-validation step.
 //! - It runs **after** the outer `RequestBodyLimitLayer` global cap
-//!   that [`crate::webui::webui_serve::webui_v2_app`] keeps as a defense in
+//!   that [`crate::webui::serve::webui_v2_app`] keeps as a defense in
 //!   depth for paths that don't match any v2 descriptor (e.g. axum's
 //!   404 fallback). Per-route enforcement is strictly tighter than that
 //!   global cap.
@@ -31,7 +31,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use ironclaw_host_api::ingress::{BodyLimitPolicy, IngressRouteDescriptor};
 
-use crate::webui::webui_route_match::{network_method_to_axum, parse_pattern, segments_match};
+use crate::webui::route_match::{network_method_to_axum, parse_pattern, segments_match};
 
 #[derive(Debug, Clone)]
 struct RouteBodyLimit {

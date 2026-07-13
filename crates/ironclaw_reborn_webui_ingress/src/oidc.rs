@@ -29,12 +29,13 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::UserId;
-use ironclaw_reborn_composition::{WebuiAuthentication, WebuiAuthenticator};
 use jsonwebtoken::{Algorithm, DecodingKey, TokenData, Validation, decode, decode_header};
 use parking_lot::RwLock;
 use serde::Deserialize;
 use thiserror::Error;
 use url::{Host, Url};
+
+use crate::{WebuiAuthentication, WebuiAuthenticator};
 
 /// Configuration for [`OidcAuthenticator`].
 #[derive(Debug, Clone)]

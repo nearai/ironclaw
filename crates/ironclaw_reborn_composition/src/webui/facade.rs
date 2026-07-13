@@ -6,7 +6,8 @@ use chrono::Utc;
 use async_trait::async_trait;
 use ironclaw_extensions::{InstallationOwner, SharedExtensionRegistry};
 use ironclaw_host_api::{
-    EffectKind, ExtensionId, InvocationId, ResourceScope, RuntimeKind, UserId,
+    AgentId, EffectKind, ExtensionId, InvocationId, ProjectId, ResourceScope, RuntimeKind,
+    TenantId, UserId,
 };
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
@@ -20,6 +21,10 @@ use ironclaw_product_workflow::{
     WebUiAuthenticatedCaller,
 };
 
+#[cfg(feature = "webui-v2-beta")]
+use ironclaw_auth::GoogleOAuthRouteConfig;
+#[cfg(feature = "webui-v2-beta")]
+use ironclaw_reborn_webui_ingress::{WebuiGatewayBundle, WebuiRouteMount};
 use ironclaw_triggers::TriggerRepository;
 
 use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
@@ -145,9 +150,8 @@ impl RebornOperatorToolCatalog for ActiveRegistryOperatorToolCatalog {
 /// This bundle deliberately exposes facade-shaped product handles consumed
 /// by WebChat v2 and the optional product-auth OAuth routes. HTTP
 /// routing, auth middleware, static assets, and SSE transport stay in the
-/// WebUI crate (or, when the `webui-v2-beta` feature is on, the
-/// [`crate::webui::webui_serve`] module in this crate); lower runtime handles stay
-/// behind the existing Reborn runtime / composition services.
+/// WebUI ingress crate; lower runtime handles stay behind the existing
+/// Reborn runtime / composition services.
 #[derive(Clone)]
 pub struct RebornWebuiBundle {
     pub api: Arc<dyn RebornServicesApi>,
@@ -163,6 +167,99 @@ impl std::fmt::Debug for RebornWebuiBundle {
             .field("product_auth", &self.product_auth.is_some())
             .field("readiness", &self.readiness)
             .finish()
+    }
+}
+
+#[cfg(feature = "webui-v2-beta")]
+impl RebornWebuiBundle {
+    pub fn gateway_bundle(&self) -> WebuiGatewayBundle {
+        WebuiGatewayBundle {
+            api: Arc::clone(&self.api),
+        }
+    }
+
+    pub fn product_auth_route_mount(
+        &self,
+        config: ProductAuthWebuiRouteMountConfig,
+    ) -> Option<WebuiRouteMount> {
+        let product_auth = Arc::clone(self.product_auth.as_ref()?);
+        let mut state = crate::product_auth::serve::ProductAuthRouteState::new(
+            product_auth,
+            config.tenant_id,
+            config.default_agent_id,
+            config.default_project_id,
+        )
+        .with_webui_api(Arc::clone(&self.api));
+        if let Some(google_oauth) = config.google_oauth {
+            state = state.with_google_oauth(google_oauth);
+        }
+        #[cfg(feature = "slack-v2-host-beta")]
+        if let Some(slack_personal_oauth) = config.slack_personal_oauth {
+            state = state.with_slack_personal_oauth(slack_personal_oauth);
+        }
+        #[cfg(feature = "slack-v2-host-beta")]
+        if let Some(slack_personal_oauth_binding) = config.slack_personal_oauth_binding {
+            state = state.with_slack_personal_oauth_binding(slack_personal_oauth_binding);
+        }
+        Some(crate::product_auth::serve::product_auth_webui_route_mount(
+            state,
+        ))
+    }
+}
+
+#[cfg(feature = "webui-v2-beta")]
+pub struct ProductAuthWebuiRouteMountConfig {
+    tenant_id: TenantId,
+    default_agent_id: Option<AgentId>,
+    default_project_id: Option<ProjectId>,
+    google_oauth: Option<GoogleOAuthRouteConfig>,
+    #[cfg(feature = "slack-v2-host-beta")]
+    slack_personal_oauth: Option<crate::slack::slack_setup::SlackPersonalSetupServiceSlot>,
+    #[cfg(feature = "slack-v2-host-beta")]
+    slack_personal_oauth_binding:
+        Option<crate::product_auth::serve::SlackPersonalOAuthBindingConfig>,
+}
+
+#[cfg(feature = "webui-v2-beta")]
+impl ProductAuthWebuiRouteMountConfig {
+    pub fn new(
+        tenant_id: TenantId,
+        default_agent_id: Option<AgentId>,
+        default_project_id: Option<ProjectId>,
+    ) -> Self {
+        Self {
+            tenant_id,
+            default_agent_id,
+            default_project_id,
+            google_oauth: None,
+            #[cfg(feature = "slack-v2-host-beta")]
+            slack_personal_oauth: None,
+            #[cfg(feature = "slack-v2-host-beta")]
+            slack_personal_oauth_binding: None,
+        }
+    }
+
+    pub fn with_google_oauth(mut self, config: GoogleOAuthRouteConfig) -> Self {
+        self.google_oauth = Some(config);
+        self
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub fn with_slack_personal_oauth(
+        mut self,
+        slot: crate::slack::slack_setup::SlackPersonalSetupServiceSlot,
+    ) -> Self {
+        self.slack_personal_oauth = Some(slot);
+        self
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub fn with_slack_personal_oauth_binding(
+        mut self,
+        config: crate::product_auth::serve::SlackPersonalOAuthBindingConfig,
+    ) -> Self {
+        self.slack_personal_oauth_binding = Some(config);
+        self
     }
 }
 

@@ -14,22 +14,22 @@ use ironclaw_reborn_composition::host_api::{
 };
 use ironclaw_reborn_composition::{
     GoogleOAuthRouteConfig, LocalTriggerAccessReconciliation, LocalTriggerAccessRole,
-    LocalTriggerAccessSource, LocalTriggerAccessStore, RebornBuildInput, RebornReadiness,
-    RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle, WebuiAuthenticator,
-    WebuiServeConfig, build_reborn_runtime, local_trigger_access_fire_checker,
-    webui_v2_app_with_lifecycle,
+    LocalTriggerAccessSource, LocalTriggerAccessStore, ProductAuthWebuiRouteMountConfig,
+    RebornBuildInput, RebornReadiness, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornWebuiBundle, WebuiAuthenticator, build_reborn_runtime, local_trigger_access_fire_checker,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_reborn_composition::{
     SlackOperatorRouteVisibility, build_slack_host_beta_runtime_mounts,
-    build_webui_services_with_slack_host_beta_mounts,
+    build_webui_services_with_slack_host_beta_mounts, slack_channel_route_admin_protected_mount,
 };
 use ironclaw_reborn_config::{
     IdentitySection, RebornConfigFile, seed_default_config_file_if_missing,
 };
 use ironclaw_reborn_webui_ingress::{
     DeferredWebuiRouterHandle, EnvBearerAuthenticator, RebornWebuiServeError,
-    RebornWebuiServeOptions, deferred_webui_v2_startup_router, serve_webui_v2,
+    RebornWebuiServeOptions, WebuiServeConfig, deferred_webui_v2_startup_router, serve_webui_v2,
+    webui_v2_app_with_lifecycle,
 };
 use secrecy::SecretString;
 
@@ -568,11 +568,17 @@ impl ServeCommand {
                 &bundle.readiness,
             );
 
-            let mut serve_config = WebuiServeConfig::new(tenant_id, authenticator, allowed_origins)
-                .with_default_agent_id(default_agent_id.clone());
+            let mut serve_config =
+                WebuiServeConfig::new(tenant_id.clone(), authenticator, allowed_origins)
+                    .with_default_agent_id(default_agent_id.clone());
             if let Some(project_id) = default_project_id.clone() {
                 serve_config = serve_config.with_default_project_id(project_id);
             }
+            let mut product_auth_mount_config = ProductAuthWebuiRouteMountConfig::new(
+                tenant_id.clone(),
+                Some(default_agent_id.clone()),
+                default_project_id.clone(),
+            );
             #[cfg(feature = "openai-compat-beta")]
             {
                 serve_config = serve_config.with_protected_route_mount(openai_compat_mount);
@@ -590,12 +596,14 @@ impl ServeCommand {
                         .with_hosted_domain_hint(hosted_domain_hint)
                         .context("invalid Google OAuth hosted-domain hint for WebUI")?;
                 }
-                serve_config = serve_config.with_google_oauth(route_config);
+                product_auth_mount_config =
+                    product_auth_mount_config.with_google_oauth(route_config);
             }
             #[cfg(feature = "slack-v2-host-beta")]
             {
                 if let Some(slot) = slack_personal_lazy_slot {
-                    serve_config = serve_config.with_slack_personal_oauth(slot);
+                    product_auth_mount_config =
+                        product_auth_mount_config.with_slack_personal_oauth(slot);
                 }
             }
             if let Some(value) = csp_override {
@@ -612,10 +620,17 @@ impl ServeCommand {
             #[cfg(feature = "slack-v2-host-beta")]
             if let Some(slack_mounts) = slack_mounts {
                 let slack_personal_oauth_binding = slack_mounts.personal_oauth_binding_config();
+                product_auth_mount_config = product_auth_mount_config
+                    .with_slack_personal_oauth_binding(slack_personal_oauth_binding);
                 serve_config = serve_config
                     .with_public_route_mount(slack_mounts.events)
-                    .with_slack_personal_oauth_binding(slack_personal_oauth_binding)
-                    .with_slack_channel_routes(slack_mounts.channel_routes);
+                    .with_protected_route_mount(slack_channel_route_admin_protected_mount(
+                        slack_mounts.channel_routes,
+                    ));
+            }
+            if let Some(product_auth_mount) = bundle.product_auth_route_mount(product_auth_mount_config)
+            {
+                serve_config = serve_config.with_route_mount(product_auth_mount);
             }
             // Public NEAR AI login callback route (token redirect target). Built
             // from the runtime's LLM seam; absent when no LLM was wired.
@@ -626,7 +641,7 @@ impl ServeCommand {
             if let Some(mount) = public_mount {
                 serve_config = serve_config.with_public_route_mount(mount);
             }
-            let webui_app = webui_v2_app_with_lifecycle(bundle, serve_config)
+            let webui_app = webui_v2_app_with_lifecycle(bundle.gateway_bundle(), serve_config)
                 .context("failed to compose v2 Router")?;
             let (router, public_route_drains) = webui_app.into_parts();
 

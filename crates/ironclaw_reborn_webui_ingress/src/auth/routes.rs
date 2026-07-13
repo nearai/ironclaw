@@ -30,7 +30,6 @@ use ironclaw_host_api::ingress::{
     IngressJustification, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor, ListenerClass,
     RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
 };
-use ironclaw_reborn_composition::PublicRouteMount;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +38,7 @@ use super::pending::{PendingFlowStore, SessionTicketStore, sanitize_redirect};
 use super::provider::OAuthProvider;
 use super::provider_name::OAuthProviderName;
 use super::user_directory::{UserDirectory, UserDirectoryError};
+use crate::PublicRouteMount;
 use crate::session::SessionStore;
 
 /// Default landing page after a successful OAuth callback. The SPA

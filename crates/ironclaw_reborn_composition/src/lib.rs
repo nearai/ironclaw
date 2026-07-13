@@ -106,6 +106,13 @@ pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleSearchExtensionSummary,
 };
+#[cfg(feature = "webui-v2-beta")]
+pub use ironclaw_reborn_webui_ingress::{
+    ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount,
+    RateLimitConfigError, WebuiAuthentication, WebuiAuthenticator, WebuiGatewayBundle,
+    WebuiRouteMount, WebuiServeConfig, WebuiServeConfigError, WebuiServeError, WebuiV2App,
+    webui_v2_app, webui_v2_app_with_lifecycle,
+};
 pub use ironclaw_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use ironclaw_runtime_policy::{
@@ -206,6 +213,8 @@ pub use slack::slack_actor_identity::{
     slack_user_identity_provider_user_id,
 };
 #[cfg(feature = "slack-v2-host-beta")]
+pub use slack::slack_channel_routes::slack_channel_route_admin_protected_mount;
+#[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH,
     WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH, WEBUI_V2_CHANNELS_SLACK_SUBJECTS_PATH,
@@ -247,15 +256,9 @@ pub use slack::slack_serve::{
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_setup::SlackPersonalSetupServiceSlot;
 pub use web_access::register_bundled_web_access_first_party_handlers;
+#[cfg(feature = "webui-v2-beta")]
+pub use webui::facade::ProductAuthWebuiRouteMountConfig;
 pub use webui::facade::{RebornWebuiBundle, build_webui_services};
-#[cfg(feature = "webui-v2-beta")]
-pub use webui::webui_rate_limit::RateLimitConfigError;
-#[cfg(feature = "webui-v2-beta")]
-pub use webui::webui_serve::{
-    ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount,
-    WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, WebuiServeConfigError,
-    WebuiServeError, WebuiV2App, webui_v2_app, webui_v2_app_with_lifecycle,
-};
 
 /// Re-exported identity vocabulary host binaries need to construct
 /// public runtime/WebUI types whose signatures mention a host-api identity.

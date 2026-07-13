@@ -28,6 +28,7 @@ use ironclaw_product_workflow::{
     ProductConversationRouteKey, ProductConversationSubjectRouteResolutionRequest,
     ProductConversationSubjectRouteResolver, ProductWorkflowError, WebUiAuthenticatedCaller,
 };
+use ironclaw_reborn_webui_ingress::ProtectedRouteMount;
 use ironclaw_safety::{SafetyConfig, SafetyLayer};
 use ironclaw_slack_v2_adapter::SLACK_V2_ADAPTER_ID;
 use serde::{Deserialize, Serialize};
@@ -764,6 +765,13 @@ pub(crate) fn slack_channel_route_admin_route_mount(
             .with_state(config),
         descriptors: slack_channel_route_admin_descriptors(),
     }
+}
+
+pub fn slack_channel_route_admin_protected_mount(
+    config: SlackChannelRouteAdminRouteConfig,
+) -> ProtectedRouteMount {
+    let mount = slack_channel_route_admin_route_mount(config);
+    ProtectedRouteMount::new(mount.protected, mount.descriptors)
 }
 
 pub(crate) fn slack_channel_route_admin_descriptors() -> Vec<IngressRouteDescriptor> {

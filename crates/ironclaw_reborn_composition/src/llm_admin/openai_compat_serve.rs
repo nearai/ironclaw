@@ -53,6 +53,7 @@ use ironclaw_reborn_openai_compat::{
 };
 #[cfg(feature = "root-llm-provider")]
 use ironclaw_reborn_openai_compat::{OpenAiCompatModelCatalog, OpenAiCompatModelEntry};
+use ironclaw_reborn_webui_ingress::ProtectedRouteMount;
 use ironclaw_threads::{
     FinalizedAssistantMessageByRunRequest, LoadContextMessagesRequest, MessageKind, MessageStatus,
     ProviderToolCallReferenceEnvelope, SessionThreadError, SessionThreadService,
@@ -68,7 +69,6 @@ use sha2::{Digest, Sha256};
 
 use crate::RebornBuildError;
 use crate::RebornRuntime;
-use crate::webui::webui_serve::ProtectedRouteMount;
 
 #[cfg(test)]
 mod tests;

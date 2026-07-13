@@ -4,7 +4,7 @@
 //!
 //! Per the issue #4116 acceptance criteria — "session use on a
 //! protected WebChat v2 route" — this test composes the full
-//! `webui_v2_app` (`ironclaw_reborn_composition`) with:
+//! `webui_v2_app` with:
 //!
 //! - the OAuth public router from `webui_v2_auth_router` (mints
 //!   sessions),
@@ -48,12 +48,10 @@ use ironclaw_product_workflow::{
     WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
     WebUiSetupExtensionRequest, rejecting_reborn_services_error,
 };
-use ironclaw_reborn_composition::{
-    RebornReadiness, RebornWebuiBundle, WebuiServeConfig, webui_v2_app,
-};
 use ironclaw_reborn_webui_ingress::{
     EmailUserDirectory, InMemorySessionStore, OAuthProvider, OAuthProviderName, OAuthRouterConfig,
-    OAuthUserProfile, SessionAuthenticator, SessionStore, webui_v2_auth_router,
+    OAuthUserProfile, SessionAuthenticator, SessionStore, WebuiGatewayBundle, WebuiServeConfig,
+    webui_v2_app, webui_v2_auth_router,
 };
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use parking_lot::Mutex as PlMutex;
@@ -394,10 +392,8 @@ fn build_app() -> (axum::Router, Arc<StubServices>, Arc<InMemorySessionStore>) {
     );
 
     let services = Arc::new(StubServices::default());
-    let bundle = RebornWebuiBundle {
+    let bundle = WebuiGatewayBundle {
         api: services.clone(),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
     };
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),

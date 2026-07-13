@@ -1,15 +1,12 @@
 #![forbid(unsafe_code)]
 
-//! Host-owned listener binding + serve loop for the Reborn WebChat v2
-//! HTTP gateway.
+//! Host-owned WebChat v2 HTTP gateway.
 //!
-//! `ironclaw_reborn_composition::webui_v2_app` returns a fully composed
-//! axum [`Router`] but deliberately stops at the
-//! `reborn_product_api_crates_do_not_bind_http_ingress` boundary — that
-//! crate must not bind sockets or call `axum::serve`. This crate is
-//! the host-owned counterpart: it accepts the `Router` from composition
-//! plus the listen address, binds a `TcpListener`, and runs the serve
-//! loop with graceful shutdown.
+//! This crate owns both the fully composed axum [`Router`] and the
+//! listener lifecycle for the Reborn WebChat v2 surface. Composition
+//! supplies the runtime-backed service facade and product route mounts;
+//! ingress owns auth middleware, descriptor-driven network policy, static
+//! security headers, listener binding, and graceful shutdown.
 //!
 //! Path A (`docs/reborn/how-to-port-channel-to-reborn.md`) native
 //! host-surface invariants:
@@ -25,14 +22,15 @@ mod auth;
 mod oidc;
 mod session;
 mod signed_session_login;
+mod webui;
 
 #[cfg(any(test, feature = "dev-in-memory-session"))]
 pub use auth::EmailUserDirectory;
 pub use auth::{
     GitHubOAuthConfig, GitHubProvider, GoogleOAuthConfig, GoogleProvider, OAuthError,
     OAuthProvider, OAuthProviderName, OAuthProviderNameError, OAuthRouterConfig, OAuthUserProfile,
-    ProviderInitError, PublicRouteMount, UserDirectory, UserDirectoryError,
-    empty_webui_v2_auth_providers_mount, webui_v2_auth_router,
+    ProviderInitError, UserDirectory, UserDirectoryError, empty_webui_v2_auth_providers_mount,
+    webui_v2_auth_router,
 };
 pub use oidc::{
     AudienceClaim, ClaimToUserIdFn, IdTokenClaims, OidcAuthenticator, OidcAuthenticatorConfig,
@@ -51,6 +49,12 @@ pub use signed_session_login::{
 // a `SessionStore` impl. Local dev and tests opt in via the feature.
 #[cfg(any(test, feature = "dev-in-memory-session"))]
 pub use session::InMemorySessionStore;
+pub use webui::rate_limit::RateLimitConfigError;
+pub use webui::serve::{
+    ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount,
+    WebuiAuthentication, WebuiAuthenticator, WebuiGatewayBundle, WebuiRouteMount, WebuiServeConfig,
+    WebuiServeConfigError, WebuiServeError, WebuiV2App, webui_v2_app, webui_v2_app_with_lifecycle,
+};
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -65,7 +69,6 @@ use axum::{
     routing::{any, get},
 };
 use ironclaw_host_api::UserId;
-use ironclaw_reborn_composition::WebuiAuthenticator;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Serialize;
 use subtle::ConstantTimeEq;
@@ -267,10 +270,7 @@ pub enum EnvBearerConfigError {
 
 #[async_trait]
 impl WebuiAuthenticator for EnvBearerAuthenticator {
-    async fn authenticate(
-        &self,
-        candidate: &str,
-    ) -> Option<ironclaw_reborn_composition::WebuiAuthentication> {
+    async fn authenticate(&self, candidate: &str) -> Option<WebuiAuthentication> {
         // Constant-time comparison so an attacker cannot use response
         // timing to learn the prefix of the configured token. Both
         // operands are coerced to `&[u8]` of the same length to make
@@ -280,9 +280,7 @@ impl WebuiAuthenticator for EnvBearerAuthenticator {
         let expected = self.token.expose_secret().as_bytes();
         let candidate = candidate.as_bytes();
         if expected.ct_eq(candidate).into() {
-            Some(ironclaw_reborn_composition::WebuiAuthentication::operator(
-                self.user_id.clone(),
-            ))
+            Some(WebuiAuthentication::operator(self.user_id.clone()))
         } else {
             None
         }

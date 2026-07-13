@@ -47,7 +47,7 @@ use ironclaw_host_api::ingress::{IngressRouteDescriptor, RateLimitPolicy, RateLi
 use ironclaw_product_workflow::WebUiAuthenticatedCaller;
 use lru::LruCache;
 
-use crate::webui::webui_route_match::{network_method_to_axum, parse_pattern, segments_match};
+use crate::webui::route_match::{network_method_to_axum, parse_pattern, segments_match};
 
 /// Number of sharded counter maps. Each authenticated request takes
 /// exactly one shard's mutex, so contention scales as 1/SHARD_COUNT in

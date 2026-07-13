@@ -1,10 +1,10 @@
 # Reborn WebUI Ingress Agent Contract
 
-This crate owns the host-side serve lifecycle for the Reborn WebChat v2
-HTTP gateway. It is deliberately small: the product/API boundary is
-held in `ironclaw_reborn_composition` (route descriptors + the
-`Router`), and this crate's only job is to bind a listener and drive
-the axum serve loop with the `Router` it gets handed.
+This crate owns the host-side WebChat v2 HTTP gateway: the axum
+`Router`, descriptor-driven middleware, auth contracts, route-mount
+types, listener binding, and serve loop. Composition still builds the
+runtime-backed `RebornServicesApi` and product-specific route mounts;
+ingress owns how those are exposed over HTTP.
 
 ## Boundaries
 
@@ -24,14 +24,16 @@ the axum serve loop with the `Router` it gets handed.
 - Do not depend on v1's `src/`, `ironclaw_engine`, channel code, or
   v1 DB infrastructure.
 - Do not store transcripts, threads, or any business state. Everything
-  the gateway needs flows through `RebornServicesApi` from the
-  `Router` the composition crate hands us.
+  the gateway needs flows through `RebornServicesApi` and typed route
+  mounts supplied by composition/host code.
 
 ## Allowed dependencies
 
-- `ironclaw_reborn_composition` (consumes the composed `Router` +
-  `WebuiAuthenticator` trait + `WebuiServeConfig`)
 - `ironclaw_host_api` (identity types: `TenantId`, `UserId`)
+- `ironclaw_product_workflow` (`RebornServicesApi` and authenticated
+  WebUI caller contract)
+- `ironclaw_webui_v2` (WebChat v2 route descriptors, static assets, and
+  handler router)
 - `axum`, `tokio`, `tracing`, `thiserror`, `async-trait`, `secrecy`,
   `subtle`
 
@@ -41,7 +43,7 @@ update + explicit PR rationale.
 ## Adding a new authenticator
 
 1. Add the impl module under `src/`.
-2. Implement `WebuiAuthenticator` from `ironclaw_reborn_composition`.
+2. Implement `WebuiAuthenticator` from this crate.
 3. Use constant-time comparison for any secret material.
 4. Add a unit test that exercises `authenticate` against a known
    token + a wrong token, including the returned capability shape.

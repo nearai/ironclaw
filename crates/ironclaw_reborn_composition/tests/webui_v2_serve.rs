@@ -129,7 +129,7 @@ async fn health_route_is_public_for_platform_probes() {
         Arc::new(OnlyValidToken),
         vec![],
     );
-    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+    let app = webui_v2_app(bundle.gateway_bundle(), config).expect("webui v2 app");
 
     let response = app
         .oneshot(
@@ -209,7 +209,7 @@ mod openai_compat_mount_tests {
         .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
         .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
         .with_protected_route_mount(mount);
-        let app = webui_v2_app(bundle, config).expect("webui v2 app");
+        let app = webui_v2_app(bundle.gateway_bundle(), config).expect("webui v2 app");
 
         let unauthenticated = app
             .clone()
@@ -280,7 +280,7 @@ mod openai_compat_mount_tests {
         .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
         .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
         .with_protected_route_mount(mount);
-        let app = webui_v2_app(bundle, config).expect("webui v2 app");
+        let app = webui_v2_app(bundle.gateway_bundle(), config).expect("webui v2 app");
 
         let timed_out = app
             .clone()
@@ -364,7 +364,7 @@ mod openai_compat_mount_tests {
         .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
         .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
         .with_protected_route_mount(mount);
-        let app = webui_v2_app(bundle, config).expect("webui v2 app");
+        let app = webui_v2_app(bundle.gateway_bundle(), config).expect("webui v2 app");
 
         let unauthenticated = app
             .clone()
@@ -1005,7 +1005,7 @@ fn build_app() -> (axum::Router, Arc<StubServices>) {
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"));
-    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+    let app = webui_v2_app(bundle.gateway_bundle(), config).expect("webui v2 app");
     (app, services)
 }
 
@@ -1025,7 +1025,7 @@ fn build_app_with_authenticator(
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"));
-    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+    let app = webui_v2_app(bundle.gateway_bundle(), config).expect("webui v2 app");
     (app, services)
 }
 
@@ -1537,7 +1537,7 @@ async fn malformed_user_id_from_authenticator_rejects_with_401() {
         Arc::new(AlwaysReject),
         vec![HeaderValue::from_static("http://localhost:1234")],
     );
-    let app = webui_v2_app(bundle, config).expect("app");
+    let app = webui_v2_app(bundle.gateway_bundle(), config).expect("app");
     let response = app
         .oneshot(
             Request::builder()
@@ -1813,7 +1813,8 @@ async fn ws_upgrade_uses_canonical_host_over_client_host_when_configured() {
         vec![HeaderValue::from_static("http://localhost:1234")],
     )
     .with_canonical_host("app.example.com");
-    let app = ironclaw_reborn_composition::webui_v2_app(bundle, config).expect("app");
+    let app =
+        ironclaw_reborn_composition::webui_v2_app(bundle.gateway_bundle(), config).expect("app");
     let (addr, handle) = spawn_serve(app).await;
 
     // (1) Origin matches Host but NOT canonical_host — fail.
@@ -2010,7 +2011,7 @@ async fn rate_limit_is_independent_per_caller() {
         Arc::new(UserSwitch),
         vec![HeaderValue::from_static("http://localhost:1234")],
     );
-    let app = webui_v2_app(bundle, config).expect("app");
+    let app = webui_v2_app(bundle.gateway_bundle(), config).expect("app");
 
     let make_request = |token: &str| -> Request<Body> {
         Request::builder()
@@ -2769,7 +2770,7 @@ async fn public_route_mount_is_merged_without_bearer_auth_and_keeps_descriptor_p
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
     .with_public_route_mount(PublicRouteMount::new(public, vec![descriptor]));
-    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+    let app = webui_v2_app(bundle.gateway_bundle(), config).expect("webui v2 app");
 
     // No Authorization header — `with_public_route_mount` MUST
     // merge outside the bearer-auth layer.

@@ -58,8 +58,8 @@ migration-support = []
 # from its `serve` subcommand. Substrate-only callers (v1 `AppBuilder`,
 # diagnostic harnesses) stay off the feature and carry no WebUI code.
 webui-v2-beta = [
-    "dep:ironclaw_webui_v2",
-    "ironclaw_webui_v2/webui-v2-beta",
+    "dep:ironclaw_reborn_webui_ingress",
+    "ironclaw_reborn_webui_ingress/webui-v2-beta",
     "dep:ironclaw_reborn_identity",
     "ironclaw_runner/webui-user-store",
     "libsql",
@@ -82,6 +82,7 @@ openai-compat-beta = [
     "dep:ironclaw_reborn_openai_compat",
     "ironclaw_reborn_openai_compat/openai-compat-beta",
     "ironclaw_reborn_openai_compat/libsql",
+    "ironclaw_reborn_webui_ingress/openai-compat-beta",
     "ironclaw_product_workflow/libsql",
     "ironclaw_product_adapters/host-auth-mint",
 ]
@@ -141,6 +142,7 @@ ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
 ironclaw_runner = { path = "../ironclaw_runner" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
 ironclaw_reborn_identity = { path = "../ironclaw_reborn_identity", optional = true }
+ironclaw_reborn_webui_ingress = { path = "../ironclaw_reborn_webui_ingress", optional = true }
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
 ironclaw_reborn_openai_compat = { path = "../ironclaw_reborn_openai_compat", optional = true }
 ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces" }
@@ -161,8 +163,6 @@ ironclaw_product_context = { path = "../ironclaw_product_context", version = "0.
 nix = { version = "0.30", default-features = false, features = ["process"] }
 # Unpacking uploaded WASM-tool bundles for the WebUI "Install Tool" import flow.
 zip = { version = "8", default-features = false, features = ["deflate"] }
-# WebUI v2 route surface — feature-gated; only used by `webui_serve`.
-ironclaw_webui_v2 = { path = "../ironclaw_webui_v2", optional = true }
 # WebUI v2 static SPA bundle — feature-gated; mounted under `/v2`.
 ironclaw_wasm_product_adapters = { path = "../ironclaw_wasm_product_adapters", optional = true }
 libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
@@ -200,6 +200,7 @@ http-body-util = "0.1"
 # Admin-user-management e2e test drives the composed app with a real session
 # authenticator so a minted API token can be validated (login-with-token).
 ironclaw_reborn_webui_ingress = { path = "../ironclaw_reborn_webui_ingress" }
+ironclaw_webui_v2 = { path = "../ironclaw_webui_v2" }
 secrecy = { version = "0.10", features = ["serde"] }
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }

@@ -4,7 +4,7 @@
 //! `RebornServicesApi` but is deliberately unaware of bearer tokens,
 //! OIDC, CORS, body limits, and static security headers — its CLAUDE.md
 //! lists these as "host composition still owes". This module is the
-//! Reborn-side home for that work: it exposes [`webui_v2_app`], the
+//! host-ingress home for that work: it exposes [`webui_v2_app`], the
 //! fully-composed axum [`Router`] (auth + rate limit + CORS + body
 //! limit + security headers + v2 route surface). Tests drive it
 //! through `tower::ServiceExt::oneshot`; the standalone
@@ -13,15 +13,8 @@
 //!
 //! ### Why no serve-and-bind helper here
 //!
-//! `ironclaw_reborn_composition` sits in the Reborn product/API
-//! boundary enforced by
-//! `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs::
-//! reborn_product_api_crates_do_not_bind_http_ingress`. Product/API
-//! crates may expose `Router` / `IngressRouteDescriptor`, but they may
-//! NOT bind `TcpListener`s, drive the axum `serve` future, or
-//! otherwise own server lifecycle — that responsibility lives in
-//! host-owned code. So the seam this PR provides is the `Router`; the
-//! consuming host binary writes the listener-binding line itself.
+//! The listener-binding serve loop lives at this crate's root. This
+//! module owns the gateway `Router` and policy stack it serves.
 //!
 //! Everything in this module is gated on the `webui-v2-beta` Cargo
 //! feature. Substrate-only callers (v1 `AppBuilder`, diagnostic
@@ -45,9 +38,9 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use ironclaw_auth::GoogleOAuthRouteConfig;
 use ironclaw_host_api::ingress::IngressRouteDescriptor;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_product_workflow::{RebornServicesApi, WebUiAuthenticatedCaller};
 use ironclaw_webui_v2::{
     DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2RouteOptions, WebUiV2State,
     is_webui_v2_operator_webui_config_route_id, webui_v2_router_with_options,
@@ -57,21 +50,12 @@ use tower_http::cors::{AllowHeaders, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 
-#[cfg(feature = "slack-v2-host-beta")]
-use crate::product_auth::serve::SlackPersonalOAuthBindingConfig;
-use crate::product_auth::serve::{ProductAuthRouteState, product_auth_route_mount};
-#[cfg(feature = "slack-v2-host-beta")]
-use crate::slack::slack_channel_routes::{
-    SlackChannelRouteAdminRouteConfig, slack_channel_route_admin_route_mount,
-};
-use crate::webui::facade::RebornWebuiBundle;
-use crate::webui::webui_body_limit::{build_body_limit_state, enforce_body_limit};
-use crate::webui::webui_operator_auth::{
+use crate::webui::body_limit::{build_body_limit_state, enforce_body_limit};
+use crate::webui::operator_auth::{
     OperatorWebuiConfigRouteState, build_operator_webui_config_route_state,
 };
-use crate::webui::webui_rate_limit::{build_rate_limit_state, enforce_rate_limit};
-use crate::webui::webui_ws_origin::{build_websocket_origin_state, enforce_websocket_origin};
-use ironclaw_product_workflow::WebUiAuthenticatedCaller;
+use crate::webui::rate_limit::{RateLimitConfigError, build_rate_limit_state, enforce_rate_limit};
+use crate::webui::ws_origin::{build_websocket_origin_state, enforce_websocket_origin};
 use serde::Serialize;
 
 /// Default per-request body limit (14 MiB) — sized to cover ~10 MiB of
@@ -173,8 +157,28 @@ fn reborn_projects_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// WebUI-facing product facade consumed by the ingress-owned gateway.
+///
+/// Composition builds the `RebornServicesApi` implementation from the
+/// assembled runtime, then hands this lightweight bundle across the
+/// product-to-ingress boundary. Product-specific routes such as
+/// product-auth or Slack travel separately as generic route mounts.
+#[derive(Clone)]
+pub struct WebuiGatewayBundle {
+    pub api: Arc<dyn RebornServicesApi>,
+}
+
+impl std::fmt::Debug for WebuiGatewayBundle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WebuiGatewayBundle")
+            .field("api", &"Arc<dyn RebornServicesApi>")
+            .finish()
+    }
+}
+
 /// Host-installation composition the Reborn HTTP gateway needs in
-/// addition to the [`RebornWebuiBundle`] it serves over.
+/// addition to the [`WebuiGatewayBundle`] it serves over.
 ///
 /// Fields are `pub(crate)` so the public surface is the typed builder
 /// methods only. This routes every host through `new` /
@@ -247,21 +251,11 @@ pub struct WebuiServeConfig {
     /// inside the bearer auth layer. These receive the same authenticated
     /// caller extensions and descriptor-driven policy enforcement as WebUI v2.
     pub(crate) protected_mounts: Vec<ProtectedRouteMount>,
-    /// Optional Google OAuth setup config for Reborn product-auth
-    /// credential onboarding. When absent, the mounted Google setup
-    /// route fails closed with a sanitized service-unavailable response.
-    pub(crate) google_oauth: Option<GoogleOAuthRouteConfig>,
-    #[cfg(feature = "slack-v2-host-beta")]
-    pub(crate) slack_personal_oauth:
-        Option<crate::slack::slack_setup::SlackPersonalSetupServiceSlot>,
-    /// Optional host hook that binds a successful Slack personal OAuth identity
-    /// to the authenticated Reborn user.
-    #[cfg(feature = "slack-v2-host-beta")]
-    pub(crate) slack_personal_oauth_binding: Option<SlackPersonalOAuthBindingConfig>,
-    /// Optional Slack channel route admin surface mounted under the WebUI
-    /// channels settings path.
-    #[cfg(feature = "slack-v2-host-beta")]
-    pub(crate) slack_channel_routes: Option<SlackChannelRouteAdminRouteConfig>,
+    /// Host-supplied route groups that carry both public and protected routers
+    /// over one descriptor set. This is the generic seam for composition-owned
+    /// product-auth routes: ingress enforces descriptor policy and auth
+    /// layering, while composition owns provider-specific route state.
+    pub(crate) route_mounts: Vec<WebuiRouteMount>,
 }
 
 /// Async drain hook for public route mounts that schedule work outside the
@@ -287,6 +281,31 @@ pub struct PublicRouteMount {
 pub struct ProtectedRouteMount {
     pub router: Router,
     pub descriptors: Vec<IngressRouteDescriptor>,
+}
+
+/// A host-supplied route group with optional public/protected halves and one
+/// descriptor set. Descriptors are folded into the shared policy middleware
+/// exactly once, which is useful when one product surface owns both callback
+/// routes and authenticated routes.
+#[derive(Clone)]
+pub struct WebuiRouteMount {
+    pub public: Option<Router>,
+    pub protected: Option<Router>,
+    pub descriptors: Vec<IngressRouteDescriptor>,
+}
+
+impl WebuiRouteMount {
+    pub fn new(
+        public: Option<Router>,
+        protected: Option<Router>,
+        descriptors: Vec<IngressRouteDescriptor>,
+    ) -> Self {
+        Self {
+            public,
+            protected,
+            descriptors,
+        }
+    }
 }
 
 impl ProtectedRouteMount {
@@ -366,44 +385,8 @@ impl WebuiServeConfig {
             default_project_id: None,
             public_mounts: Vec::new(),
             protected_mounts: Vec::new(),
-            google_oauth: None,
-            #[cfg(feature = "slack-v2-host-beta")]
-            slack_personal_oauth: None,
-            #[cfg(feature = "slack-v2-host-beta")]
-            slack_personal_oauth_binding: None,
-            #[cfg(feature = "slack-v2-host-beta")]
-            slack_channel_routes: None,
+            route_mounts: Vec::new(),
         }
-    }
-
-    pub fn with_google_oauth(mut self, config: GoogleOAuthRouteConfig) -> Self {
-        self.google_oauth = Some(config);
-        self
-    }
-
-    /// Slack personal (user-token) OAuth lazy slot for the WebUI setup flow.
-    #[cfg(feature = "slack-v2-host-beta")]
-    pub fn with_slack_personal_oauth(
-        mut self,
-        slot: crate::slack::slack_setup::SlackPersonalSetupServiceSlot,
-    ) -> Self {
-        self.slack_personal_oauth = Some(slot);
-        self
-    }
-
-    #[cfg(feature = "slack-v2-host-beta")]
-    pub fn with_slack_personal_oauth_binding(
-        mut self,
-        config: SlackPersonalOAuthBindingConfig,
-    ) -> Self {
-        self.slack_personal_oauth_binding = Some(config);
-        self
-    }
-
-    #[cfg(feature = "slack-v2-host-beta")]
-    pub fn with_slack_channel_routes(mut self, config: SlackChannelRouteAdminRouteConfig) -> Self {
-        self.slack_channel_routes = Some(config);
-        self
     }
 
     /// Attach a host-supplied public sub-router PLUS its route
@@ -444,6 +427,13 @@ impl WebuiServeConfig {
     /// descriptor-driven rate/body-limit enforcement.
     pub fn with_protected_route_mount(mut self, mount: ProtectedRouteMount) -> Self {
         self.protected_mounts.push(mount);
+        self
+    }
+
+    /// Attach a host-supplied route group with optional public and protected
+    /// routers over a single descriptor set.
+    pub fn with_route_mount(mut self, mount: WebuiRouteMount) -> Self {
+        self.route_mounts.push(mount);
         self
     }
 
@@ -529,7 +519,7 @@ pub enum WebuiServeError {
     #[error("invalid CSP header value: {0}")]
     InvalidCspHeader(String),
     #[error("rate-limit composition failed: {0}")]
-    RateLimit(#[from] crate::webui::webui_rate_limit::RateLimitConfigError),
+    RateLimit(#[from] RateLimitConfigError),
 }
 
 /// Build the fully-composed Reborn WebChat v2 axum app:
@@ -560,14 +550,14 @@ pub enum WebuiServeError {
 /// enforced by `reborn_product_api_crates_do_not_bind_http_ingress`
 /// in `ironclaw_architecture`.
 pub fn webui_v2_app(
-    bundle: RebornWebuiBundle,
+    bundle: WebuiGatewayBundle,
     config: WebuiServeConfig,
 ) -> Result<Router, WebuiServeError> {
     Ok(webui_v2_app_with_lifecycle(bundle, config)?.into_parts().0)
 }
 
 pub fn webui_v2_app_with_lifecycle(
-    bundle: RebornWebuiBundle,
+    bundle: WebuiGatewayBundle,
     config: WebuiServeConfig,
 ) -> Result<WebuiV2App, WebuiServeError> {
     let csp_value = config.csp_header.clone().map(Ok).unwrap_or_else(|| {
@@ -590,35 +580,10 @@ pub fn webui_v2_app_with_lifecycle(
         ]))
         .allow_credentials(true);
 
-    let product_auth_mount = bundle.product_auth.clone().map(|product_auth| {
-        let mut state = ProductAuthRouteState::new(
-            product_auth,
-            config.tenant_id.clone(),
-            config.default_agent_id.clone(),
-            config.default_project_id.clone(),
-        )
-        .with_webui_api(bundle.api.clone());
-        if let Some(google_oauth) = config.google_oauth.clone() {
-            state = state.with_google_oauth(google_oauth);
-        }
-        #[cfg(feature = "slack-v2-host-beta")]
-        if let Some(slack_personal_oauth) = config.slack_personal_oauth.clone() {
-            state = state.with_slack_personal_oauth(slack_personal_oauth);
-        }
-        #[cfg(feature = "slack-v2-host-beta")]
-        if let Some(slack_personal_oauth_binding) = config.slack_personal_oauth_binding.clone() {
-            state = state.with_slack_personal_oauth_binding(slack_personal_oauth_binding);
-        }
-        product_auth_route_mount(state)
-    });
     let mount_operator_routes = config.authenticator.mounts_operator_webui_config_routes();
-    #[cfg(feature = "slack-v2-host-beta")]
-    let slack_channel_routes_mount = config
-        .slack_channel_routes
-        .clone()
-        .map(slack_channel_route_admin_route_mount);
     let public_mounts = config.public_mounts;
     let protected_mounts = config.protected_mounts;
+    let route_mounts = config.route_mounts;
     let public_route_drains = PublicRouteDrains::new(
         public_mounts
             .iter()
@@ -639,20 +604,13 @@ pub fn webui_v2_app_with_lifecycle(
         });
         operator_descriptors.clear();
     }
-    if let Some(mount) = &product_auth_mount {
-        descriptors.extend(mount.descriptors.iter().cloned());
-    }
-    #[cfg(feature = "slack-v2-host-beta")]
-    if let Some(mount) = &slack_channel_routes_mount
-        && mount_operator_routes
-    {
-        operator_descriptors.extend(mount.descriptors.iter().cloned());
-        descriptors.extend(mount.descriptors.iter().cloned());
-    }
     for mount in &public_mounts {
         descriptors.extend(mount.descriptors.iter().cloned());
     }
     for mount in &protected_mounts {
+        descriptors.extend(mount.descriptors.iter().cloned());
+    }
+    for mount in &route_mounts {
         descriptors.extend(mount.descriptors.iter().cloned());
     }
     let rate_limit_state = build_rate_limit_state(&descriptors)?;
@@ -688,21 +646,22 @@ pub fn webui_v2_app_with_lifecycle(
         protected_inner = protected_inner.merge(mount.router);
     }
     let mut public_inner: Option<Router> = None;
-    if let Some(mount) = product_auth_mount {
-        protected_inner = protected_inner.merge(mount.protected);
-        public_inner = Some(mount.public);
-    }
-    #[cfg(feature = "slack-v2-host-beta")]
-    if let Some(mount) = slack_channel_routes_mount
-        && mount_operator_routes
-    {
-        protected_inner = protected_inner.merge(mount.protected);
-    }
     for mount in public_mounts {
         public_inner = Some(match public_inner {
             Some(existing) => existing.merge(mount.router),
             None => mount.router,
         });
+    }
+    for mount in route_mounts {
+        if let Some(protected) = mount.protected {
+            protected_inner = protected_inner.merge(protected);
+        }
+        if let Some(public) = mount.public {
+            public_inner = Some(match public_inner {
+                Some(existing) => existing.merge(public),
+                None => public,
+            });
+        }
     }
 
     // Layer order matters. `route_layer` stacks inside-out from the

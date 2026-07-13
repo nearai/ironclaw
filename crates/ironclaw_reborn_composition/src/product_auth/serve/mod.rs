@@ -62,6 +62,7 @@ use ironclaw_host_api::{
 use ironclaw_product_workflow::{
     LifecyclePackageKind, RebornServicesApi, RebornServicesError, WebUiAuthenticatedCaller,
 };
+use ironclaw_reborn_webui_ingress::WebuiRouteMount;
 use lru::LruCache;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -668,6 +669,11 @@ pub(crate) fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductA
         public: public.with_state(state),
         descriptors: product_auth_route_descriptors(),
     }
+}
+
+pub(crate) fn product_auth_webui_route_mount(state: ProductAuthRouteState) -> WebuiRouteMount {
+    let mount = product_auth_route_mount(state);
+    WebuiRouteMount::new(Some(mount.public), Some(mount.protected), mount.descriptors)
 }
 
 pub(crate) fn product_auth_route_descriptors() -> Vec<IngressRouteDescriptor> {

@@ -1,7 +1,7 @@
 # ironclaw_reborn_webui_ingress guardrails
 
-Host-owned counterpart to `ironclaw_reborn_composition::webui_v2_app`.
-Owns the listener binding + serve loop, the bearer authenticators
+Host-owned WebChat v2 ingress. Owns `webui_v2_app`, the descriptor-driven
+middleware stack, route-mount types, listener binding + serve loop, the bearer authenticators
 (`EnvBearerAuthenticator`, `SessionAuthenticator`, `OidcAuthenticator`),
 the durable / in-memory `SessionStore` trait + impl, and the WebChat
 v2 OAuth login surface that mints sessions.
@@ -14,13 +14,14 @@ v1 secrets / settings / DB.
 
 | Symbol | Role |
 |---|---|
+| `webui_v2_app(bundle, config)` | Compose the WebChat v2 router, auth, route mounts, descriptor policy middleware, static assets, and security headers |
 | `serve_webui_v2(opts)` | Bind a `TcpListener` + run `axum::serve` with graceful shutdown |
 | `RebornWebuiServeOptions` | Owner-supplied input (addr, router, shutdown receiver) |
 | `EnvBearerAuthenticator` | Single-token `WebuiAuthenticator` for the standalone CLI / local dev; accepted tokens map to operator WebUI capabilities |
 | `SessionStore` trait | Pluggable session storage; durable impl is host's; `InMemorySessionStore` for local dev / tests |
 | `SessionAuthenticator` | `WebuiAuthenticator` that resolves bearer tokens through a `SessionStore`; accepted tokens map to non-operator WebUI capabilities |
 | `OidcAuthenticator` | OIDC bearer-token verifier (JWKS + standard claims); accepted tokens map to non-operator WebUI capabilities |
-| `webui_v2_auth_router(config) -> PublicRouteMount` | OAuth login router + route descriptors. The descriptors travel with the router so composition can fold them into the descriptor-driven per-route rate-limit / body-limit middleware — same machinery the v2 facade and product-auth callback already use, no side door. |
+| `webui_v2_auth_router(config) -> PublicRouteMount` | OAuth login router + route descriptors. The descriptors travel with the router so `webui_v2_app` can fold them into the descriptor-driven per-route rate-limit / body-limit middleware — same machinery the v2 facade and product-auth callback already use, no side door. |
 | `PublicRouteMount` | `{ router, descriptors }` pair handed to `WebuiServeConfig::with_public_route_mount` |
 | `OAuthProvider` trait (in `auth/provider.rs`) | Extension point for per-provider URL / code-exchange logic. Deliberately lives in its own module so each provider does not depend on the others. `GoogleProvider` and `GitHubProvider` ship today. |
 | `GoogleProvider` (in `auth/google.rs`) | Google OIDC provider (scopes `openid email profile`, PKCE S256, optional `hd` hosted-domain restriction). Built from `GoogleOAuthConfig`. |
@@ -43,7 +44,7 @@ composes SSO plus the env bearer token, the env token remains the
 separate operator credential and session/OIDC bearers remain
 non-operator.
 
-Composition merges the `PublicRouteMount` supplied by
+The host merges the `PublicRouteMount` supplied by
 `webui_v2_auth_router` through
 `WebuiServeConfig::with_public_route_mount`. The router merges
 outside bearer auth (the user has no session yet); the

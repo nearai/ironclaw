@@ -3164,12 +3164,11 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
-            // Host-owned WebUI ingress: binds the TCP listener and runs
-            // the axum serve loop for the composed v2 Router. Deliberately
-            // narrow: it must not pull product/API internals, lower
-            // substrate handles, or v1 surface code into the binary path.
-            // Reaches Reborn through ironclaw_reborn_composition's facade
-            // only (Router + WebuiAuthenticator trait + WebuiServeConfig).
+            // Host-owned WebUI ingress: owns the WebChat v2 gateway app,
+            // middleware stack, auth contracts, TCP listener, and axum serve
+            // loop. It may depend on WebUI/product workflow route contracts,
+            // but must not pull composition, lower runtime/substrate handles,
+            // or v1 surface code into the binary path.
             crate_name: "ironclaw_reborn_webui_ingress",
             forbidden: vec![
                 "ironclaw",
@@ -3190,11 +3189,10 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_outbound",
                 "ironclaw_processes",
-                "ironclaw_product_adapters",
                 "ironclaw_product_adapter_registry",
-                "ironclaw_product_workflow",
                 "ironclaw_runner",
                 "ironclaw_reborn_cli",
+                "ironclaw_reborn_composition",
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
                 "ironclaw_resources",
@@ -3210,7 +3208,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_turns",
                 "ironclaw_wasm",
                 "ironclaw_wasm_product_adapters",
-                "ironclaw_webui_v2",
             ],
         },
         BoundaryRule {
@@ -4018,13 +4015,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         introduced: "2026-07-09",
         removes_in: "W7",
         reason: "the runner intentionally composes loop-host adapters until kernel consolidation introduces a neutral dispatch boundary",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_reborn_webui_ingress",
-        dependency_name: "ironclaw_reborn_composition",
-        introduced: "2026-07-09",
-        removes_in: "W3.6",
-        reason: "webui ingress still reaches composition until the composition webui module is folded into ingress and runtime handles are inverted",
     },
     LayerMatrixException {
         crate_name: "ironclaw_reborn_migration",

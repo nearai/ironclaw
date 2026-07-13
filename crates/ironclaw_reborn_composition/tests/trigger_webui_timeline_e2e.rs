@@ -290,7 +290,7 @@ fn build_timeline_app(runtime: &RebornRuntime) -> axum::Router {
     // NOTE: with_default_project_id intentionally omitted — trigger records
     // use project_id = None and the caller scope must match.
 
-    webui_v2_app(bundle, config).expect("webui_v2_app")
+    webui_v2_app(bundle.gateway_bundle(), config).expect("webui_v2_app")
 }
 
 // ─── HTTP helpers ─────────────────────────────────────────────────────────────

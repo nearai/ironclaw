@@ -38,12 +38,10 @@ use ironclaw_product_workflow::{
     WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
     WebUiSetupExtensionRequest, rejecting_reborn_services_error,
 };
-use ironclaw_reborn_composition::{
-    RebornReadiness, RebornWebuiBundle, WebuiServeConfig, webui_v2_app,
-};
 use ironclaw_reborn_webui_ingress::{
     EnvBearerAuthenticator, OAuthProvider, OAuthProviderName, OAuthUserProfile,
-    SignedSessionLoginConfig, UserDirectory, UserDirectoryError, build_signed_session_login,
+    SignedSessionLoginConfig, UserDirectory, UserDirectoryError, WebuiGatewayBundle,
+    WebuiServeConfig, build_signed_session_login, webui_v2_app,
 };
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use parking_lot::Mutex as PlMutex;
@@ -370,10 +368,8 @@ fn build_app(profiles: Vec<OAuthUserProfile>) -> (axum::Router, Arc<RecordingSer
     .expect("login wiring");
 
     let services = Arc::new(RecordingServices::default());
-    let bundle = RebornWebuiBundle {
+    let bundle = WebuiGatewayBundle {
         api: services.clone(),
-        product_auth: None,
-        readiness: RebornReadiness::disabled(),
     };
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),

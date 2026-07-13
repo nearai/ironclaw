@@ -1,6 +1,6 @@
 //! Host-owned OAuth login surface for the WebChat v2 gateway.
 //!
-//! Composition mounts [`webui_v2_auth_router`] as a public route
+//! Host WebUI setup mounts [`webui_v2_auth_router`] as a public route
 //! group alongside the bearer-protected WebChat v2 routes:
 //!
 //! - `GET  /auth/providers` — list configured OAuth providers (the
@@ -36,7 +36,6 @@ pub use config::{GitHubOAuthConfig, GoogleOAuthConfig};
 pub use error::{OAuthError, ProviderInitError};
 pub use github::GitHubProvider;
 pub use google::GoogleProvider;
-pub use ironclaw_reborn_composition::PublicRouteMount;
 pub use profile::OAuthUserProfile;
 pub use provider::OAuthProvider;
 pub use provider_name::{OAuthProviderName, OAuthProviderNameError};

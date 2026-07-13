@@ -15,6 +15,12 @@ layer = "products"
 
 [features]
 default = []
+webui-v2-beta = ["ironclaw_webui_v2/webui-v2-beta"]
+openai-compat-beta = [
+    "dep:ironclaw_product_adapters",
+    "dep:ironclaw_reborn_openai_compat",
+    "ironclaw_reborn_openai_compat/openai-compat-beta",
+]
 # Compile in `InMemorySessionStore` as a public crate item. Off by
 # default so a production deployment cannot accidentally wire the
 # process-local store as a `SessionStore` impl — `SessionAuthenticator`
@@ -31,8 +37,12 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 hex = "0.4.3"
 hmac = "0.13"
 ironclaw_host_api = { path = "../ironclaw_host_api" }
-ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", features = ["webui-v2-beta"] }
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters", optional = true }
+ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
+ironclaw_reborn_openai_compat = { path = "../ironclaw_reborn_openai_compat", optional = true }
+ironclaw_webui_v2 = { path = "../ironclaw_webui_v2" }
 jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
+lru = "0.18"
 parking_lot = "0.12"
 rand = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -44,6 +54,7 @@ subtle = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["cors", "set-header", "limit", "catch-panic"] }
 tracing = "0.1"
 url = "2"
 urlencoding = "2"
@@ -61,9 +72,8 @@ http-body-util = "0.1"
 # End-to-end session test (`tests/session_round_trip.rs`) drives the
 # composed `webui_v2_app` with a minimal `RebornServicesApi` stub so
 # the assertion covers SessionAuthenticator + the v2 route surface
-# together. The runtime `ironclaw_reborn_composition` dep already
-# enables `webui-v2-beta`; the three crates below supply the trait
-# + DTO shapes the stub implements.
+# together. The crates below supply the trait + DTO shapes the stub
+# implements.
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = ["test-support"] }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_turns = { path = "../ironclaw_turns" }
