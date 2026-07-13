@@ -565,9 +565,15 @@ async fn reborn_qa_fired_routine_executes_action_and_finalizes_reply() {
         .iter()
         .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
         .expect("the fired routine's action must reach the model");
+    // Issue #5838: a result under the inline first-look preview cap
+    // (`LOCAL_DEV_RESULT_PREVIEW_MAX_BYTES`) legitimately appears inline in
+    // `detail.preview` so the model does not need a follow-up `result_read`
+    // call; the marker here is well under the cap. Mirrors
+    // `assert_local_dev_result_reference` in
+    // `crates/ironclaw_reborn_composition/src/runtime.rs`.
     assert!(
-        !tool_result.content.contains(QA_DM_ACTION_MARKER),
-        "raw fired-routine output must stay out of model replay: {}",
+        tool_result.content.contains(QA_DM_ACTION_MARKER),
+        "a result under the first-look preview cap should appear inline in model replay: {}",
         tool_result.content
     );
     let Some(HostManagedToolResultContent::Reference { envelope }) =
