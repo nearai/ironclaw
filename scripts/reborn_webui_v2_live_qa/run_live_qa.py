@@ -361,7 +361,7 @@ def _reborn_binary() -> Path:
 def build_reborn_binary() -> Path:
     features = os.environ.get(
         "REBORN_WEBUI_V2_LIVE_QA_FEATURES",
-        "webui-v2-beta,slack-v2-host-beta",
+        "webui-v2-beta",
     )
     build_env = os.environ.copy()
     build_env.setdefault("CARGO_PROFILE_DEV_DEBUG", "0")

@@ -74,8 +74,8 @@ use crate::extension_host::available_extensions::{
     visible_capability_ids,
 };
 use crate::extension_host::extension_activation_credentials::{
-    ChannelSetupActivationCredentialGate, ExtensionActivationCredentialGate,
-    RuntimeExtensionActivationCredentialGate, UnavailableExtensionActivationCredentialGate,
+    ExtensionActivationCredentialGate, RuntimeExtensionActivationCredentialGate,
+    UnavailableExtensionActivationCredentialGate,
 };
 use crate::extension_host::extension_credential_requirements::package_runtime_credential_auth_requirements;
 use crate::extension_host::lifecycle::response_with_payload;
@@ -769,22 +769,6 @@ impl RebornLocalExtensionManagementPort {
         let credential_gate = UnavailableExtensionActivationCredentialGate;
         self.activate_inner(package_ref, mode, &credential_gate)
             .await
-    }
-
-    /// Operator channel-setup activation: activates the channel surface after
-    /// workspace setup save without demanding per-caller product-auth
-    /// accounts — see [`ChannelSetupActivationCredentialGate`].
-    pub(crate) async fn activate_for_channel_setup(
-        &self,
-        package_ref: LifecyclePackageRef,
-    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        let credential_gate = ChannelSetupActivationCredentialGate;
-        self.activate_inner(
-            package_ref,
-            ExtensionActivationMode::Static,
-            &credential_gate,
-        )
-        .await
     }
 
     pub(crate) async fn activate_with_credential_gate(
@@ -2506,7 +2490,6 @@ mod tests {
         assert_eq!(example.installation_phase, Some(LifecyclePhase::Active));
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_tools_extension_installs_activates_and_publishes_capabilities() {
         let (_dir, _storage_root, port, _active_registry, installation_store) =
@@ -2587,7 +2570,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_tools_extension_activation_requires_personal_oauth() {
         let (_dir, _storage_root, port, _active_registry, _installation_store) =
@@ -2643,7 +2625,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_tools_extension_removes_cleanly() {
         let (_dir, _storage_root, port, _active_registry, installation_store) =

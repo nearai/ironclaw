@@ -530,6 +530,25 @@ impl HostRuntimeCapabilityHarness {
         if !native_extension_factories.is_empty() {
             input = input.with_native_extension_factories(native_extension_factories);
         }
+        // Mirror the binary's channel-extension binding assembly (DEL-7):
+        // the slack channel adapter + extras ride the composition input seam
+        // exactly as `ironclaw_reborn_cli` supplies them, so activated slack
+        // packages bind the REAL adapter in integration runs.
+        input = input.with_channel_extension_bindings(vec![
+            ironclaw_reborn_composition::ChannelExtensionBinding {
+                extension_id: "slack".to_string(),
+                adapter: Arc::new(ironclaw_slack_v2_adapter::SlackChannelAdapter),
+                inbound_payload_classifier: Some(Arc::new(|message| {
+                    ironclaw_slack_v2_adapter::classify_interaction_resolution(
+                        &message.text,
+                        message.trigger,
+                    )
+                })),
+                preference_target_codec: Some(Arc::new(
+                    ironclaw_slack_v2_adapter::SlackPreferenceTargetCodec,
+                )),
+            },
+        ]);
         let services = build_reborn_services(input).await?;
         if seed_extension_credentials {
             profiles::extension::seed_extension_lifecycle_credentials(&services, &user_id).await?;

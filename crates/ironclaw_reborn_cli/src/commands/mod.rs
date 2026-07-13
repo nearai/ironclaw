@@ -15,7 +15,6 @@ pub(crate) mod run;
 #[cfg(feature = "webui-v2-beta")]
 pub(crate) mod serve;
 #[cfg(feature = "webui-v2-beta")]
-pub(crate) mod serve_slack;
 #[cfg(feature = "webui-v2-beta")]
 pub(crate) mod serve_sso;
 pub(crate) mod skills;

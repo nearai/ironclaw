@@ -14,11 +14,9 @@
 //!
 //! Vendor residue that is not yet host-generic enters only through
 //! [`ChannelExtras`]: an inbound payload classifier (gate-resolution
-//! replies), the preference-target codec for the triggered delivery driver,
+//! replies), the preference-target codec for the triggered delivery driver, and
 //! an optional storage-root override for a channel whose durable state
-//! predates the generic root scheme, and — for a channel lane whose
-//! configure surface predates `[channel.config]` — a full lane-owned
-//! registration override that the reconcile passes never touch.
+//! predates the generic root scheme.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -211,22 +209,15 @@ pub(crate) struct ChannelExtras {
     pub(crate) subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
     /// Legacy storage-root override for the per-extension workflow state.
     pub(crate) storage_roots: Option<ChannelWorkflowStorageRoots>,
-    /// Full lane-owned inbound wiring (verification secrets + sink + drain)
-    /// for a channel whose configure surface predates `[channel.config]`.
-    /// When present the assembly registers exactly this and its reconcile
-    /// passes never rebuild or unregister it.
-    pub(crate) registration: Option<ChannelIngressRegistration>,
 }
 
-/// The extras retained after registration (the one-shot registration
-/// override is consumed at [`GenericChannelHostAssembly::register_extras`]).
+/// The extras retained after registration.
 #[derive(Clone, Default)]
 struct StoredChannelExtras {
     classifier: Option<Arc<InboundPayloadClassifier>>,
     preference_target_codec: Option<Arc<dyn PreferenceTargetCodec>>,
     subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
     storage_roots: Option<ChannelWorkflowStorageRoots>,
-    lane_registered: bool,
 }
 
 /// The deployment identity every per-extension workflow binds under: the
@@ -275,8 +266,6 @@ pub(crate) struct GenericChannelHostDeps {
 
 /// What the assembly last reconciled for one extension id.
 enum ReconciledChannel {
-    /// Lane-owned registration override; reconcile passes never touch it.
-    LaneOverride,
     /// Assembly-built generic graph for exactly this active-set entry.
     Generic {
         active: Arc<ActiveExtension>,
@@ -286,8 +275,8 @@ enum ReconciledChannel {
         /// injected through the SAME observer instance the sink drives).
         observer: Option<Arc<dyn PostAdmissionObserver>>,
     },
-    /// Nothing registered for this entry (foreign lane-owned registration,
-    /// no verification recipe, or a build failure already logged); skipped
+    /// Nothing registered for this entry (unmanaged registration, no
+    /// verification recipe, or a build failure already logged); skipped
     /// until the active-set entry changes.
     Untouched { active: Arc<ActiveExtension> },
 }
@@ -334,9 +323,8 @@ impl GenericChannelHostAssembly {
         assembly
     }
 
-    /// Register one extension's vendor extras. A registration override is
-    /// installed immediately (lane-owned lifetime); otherwise the extension
-    /// is re-reconciled against the current snapshot so classifier/storage
+    /// Register one extension's vendor extras, then re-reconcile the
+    /// extension against the current snapshot so classifier/storage
     /// overrides apply to the next build.
     pub(crate) async fn register_extras(&self, extension_id: &str, extras: ChannelExtras) {
         let ChannelExtras {
@@ -344,9 +332,7 @@ impl GenericChannelHostAssembly {
             preference_target_codec,
             subject_route_resolver,
             storage_roots,
-            registration,
         } = extras;
-        let lane_registered = registration.is_some();
         if let Ok(mut stored) = self.extras.lock() {
             stored.insert(
                 extension_id.to_string(),
@@ -355,29 +341,13 @@ impl GenericChannelHostAssembly {
                     preference_target_codec,
                     subject_route_resolver,
                     storage_roots,
-                    lane_registered,
                 },
             );
         }
         let mut reconciled = self.reconciled.lock().await;
-        match registration {
-            Some(registration) => {
-                // Retire any generic graph the assembly built before the
-                // lane arrived (boot window). The moment between managed
-                // unregistration and the lane registration fails closed and
-                // retryable at the router.
-                if let Some(replaced) = self.deps.registry.unregister_managed(extension_id) {
-                    spawn_drain(replaced.drain.clone());
-                }
-                self.deps.registry.register(extension_id, registration);
-                reconciled.insert(extension_id.to_string(), ReconciledChannel::LaneOverride);
-            }
-            None => {
-                reconciled.remove(extension_id);
-                drop(reconciled);
-                self.reconcile(self.deps.watch.current()).await;
-            }
-        }
+        reconciled.remove(extension_id);
+        drop(reconciled);
+        self.reconcile(self.deps.watch.current()).await;
     }
 
     /// The registered preference-target codec for one extension, if any —
@@ -500,10 +470,7 @@ impl GenericChannelHostAssembly {
 
         let deactivated: Vec<String> = reconciled
             .iter()
-            .filter(|(extension_id, entry)| {
-                !active_channels.contains(*extension_id)
-                    && !matches!(entry, ReconciledChannel::LaneOverride)
-            })
+            .filter(|(extension_id, _)| !active_channels.contains(*extension_id))
             .map(|(extension_id, _)| extension_id.clone())
             .collect();
         for extension_id in deactivated {
@@ -519,7 +486,6 @@ impl GenericChannelHostAssembly {
                 continue;
             };
             match reconciled.get(&extension_id) {
-                Some(ReconciledChannel::LaneOverride) => continue,
                 Some(ReconciledChannel::Generic { active: last, .. })
                 | Some(ReconciledChannel::Untouched { active: last })
                     if Arc::ptr_eq(last, &active) =>
@@ -529,13 +495,6 @@ impl GenericChannelHostAssembly {
                 _ => {}
             }
             let extras = self.stored_extras(&extension_id);
-            if extras.lane_registered {
-                // The lane owns this extension's registration but the
-                // reconcile ledger lost track (fresh assembly over an
-                // already-registered lane): leave it alone.
-                reconciled.insert(extension_id.clone(), ReconciledChannel::LaneOverride);
-                continue;
-            }
             match self.build_generic_graph(&active, &extras).await {
                 Ok(Some((registration, binding, observer))) => {
                     match self

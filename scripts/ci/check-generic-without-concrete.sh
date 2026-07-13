@@ -34,9 +34,8 @@ CONCRETE_CRATES=(
 )
 
 # dependent-crate:removal-phase — mirrors CONCRETE_DEPENDENCY_EXCEPTIONS.
-TEMPORARY_EXCEPTIONS=(
-  "ironclaw_reborn_composition:P6"
-)
+# Empty since P6 deleted the composition→slack edge (DEL-7/DEL-9).
+TEMPORARY_EXCEPTIONS=()
 
 GENERIC_CRATES=()
 while IFS= read -r crate_name; do
@@ -81,7 +80,8 @@ echo "checking ${#GENERIC_CRATES[@]} generic crates for concrete extension depen
 
 is_excepted() {
   local crate="$1"
-  for entry in "${TEMPORARY_EXCEPTIONS[@]}"; do
+  # `${arr[@]+...}` keeps `set -u` happy on bash 3.2 when the list is empty.
+  for entry in ${TEMPORARY_EXCEPTIONS[@]+"${TEMPORARY_EXCEPTIONS[@]}"}; do
     if [ "${entry%%:*}" = "$crate" ]; then
       echo "${entry##*:}"
       return 0
@@ -124,7 +124,12 @@ for crate in "${GENERIC_CRATES[@]}"; do
   if phase="$(is_excepted "$crate")"; then
     continue
   fi
-  echo "==> cargo test -p $crate"
-  cargo test -p "$crate" --quiet
+  # Run each crate with the SAME feature recipe the CI crate-tests job uses
+  # (feature-gated test targets like product_adapters' contract tests do not
+  # compile bare).
+  flags="$(scripts/ci/package-feature-flags.sh "$crate")"
+  echo "==> cargo test -p $crate ${flags}"
+  # shellcheck disable=SC2086
+  cargo test -p "$crate" ${flags} --quiet
 done
 echo "generic crates build and pass tests without concrete extension crates"

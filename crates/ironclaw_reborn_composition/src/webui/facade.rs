@@ -114,7 +114,16 @@ pub fn build_webui_services(
     runtime: &RebornRuntime,
     event_stream: Option<Arc<dyn ProjectionStream>>,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
-    build_webui_services_with_channel_connection(runtime, event_stream, None, Vec::new())
+    // The generic per-user channel-connection facade (extension-runtime
+    // §6.3): channel extensions are discovered from the durable installation
+    // store; no per-vendor lane registers anything.
+    let channel_connection = runtime.generic_channel_connection_facade();
+    build_webui_services_with_channel_connection(
+        runtime,
+        event_stream,
+        channel_connection,
+        Vec::new(),
+    )
 }
 
 pub(crate) fn build_webui_services_with_channel_connection(

@@ -60,10 +60,6 @@ use crate::extension_host::channel_identity::{
     ChannelIdentityBindingConfig, channel_identity_binding_hook_factory,
 };
 use crate::product_auth::serve::{ProductAuthRouteState, product_auth_route_mount};
-#[cfg(feature = "slack-v2-host-beta")]
-use crate::slack::slack_channel_routes::{
-    SlackChannelRouteAdminRouteConfig, slack_channel_route_admin_route_mount,
-};
 use crate::webui::facade::RebornWebuiBundle;
 use crate::webui::webui_body_limit::{build_body_limit_state, enforce_body_limit};
 use crate::webui::webui_operator_auth::{
@@ -109,7 +105,7 @@ pub trait WebuiAuthenticator: Send + Sync + 'static {
     /// Whether bearer tokens accepted by this authenticator represent a
     /// single trusted operator. Operator-wide WebUI config routes mutate
     /// shared host configuration such as provider catalogs, secrets, active
-    /// models, or Slack channel routes, so host composition only mounts them
+    /// models), so host composition only mounts them
     /// for authenticators that explicitly opt in.
     fn mounts_operator_webui_config_routes(&self) -> bool {
         #[allow(deprecated)]
@@ -237,7 +233,7 @@ pub struct WebuiServeConfig {
     /// into the composed app outside the bearer auth layer. Used
     /// by `ironclaw_reborn_webui_ingress::webui_v2_auth_router`
     /// to mount the WebChat v2 OAuth login surface and by protocol
-    /// webhooks such as Slack Events API. Both the `Router` and the
+    /// webhooks such as a channel vendor's events API. Both the `Router` and the
     /// `Vec<IngressRouteDescriptor>` are required so the descriptor-driven
     /// per-route rate-limit and body-limit middlewares apply to these routes
     /// just like they do to the v2 facade and the product-auth callback —
@@ -251,10 +247,6 @@ pub struct WebuiServeConfig {
     /// identity to the authenticated Reborn user (the generic post-exchange
     /// identity binding; extension-runtime §5.5).
     pub(crate) channel_identity_binding: Option<ChannelIdentityBindingConfig>,
-    /// Optional Slack channel route admin surface mounted under the WebUI
-    /// channels settings path.
-    #[cfg(feature = "slack-v2-host-beta")]
-    pub(crate) slack_channel_routes: Option<SlackChannelRouteAdminRouteConfig>,
 }
 
 /// Async drain hook for public route mounts that schedule work outside the
@@ -360,8 +352,6 @@ impl WebuiServeConfig {
             public_mounts: Vec::new(),
             protected_mounts: Vec::new(),
             channel_identity_binding: None,
-            #[cfg(feature = "slack-v2-host-beta")]
-            slack_channel_routes: None,
         }
     }
 
@@ -371,12 +361,6 @@ impl WebuiServeConfig {
     /// declares the callback's vendor.
     pub fn with_channel_identity_binding(mut self, config: ChannelIdentityBindingConfig) -> Self {
         self.channel_identity_binding = Some(config);
-        self
-    }
-
-    #[cfg(feature = "slack-v2-host-beta")]
-    pub fn with_slack_channel_routes(mut self, config: SlackChannelRouteAdminRouteConfig) -> Self {
-        self.slack_channel_routes = Some(config);
         self
     }
 
@@ -579,11 +563,6 @@ pub fn webui_v2_app_with_lifecycle(
         product_auth_route_mount(state)
     });
     let mount_operator_routes = config.authenticator.mounts_operator_webui_config_routes();
-    #[cfg(feature = "slack-v2-host-beta")]
-    let slack_channel_routes_mount = config
-        .slack_channel_routes
-        .clone()
-        .map(slack_channel_route_admin_route_mount);
     let public_mounts = config.public_mounts;
     let protected_mounts = config.protected_mounts;
     let public_route_drains = PublicRouteDrains::new(
@@ -607,13 +586,6 @@ pub fn webui_v2_app_with_lifecycle(
         operator_descriptors.clear();
     }
     if let Some(mount) = &product_auth_mount {
-        descriptors.extend(mount.descriptors.iter().cloned());
-    }
-    #[cfg(feature = "slack-v2-host-beta")]
-    if let Some(mount) = &slack_channel_routes_mount
-        && mount_operator_routes
-    {
-        operator_descriptors.extend(mount.descriptors.iter().cloned());
         descriptors.extend(mount.descriptors.iter().cloned());
     }
     for mount in &public_mounts {
@@ -658,12 +630,6 @@ pub fn webui_v2_app_with_lifecycle(
     if let Some(mount) = product_auth_mount {
         protected_inner = protected_inner.merge(mount.protected);
         public_inner = Some(mount.public);
-    }
-    #[cfg(feature = "slack-v2-host-beta")]
-    if let Some(mount) = slack_channel_routes_mount
-        && mount_operator_routes
-    {
-        protected_inner = protected_inner.merge(mount.protected);
     }
     for mount in public_mounts {
         public_inner = Some(match public_inner {

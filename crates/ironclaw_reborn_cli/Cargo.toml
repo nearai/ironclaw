@@ -44,16 +44,6 @@ webui-v2-beta = [
     "dep:ironclaw_reborn_webui_ingress",
     "dep:async-trait",
 ]
-# Compile in the Slack Events API host-beta mount for `ironclaw-reborn serve`.
-# Still requires effective Slack enablement at runtime before the route is
-# mounted: either `[slack].enabled = true` or
-# `IRONCLAW_REBORN_SLACK_ENABLED=true`.
-slack-v2-host-beta = [
-    "webui-v2-beta",
-    "ironclaw_reborn_composition/slack-v2-host-beta",
-    "dep:ironclaw_extension_host",
-    "dep:ironclaw_telegram_v2_adapter",
-]
 openai-compat-beta = [
     "webui-v2-beta",
     "ironclaw_reborn_composition/openai-compat-beta",
@@ -83,11 +73,12 @@ hex = "0.4.3"
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4.5.0"
 dotenvy = "0.15"
-ironclaw_extension_host = { path = "../ironclaw_extension_host", version = "0.1.0", optional = true }
+ironclaw_extension_host = { path = "../ironclaw_extension_host", version = "0.1.0" }
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version = "0.1.0" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config", version = "0.1.0" }
 ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces", version = "0.1.0" }
-ironclaw_telegram_v2_adapter = { path = "../ironclaw_telegram_v2_adapter", version = "0.1.0", optional = true }
+ironclaw_slack_v2_adapter = { path = "../ironclaw_slack_v2_adapter", version = "0.1.0" }
+ironclaw_telegram_v2_adapter = { path = "../ironclaw_telegram_v2_adapter", version = "0.1.0" }
 ironclaw_reborn_webui_ingress = { path = "../ironclaw_reborn_webui_ingress", version = "0.1.0", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
 secrecy = "0.10"

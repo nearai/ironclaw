@@ -41,7 +41,7 @@ fallback_feature_flags() {
 
 case "${package}" in
   ironclaw_reborn_cli)
-    printf '%s\n' "--features webui-v2-beta,slack-v2-host-beta"
+    printf '%s\n' "--features webui-v2-beta"
     ;;
   ironclaw_product_adapters)
     printf '%s\n' "--features test-support,host-auth-mint"
@@ -52,7 +52,7 @@ case "${package}" in
     printf '%s\n' "--features test-support,libsql"
     ;;
   ironclaw_reborn_composition)
-    printf '%s\n' "--features test-support,webui-v2-beta,slack-v2-host-beta,libsql"
+    printf '%s\n' "--features test-support,webui-v2-beta,libsql"
     ;;
   ironclaw_reborn)
     printf '%s\n' "--features root-llm-provider,libsql-secrets,libsql-restart-tests,webui-user-store"

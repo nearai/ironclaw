@@ -10,12 +10,34 @@ use ironclaw_extension_host::{
     BindContext, BindError, ExtensionBindings, ExtensionEntrypoint, LoadContext,
     NativeExtensionFactory,
 };
+use ironclaw_reborn_composition::ChannelExtensionBinding;
 use ironclaw_telegram_v2_adapter::TelegramChannelAdapter;
 
-/// Every native factory the binary assembles. (Slack's fold from the
-/// composition-bundled binding into this registry is extension-runtime P6.)
+/// Every native factory the binary assembles (`first_party`-runtime
+/// extensions bind their adapters through these).
 pub(crate) fn bundled_native_extension_factories() -> Vec<Arc<dyn NativeExtensionFactory>> {
     vec![Arc::new(TelegramExtensionFactory)]
+}
+
+/// Channel-adapter bindings for channel extensions whose runtime is NOT
+/// `first_party` (extension-runtime P6): Slack's WASM-runtime package cannot
+/// ride a native factory, so the binary supplies its channel adapter plus
+/// the composition extras (gate-reply classifier + preference-target codec)
+/// as build input. Composition never names a concrete extension crate.
+pub(crate) fn bundled_channel_extension_bindings() -> Vec<ChannelExtensionBinding> {
+    vec![ChannelExtensionBinding {
+        extension_id: "slack".to_string(),
+        adapter: Arc::new(ironclaw_slack_v2_adapter::SlackChannelAdapter),
+        inbound_payload_classifier: Some(Arc::new(|message| {
+            ironclaw_slack_v2_adapter::classify_interaction_resolution(
+                &message.text,
+                message.trigger,
+            )
+        })),
+        preference_target_codec: Some(Arc::new(
+            ironclaw_slack_v2_adapter::SlackPreferenceTargetCodec,
+        )),
+    }]
 }
 
 /// `runtime.service = "telegram.extension/v1"` — the Telegram channel
@@ -56,5 +78,16 @@ mod tests {
                 .any(|factory| factory.service() == "telegram.extension/v1"),
             "the binary assembles the telegram factory"
         );
+    }
+
+    #[test]
+    fn slack_channel_binding_carries_adapter_classifier_and_codec() {
+        let bindings = bundled_channel_extension_bindings();
+        let slack = bindings
+            .iter()
+            .find(|binding| binding.extension_id == "slack")
+            .expect("the binary supplies the slack channel binding");
+        assert!(slack.inbound_payload_classifier.is_some());
+        assert!(slack.preference_target_codec.is_some());
     }
 }

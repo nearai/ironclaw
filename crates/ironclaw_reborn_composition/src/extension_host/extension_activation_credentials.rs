@@ -65,25 +65,6 @@ impl ExtensionActivationCredentialGate for RuntimeExtensionActivationCredentialG
     }
 }
 
-/// Activation gate for operator channel-setup activation of a
-/// channel-surface extension (Slack workspace setup save). Per-caller
-/// `product_auth_account` requirements deliberately do not gate this
-/// activation: those are user-scoped accounts, enforced per caller at
-/// tool-call time by runtime credential selection (the auth_required gate).
-/// Workspace-level secrets (bot token, signing secret) are validated by the
-/// setup route itself before activation runs.
-pub(crate) struct ChannelSetupActivationCredentialGate;
-
-#[async_trait]
-impl ExtensionActivationCredentialGate for ChannelSetupActivationCredentialGate {
-    async fn ensure_credentials(
-        &self,
-        _package: &ExtensionPackage,
-    ) -> Result<(), ProductWorkflowError> {
-        Ok(())
-    }
-}
-
 pub(crate) struct UnavailableExtensionActivationCredentialGate;
 
 #[async_trait]

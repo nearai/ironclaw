@@ -120,3 +120,14 @@ impl PublicRouteDrain for AliasDrain {
         Box::pin(self.0.drain())
     }
 }
+
+/// Serve-layer wrapper over the alias table: one mount per retired vendor
+/// webhook path, forwarding into the SAME generic ingress router the
+/// canonical `/webhooks/extensions/{extension_id}/{route_suffix}` mount
+/// drives. In-flight work drains through the shared ingress registry (the
+/// canonical mount's drain), so the aliases carry no drain of their own.
+pub fn legacy_extension_ingress_alias_mounts(
+    parts: &crate::extension_host::extension_ingress::ExtensionIngressParts,
+) -> Result<Vec<PublicRouteMount>, crate::RebornBuildError> {
+    legacy_channel_ingress_alias_mounts(&parts.router, None)
+}

@@ -1,4 +1,3 @@
-#[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_auth::SLACK_PROVIDER_ID;
 use ironclaw_extensions::{
     CapabilityDeclV2, CapabilityVisibility, ExtensionAssetPath, ExtensionManifestRecord,
@@ -50,10 +49,8 @@ const GOOGLE_SHEETS_WASM_MODULE: &[u8] = include_bytes!(
 );
 const SLACK_MANIFEST: &str =
     include_str!("../../../ironclaw_first_party_extensions/assets/slack/manifest.toml");
-#[cfg(feature = "slack-v2-host-beta")]
 const TELEGRAM_MANIFEST: &str =
     include_str!("../../../ironclaw_first_party_extensions/assets/telegram/manifest.toml");
-#[cfg(feature = "slack-v2-host-beta")]
 const SLACK_WASM_MODULE: &[u8] = include_bytes!(
     "../../../ironclaw_first_party_extensions/assets/slack/wasm/slack_user_tool.wasm"
 );
@@ -71,9 +68,7 @@ const WEB_ACCESS_MANIFEST: &str =
 const NEARAI_MCP_MANIFEST: &str =
     include_str!("../../../ironclaw_first_party_extensions/assets/nearai-mcp/manifest.toml");
 const NEARAI_EXTENSION_ID: &str = HostManagedCredentialExtension::NearAi.id();
-#[cfg(feature = "slack-v2-host-beta")]
 pub(crate) const SLACK_EXTENSION_ID: &str = "slack";
-#[cfg(feature = "slack-v2-host-beta")]
 const SLACK_PERSONAL_OAUTH_REQUIREMENT_NAME: &str = "slack_personal_oauth";
 // The slack_personal OAuth setup scopes are the union of the Slack tools'
 // per-capability scopes: the read-only tools request only read scopes, and
@@ -83,7 +78,6 @@ const SLACK_PERSONAL_OAUTH_REQUIREMENT_NAME: &str = "slack_personal_oauth";
 // in nearai/ironclaw#5669. `slack_read_only_tools_do_not_request_chat_write`
 // enforces that this list equals the union of the manifest capabilities' scopes
 // and that only write-effect capabilities declare chat:write.
-#[cfg(feature = "slack-v2-host-beta")]
 const SLACK_OAUTH_SETUP_SCOPES: &[&str] = &[
     "search:read",
     "channels:history",
@@ -231,7 +225,6 @@ fn onboarding(package_ref: &LifecyclePackageRef) -> Option<LifecycleExtensionOnb
             None,
             "After authorization completes, activate Gmail to publish its tools.",
         )),
-        #[cfg(feature = "slack-v2-host-beta")]
         "slack" => Some(onboarding_message(
             "Slack needs OAuth authorization before the Slack channel can recognize your DMs and before the user-scoped Slack tools can run.",
             Some("Authorize the Slack account you will use to DM IronClaw."),
@@ -296,7 +289,6 @@ fn credential_requirements(
     }
     // Model B: the user-installable Slack tools extension (`slack`) surfaces the
     // slack_personal OAuth connect requirement; the bot channel is operator infra.
-    #[cfg(feature = "slack-v2-host-beta")]
     if package.package_ref.kind == LifecyclePackageKind::Extension
         && package.package_ref.id.as_str() == SLACK_EXTENSION_ID
     {
@@ -349,7 +341,6 @@ fn credential_requirements(
         .collect()
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 fn slack_personal_oauth_credential_requirements() -> Vec<LifecycleExtensionCredentialRequirement> {
     vec![LifecycleExtensionCredentialRequirement {
         name: SLACK_PERSONAL_OAUTH_REQUIREMENT_NAME.to_string(),
@@ -400,7 +391,6 @@ impl AvailableExtensionCatalog {
     pub(crate) fn from_first_party_assets_with_nearai_mcp_config(
         nearai_mcp_config: Option<&NearAiMcpBootstrapConfig>,
     ) -> Result<Self, ProductWorkflowError> {
-        #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(unused_mut))]
         let mut packages = vec![
             github_package()?,
             notion_mcp_package()?,
@@ -413,9 +403,7 @@ impl AvailableExtensionCatalog {
             google_slides_package()?,
             gmail_package()?,
         ];
-        #[cfg(feature = "slack-v2-host-beta")]
         packages.push(slack_package()?);
-        #[cfg(feature = "slack-v2-host-beta")]
         packages.push(telegram_package()?);
         Ok(Self::from_packages(packages))
     }
@@ -640,14 +628,12 @@ fn gmail_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     bundled_extension_package("gmail", "Gmail", GMAIL_MANIFEST, gmail_assets())
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 pub(crate) fn slack_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     bundled_extension_package(SLACK_EXTENSION_ID, "Slack", SLACK_MANIFEST, slack_assets())
 }
 
 /// The Telegram channel package: a pure channel extension — one manifest,
 /// zero package assets beyond it (DEL-10's addition test).
-#[cfg(feature = "slack-v2-host-beta")]
 pub(crate) fn telegram_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     bundled_extension_package(
         "telegram",
@@ -673,7 +659,6 @@ pub(crate) fn google_sheets_manifest_digest() -> String {
     sha256_digest_token(GOOGLE_SHEETS_MANIFEST.as_bytes())
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 pub(crate) fn slack_manifest_digest() -> String {
     sha256_digest_token(SLACK_MANIFEST.as_bytes())
 }
@@ -694,35 +679,11 @@ pub(crate) fn web_access_manifest_digest() -> String {
     sha256_digest_token(WEB_ACCESS_MANIFEST.as_bytes())
 }
 
-/// The Slack **bot** channel manifest — the model-B product adapter that owns
-/// the Slack Events host-ingress route. `slack_serve` projects the route
-/// descriptor from here; the tools package manifest (`SLACK_MANIFEST`)
-/// carries only WASM tool capabilities, not channel ingress.
+/// The bundled Slack channel manifest — the MIG-5 legacy alias mount
+/// (`extension_host/legacy_ingress_aliases.rs`) projects its route
+/// descriptor from here.
 pub(crate) fn slack_manifest_toml() -> &'static str {
     SLACK_MANIFEST
-}
-
-/// Real channel adapters for bundled channel-declaring extensions, keyed by
-/// extension id (the generic loader binds them at activation; extensions
-/// without an entry bind the transitional bridge). Feature-gated transitional
-/// debt: the Slack adapter crate is already a composition dependency under
-/// `slack-v2-host-beta`; the binding assembly moves to the binary's native
-/// factory registry when the extension crates extract (P6).
-pub(crate) fn bundled_channel_adapter_bindings() -> Vec<(
-    String,
-    std::sync::Arc<dyn ironclaw_product_adapters::ChannelAdapter>,
-)> {
-    #[cfg(feature = "slack-v2-host-beta")]
-    {
-        vec![(
-            "slack".to_string(),
-            std::sync::Arc::new(ironclaw_slack_v2_adapter::SlackChannelAdapter),
-        )]
-    }
-    #[cfg(not(feature = "slack-v2-host-beta"))]
-    {
-        Vec::new()
-    }
 }
 
 pub(crate) fn nearai_mcp_manifest_toml_for_config(
@@ -1426,7 +1387,6 @@ fn google_sheets_assets() -> Vec<AvailableExtensionAsset> {
     )
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 fn slack_assets() -> Vec<AvailableExtensionAsset> {
     // The schema/prompt asset dirs now match the extension id (`slack`), but the
     // WASM binary keeps its legacy `slack_user_tool.wasm` filename (and the tool
@@ -2107,7 +2067,6 @@ mod tests {
                 "google-calendar",
                 "Google Calendar needs Google OAuth authorization",
             ),
-            #[cfg(feature = "slack-v2-host-beta")]
             ("slack", "Slack needs OAuth authorization"),
             ("notion", "Notion needs OAuth authorization"),
             #[cfg(feature = "root-llm-provider")]
@@ -2313,7 +2272,6 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn bundled_slack_search_exposes_one_public_slack_extension() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
@@ -2329,7 +2287,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn bundled_slack_tools_extension_projects_personal_oauth_setup() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
@@ -2459,7 +2416,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn slack_read_only_tools_do_not_request_chat_write() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
@@ -2567,7 +2523,6 @@ mod tests {
         assert!(upload_file.effects.contains(&EffectKind::ExternalWrite));
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn bundled_slack_package_declares_product_adapter_channel_surface() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
@@ -2725,7 +2680,6 @@ handle = "web_token"
         assert!(google_sheets_manifest_digest().starts_with("sha256:"));
         assert!(google_slides_manifest_digest().starts_with("sha256:"));
         assert!(gmail_manifest_digest().starts_with("sha256:"));
-        #[cfg(feature = "slack-v2-host-beta")]
         assert!(slack_manifest_digest().starts_with("sha256:"));
     }
 

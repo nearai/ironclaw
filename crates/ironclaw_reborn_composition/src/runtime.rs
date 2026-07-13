@@ -109,11 +109,13 @@ use self::runtime_turn_scheduler::RuntimeTurnScheduler;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore, builtin_extension_registry};
 use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
 #[cfg(any(test, feature = "test-support"))]
+use crate::outbound::OutboundDeliveryTargetRegistrationOutcome;
+#[cfg(any(test, feature = "test-support"))]
 use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
 use crate::outbound::{
     MutableOutboundDeliveryTargetRegistry, OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
-    OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome,
-    RebornOutboundPreferencesFacade, outbound_delivery_synthetic_provider,
+    OutboundDeliveryTargetProvider, RebornOutboundPreferencesFacade,
+    outbound_delivery_synthetic_provider,
 };
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::root::default_system_prompt::DefaultSystemPromptIdentitySource;
@@ -650,8 +652,13 @@ pub struct RebornRuntime {
     /// Generic channel host assembly (extension-runtime P6 S2): the
     /// per-extension inbound-channel reconcile loop over the generic host's
     /// active snapshot. `None` when the composition path has no generic
-    /// host. Held here so the loop lives exactly as long as the runtime and
-    /// so concrete channel lanes can feed their vendor extras.
+    /// host. Never read after construction — held purely so the reconcile
+    /// loop lives exactly as long as the runtime (dropping the `Arc` ends
+    /// the loop).
+    #[allow(
+        dead_code,
+        reason = "owned so the reconcile loop lives with the runtime"
+    )]
     channel_host_assembly:
         Option<Arc<crate::extension_host::channel_host::GenericChannelHostAssembly>>,
     /// Concrete in-memory turn-state authority, kept so graceful `shutdown` can
@@ -672,15 +679,6 @@ pub struct RebornRuntime {
     #[cfg(feature = "root-llm-provider")]
     skill_learning_extraction_tasks:
         Option<Arc<crate::extension_host::skill_learning::SkillLearningExtractionTasks>>,
-    /// Late-binding slot shared with the poller's `PostSubmitHookWrappedSubmitter`.
-    /// Filled at build time by the generic triggered-delivery hook (or by a
-    /// concrete channel lane through `set_trigger_post_submit_hook`).
-    /// `None` when the trigger poller is not enabled.
-    post_submit_hook_slot: Option<
-        Arc<
-            std::sync::OnceLock<Arc<dyn crate::automation::trigger_poller::PostSubmitDeliveryHook>>,
-        >,
-    >,
     #[cfg(any(test, feature = "test-support"))]
     trigger_conversation_pairing:
         Option<Arc<dyn ironclaw_conversations::ConversationActorPairingService>>,
@@ -843,10 +841,9 @@ type LocalDevSkillExecutionAdapter =
 struct TriggerPollerServices {
     materializer: Arc<dyn ironclaw_triggers::TriggerPromptMaterializer>,
     trusted_submitter: Arc<dyn ironclaw_triggers::TrustedTriggerFireSubmitter>,
-    /// Late-binding slot for the post-submit hook. Created here and shared with
-    /// the poller wrapper; filled by the composition root (generic hook) or
-    /// later through `RebornRuntime::set_trigger_post_submit_hook` (a lane
-    /// wired after runtime build) without restarting the poller.
+    /// Late-binding slot for the post-submit hook. Created here and shared
+    /// with the poller wrapper; filled by the composition root (the generic
+    /// triggered-delivery hook) without restarting the poller.
     post_submit_hook_slot: Arc<
         std::sync::OnceLock<Arc<dyn crate::automation::trigger_poller::PostSubmitDeliveryHook>>,
     >,
@@ -1638,32 +1635,81 @@ impl RebornRuntime {
         self.turn_coordinator.clone()
     }
 
-    /// The generic channel host assembly, when this runtime composed a
-    /// generic extension host. Concrete channel lanes route their inbound
-    /// registration (and vendor extras) through this instead of writing the
-    /// ingress registry directly.
-    pub(crate) fn channel_host_assembly(
+    /// The generic post-OAuth channel-identity binding config for this
+    /// deployment (extension-runtime §5.5): channel extensions bind through
+    /// generic discovery over the durable installation store; bindings
+    /// persist in the generic channel-identity store; post-bind DM-target
+    /// provisioning opens the caller's direct conversation through the
+    /// extension's own adapter. `None` when the composed runtime carries no
+    /// durable channel-identity storage.
+    pub fn channel_identity_binding_config(
         &self,
-    ) -> Option<Arc<crate::extension_host::channel_host::GenericChannelHostAssembly>> {
-        self.channel_host_assembly.clone()
+    ) -> Option<crate::extension_host::channel_identity::ChannelIdentityBindingConfig> {
+        let local_runtime = self.services.local_runtime.as_ref()?;
+        let identity_store = local_runtime.channel_identity_store.clone()?;
+        let installation_store = local_runtime
+            .extension_management
+            .as_ref()
+            .map(|management| management.installation_store_handle());
+        let post_bind_factory = match (
+            self.services.channel_delivery_resolver(),
+            local_runtime.channel_dm_target_store.clone(),
+        ) {
+            (Some(delivery), Some(store)) => Some(Arc::new(
+                crate::extension_host::channel_dm_provisioning::ChannelDmTargetProvisioning::new(
+                    delivery, store,
+                ),
+            )
+                as Arc<
+                    dyn crate::extension_host::channel_identity::ChannelIdentityPostBindFactory,
+                >),
+            _ => None,
+        };
+        Some(
+            crate::extension_host::channel_identity::ChannelIdentityBindingConfig {
+                tenant_id: self.thread_scope.tenant_id.clone(),
+                installation_store,
+                binding_store: Arc::clone(&identity_store)
+                    as Arc<dyn crate::provider_identity::RebornUserIdentityBindingStore>,
+                rollback_store: identity_store
+                    as Arc<dyn crate::provider_identity::RebornUserIdentityBindingDeleteStore>,
+                post_bind_factory,
+                overrides: Vec::new(),
+            },
+        )
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
-    pub(crate) fn auth_challenge_provider(&self) -> Option<Arc<dyn crate::AuthChallengeProvider>> {
-        self.services
-            .product_auth
-            .as_ref()
-            .and_then(|product_auth| product_auth.as_auth_challenge_provider())
-    }
-
-    #[cfg(feature = "slack-v2-host-beta")]
-    pub(crate) fn blocked_auth_flow_canceller(
+    /// The generic per-user channel-connection facade over the same generic
+    /// stores (discovery from the installation store; connected = an
+    /// identity binding under the extension's installation prefix;
+    /// disconnect clears bindings, vendor credentials, and the provisioned
+    /// DM target). `None` when the composed runtime carries no durable
+    /// channel-identity storage.
+    pub(crate) fn generic_channel_connection_facade(
         &self,
-    ) -> Option<Arc<dyn crate::BlockedAuthFlowCanceller>> {
-        self.services
-            .product_auth
+    ) -> Option<Arc<dyn ironclaw_product_workflow::ChannelConnectionFacade>> {
+        let local_runtime = self.services.local_runtime.as_ref()?;
+        let identity_store = local_runtime.channel_identity_store.clone()?;
+        let installation_store = local_runtime
+            .extension_management
             .as_ref()
-            .and_then(|product_auth| product_auth.as_blocked_auth_flow_canceller())
+            .map(|management| management.installation_store_handle());
+        let credential_cleanup = self.services.product_auth.clone().map(|services| {
+            services as Arc<dyn crate::extension_host::channel_connection::ChannelCredentialCleanup>
+        });
+        Some(Arc::new(
+            crate::extension_host::channel_connection::GenericChannelConnectionFacade::new(
+                self.thread_scope.tenant_id.clone(),
+                Vec::new(),
+                installation_store,
+                Arc::clone(&identity_store)
+                    as Arc<dyn crate::provider_identity::RebornUserIdentityLookup>,
+                identity_store
+                    as Arc<dyn crate::provider_identity::RebornUserIdentityBindingDeleteStore>,
+                credential_cleanup,
+                local_runtime.channel_dm_target_store.clone(),
+            ),
+        ))
     }
 
     pub(crate) fn webui_event_stream(&self) -> Arc<dyn ProjectionStream> {
@@ -1690,7 +1736,7 @@ impl RebornRuntime {
             })
     }
 
-    #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(dead_code))]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn register_outbound_delivery_target_provider(
         &self,
         provider_key: impl Into<String>,
@@ -1745,55 +1791,6 @@ impl RebornRuntime {
         .map(|_| ())
     }
 
-    #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(dead_code))]
-    pub(crate) fn outbound_delivery_target_provider_key_registered(
-        &self,
-        provider_key: &str,
-    ) -> Result<bool, RebornRuntimeError> {
-        let Some(registry) = self.outbound_delivery_target_registry.as_ref() else {
-            return Err(RebornRuntimeError::InvalidArgument {
-                reason: "outbound delivery target registry unavailable for this runtime"
-                    .to_string(),
-            });
-        };
-        registry
-            .contains_provider_key(provider_key)
-            .map_err(|error| RebornRuntimeError::InvalidArgument {
-                reason: format!("outbound delivery target provider lookup failed: {error}"),
-            })
-    }
-    /// Wire a triggered-run delivery hook into the already-spawned trigger
-    /// poller. The composition root installs the generic hook at build time;
-    /// a concrete channel lane built after [`build_reborn_runtime`] returns
-    /// may call this instead. The hook is idempotent: a second call is
-    /// silently ignored. Returns `false` when the trigger poller is not
-    /// enabled (slot is `None`) or the slot is already occupied, `true` on
-    /// first successful set.
-    pub fn set_trigger_post_submit_hook(
-        &self,
-        hook: Arc<dyn crate::automation::trigger_poller::PostSubmitDeliveryHook>,
-    ) -> bool {
-        let Some(slot) = self.post_submit_hook_slot.as_ref() else {
-            tracing::debug!("set_trigger_post_submit_hook: trigger poller not enabled, ignoring");
-            return false;
-        };
-        match slot.set(hook) {
-            Ok(()) => true,
-            Err(_) => {
-                tracing::debug!(
-                    "set_trigger_post_submit_hook: slot already occupied, ignoring (idempotent)"
-                );
-                false
-            }
-        }
-    }
-
-    #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(dead_code))]
-    pub(crate) fn trigger_post_submit_hook_is_set(&self) -> bool {
-        self.post_submit_hook_slot
-            .as_ref()
-            .is_some_and(|slot| slot.get().is_some())
-    }
     #[cfg(test)]
     fn webui_approval_audit_sink(&self) -> Arc<InMemoryAuditSink> {
         self.approval_audit_sink.clone()
@@ -3894,6 +3891,25 @@ pub async fn build_reborn_runtime(
         })
     };
 
+    // The binary-assembled channel-extension extras (extension-runtime
+    // DEL-7): gate-reply classifiers + preference-target codecs registered
+    // on the assembly for every supplied channel binding.
+    if let Some(assembly) = channel_host_assembly.as_ref() {
+        for binding in &services.channel_extension_bindings {
+            assembly
+                .register_extras(
+                    &binding.extension_id,
+                    crate::extension_host::channel_host::ChannelExtras {
+                        classifier: binding.inbound_payload_classifier.clone(),
+                        preference_target_codec: binding.preference_target_codec.clone(),
+                        subject_route_resolver: None,
+                        storage_roots: None,
+                    },
+                )
+                .await;
+        }
+    }
+
     // Generic outbound-delivery targets (extension-runtime P6): one provider
     // over the assembly's vendor codecs, the `[channel.config]` routing
     // values, and the generic DM-target store serves every active channel
@@ -3990,10 +4006,7 @@ pub async fn build_reborn_runtime(
 
     // Generic triggered-run delivery (extension-runtime P6): one hook routes
     // each settled trigger fire to the owning channel extension's driver via
-    // the assembly's vendor codecs. While the retiring Slack lane is
-    // compiled in, the lane still owns the slot (it wires its own hook after
-    // runtime build and errors when the slot is pre-occupied), so the
-    // generic hook is only INSTALLED without that lane.
+    // the assembly's vendor codecs.
     if let (Some(slot), Some(assembly), Some(local_runtime)) = (
         runtime_post_submit_hook_slot.as_ref(),
         channel_host_assembly.as_ref(),
@@ -4008,17 +4021,10 @@ pub async fn build_reborn_runtime(
                 Arc::clone(&local_runtime.outbound_preferences),
             ),
         );
-        #[cfg(not(feature = "slack-v2-host-beta"))]
         if slot.set(generic_trigger_hook).is_err() {
             tracing::debug!(
                 "generic triggered-run delivery hook slot was already occupied; keeping the first hook"
             );
-        }
-        #[cfg(feature = "slack-v2-host-beta")]
-        {
-            // Lane-owned slot: the Slack lane wires its own hook after
-            // runtime build; drop the generic hook unused.
-            let _ = (slot, generic_trigger_hook);
         }
     }
 
@@ -4102,7 +4108,6 @@ pub async fn build_reborn_runtime(
         trace_flush_worker,
         #[cfg(feature = "root-llm-provider")]
         skill_learning_extraction_tasks,
-        post_submit_hook_slot: runtime_post_submit_hook_slot,
         #[cfg(any(test, feature = "test-support"))]
         trigger_conversation_pairing: trigger_conversation_pairing_value,
         outbound_delivery_target_registry,

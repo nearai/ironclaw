@@ -27,8 +27,6 @@ use crate::extension_host::channel_config::ChannelConfigService;
 use crate::input::{OAuthDcrCallbackConfig, OAuthProviderBackendConfig};
 use crate::product_auth::oauth::oauth_gate::OAuthGateFlowDriver;
 use crate::product_auth::oauth::staged_egress::ObligationStagedAuthEgress;
-#[cfg(feature = "slack-v2-host-beta")]
-use crate::slack::slack_setup::SlackPersonalSetupServiceSlot;
 
 /// Display name sent with RFC 7591 dynamic client registration.
 const DCR_CLIENT_NAME: &str = "Ironclaw";
@@ -175,10 +173,6 @@ pub(crate) fn compose_provider_client(
     secret_store: Arc<dyn SecretStore>,
     runtime_ports: ProductAuthProviderRuntimePorts,
     channel_config_credentials: ChannelConfigCredentialSlot,
-    #[cfg(feature = "slack-v2-host-beta")] slack_personal_oauth_slot: Option<
-        SlackPersonalSetupServiceSlot,
-    >,
-    #[cfg(not(feature = "slack-v2-host-beta"))] _slack_personal_oauth_slot: Option<()>,
 ) -> Result<OAuthProviderComposition, RebornBuildError> {
     let recipes: Arc<dyn AuthRecipeResolver> = Arc::new(StaticAuthRecipeResolver::new(
         crate::extension_host::available_extensions::AvailableExtensionCatalog::bundled_vendor_recipes()
@@ -192,13 +186,6 @@ pub(crate) fn compose_provider_client(
         register_vendor_client_config(&mut client_credentials, recipes.as_ref(), config);
     }
     client_credentials.with_channel_config_fallback(channel_config_credentials);
-    #[cfg(feature = "slack-v2-host-beta")]
-    let slack_slot_redirect = slack_personal_oauth_slot
-        .as_ref()
-        .map(|slot| slot.redirect_uri().as_str().to_string());
-    #[cfg(not(feature = "slack-v2-host-beta"))]
-    let slack_slot_redirect: Option<String> = None;
-
     let callback_base = dcr_callback
         .map(|dcr| {
             EngineCallbackBase::new(format!(
@@ -214,11 +201,6 @@ pub(crate) fn compose_provider_client(
             configs
                 .iter()
                 .find_map(|config| callback_base_from_redirect(config.client.redirect_uri.as_str()))
-        })
-        .or_else(|| {
-            slack_slot_redirect
-                .as_deref()
-                .and_then(callback_base_from_redirect)
         });
 
     compose_auth_engine(

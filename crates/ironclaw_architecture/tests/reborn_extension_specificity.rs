@@ -823,10 +823,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "slack",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/delivered_gate_routing.rs",
-        "slack",
-    ),
-    (
         "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
         "github",
     ),
@@ -913,10 +909,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     (
         "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
         "web_access",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/extension_host/extension_activation_credentials.rs",
-        "slack",
     ),
     (
         "crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs",
@@ -1008,7 +1000,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_reborn_composition/src/input.rs",
         "nearaimcp",
     ),
-    ("crates/ironclaw_reborn_composition/src/input.rs", "slack"),
     ("crates/ironclaw_reborn_composition/src/lib.rs", "github"),
     ("crates/ironclaw_reborn_composition/src/lib.rs", "google"),
     (
@@ -1046,10 +1037,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "slack",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/outbound/outbound_preferences.rs",
-        "slack",
-    ),
-    (
         "crates/ironclaw_reborn_composition/src/product_auth/api/auth.rs",
         "nearai_mcp",
     ),
@@ -1059,10 +1046,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     (
         "crates/ironclaw_reborn_composition/src/product_auth/api/auth_prompt.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/product_auth/credentials/product_auth_providers.rs",
         "slack",
     ),
     (
@@ -1101,58 +1084,9 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_reborn_composition/src/runtime.rs",
         "nearai_mcp",
     ),
-    ("crates/ironclaw_reborn_composition/src/runtime.rs", "slack"),
     (
         "crates/ironclaw_reborn_composition/src/runtime/local_dev/extension_surface.rs",
         "web_access",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/slack/mod.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/slack/slack_channel_routes.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/slack/slack_channel_routes/allowed.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/slack/slack_channel_routes/setup.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/slack/slack_channel_routes/subjects.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/slack/slack_host_beta.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/slack/slack_host_beta/runtime_setup.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/slack/slack_host_state.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/slack/slack_preference_targets.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/slack/slack_serve.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/slack/slack_serve/installation.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/slack/slack_setup.rs",
-        "slack",
     ),
     (
         "crates/ironclaw_reborn_composition/src/web_access.rs",
@@ -1162,12 +1096,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_reborn_composition/src/web_access.rs",
         "webaccess",
     ),
-    (
-        "crates/ironclaw_reborn_composition/src/webui/webui_serve.rs",
-        "slack",
-    ),
-    ("crates/ironclaw_reborn_config/src/config_file.rs", "slack"),
-    ("crates/ironclaw_reborn_config/src/lib.rs", "slack"),
     (
         "crates/ironclaw_reborn_identity/src/filesystem_store.rs",
         "slack",
@@ -1421,11 +1349,7 @@ fn reborn_generic_code_names_no_concrete_extension() {
 /// that predate the unified runtime. Each names the phase that deletes it; a
 /// stale entry (edge no longer present) fails so the list only shrinks.
 /// Checklist DEL-7 requires this list empty.
-const CONCRETE_DEPENDENCY_EXCEPTIONS: &[(&str, &str, &str)] = &[(
-    "ironclaw_reborn_composition",
-    "ironclaw_slack_v2_adapter",
-    "P6 deletes composition/src/slack/** and the slack-v2-host-beta feature (DEL-1, DEL-3)",
-)];
+const CONCRETE_DEPENDENCY_EXCEPTIONS: &[(&str, &str, &str)] = &[];
 
 #[test]
 fn concrete_extension_crates_link_only_from_the_binary_and_tests() {

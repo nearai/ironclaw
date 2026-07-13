@@ -424,9 +424,9 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         }),
     };
     let assembly = GenericChannelHostAssembly::start(deps);
-    // Vendor extras exactly as the binary's native slack registration feeds
+    // Vendor extras exactly as the binary's channel-extension binding feeds
     // them: the gate-reply classifier and the preference-target codec — no
-    // storage-root override, no lane-owned registration.
+    // storage-root override.
     assembly
         .register_extras(
             "slack",
@@ -435,7 +435,6 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
                 preference_target_codec: Some(Arc::new(SlackPreferenceTargetCodec)),
                 subject_route_resolver: None,
                 storage_roots: None,
-                registration: None,
             },
         )
         .await;

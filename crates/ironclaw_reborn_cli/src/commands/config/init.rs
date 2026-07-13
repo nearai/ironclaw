@@ -218,13 +218,6 @@ api_key_env = "OPENAI_API_KEY"
 # model       = "claude-3-5-sonnet-latest"
 # api_key_env = "ANTHROPIC_API_KEY"
 
-# [slack]
-# # Host-beta Slack Events API route for `ironclaw-reborn serve`.
-# # Requires a binary built with `--features slack-v2-host-beta`.
-# # Can also be overridden by IRONCLAW_REBORN_SLACK_ENABLED.
-# enabled = false
-# # Configure Slack app ids, bot token, signing secret, and channel mappings
-# # from WebUI channel setup after the server starts.
 "#,
         api_version = REBORN_CONFIG_API_VERSION,
     )

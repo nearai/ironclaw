@@ -597,12 +597,19 @@ Rules — kept short on purpose:
 
 ## 8. Extraction and deletion (DEL)
 
-- [ ] DEL-1 `crates/ironclaw_reborn_composition/src/slack/` no longer exists.
+- [x] DEL-1 `crates/ironclaw_reborn_composition/src/slack/` no longer exists.
+  — P6 deleted the lane: the generic channel host assembly +
+  `[channel.config]` + the generic outbound-target provider and
+  triggered-delivery hook replaced every lane surface; the H.3/H.4 folds
+  (`channel_state_folds.rs`) carry retired durable state forward.
 - [ ] DEL-2 `ironclaw_slack_v2_adapter` and `ironclaw_telegram_v2_adapter` are
   folded into their extension crates and removed from the workspace.
-- [ ] DEL-3 `serve_slack.rs` and the `slack-v2-host-beta` cargo feature are
+- [x] DEL-3 `serve_slack.rs` and the `slack-v2-host-beta` cargo feature are
   deleted; no channel-specific config type remains in
-  `ironclaw_reborn_config`.
+  `ironclaw_reborn_config`. — `SlackSection`/`SlackChannelRouteSection` are
+  gone; a stale `[slack]` section hard-fails config parse (accepted beta
+  posture, pinned by `rejects_retired_slack_section`); the secrets guard
+  keeps the `xoxb-`/`xoxp-`/`xapp-` prefixes.
 - [ ] DEL-4 Slack cleanup constants in product workflow and Slack connection
   copy in lifecycle are deleted (standard pipeline + manifest display data).
 - [ ] DEL-5 The old `ProductAdapter` metadata getters and the unused registry
@@ -613,8 +620,11 @@ Rules — kept short on purpose:
   metadata getters go when their P4/P5 callers cut over.)
 - [ ] DEL-6 Composition constructs no concrete extension and mounts no
   concrete route (architecture gate).
-- [ ] DEL-7 Only `ironclaw_reborn_cli` and tests depend on concrete extension
-  crates (`cargo metadata` gate).
+- [x] DEL-7 Only `ironclaw_reborn_cli` and tests depend on concrete extension
+  crates (`cargo metadata` gate). — `CONCRETE_DEPENDENCY_EXCEPTIONS` is
+  empty; composition keeps `ironclaw_slack_v2_adapter` as a dev-dependency
+  only (the sanctioned test linkage); the CLI supplies the Slack channel
+  adapter + extras through `RebornBuildInput::with_channel_extension_bindings`.
 - [ ] DEL-8 The concrete-name scanner allowlist is empty.
 - [ ] DEL-9 `check-generic-without-concrete.sh` passes in CI: every generic
   crate's dependency tree is free of concrete extension crates and its tests
