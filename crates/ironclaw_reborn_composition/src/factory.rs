@@ -5284,9 +5284,7 @@ mod tests {
         RebornReadinessDiagnostic, RebornReadinessState, runtime::SKILL_ACTIVATE_CAPABILITY_ID,
     };
 
-    fn test_scope(user: UserId) -> ResourceScope {
-        ResourceScope::local_default(user, InvocationId::new()).expect("valid local scope")
-    }
+    use crate::approval_test_support::test_scope;
 
     #[cfg(feature = "libsql")]
     #[test]

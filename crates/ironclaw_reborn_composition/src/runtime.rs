@@ -5108,9 +5108,7 @@ output_schema_ref = "schemas/write.output.json"
         RebornCompositionProfile, RebornReadiness, RebornReadinessState, RebornRuntimeError,
     };
 
-    fn test_scope(user: UserId) -> ResourceScope {
-        ResourceScope::local_default(user, InvocationId::new()).expect("valid local scope")
-    }
+    use crate::approval_test_support::test_scope;
 
     use super::{
         RebornSkillSourceKind, TRUSTED_LAPTOP_ACCESS_AUDIT_KIND,
