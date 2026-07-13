@@ -35,9 +35,9 @@ they do not drive these caller paths or classify their outcomes.
    first answer into an unqualified pass.
 2. Test one responsibility per journey. Extension lifecycle, Slack capability
    correctness, and model answer quality must be attributable separately.
-3. Protect the user independently of model quality. A safety backstop may
-   prevent a raw identifier from reaching the user, but the behavioral result
-   must still report that the model needed intervention.
+3. Measure model and tool-contract quality directly. The production runtime
+   must not hide an integration-specific model failure with Slack-only output
+   policy; committed QA artifacts still redact any observed live identifiers.
 4. Use final-turn state for liveness and seeded/authoritative data for
    correctness.
 5. Treat live LLM tests as supplemental quality evidence; deterministic product
@@ -110,25 +110,21 @@ history chaining, user lookup, conversation lookup, and encoded mentions require
 them. Continue enriching the same results with display names and
 `is_current_user`.
 
-Add a product-live model-output decorator owned by Reborn composition. When the
-Slack capability surface is active, it sanitizes Slack-shaped identifiers only
-in streamed assistant text, reasoning text exposed to the UI, and finalized
-assistant replies. It must not alter `ParentLoopOutput::CapabilityCalls`, tool
-arguments, stored capability results, or Slack message bodies sent intentionally
-through the Slack capability.
+Do not add Slack identifier parsing or a Slack-aware model-gateway decorator to
+`ironclaw_reborn_composition`, `ironclaw_turns`, `ironclaw_loop_support`, or any
+other neutral/core runtime layer. Q-10I directly evaluates whether the model uses
+the enriched display-name fields and fails when the assistant reply contains raw
+`U…`/`W…` identifiers or encoded mention markup.
 
-The replacement is an explicit bounded marker such as
-`[Slack identifier redacted]`. The live 10I behavioral case fails if either a
-raw identifier or this intervention marker appears, and still requires the
-resolved display name. Therefore:
+Persist only counts and redacted excerpts in live-QA artifacts so the failed
+observation does not re-leak the identifier. This artifact hygiene belongs to the
+Slack canary harness, not the production runtime.
 
-- users never receive the raw identifier;
-- the model does not receive an undeserved pass when the backstop intervenes;
-- tool chaining and mention encoding remain intact.
-
-The decorator is scoped to product-live assistant output and is not added to the
-neutral `ironclaw_turns` contracts, which must not parse product-specific Slack
-identity.
+If multiple integrations later require a production display-identifier
+backstop, design a separate generic policy around typed private-identifier and
+display-replacement metadata. That future seam must have at least two real
+integration consumers and must not identify products through capability-name
+prefixes or vendor-specific regular expressions in core composition.
 
 ### 4. Terminal-state and provider-error handling
 
@@ -187,7 +183,7 @@ Replace or augment source-string pins with direct tests that drive:
 - Slack prerequisite activation through the shared chat caller;
 - 10D success/failure based on completed `slack.list_conversations` calls;
 - scoped versus global 10G classification;
-- 10I raw-ID and sanitizer-intervention detection;
+- 10I raw-ID detection and artifact redaction;
 - finalized replies whose synthetic marker was reformatted;
 - structured provider errors and remaining-case short-circuiting;
 - result aggregation for contract, behavioral, infrastructure, and precondition
@@ -196,8 +192,8 @@ Replace or augment source-string pins with direct tests that drive:
 ### Product and UI contracts
 
 - Frontend component tests pin structured failure attributes.
-- Composition/runner caller tests prove streamed and finalized assistant text is
-  sanitized while capability-call arguments remain byte-for-byte unchanged.
+- Architecture tests prove Reborn composition does not install a Slack-specific
+  model gateway or parse Slack identifier formats.
 - The real bundled Slack WASM contract continues to prove that display names and
   raw IDs coexist in capability output for chaining.
 - Tool-surface tests pin the corrected descriptions through the actual catalog
@@ -241,6 +237,7 @@ Ready-for-review requires:
 - Removing raw IDs from Slack capability results or tool arguments.
 - Adding blanket whole-case retries or increasing the 240-second timeout.
 - Building a new cross-workspace Slack search/index service.
+- Adding Slack-specific model-output policy to core/runtime composition.
 - Reworking unrelated QA shards or Slack delivery behavior.
 
 ## Rollback and compatibility
@@ -249,6 +246,7 @@ The result schema additions are backward-compatible optional fields for artifact
 consumers. Existing case identifiers remain stable where possible; the new
 workspace-global 10G behavioral case receives its own identifier.
 
-The assistant-output guard is limited to product-live Slack-aware output. If it
-causes false positives, it can be disabled independently without removing the
-case classification, terminal-state, or tool-contract improvements.
+The canary-specific artifact scrubber is isolated to the live-QA harness. It can
+change independently without introducing extension-specific behavior into the
+production runtime or removing case classification, terminal-state, and
+tool-contract improvements.

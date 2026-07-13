@@ -2,18 +2,18 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (- [ ]) syntax for tracking.
 
-**Goal:** Make Q-10 a reliable, attributable evaluation of Slack tool quality and live-model behavior while deterministically preventing raw Slack identifiers from reaching user-facing assistant output.
+**Goal:** Make Q-10 a reliable, attributable evaluation of Slack tool quality and live-model behavior without placing Slack-specific policy in the core Reborn runtime.
 
-**Architecture:** Correct the model-visible tool contracts, wrap the product-live model gateway with a Slack-aware assistant-output policy, and divide live-QA results into blocking contracts and nonblocking behavioral observations. Q-10 correctness cases preactivate Slack and prove the expected capability actually ran; terminal UI state and typed provider failures replace synthetic-marker timeouts.
+**Architecture:** Correct the model-visible tool contracts and divide live-QA results into blocking contracts and nonblocking behavioral observations. Q-10 correctness cases preactivate Slack and prove the expected capability actually ran; terminal UI state and typed provider failures replace synthetic-marker timeouts. The canary evaluates raw-identifier behavior directly and redacts only persisted QA artifacts.
 
 **Tech Stack:** Rust workspace crates, Python 3 live-QA harness, React/TypeScript WebUI v2, GitHub Actions, and recorded Reborn QA traces.
 
 ## Global Constraints
 
 - No whole-case retry may turn a failed first answer into an unqualified pass.
-- Raw Slack IDs remain available in capability results and capability-call arguments; only user-facing assistant text is sanitized.
-- The output guard must not modify ParentLoopOutput::CapabilityCalls, stored capability results, or Slack message bodies sent through slack.send_message.
-- A sanitizer intervention remains a failed model-quality observation; it must not make 10I look naturally compliant.
+- Raw Slack IDs remain available in capability results and capability-call arguments for tool chaining.
+- Production Reborn composition and neutral runtime crates must not parse Slack IDs or install a Slack-specific model-output decorator.
+- Q-10I directly fails raw user identifiers or encoded mentions in assistant output; live-QA artifacts persist only counts and redacted excerpts.
 - Correctness cases must prove the intended capability completed before evaluating answer text.
 - Final-turn state, not exact synthetic marker spelling, is the liveness primitive.
 - Provider-unavailable runs are infrastructure incidents and never count as product passes or product regressions.
@@ -93,107 +93,63 @@ git commit -m "fix(reborn): clarify Slack capability selection"
 
 ---
 
-### Task 2: Add a Slack-aware user-facing model-output guard
+### Task 2: Keep Slack-specific output policy out of core runtime
 
 **Files:**
-- Create: crates/ironclaw_reborn_composition/src/runtime/slack_output_hygiene.rs
+- Delete: crates/ironclaw_reborn_composition/src/runtime/slack_output_hygiene.rs
 - Modify: crates/ironclaw_reborn_composition/src/runtime.rs
-- Test: crates/ironclaw_reborn_composition/src/runtime/slack_output_hygiene.rs
-- Test: crates/ironclaw_reborn_composition/src/runtime/local_dev/tests.rs
-- Verify unchanged: crates/ironclaw_host_runtime/tests/github_wasm_runtime_contract.rs
+- Modify: crates/ironclaw_reborn_composition/src/runtime/local_dev/tests.rs
+- Modify: crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs
+- Modify: scripts/reborn_webui_v2_live_qa/run_live_qa.py
+- Modify: scripts/reborn_webui_v2_live_qa/test_run_live_qa.py
 
 **Interfaces:**
-- Consumes: HostManagedModelGateway, HostManagedModelRequest, HostManagedModelResponse, HostManagedModelStreamSink, LoopCapabilityPort, and ParentLoopOutput.
-- Produces: SlackOutputHygieneGateway::new(Arc<dyn HostManagedModelGateway>).
-- Produces: SLACK_IDENTIFIER_REDACTION with exact value [Slack identifier redacted].
+- Preserves: HostManagedModelGateway remains integration-neutral and is passed directly into runtime assembly.
+- Produces: an architecture contract rejecting Slack-specific model-gateway policy in Reborn composition.
+- Preserves: Q-10I raw-ID detection and persisted-artifact redaction in the Slack live-QA harness.
 
-- [ ] **Step 1: Write pure failing redaction tests**
+- [ ] **Step 1: Write the failing architecture regression**
 
-Specify a private function:
-
-~~~rust
-fn redact_slack_identifiers(text: &str) -> String;
-~~~
-
-Required examples:
-
-~~~rust
-assert_eq!(redact_slack_identifiers("user U0123ABCDE"),
-           "user [Slack identifier redacted]");
-assert_eq!(redact_slack_identifiers("mention <@U0123ABCDE>"),
-           "mention [Slack identifier redacted]");
-assert_eq!(redact_slack_identifiers("legacy W0123ABCDE."),
-           "legacy [Slack identifier redacted].");
-assert_eq!(redact_slack_identifiers("short U123 and word BUILDING"),
-           "short U123 and word BUILDING");
-let once = redact_slack_identifiers("U0123ABCDE");
-assert_eq!(redact_slack_identifiers(&once), once);
-~~~
-
-Recognize bounded U/W identifiers with at least eight uppercase ASCII letters/digits and token boundaries. Keep this logic out of ironclaw_turns and out of global tool-result sanitization.
+Add a source-boundary assertion that production composition contains neither a
+`SlackOutputHygieneGateway` wrapper nor a `runtime/slack_output_hygiene.rs`
+module. Keep the assertion in the Reborn architecture suite so a future PR
+cannot silently restore extension-specific policy to the core model path.
 
 - [ ] **Step 2: Run RED**
 
 ~~~bash
-cargo test -p ironclaw_reborn_composition slack_output_hygiene -- --nocapture
+cargo test -p ironclaw_architecture composition_runtime_has_no_slack_output_policy -- --nocapture
 ~~~
 
-Expected: missing module/function failure.
+Expected: FAIL because `runtime.rs` installs `SlackOutputHygieneGateway` and the
+Slack-specific module exists.
 
-- [ ] **Step 3: Implement bounded redaction, then add failing decorator tests**
+- [ ] **Step 3: Remove the production gateway and obsolete tests**
 
-Define:
+Delete the module, import, unconditional wrapper, decorator-specific unit tests,
+and composition-root test whose expected public response depends on the Slack
+backstop. Preserve generic tool-result hydration coverage and every canary/tool
+contract unrelated to the production sanitizer.
 
-~~~rust
-#[derive(Clone)]
-pub(super) struct SlackOutputHygieneGateway {
-    inner: Arc<dyn HostManagedModelGateway>,
-}
+- [ ] **Step 4: Make Q-10I assert natural model compliance**
 
-impl SlackOutputHygieneGateway {
-    pub(super) fn new(inner: Arc<dyn HostManagedModelGateway>) -> Self;
-}
+Remove the special `[Slack identifier redacted]` intervention arm from Q-10I.
+Continue rejecting raw `U…`/`W…` identifiers and encoded mentions from the full
+in-memory reply. Continue redacting response-derived strings before persisting
+failure artifacts.
 
-struct SlackOutputHygieneSink {
-    inner: Arc<dyn HostManagedModelStreamSink>,
-}
-~~~
-
-Tests must prove:
-
-1. Slack-context assistant text, safe reasoning, and cumulative progress use the intervention marker.
-2. ParentLoopOutput::CapabilityCalls retains arguments containing user_id U0123ABCDE and text <@U0123ABCDE> byte-for-byte.
-3. Non-Slack requests are unchanged.
-4. resolve_for_scope wraps a resolved inner gateway.
-
-Determine Slack context from prior tool_result_provider_call.capability_id values and, in capability-aware methods, from visible Slack tool definitions. Never rewrite hydrated tool-result content.
-
-- [ ] **Step 4: Run RED for the decorator**
+- [ ] **Step 5: Run GREEN and commit**
 
 ~~~bash
-cargo test -p ironclaw_reborn_composition slack_output_hygiene_gateway -- --nocapture
-~~~
-
-Expected: raw IDs remain or the decorator is missing.
-
-- [ ] **Step 5: Implement all four gateway methods and wire composition**
-
-The progress methods wrap the sink only for Slack context. All methods sanitize returned assistant/public fields only for Slack context. Forward requests, usage, capability ports, and CapabilityCalls unchanged. Declare the private module in runtime.rs and wrap the selected gateway before local-dev result hydration.
-
-Do not change sanitize_model_visible_text because hydration uses it on model-visible tool results.
-
-- [ ] **Step 6: Run GREEN and commit**
-
-~~~bash
-cargo test -p ironclaw_reborn_composition slack_output_hygiene -- --nocapture
-cargo test -p ironclaw_reborn_composition \
-  local_dev_runtime_exposes_host_runtime_capabilities_to_model_calls -- --nocapture
-cargo test -p ironclaw_host_runtime --test github_wasm_runtime_contract \
-  slack_history_output_carries_display_names_alongside_raw_user_ids -- --nocapture
-git add crates/ironclaw_reborn_composition/src/runtime/slack_output_hygiene.rs \
+cargo test -p ironclaw_architecture composition_runtime_has_no_slack_output_policy -- --nocapture
+cargo test -p ironclaw_reborn_composition --features slack-v2-host-beta --lib
+python3 scripts/reborn_webui_v2_live_qa/test_run_live_qa.py
+git add crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs \
   crates/ironclaw_reborn_composition/src/runtime.rs \
-  crates/ironclaw_reborn_composition/src/runtime/local_dev/tests.rs
-git commit -m "fix(reborn): guard Slack IDs in assistant output"
+  crates/ironclaw_reborn_composition/src/runtime/local_dev/tests.rs \
+  scripts/reborn_webui_v2_live_qa/run_live_qa.py \
+  scripts/reborn_webui_v2_live_qa/test_run_live_qa.py
+git commit -m "refactor(reborn): remove Slack policy from core runtime"
 ~~~
 
 ---
@@ -392,7 +348,7 @@ Add 10D tests: a correct-looking answer without a new completed slack.list_conve
 
 The blocking 10G prompt names the seeded channel and requires a new completed slack.get_conversation_history call. The global case keeps the original wording and registers tier=behavioral, blocking=False.
 
-10I requires the display-name token and rejects raw U/W identifiers plus [Slack identifier redacted]. It registers behavioral/nonblocking and never retries.
+10I requires the display-name token and rejects raw U/W identifiers and encoded mentions. It registers behavioral/nonblocking and never retries.
 
 - [ ] **Step 3: Run RED**
 
@@ -400,7 +356,7 @@ The blocking 10G prompt names the seeded channel and requires a new completed sl
 python3 scripts/reborn_webui_v2_live_qa/test_run_live_qa.py
 ~~~
 
-Expected: preactivation, expected-capability, scoped/global, and intervention tests fail.
+Expected: preactivation, expected-capability, scoped/global, and raw-entity tests fail.
 
 - [ ] **Step 4: Implement shared preactivation and evidence**
 
@@ -410,7 +366,7 @@ Classify missing capability as model_quality, answer/ground-truth mismatch as pr
 
 - [ ] **Step 5: Register scoped/global 10G and strict 10I**
 
-Keep QA row 10G stable for the scoped contract; map the new global case to 10G for reporting. Add both to workflow selection and coverage tests. Mark 10I behavioral/nonblocking; Task 2 supplies the blocking safety guarantee.
+Keep QA row 10G stable for the scoped contract; map the new global case to 10G for reporting. Add both to workflow selection and coverage tests. Mark 10I behavioral/nonblocking and evaluate the model reply directly; no production sanitizer supplies a hidden pass or fallback.
 
 - [ ] **Step 6: Run GREEN and commit**
 
@@ -500,6 +456,6 @@ The exact SHA needs an approving review from a write-capable collaborator before
 
 - [ ] **Step 8: Validate three consecutive exact-head runs**
 
-Require three consecutive runs whose blocking Q-10 contracts pass. Provider-unavailable runs are inconclusive. Inspect artifacts to confirm 10D used slack.list_conversations, scoped 10G used slack.get_conversation_history, 10I exposed neither raw IDs nor the intervention marker when naturally compliant, behavioral failures stayed visible with success=false, and no first-attempt failure was hidden.
+Require three consecutive runs whose blocking Q-10 contracts pass. Provider-unavailable runs are inconclusive. Inspect artifacts to confirm 10D used slack.list_conversations, scoped 10G used slack.get_conversation_history, 10I naturally used display names without raw IDs or encoded mentions, behavioral failures stayed visible with success=false, and no first-attempt failure was hidden.
 
 Only then mark the PR ready for review.
