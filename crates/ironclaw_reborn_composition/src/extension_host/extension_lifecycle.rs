@@ -91,8 +91,9 @@ use crate::extension_host::mcp_discovery::{
     HostedMcpDiscoveryError, discover_hosted_mcp_package, is_hosted_http_mcp_package,
 };
 use crate::extension_host::registered_extension_store::{
-    is_owner_registered, migrate_legacy_owner_layout, resolve_registered_for_owner,
-    resolve_registered_for_scope, search_with_owner_overlay_for_scope,
+    available_extension_not_found, is_owner_registered, migrate_legacy_owner_layout,
+    resolve_registered_for_owner, resolve_registered_for_scope,
+    search_with_owner_overlay_for_scope,
 };
 
 pub(crate) use active_publication::ActiveExtensionPublisher;
@@ -527,6 +528,7 @@ impl RebornLocalExtensionManagementPort {
         let summary = self
             .resolve_available_for_scope(&package_ref, scope)
             .await?
+            .ok_or_else(available_extension_not_found)?
             .summary();
         Ok(response_with_payload(
             Some(package_ref),
@@ -634,8 +636,20 @@ impl RebornLocalExtensionManagementPort {
             if is_internal_extension_package_ref(&package_ref) {
                 continue;
             }
-            let Ok(available) = self.resolve_available_for_scope(&package_ref, scope).await else {
-                continue;
+            // Blast-radius policy: the list must survive one entry's trouble.
+            // A genuine miss (foreign-owned or gone) stays silent; a real
+            // read error is logged so it's distinguishable, then skipped.
+            let available = match self.resolve_available_for_scope(&package_ref, scope).await {
+                Ok(Some(available)) => available,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::debug!(
+                        extension_id = installation.extension_id().as_str(),
+                        %error,
+                        "skipping installed extension summary: package resolution failed"
+                    );
+                    continue;
+                }
             };
             summaries.push(LifecycleInstalledExtensionSummary {
                 summary: available.summary(),
@@ -650,22 +664,25 @@ impl RebornLocalExtensionManagementPort {
     /// first-party catalog first — its read lock held only for the synchronous
     /// lookup, never across an await — then the CALLER's registered set, since
     /// registered packages never enter the shared catalog (boot-leak
-    /// invariant). A foreign owner's registered package resolves as not-found.
+    /// invariant). `Ok(None)` is a genuine miss (a foreign owner's registered
+    /// package included); `Err` is a real registered-store read failure.
     async fn resolve_available_for_scope(
         &self,
         package_ref: &LifecyclePackageRef,
         scope: &ResourceScope,
-    ) -> Result<Arc<AvailableExtensionPackage>, ProductWorkflowError> {
+    ) -> Result<Option<Arc<AvailableExtensionPackage>>, ProductWorkflowError> {
         let catalog_hit = {
             let catalog = self.catalog.read().await;
             catalog.resolve(package_ref).ok()
         };
         if let Some(available) = catalog_hit {
-            return Ok(available);
+            return Ok(Some(available));
         }
-        resolve_registered_for_scope(self.filesystem.as_ref(), scope, package_ref)
-            .await
-            .map(Arc::new)
+        Ok(
+            resolve_registered_for_scope(self.filesystem.as_ref(), scope, package_ref)
+                .await?
+                .map(Arc::new),
+        )
     }
 
     async fn search_summary(
@@ -813,7 +830,8 @@ impl RebornLocalExtensionManagementPort {
         // operator-eviction arm below unreachable for registered ids.
         let available = self
             .resolve_available_for_scope(&package_ref, scope)
-            .await?;
+            .await?
+            .ok_or_else(available_extension_not_found)?;
         let _operation_guard = self.operation_lock.lock().await;
         let installation_id =
             ExtensionInstallationId::new(available.package.id.as_str().to_string())

@@ -328,7 +328,9 @@ fn map_transient(error: impl std::fmt::Display) -> ProductWorkflowError {
     }
 }
 
-fn not_found() -> ProductWorkflowError {
+/// The masked lookup miss every scoped resolution path reports — a foreign
+/// owner's registered package is indistinguishable from a nonexistent one.
+pub(crate) fn available_extension_not_found() -> ProductWorkflowError {
     ProductWorkflowError::InvalidBindingRequest {
         reason: "available extension was not found".to_string(),
     }
@@ -366,20 +368,22 @@ where
 /// the shared first-party catalog first (holding its lock only for that
 /// synchronous lookup — never across this function's filesystem awaits) and
 /// fall back here on a miss, since registered packages never enter the shared
-/// catalog (boot-leak invariant).
+/// catalog (boot-leak invariant). `Ok(None)` is a genuine miss (nonexistent
+/// or foreign-owned — deliberately indistinguishable); `Err` is a real read
+/// failure, so list-shaped callers can stay resilient without conflating the
+/// two.
 pub(crate) async fn resolve_registered_for_scope<F>(
     fs: &F,
     scope: &ResourceScope,
     package_ref: &LifecyclePackageRef,
-) -> Result<AvailableExtensionPackage, ProductWorkflowError>
+) -> Result<Option<AvailableExtensionPackage>, ProductWorkflowError>
 where
     F: RootFilesystem + ?Sized,
 {
-    RegisteredExtensionStore::list_for_scope(fs, scope)
+    Ok(RegisteredExtensionStore::list_for_scope(fs, scope)
         .await?
         .into_iter()
-        .find(|package| &package.package_ref == package_ref)
-        .ok_or_else(not_found)
+        .find(|package| &package.package_ref == package_ref))
 }
 
 /// Boot-only restore fallback, reached on a `catalog.resolve()` miss during
@@ -405,5 +409,7 @@ where
     let mut scope = ResourceScope::local_default(owner.clone(), InvocationId::new())
         .map_err(map_binding_error)?;
     scope.tenant_id = tenant_id.clone();
-    resolve_registered_for_scope(fs, &scope, package_ref).await
+    resolve_registered_for_scope(fs, &scope, package_ref)
+        .await?
+        .ok_or_else(available_extension_not_found)
 }

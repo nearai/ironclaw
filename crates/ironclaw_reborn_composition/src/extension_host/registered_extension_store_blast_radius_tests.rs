@@ -9,25 +9,33 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_extensions::{
     ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
-    ExtensionInstallationStore, ExtensionLifecycleService, ExtensionManifestRecord,
-    ExtensionManifestRef, ExtensionRegistry, InMemoryExtensionInstallationStore, InstallationOwner,
-    ManifestHash, ManifestSource, SharedExtensionRegistry,
+    ExtensionInstallationStore, ExtensionLifecycleService, ExtensionManifest,
+    ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage, ExtensionRegistry,
+    InMemoryExtensionInstallationStore, InstallationOwner, ManifestHash, ManifestSource,
+    SharedExtensionRegistry,
 };
 use ironclaw_filesystem::{
     DirEntry, FileStat, FilesystemError, LocalFilesystem, RootFilesystem, VersionedEntry,
 };
 use ironclaw_host_api::{
-    ExtensionId, HostPath, TenantId, UserId, VirtualPath, sha256_digest_token,
+    ExtensionId, HostPath, InvocationId, ResourceScope, TenantId, UserId, VirtualPath,
+    sha256_digest_token,
 };
-use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef};
+use ironclaw_product_workflow::{
+    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload,
+};
 use ironclaw_trust::{AdminConfig, HostTrustPolicy, InvalidationBus};
 use tokio::sync::Mutex;
 
-use crate::extension_host::available_extensions::AvailableExtensionCatalog;
-use crate::extension_host::extension_lifecycle::{
-    ActiveExtensionPublisher, restore_extension_lifecycle_state,
+use crate::extension_host::available_extensions::{
+    AvailableExtensionCatalog, AvailableExtensionPackage,
 };
-use crate::extension_host::registered_extension_store::RegisteredExtensionStore;
+use crate::extension_host::extension_lifecycle::{
+    ActiveExtensionPublisher, RebornLocalExtensionManagementPort, restore_extension_lifecycle_state,
+};
+use crate::extension_host::registered_extension_store::{
+    RegisteredExtensionStore, resolve_registered_for_scope,
+};
 
 const HEALTHY_OWNER_USER_ID: &str = "c3333333-7fe5-474c-965a-67cb69df3d06";
 const BROKEN_OWNER_USER_ID: &str = "d4444444-7fe5-474c-965a-67cb69df3d07";
@@ -156,7 +164,7 @@ async fn list_all_skips_owner_whose_directory_listing_errors() {
 /// Pins the `restore_extension_lifecycle_state` fix: an installation whose
 /// registered manifest is gone (deleted/corrupted on disk, but still on
 /// record in the installation store) must be skipped via the registered-store
-/// fallback's `resolve_any_owner_for_restore` error, not abort the whole boot
+/// fallback's (`resolve_registered_for_owner`) miss, not abort the whole boot
 /// restore — a second, healthy installation must still restore and publish.
 /// RED before the fix (the whole restore returned `Err` on the first broken
 /// installation).
@@ -523,4 +531,247 @@ async fn restore_uses_row_owners_registered_descriptor_not_a_differently_ordered
         Some("http://owner-a.example/mcp"),
         "restore must materialize owner A's own manifest content, never owner B's"
     );
+}
+
+const CATALOG_MANIFEST_TOML: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "catalog-mcp"
+name = "Catalog MCP"
+version = "0.1.0"
+description = "Shared-catalog extension (list blast-radius fixture)"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/catalog.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "catalog-mcp.search"
+description = "Search catalog fixture data"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/search.input.json"
+output_schema_ref = "schemas/search.output.json"
+"#;
+
+fn catalog_fixture_package() -> AvailableExtensionPackage {
+    let host_ports = ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog");
+    let contracts =
+        ironclaw_host_runtime::default_host_api_contract_registry().expect("host API contracts");
+    let manifest = ExtensionManifest::parse_with_host_api_contracts(
+        CATALOG_MANIFEST_TOML,
+        ManifestSource::InstalledLocal,
+        &host_ports,
+        &contracts,
+    )
+    .expect("catalog fixture manifest");
+    let root = VirtualPath::new("/system/extensions/catalog-mcp").expect("extension root");
+    let package = ExtensionPackage::from_manifest_toml(manifest, root, CATALOG_MANIFEST_TOML)
+        .expect("catalog fixture package");
+    AvailableExtensionPackage {
+        package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "catalog-mcp")
+            .expect("catalog fixture ref"),
+        manifest_toml: CATALOG_MANIFEST_TOML.to_string(),
+        source: ManifestSource::InstalledLocal,
+        package,
+        surface_kinds: Vec::new(),
+        assets: Vec::new(),
+    }
+}
+
+fn owner_scope(user: &str) -> ResourceScope {
+    ResourceScope::local_default(UserId::new(user).expect("valid user"), InvocationId::new())
+        .expect("valid local scope")
+}
+
+/// Pins the resolver's miss-vs-failure split (T2 review item): a package that
+/// simply is not in the caller's registered set is `Ok(None)`, while a real
+/// storage failure on the owner's registered root is `Err` — callers like the
+/// installed-summaries list need the distinction to skip silently on the
+/// former and log on the latter instead of conflating both.
+#[tokio::test]
+async fn resolve_registered_for_scope_distinguishes_missing_from_read_failure() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage_root = dir.path().join("local-dev");
+    std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
+    seed_registered_manifest(&storage_root, HEALTHY_OWNER_USER_ID, HEALTHY_EXTENSION_ID);
+
+    let mut local_filesystem = LocalFilesystem::new();
+    local_filesystem
+        .mount_local(
+            VirtualPath::new("/system/extensions").expect("valid virtual path"),
+            HostPath::from_path_buf(storage_root.join("system/extensions")),
+        )
+        .expect("mount system extensions");
+    let healthy_owner_root = VirtualPath::new(format!(
+        "/system/extensions/registered/{}/{HEALTHY_OWNER_USER_ID}",
+        ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID
+    ))
+    .expect("valid virtual path");
+    let filesystem = FailListDirFilesystem {
+        inner: local_filesystem,
+        fail_path: healthy_owner_root,
+    };
+
+    let package_ref =
+        LifecyclePackageRef::new(LifecyclePackageKind::Extension, "absent-mcp").expect("valid ref");
+    let miss = resolve_registered_for_scope(
+        &filesystem,
+        &owner_scope(BROKEN_OWNER_USER_ID),
+        &package_ref,
+    )
+    .await
+    .expect("an absent package under a readable (empty) owner root is a plain miss");
+    assert!(miss.is_none(), "a genuine miss must be Ok(None)");
+
+    let healthy_ref =
+        LifecyclePackageRef::new(LifecyclePackageKind::Extension, HEALTHY_EXTENSION_ID)
+            .expect("valid ref");
+    resolve_registered_for_scope(
+        &filesystem,
+        &owner_scope(HEALTHY_OWNER_USER_ID),
+        &healthy_ref,
+    )
+    .await
+    .expect_err("a storage failure on the owner's registered root must surface as Err");
+}
+
+/// Pins the installed-summaries blast radius (T2 review item): one entry
+/// whose registered-store resolution ERRORS (not merely misses) must be
+/// logged-and-skipped, leaving every other installed summary intact — the
+/// old `let Ok(...) else continue` swallowed the error indistinguishably.
+#[tokio::test]
+async fn list_installed_survives_one_entry_whose_registered_resolution_errors() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage_root = dir.path().join("local-dev");
+    std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
+    seed_registered_manifest(&storage_root, HEALTHY_OWNER_USER_ID, HEALTHY_EXTENSION_ID);
+
+    let mut local_filesystem = LocalFilesystem::new();
+    local_filesystem
+        .mount_local(
+            VirtualPath::new("/system/extensions").expect("valid virtual path"),
+            HostPath::from_path_buf(storage_root.join("system/extensions")),
+        )
+        .expect("mount system extensions");
+    let owner_root = VirtualPath::new(format!(
+        "/system/extensions/registered/{}/{HEALTHY_OWNER_USER_ID}",
+        ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID
+    ))
+    .expect("valid virtual path");
+    let filesystem: Arc<dyn RootFilesystem> = Arc::new(FailListDirFilesystem {
+        inner: local_filesystem,
+        fail_path: owner_root,
+    });
+
+    let caller = UserId::new(HEALTHY_OWNER_USER_ID).expect("valid user");
+    let installation_store: Arc<dyn ExtensionInstallationStore> =
+        Arc::new(InMemoryExtensionInstallationStore::default());
+    let host_ports = ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog");
+    let contracts =
+        ironclaw_host_runtime::default_host_api_contract_registry().expect("host API contracts");
+    installation_store
+        .upsert_manifest(
+            ExtensionManifestRecord::from_toml_with_contracts(
+                CATALOG_MANIFEST_TOML,
+                ManifestSource::InstalledLocal,
+                &host_ports,
+                None,
+                &contracts,
+            )
+            .expect("catalog manifest record"),
+        )
+        .await
+        .expect("seed catalog manifest record");
+    installation_store
+        .upsert_manifest(
+            ExtensionManifestRecord::from_toml_with_contracts(
+                HEALTHY_MANIFEST_TOML,
+                ManifestSource::UserRegistered {
+                    tenant_id: TenantId::from_trusted(
+                        ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string(),
+                    ),
+                    owner: caller.clone(),
+                },
+                &host_ports,
+                None,
+                &contracts,
+            )
+            .expect("registered manifest record"),
+        )
+        .await
+        .expect("seed registered manifest record");
+    // Row 1: tenant-shared, resolvable through the shared catalog.
+    let catalog_extension_id = ExtensionId::new("catalog-mcp").expect("valid extension id");
+    installation_store
+        .upsert_installation(
+            ExtensionInstallation::new(
+                ExtensionInstallationId::new("catalog-mcp").expect("valid installation id"),
+                catalog_extension_id.clone(),
+                ExtensionActivationState::Enabled,
+                ExtensionManifestRef::new(catalog_extension_id, None),
+                Vec::new(),
+                chrono::Utc::now(),
+                InstallationOwner::Tenant,
+            )
+            .expect("catalog installation"),
+        )
+        .await
+        .expect("seed catalog installation");
+    // Row 2: the caller's registered install, whose overlay read errors.
+    let registered_extension_id = ExtensionId::new(HEALTHY_EXTENSION_ID).expect("valid id");
+    installation_store
+        .upsert_installation(
+            ExtensionInstallation::new(
+                ExtensionInstallationId::new(HEALTHY_EXTENSION_ID).expect("valid installation id"),
+                registered_extension_id.clone(),
+                ExtensionActivationState::Enabled,
+                ExtensionManifestRef::new(registered_extension_id, None),
+                Vec::new(),
+                chrono::Utc::now(),
+                InstallationOwner::user(caller.clone()),
+            )
+            .expect("registered installation"),
+        )
+        .await
+        .expect("seed registered installation");
+
+    let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+    let trust_policy =
+        Arc::new(HostTrustPolicy::new(vec![Box::new(AdminConfig::new())]).expect("trust policy"));
+    let port = RebornLocalExtensionManagementPort::new(
+        filesystem,
+        AvailableExtensionCatalog::from_packages(vec![catalog_fixture_package()]),
+        installation_store,
+        Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        ))),
+        ActiveExtensionPublisher::new(
+            active_registry,
+            trust_policy,
+            Arc::new(InvalidationBus::new()),
+        ),
+        None,
+        caller.clone(),
+    );
+
+    let response = port
+        .list_installed(&owner_scope(HEALTHY_OWNER_USER_ID))
+        .await
+        .expect(
+            "one entry's registered-store read error must not kill the whole installed listing",
+        );
+    let Some(LifecycleProductPayload::ExtensionList { extensions, count }) = response.payload
+    else {
+        panic!("expected extension list payload");
+    };
+    assert_eq!(count, 1, "the catalog-backed summary must survive");
+    assert_eq!(extensions[0].summary.package_ref.id.as_str(), "catalog-mcp");
 }
