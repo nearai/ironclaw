@@ -38,10 +38,13 @@ impl RebornAuthContinuationDispatcher for LifecycleAuthContinuationDispatcher {
         let AuthContinuationRef::LifecycleActivation { package_ref } = &event.continuation else {
             return self.inner.dispatch_auth_continuation(event).await;
         };
-        let lifecycle = self
-            .lifecycle
-            .get()
-            .ok_or(AuthProductError::BackendUnavailable)?;
+        let lifecycle = self.lifecycle.get().ok_or_else(|| {
+            tracing::error!(
+                flow_id = %event.flow_id,
+                "lifecycle facade is not wired for auth continuation dispatch"
+            );
+            AuthProductError::BackendUnavailable
+        })?;
         let package_ref = LifecyclePackageRef::new(
             LifecyclePackageKind::Extension,
             package_ref.as_str(),

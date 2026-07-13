@@ -119,9 +119,10 @@ fn oauth_flow_scope(
     flow_id: &str,
     query: OAuthFlowStatusQuery,
 ) -> Result<(AuthProductScope, AuthFlowId), ProductAuthRouteFailure> {
-    let flow_id = AuthFlowId::from_uuid(
-        Uuid::parse_str(flow_id).map_err(|_| ProductAuthRouteFailure::malformed_callback())?,
-    );
+    let flow_id = AuthFlowId::from_uuid(Uuid::parse_str(flow_id).map_err(|error| {
+        tracing::debug!(%error, "malformed flow id in oauth flow status/reconcile path");
+        ProductAuthRouteFailure::malformed_callback()
+    })?);
     let fields = ScopeFields {
         session_id: None,
         thread_id: None,
@@ -735,14 +736,14 @@ async fn oauth_provider_callback_attempt(
             },
         ))
         .await;
-        run_terminal_failure_hook(
+        run_terminal_failure_hook_best_effort(
             &state,
             descriptor,
             callback_scope,
             flow_id,
             RebornOAuthCallbackFailureStage::Terminal,
         )
-        .await?;
+        .await;
         state.remove_pkce_verifier(flow_id);
         return oauth_callback_route_result_response(headers, response);
     }
@@ -766,6 +767,7 @@ async fn oauth_provider_callback_attempt(
     // the flow). Provider cleanup therefore follows the control-flow outcome,
     // not a hand-maintained list of error codes.
     let mut callback_owned_by_service = false;
+    let mut terminal_failure_hook_attempted = false;
     let result = async {
         let code = query
             .code
@@ -792,14 +794,15 @@ async fn oauth_provider_callback_attempt(
                     },
                 ))
                 .await;
-                run_terminal_failure_hook(
+                terminal_failure_hook_attempted = true;
+                run_terminal_failure_hook_best_effort(
                     &state,
                     descriptor,
                     callback_scope,
                     flow_id,
                     RebornOAuthCallbackFailureStage::Terminal,
                 )
-                .await?;
+                .await;
                 return oauth_callback_route_result_response(headers, response);
             }
         };
@@ -854,18 +857,21 @@ async fn oauth_provider_callback_attempt(
         ) {
             state.remove_pkce_verifier(flow_id);
         }
-        if !matches!(
-            stage,
-            RebornOAuthCallbackFailureStage::ContinuationAcknowledgement
-                | RebornOAuthCallbackFailureStage::ContinuationRetryable
-        ) && let Err(hook_error) =
-            run_terminal_failure_hook(&state, descriptor, callback_scope, flow_id, stage).await
+        if !terminal_failure_hook_attempted
+            && !matches!(
+                stage,
+                RebornOAuthCallbackFailureStage::ContinuationAcknowledgement
+                    | RebornOAuthCallbackFailureStage::ContinuationRetryable
+            )
         {
-            tracing::warn!(
-                error_code = ?hook_error.body.code,
-                %flow_id,
-                "provider terminal cleanup remains pending for status polling"
-            );
+            run_terminal_failure_hook_best_effort(
+                &state,
+                descriptor,
+                callback_scope,
+                flow_id,
+                stage,
+            )
+            .await;
         }
     }
     result
@@ -908,6 +914,24 @@ async fn run_terminal_failure_hook(
         failure_stage,
     ))
     .await
+}
+
+async fn run_terminal_failure_hook_best_effort(
+    state: &ProductAuthRouteState,
+    descriptor: &OAuthCallbackDescriptor,
+    callback_scope: &AuthProductScope,
+    flow_id: AuthFlowId,
+    failure_stage: RebornOAuthCallbackFailureStage,
+) {
+    if let Err(hook_error) =
+        run_terminal_failure_hook(state, descriptor, callback_scope, flow_id, failure_stage).await
+    {
+        tracing::warn!(
+            error_code = ?hook_error.body.code,
+            %flow_id,
+            "provider terminal cleanup remains pending for status polling"
+        );
+    }
 }
 
 async fn terminal_failure_hook(
@@ -1262,7 +1286,8 @@ mod tests {
     use ironclaw_secrets::{InMemorySecretStore, SecretStore};
     use ironclaw_turns::{TurnRunId, TurnScope};
     #[cfg(feature = "slack-v2-host-beta")]
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     #[cfg(feature = "slack-v2-host-beta")]
@@ -1294,6 +1319,20 @@ mod tests {
         SlackInstallationSetup, SlackInstallationSetupStore, SlackInstallationSetupUpdate,
         SlackPersonalSetupServiceSlot, SlackSetupError, SlackSetupService,
     };
+
+    static FAILING_TERMINAL_HOOK_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn failing_terminal_hook(
+        _state: ProductAuthRouteState,
+        _scope: AuthProductScope,
+        _flow_id: AuthFlowId,
+        _stage: RebornOAuthCallbackFailureStage,
+    ) -> OAuthCallbackTerminalHookFuture {
+        Box::pin(async {
+            FAILING_TERMINAL_HOOK_CALLS.fetch_add(1, Ordering::SeqCst);
+            Err(ProductAuthRouteFailure::backend_unavailable())
+        })
+    }
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[derive(Debug, Default)]
@@ -1895,6 +1934,169 @@ mod tests {
             "failure signal must carry the flow id so only the owning window reacts: {body}"
         );
         assert!(body.contains("window.close()"));
+    }
+
+    #[tokio::test]
+    async fn provider_denials_preserve_response_and_attempt_failing_terminal_hook_once() {
+        FAILING_TERMINAL_HOOK_CALLS.store(0, Ordering::SeqCst);
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store_for_provider: Arc<dyn SecretStore> = secret_store.clone();
+        let google_gate = Arc::new(OAuthGateFlowDriver::new(
+            Arc::new(GoogleOAuthGateProvider::new(
+                OAuthClientConfig::new(
+                    "google-client.apps.googleusercontent.com",
+                    "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
+                    None,
+                )
+                .expect("google oauth client"),
+            )),
+            secret_store_for_provider,
+        ));
+        let product_auth = Arc::new(
+            RebornProductAuthServices::from_shared(
+                shared.clone(),
+                Arc::new(RecordingDispatcher::default()),
+            )
+            .with_flow_record_source(shared)
+            .with_oauth_gate_registry(Arc::new(OAuthGateProviderRegistry::new(vec![google_gate]))),
+        );
+        let state = ProductAuthRouteState::new(
+            product_auth.clone(),
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        );
+        let requirements = vec![RuntimeCredentialAuthRequirement {
+            provider: RuntimeCredentialAccountProviderId::new("google").expect("provider"),
+            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                scopes: vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()],
+            },
+            requester_extension: ExtensionId::new("gmail").expect("extension"),
+            provider_scopes: vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()],
+        }];
+        let challenge = product_auth
+            .challenge_for_gate(
+                &TurnScope::new(
+                    TenantId::new("tenant-alpha").expect("tenant"),
+                    None,
+                    None,
+                    ThreadId::new("thread-alpha").expect("thread"),
+                ),
+                &UserId::new("user-alpha").expect("user"),
+                TurnRunId::new(),
+                "gate:gmail-auth",
+                &requirements,
+            )
+            .await
+            .expect("challenge lookup")
+            .expect("google oauth challenge");
+        let state_value = Url::parse(
+            challenge
+                .authorization_url
+                .expect("authorization url")
+                .as_str(),
+        )
+        .expect("authorization url")
+        .query_pairs()
+        .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
+        .expect("oauth state");
+        let flow_id = OAuthCallbackState::decode(OAuthCallbackStateKind::GOOGLE, &state_value)
+            .expect("decode callback state")
+            .flow_id();
+        let encoded_state =
+            url::form_urlencoded::byte_serialize(state_value.as_bytes()).collect::<String>();
+        let uri = format!(
+            "{GOOGLE_OAUTH_CALLBACK_PATH}?state={encoded_state}&code=google-auth-code&scope="
+        )
+        .parse::<Uri>()
+        .expect("callback uri");
+        let raw_query = uri.query().map(str::to_string);
+        let descriptor = OAuthCallbackDescriptor {
+            state_kind: OAuthCallbackStateKind::GOOGLE,
+            provider_id: GOOGLE_PROVIDER_ID,
+            scope_resolution: CallbackScopeResolution::ValidateEchoedIncludesRequested,
+            identity_hook: no_identity_hook,
+            on_terminal_failure: Some(failing_terminal_hook),
+        };
+        let mut known_flow_id = None;
+
+        let error = oauth_provider_callback_attempt(
+            state,
+            &descriptor,
+            raw_query,
+            uri,
+            &HeaderMap::new(),
+            &mut known_flow_id,
+        )
+        .await
+        .expect_err("empty granted scope must preserve the provider-denied response");
+
+        assert_eq!(error.body.code, AuthErrorCode::ProviderDenied);
+        assert_eq!(known_flow_id, Some(flow_id));
+        assert_eq!(
+            FAILING_TERMINAL_HOOK_CALLS.load(Ordering::SeqCst),
+            1,
+            "terminal cleanup is retryable but must be attempted only once per callback"
+        );
+
+        let second_challenge = product_auth
+            .challenge_for_gate(
+                &TurnScope::new(
+                    TenantId::new("tenant-alpha").expect("tenant"),
+                    None,
+                    None,
+                    ThreadId::new("thread-beta").expect("thread"),
+                ),
+                &UserId::new("user-alpha").expect("user"),
+                TurnRunId::new(),
+                "gate:gmail-auth-retry",
+                &requirements,
+            )
+            .await
+            .expect("second challenge lookup")
+            .expect("second google oauth challenge");
+        let second_state_value = Url::parse(
+            second_challenge
+                .authorization_url
+                .expect("authorization url")
+                .as_str(),
+        )
+        .expect("authorization url")
+        .query_pairs()
+        .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
+        .expect("oauth state");
+        let encoded_state =
+            url::form_urlencoded::byte_serialize(second_state_value.as_bytes()).collect::<String>();
+        let uri = format!("{GOOGLE_OAUTH_CALLBACK_PATH}?state={encoded_state}&error=access_denied")
+            .parse::<Uri>()
+            .expect("callback uri");
+        let raw_query = uri.query().map(str::to_string);
+        let state = ProductAuthRouteState::new(
+            product_auth,
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        );
+        let mut second_known_flow_id = None;
+
+        let error = oauth_provider_callback_attempt(
+            state,
+            &descriptor,
+            raw_query,
+            uri,
+            &HeaderMap::new(),
+            &mut second_known_flow_id,
+        )
+        .await
+        .expect_err("explicit provider denial must preserve the provider-denied response");
+
+        assert_eq!(error.body.code, AuthErrorCode::ProviderDenied);
+        assert_eq!(
+            FAILING_TERMINAL_HOOK_CALLS.load(Ordering::SeqCst),
+            2,
+            "each provider-denied callback must attempt terminal cleanup exactly once"
+        );
     }
 
     #[tokio::test]

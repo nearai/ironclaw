@@ -49,6 +49,20 @@ impl CredentialSecretFingerprint {
         // `sha256_hex` is canonical lowercase hex by contract.
         Self(ironclaw_common::hashing::sha256_hex(material.as_bytes()))
     }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl AsRef<str> for CredentialSecretFingerprint {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
 }
 
 impl TryFrom<String> for CredentialSecretFingerprint {
@@ -61,7 +75,7 @@ impl TryFrom<String> for CredentialSecretFingerprint {
 
 impl From<CredentialSecretFingerprint> for String {
     fn from(value: CredentialSecretFingerprint) -> Self {
-        value.0
+        value.into_inner()
     }
 }
 
@@ -1162,6 +1176,9 @@ mod tests {
             &serde_json::to_string(&canonical).expect("serialize canonical fingerprint"),
         )
         .expect("canonical fingerprint");
+        assert_eq!(parsed.as_str(), canonical);
+        assert_eq!(parsed.as_ref(), canonical);
+        assert_eq!(parsed.clone().into_inner(), canonical);
         assert_eq!(String::from(parsed), canonical);
     }
 

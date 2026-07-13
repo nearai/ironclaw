@@ -37,8 +37,8 @@ impl<'de> Deserialize<'de> for ManifestHash {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
-#[serde(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct ExtensionRemovalCleanupAdapterId(String);
 
 impl ExtensionRemovalCleanupAdapterId {
@@ -49,20 +49,34 @@ impl ExtensionRemovalCleanupAdapterId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
-}
 
-impl<'de> Deserialize<'de> for ExtensionRemovalCleanupAdapterId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::new(value).map_err(serde::de::Error::custom)
+    pub fn into_inner(self) -> String {
+        self.0
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
-#[serde(transparent)]
+impl AsRef<str> for ExtensionRemovalCleanupAdapterId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ExtensionRemovalCleanupAdapterId {
+    type Error = ExtensionInstallationError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<ExtensionRemovalCleanupAdapterId> for String {
+    fn from(value: ExtensionRemovalCleanupAdapterId) -> Self {
+        value.into_inner()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct ExtensionRemovalChannelId(String);
 
 impl ExtensionRemovalChannelId {
@@ -73,15 +87,29 @@ impl ExtensionRemovalChannelId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
 }
 
-impl<'de> Deserialize<'de> for ExtensionRemovalChannelId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::new(value).map_err(serde::de::Error::custom)
+impl AsRef<str> for ExtensionRemovalChannelId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ExtensionRemovalChannelId {
+    type Error = ExtensionInstallationError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<ExtensionRemovalChannelId> for String {
+    fn from(value: ExtensionRemovalChannelId) -> Self {
+        value.into_inner()
     }
 }
 
@@ -1063,6 +1091,48 @@ mod tests {
 
     use super::*;
     use crate::ManifestSource;
+
+    #[test]
+    fn removal_cleanup_ids_validate_and_round_trip_their_canonical_wire_values() {
+        let adapter = ExtensionRemovalCleanupAdapterId::new("slack.personal")
+            .expect("canonical cleanup adapter");
+        assert_eq!(adapter.as_str(), "slack.personal");
+        assert_eq!(adapter.as_ref(), "slack.personal");
+        assert_eq!(adapter.clone().into_inner(), "slack.personal");
+        assert_eq!(String::from(adapter.clone()), "slack.personal");
+        assert_eq!(
+            serde_json::from_str::<ExtensionRemovalCleanupAdapterId>(
+                &serde_json::to_string(&adapter).expect("serialize adapter")
+            )
+            .expect("deserialize adapter"),
+            adapter
+        );
+
+        let channel = ExtensionRemovalChannelId::new("slack").expect("canonical cleanup channel");
+        assert_eq!(channel.as_str(), "slack");
+        assert_eq!(channel.as_ref(), "slack");
+        assert_eq!(channel.clone().into_inner(), "slack");
+        assert_eq!(String::from(channel.clone()), "slack");
+        assert_eq!(
+            serde_json::from_str::<ExtensionRemovalChannelId>(
+                &serde_json::to_string(&channel).expect("serialize channel")
+            )
+            .expect("deserialize channel"),
+            channel
+        );
+
+        for invalid in ["", "Slack", "slack/connection", "-slack", "slack-"] {
+            let wire = serde_json::to_string(invalid).expect("serialize invalid cleanup id");
+            assert!(
+                serde_json::from_str::<ExtensionRemovalCleanupAdapterId>(&wire).is_err(),
+                "invalid cleanup adapter must be rejected: {invalid}"
+            );
+            assert!(
+                serde_json::from_str::<ExtensionRemovalChannelId>(&wire).is_err(),
+                "invalid cleanup channel must be rejected: {invalid}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn delete_manifest_rejects_active_installations() {
