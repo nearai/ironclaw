@@ -183,8 +183,9 @@ pub use product_auth::api::auth::{
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
 pub use provider_identity::{
     ProviderIdentityActorResolver, RebornIdentityProviderId, RebornIdentityProviderUserId,
-    RebornUserIdentityBinding, RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
-    RebornUserIdentityLookup, RebornUserIdentityLookupError, installation_scoped_provider_user_id,
+    RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
+    RebornUserIdentityBindingError, RebornUserIdentityBindingStore, RebornUserIdentityLookup,
+    RebornUserIdentityLookupError, installation_scoped_provider_user_id,
 };
 pub use readiness::{
     RebornFacadeReadiness, RebornReadiness, RebornReadinessDiagnostic,

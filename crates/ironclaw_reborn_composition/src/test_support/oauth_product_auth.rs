@@ -91,6 +91,13 @@ impl ScriptedOAuthTokenEgress {
         Self::build(200, body)
     }
 
+    /// Build a scripted egress that returns `200` with an arbitrary JSON
+    /// body — for token responses carrying vendor identity claims that the
+    /// recipe's `identity` pointers extract.
+    pub fn with_json_body(body: &serde_json::Value) -> Self {
+        Self::build(200, body.to_string().into_bytes())
+    }
+
     /// Build a scripted egress that returns `status` with a minimal
     /// `{"error":"<error_code>"}` body — for example, `(400, "invalid_grant")`
     /// to simulate an OAuth provider permanently revoking a refresh token.
@@ -672,4 +679,115 @@ pub fn build_google_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle 
         egress,
         keepalive_recipes,
     }
+}
+
+// ─── Generic channel-identity binding test support (extension-runtime P6) ────
+
+/// Build the same recipe-driven engine as [`build_oauth_product_auth_for_test`]
+/// with an `[auth.*.identity]` extraction section (subject/team/app pointers
+/// over the token response body).
+fn engine_provider_client_with_identity_for_test(
+    vendor: &str,
+    scopes: &[&str],
+    egress: Arc<ScriptedOAuthTokenEgress>,
+    secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
+) -> Arc<ironclaw_auth::AuthEngine> {
+    let recipe: ironclaw_host_api::VendorAuthRecipe = serde_json::from_value(serde_json::json!({
+        "method": "oauth2_code",
+        "display_name": format!("{vendor} account"),
+        "authorization_endpoint": "https://oauth.test.example.com/authorize",
+        "token_endpoint": "https://oauth.test.example.com/token",
+        "scopes": scopes,
+        "client_credentials": { "client_id_handle": format!("{vendor}_oauth_client_id") },
+        "token_response": {
+            "access_token": "/access_token",
+            "scope": { "path": "/scope", "missing": "fallback_to_requested" }
+        },
+        "identity": {
+            "account_id": "/authed_user/id",
+            "team_id": "/team/id",
+            "app_id": "/app_id"
+        },
+    }))
+    .expect("identity test vendor recipe parses");
+    Arc::new(ironclaw_auth::AuthEngine::new(
+        ironclaw_auth::AuthEngineDeps {
+            recipes: Arc::new(ironclaw_auth::StaticAuthRecipeResolver::new(vec![
+                ironclaw_auth::ResolvedVendorAuthRecipe {
+                    vendor: vendor.to_string(),
+                    recipe,
+                    token_exchange_resource: None,
+                },
+            ])),
+            client_credentials: Arc::new(TestStaticClientCredentials),
+            egress: egress as Arc<dyn ironclaw_host_api::RuntimeHttpEgress>,
+            secret_store,
+            callback_base: ironclaw_auth::EngineCallbackBase::new(
+                "https://localhost/api/reborn/product-auth/oauth",
+            )
+            .expect("test callback base"),
+            dcr_client_name: "Ironclaw test".to_string(),
+        },
+    ))
+}
+
+/// [`build_oauth_product_auth_for_test`] with a vendor recipe that declares
+/// identity extraction and a scripted token body carrying the claims —
+/// the fixture chain for tests that drive the generic post-OAuth channel
+/// identity binding.
+pub fn build_oauth_product_auth_with_identity_for_test(
+    vendor: &str,
+    token_body: &serde_json::Value,
+) -> OAuthProductAuthTestBundle {
+    let OAuthProductAuthInfra {
+        secret_store,
+        durable,
+    } = build_oauth_product_auth_infra();
+    let egress = Arc::new(ScriptedOAuthTokenEgress::with_json_body(token_body));
+    let engine = engine_provider_client_with_identity_for_test(
+        vendor,
+        &["test.readonly"],
+        Arc::clone(&egress),
+        Arc::clone(&secret_store),
+    );
+    let services = Arc::new(crate::RebornProductAuthServices::new(
+        durable.clone() as Arc<dyn ironclaw_auth::AuthFlowManager>,
+        durable.clone() as Arc<dyn ironclaw_auth::AuthInteractionService>,
+        durable.clone() as Arc<dyn ironclaw_auth::CredentialSetupService>,
+        durable.clone() as Arc<dyn ironclaw_auth::CredentialAccountService>,
+        Arc::clone(&engine) as Arc<dyn ironclaw_auth::AuthProviderClient>,
+        durable as Arc<dyn ironclaw_auth::SecretCleanupService>,
+        Arc::new(TestNoopContinuationDispatcher),
+    ));
+    let keepalive_recipes = Arc::clone(engine.recipes());
+    OAuthProductAuthTestBundle {
+        services,
+        egress,
+        keepalive_recipes,
+    }
+}
+
+/// Drive `handle_oauth_callback` WITH the generic channel-identity binding
+/// hook — the exact post-exchange seam the production product-auth route
+/// installs (`WebuiServeConfig::with_channel_identity_binding`) — so
+/// integration tests can prove a channel extension's OAuth connect writes
+/// an identity binding through the generic hook.
+pub async fn handle_oauth_callback_with_channel_identity_binding_for_test(
+    services: &crate::RebornProductAuthServices,
+    request: crate::RebornOAuthCallbackRequest,
+    binding: &crate::ChannelIdentityBindingConfig,
+) -> Result<crate::RebornOAuthCallbackResponse, crate::RebornOAuthCallbackError> {
+    let provider = match &request.outcome {
+        crate::RebornOAuthCallbackOutcome::Authorized { provider_request } => {
+            provider_request.provider.as_str().to_string()
+        }
+        _ => String::new(),
+    };
+    let factory = crate::extension_host::channel_identity::channel_identity_binding_hook_factory(
+        binding.clone(),
+    );
+    let check = factory(&provider, &request.scope);
+    services
+        .handle_oauth_callback_with_optional_provider_identity_check(request, check)
+        .await
 }
