@@ -1006,6 +1006,30 @@ fn reborn_internal_crate_keeps_directory_of_modules_lib_rs() {
     );
 }
 
+#[test]
+fn composition_runtime_has_no_slack_output_policy() {
+    let root = workspace_root();
+    let runtime_path = root.join("crates/ironclaw_reborn_composition/src/runtime.rs");
+    let runtime_source = std::fs::read_to_string(&runtime_path)
+        .expect("ironclaw_reborn_composition runtime.rs must be readable");
+
+    for forbidden in ["SlackOutputHygieneGateway", "mod slack_output_hygiene"] {
+        assert!(
+            !runtime_source.contains(forbidden),
+            "Reborn composition must remain integration-neutral and must not install \
+             Slack-specific model output policy via `{forbidden}`"
+        );
+    }
+
+    let slack_policy_module =
+        root.join("crates/ironclaw_reborn_composition/src/runtime/slack_output_hygiene.rs");
+    assert!(
+        !slack_policy_module.exists(),
+        "Reborn composition must not own the Slack-specific output policy module at {}",
+        slack_policy_module.display()
+    );
+}
+
 /// Lock the boot-config TOML + provider-catalog layering for the
 /// standalone `ironclaw-reborn` binary.
 ///

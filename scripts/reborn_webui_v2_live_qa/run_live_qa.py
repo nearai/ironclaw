@@ -7001,22 +7001,6 @@ async def case_qa_10i_slack_raw_entity_hygiene(ctx: LiveQaContext) -> ProbeResul
                 f"reply leaked {len(set(leaked_ids))} raw Slack user id(s) "
                 "instead of a display name"
             )
-        if "[Slack identifier redacted]" in reply_text:
-            return _result(
-                case_name,
-                False,
-                started,
-                {
-                    **details,
-                    "error": (
-                        "assistant output required Slack identifier sanitizer "
-                        "intervention instead of rendering the display name"
-                    ),
-                    "failure_class": "model_quality",
-                    "failure_category": "sanitizer_intervention",
-                    "failure_status": "failed",
-                },
-            )
         if not _name_token_in_text(reply_text, display_name):
             raise AssertionError(
                 "reply did not name the mentioned user by any display-name "

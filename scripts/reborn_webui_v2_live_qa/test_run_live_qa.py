@@ -6072,9 +6072,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertNotIn("D0FIXTURE1", global_calls[0]["prompt"])
         self.assertIsNone(global_calls[0].get("expected_capability"))
 
-    def test_qa_10i_requires_display_name_and_rejects_raw_ids_or_intervention_once(
-        self,
-    ):
+    def test_qa_10i_requires_display_name_and_rejects_raw_ids_once(self):
         async def fake_identity(_token):
             return {"ok": True, "user_id": "W0FIXTURE1"}
 
@@ -6152,9 +6150,6 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         encoded_id, encoded_id_calls = drive(
             "Canary Person (<@WABCDEFGH>) should sync the fixture."
         )
-        intervened, intervention_calls = drive(
-            "Canary Person ([Slack identifier redacted]) should sync the fixture."
-        )
         missing_name, missing_name_calls = drive("Someone should sync the fixture.")
 
         self.assertTrue(natural.success)
@@ -6162,8 +6157,6 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(raw_id.details["failure_class"], "product")
         self.assertFalse(encoded_id.success)
         self.assertNotIn("WABCDEFGH", json.dumps(encoded_id.details))
-        self.assertFalse(intervened.success)
-        self.assertEqual(intervened.details["failure_class"], "model_quality")
         self.assertFalse(missing_name.success)
         self.assertEqual(missing_name.details["failure_class"], "product")
         self.assertEqual(
@@ -6171,10 +6164,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 natural_calls,
                 raw_id_calls,
                 encoded_id_calls,
-                intervention_calls,
                 missing_name_calls,
             ),
-            (1, 1, 1, 1, 1),
+            (1, 1, 1, 1),
             "10I is a one-shot behavioral observation and must never retry",
         )
 
@@ -6393,7 +6385,6 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "ENTITYMSG_",
                 "_raw_slack_user_ids_in_text",
                 "<@U",
-                "[Slack identifier redacted]",
                 "_name_token_in_text",
             ),
         }
