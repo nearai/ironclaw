@@ -521,7 +521,11 @@ async fn capability_id_filter_some_empty_grants_zero_capabilities() {
     let builtin_ids: Vec<&str> = definitions
         .iter()
         .map(|definition| definition.capability_id.as_str())
-        .filter(|id| id.starts_with("builtin.") && *id != PROJECT_CREATE_CAPABILITY_ID)
+        .filter(|id| {
+            id.starts_with("builtin.")
+                && *id != PROJECT_CREATE_CAPABILITY_ID
+                && *id != RESULT_READ_CAPABILITY_ID
+        })
         .collect();
     assert!(
         builtin_ids.is_empty(),
@@ -532,6 +536,12 @@ async fn capability_id_filter_some_empty_grants_zero_capabilities() {
             .iter()
             .any(|definition| definition.capability_id.as_str() == PROJECT_CREATE_CAPABILITY_ID),
         "synthetic project_create capability bypasses the filter entirely: {definitions:?}"
+    );
+    assert!(
+        definitions
+            .iter()
+            .any(|definition| definition.capability_id.as_str() == RESULT_READ_CAPABILITY_ID),
+        "synthetic result_read capability bypasses the filter entirely (issue #5838): {definitions:?}"
     );
 }
 

@@ -327,7 +327,6 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
-
     /// Opt-in to real shell execution for this harness. By default the
     /// `BuiltinHttpTools` backend injects an inert `RecordingProcessPort` so that
     /// `builtin.shell` turns record the command without spawning any OS process.

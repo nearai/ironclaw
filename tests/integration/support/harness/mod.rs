@@ -53,8 +53,8 @@ use ironclaw_trust::EffectiveTrustClass;
 use ironclaw_turns::{
     GateRef,
     run_profile::{
-        AgentLoopHostError, CapabilityInvocation, LoopCapabilityPort, LoopHostMilestoneSink,
-        LoopRunContext,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInvocation, LoopCapabilityPort,
+        LoopHostMilestoneSink, LoopRunContext,
     },
 };
 
@@ -747,7 +747,8 @@ impl HostRuntimeCapabilityHarness {
         self: &Arc<Self>,
     ) -> Arc<dyn LoopCapabilityResultWriter> {
         Arc::new(RecordingCapabilityResultWriter {
-            inner: self.result_writer_io(),
+            input_resolver: self.input_resolver(),
+            result_writer: self.result_writer_io(),
             results: Arc::clone(&self.results),
         })
     }
@@ -1333,7 +1334,8 @@ impl HostRuntimeCapabilityHarness {
         // object into both config fields below, never two
         // independently-sourced io objects.
         let shared_io = Arc::new(RecordingCapabilityResultWriter {
-            inner: self.io.clone(),
+            input_resolver: self.input_resolver(),
+            result_writer: self.result_writer_io(),
             results: Arc::clone(&self.results),
         });
         let input_resolver: Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver> =
@@ -1396,6 +1398,48 @@ impl HostRuntimeCapabilityHarness {
             .as_ref()
             .map(|parts| parts.requires_approval)
             .unwrap_or(false);
+        // Grantee = the loop-driver execution extension — the SAME principal
+        // production's `local_dev_visible_capability_request` executes under
+        // and mints extension grants for (`LocalDevExtensionSurface::grants`);
+        // a `Principal::User` grantee (the pre-seam harness's choice, matched
+        // to its removed hand-built User-principal authority) is skipped by
+        // authorization under the production request. Computed early (moved
+        // up from its original spot below) because
+        // `build_additional_provider_trust`'s per-provider activation check
+        // needs it too.
+        let execution_extension =
+            ironclaw_loop_host::loop_driver_execution_extension_id(run_context)?;
+        // Which providers ALREADY have a production trust decision arriving
+        // through the real activation handshake (`extension_surface_source`'s
+        // `LocalDevExtensionSurface::provider_trust()`, same
+        // `extension_management` + grantee production's factory reads) --
+        // queried the SAME way `build_local_dev_extension_management_for_test`
+        // -> `extension_surface_source` will read it downstream in
+        // `create_refreshing_local_dev_capability_port_for_test`. NOT the same
+        // as "this harness has `reborn_services` wired": a harness can have
+        // `reborn_services` (so `new_with_options`) while only ever calling
+        // the `publish_bundled_extension_for_test` SHORTCUT (registers the
+        // package in the active registry but creates no enabled
+        // installation), which `active_model_visible_capabilities()` requires
+        // -- such a provider has NO production trust decision to protect, so
+        // this must be an empty set for it, not treated as activation-backed.
+        let activation_backed_providers: std::collections::HashSet<ExtensionId> =
+            if let Some(services) = self.reborn_services.as_ref() {
+                match services
+                    .local_dev_active_extension_authority_for_test(&execution_extension)
+                    .await
+                {
+                    Some(active_authority) => active_authority
+                        .map_err(host_runtime_harness_error)?
+                        .provider_trust
+                        .into_iter()
+                        .map(|(provider, _decision)| provider)
+                        .collect(),
+                    None => std::collections::HashSet::new(),
+                }
+            } else {
+                std::collections::HashSet::new()
+            };
         // Two config extensions Change 1 added (plus `capability_id_filter`
         // below = three total): per-capability execution-mount overrides and
         // additional provider-trust entries. Both inert/empty at production's
@@ -1407,7 +1451,7 @@ impl HostRuntimeCapabilityHarness {
             &self.provider_id,
             &self.effect_kinds,
             &self.additional_provider_trust,
-            self.reborn_services.is_some(),
+            &activation_backed_providers,
         );
         // Hand-mint a grant for every id in this harness's `capability_ids`
         // allowlist (ad-hoc test-only `HostRuntime` backends never get a real
@@ -1422,14 +1466,6 @@ impl HostRuntimeCapabilityHarness {
         ]
         .into_iter()
         .collect();
-        // Grantee = the loop-driver execution extension — the SAME principal
-        // production's `local_dev_visible_capability_request` executes under
-        // and mints extension grants for (`LocalDevExtensionSurface::grants`);
-        // a `Principal::User` grantee (the pre-seam harness's choice, matched
-        // to its removed hand-built User-principal authority) is skipped by
-        // authorization under the production request.
-        let execution_extension =
-            ironclaw_loop_host::loop_driver_execution_extension_id(run_context)?;
         let additional_capability_grants: Vec<CapabilityGrant> = self
             .capability_ids
             .iter()
@@ -1639,52 +1675,53 @@ impl HostRuntimeCapabilityHarness {
     ///    never get its provider trusted, and `tool_definitions()` silently
     ///    omits every capability from an untrusted provider.
     ///
-    /// Security (CodeRabbit, PR #6026): entry (2) is ONLY safe to mint when
-    /// this harness has NO wired extension_management — i.e.
-    /// `has_reborn_services` is `false` (the mock-mcp / standalone github /
-    /// standalone web-access harnesses, none of which ever activate a real
-    /// extension, so no production decision can ever exist for their
-    /// provider to clobber). Every current `provider_trust_override` caller
-    /// (`extension_lifecycle_tools_profile`, `file_and_github_auth_tools_profile`,
-    /// `extension_visibility_probe_tools_profile`) instead builds through
-    /// `new_with_options`, which unconditionally sets `reborn_services` and
-    /// therefore wires the SAME `extension_management`
-    /// (`create_recording_capability_port` passes
-    /// `self.reborn_services.as_ref().and_then(build_local_dev_extension_management_for_test)`
-    /// straight to `build_inner`) these providers would otherwise clobber.
-    /// Those providers (`gmail`, `github`, `visprobe`, ...) are exactly the
-    /// bundled/fixture extensions those profiles install/activate or publish
-    /// for real during the test — before activation the capability is
-    /// unreachable anyway (fails closed at registry-publication, never
-    /// reaching this trust check), and after activation
-    /// `extension_surface.provider_trust()` supplies the authoritative
-    /// production ceiling, which this harness entry must not overwrite
-    /// (`additional_provider_trust` OVERWRITES same-id entries — pinned by
-    /// `additional_provider_trust_is_forwarded_to_visible_request` in
-    /// `refreshing_capability_port_test_support.rs`). So: skip entry (2)
-    /// entirely whenever `has_reborn_services` is `true`; only a
-    /// `None`-services (genuinely ad-hoc, non-activation-backed) harness
-    /// mints it. See `harness_trust_tests` below for the regression pin.
+    /// Security (CodeRabbit, PR #6026): entry (2) is ONLY safe to mint for a
+    /// provider that does NOT already have a production trust decision --
+    /// `additional_provider_trust` OVERWRITES same-id entries
+    /// (`additional_provider_trust_is_forwarded_to_visible_request` in
+    /// `refreshing_capability_port_test_support.rs`), so minting one for a
+    /// provider `extension_surface_source` already trusts would silently
+    /// clobber that (potentially narrower) production ceiling.
+    ///
+    /// The gate is PER-PROVIDER (`activation_backed_providers`), not a
+    /// harness-wide `reborn_services.is_some()` boolean: a harness can have
+    /// `reborn_services` wired (`new_with_options`) while its provider only
+    /// ever reached the registry through the
+    /// `publish_bundled_extension_for_test` SHORTCUT (upserts the package
+    /// into the active registry but creates no ENABLED INSTALLATION) --
+    /// `active_model_visible_capabilities()` requires an enabled
+    /// installation, so such a provider has NO production trust decision at
+    /// all and this entry is the ONLY thing that ever trusts it (see
+    /// `file_and_github_auth_tools_profile` / `extension_visibility_probe_tools_profile`,
+    /// neither of which runs a real install→activate handshake). A provider
+    /// IS activation-backed (must be excluded here) only once
+    /// `local_dev_active_extension_authority_for_test` actually reports a
+    /// trust entry for it -- e.g. `extension_lifecycle_tools_profile`'s real
+    /// credentialed install+activate flow. See `harness_trust_tests` below
+    /// for the regression pin covering both shapes.
     fn build_additional_provider_trust(
         provider_id: &ExtensionId,
         effect_kinds: &[EffectKind],
         additional_provider_trust: &[(ExtensionId, Vec<EffectKind>)],
-        has_reborn_services: bool,
+        activation_backed_providers: &std::collections::HashSet<ExtensionId>,
     ) -> BTreeMap<ExtensionId, ironclaw_trust::TrustDecision> {
         let mut result = BTreeMap::new();
-        if provider_id.as_str() != ironclaw_host_runtime::BUILTIN_FIRST_PARTY_PROVIDER {
+        if provider_id.as_str() != ironclaw_host_runtime::BUILTIN_FIRST_PARTY_PROVIDER
+            && !activation_backed_providers.contains(provider_id)
+        {
             result.insert(
                 provider_id.clone(),
                 Self::admin_config_trust_decision(effect_kinds.to_vec()),
             );
         }
-        if !has_reborn_services {
-            for (provider, effects) in additional_provider_trust {
-                result.insert(
-                    provider.clone(),
-                    Self::admin_config_trust_decision(effects.clone()),
-                );
+        for (provider, effects) in additional_provider_trust {
+            if activation_backed_providers.contains(provider) {
+                continue;
             }
+            result.insert(
+                provider.clone(),
+                Self::admin_config_trust_decision(effects.clone()),
+            );
         }
         result
     }
@@ -1714,6 +1751,10 @@ impl CapabilitySurfaceProfileResolver for HostRuntimeHarnessSurfaceResolver {
     ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
         Ok(CapabilityAllowSet::All)
     }
+}
+
+fn host_runtime_harness_error(error: impl std::fmt::Display) -> AgentLoopHostError {
+    AgentLoopHostError::new(AgentLoopHostErrorKind::InvalidInvocation, error.to_string())
 }
 
 fn approval_request_id_from_gate_ref(gate_ref: &GateRef) -> HarnessResult<ApprovalRequestId> {
@@ -1801,13 +1842,13 @@ mod harness_trust_tests {
 
     /// The exact shape `extension_lifecycle_tools_profile_for_user` builds:
     /// a blanket `bundled_extension_provider_trust()`-style entry for
-    /// `gmail` (the provider CodeRabbit's finding named), on a harness with
-    /// `reborn_services` wired (`has_reborn_services = true`, matching every
-    /// current `provider_trust_override` caller, all of which build through
-    /// `new_with_options`). Before the fix this test would have observed an
-    /// unbounded `gmail` entry here; the fix must make it absent so the
-    /// activation-backed production decision (computed downstream, not
-    /// visible to this pure helper) is free to pass through untouched.
+    /// `gmail` (the provider CodeRabbit's finding named), where `gmail` IS in
+    /// `activation_backed_providers` (its real credentialed install+activate
+    /// handshake already produced a production trust decision). Before the
+    /// fix this test would have observed an unbounded `gmail` entry here; the
+    /// fix must make it absent so the activation-backed production decision
+    /// (computed downstream, not visible to this pure helper) is free to pass
+    /// through untouched.
     #[test]
     fn activation_backed_provider_gets_no_synthetic_trust_entry() {
         let builtin_provider =
@@ -1815,27 +1856,30 @@ mod harness_trust_tests {
                 .expect("builtin provider id");
         let gmail_provider = ExtensionId::new("gmail").expect("gmail provider id");
         let blanket_additional = vec![(gmail_provider.clone(), local_dev_all_effects())];
+        let activation_backed_providers: std::collections::HashSet<ExtensionId> =
+            [gmail_provider.clone()].into_iter().collect();
 
         let result = HostRuntimeCapabilityHarness::build_additional_provider_trust(
             &builtin_provider,
             &local_dev_all_effects(),
             &blanket_additional,
-            /* has_reborn_services */ true,
+            &activation_backed_providers,
         );
 
         assert!(
             !result.contains_key(&gmail_provider),
-            "an activation-backed harness (reborn_services wired) must never mint a \
-             synthetic trust entry for a bundled-extension provider like `gmail` -- \
-             production's `extension_surface.provider_trust()` must be the sole \
-             source of `gmail`'s ceiling once it is activated, and this entry would \
-             silently overwrite it: {result:?}"
+            "a provider already reported by `local_dev_active_extension_authority_for_test` \
+             must never get a synthetic trust entry -- production's \
+             `extension_surface.provider_trust()` must be the sole source of `gmail`'s \
+             ceiling once it is activated, and this entry would silently overwrite it: \
+             {result:?}"
         );
     }
 
     /// The genuinely ad-hoc case (mock-mcp / standalone github / standalone
-    /// web-access harnesses): `reborn_services` is never wired for these, so
-    /// there is no production decision to ever clobber, and the entry IS
+    /// web-access harnesses): the provider is absent from
+    /// `activation_backed_providers` (no `reborn_services` wired at all, so
+    /// there is no production decision to ever clobber), and the entry IS
     /// needed (no other path trusts these providers at all).
     #[test]
     fn ad_hoc_provider_without_reborn_services_still_gets_trust_entry() {
@@ -1850,7 +1894,7 @@ mod harness_trust_tests {
             &builtin_provider,
             &effects,
             &additional,
-            /* has_reborn_services */ false,
+            &std::collections::HashSet::new(),
         );
 
         assert_eq!(
@@ -1858,8 +1902,54 @@ mod harness_trust_tests {
                 .get(&mock_mcp_provider)
                 .map(|decision| &decision.authority_ceiling.allowed_effects),
             Some(&effects),
-            "a harness with no wired extension_management must still mint its ad-hoc \
-             provider's trust entry, or that provider's capabilities become invisible: {result:?}"
+            "a harness with no activation-backed decision for this provider must still mint \
+             its ad-hoc provider's trust entry, or that provider's capabilities become \
+             invisible: {result:?}"
+        );
+    }
+
+    /// The gap this fix closes (CI diagnostician finding, post-#5902
+    /// rebase): `file_and_github_auth_tools_profile` /
+    /// `extension_visibility_probe_tools_profile` build through
+    /// `new_with_options` (so `reborn_services` IS wired) but only ever call
+    /// the `publish_bundled_extension_for_test` shortcut for their provider
+    /// -- no enabled installation, so `local_dev_active_extension_authority_for_test`
+    /// never reports a trust entry for it. The OLD `has_reborn_services: bool`
+    /// gate treated "reborn_services wired" as "activation-backed" and
+    /// wrongly suppressed this provider's only trust source. The per-provider
+    /// `activation_backed_providers` set must NOT contain such a
+    /// shortcut-only provider, so its synthetic entry is still minted.
+    #[test]
+    fn shortcut_published_provider_without_activation_still_gets_trust_entry() {
+        let builtin_provider =
+            ExtensionId::new(ironclaw_host_runtime::BUILTIN_FIRST_PARTY_PROVIDER)
+                .expect("builtin provider id");
+        let visprobe_provider = ExtensionId::new("visprobe").expect("visprobe provider id");
+        let effects = local_dev_all_effects();
+        let additional = vec![(visprobe_provider.clone(), effects.clone())];
+        // reborn_services is wired for this harness shape (`new_with_options`)
+        // but `visprobe` was only ever `publish_bundled_extension_for_test`'d,
+        // never installed+activated -- so it must be ABSENT from
+        // `activation_backed_providers`, not folded in via a blanket
+        // `reborn_services.is_some()` check.
+        let activation_backed_providers: std::collections::HashSet<ExtensionId> =
+            std::collections::HashSet::new();
+
+        let result = HostRuntimeCapabilityHarness::build_additional_provider_trust(
+            &builtin_provider,
+            &effects,
+            &additional,
+            &activation_backed_providers,
+        );
+
+        assert_eq!(
+            result
+                .get(&visprobe_provider)
+                .map(|decision| &decision.authority_ceiling.allowed_effects),
+            Some(&effects),
+            "a publish-only (never installed+activated) provider must still get its \
+             synthetic trust entry even when the harness has `reborn_services` wired, \
+             or its capabilities become invisible: {result:?}"
         );
     }
 }
