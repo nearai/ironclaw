@@ -20,7 +20,6 @@ use ironclaw_host_runtime::{
     TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
     WRITE_FILE_CAPABILITY_ID,
 };
-use ironclaw_reborn_composition::ProductLiveCapabilityIo;
 
 use super::super::{
     HarnessResult, HostRuntimeCapabilityHarness, RecordingRuntimeHttpEgress,
@@ -83,12 +82,16 @@ pub(crate) async fn qa_smoke_tools() -> HarnessResult<HostRuntimeCapabilityHarne
         CapabilityId::new(MEMORY_READ_CAPABILITY_ID)?,
         CapabilityId::new(MEMORY_TREE_CAPABILITY_ID)?,
     ];
+    let (io, result_writer_io) = super::super::default_capability_io_pair();
     Ok(HostRuntimeCapabilityHarness {
         runtime,
         approval_parts: None,
         auto_approve_settings: None,
         pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
-        io: Arc::new(ProductLiveCapabilityIo::default()),
+        io: Mutex::new(io),
+        result_writer_io: Mutex::new(result_writer_io),
+        durable_capability_io_thread_service: Mutex::new(None),
+        durable_capability_io_requested: false,
         root,
         workspace_root,
         mounts,

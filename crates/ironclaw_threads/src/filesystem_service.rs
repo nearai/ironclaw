@@ -59,19 +59,25 @@ use uuid::Uuid;
 use crate::identifiers::SummaryArtifactId;
 use crate::summary_artifacts::find_overlapping_summary;
 use crate::title::derive_title_from_message;
+use crate::tool_result_records::{
+    tool_result_record_chunk, validate_tool_result_record_content,
+    validate_tool_result_record_read, validate_tool_result_record_ref,
+};
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
     AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest,
     CapabilityDisplayPreviewEnvelope, ContextMessage, ContextMessages, ContextWindow,
-    CreateSummaryArtifactRequest, EnsureThreadRequest, LatestThreadMessageRequest,
-    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
-    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
-    ProviderToolCallReferenceEnvelope, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
+    CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
+    LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
+    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
+    MessageStatus, ProviderToolCallReferenceEnvelope, PutToolResultRecordRequest,
+    ReadToolResultRecordRequest, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
     SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact,
     SummaryModelContextPolicy, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
     ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope,
-    ToolResultReferenceEnvelope, UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
+    ToolResultRecordChunk, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
+    UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
 };
 use message_lookup_index::MessageLookupIndexStore;
 use message_sequence_index::{MessageSequenceIndexStore, message_sequence_index_entry_for_message};
@@ -2240,6 +2246,131 @@ where
         Ok(updated)
     }
 
+    async fn put_tool_result_record(
+        &self,
+        request: PutToolResultRecordRequest,
+    ) -> Result<(), SessionThreadError> {
+        validate_tool_result_record_ref(&request.result_ref)?;
+        validate_tool_result_record_content(&request.content)?;
+        self.read_thread(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: request.thread_id.clone(),
+        })
+        .await?;
+        let path =
+            tool_result_record_path(&request.scope, &request.thread_id, &request.result_ref)?;
+        let content = request.content;
+        cas_update(
+            self.filesystem.as_ref(),
+            &request.scope.to_resource_scope(),
+            &path,
+            |body| Ok::<_, SessionThreadError>(body.to_vec()),
+            |body| {
+                Ok::<_, SessionThreadError>(
+                    Entry::bytes(body.clone()).with_content_type(ContentType::octet_stream()),
+                )
+            },
+            move |existing| {
+                let content = content.clone();
+                async move {
+                    match existing {
+                        Some(existing) if existing == content => Ok(CasApply::no_op(existing, ())),
+                        Some(_) => Err(SessionThreadError::Backend(
+                            "tool result record conflicts with existing content".to_string(),
+                        )),
+                        None => Ok(CasApply::new(content, ())),
+                    }
+                }
+            },
+        )
+        .await
+        .map_err(map_cas_error)
+    }
+
+    async fn read_tool_result_record(
+        &self,
+        request: ReadToolResultRecordRequest,
+    ) -> Result<Option<ToolResultRecordChunk>, SessionThreadError> {
+        validate_tool_result_record_ref(&request.result_ref)?;
+        validate_tool_result_record_read(request.max_bytes)?;
+        self.read_thread(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: request.thread_id.clone(),
+        })
+        .await?;
+        let path =
+            tool_result_record_path(&request.scope, &request.thread_id, &request.result_ref)?;
+        let content = self
+            .filesystem
+            .get(&request.scope.to_resource_scope(), &path)
+            .await?
+            .map(|entry| entry.entry.body);
+        Ok(content
+            .map(|content| tool_result_record_chunk(&content, request.offset, request.max_bytes)))
+    }
+
+    async fn update_tool_result_record(
+        &self,
+        request: UpdateToolResultRecordRequest,
+    ) -> Result<(), SessionThreadError> {
+        validate_tool_result_record_ref(&request.result_ref)?;
+        validate_tool_result_record_content(&request.content)?;
+        self.read_thread(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: request.thread_id.clone(),
+        })
+        .await?;
+        let path =
+            tool_result_record_path(&request.scope, &request.thread_id, &request.result_ref)?;
+        let content = request.content;
+        cas_update(
+            self.filesystem.as_ref(),
+            &request.scope.to_resource_scope(),
+            &path,
+            |body| Ok::<_, SessionThreadError>(body.to_vec()),
+            |body| {
+                Ok::<_, SessionThreadError>(
+                    Entry::bytes(body.clone()).with_content_type(ContentType::octet_stream()),
+                )
+            },
+            move |existing| {
+                let content = content.clone();
+                async move {
+                    if existing.is_none() {
+                        return Err(SessionThreadError::Backend(
+                            "tool result record was not found in thread".to_string(),
+                        ));
+                    }
+                    Ok(CasApply::new(content, ()))
+                }
+            },
+        )
+        .await
+        .map_err(map_cas_error)
+    }
+
+    async fn delete_tool_result_record(
+        &self,
+        request: DeleteToolResultRecordRequest,
+    ) -> Result<(), SessionThreadError> {
+        validate_tool_result_record_ref(&request.result_ref)?;
+        self.read_thread(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: request.thread_id.clone(),
+        })
+        .await?;
+        let path =
+            tool_result_record_path(&request.scope, &request.thread_id, &request.result_ref)?;
+        match self
+            .filesystem
+            .delete(&request.scope.to_resource_scope(), &path)
+            .await
+        {
+            Ok(()) | Err(FilesystemError::NotFound { .. }) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     async fn update_assistant_draft(
         &self,
         request: UpdateAssistantDraftRequest,
@@ -2777,6 +2908,29 @@ fn messages_root(
         "{}/messages",
         thread_root_string(scope, thread_id)
     ))
+}
+
+fn tool_result_record_path(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+    result_ref: &str,
+) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&format!(
+        "{}/tool_results/{}.bin",
+        thread_root_string(scope, thread_id),
+        tool_result_record_key(result_ref)
+    ))
+}
+
+fn tool_result_record_key(result_ref: &str) -> String {
+    let digest = Sha256::digest(result_ref.as_bytes());
+    let mut output = String::with_capacity("sha256-".len() + digest.len() * 2);
+    output.push_str("sha256-");
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut output, "{byte:02x}");
+    }
+    output
 }
 
 fn message_record_path(

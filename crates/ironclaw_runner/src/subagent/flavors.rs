@@ -538,6 +538,7 @@ mod tests {
                     terminate_hint: false,
                     byte_len: 0,
                     output_digest: None,
+                    model_observation: None,
                 }))
             }
 

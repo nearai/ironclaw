@@ -451,6 +451,55 @@ fn invalid_config(reason: impl std::fmt::Display) -> RebornBuildError {
 mod tests {
     use super::*;
 
+    /// Zero-legacy gate for embedded skill guidance: the Reborn binary embeds
+    /// the repo `skills/` directory, so a skill teaching the retired v1
+    /// automation tools (`routine_create` / `routine_list`) misdirects every
+    /// Reborn automation conversation its keywords match. The automation
+    /// advisor must teach the Reborn capability surface instead.
+    #[test]
+    fn embedded_skills_teach_reborn_trigger_tools_not_retired_v1_routines() {
+        let bundles = embedded_reborn_skill_bundles().expect("embedded bundles parse");
+        let mut routine_advisor_skill_md = None;
+        for bundle in &bundles {
+            for file in &bundle.files {
+                let Ok(content) = std::str::from_utf8(&file.bytes) else {
+                    continue;
+                };
+                assert!(
+                    !content.contains("routine_create") && !content.contains("routine_list"),
+                    "embedded skill `{}` file `{}` references retired v1 routine tools",
+                    bundle.name,
+                    file.path
+                );
+                if bundle.name == "routine-advisor" && file.path == "SKILL.md" {
+                    routine_advisor_skill_md = Some(content.to_string());
+                }
+            }
+        }
+        let skill_md = routine_advisor_skill_md.expect("routine-advisor SKILL.md is embedded");
+        assert!(
+            skill_md.contains("builtin__trigger_create"),
+            "routine-advisor must teach the Reborn trigger_create capability"
+        );
+        assert!(
+            skill_md.contains("builtin__outbound_delivery_targets_list"),
+            "routine-advisor must teach delivery-target selection"
+        );
+        assert!(
+            skill_md.contains("delivered automatically"),
+            "routine-advisor must state host-owned result delivery"
+        );
+        assert!(
+            skill_md.contains("delivery_target_id"),
+            "routine-advisor must teach per-trigger routing, not only the user-wide default"
+        );
+        assert!(
+            skill_md.contains("delivery routing, not a task step"),
+            "routine-advisor must frame send-me asks as routing so prompts never carry a \
+             send-to-requester step"
+        );
+    }
+
     #[tokio::test]
     async fn bundled_reborn_skills_include_current_repo_bundles_and_assets() {
         let dir = tempfile::tempdir().expect("tempdir");

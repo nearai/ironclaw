@@ -20,7 +20,7 @@
 // — reused, not a new feature, per §12's "no new feature flag" non-goal).
 // `SubagentSpawnDeps.await_edge_writer`/observer registration hold these as
 // `Arc<dyn AwaitEdgeWriter>`/`Arc<dyn TurnCommittedEventObserver>` trait
-// objects (loop_support/ironclaw_turns types, no filesystem dependency), so
+// objects (loop_host/ironclaw_turns types, no filesystem dependency), so
 // gating the concrete impl here does not ripple into always-compiled code.
 #[cfg(feature = "filesystem-goal-store")]
 pub mod boot_recovery;

@@ -1954,11 +1954,11 @@ fn doctor_uses_reborn_home_override_without_touching_v1_state() {
         stdout.contains(reborn_home.to_str().expect("utf8 path")),
         "stdout: {stdout}"
     );
-    assert!(stdout.contains("profile: local-dev"), "stdout: {stdout}");
-    assert!(stdout.contains("v1_state: not-used"), "stdout: {stdout}");
+    assert!(stdout.contains("local-dev"), "stdout: {stdout}");
+    assert!(stdout.contains("text_only_driver"), "stdout: {stdout}");
     assert!(
-        stdout.contains("driver_registry: initialized"),
-        "stdout: {stdout}"
+        !stdout.contains("v1_state"),
+        "doctor output should not include v1_state"
     );
     assert!(
         !reborn_home.exists(),
@@ -2444,8 +2444,8 @@ fn doctor_default_home_is_reborn_scoped_and_dry_run() {
         stdout.contains(reborn_home.to_str().expect("utf8 path")),
         "stdout: {stdout}"
     );
-    assert!(stdout.contains("home_source: default"), "stdout: {stdout}");
-    assert!(stdout.contains("profile: local-dev"), "stdout: {stdout}");
+    assert!(stdout.contains("(default)"), "stdout: {stdout}");
+    assert!(stdout.contains("local-dev"), "stdout: {stdout}");
     assert!(
         !temp.path().join(".ironclaw").exists(),
         "doctor should not create default Reborn or v1 state directories"
@@ -2469,7 +2469,12 @@ fn doctor_reports_explicit_profile() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("profile: production"), "stdout: {stdout}");
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.contains("profile") && line.contains("production")),
+        "expected a line containing both 'profile' and 'production', stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -2670,6 +2675,46 @@ fn doctor_rejects_missing_home_for_default_reborn_home() {
     assert!(
         stderr.contains("HOME or USERPROFILE must be set"),
         "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn doctor_json_reports_checks_and_summary() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+
+    let output = Command::new(reborn_bin())
+        .args(["doctor", "--json"])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env_remove("IRONCLAW_REBORN_PROFILE")
+        .output()
+        .expect("ironclaw-reborn doctor --json should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+
+    let checks = json["checks"].as_array().expect("checks is array");
+    assert!(!checks.is_empty(), "checks should not be empty");
+    for check in checks {
+        assert!(check.get("name").is_some(), "check must have name");
+        assert!(check.get("category").is_some(), "check must have category");
+        assert!(check.get("outcome").is_some(), "check must have outcome");
+        assert!(check.get("detail").is_some(), "check must have detail");
+    }
+
+    let summary = &json["summary"];
+    assert!(summary["pass"].is_u64(), "summary.pass must be numeric");
+    assert!(summary["fail"].is_u64(), "summary.fail must be numeric");
+    assert!(summary["skip"].is_u64(), "summary.skip must be numeric");
+
+    assert!(
+        !reborn_home.exists(),
+        "doctor --json should not create state directories"
     );
 }
 
@@ -3060,6 +3105,289 @@ fn config_path_reports_file_presence() {
     assert!(
         present_stdout.contains("providers") && present_stdout.contains("present"),
         "stdout: {present_stdout}"
+    );
+}
+
+// ─── status ───────────────────────────────────────────────────────────────
+
+#[test]
+fn status_reports_reborn_home_without_touching_v1_state() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+
+    let output = Command::new(reborn_bin())
+        .arg("status")
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env_remove("IRONCLAW_REBORN_PROFILE")
+        .output()
+        .expect("ironclaw-reborn status should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("IronClaw Reborn status"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains(reborn_home.to_str().expect("utf8 path")),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("local-dev"), "stdout: {stdout}");
+    assert!(stdout.contains("text_only"), "stdout: {stdout}");
+    assert!(
+        !stdout.contains("v1_state"),
+        "status output should not include v1_state"
+    );
+    assert!(
+        !reborn_home.exists(),
+        "status should not create state directories"
+    );
+}
+
+#[test]
+fn status_json_reports_reborn_home_without_touching_v1_state() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+
+    let output = Command::new(reborn_bin())
+        .arg("status")
+        .arg("--json")
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env_remove("IRONCLAW_REBORN_PROFILE")
+        .output()
+        .expect("ironclaw-reborn status --json should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    assert_eq!(
+        json["reborn_home"],
+        reborn_home.to_str().expect("utf8 path")
+    );
+    assert_eq!(json["profile"], "local-dev");
+    assert!(json["drivers"]["text_only"].is_object());
+    assert!(
+        json.get("v1_state").is_none(),
+        "status JSON should not include v1_state"
+    );
+    assert!(
+        !reborn_home.exists(),
+        "status should not create state directories"
+    );
+}
+
+#[test]
+fn status_json_reports_present_config_and_providers_files() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    std::fs::create_dir_all(&reborn_home).expect("create Reborn home");
+    let config_path = reborn_home.join("config.toml");
+    let providers_path = reborn_home.join("providers.json");
+    std::fs::write(&config_path, "").expect("write config");
+    std::fs::write(&providers_path, "[]").expect("write providers");
+
+    let output = Command::new(reborn_bin())
+        .args(["status", "--json"])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn status --json should run");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("valid status JSON");
+    assert_eq!(
+        json["config_file"]["path"],
+        config_path.to_str().expect("utf8")
+    );
+    assert_eq!(json["config_file"]["present"], true);
+    assert_eq!(
+        json["providers_file"]["path"],
+        providers_path.to_str().expect("utf8")
+    );
+    assert_eq!(json["providers_file"]["present"], true);
+}
+
+// ─── config list ──────────────────────────────────────────────────────────
+
+#[test]
+fn config_list_reports_entries_without_creating_state() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+
+    let output = Command::new(reborn_bin())
+        .args(["config", "list"])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env_remove("IRONCLAW_REBORN_PROFILE")
+        .output()
+        .expect("ironclaw-reborn config list should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("IronClaw Reborn config"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("api_version"), "stdout: {stdout}");
+    assert!(stdout.contains("boot.profile"), "stdout: {stdout}");
+    assert!(stdout.contains("harness.id"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("llm.default.provider_id"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        !reborn_home.exists(),
+        "config list should not create state directories"
+    );
+}
+
+#[test]
+fn config_list_json_reports_entries_without_creating_state() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+
+    let output = Command::new(reborn_bin())
+        .args(["config", "list", "--json"])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env_remove("IRONCLAW_REBORN_PROFILE")
+        .output()
+        .expect("ironclaw-reborn config list --json should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    let entries = json["entries"].as_array().expect("entries is array");
+    assert!(!entries.is_empty(), "entries should not be empty");
+    let first = &entries[0];
+    assert!(first.get("key").is_some(), "entry should have key field");
+    assert!(
+        entries
+            .iter()
+            .any(|e| e["key"] == "llm.default.provider_id"),
+        "entries should include llm.default.provider_id"
+    );
+    assert!(
+        !reborn_home.exists(),
+        "config list should not create state directories"
+    );
+}
+
+// ─── config get ───────────────────────────────────────────────────────────
+
+#[test]
+fn config_get_known_key_prints_value() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+
+    let output = Command::new(reborn_bin())
+        .args(["config", "get", "boot.profile"])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env_remove("IRONCLAW_REBORN_PROFILE")
+        .output()
+        .expect("ironclaw-reborn config get should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("(not set)") || stdout.contains("local-dev"),
+        "stdout should contain the value or (not set): {stdout}"
+    );
+}
+
+#[test]
+fn config_get_known_key_json_prints_value() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+
+    let output = Command::new(reborn_bin())
+        .args(["config", "get", "boot.profile", "--json"])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env_remove("IRONCLAW_REBORN_PROFILE")
+        .output()
+        .expect("ironclaw-reborn config get --json should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    assert_eq!(json["key"], "boot.profile");
+}
+
+#[test]
+fn config_get_unknown_key_exits_nonzero() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+
+    let output = Command::new(reborn_bin())
+        .args(["config", "get", "nonexistent.key"])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env_remove("IRONCLAW_REBORN_PROFILE")
+        .output()
+        .expect("ironclaw-reborn config get should run");
+
+    assert!(
+        !output.status.success(),
+        "config get with unknown key should exit nonzero"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unknown config key"),
+        "stderr should mention unknown key: {stderr}"
+    );
+}
+
+#[test]
+fn config_list_rejects_malformed_config() {
+    assert_config_read_rejects_malformed(&["config", "list"]);
+}
+
+#[test]
+fn config_get_rejects_malformed_config() {
+    assert_config_read_rejects_malformed(&["config", "get", "boot.profile"]);
+}
+
+fn assert_config_read_rejects_malformed(args: &[&str]) {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    std::fs::create_dir_all(&reborn_home).expect("create Reborn home");
+    std::fs::write(reborn_home.join("config.toml"), "[boot\nprofile = broken")
+        .expect("write malformed config");
+
+    let output = Command::new(reborn_bin())
+        .args(args)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("config read command should run");
+    assert!(!output.status.success(), "malformed config must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failed to parse") || stderr.contains("TOML"),
+        "stderr should report parse failure: {stderr}"
     );
 }
 

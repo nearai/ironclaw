@@ -144,6 +144,11 @@ impl ProviderToolCallReferenceEnvelope {
 }
 
 impl ToolResultReferenceEnvelope {
+    /// Validate an opaque result reference before it is used as a storage key.
+    pub fn validate_result_ref(value: &str) -> Result<(), String> {
+        validate_tool_result_ref(value)
+    }
+
     pub fn new(
         result_ref: impl Into<String>,
         safe_summary: ToolResultSafeSummary,
@@ -183,25 +188,13 @@ impl ToolResultReferenceEnvelope {
             return Ok(envelope);
         };
 
-        match validate_model_observation(&model_observation) {
-            Ok(()) => {
-                let model_observation_content =
-                    serde_json::to_string(&model_observation).unwrap_or_default();
-                log_model_observation_constructed(&envelope.result_ref, &model_observation_content);
-                envelope.model_observation = Some(model_observation);
-            }
-            Err(error) => {
-                tracing::debug!(
-                    reason = %error,
-                    result_ref = %envelope.result_ref,
-                    "model-visible tool observation validation failed; preserving safe summary"
-                );
-                tracing::warn!(
-                    reason = %error,
-                    result_ref = %envelope.result_ref,
-                    "dropping invalid model-visible tool observation and preserving safe summary"
-                );
-            }
+        if let Some(model_observation) =
+            normalized_model_observation(&envelope.result_ref, model_observation)
+        {
+            let model_observation_content =
+                serde_json::to_string(&model_observation).unwrap_or_default();
+            log_model_observation_constructed(&envelope.result_ref, &model_observation_content);
+            envelope.model_observation = Some(model_observation);
         }
         Ok(envelope)
     }
@@ -312,6 +305,46 @@ impl ToolResultReferenceEnvelope {
         serde_json::to_string(&merged)
             .map(Some)
             .map_err(|error| error.to_string())
+    }
+}
+
+fn normalized_model_observation(
+    result_ref: &str,
+    mut model_observation: serde_json::Value,
+) -> Option<serde_json::Value> {
+    match validate_model_observation(&model_observation) {
+        Ok(()) => Some(model_observation),
+        Err(error) => {
+            let removed_result_preview = model_observation
+                .as_object_mut()
+                .and_then(|observation| observation.get_mut("detail"))
+                .and_then(serde_json::Value::as_object_mut)
+                .filter(|detail| {
+                    detail.get("kind").and_then(serde_json::Value::as_str)
+                        == Some("result_reference")
+                })
+                .and_then(|detail| detail.remove("preview"))
+                .is_some();
+            if removed_result_preview && validate_model_observation(&model_observation).is_ok() {
+                tracing::warn!(
+                    reason = %error,
+                    result_ref = %result_ref,
+                    "dropping an unsafe tool-result preview while preserving its result reference"
+                );
+                Some(model_observation)
+            } else {
+                tracing::debug!(
+                    reason = %error,
+                    "model-visible tool observation validation failed; preserving safe summary"
+                );
+                tracing::warn!(
+                    reason = %error,
+                    result_ref = %result_ref,
+                    "dropping invalid model-visible tool observation and preserving safe summary"
+                );
+                None
+            }
+        }
     }
 }
 
@@ -533,14 +566,52 @@ fn validate_model_observation_detail(value: &serde_json::Value) -> Result<(), St
         "generic_failure" => {
             validate_object_keys(
                 object,
-                &["kind", "failure_kind"],
+                &["kind", "failure_kind", "detail"],
                 "model observation detail",
             )?;
             validate_model_observation_identifier(
                 required_string(object, "failure_kind", "model observation detail")?,
                 "model observation failure kind",
                 128,
+            )?;
+            validate_optional_observation_text_len(
+                optional_string(object, "detail", "model observation detail")?,
+                "model observation failure detail",
+                MAX_MODEL_OBSERVATION_BYTES,
             )
+        }
+        "result_reference" => {
+            validate_object_keys(
+                object,
+                &[
+                    "kind",
+                    "result_ref",
+                    "byte_len",
+                    "preview",
+                    "total_bytes",
+                    "next_offset",
+                ],
+                "model observation detail",
+            )?;
+            validate_required_observation_text(
+                required_string(object, "result_ref", "model observation detail")?,
+                "model observation result ref",
+                MODEL_OBSERVATION_TEXT_MAX_BYTES,
+            )?;
+            required_u64(object, "byte_len", "model observation detail")?;
+            for field in ["total_bytes", "next_offset"] {
+                if let Some(value) = object.get(field)
+                    && value.as_u64().is_none()
+                {
+                    return Err(format!(
+                        "model observation detail field `{field}` must be a u64"
+                    ));
+                }
+            }
+            if let Some(preview) = optional_string(object, "preview", "model observation detail")? {
+                validate_model_observation_text(preview)?;
+            }
+            Ok(())
         }
         other => Err(format!(
             "model observation detail kind `{other}` is unsupported"
@@ -799,8 +870,16 @@ fn validate_optional_observation_text(
     value: Option<&str>,
     label: &'static str,
 ) -> Result<(), String> {
+    validate_optional_observation_text_len(value, label, MODEL_OBSERVATION_TEXT_MAX_BYTES)
+}
+
+fn validate_optional_observation_text_len(
+    value: Option<&str>,
+    label: &'static str,
+    max_bytes: usize,
+) -> Result<(), String> {
     if let Some(value) = value {
-        validate_observation_text_len(value, label, MODEL_OBSERVATION_TEXT_MAX_BYTES)?;
+        validate_observation_text_len(value, label, max_bytes)?;
     }
     Ok(())
 }
@@ -905,6 +984,47 @@ mod tests {
                 .and_then(|detail| detail.get("failure_kind"))
                 .and_then(serde_json::Value::as_str),
             Some("repeated_error_elided")
+        );
+    }
+
+    #[test]
+    fn generic_failure_observation_accepts_diagnostic_detail() {
+        let diagnostic = "missing input_schema_ref at /system/extensions/google-calendar/schemas/google-calendar/list_calendars.input.v1.json";
+        let error_obs = serde_json::json!({
+            "schema_version": 1,
+            "status": "error",
+            "summary": "Capability failed with missing_runtime.",
+            "detail": {
+                "kind": "generic_failure",
+                "failure_kind": "missing_runtime",
+                "detail": diagnostic,
+            },
+            "recovery": {
+                "same_call_retry": "not_useful",
+                "repairs": [],
+                "recovery_hint": "respect_failure_constraint",
+            },
+            "trust": "untrusted_tool_output",
+        });
+
+        let envelope = ToolResultReferenceEnvelope::with_model_observation(
+            "result:tool-output_1.4",
+            ToolResultSafeSummary::new("tool failed").expect("summary"),
+            error_obs,
+        )
+        .expect("diagnostic observation envelope");
+
+        envelope
+            .validate()
+            .expect("diagnostic observation validates");
+        assert_eq!(
+            envelope
+                .model_observation
+                .as_ref()
+                .and_then(|observation| observation.get("detail"))
+                .and_then(|detail| detail.get("detail"))
+                .and_then(serde_json::Value::as_str),
+            Some(diagnostic)
         );
     }
 

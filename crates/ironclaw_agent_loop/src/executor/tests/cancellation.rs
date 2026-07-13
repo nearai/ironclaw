@@ -641,6 +641,7 @@ async fn cancellation_after_capability_batch_preserves_completed_result() {
                 terminate_hint: true,
                 byte_len: 0,
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         }])

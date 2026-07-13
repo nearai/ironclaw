@@ -405,9 +405,18 @@ impl RebornBinaryE2EHarness {
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
     ) -> HarnessResult<Self> {
+        // Invariant (#5459): the profile (credential seeding included) must be
+        // built under the same subject user the turn's authenticated binding
+        // resolves to — extension_remove reads ownership under that actor, so a
+        // fixed profile user makes install-then-remove see "never installed".
+        // Mirrors `build_group_capability_with_base` in the group harness.
+        let subject_user = Self::resolve_default_binding_subject_user(conversation_id).await?;
         let host_runtime = Arc::new(
-            crate::reborn_support::harness::profiles::extension::extension_lifecycle_tools()
-                .await?,
+            crate::reborn_support::harness::profiles::extension::extension_lifecycle_tools_profile_for_user(
+                subject_user.as_str(),
+            )?
+            .build()
+            .await?,
         );
         Self::with_model_gateway_capability_mode(
             conversation_id,
@@ -416,6 +425,35 @@ impl RebornBinaryE2EHarness {
             false,
         )
         .await
+    }
+
+    /// Resolve the `(tenant, subject-user)` a default `submit_text` call
+    /// (actor `"alice"`, adapter `"reborn-test"`, installation `"install-1"`)
+    /// will bind to for `conversation_id`, WITHOUT depending on the harness
+    /// under construction. Deterministic and side-effect-free from the
+    /// caller's perspective (its own throwaway `filesystem_temp` product
+    /// harness/backend): direct-chat routes set `subject_user_id` to the
+    /// resolved actor (`ResolvedBinding` doc comment), so this reproduces
+    /// exactly what the real turn's binding resolves to later.
+    async fn resolve_default_binding_subject_user(
+        conversation_id: &str,
+    ) -> HarnessResult<ironclaw_host_api::UserId> {
+        let adapter = RebornTestProductAdapter::new("reborn-test", "install-1")?;
+        let ingress = RebornTestIngress::new(adapter);
+        let envelope = ingress.verified_text_envelope_with_trigger(
+            "extension-lifecycle-actor-probe",
+            "alice",
+            conversation_id,
+            "probe",
+            ProductTriggerReason::DirectChat,
+        )?;
+        let binding_request = binding_request_from_envelope(&envelope);
+        let product_harness = RebornProductWorkflowHarness::filesystem_temp(product_scope())?;
+        let binding = product_harness
+            .binding_service()?
+            .resolve_binding(binding_request)
+            .await?;
+        Ok(binding.subject_user_id.unwrap_or(binding.actor_user_id))
     }
 
     pub async fn with_host_runtime_skill_management_capabilities(
@@ -721,7 +759,10 @@ impl RebornBinaryE2EHarness {
             capability_input_resolver,
             capability_result_writer,
             capability_recorder,
-        ) = capability_mode.into_parts(milestone_sink.clone())?;
+        ) = capability_mode.into_parts(
+            milestone_sink.clone(),
+            thread_harness.service.clone() as Arc<dyn SessionThreadService>,
+        )?;
         // Same shared `ScopedFilesystem` handle the turn store uses (`/turns`
         // mount) — the await-edge tree lives at
         // `/turns/subagent-await-edges/...`, a sibling prefix, per §4.5a's

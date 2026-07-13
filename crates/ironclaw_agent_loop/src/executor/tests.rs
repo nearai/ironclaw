@@ -15,6 +15,7 @@ use ironclaw_turns::{
         LoopCompactionOutcome, LoopCompactionResponse, LoopContextCompactionKind, LoopInput,
         LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInterruptKind, LoopProcessRef,
         LoopProgressEvent, LoopRunInfoPort, LoopSafeSummary, LoopSummaryArtifactId,
+        MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleToolObservation,
         ObservationTrust, ParentLoopOutput, ProcessHandleSummary, PromptMode,
         ProviderToolCallReplay, SameCallRetryConstraint, ToolObservationDetail,
         ToolObservationStatus, VisibleCapabilityRequest,
@@ -55,6 +56,27 @@ use support::*;
 
 mod cancellation;
 mod failure_matrix;
+
+fn continuation_observation(
+    result_ref: &LoopResultRef,
+    byte_len: u64,
+) -> ModelVisibleToolObservation {
+    ModelVisibleToolObservation {
+        schema_version: 1,
+        status: ToolObservationStatus::Success,
+        summary: "Use result_read to continue this child result.".to_string(),
+        detail: ToolObservationDetail::ResultReference {
+            result_ref: result_ref.as_str().to_string(),
+            byte_len,
+            preview: Some("first bounded chunk".to_string()),
+            total_bytes: Some(byte_len * 2),
+            next_offset: Some(byte_len),
+        },
+        artifacts: Vec::new(),
+        recovery: None,
+        trust: ObservationTrust::UntrustedToolOutput,
+    }
+}
 
 #[tokio::test]
 async fn reply_only_completes_with_final_checkpoint() {
@@ -646,18 +668,20 @@ async fn prompt_stage_cancellation_after_prompt_bundle_returns_cancelled_exit() 
 }
 
 #[tokio::test]
-async fn prompt_stage_compaction_timeout_returns_failed_exit() {
+async fn prompt_stage_compaction_inference_timeout_returns_to_normal_prompt_path() {
+    // Simulates the inner `ModelGatewayBackedSystemInferencePort` deadline
+    // firing: it surfaces as `LoopCompactionError::InferenceFailed`, not as
+    // a separate outer race in the executor (that duplicate timeout was
+    // removed — see `await_compaction_with_cancellation`).
     let host = MockHost::new(Vec::new())
         .with_prompt_compaction_index(vec![compaction_metadata(
             1,
             LoopContextCompactionKind::User,
             10,
         )])
-        .with_compaction_result(Ok(LoopCompactionResponse {
-            summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
-            compression_ratio_ppm: 250_000,
-        }))
-        .with_compaction_delay(std::time::Duration::from_millis(25));
+        .with_compaction_result(Err(LoopCompactionError::InferenceFailed {
+            safe_summary: LoopSafeSummary::new("compaction deadline exceeded").unwrap(),
+        }));
     let family = family_with_compaction_strategy(DefaultCompactionStrategy {
         deadline_ms: 1,
         ..Default::default()
@@ -680,26 +704,43 @@ async fn prompt_stage_compaction_timeout_returns_failed_exit() {
         .await
         .expect("prompt stage");
 
-    match step {
-        PromptStep::Exit(LoopExit::Failed(failed)) => {
-            assert!(failed.checkpoint_id.is_some());
+    let output = match step {
+        PromptStep::Prepared(output) => output,
+        PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
+        PromptStep::ResumeApproval(_)
+        | PromptStep::ResumeAuth(_)
+        | PromptStep::ResumeExternalTool(_) => {
+            panic!("unexpected resume step")
         }
-        _ => panic!("expected failed exit"),
-    }
-    assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
+        PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
+    };
+    assert_eq!(
+        output.state.compaction_state.last_deferred,
+        Some(DeferredCompactionWatermark {
+            through_seq: 1,
+            prompt_fingerprint: output.state.compaction_prompt.fingerprint(),
+        })
+    );
+    assert!(
+        !output
+            .state
+            .compaction_state
+            .force_compact_on_next_iteration
+    );
+    assert_eq!(host.prompt_requests().len(), 1);
+    assert!(host.checkpoint_kinds().is_empty());
     assert_eq!(
         host.progress_event_names(),
         vec![
             "prompt_bundle_built",
             "compaction_started",
             "compaction_failed",
-            "checkpoint_written",
         ]
     );
 }
 
 #[tokio::test]
-async fn prompt_stage_compaction_security_rejection_returns_failed_exit() {
+async fn prompt_stage_compaction_security_rejection_returns_to_normal_prompt_path() {
     let host = MockHost::new(Vec::new())
         .with_prompt_compaction_index(vec![compaction_metadata(
             1,
@@ -731,32 +772,41 @@ async fn prompt_stage_compaction_security_rejection_returns_failed_exit() {
         .await
         .expect("prompt stage");
 
-    match step {
-        PromptStep::Exit(LoopExit::Failed(failed)) => {
-            assert!(failed.checkpoint_id.is_some());
-        }
-        PromptStep::Prepared(_) => panic!("security rejection should end the run"),
+    let output = match step {
+        PromptStep::Prepared(output) => output,
         PromptStep::ResumeApproval(_)
         | PromptStep::ResumeAuth(_)
         | PromptStep::ResumeExternalTool(_) => {
             panic!("unexpected resume step")
         }
-        PromptStep::Exit(exit) => panic!("expected failed exit, got {exit:?}"),
+        PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
         PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
-    }
+    };
+    assert_eq!(
+        output.state.compaction_state.last_deferred,
+        Some(DeferredCompactionWatermark {
+            through_seq: 1,
+            prompt_fingerprint: output.state.compaction_prompt.fingerprint(),
+        })
+    );
+    assert!(
+        !output
+            .state
+            .compaction_state
+            .force_compact_on_next_iteration
+    );
     assert_eq!(
         host.prompt_requests().len(),
-        2,
-        "compaction failure should request a best-effort explanation prompt"
+        1,
+        "compaction failure should continue with the existing prompt candidate"
     );
-    assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
+    assert!(host.checkpoint_kinds().is_empty());
     assert_eq!(
         host.progress_event_names(),
         vec![
             "prompt_bundle_built",
             "compaction_started",
             "compaction_failed",
-            "checkpoint_written",
         ]
     );
 }
@@ -813,6 +863,22 @@ async fn compaction_failure_cancellation_skips_explanation_and_returns_cancelled
         host.prompt_requests().len(),
         1,
         "compaction cancellation should not request a failure explanation prompt"
+    );
+
+    // The Final checkpoint must persist the deferred watermark set by the
+    // failure-fallback path, not just the in-memory Cancelled exit.
+    let final_state = final_staged_state(&host);
+    assert!(
+        !final_state.compaction_state.force_compact_on_next_iteration,
+        "force_compact_on_next_iteration must be cleared before the Final checkpoint"
+    );
+    assert_eq!(
+        final_state.compaction_state.last_deferred,
+        Some(DeferredCompactionWatermark {
+            through_seq: 1,
+            prompt_fingerprint: final_state.compaction_prompt.fingerprint(),
+        }),
+        "deferred watermark must persist through the cancellation checkpoint"
     );
 }
 
@@ -1337,6 +1403,7 @@ async fn reply_admission_rejects_candidate_before_finalizing_and_continues() {
                 terminate_hint: false,
                 byte_len: 0,
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         }]);
@@ -1408,6 +1475,7 @@ async fn reply_admission_rendered_flag_stays_false_when_context_suppresses_contr
                 terminate_hint: false,
                 byte_len: 0,
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         }]);
@@ -1586,6 +1654,7 @@ async fn capability_stage_returns_after_batch_summary() {
                 terminate_hint: false,
                 byte_len: 0,
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         },
@@ -2085,6 +2154,7 @@ async fn stopped_on_suspension_completed_outcome_still_appends_result() {
                 terminate_hint: true,
                 byte_len: 0,
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: true,
         },
@@ -2176,6 +2246,7 @@ async fn terminate_hint_after_batch_completes_without_extra_model_call() {
                 terminate_hint: true,
                 byte_len: 0,
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         },
@@ -2314,6 +2385,7 @@ async fn approval_resume_metadata_is_replayed_after_before_block_checkpoint() {
                 terminate_hint: true,
                 byte_len: 0,
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         },
@@ -2545,6 +2617,7 @@ async fn parallel_batch_records_completed_results_before_blocking_on_suspension(
                     terminate_hint: false,
                     byte_len: 0,
                     output_digest: None,
+                    model_observation: None,
                 }),
             ],
             stopped_on_suspension: false,
@@ -2605,6 +2678,7 @@ async fn capability_batch_rejects_outcome_count_exceeding_invocation_count() {
                     terminate_hint: false,
                     byte_len: 0,
                     output_digest: None,
+                    model_observation: None,
                 }),
                 CapabilityOutcome::Completed(CapabilityResultMessage {
                     result_ref: LoopResultRef::new("result:second").expect("valid"),
@@ -2613,6 +2687,7 @@ async fn capability_batch_rejects_outcome_count_exceeding_invocation_count() {
                     terminate_hint: false,
                     byte_len: 0,
                     output_digest: None,
+                    model_observation: None,
                 }),
             ],
             stopped_on_suspension: true,
@@ -2878,7 +2953,15 @@ async fn capability_abort_finalizes_explanation_and_failed_exit_refs_partial_fir
     );
     let requests = host.model_requests();
     assert_eq!(requests.len(), 2);
-    assert!(requests[1].capability_view.is_none());
+    let explanation_capability_view = requests[1]
+        .capability_view
+        .as_ref()
+        .expect("failure explanation model request must suppress tools");
+    assert!(
+        explanation_capability_view
+            .visible_capability_ids
+            .is_empty()
+    );
     assert!(requests[1].surface_version.is_none());
     assert!(requests[1].model_preference.is_none());
 }
@@ -3142,6 +3225,7 @@ async fn terminate_hint_counts_only_visible_invoked_calls() {
                 terminate_hint: true,
                 byte_len: 0,
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         },
@@ -3233,6 +3317,7 @@ async fn retry_uses_single_call_invocation() {
                     terminate_hint: true,
                     byte_len: 0,
                     output_digest: None,
+                    model_observation: None,
                 },
             )]);
         let executor = CanonicalAgentLoopExecutor;
@@ -3269,6 +3354,7 @@ async fn policy_denied_capability_error_honors_retry_recovery() {
                 terminate_hint: true,
                 byte_len: 0,
                 output_digest: None,
+                model_observation: None,
             },
         )]);
     let executor = CanonicalAgentLoopExecutor;
@@ -3330,6 +3416,7 @@ async fn spawned_child_run_result_append_failure_propagates_without_completed_re
                 result_ref,
                 safe_summary: "spawned child completed".to_string(),
                 byte_len: 0,
+                model_observation: None,
             }],
             stopped_on_suspension: false,
         }])
@@ -3361,6 +3448,7 @@ async fn spawned_child_run_rejects_unsafe_safe_summary_without_appending_result(
                 result_ref,
                 safe_summary: "/Users/alice/.ssh/id_rsa".to_string(),
                 byte_len: 0,
+                model_observation: None,
             }],
             stopped_on_suspension: false,
         },
@@ -3385,15 +3473,17 @@ async fn spawned_child_run_rejects_unsafe_safe_summary_without_appending_result(
 #[tokio::test]
 async fn completed_provider_call_appends_provider_replay_metadata() {
     let result_ref = LoopResultRef::new("result:provider-call").expect("valid");
+    let safe_summary = "a".repeat(300);
     let host = MockHost::new(vec![provider_calls_response()]).with_batch_outcomes(vec![
         ironclaw_turns::run_profile::CapabilityBatchOutcome {
             outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
                 result_ref: result_ref.clone(),
-                safe_summary: "provider call completed".to_string(),
+                safe_summary: safe_summary.clone(),
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: true,
                 byte_len: 0,
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         },
@@ -3426,6 +3516,29 @@ async fn completed_provider_call_appends_provider_replay_metadata() {
     );
     assert_eq!(provider_call.reasoning.as_deref(), Some("call reasoning"));
     assert_eq!(provider_call.signature.as_deref(), Some("sig-1"));
+    let model_observation = appended[0]
+        .model_observation
+        .as_ref()
+        .expect("model-visible observation");
+    assert_eq!(
+        model_observation.schema_version,
+        MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION
+    );
+    assert_eq!(model_observation.status, ToolObservationStatus::Success);
+    assert_eq!(model_observation.summary, safe_summary);
+    assert!(matches!(
+        &model_observation.detail,
+        ToolObservationDetail::GenericFailure {
+            failure_kind,
+            detail: None,
+        } if failure_kind.as_str() == "none"
+    ));
+    assert!(model_observation.artifacts.is_empty());
+    assert!(model_observation.recovery.is_none());
+    assert_eq!(
+        model_observation.trust,
+        ObservationTrust::UntrustedToolOutput
+    );
 }
 
 #[tokio::test]
@@ -3441,6 +3554,7 @@ async fn denied_provider_call_appends_failure_tool_result_for_replay() {
                     terminate_hint: true,
                     byte_len: 0,
                     output_digest: None,
+                    model_observation: None,
                 }),
                 CapabilityOutcome::Denied(ironclaw_turns::run_profile::CapabilityDenied {
                     reason_kind:
@@ -3705,6 +3819,7 @@ async fn completed_output_digest_is_recorded_into_seen_capability_output_digests
                 terminate_hint: true,
                 byte_len: 0,
                 output_digest: Some(digest),
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         },
@@ -4015,6 +4130,7 @@ async fn executor_post_capability_trips_policy_and_sets_flags_in_final_state() {
                 // Exceeds the default 32 000-byte cap for unknown capability ids.
                 byte_len: 33_001,
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         },
@@ -4078,6 +4194,7 @@ async fn executor_post_capability_does_not_trip_under_threshold() {
                 terminate_hint: true,
                 byte_len: 100, // well under the 32 000-byte default cap
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         },
@@ -4125,6 +4242,7 @@ async fn executor_skip_model_turn_bypasses_model_stage() {
                 terminate_hint: false, // loop must continue so SkipModel fires
                 byte_len: 33_001,
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         },
@@ -4237,6 +4355,7 @@ async fn executor_batch_accumulates_per_capability_bytes_and_trips() {
                     terminate_hint: true, // exit after batch so we can inspect state
                     byte_len: 20_000,
                     output_digest: None,
+                    model_observation: None,
                 }),
                 CapabilityOutcome::Completed(CapabilityResultMessage {
                     result_ref: LoopResultRef::new("result:second").expect("valid"),
@@ -4245,6 +4364,7 @@ async fn executor_batch_accumulates_per_capability_bytes_and_trips() {
                     terminate_hint: true,
                     byte_len: 20_000,
                     output_digest: None,
+                    model_observation: None,
                 }),
             ],
             stopped_on_suspension: false,
@@ -4295,6 +4415,42 @@ async fn executor_batch_accumulates_per_capability_bytes_and_trips() {
     );
 }
 
+#[tokio::test]
+async fn await_dependent_run_preserves_model_observation_for_replay() {
+    let result_ref =
+        LoopResultRef::new("result:await-dependent-preserved-observation").expect("valid");
+    let observation = continuation_observation(&result_ref, 4_096);
+    let host = MockHost::new(vec![provider_calls_response()]).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::AwaitDependentRun {
+                gate_ref: LoopGateRef::new("gate:await-dependent-preserved-observation")
+                    .expect("valid"),
+                result_ref,
+                safe_summary: "awaited child completed".to_string(),
+                byte_len: 4_096,
+                model_observation: Some(observation.clone()),
+            }],
+            stopped_on_suspension: true,
+        },
+    ]);
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(
+            &crate::families::default(),
+            &host,
+            LoopExecutionState::initial_for_run(host.run_context()),
+        )
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Blocked(_)));
+    assert_eq!(host.appended_result_refs().len(), 1);
+    assert_eq!(
+        host.appended_result_refs()[0].model_observation.as_ref(),
+        Some(&observation)
+    );
+}
+
 /// D2 regression: byte_len was hardcoded to 0 for SpawnedChildRun outcomes.
 /// ByteCapStrategy (WU-A) never tripped for builtin.spawn_subagent — the
 /// capability with the largest configured cap (48 KB) — even when the spawned
@@ -4317,6 +4473,7 @@ async fn spawned_child_run_byte_len_accumulates_and_trips_policy() {
                 // If byte_len were still hardcoded to 0 in append_spawned_child_result,
                 // the policy would never trip and both flag assertions below would fail.
                 byte_len: 49_001,
+                model_observation: None,
             }],
             stopped_on_suspension: false,
         },
@@ -4381,6 +4538,7 @@ async fn await_dependent_run_byte_len_accumulates_and_trips_policy() {
                 // still propagated as 0 in the AwaitDependentRunGateStage path,
                 // the pending_capability_bytes assertion below would fail.
                 byte_len: 33_001,
+                model_observation: None,
             }],
             stopped_on_suspension: true,
         },
@@ -4467,6 +4625,7 @@ async fn executor_emits_compaction_started_with_capability_result_overflow_initi
                 terminate_hint: false, // loop must continue so SkipModel iteration fires
                 byte_len: 33_001,      // exceeds the 32 000-byte default cap
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         }])
@@ -4558,6 +4717,59 @@ async fn executor_emits_compaction_started_with_capability_result_overflow_initi
         final_state.stop_state.turns_completed, 3,
         "turns_completed must be 3 (D-A: CompactionOnly turns count per \
          observe_completed_turn's unconditional increment)"
+    );
+}
+
+#[tokio::test]
+async fn executor_continues_after_forced_compaction_rejection_from_tool_result_overflow() {
+    let host = MockHost::new(vec![
+        calls_response(),
+        reply_response_with_text("final answer"),
+    ])
+    .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
+        outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+            result_ref: LoopResultRef::new("result:big-compaction-rejected").expect("valid"),
+            safe_summary: "large search result".to_string(),
+            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            terminate_hint: false,
+            byte_len: 33_001,
+            output_digest: None,
+            model_observation: None,
+        })],
+        stopped_on_suspension: false,
+    }])
+    .with_prompt_compaction_indexes(vec![active_task_preserving_compaction_index(), vec![]])
+    .with_compaction_outcome(Err(LoopCompactionError::SecurityRejected {
+        safe_summary: LoopSafeSummary::new("injection detected").unwrap(),
+    }));
+
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(
+        matches!(exit, LoopExit::Completed(_)),
+        "compaction rejection after successful tool execution must not fail the run: {exit:?}"
+    );
+    assert_eq!(
+        host.model_requests().len(),
+        2,
+        "the loop should continue to the post-tool reply model turn"
+    );
+    let progress_events = host.progress_event_names();
+    assert!(
+        progress_events.contains(&"compaction_failed"),
+        "the failed compaction should still be reported: {progress_events:?}"
+    );
+    assert!(
+        host.finalized_assistant_messages()
+            .iter()
+            .any(|message| message.contains("final answer")),
+        "the post-tool assistant reply should still finalize"
     );
 }
 
@@ -4677,6 +4889,7 @@ async fn await_dependent_run_gate_skip_and_continue_accumulates_byte_len() {
                 result_ref: LoopResultRef::new(result_ref_str).expect("valid"),
                 safe_summary: "dependent run skip and continue".to_string(),
                 byte_len,
+                model_observation: None,
             }],
             stopped_on_suspension: false,
         },
@@ -4914,6 +5127,7 @@ async fn parallel_batch_records_completed_results_before_external_tool_block() {
                     terminate_hint: false,
                     byte_len: 0,
                     output_digest: None,
+                    model_observation: None,
                 }),
                 CapabilityOutcome::ExternalToolPending {
                     gate_ref: external_gate_ref.clone(),
@@ -4971,6 +5185,7 @@ async fn resume_after_external_tool_gate_redispatches_without_model_turn() {
                     terminate_hint: true,
                     byte_len: 0,
                     output_digest: None,
+                    model_observation: None,
                 },
             )],
             stopped_on_suspension: false,
@@ -5047,6 +5262,7 @@ async fn resume_after_auth_gate_redispatches_original_call_without_model_turn() 
                     terminate_hint: true,
                     byte_len: 0,
                     output_digest: None,
+                    model_observation: None,
                 },
             )],
             stopped_on_suspension: false,
@@ -5218,6 +5434,7 @@ async fn auth_resume_provider_registration_failure_fails_before_invocation() {
                         terminate_hint: true,
                         byte_len: 0,
                         output_digest: None,
+                        model_observation: None,
                     },
                 )],
                 stopped_on_suspension: false,
@@ -5288,6 +5505,7 @@ async fn auth_resume_provider_activity_remap_fails_before_invocation() {
                     terminate_hint: true,
                     byte_len: 0,
                     output_digest: None,
+                    model_observation: None,
                 },
             )],
             stopped_on_suspension: false,
@@ -5780,6 +5998,7 @@ async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id
                     terminate_hint: true,
                     byte_len: 0,
                     output_digest: None,
+                    model_observation: None,
                 },
             )],
             stopped_on_suspension: false,
@@ -6022,6 +6241,7 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
                     terminate_hint: true,
                     byte_len: 0,
                     output_digest: None,
+                    model_observation: None,
                 },
             )],
             stopped_on_suspension: false,
@@ -6157,6 +6377,7 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
                         terminate_hint: false,
                         byte_len: 0,
                         output_digest: None,
+                        model_observation: None,
                     },
                 ),
                 CapabilityOutcome::Completed(
@@ -6167,6 +6388,7 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
                         terminate_hint: false,
                         byte_len: 0,
                         output_digest: None,
+                        model_observation: None,
                     },
                 ),
             ],
@@ -7005,6 +7227,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
                 terminate_hint: false,
                 byte_len: 0,
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         }]);
@@ -7203,6 +7426,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_activity_when_c
                 terminate_hint: false,
                 byte_len: 0,
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         },
@@ -7357,6 +7581,7 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
                     terminate_hint: false,
                     byte_len: 0,
                     output_digest: None,
+                    model_observation: None,
                 }),
                 CapabilityOutcome::Completed(CapabilityResultMessage {
                     result_ref: z_result_ref.clone(),
@@ -7365,6 +7590,7 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
                     terminate_hint: false,
                     byte_len: 0,
                     output_digest: None,
+                    model_observation: None,
                 }),
             ],
             stopped_on_suspension: false,
@@ -7600,6 +7826,7 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
                 terminate_hint: false,
                 byte_len: 0,
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         }]);
@@ -7816,6 +8043,7 @@ async fn capability_stage_denied_approval_resume_no_matching_call_dispatches_unr
                 terminate_hint: false,
                 byte_len: 0,
                 output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         }]);

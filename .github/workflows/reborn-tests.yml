@@ -793,8 +793,18 @@ jobs:
       - webui-v2-js-tests
       - qa-recorded-fixtures
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
       - name: Check Reborn test result
         run: |
+          # shellcheck disable=SC1091
+          if ! source .github/scripts/ci-job-result-ok.sh; then
+            echo "Unable to source .github/scripts/ci-job-result-ok.sh"
+            exit 1
+          fi
+
           if [[ "${{ needs.changes.result }}" != "success" ]]; then
             echo "changes failed: ${{ needs.changes.result }}"
             exit 1
@@ -810,22 +820,22 @@ jobs:
             exit 0
           fi
 
-          if [[ "${{ needs.package-matrix.result }}" != "success" ]]; then
+          if ! job_result_ok "package-matrix" "${{ needs.package-matrix.result }}" false "allow"; then
             echo "Reborn package matrix discovery failed: ${{ needs.package-matrix.result }}"
             exit 1
           fi
 
-          if [[ "${{ needs.crate-tests.result }}" != "success" ]]; then
+          if ! job_result_ok "crate-tests" "${{ needs.crate-tests.result }}" false "allow"; then
             echo "One or more Reborn binary crate tests failed: ${{ needs.crate-tests.result }}"
             exit 1
           fi
 
-          if [[ "${{ needs.root-reborn-parity-tests.result }}" != "success" ]]; then
+          if ! job_result_ok "root-reborn-parity-tests" "${{ needs.root-reborn-parity-tests.result }}" false "allow"; then
             echo "One or more Reborn root tests failed: ${{ needs.root-reborn-parity-tests.result }}"
             exit 1
           fi
 
-          if [[ "${{ needs.reborn-group-tests.result }}" != "success" ]]; then
+          if ! job_result_ok "reborn-group-tests" "${{ needs.reborn-group-tests.result }}" false "allow"; then
             echo "One or more Reborn group tests failed: ${{ needs.reborn-group-tests.result }}"
             exit 1
           fi
@@ -834,7 +844,7 @@ jobs:
           # suites (see the reborn-integration-coverage job), so it gates like
           # every other test job above — real pass/fail, not the coverage
           # percentage (that's coverage-report below).
-          if [[ "${{ needs.reborn-integration-coverage.result }}" != "success" ]]; then
+          if ! job_result_ok "reborn-integration-coverage" "${{ needs.reborn-integration-coverage.result }}" false "allow"; then
             echo "One or more Reborn integration-tier coverage lanes failed: ${{ needs.reborn-integration-coverage.result }}"
             exit 1
           fi
@@ -846,17 +856,17 @@ jobs:
           # like every other job above. (While [global].enforce = false in the
           # floor file, the ratchet step always exits 0, so this stays green
           # during the dry-run soak period — see the floor file's own header.)
-          if [[ "${{ needs.coverage-report.result }}" != "success" ]]; then
+          if ! job_result_ok "coverage-report" "${{ needs.coverage-report.result }}" false "allow"; then
             echo "Reborn coverage-report job failed (merge/summary error, or a coverage ratchet violation): ${{ needs.coverage-report.result }}"
             exit 1
           fi
 
-          if [[ "${{ needs.webui-v2-js-tests.result }}" != "success" ]]; then
+          if ! job_result_ok "webui-v2-js-tests" "${{ needs.webui-v2-js-tests.result }}" false "allow"; then
             echo "Reborn WebUI v2 JS tests failed: ${{ needs.webui-v2-js-tests.result }}"
             exit 1
           fi
 
-          if [[ "${{ needs.qa-recorded-fixtures.result }}" != "success" ]]; then
+          if ! job_result_ok "qa-recorded-fixtures" "${{ needs.qa-recorded-fixtures.result }}" false "allow"; then
             echo "Reborn QA recorded fixture tests failed: ${{ needs.qa-recorded-fixtures.result }}"
             exit 1
           fi

@@ -15,13 +15,19 @@
 //! - `search_messages`: Search all messages the user can see
 //! - `list_conversations`: List channels, DMs, and group DMs the user is in
 //! - `get_conversation_history`: Read history of any channel or DM
+//! - `get_thread_replies`: Read one thread's replies (not part of history)
 //! - `get_user_info`: Get information about a Slack user
+//! - `whoami`: Resolve who the connected account is (auth.test)
 //! - `send_message`: Post a message as the user
 //!
 //! # Example Usage
 //!
+//! The host selects the operation from the capability id (e.g.
+//! `slack.search_messages`); params carry only the operation's fields and
+//! must NOT include an `action` key:
+//!
 //! ```json
-//! {"action": "search_messages", "query": "from:@me project plan", "count": 20}
+//! {"query": "from:me project plan", "count": 20}
 //! ```
 
 mod api;
@@ -85,14 +91,27 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
     );
 
     let result = match action {
-        SlackUserAction::SearchMessages { query, count, sort } => {
-            let result =
-                api::search_messages(&query, count, sort.as_ref().map(|sort| sort.as_str()))?;
+        SlackUserAction::SearchMessages {
+            query,
+            count,
+            sort,
+            page,
+        } => {
+            let result = api::search_messages(
+                &query,
+                count,
+                sort.as_ref().map(|sort| sort.as_str()),
+                page,
+            )?;
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
 
-        SlackUserAction::ListConversations { types, limit } => {
-            let result = api::list_conversations(&types, limit)?;
+        SlackUserAction::ListConversations {
+            types,
+            limit,
+            cursor,
+        } => {
+            let result = api::list_conversations(&types, limit, cursor.as_deref())?;
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
 
@@ -111,8 +130,22 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
 
+        SlackUserAction::GetThreadReplies {
+            channel,
+            thread_ts,
+            limit,
+        } => {
+            let result = api::get_thread_replies(&channel, &thread_ts, limit)?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())?
+        }
+
         SlackUserAction::GetUserInfo { user_id } => {
             let result = api::get_user_info(&user_id)?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())?
+        }
+
+        SlackUserAction::Whoami => {
+            let result = api::whoami()?;
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
 
@@ -139,7 +172,9 @@ fn action_from_context(context: Option<&str>) -> Result<&'static str, String> {
         "slack.search_messages" => Ok("search_messages"),
         "slack.list_conversations" => Ok("list_conversations"),
         "slack.get_conversation_history" => Ok("get_conversation_history"),
+        "slack.get_thread_replies" => Ok("get_thread_replies"),
         "slack.get_user_info" => Ok("get_user_info"),
+        "slack.whoami" => Ok("whoami"),
         "slack.send_message" => Ok("send_message"),
         _ => Err("unsupported_slack_user_capability".to_string()),
     }

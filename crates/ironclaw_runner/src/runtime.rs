@@ -1411,7 +1411,7 @@ mod tests {
         //
         // This indirectly proves the threading: if the decorator passes a
         // non-empty catalog, the produced schema will have a satisfiable enum
-        // constraint. The companion empty-catalog test (gap 1, loop_support)
+        // constraint. The companion empty-catalog test (gap 1, loop_host)
         // confirms the absent-enum guard on the other side.
         use ironclaw_loop_host::build_spawn_subagent_parameters_schema;
 

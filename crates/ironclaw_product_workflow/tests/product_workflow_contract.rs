@@ -10,7 +10,8 @@ use chrono::{Duration, Utc};
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
 use ironclaw_conversations::{
-    ConversationBindingService as ConversationBindingPort, InMemoryConversationServices,
+    ConversationBindingService as ConversationBindingPort, ExternalActorBindingEpoch,
+    InMemoryConversationServices,
 };
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{
@@ -46,8 +47,9 @@ use ironclaw_product_workflow::{
     ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
     RebornFilesystemIdempotencyLedger, ResolveApprovalInteractionRequest,
     ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, ResolveBindingRequest, ResolvedBinding, SourceBindingKey,
-    StaticProductInstallationResolver, approval_gate_ref,
+    ResolveAuthInteractionResponse, ResolveBindingRequest, ResolvedBinding,
+    ResolvedProductActorUser, SourceBindingKey, StaticProductInstallationResolver,
+    approval_gate_ref,
 };
 use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_turns::{
@@ -4015,7 +4017,46 @@ async fn actor_user_resolver_accepts_user_message_without_legacy_pairing() {
         .next()
         .expect("turn should be submitted");
     assert_eq!(submission.actor.user_id.as_str(), "user:resolved-slack");
-    assert_eq!(actor_resolver.calls().len(), 1);
+    assert_eq!(
+        actor_resolver.calls().len(),
+        2,
+        "resolver-backed actor bindings are rechecked before the turn is submitted"
+    );
+}
+
+#[tokio::test]
+async fn actor_user_resolver_rewrites_pairing_after_explicit_unpair() {
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    let actor_ref = ExternalActorRef::new("test", "user1", None::<String>).expect("actor");
+    let (binding, _actor_resolver) = product_binding_service_with_actor_user_resolver(
+        conversations.clone(),
+        [(
+            actor_ref.clone(),
+            UserId::new("user:resolved-slack").expect("user"),
+        )],
+    );
+
+    binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(&sample_envelope(
+            "resolver-before-unpair",
+        )))
+        .await
+        .expect("initial resolved actor binding");
+    conversations
+        .unpair_external_actor(
+            &TenantId::new("tenant:alpha").expect("tenant"),
+            &ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
+            &ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
+            &ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+        )
+        .await;
+
+    binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(&sample_envelope(
+            "resolver-after-unpair",
+        )))
+        .await
+        .expect("same-process reconnect should rewrite the resolved actor pairing");
 }
 
 #[tokio::test]
@@ -4052,6 +4093,133 @@ async fn actor_user_resolver_rejects_unknown_actor_before_turn_submission() {
             ..
         }
     ));
+}
+
+#[tokio::test]
+async fn actor_user_resolver_rechecks_revocation_before_turn_submission() {
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    let actor_ref = ExternalActorRef::new("test", "user1", None::<String>).expect("actor");
+    let actor_resolver = Arc::new(RevokingProductActorUserResolver::new(
+        actor_ref,
+        UserId::new("user:resolved-slack").expect("user"),
+    ));
+    let binding = product_binding_service_with_actor_user_resolver_arc(
+        conversations.clone(),
+        actor_resolver.clone(),
+    );
+    let coordinator = Arc::new(RecordingTurnCoordinator::default());
+    let workflow = DefaultProductWorkflow::new(
+        Arc::new(DefaultInboundTurnService::new(
+            binding.clone(),
+            InMemorySessionThreadService::default(),
+            coordinator.clone(),
+        )),
+        Arc::new(InMemoryIdempotencyLedger::new()),
+        Arc::new(binding),
+    );
+
+    let err = workflow
+        .accept_inbound(sample_envelope("resolver-revoked-mid-resolution"))
+        .await
+        .expect_err("revoked actor should be rejected before turn submission");
+
+    assert!(coordinator.submissions().is_empty());
+    assert_eq!(
+        actor_resolver.calls(),
+        2,
+        "the second resolver call catches revocation after the initial stale read"
+    );
+    assert!(matches!(
+        err,
+        ProductAdapterError::WorkflowRejected {
+            kind: ProductWorkflowRejectionKind::ScopeNotFound,
+            status_code: 404,
+            retryable: false,
+            ..
+        }
+    ));
+
+    let stale = conversations
+        .lookup_binding(ironclaw_conversations::ResolveConversationRequest {
+            tenant_id: TenantId::new("tenant:alpha").expect("tenant"),
+            adapter_kind: ironclaw_conversations::AdapterKind::new("test_adapter")
+                .expect("adapter"),
+            adapter_installation_id: ironclaw_conversations::AdapterInstallationId::new(
+                "install_alpha",
+            )
+            .expect("install"),
+            external_actor_ref: ironclaw_conversations::ExternalActorRef::new("test", "user1")
+                .expect("actor"),
+            external_conversation_ref: ironclaw_conversations::ExternalConversationRef::new(
+                None, "conv1", None, None,
+            )
+            .expect("conversation"),
+            external_event_id: ironclaw_conversations::ExternalEventId::new(
+                "evt:resolver-revoked-mid-resolution-lookup",
+            )
+            .expect("event"),
+            route_kind: ironclaw_conversations::ConversationRouteKind::Direct,
+            requested_agent_id: Some(AgentId::new("agent:alpha").expect("agent")),
+            requested_project_id: Some(ProjectId::new("project:alpha").expect("project")),
+        })
+        .await
+        .expect_err("revalidation should roll back the stale pairing and direct route");
+    assert!(matches!(
+        stale,
+        ironclaw_conversations::InboundTurnError::BindingRequired { .. }
+    ));
+}
+
+#[tokio::test]
+async fn actor_user_resolver_revalidation_cannot_unpair_a_newer_generation() {
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    let actor_ref = ExternalActorRef::new("test", "user1", None::<String>).expect("actor");
+    let user_id = UserId::new("user:resolved-slack").expect("user");
+    let actor_resolver = Arc::new(ReplacingProductActorUserResolver::new(
+        conversations.clone(),
+        actor_ref,
+        user_id.clone(),
+    ));
+    let binding =
+        product_binding_service_with_actor_user_resolver_arc(conversations.clone(), actor_resolver);
+
+    binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(&sample_envelope(
+            "resolver-replaced-mid-resolution",
+        )))
+        .await
+        .expect_err("a generation change during resolution must reject the stale turn");
+
+    let resolution = conversations
+        .lookup_binding(ironclaw_conversations::ResolveConversationRequest {
+            tenant_id: TenantId::new("tenant:alpha").expect("tenant"),
+            adapter_kind: ironclaw_conversations::AdapterKind::new("test_adapter")
+                .expect("adapter"),
+            adapter_installation_id: ironclaw_conversations::AdapterInstallationId::new(
+                "install_alpha",
+            )
+            .expect("install"),
+            external_actor_ref: ironclaw_conversations::ExternalActorRef::new("test", "user1")
+                .expect("actor"),
+            external_conversation_ref: ironclaw_conversations::ExternalConversationRef::new(
+                None, "conv1", None, None,
+            )
+            .expect("conversation"),
+            external_event_id: ironclaw_conversations::ExternalEventId::new(
+                "evt:resolver-replaced-mid-resolution-lookup",
+            )
+            .expect("event"),
+            route_kind: ironclaw_conversations::ConversationRouteKind::Direct,
+            requested_agent_id: Some(AgentId::new("agent:alpha").expect("agent")),
+            requested_project_id: Some(ProjectId::new("project:alpha").expect("project")),
+        })
+        .await
+        .expect("stale generation cleanup must preserve the replacement pairing and route");
+    assert_eq!(resolution.actor.user_id, user_id);
+    assert_eq!(
+        resolution.binding_epoch,
+        Some(ExternalActorBindingEpoch::new("generation-2").expect("epoch"))
+    );
 }
 
 #[tokio::test]
@@ -4098,13 +4266,13 @@ async fn lookup_binding_with_actor_user_resolver_uses_existing_pairings_only() {
 
     assert!(
         actor_resolver.calls().is_empty(),
-        "existing-only lookup must not trigger resolver pairing challenges"
+        "lookup cannot revalidate until a durable pairing and route exist"
     );
     assert!(matches!(err, ProductWorkflowError::BindingRequired { .. }));
 }
 
 #[tokio::test]
-async fn lookup_binding_with_actor_user_resolver_ignores_resolver_failures() {
+async fn lookup_binding_with_actor_user_resolver_ignores_resolver_failures_before_route_lookup() {
     let conversations = Arc::new(InMemoryConversationServices::default());
     let binding = product_binding_service_with_actor_user_resolver_arc(
         conversations,
@@ -4116,13 +4284,13 @@ async fn lookup_binding_with_actor_user_resolver_ignores_resolver_failures() {
             "lookup-resolver-error",
         )))
         .await
-        .expect_err("lookup should fail from missing durable pairing, not resolver backend");
+        .expect_err("missing durable pairing fails before resolver revalidation");
 
     assert!(matches!(err, ProductWorkflowError::BindingRequired { .. }));
 }
 
 #[tokio::test]
-async fn lookup_binding_with_actor_user_resolver_returns_existing_actor_pairing() {
+async fn lookup_binding_with_actor_user_resolver_rejects_a_stale_actor_pairing() {
     let conversations = Arc::new(InMemoryConversationServices::default());
     conversations
         .pair_external_actor(
@@ -4156,16 +4324,77 @@ async fn lookup_binding_with_actor_user_resolver_returns_existing_actor_pairing(
         )],
     );
 
-    let resolved = binding
+    let error = binding
         .lookup_binding(ResolveBindingRequest::from_envelope(&envelope))
         .await
-        .expect("lookup should use the existing durable actor pairing");
+        .expect_err("lookup must reject a durable pairing that no longer matches the resolver");
 
-    assert!(
-        actor_resolver.calls().is_empty(),
-        "existing-only lookup must not reinterpret durable pairing through resolver"
-    );
-    assert_eq!(resolved.actor_user_id.as_str(), "user:paired-bob");
+    assert_eq!(actor_resolver.calls().len(), 1);
+    assert!(matches!(error, ProductWorkflowError::BindingAccessDenied));
+}
+
+#[tokio::test]
+async fn lookup_binding_rechecks_direct_actor_revocation_after_the_route_was_created() {
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    let resolver = Arc::new(MutableProductActorUserResolver::new(Some(
+        ResolvedProductActorUser {
+            user_id: UserId::new("user:resolved-slack").expect("user"),
+            binding_epoch: Some(ExternalActorBindingEpoch::new("generation-1").expect("epoch")),
+        },
+    )));
+    let binding =
+        product_binding_service_with_actor_user_resolver_arc(conversations, resolver.clone());
+    let envelope = sample_envelope("direct-route-revoked");
+    let request = ResolveBindingRequest::from_envelope(&envelope);
+    binding
+        .resolve_binding(request.clone())
+        .await
+        .expect("seed direct route");
+    resolver.set(None);
+
+    let error = binding
+        .lookup_binding(request)
+        .await
+        .expect_err("revoked actor must not use a cached direct route");
+
+    assert!(matches!(
+        error,
+        ProductWorkflowError::BindingRequired { .. } | ProductWorkflowError::BindingAccessDenied
+    ));
+}
+
+#[tokio::test]
+async fn lookup_binding_rechecks_direct_actor_revocation_when_the_epoch_changes() {
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    let user_id = UserId::new("user:resolved-slack").expect("user");
+    let resolver = Arc::new(MutableProductActorUserResolver::new(Some(
+        ResolvedProductActorUser {
+            user_id: user_id.clone(),
+            binding_epoch: Some(ExternalActorBindingEpoch::new("generation-1").expect("epoch")),
+        },
+    )));
+    let binding =
+        product_binding_service_with_actor_user_resolver_arc(conversations, resolver.clone());
+    let envelope = sample_envelope("direct-route-new-generation");
+    let request = ResolveBindingRequest::from_envelope(&envelope);
+    binding
+        .resolve_binding(request.clone())
+        .await
+        .expect("seed generation one direct route");
+    resolver.set(Some(ResolvedProductActorUser {
+        user_id,
+        binding_epoch: Some(ExternalActorBindingEpoch::new("generation-2").expect("epoch")),
+    }));
+
+    let error = binding
+        .lookup_binding(request)
+        .await
+        .expect_err("a new binding generation must fence the cached direct route");
+
+    assert!(matches!(
+        error,
+        ProductWorkflowError::BindingRequired { .. } | ProductWorkflowError::BindingAccessDenied
+    ));
 }
 
 #[tokio::test]
@@ -6234,6 +6463,40 @@ struct RecordingProductActorUserResolver {
     calls: Mutex<Vec<ProductActorUserResolutionRequest>>,
 }
 
+#[derive(Debug)]
+struct MutableProductActorUserResolver {
+    current: Mutex<Option<ResolvedProductActorUser>>,
+}
+
+impl MutableProductActorUserResolver {
+    fn new(current: Option<ResolvedProductActorUser>) -> Self {
+        Self {
+            current: Mutex::new(current),
+        }
+    }
+
+    fn set(&self, current: Option<ResolvedProductActorUser>) {
+        *self
+            .current
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = current;
+    }
+}
+
+#[async_trait]
+impl ProductActorUserResolver for MutableProductActorUserResolver {
+    async fn resolve_product_actor_user(
+        &self,
+        _request: ProductActorUserResolutionRequest,
+    ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
+        Ok(self
+            .current
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone())
+    }
+}
+
 impl RecordingProductActorUserResolver {
     fn new(bindings: impl IntoIterator<Item = (ExternalActorRef, UserId)>) -> Self {
         Self {
@@ -6255,12 +6518,109 @@ impl ProductActorUserResolver for RecordingProductActorUserResolver {
     async fn resolve_product_actor_user(
         &self,
         request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<UserId>, ProductWorkflowError> {
+    ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
         self.calls
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(request.clone());
-        Ok(self.bindings.get(&request.external_actor_ref).cloned())
+        Ok(self
+            .bindings
+            .get(&request.external_actor_ref)
+            .cloned()
+            .map(ResolvedProductActorUser::new))
+    }
+}
+
+#[derive(Debug)]
+struct RevokingProductActorUserResolver {
+    actor_ref: ExternalActorRef,
+    user_id: UserId,
+    calls: AtomicUsize,
+}
+
+struct ReplacingProductActorUserResolver {
+    conversations: Arc<InMemoryConversationServices>,
+    actor_ref: ExternalActorRef,
+    user_id: UserId,
+    calls: AtomicUsize,
+}
+
+impl ReplacingProductActorUserResolver {
+    fn new(
+        conversations: Arc<InMemoryConversationServices>,
+        actor_ref: ExternalActorRef,
+        user_id: UserId,
+    ) -> Self {
+        Self {
+            conversations,
+            actor_ref,
+            user_id,
+            calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl ProductActorUserResolver for ReplacingProductActorUserResolver {
+    async fn resolve_product_actor_user(
+        &self,
+        request: ProductActorUserResolutionRequest,
+    ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if request.external_actor_ref != self.actor_ref {
+            return Ok(None);
+        }
+        let epoch = if call == 0 {
+            ExternalActorBindingEpoch::new("generation-1").expect("epoch")
+        } else {
+            let epoch = ExternalActorBindingEpoch::new("generation-2").expect("epoch");
+            self.conversations
+                .pair_external_actor_with_epoch(
+                    TenantId::new("tenant:alpha").expect("tenant"),
+                    ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
+                    ironclaw_conversations::AdapterInstallationId::new("install_alpha")
+                        .expect("install"),
+                    ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+                    self.user_id.clone(),
+                    epoch.clone(),
+                )
+                .await
+                .expect("replace actor generation");
+            epoch
+        };
+        Ok(Some(ResolvedProductActorUser::with_binding_epoch(
+            self.user_id.clone(),
+            epoch,
+        )))
+    }
+}
+
+impl RevokingProductActorUserResolver {
+    fn new(actor_ref: ExternalActorRef, user_id: UserId) -> Self {
+        Self {
+            actor_ref,
+            user_id,
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl ProductActorUserResolver for RevokingProductActorUserResolver {
+    async fn resolve_product_actor_user(
+        &self,
+        request: ProductActorUserResolutionRequest,
+    ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call == 0 && request.external_actor_ref == self.actor_ref {
+            Ok(Some(ResolvedProductActorUser::new(self.user_id.clone())))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -6436,7 +6796,7 @@ impl ProductActorUserResolver for FailingProductActorUserResolver {
     async fn resolve_product_actor_user(
         &self,
         _request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<UserId>, ProductWorkflowError> {
+    ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
         Err(ProductWorkflowError::BindingResolutionFailed {
             reason: "actor resolver backend down".into(),
         })

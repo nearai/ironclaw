@@ -11,6 +11,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use super::super::{
+    HarnessResult, HostRuntimeCapabilityHarness, RecordingNetworkHttpTransport,
+    RecordingRuntimeHttpEgress, host_runtime_storage_roots, http_test_policy,
+    local_dev_host_runtime_with_http_egress, local_dev_host_runtime_with_live_http_egress,
+    local_dev_host_runtime_with_real_egress_pipeline, memory_mounts, workspace_mounts,
+};
 use ironclaw_host_api::{
     CapabilityId, EffectKind, ExtensionId, MountPermissions, NetworkPolicy, RuntimeKind, UserId,
 };
@@ -20,14 +26,6 @@ use ironclaw_host_runtime::{
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
     PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeProcessPort, SHELL_CAPABILITY_ID,
     TIME_CAPABILITY_ID,
-};
-use ironclaw_reborn_composition::ProductLiveCapabilityIo;
-
-use super::super::{
-    HarnessResult, HostRuntimeCapabilityHarness, RecordingNetworkHttpTransport,
-    RecordingRuntimeHttpEgress, host_runtime_storage_roots, http_test_policy,
-    local_dev_host_runtime_with_http_egress, local_dev_host_runtime_with_live_http_egress,
-    local_dev_host_runtime_with_real_egress_pipeline, memory_mounts, workspace_mounts,
 };
 
 /// How [`core_builtin_tools`] constructs HTTP egress. The three modes are
@@ -232,12 +230,16 @@ fn core_builtin_tools_from_runtime(
         // like the four memory_* capabilities above.
         CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?,
     ];
+    let (io, result_writer_io) = super::super::default_capability_io_pair();
     Ok(HostRuntimeCapabilityHarness {
         runtime,
         approval_parts: None,
         auto_approve_settings: None,
         pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
-        io: Arc::new(ProductLiveCapabilityIo::default()),
+        io: Mutex::new(io),
+        result_writer_io: Mutex::new(result_writer_io),
+        durable_capability_io_thread_service: Mutex::new(None),
+        durable_capability_io_requested: false,
         root,
         workspace_root,
         mounts,

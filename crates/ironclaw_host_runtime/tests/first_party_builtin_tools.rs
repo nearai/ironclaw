@@ -587,6 +587,125 @@ async fn builtin_trigger_create_stamps_caller_scope_and_persists_record() {
     assert_eq!(records[0].project_id, context.resource_scope.project_id);
 }
 
+/// Per-trigger delivery routing: a model-supplied `delivery_target_id` is
+/// shape-validated, host-validated through the create hook, persisted on the
+/// record, and echoed in the model-facing output — so one automation's
+/// routing no longer depends on the mutable user-global preference.
+#[tokio::test]
+async fn builtin_trigger_create_with_delivery_target_persists_it_when_host_validates() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let hook = Arc::new(DeliveryTargetValidatingTriggerCreateHook::accepting(
+        "slack:personal-dm:T123:user-a",
+    ));
+    let runtime = runtime_with_trigger_repository_and_create_hook(repository.clone(), hook.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let output = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Routed summary",
+            "prompt": "Summarize yesterday",
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" },
+            "delivery_target_id": "slack:personal-dm:T123:user-a"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        output["trigger"]["delivery_target_id"],
+        json!("slack:personal-dm:T123:user-a")
+    );
+    assert_eq!(
+        hook.validated(),
+        vec!["slack:personal-dm:T123:user-a".to_string()],
+        "the host validation hook must see the model-supplied target"
+    );
+
+    let records = repository
+        .list_triggers(context.resource_scope.tenant_id)
+        .await
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0]
+            .delivery_target
+            .as_ref()
+            .map(|target| target.as_str()),
+        Some("slack:personal-dm:T123:user-a")
+    );
+}
+
+/// Fail closed: without host wiring that can resolve outbound delivery
+/// targets (the default no-op hook), a supplied `delivery_target_id` must be
+/// rejected as invalid input instead of being persisted unvalidated.
+#[tokio::test]
+async fn builtin_trigger_create_rejects_delivery_target_without_host_validation() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let error = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Routed summary",
+            "prompt": "Summarize yesterday",
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" },
+            "delivery_target_id": "slack:personal-dm:T123:user-a"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// A target the host rejects (unknown id, foreign owner, disconnected
+/// product) is invalid input and nothing persists.
+#[tokio::test]
+async fn builtin_trigger_create_rejects_delivery_target_the_host_rejects() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let hook = Arc::new(DeliveryTargetValidatingTriggerCreateHook::accepting(
+        "slack:personal-dm:T123:user-a",
+    ));
+    let runtime = runtime_with_trigger_repository_and_create_hook(repository.clone(), hook);
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let error = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Routed summary",
+            "prompt": "Summarize yesterday",
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" },
+            "delivery_target_id": "slack:shared-channel:T123:C_SOMEONE_ELSES"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
 #[tokio::test]
 async fn builtin_trigger_create_accepts_weekly_tuesday_cron_schedule() {
     let repository = Arc::new(InMemoryTriggerRepository::default());
@@ -7932,6 +8051,49 @@ impl TriggerCreateHook for FailingTriggerCreateHook {
         Err(TriggerError::Backend {
             reason: "hook unavailable".to_string(),
         })
+    }
+}
+
+/// Test hook standing in for host composition's outbound-target resolution:
+/// accepts exactly one target id, records every validation request.
+struct DeliveryTargetValidatingTriggerCreateHook {
+    accepted: String,
+    validated: std::sync::Mutex<Vec<String>>,
+}
+
+impl DeliveryTargetValidatingTriggerCreateHook {
+    fn accepting(target: &str) -> Self {
+        Self {
+            accepted: target.to_string(),
+            validated: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn validated(&self) -> Vec<String> {
+        self.validated.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl TriggerCreateHook for DeliveryTargetValidatingTriggerCreateHook {
+    async fn validate_delivery_target(
+        &self,
+        _scope: &ironclaw_host_api::ResourceScope,
+        target: &ironclaw_triggers::TriggerDeliveryTargetId,
+    ) -> Result<(), TriggerError> {
+        self.validated.lock().unwrap().push(target.to_string());
+        if target.as_str() == self.accepted {
+            Ok(())
+        } else {
+            Err(TriggerError::InvalidRecord {
+                kind: ironclaw_triggers::TriggerRecordValidationKind::DeliveryTargetInvalid,
+                reason: "delivery target is not available to this caller".to_string(),
+            })
+        }
+    }
+
+    async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
+        Ok(())
     }
 }
 

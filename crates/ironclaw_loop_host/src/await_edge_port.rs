@@ -34,7 +34,7 @@ pub struct ScopeRecoveryInProgress {
 
 /// Spawn-side writer seam (§3 replacement for `SubagentGateResolutionStore`).
 /// Implemented in `ironclaw_runner` by `FilesystemAwaitEdgeStore` (production)
-/// and here by `InMemoryAwaitEdgeWriter` (loop_support's own unit tests, no
+/// and here by `InMemoryAwaitEdgeWriter` (loop_host's own unit tests, no
 /// filesystem/CAS semantics needed).
 #[async_trait]
 pub trait AwaitEdgeWriter: Send + Sync {

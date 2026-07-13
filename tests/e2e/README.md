@@ -58,8 +58,8 @@ Then Playwright drives a headless Chromium browser against the gateway, making D
 | `test_html_injection.py` | HTML injection security |
 | `test_extensions.py` | Extensions tab: install, remove, configure, OAuth, auth card, activate |
 | `test_oauth_refresh.py` | Hosted Gmail/MCP OAuth refresh; the Gmail path refreshes through the proxy and reads seeded Gmail data from Emulate |
-| `test_emulate_reborn_provider_contracts.py` | Emulate provider contracts for Reborn-backed Google Gmail/Calendar/Drive reads and writes, Slack channel/thread/DM delivery plus reactions/user lookup, and GitHub repo/issue/PR/search/branch/git-object/release/fork/action-route surfaces |
-| `test_reborn_emulate_full_path.py` | Full-path Reborn + Emulate coverage: install/auth a first-party extension, drive a scripted model tool call, and assert provider-side Emulate state |
+| `test_emulate_reborn_provider_contracts.py` | Emulate provider contracts for Reborn-backed Google Gmail/Calendar/Drive reads, writes, missing resources, and account isolation; Slack QA 9/10 channel/thread/DM routing, strict-scope failures, profiles, mentions, and identity shapes; and GitHub identity, negative-result, repo/issue/PR/search/branch/git-object/release/fork/action-route surfaces |
+| `test_reborn_emulate_full_path.py` | Full-path IronClaw + Emulate coverage: install/auth extensions, drive scripted Gmail/Calendar/Drive/GitHub/Slack calls, assert provider-side state, and exercise GitHub→Slack, Calendar+Drive→Slack, Gmail→Slack, and Slack→Drive→Slack dispatch |
 
 ## Reborn coverage gate
 
@@ -85,13 +85,15 @@ Emulate coverage is intentionally limited to provider APIs that match Reborn
 features already present in the codebase:
 
 - Google: Gmail, Calendar, and Drive seeded reads plus Gmail send, Calendar
-  event create/delete, and Drive upload/readback.
+  event create/delete, and Drive upload/update/readback with two isolated users.
 - Slack: auth, conversations, channel/thread/DM delivery, reactions, user
-  lookup, and readback.
+  lookup, membership, self-authored/last-sent identity, missing email/scope,
+  mention encoding, two isolated DM targets, and exact-count readback.
 - GitHub: authenticated user, repo create/list/metadata, fork list/create,
   release create/latest/list, issue create/read/comment/list/search, PR
   create/read/list/files/review/comment/merge, search, branch/ref mutation,
-  Git blob/tree/commit read/write, and Actions workflow/run route readback.
+  Git blob/tree/commit read/write, Actions workflow/run route readback, two
+  repositories with distinct latest releases, and private-account isolation.
 
 Google Docs, Sheets, and Slides exist as first-party extension assets, but
 Emulate 0.7.0 does not expose those API families directly. Cover those with
@@ -110,6 +112,15 @@ Reborn + Emulate tests should use `hosted_google_emulate_server` or a matching
 provider fixture, install/auth the extension through IronClaw, drive
 `/api/chat/send` with the scripted mock LLM, and assert provider state through
 Emulate readback.
+
+Do not duplicate account binding, refresh/reconnect, malformed-provider,
+duplicate-inbound, or repeated-delivery contracts as provider-only fixtures.
+Those are caller/runtime properties and remain covered at their existing
+hermetic seams (`runtime_credentials`, `gsuite_core`,
+`github_wasm_runtime_contract`, `idempotent_replay`, trigger/outbound
+integration tests, and `test_v2_auth_oauth_matrix.py`). Emulate supplies the
+provider state for full-path flows; it is not an OAuth authority or a fault
+injection proxy.
 
 ### Manual QA mapping
 
