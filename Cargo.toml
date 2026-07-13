@@ -3,6 +3,7 @@ members = [".", "crates/ironclaw_common", "crates/ironclaw_observability", "crat
 exclude = [
     "channels-src/discord",
     "channels-src/feishu",
+    "channels-src/matrix",
     "channels-src/telegram",
     "channels-src/slack",
     "channels-src/wechat",

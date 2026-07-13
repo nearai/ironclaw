@@ -1,6 +1,6 @@
 {
   "version": "0.1.0",
-  "wit_version": "0.3.0",
+  "wit_version": "0.3.1",
   "type": "channel",
   "name": "wechat",
   "description": "WeChat iLink Bot channel for direct-message chat via long polling",

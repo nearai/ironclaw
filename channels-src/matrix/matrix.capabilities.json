@@ -1,0 +1,68 @@
+{
+  "version": "0.1.0",
+  "wit_version": "0.3.1",
+  "type": "channel",
+  "name": "matrix",
+  "description": "Matrix homeserver channel skeleton for IronClaw Reborn",
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "matrix_access_token",
+        "prompt": "Enter the Matrix access token for the bot account. The host injects this token only into allowed Matrix HTTP requests.",
+        "optional": false
+      },
+      {
+        "name": "matrix_webhook_secret",
+        "prompt": "Optional shared secret for Matrix webhook callbacks. Leave blank to let IronClaw generate one.",
+        "optional": true,
+        "auto_generate": {
+          "length": 32
+        }
+      }
+    ],
+    "setup_url": "https://spec.matrix.org"
+  },
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        { "host": "matrix.org", "path_prefix": "/_matrix/" }
+      ],
+      "credentials": {
+        "matrix_token": {
+          "secret_name": "matrix_access_token",
+          "location": { "type": "bearer" },
+          "host_patterns": ["matrix.org"]
+        }
+      },
+      "rate_limit": {
+        "requests_per_minute": 30,
+        "requests_per_hour": 1000
+      }
+    },
+    "secrets": {
+      "allowed_names": ["matrix_*"]
+    },
+    "channel": {
+      "allowed_paths": ["/webhook/matrix"],
+      "allow_polling": true,
+      "workspace_prefix": "channels/matrix/",
+      "emit_rate_limit": {
+        "messages_per_minute": 50,
+        "messages_per_hour": 2000
+      },
+      "webhook": {
+        "secret_header": "X-Matrix-Webhook-Secret",
+        "secret_name": "matrix_webhook_secret",
+        "managed_by_host": true,
+        "methods": ["POST"]
+      }
+    }
+  },
+  "config": {
+    "homeserver_url": null,
+    "user_id": null,
+    "device_id": null,
+    "polling_enabled": false,
+    "poll_interval_ms": 30000
+  }
+}

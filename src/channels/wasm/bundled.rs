@@ -20,6 +20,7 @@ const CARGO_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 const KNOWN_CHANNELS: &[(&str, &str)] = &[
     ("telegram", "telegram_channel"),
     ("slack", "slack_channel"),
+    ("matrix", "matrix_channel"),
     ("discord", "discord_channel"),
     ("whatsapp", "whatsapp_channel"),
     ("feishu", "feishu_channel"),
@@ -139,6 +140,12 @@ pub fn available_channel_names() -> Vec<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use crate::channels::wasm::{
+        ChannelCapabilitiesFile, WasmChannel, WasmChannelRuntime, WasmChannelRuntimeConfig,
+    };
+    use crate::pairing::PairingStore;
     use tempfile::tempdir;
     use tokio::fs;
 
@@ -149,6 +156,7 @@ mod tests {
         let names = bundled_channel_names();
         assert!(names.contains(&"telegram"));
         assert!(names.contains(&"slack"));
+        assert!(names.contains(&"matrix"));
         assert!(names.contains(&"discord"));
         assert!(names.contains(&"whatsapp"));
         assert!(names.contains(&"feishu"));
@@ -179,5 +187,77 @@ mod tests {
         // Original file should be untouched
         let existing = fs::read(&wasm_path).await.unwrap();
         assert_eq!(existing, b"custom");
+    }
+
+    fn matrix_wasm_path() -> PathBuf {
+        PathBuf::from(CARGO_MANIFEST_DIR)
+            .join("channels-src/matrix/target/wasm32-wasip2/release/matrix_channel.wasm")
+    }
+
+    fn matrix_capabilities_path() -> PathBuf {
+        PathBuf::from(CARGO_MANIFEST_DIR).join("channels-src/matrix/matrix.capabilities.json")
+    }
+
+    #[tokio::test]
+    async fn test_matrix_component_loads_and_registers_skeleton_endpoint() {
+        if !matrix_wasm_path().exists() {
+            let msg = format!(
+                "Matrix WASM module not found at {:?}. Build with: \
+                 cargo build --manifest-path channels-src/matrix/Cargo.toml --target wasm32-wasip2 --release",
+                matrix_wasm_path()
+            );
+            if std::env::var("CI").is_ok() {
+                panic!("{}", msg);
+            }
+            eprintln!("Skipping test: {}", msg);
+            return;
+        }
+
+        let runtime = Arc::new(
+            WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing())
+                .expect("failed to create WASM channel runtime"),
+        );
+        let wasm_bytes = std::fs::read(matrix_wasm_path()).expect("failed to read Matrix WASM");
+        let module = runtime
+            .prepare(
+                "matrix",
+                &wasm_bytes,
+                None,
+                Some("Matrix homeserver channel skeleton".to_string()),
+            )
+            .await
+            .expect("Matrix component should prepare successfully");
+
+        let capabilities_bytes =
+            std::fs::read(matrix_capabilities_path()).expect("failed to read Matrix capabilities");
+        let capabilities_file = ChannelCapabilitiesFile::from_bytes(&capabilities_bytes)
+            .expect("Matrix capabilities should parse");
+        crate::tools::wasm::check_wit_version_compat(
+            "matrix",
+            capabilities_file.wit_version.as_deref(),
+            crate::tools::wasm::WIT_CHANNEL_VERSION,
+        )
+        .expect("Matrix WIT version should match host channel WIT");
+
+        let channel = WasmChannel::new(
+            runtime,
+            module,
+            capabilities_file.to_capabilities(),
+            "default",
+            capabilities_file.config_json(),
+            Arc::new(PairingStore::new_noop()),
+            None,
+        );
+
+        let config = channel
+            .call_on_start()
+            .await
+            .expect("Matrix skeleton should instantiate and return channel config");
+
+        assert_eq!(config.display_name, "Matrix");
+        assert_eq!(config.http_endpoints.len(), 1);
+        assert_eq!(config.http_endpoints[0].path, "/webhook/matrix");
+        assert_eq!(config.http_endpoints[0].methods, vec!["POST"]);
+        assert!(config.http_endpoints[0].require_secret);
     }
 }

@@ -39,6 +39,7 @@ jobs:
       has_wasm_abi_risk: ${{ steps.non_diff.outputs.has_wasm_abi_risk || steps.diff.outputs.has_wasm_abi_risk }}
       has_telegram_risk: ${{ steps.non_diff.outputs.has_telegram_risk || steps.diff.outputs.has_telegram_risk }}
       has_slack_risk: ${{ steps.non_diff.outputs.has_slack_risk || steps.diff.outputs.has_slack_risk }}
+      has_matrix_risk: ${{ steps.non_diff.outputs.has_matrix_risk || steps.diff.outputs.has_matrix_risk }}
       has_legacy_tests: ${{ steps.non_diff.outputs.has_legacy_tests || steps.diff.outputs.has_legacy_tests }}
     steps:
       - id: non_diff
@@ -55,6 +56,7 @@ jobs:
           echo "has_wasm_abi_risk=true" >> "$GITHUB_OUTPUT"
           echo "has_telegram_risk=true" >> "$GITHUB_OUTPUT"
           echo "has_slack_risk=true" >> "$GITHUB_OUTPUT"
+          echo "has_matrix_risk=true" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         with:
@@ -115,6 +117,12 @@ jobs:
             echo "has_slack_risk=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_slack_risk=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if has_match '^(channels-src/matrix/|src/channels/wasm/|\.github/workflows/(test|nightly-deep-ci)\.yml$)'; then
+            echo "has_matrix_risk=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_matrix_risk=false" >> "$GITHUB_OUTPUT"
           fi
 
   matrix-config:
@@ -390,6 +398,40 @@ jobs:
           timeout --signal=INT --kill-after=30s 15m \
             cargo test --features integration --test slack_auth_integration -- --nocapture
 
+  matrix-tests:
+    name: Matrix Channel Tests
+    needs: changes
+    if: >
+      needs.changes.outputs.docs_only != 'true' &&
+      needs.changes.outputs.has_legacy_tests == 'true' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_call' || needs.changes.outputs.has_matrix_risk == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: matrix-channel
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Run Matrix channel unit tests
+        run: |
+          timeout --signal=INT --kill-after=30s 10m \
+            cargo test --manifest-path channels-src/matrix/Cargo.toml -- --nocapture
+      - name: Build Matrix WASM channel
+        run: cargo build --manifest-path channels-src/matrix/Cargo.toml --target wasm32-wasip2 --release
+      - name: Run Matrix channel load test
+        run: |
+          timeout --signal=INT --kill-after=30s 10m \
+            cargo test --no-default-features --features libsql --lib test_matrix_component_loads_and_registers_skeleton_endpoint -- --nocapture
+
   run-tests:
     name: Tests (Legacy)
     runs-on: ubuntu-latest
@@ -405,6 +447,7 @@ jobs:
       - web-e2e-full
       - telegram-tests
       - slack-tests
+      - matrix-tests
     steps:
       - run: |
           require_success() {
@@ -460,6 +503,10 @@ jobs:
 
           if [[ "$event" == "push" || "$event" == "workflow_call" || "${{ needs.changes.outputs.has_slack_risk }}" == "true" ]]; then
             require_success "slack-tests" "${{ needs.slack-tests.result }}"
+          fi
+
+          if [[ "$event" == "push" || "$event" == "workflow_call" || "${{ needs.changes.outputs.has_matrix_risk }}" == "true" ]]; then
+            require_success "matrix-tests" "${{ needs.matrix-tests.result }}"
           fi
 
   run-tests-compat:
