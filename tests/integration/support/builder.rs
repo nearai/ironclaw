@@ -37,7 +37,8 @@ use ironclaw_llm::Role;
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
 use ironclaw_product_adapters::{ProductInboundAck, ProductTriggerReason, ProductWorkflow};
 use ironclaw_product_workflow::{
-    DefaultProductWorkflow, ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
+    ConversationBindingService, DefaultProductWorkflow, ProductConversationRouteKind,
+    ResolveBindingRequest, ResolvedBinding,
 };
 use ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_reborn::runtime::ToolDisclosureMode;
@@ -792,6 +793,44 @@ impl RebornIntegrationHarness {
     /// through this exact instance.
     pub(crate) fn product_workflow_for_test(&self) -> std::sync::Arc<DefaultProductWorkflow> {
         std::sync::Arc::clone(&self.workflow)
+    }
+
+    /// A fresh binding-service instance over the GROUP-shared product
+    /// harness storage — the SAME durable binding ledger the workflow above
+    /// resolves through at admission. Delivery proofs hand this to the
+    /// generic run-delivery components so observer-side binding reads see
+    /// admission-time writes.
+    pub(crate) fn binding_service_for_test(
+        &self,
+    ) -> HarnessResult<Arc<dyn ConversationBindingService>> {
+        Ok(Arc::new(self._shared.product_harness.binding_service()?))
+    }
+
+    /// A thread-service instance over the group-shared threads storage
+    /// (requests carry their own `ThreadScope`, so this serves any binding's
+    /// thread, not just this harness thread's).
+    pub(crate) fn thread_service_for_test(
+        &self,
+    ) -> HarnessResult<Arc<dyn ironclaw_threads::SessionThreadService>> {
+        Ok(Arc::new(self.thread_harness.service_instance()?))
+    }
+
+    /// The group-shared turn coordinator every thread's runs execute on.
+    pub(crate) fn turn_coordinator_for_test(&self) -> Arc<dyn TurnCoordinator> {
+        Arc::clone(&self.coordinator)
+    }
+
+    /// Register a scripted model gateway for a scope OTHER than this
+    /// harness thread's own (which is registered at build time): delivery
+    /// proofs pre-resolve the vendor conversation's binding and register its
+    /// scope here so the admitted run reaches a scripted model instead of
+    /// the routing-miss sentinel. Panics on duplicate registration.
+    pub(crate) fn register_scope_gateway_for_test(
+        &self,
+        scope: TurnScope,
+        gateway: Arc<dyn ironclaw_loop_support::HostManagedModelGateway>,
+    ) {
+        self._shared.scope_gateway.register(scope, gateway);
     }
 
     /// Submit a user turn and wait until it blocks on an approval gate, returning

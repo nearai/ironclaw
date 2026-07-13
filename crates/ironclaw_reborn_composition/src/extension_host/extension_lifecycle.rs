@@ -385,6 +385,23 @@ impl RebornLocalExtensionManagementPort {
         package: &ExtensionPackage,
         resolved: Option<&ironclaw_extensions::ResolvedExtensionManifest>,
     ) -> Result<(), ProductWorkflowError> {
+        self.publish_bundled_package_with_config_for_test(package, resolved, Vec::new())
+            .await
+    }
+
+    /// [`Self::publish_bundled_package_for_test`] with non-secret operator
+    /// config on the installation record — the stand-in for the deferred
+    /// production configure surface (P6/H): channel extensions whose
+    /// activation hook reads `[channel.config]` values (e.g. Telegram's
+    /// `telegram_webhook_url` for `setWebhook`) need them present at
+    /// `host.activate` time.
+    #[cfg(feature = "test-support")]
+    pub(crate) async fn publish_bundled_package_with_config_for_test(
+        &self,
+        package: &ExtensionPackage,
+        resolved: Option<&ironclaw_extensions::ResolvedExtensionManifest>,
+        config: Vec<(String, String)>,
+    ) -> Result<(), ProductWorkflowError> {
         self.active_extensions.publish(package)?;
         let Some(host) = self.generic_host.get() else {
             return Ok(());
@@ -430,7 +447,7 @@ impl RebornLocalExtensionManagementPort {
             installation_id: format!("{}-test-install", package.id.as_str()),
             state: ironclaw_extension_host::InstallationState::Installed,
             resolved: Arc::new(effective),
-            config: Vec::new(),
+            config,
             last_error: None,
         })
         .await

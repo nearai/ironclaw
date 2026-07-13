@@ -812,6 +812,70 @@ impl RebornServices {
                 .await,
         )
     }
+
+    /// [`Self::publish_bundled_extension_for_test`] with non-secret operator
+    /// config on the installation record — the test stand-in for the
+    /// deferred production configure surface (P6/H). Channel extensions
+    /// whose activation hook reads `[channel.config]` values (e.g.
+    /// Telegram's `telegram_webhook_url` for `setWebhook`) need them present
+    /// when `host.activate` fires.
+    #[cfg(feature = "test-support")]
+    pub async fn publish_bundled_extension_with_config_for_test(
+        &self,
+        package: &ironclaw_extensions::ExtensionPackage,
+        resolved: Option<&ironclaw_extensions::ResolvedExtensionManifest>,
+        config: Vec<(String, String)>,
+    ) -> Option<Result<(), ironclaw_product_workflow::ProductWorkflowError>> {
+        let extension_management = self.local_runtime.as_ref()?.extension_management.as_ref()?;
+        Some(
+            extension_management
+                .publish_bundled_package_with_config_for_test(package, resolved, config)
+                .await,
+        )
+    }
+
+    /// Register a static channel-egress credential mapping
+    /// `(extension_id, handle) → material`, consulted ahead of the scoped
+    /// secret store — the test stand-in for `[channel.config]` secret
+    /// storage until the configure surface lands (P6/H). Returns `false`
+    /// when this composition built no channel-egress credential bridging
+    /// (no generic extension host).
+    #[cfg(feature = "test-support")]
+    pub fn register_static_channel_egress_credentials_for_test(
+        &self,
+        entries: Vec<(String, String, ironclaw_secrets::SecretMaterial)>,
+    ) -> bool {
+        let Some(bridges) = &self.channel_egress_credential_bridges else {
+            return false;
+        };
+        bridges.register(Arc::new(
+            crate::extension_host::channel_egress::StaticChannelEgressCredentials::new(entries),
+        ));
+        true
+    }
+
+    /// The delivery coordinator's outbound stores — the SAME instances the
+    /// factory handed the coordinator (`outbound_state`), the gate-route
+    /// recorder (`delivered_gate_routes`), and the preference facade
+    /// (`outbound_preferences`). Integration proofs build generic
+    /// run-delivery components over these so observer and coordinator share
+    /// one delivery ledger. `None` without a local-dev runtime.
+    #[cfg(all(feature = "test-support", feature = "slack-v2-host-beta"))]
+    #[allow(clippy::type_complexity)]
+    pub fn outbound_delivery_stores_for_test(
+        &self,
+    ) -> Option<(
+        Arc<dyn ironclaw_outbound::OutboundStateStore>,
+        Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
+        Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository>,
+    )> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        Some((
+            Arc::clone(&local_runtime.outbound_state),
+            Arc::clone(&local_runtime.delivered_gate_routes),
+            Arc::clone(&local_runtime.outbound_preferences),
+        ))
+    }
 }
 
 /// Bundle returned by [`RebornServices::local_dev_attachment_test_support_for_test`]

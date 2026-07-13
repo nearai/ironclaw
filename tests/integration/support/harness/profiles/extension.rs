@@ -534,3 +534,118 @@ pub(crate) fn extension_runtime_acme_tools_profile() -> HarnessResult<ToolsProfi
 pub(crate) async fn extension_runtime_acme_tools() -> HarnessResult<HostRuntimeCapabilityHarness> {
     extension_runtime_acme_tools_profile()?.build().await
 }
+
+// ── Delivery-proof profile (extension-runtime P5, §5.4 / DEL-10) ───────────
+
+/// The bundled telegram manifest's `runtime.service` id — the same native
+/// binding the binary assembles (`ironclaw_reborn_cli::runtime::native_extensions`).
+pub(crate) const TELEGRAM_FIXTURE_SERVICE: &str = "telegram.extension/v1";
+
+/// Native factory for the bundled telegram package: binds the REAL
+/// `TelegramChannelAdapter` as its channel surface, exactly like the binary
+/// assembly in `crates/ironclaw_reborn_cli/src/runtime/native_extensions.rs`
+/// (mirrored here because the integration harness composes its own runtime
+/// and cannot depend on the CLI crate).
+struct TelegramFixtureFactory;
+
+impl ironclaw_extension_host::NativeExtensionFactory for TelegramFixtureFactory {
+    fn service(&self) -> &str {
+        TELEGRAM_FIXTURE_SERVICE
+    }
+
+    fn load(
+        &self,
+        _ctx: &ironclaw_extension_host::LoadContext,
+    ) -> Result<
+        Box<dyn ironclaw_extension_host::ExtensionEntrypoint>,
+        ironclaw_extension_host::BindError,
+    > {
+        Ok(Box::new(TelegramFixtureEntrypoint))
+    }
+}
+
+struct TelegramFixtureEntrypoint;
+
+impl ironclaw_extension_host::ExtensionEntrypoint for TelegramFixtureEntrypoint {
+    fn bind(
+        &self,
+        _ctx: ironclaw_extension_host::BindContext,
+    ) -> Result<ironclaw_extension_host::ExtensionBindings, ironclaw_extension_host::BindError>
+    {
+        Ok(ironclaw_extension_host::ExtensionBindings {
+            tools: None,
+            channel: Some(Arc::new(
+                ironclaw_telegram_v2_adapter::TelegramChannelAdapter::default(),
+            )),
+        })
+    }
+}
+
+/// Vendor-shaped scripted responses for the delivery proofs: the Slack Web
+/// API and the Telegram Bot API answer their happy-path bodies (the adapters
+/// parse these for vendor message refs), everything else falls back to the
+/// profile's default recorder body.
+fn delivery_vendor_router(
+    request: &ironclaw_network::NetworkHttpRequest,
+) -> Option<(u16, Vec<u8>)> {
+    if request.url.ends_with("/api/chat.postMessage") {
+        let channel = serde_json::from_slice::<serde_json::Value>(&request.body)
+            .ok()
+            .and_then(|body| {
+                body.get("channel")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "D0000000000".to_string());
+        let body = serde_json::json!({
+            "ok": true,
+            "channel": channel,
+            "ts": "1710000200.000001",
+        });
+        return Some((200, serde_json::to_vec(&body).ok()?));
+    }
+    if request.url.ends_with("/api/conversations.open") {
+        return Some((
+            200,
+            br#"{"ok":true,"channel":{"id":"D0000000000"}}"#.to_vec(),
+        ));
+    }
+    if request.url.contains("api.telegram.org") {
+        let body: &[u8] = if request.url.ends_with("/sendMessage") {
+            br#"{"ok":true,"result":{"message_id":4242}}"#
+        } else {
+            // setWebhook / deleteWebhook and friends return a bool result.
+            br#"{"ok":true,"result":true}"#
+        };
+        return Some((200, body.to_vec()));
+    }
+    None
+}
+
+/// The acme runtime profile extended for the §5.4 delivery proofs: the
+/// bundled telegram package's native channel factory is assembled (DEL-10
+/// activates the REAL bundled manifest through the generic host), telegram's
+/// provider is trusted, and the recording network egress answers
+/// vendor-shaped bodies so the real adapters can parse delivery responses.
+pub(crate) fn extension_delivery_tools_profile() -> HarnessResult<ToolsProfile> {
+    let mut profile = extension_runtime_acme_tools_profile()?;
+    if let Some(trust) = profile.provider_trust_override.as_mut() {
+        trust.push((
+            ironclaw_host_api::ExtensionId::new("telegram")?,
+            local_dev_all_effects(),
+        ));
+    }
+    let network_egress = Arc::new(
+        RecordingNetworkHttpEgress::with_body(br#"{"ok":true}"#.to_vec())
+            .with_vendor_router(Arc::new(delivery_vendor_router)),
+    );
+    profile.options = profile
+        .options
+        .with_native_extension_factory(Arc::new(TelegramFixtureFactory))
+        .with_recording_network_egress(network_egress);
+    Ok(profile)
+}
+
+pub(crate) async fn extension_delivery_tools() -> HarnessResult<HostRuntimeCapabilityHarness> {
+    extension_delivery_tools_profile()?.build().await
+}

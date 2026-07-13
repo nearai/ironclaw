@@ -135,6 +135,40 @@ impl ChannelEgressCredentialsPort for BridgedChannelEgressCredentials {
     }
 }
 
+/// Fixed `(extension_id, handle) → material` mapping, registered as a bridge
+/// by integration proofs standing in for `[channel.config]` secret storage
+/// until the configure surface lands (P6/H). Test-support only.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) struct StaticChannelEgressCredentials {
+    entries: Vec<(String, String, SecretMaterial)>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl StaticChannelEgressCredentials {
+    pub(crate) fn new(entries: Vec<(String, String, SecretMaterial)>) -> Self {
+        Self { entries }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[async_trait]
+impl ChannelEgressCredentialsPort for StaticChannelEgressCredentials {
+    async fn channel_secret(
+        &self,
+        extension_id: &str,
+        _installation_id: &str,
+        handle: &SecretHandle,
+    ) -> Result<Option<SecretMaterial>, ChannelEgressCredentialError> {
+        Ok(self
+            .entries
+            .iter()
+            .find(|(extension, entry_handle, _)| {
+                extension == extension_id && entry_handle == handle.as_str()
+            })
+            .map(|(_, _, material)| material.clone()))
+    }
+}
+
 /// The production [`ChannelEgressTransport`]: host runtime egress with the
 /// network policy pinned to the approved host.
 pub(crate) struct HostRuntimeChannelEgressTransport {
