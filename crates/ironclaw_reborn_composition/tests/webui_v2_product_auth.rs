@@ -261,7 +261,8 @@ impl UnusedServices {
                     )
                     .expect("installed extension package ref"),
                     display_name: (*package_id).to_string(),
-                    kind: "wasm_tool".to_string(),
+                    runtime: "wasm".to_string(),
+                    surfaces: Vec::new(),
                     description: "test installed extension".to_string(),
                     authenticated: false,
                     active: false,

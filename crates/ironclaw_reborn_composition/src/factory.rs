@@ -153,9 +153,7 @@ use ironclaw_turns::{InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore};
 
 use crate::RebornProductAuthServicePorts;
 #[cfg(feature = "slack-v2-host-beta")]
-use crate::extension_host::available_extensions::{
-    slack_bot_manifest_digest, slack_manifest_digest,
-};
+use crate::extension_host::available_extensions::slack_manifest_digest;
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::extension_host::extension_removal_cleanup::SlackPersonalConnectionCleanupAdapter;
 use crate::extension_host::lifecycle::{
@@ -1067,7 +1065,7 @@ pub(crate) struct RebornLocalRuntimeServices {
     /// fails closed (blocks) for any channel that declares a connection
     /// requirement. Mirrors the `post_submit_hook_slot` deferred-wiring pattern.
     #[cfg(any(feature = "slack-v2-host-beta", test))]
-    pub(crate) channel_connection_facade_slot:
+    pub(crate) channel_connection_facade:
         Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionFacade>>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub(crate) host_runtime_http_egress: Option<HostRuntimeHttpEgressPort>,
@@ -1870,7 +1868,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     #[cfg(feature = "slack-v2-host-beta")]
     let removal_cleanup_adapters: Vec<Arc<dyn ExtensionRemovalCleanupAdapter>> = vec![Arc::new(
         SlackPersonalConnectionCleanupAdapter::new(Arc::clone(
-            &store_graph.local_runtime.channel_connection_facade_slot,
+            &store_graph.local_runtime.channel_connection_facade,
         ))
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("Slack extension removal cleanup could not be built: {error}"),
@@ -2480,7 +2478,7 @@ async fn build_local_dev_store_graph(
         skill_management,
         extension_management: None,
         #[cfg(any(feature = "slack-v2-host-beta", test))]
-        channel_connection_facade_slot: Arc::new(std::sync::OnceLock::new()),
+        channel_connection_facade: Arc::new(std::sync::OnceLock::new()),
         runtime_http_egress: None,
         host_runtime_http_egress: None,
         skill_mounts,
@@ -2637,7 +2635,7 @@ async fn build_local_dev_store_graph(
         skill_management,
         extension_management: None,
         #[cfg(any(feature = "slack-v2-host-beta", test))]
-        channel_connection_facade_slot: Arc::new(std::sync::OnceLock::new()),
+        channel_connection_facade: Arc::new(std::sync::OnceLock::new()),
         runtime_http_egress: None,
         host_runtime_http_egress: None,
         skill_mounts,
@@ -4064,17 +4062,6 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
             None,
         ),
     ];
-    #[cfg(feature = "slack-v2-host-beta")]
-    entries.push(AdminEntry::for_local_manifest(
-        PackageId::new("slack_bot").map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("Slack first-party package id is invalid: {error}"),
-        })?,
-        "/system/extensions/slack_bot/manifest.toml".to_string(),
-        Some(slack_bot_manifest_digest()),
-        HostTrustAssignment::first_party(),
-        Vec::new(),
-        None,
-    ));
     #[cfg(feature = "slack-v2-host-beta")]
     entries.push(AdminEntry::for_local_manifest(
         PackageId::new("slack").map_err(|error| RebornBuildError::InvalidConfig {
@@ -5696,9 +5683,7 @@ mod tests {
             skill_management: Arc::clone(&base_runtime.skill_management),
             extension_management: base_runtime.extension_management.clone(),
             #[cfg(any(feature = "slack-v2-host-beta", test))]
-            channel_connection_facade_slot: Arc::clone(
-                &base_runtime.channel_connection_facade_slot,
-            ),
+            channel_connection_facade: Arc::clone(&base_runtime.channel_connection_facade),
             runtime_http_egress: base_runtime.runtime_http_egress.clone(),
             host_runtime_http_egress: base_runtime.host_runtime_http_egress.clone(),
             skill_mounts: base_runtime.skill_mounts.clone(),
@@ -8054,7 +8039,7 @@ mod tests {
         digest: Option<String>,
     ) -> ironclaw_host_api::PackageIdentity {
         ironclaw_host_api::PackageIdentity::new(
-            ironclaw_host_api::PackageId::new("slack_bot").expect("slack package id"),
+            ironclaw_host_api::PackageId::new("slack").expect("slack package id"),
             ironclaw_host_api::PackageSource::LocalManifest {
                 path: manifest_path.to_string(),
             },
@@ -8067,13 +8052,13 @@ mod tests {
     #[test]
     fn builtin_first_party_trust_policy_includes_slack_local_manifest_entry() {
         let policy = builtin_first_party_trust_policy().expect("trust policy");
-        let expected_digest = slack_bot_manifest_digest();
+        let expected_digest = slack_manifest_digest();
 
         let matching = ironclaw_trust::TrustPolicy::evaluate(
             &policy,
             &ironclaw_trust::TrustPolicyInput {
                 identity: slack_identity(
-                    "/system/extensions/slack_bot/manifest.toml",
+                    "/system/extensions/slack/manifest.toml",
                     Some(expected_digest.clone()),
                 ),
                 requested_trust: ironclaw_host_api::RequestedTrustClass::FirstPartyRequested,
@@ -8092,7 +8077,7 @@ mod tests {
             &policy,
             &ironclaw_trust::TrustPolicyInput {
                 identity: slack_identity(
-                    "/system/extensions/slack_bot/manifest.toml",
+                    "/system/extensions/slack/manifest.toml",
                     Some(
                         "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
                             .to_string(),
@@ -8114,7 +8099,7 @@ mod tests {
             &policy,
             &ironclaw_trust::TrustPolicyInput {
                 identity: slack_identity(
-                    "/system/extensions/slack_bot/other-manifest.toml",
+                    "/system/extensions/slack/other-manifest.toml",
                     Some(expected_digest),
                 ),
                 requested_trust: ironclaw_host_api::RequestedTrustClass::FirstPartyRequested,

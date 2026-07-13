@@ -26,6 +26,12 @@ use crate::extension_host::extension_credential_requirements::{
     can_merge_lifecycle_credential_setup, merge_lifecycle_credential_setup,
     product_auth_credential_source,
 };
+use crate::extension_host::extension_removal_cleanup::ExtensionRemovalCleanupRequirement;
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::extension_host::extension_removal_cleanup::{
+    ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapterId,
+    SLACK_EXTENSION_REMOVAL_CHANNEL_ID, SLACK_PERSONAL_CONNECTION_CLEANUP_ADAPTER_ID,
+};
 use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 use crate::llm_admin::nearai_mcp::{
     NearAiMcpBootstrapConfig, NearAiMcpEndpoint, durable_product_auth_storage_enabled,
@@ -180,6 +186,10 @@ pub(crate) struct AvailableExtensionPackage {
     /// `surface_kinds`.
     pub(crate) channel_directions: Option<LifecycleChannelDirections>,
     pub(crate) assets: Vec<AvailableExtensionAsset>,
+    /// Extension-declared removal-cleanup requirements (#5957): feed the
+    /// removal-cleanup registry on uninstall. Empty unless the bundled
+    /// package explicitly declares one (e.g. the unified Slack extension).
+    pub(crate) cleanup_requirements: Vec<ExtensionRemovalCleanupRequirement>,
 }
 
 impl AvailableExtensionPackage {
@@ -622,7 +632,22 @@ fn gmail_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
 
 #[cfg(feature = "slack-v2-host-beta")]
 fn slack_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package(SLACK_EXTENSION_ID, "Slack", SLACK_MANIFEST, slack_assets())
+    let mut package =
+        bundled_extension_package(SLACK_EXTENSION_ID, "Slack", SLACK_MANIFEST, slack_assets())?;
+    package
+        .cleanup_requirements
+        .push(ExtensionRemovalCleanupRequirement::channel_connection(
+            ExtensionRemovalCleanupAdapterId::new(SLACK_PERSONAL_CONNECTION_CLEANUP_ADAPTER_ID)
+                .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+                    reason: error.to_string(),
+                })?,
+            ExtensionRemovalChannelId::new(SLACK_EXTENSION_REMOVAL_CHANNEL_ID).map_err(
+                |error| ProductWorkflowError::InvalidBindingRequest {
+                    reason: error.to_string(),
+                },
+            )?,
+        ));
+    Ok(package)
 }
 
 /// After the slack_bot/slack unification there is no separate internal
@@ -798,6 +823,7 @@ fn bundled_extension_package(
         package,
         surface_kinds,
         channel_directions,
+        cleanup_requirements: Vec::new(),
         assets,
     })
 }
@@ -1753,6 +1779,7 @@ where
         package,
         surface_kinds,
         channel_directions,
+        cleanup_requirements: Vec::new(),
         assets,
     }))
 }
@@ -3255,6 +3282,7 @@ output_schema_ref = "schemas/write.output.json"
             package,
             surface_kinds: Vec::new(),
             channel_directions: None,
+            cleanup_requirements: Vec::new(),
             assets: vec![
                 AvailableExtensionAsset {
                     path: "manifest.toml".to_string(),

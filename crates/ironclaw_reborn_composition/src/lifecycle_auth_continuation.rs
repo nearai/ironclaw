@@ -190,7 +190,7 @@ mod tests {
             continuation: AuthContinuationRef::LifecycleActivation {
                 package_ref: AuthPackageRef::new("slack").expect("package ref"),
             },
-            provider: AuthProviderId::new("slack_personal").expect("provider"),
+            provider: AuthProviderId::new("slack").expect("provider"),
             credential_account_id: None,
             emitted_at: chrono::Utc::now(),
         }

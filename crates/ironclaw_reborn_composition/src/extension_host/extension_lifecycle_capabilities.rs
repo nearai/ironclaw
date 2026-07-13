@@ -955,9 +955,8 @@ credential_handle = "channel_ext_token"
             runtime.set_channel_connection_facade(channel_connection_trait.clone()),
             "channel connection facade slot should be unset in the test runtime"
         );
-        let webui = crate::webui::facade::build_webui_services_with_connectable_channels(
+        let webui = crate::webui::facade::build_webui_services_with_channel_connection(
             &runtime,
-            None,
             None,
             Some(channel_connection_trait),
             Vec::new(),

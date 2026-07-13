@@ -4446,7 +4446,7 @@ test("useChat: a late flow A status cannot complete or fail newer flow B", async
     fetchExtensionSetup: async () => ({
       secrets: [
         {
-          provider: "slack_personal",
+          provider: "slack",
           setup: { kind: "oauth", invocation_id: "invocation-slack" },
         },
       ],

@@ -1220,8 +1220,6 @@ test("useOauthSetup ignores flow A status after flow B becomes current", async (
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
-    isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () =>
       new Promise((resolve) => {
@@ -1331,8 +1329,6 @@ test("useOauthSetup still times out when a matched failure signal cannot reach d
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
-    isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},

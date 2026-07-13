@@ -271,6 +271,7 @@ fn migrate_retired_slack_bot_identity(state: &mut WireState) -> bool {
                 raw_toml: super::available_extensions::slack_manifest_toml().to_string(),
                 source: WireManifestSource::HostBundled,
                 manifest_hash: None,
+                removal_cleanup_requirements: Vec::new(),
             });
         }
         #[cfg(not(feature = "slack-v2-host-beta"))]

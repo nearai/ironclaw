@@ -164,11 +164,7 @@ async fn current_tool_surface_overrides_stale_assistant_unavailable_claim() {
         .await
         .expect("Slack lifecycle thread builds");
     lifecycle
-        .seed_capability_credential_account(
-            "slack_personal",
-            "itest Slack personal",
-            SLACK_PERSONAL_SCOPES,
-        )
+        .seed_capability_credential_account("slack", "itest Slack personal", SLACK_PERSONAL_SCOPES)
         .await
         .expect("Slack personal credential is seeded with real test material");
     lifecycle

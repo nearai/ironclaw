@@ -14,17 +14,17 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, NetworkTargetPattern,
-    PermissionMode, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement,
-    RuntimeHttpEgress, UserId, VirtualPath, sha256_digest_token,
+    CapabilityDescriptor, CapabilityId, CapabilitySurfaceKind, EffectKind, ExtensionId,
+    NetworkTargetPattern, PermissionMode, ResourceScope, RuntimeCredentialAuthRequirement,
+    RuntimeCredentialRequirement, RuntimeHttpEgress, UserId, VirtualPath, sha256_digest_token,
 };
 use ironclaw_product_adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use ironclaw_product_workflow::{
     ChannelConnectionRequirement, LifecycleBlockerRef, LifecycleExtensionSummary,
-    LifecycleExtensionSurfaceKind, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
-    LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleReadinessBlocker, LifecycleSearchExtensionSummary, ProductWorkflowError,
-    RebornChannelConnectStrategy, RebornServicesError,
+    LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
+    LifecycleProductPayload, LifecycleProductResponse, LifecycleReadinessBlocker,
+    LifecycleSearchExtensionSummary, ProductWorkflowError, RebornChannelConnectStrategy,
+    RebornServicesError,
 };
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
@@ -75,8 +75,9 @@ use crate::extension_host::available_extensions::{
     is_internal_extension_package_ref, materialize_available_extension, visible_capability_ids,
 };
 use crate::extension_host::extension_activation_credentials::{
-    ExtensionActivationCredentialGate, ExtensionActivationCredentialReadiness,
-    RuntimeExtensionActivationCredentialGate, UnavailableExtensionActivationCredentialGate,
+    ChannelSetupActivationCredentialGate, ExtensionActivationCredentialGate,
+    ExtensionActivationCredentialReadiness, RuntimeExtensionActivationCredentialGate,
+    UnavailableExtensionActivationCredentialGate,
 };
 use crate::extension_host::extension_credential_requirements::{
     manifest_runtime_credential_auth_requirements, package_runtime_credential_auth_requirements,
@@ -870,6 +871,24 @@ impl RebornLocalExtensionManagementPort {
         let caller = self.tenant_operator_user_id.clone();
         self.activate_inner(package_ref, mode, &credential_gate, &caller)
             .await
+    }
+
+    /// Activate a channel extension for its host-owned OAuth channel-setup path,
+    /// which pre-authorizes credentials via the channel-setup gate rather than
+    /// requiring already-connected accounts.
+    pub(crate) async fn activate_for_channel_setup(
+        &self,
+        package_ref: LifecyclePackageRef,
+        caller: &UserId,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        let credential_gate = ChannelSetupActivationCredentialGate;
+        self.activate_inner(
+            package_ref,
+            ExtensionActivationMode::Static,
+            &credential_gate,
+            caller,
+        )
+        .await
     }
 
     async fn activate_inner(
@@ -1944,7 +1963,7 @@ fn prepare_install(
     // stamping everything `HostBundled` here would launder an imported
     // (`InstalledLocal`) bundle into the stored-manifest tier that is allowed
     // first-party trust and the bundled hash-migration path below.
-    let manifest_record = ExtensionManifestRecord::from_toml_with_contracts(
+    let manifest_record = ExtensionManifestRecord::from_toml(
         &available.manifest_toml,
         available.source,
         &host_ports,
@@ -1993,7 +2012,7 @@ fn prepare_manifest_migration(
     // (`migrate_host_bundled_manifest_hash`) additionally requires the STORED
     // manifest to be `HostBundled` before migrating, so an imported extension
     // whose on-disk manifest changed fails closed instead of migrating.
-    let manifest_record = ExtensionManifestRecord::from_toml_with_contracts(
+    let manifest_record = ExtensionManifestRecord::from_toml(
         &available.manifest_toml,
         available.source,
         &host_ports,
@@ -2151,7 +2170,7 @@ fn activation_success_message(
     visible_capability_ids: &[String],
 ) -> String {
     if package_declares_inbound_product_adapter(package) {
-        if package_ref.id.as_str() == "slack_bot" {
+        if package_ref.id.as_str() == "slack" {
             return "Slack is installed as an inbound entrypoint. If WebChat shows a Slack account connection panel, tell the user to configure Slack OAuth for this extension rather than pasting anything into normal chat. If the user's Slack account is already connected, continue the user's original request; Slack DMs and WebUI chat can use the same user-scoped Slack tools.".to_string();
         }
         return format!(
@@ -2186,7 +2205,7 @@ pub(crate) fn channel_connection_requirement(
     channel_id: &str,
     display_name: &str,
 ) -> ChannelConnectionRequirement {
-    if channel_id == "slack_bot" {
+    if channel_id == "slack" {
         ChannelConnectionRequirement {
             channel: "slack".to_string(),
             strategy: RebornChannelConnectStrategy::OAuth,
@@ -2291,7 +2310,7 @@ fn extension_search_has_ready_result(payload: Option<&LifecycleProductPayload>) 
         ) && !extension
             .summary
             .surface_kinds
-            .contains(&LifecycleExtensionSurfaceKind::ExternalChannel)
+            .contains(&CapabilitySurfaceKind::Channel)
             && extension.summary.credential_requirements.is_empty()
             && extension.summary.onboarding.is_none()
     })
@@ -2310,7 +2329,7 @@ fn extension_search_has_installed_external_channel_result(
         ) && extension
             .summary
             .surface_kinds
-            .contains(&LifecycleExtensionSurfaceKind::ExternalChannel)
+            .contains(&CapabilitySurfaceKind::Channel)
     })
 }
 
@@ -2542,21 +2561,20 @@ mod tests {
         let payload = LifecycleProductPayload::ExtensionSearch {
             extensions: vec![LifecycleSearchExtensionSummary {
                 summary: LifecycleExtensionSummary {
-                    package_ref: LifecyclePackageRef::new(
-                        LifecyclePackageKind::Extension,
-                        "slack_bot",
-                    )
-                    .expect("valid package ref"),
+                    package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
+                        .expect("valid package ref"),
                     name: "Slack".to_string(),
                     version: "1.0.0".to_string(),
                     description: "Slack channel".to_string(),
                     source: LifecycleExtensionSource::HostBundled,
                     runtime_kind: LifecycleExtensionRuntimeKind::WasmTool,
-                    surface_kinds: vec![LifecycleExtensionSurfaceKind::ExternalChannel],
+                    surface_kinds: vec![CapabilitySurfaceKind::Channel],
                     visible_capability_ids: Vec::new(),
                     visible_read_only_capability_ids: Vec::new(),
                     credential_requirements: Vec::new(),
                     onboarding: None,
+                    channel_directions: None,
+                    channel_connection: None,
                 },
                 installation_phase: Some(LifecyclePhase::Installed),
             }],
@@ -2956,13 +2974,12 @@ output_schema_ref = "schemas/run.output.json"
         let (_dir, _storage_root, facade, _active_registry, _installation_store) =
             extension_lifecycle_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_packages(vec![fixture_external_channel_package(
-                    "slack_bot",
-                    "Slack",
+                    "slack", "Slack",
                 )]),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
-        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack_bot")
-            .expect("valid ref");
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("valid ref");
         facade
             .execute(
                 lifecycle_surface_context(),
@@ -3986,7 +4003,7 @@ output_schema_ref = "schemas/run.output.json"
             .expect("Slack activation requirements");
         assert_eq!(requirements.len(), 1);
         let requirement = &requirements[0];
-        assert_eq!(requirement.provider.as_str(), "slack_personal");
+        assert_eq!(requirement.provider.as_str(), "slack");
         assert_eq!(requirement.requester_extension.as_str(), "slack");
         let expected_scopes = [
             "channels:history",
@@ -8042,7 +8059,7 @@ credential_handle = "{id}_bot_token"
         );
         let mut package =
             fixture_extension_package_from_manifest_with_product_adapter_contracts(&manifest, id);
-        package.surface_kinds = vec![LifecycleExtensionSurfaceKind::ExternalChannel];
+        package.surface_kinds = vec![CapabilitySurfaceKind::Channel];
         package
     }
 
@@ -8071,7 +8088,13 @@ trust = "first_party_requested"
 kind = "wasm"
 module = "wasm/github.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "github.read"
 description = "Read GitHub data"
 effects = ["network", "use_secret"]
@@ -8111,7 +8134,13 @@ trust = "first_party_requested"
 kind = "wasm"
 module = "wasm/fixture.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "fixture.search"
 description = "Search fixture data"
 effects = ["network"]
@@ -8120,7 +8149,7 @@ visibility = "model"
 input_schema_ref = "schemas/search.input.json"
 output_schema_ref = "schemas/search.output.json"
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "fixture.write"
 description = "Write fixture data"
 effects = ["network", "external_write"]
@@ -8238,6 +8267,7 @@ output_schema_ref = "schemas/search.output.json"
             manifest_toml,
             ManifestSource::HostBundled,
             &HostPortCatalog::empty(),
+            &product_extension_host_api_contract_registry().expect("host api contracts"),
         )
         .expect("fixture manifest");
         fixture_extension_package_from_parsed_manifest(manifest_toml, root_id, manifest)
@@ -8254,7 +8284,7 @@ output_schema_ref = "schemas/search.output.json"
                     .expect("product adapter host API contract"),
             ))
             .expect("register product adapter host API contract");
-        let manifest = ExtensionManifest::parse_with_host_api_contracts(
+        let manifest = ExtensionManifest::parse(
             manifest_toml,
             ManifestSource::HostBundled,
             &HostPortCatalog::empty(),
@@ -8281,6 +8311,7 @@ output_schema_ref = "schemas/search.output.json"
             package,
             cleanup_requirements: Vec::new(),
             surface_kinds: Vec::new(),
+            channel_directions: None,
             assets: vec![
                 AvailableExtensionAsset {
                     path: "manifest.toml".to_string(),
@@ -8304,7 +8335,7 @@ output_schema_ref = "schemas/search.output.json"
         let host_ports =
             ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog");
         let contracts = product_extension_host_api_contract_registry().expect("host API contracts");
-        ExtensionManifestRecord::from_toml_with_contracts(
+        ExtensionManifestRecord::from_toml(
             manifest_toml,
             source,
             &host_ports,
@@ -8344,7 +8375,7 @@ output_schema_ref = "schemas/search.output.json"
         response: LifecycleProductResponse,
         expected_ref: &str,
     ) {
-        assert_eq!(response.phase, LifecyclePhase::UnsupportedOrLegacy);
+        assert_eq!(response.phase, LifecyclePhase::Unsupported);
         assert!(response.blockers.iter().any(|blocker| matches!(
             blocker,
             LifecycleReadinessBlocker::Runtime { ref_id: Some(ref_id) }

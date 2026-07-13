@@ -754,12 +754,12 @@ async fn slack_oauth_callback_activates_and_publishes_all_personal_tools() {
         blocked_scope.clone(),
         TurnActor::new(UserId::new("alice").unwrap()),
         "slack-lifecycle",
-        ironclaw_auth::SLACK_PERSONAL_PROVIDER_ID,
+        ironclaw_auth::SLACK_PROVIDER_ID,
         "slack",
     )
     .await;
-    let slack_provider = AuthProviderId::new(ironclaw_auth::SLACK_PERSONAL_PROVIDER_ID)
-        .expect("Slack personal provider");
+    let slack_provider =
+        AuthProviderId::new(ironclaw_auth::SLACK_PROVIDER_ID).expect("Slack personal provider");
     let flow_id = create_provider_flow(
         product_auth,
         auth_scope.clone(),

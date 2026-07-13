@@ -159,6 +159,7 @@ mod tests {
     };
     #[cfg(feature = "libsql")]
     use ironclaw_filesystem::{LibSqlRootFilesystem, RootFilesystem, ScopedFilesystem};
+    use ironclaw_host_runtime::default_host_api_contract_registry;
     #[cfg(feature = "libsql")]
     use ironclaw_host_api::AgentId;
     use ironclaw_host_api::{ExtensionId, HostPortCatalog, TenantId, UserId};
@@ -202,10 +203,15 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/{id}.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "{id}.read"
 description = "read"
-effects = ["network"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/read.input.json"
@@ -215,6 +221,7 @@ output_schema_ref = "schemas/read.output.json"
             ManifestSource::HostBundled,
             &HostPortCatalog::empty(),
             None,
+            &default_host_api_contract_registry().expect("host api contracts"),
         )
         .expect("manifest")
     }

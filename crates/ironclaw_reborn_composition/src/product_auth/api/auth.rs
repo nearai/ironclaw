@@ -2238,7 +2238,7 @@ mod tests {
     async fn abandoned_lifecycle_lease_can_terminalize_and_compensate() {
         let shared = Arc::new(InMemoryAuthProductServices::new());
         let scope = test_auth_product_scope();
-        let provider = AuthProviderId::new("slack_personal").expect("provider");
+        let provider = AuthProviderId::new("slack").expect("provider");
         let account = shared
             .create_account(NewCredentialAccount {
                 scope: scope.clone(),
