@@ -83,7 +83,7 @@ use ironclaw_host_runtime::{
     builtin_first_party_package_for_process_backend,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_loop_support::FilesystemCheckpointStateStore;
+use ironclaw_loop_host::FilesystemCheckpointStateStore;
 use ironclaw_outbound::CommunicationPreferenceRepository;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_outbound::FilesystemOutboundStateStore;
@@ -614,6 +614,22 @@ impl RebornServices {
         Some(Arc::clone(&local_runtime.project_service))
     }
 
+    /// Test-support access to the local-dev session thread service (durable
+    /// tool-result projection seam, issue #5838). This is the SAME `Arc`
+    /// production's `capability_wiring` passes to
+    /// `LocalDevCapabilityIo::new_with_durable_previews` and to the
+    /// `result_read` synthetic capability, so a harness built over this
+    /// `RebornServices` can drive its own real `LocalDevCapabilityIo` through
+    /// `local_dev_capability_io_for_test`. Returns `None` for production-profile
+    /// compositions without a local-dev runtime.
+    #[cfg(feature = "test-support")]
+    pub fn local_dev_thread_service_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_threads::SessionThreadService>> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        Some(Arc::clone(&local_runtime.thread_service))
+    }
+
     /// Test-support access to the local-dev communication-preference repository
     /// (W6-COLD-SPOTS seam). This is the SAME `Arc` that `build_local_dev_store_graph`
     /// wires into `RebornLocalRuntimeServices::outbound_preferences` via
@@ -674,7 +690,7 @@ impl RebornServices {
     #[cfg(feature = "test-support")]
     pub fn local_dev_attachment_test_support_for_test(&self) -> Option<AttachmentTestSupport> {
         let read_port = self.local_dev_workspace_attachment_reader_for_test()?
-            as Arc<dyn ironclaw_loop_support::LoopAttachmentReadPort>;
+            as Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>;
         let read_write_workspace_filesystem = self.read_write_workspace_filesystem()?;
         Some(AttachmentTestSupport {
             read_port,
@@ -914,7 +930,7 @@ fn active_extension_network_policy_for_test(
 #[cfg(feature = "test-support")]
 #[derive(Clone)]
 pub struct AttachmentTestSupport {
-    pub read_port: Arc<dyn ironclaw_loop_support::LoopAttachmentReadPort>,
+    pub read_port: Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>,
     pub lander: Arc<dyn ironclaw_product_workflow::InboundAttachmentLander>,
 }
 
@@ -4465,6 +4481,40 @@ fn ensure_postgres_event_store_config(
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn warm_resource_governor_with_error<F, E, J>(
+    resource_governor: FilesystemResourceGovernor<F>,
+    map_join_error: J,
+) -> Result<FilesystemResourceGovernor<F>, E>
+where
+    F: RootFilesystem + 'static,
+    E: From<ironclaw_resources::ResourceError>,
+    J: FnOnce(tokio::task::JoinError) -> E,
+{
+    let resource_governor = tokio::task::spawn_blocking(move || {
+        resource_governor.warm_authority()?;
+        Ok::<_, ironclaw_resources::ResourceError>(resource_governor)
+    })
+    .await
+    .map_err(map_join_error)??;
+    Ok(resource_governor)
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn warm_resource_governor_for_composition<F>(
+    resource_governor: FilesystemResourceGovernor<F>,
+) -> Result<FilesystemResourceGovernor<F>, crate::RebornCompositionError>
+where
+    F: RootFilesystem + 'static,
+{
+    warm_resource_governor_with_error(resource_governor, |error| {
+        crate::RebornCompositionError::InvalidConfig {
+            reason: format!("resource governor warm-up task failed: {error}"),
+        }
+    })
+    .await
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 async fn build_filesystem_production_host_runtime_services<F, TPolicy, TWake>(
     input: FilesystemProductionHostRuntimeServicesInput<F, TPolicy, TWake>,
 ) -> Result<FilesystemProductionHostRuntimeServices<F>, crate::RebornCompositionError>
@@ -4499,7 +4549,7 @@ where
         secret_master_key,
     )
     .await?;
-    resource_governor.warm_authority()?;
+    let resource_governor = warm_resource_governor_for_composition(resource_governor).await?;
     let governor = Arc::new(resource_governor);
     let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
         &scoped_filesystem,
@@ -4653,7 +4703,7 @@ impl<F> ProductionStoreBundle<F>
 where
     F: RootFilesystem + 'static,
 {
-    fn new(
+    async fn new(
         filesystem: Arc<F>,
         resource_governor: FilesystemResourceGovernor<F>,
         secret_master_key: ironclaw_secrets::SecretMaterial,
@@ -4670,7 +4720,7 @@ where
             Arc::clone(&scoped_filesystem),
             secret_master_key,
         )?;
-        resource_governor.warm_authority()?;
+        let resource_governor = warm_resource_governor_for_build(resource_governor).await?;
 
         Ok(Self {
             filesystem,
@@ -4682,6 +4732,19 @@ where
             event_store,
         })
     }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn warm_resource_governor_for_build<F>(
+    resource_governor: FilesystemResourceGovernor<F>,
+) -> Result<FilesystemResourceGovernor<F>, RebornBuildError>
+where
+    F: RootFilesystem + 'static,
+{
+    warm_resource_governor_with_error(resource_governor, |error| RebornBuildError::InvalidConfig {
+        reason: format!("resource governor warm-up task failed: {error}"),
+    })
+    .await
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -5000,7 +5063,8 @@ async fn build_libsql_production(
             path_or_url,
             auth_token,
         },
-    )?;
+    )
+    .await?;
 
     build_backend_production(
         context,
@@ -5058,7 +5122,8 @@ async fn build_postgres_production(
         resource_governor,
         secret_master_key,
         ironclaw_reborn_event_store::RebornEventStoreConfig::PostgresPool { pool },
-    )?;
+    )
+    .await?;
 
     build_backend_production(
         context,

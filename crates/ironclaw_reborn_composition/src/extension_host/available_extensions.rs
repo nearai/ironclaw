@@ -5,12 +5,13 @@ use std::sync::Arc;
 use ironclaw_auth::SLACK_PERSONAL_PROVIDER_ID;
 use ironclaw_extensions::{
     CapabilityDeclV2, CapabilityVisibility, ExtensionManifestRecord, ExtensionPackage,
-    ExtensionRuntime, ManifestSource,
+    ExtensionRuntime, HostApiContractRegistry, ManifestSource,
 };
-use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
+use ironclaw_filesystem::{DirEntry, FileType, FilesystemError, RootFilesystem};
 use ironclaw_first_party_extensions::is_gsuite_extension_id;
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, RuntimeCredentialAccountProviderId, VirtualPath, sha256_digest_token,
+    CapabilityId, ExtensionId, HostPortCatalog, RuntimeCredentialAccountProviderId, VirtualPath,
+    sha256_digest_token,
 };
 use ironclaw_product_adapter_registry::product_adapter_sections;
 use ironclaw_product_adapters::ProductSurfaceKind;
@@ -1620,73 +1621,103 @@ where
         if reserved_host_bundled_extension_id(&extension_id) {
             continue;
         }
-        let manifest_path = VirtualPath::new(format!(
-            "{}/manifest.toml",
-            entry.path.as_str().trim_end_matches('/')
-        ))
-        .map_err(map_binding_error)?;
-        let manifest_bytes = match fs.read_file(&manifest_path).await {
-            Ok(bytes) => bytes,
-            Err(FilesystemError::NotFound { .. }) | Err(FilesystemError::MountNotFound { .. }) => {
-                continue;
+        match load_filesystem_package(fs, entry, &host_ports, &contracts).await {
+            Ok(Some(package)) => packages.push(package),
+            Ok(None) => {}
+            // Per-entry validation failure is fail-open: a stale materialized
+            // manifest (e.g. a pre-#5499 first-party copy whose trust
+            // `InstalledLocal` may no longer assert) must not abort the whole
+            // catalog and crash-loop the deployment (#5966); the bundled-assets
+            // merge supersedes first-party ids afterwards. Infrastructure
+            // errors (`Transient`) stay fail-closed so a flaky volume does not
+            // silently drop installed extensions.
+            Err(ProductWorkflowError::InvalidBindingRequest { reason }) => {
+                tracing::warn!(
+                    extension_id = %extension_id,
+                    %reason,
+                    "skipping invalid available extension manifest"
+                );
             }
-            Err(error) => {
-                return Err(ProductWorkflowError::Transient {
-                    reason: format!("failed to read available extension manifest: {error}"),
-                });
-            }
-        };
-        let manifest_toml = String::from_utf8(manifest_bytes).map_err(|error| {
-            ProductWorkflowError::InvalidBindingRequest {
-                reason: format!("available extension manifest is not UTF-8: {error}"),
-            }
-        })?;
-        let record = ExtensionManifestRecord::from_toml_with_contracts(
-            manifest_toml,
-            ManifestSource::InstalledLocal,
-            &host_ports,
-            None,
-            &contracts,
-        )
-        .map_err(map_binding_error)?;
-        let surface_kinds = surface_kinds_from_manifest_record(&record, entry.name.as_str())?;
-        let manifest = record
-            .manifest()
-            .clone()
-            .try_into()
-            .map_err(map_binding_error)?;
-        let package = ExtensionPackage::from_manifest_toml(manifest, entry.path, record.raw_toml())
-            .map_err(map_binding_error)?;
-        // Catalog EVERY file in the extension dir as inline bytes, exactly
-        // like a fresh import. Assets stored as `Filesystem(path)` pointers
-        // into the extension's own materialized dir dangle after `remove`
-        // (which deletes that dir) and break the intended
-        // remove -> available -> reinstall flow with
-        // "failed to read available extension asset"; and cataloging only
-        // manifest + wasm module would lose schemas/prompt docs on reinstall.
-        let assets = inline_extension_dir_assets(fs, &package.root).await?;
-        packages.push(AvailableExtensionPackage {
-            package_ref: LifecyclePackageRef::new(
-                LifecyclePackageKind::Extension,
-                package.id.as_str(),
-            )?,
-            manifest_toml: record.raw_toml().to_string(),
-            // Everything discovered on the filesystem is `InstalledLocal`, per
-            // the `ManifestSource` contract ("Locally installed extension under
-            // `/system/extensions/`"). `HostBundled` — the only tier eligible
-            // for first-party/system trust — is reserved for extensions
-            // compiled into the host binary (`from_first_party_assets`), whose
-            // reserved ids the scan skips above. Uploaded tool bundles
-            // materialize under this root, so stamping discovery `HostBundled`
-            // would let a process restart launder an untrusted upload into
-            // first-party trust (#5459 review: import → restart → install).
-            source: ManifestSource::InstalledLocal,
-            package,
-            surface_kinds,
-            assets,
-        });
+            Err(error) => return Err(error),
+        }
     }
     Ok(packages)
+}
+
+async fn load_filesystem_package<F>(
+    fs: &F,
+    entry: DirEntry,
+    host_ports: &HostPortCatalog,
+    contracts: &HostApiContractRegistry,
+) -> Result<Option<AvailableExtensionPackage>, ProductWorkflowError>
+where
+    F: RootFilesystem + ?Sized,
+{
+    let manifest_path = VirtualPath::new(format!(
+        "{}/manifest.toml",
+        entry.path.as_str().trim_end_matches('/')
+    ))
+    .map_err(map_binding_error)?;
+    let manifest_bytes = match fs.read_file(&manifest_path).await {
+        Ok(bytes) => bytes,
+        Err(FilesystemError::NotFound { .. }) | Err(FilesystemError::MountNotFound { .. }) => {
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err(ProductWorkflowError::Transient {
+                reason: format!("failed to read available extension manifest: {error}"),
+            });
+        }
+    };
+    let manifest_toml = String::from_utf8(manifest_bytes).map_err(|error| {
+        ProductWorkflowError::InvalidBindingRequest {
+            reason: format!("available extension manifest is not UTF-8: {error}"),
+        }
+    })?;
+    let record = ExtensionManifestRecord::from_toml_with_contracts(
+        manifest_toml,
+        ManifestSource::InstalledLocal,
+        host_ports,
+        None,
+        contracts,
+    )
+    .map_err(map_binding_error)?;
+    let surface_kinds = surface_kinds_from_manifest_record(&record, entry.name.as_str())?;
+    let manifest = record
+        .manifest()
+        .clone()
+        .try_into()
+        .map_err(map_binding_error)?;
+    let package = ExtensionPackage::from_manifest_toml(manifest, entry.path, record.raw_toml())
+        .map_err(map_binding_error)?;
+    // Catalog EVERY file in the extension dir as inline bytes, exactly
+    // like a fresh import. Assets stored as `Filesystem(path)` pointers
+    // into the extension's own materialized dir dangle after `remove`
+    // (which deletes that dir) and break the intended
+    // remove -> available -> reinstall flow with
+    // "failed to read available extension asset"; and cataloging only
+    // manifest + wasm module would lose schemas/prompt docs on reinstall.
+    let assets = inline_extension_dir_assets(fs, &package.root).await?;
+    Ok(Some(AvailableExtensionPackage {
+        package_ref: LifecyclePackageRef::new(
+            LifecyclePackageKind::Extension,
+            package.id.as_str(),
+        )?,
+        manifest_toml: record.raw_toml().to_string(),
+        // Everything discovered on the filesystem is `InstalledLocal`, per
+        // the `ManifestSource` contract ("Locally installed extension under
+        // `/system/extensions/`"). `HostBundled` — the only tier eligible
+        // for first-party/system trust — is reserved for extensions
+        // compiled into the host binary (`from_first_party_assets`), whose
+        // reserved ids the scan skips above. Uploaded tool bundles
+        // materialize under this root, so stamping discovery `HostBundled`
+        // would let a process restart launder an untrusted upload into
+        // first-party trust (#5459 review: import → restart → install).
+        source: ManifestSource::InstalledLocal,
+        package,
+        surface_kinds,
+        assets,
+    }))
 }
 
 pub(crate) fn reserved_host_bundled_extension_id(extension_id: &ExtensionId) -> bool {
@@ -2324,6 +2355,13 @@ mod tests {
             "send_message description must forbid self-delivery of the run's own answer: {}",
             send_message.description
         );
+        assert!(
+            send_message.description.contains(
+                "Never call this — or instruct a trigger to call it — for that run's own final reply"
+            ) && send_message.description.contains("delivery_target_id"),
+            "send_message description must front-load the trigger duplicate-delivery guard: {}",
+            send_message.description
+        );
         // Honesty: a per-trigger delivery_target_id can route the final reply
         // elsewhere, so the description must name the configured outbound
         // delivery target, not promise "the requesting user".
@@ -2348,16 +2386,38 @@ mod tests {
             "send_message description must document the <@U…> mention encoding: {}",
             send_message.description
         );
+        assert!(
+            send_message.description.contains("Never guess")
+                && send_message
+                    .description
+                    .contains("slack.list_conversations")
+                && send_message.description.contains("DM entry's user field"),
+            "send_message description must explain how to resolve the real mention target instead of deriving a user id from a conversation id: {}",
+            send_message.description
+        );
+
+        let list_conversations = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "slack.list_conversations")
+            .expect("slack manifest declares slack.list_conversations");
+        assert!(
+            list_conversations
+                .description
+                .contains("raw counterpart user id"),
+            "list_conversations description must advertise the authoritative DM mention target: {}",
+            list_conversations.description
+        );
     }
 
-    /// Raw-entity hygiene pin (live canary qa_10i): the model narrates raw
-    /// Slack ids into replies ("… user id U0BDC16TML3 …") unless the ONLY
-    /// model-visible guidance — capability descriptions — forbids it
-    /// explicitly. Every slack read surface must carry the imperative
-    /// "tool calls only … never include" raw-id rule.
+    /// Model-visible Slack-read contract: steer the model to the correct read
+    /// capability and keep user-facing answers humanized rather than exposing
+    /// raw Slack ids.
     #[cfg(feature = "slack-v2-host-beta")]
     #[test]
-    fn slack_read_descriptions_forbid_raw_ids_in_replies() {
+    fn slack_read_descriptions_steer_tool_selection_and_humanized_output() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").unwrap();
@@ -2384,6 +2444,35 @@ mod tests {
                 capability.description
             );
         }
+
+        let search = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "slack.search_messages")
+            .expect("slack manifest declares slack.search_messages");
+        let list = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "slack.list_conversations")
+            .expect("slack manifest declares slack.list_conversations");
+        let history = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "slack.get_conversation_history")
+            .expect("slack manifest declares slack.get_conversation_history");
+
+        assert!(search.description.contains("single newest message"));
+        assert!(search.description.contains("get_conversation_history"));
+        assert!(list.description.contains("is_member"));
+        assert!(list.description.contains("not only"));
+        assert!(history.description.contains("user_display_name"));
+        assert!(history.description.contains("is_current_user"));
     }
 
     /// Honesty pin: the slack_personal OAuth grant does not include

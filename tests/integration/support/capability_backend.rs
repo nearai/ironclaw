@@ -49,6 +49,12 @@ pub(super) enum RebornCapabilityBackend {
     /// recorded. Distinct from `BuiltinHttpTools`, whose
     /// `RecordingRuntimeHttpEgress` bypasses that whole pipeline.
     BuiltinHttpToolsRealEgress,
+    /// `write_file`/`read_file` (same as `file_tools()`), but backed by the
+    /// REAL `LocalDevCapabilityIo` (durable tool-result projection seam,
+    /// issue #5838) instead of the ephemeral `ProductLiveCapabilityIo` test
+    /// double -- so a large `read_file` result is persisted durably and
+    /// `result_read` can page through it.
+    FileToolsDurableIo,
 }
 
 /// Which process port the built `BuiltinHttpTools` runtime installs for
@@ -183,6 +189,11 @@ impl RebornCapabilityBackend {
                 )
                 .await?;
                 host_runtime.install_real_egress_response_bodies(real_egress_response_bodies)?;
+                GroupCapability::HostRuntime(Arc::new(host_runtime))
+            }
+            RebornCapabilityBackend::FileToolsDurableIo => {
+                let host_runtime =
+                    super::harness::profiles::file::file_tools_with_durable_capability_io().await?;
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
         })

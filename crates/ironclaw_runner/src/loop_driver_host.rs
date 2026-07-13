@@ -17,7 +17,7 @@ use ironclaw_hooks::middleware::{
     HookedLoopTranscriptPort,
 };
 use ironclaw_host_api::{CapabilityId, ExtensionId};
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT, CapabilityResolveError, CapabilitySurfaceProfileFilter,
     CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, EmptyUserProfileSource,
     GuardedSystemInferencePort, HostIdentityContextSource, HostInputQueue, HostManagedModelGateway,
@@ -327,7 +327,7 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
     }
 }
 
-// `LoopCapabilityInputResolver` is now defined in `ironclaw_loop_support`
+// `LoopCapabilityInputResolver` is now defined in `ironclaw_loop_host`
 // (workspace-10 refactor); imported above.
 
 /// Default upper bound (in bytes of UTF-8 JSON-serialized form) above which
@@ -440,7 +440,7 @@ impl HookCapabilityInputResolver for HookCapabilityInputResolverAdapter {
     }
 }
 
-// `LoopCapabilityResultWriter` is now defined in `ironclaw_loop_support`
+// `LoopCapabilityResultWriter` is now defined in `ironclaw_loop_host`
 // (workspace-10 refactor); imported above.
 
 pub type HookDispatcherFactory = Arc<dyn Fn() -> Arc<HookDispatcher> + Send + Sync + 'static>;
@@ -2532,28 +2532,28 @@ fn validate_thread_scope(
 
 fn turn_error_to_host_error(error: TurnError) -> AgentLoopHostError {
     match &error {
-        TurnError::Unauthorized => ironclaw_loop_support::raw_agent_loop_host_error(
+        TurnError::Unauthorized => ironclaw_loop_host::raw_agent_loop_host_error(
             "checkpoint_state",
             "access",
             AgentLoopHostErrorKind::Unauthorized,
             "checkpoint state access was unauthorized",
             &error,
         ),
-        TurnError::InvalidRequest { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
+        TurnError::InvalidRequest { .. } => ironclaw_loop_host::raw_agent_loop_host_error(
             "checkpoint_state",
             "request",
             AgentLoopHostErrorKind::InvalidInvocation,
             "checkpoint state request is invalid",
             &error,
         ),
-        TurnError::Unavailable { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
+        TurnError::Unavailable { .. } => ironclaw_loop_host::raw_agent_loop_host_error(
             "checkpoint_state",
             "store",
             AgentLoopHostErrorKind::Unavailable,
             "checkpoint state store is unavailable",
             &error,
         ),
-        TurnError::ScopeNotFound => ironclaw_loop_support::raw_agent_loop_host_error(
+        TurnError::ScopeNotFound => ironclaw_loop_host::raw_agent_loop_host_error(
             "checkpoint_state",
             "scope_lookup",
             AgentLoopHostErrorKind::CheckpointRejected,
@@ -2561,7 +2561,7 @@ fn turn_error_to_host_error(error: TurnError) -> AgentLoopHostError {
             &error,
         ),
         TurnError::Conflict { .. } | TurnError::RunNotRetryable { .. } => {
-            ironclaw_loop_support::raw_agent_loop_host_error(
+            ironclaw_loop_host::raw_agent_loop_host_error(
                 "checkpoint_state",
                 "write",
                 AgentLoopHostErrorKind::CheckpointRejected,
@@ -2569,21 +2569,21 @@ fn turn_error_to_host_error(error: TurnError) -> AgentLoopHostError {
                 &error,
             )
         }
-        TurnError::CapacityExceeded { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
+        TurnError::CapacityExceeded { .. } => ironclaw_loop_host::raw_agent_loop_host_error(
             "checkpoint_state",
             "write",
             AgentLoopHostErrorKind::Unavailable,
             "checkpoint state store capacity was exceeded",
             &error,
         ),
-        TurnError::InvalidTransition { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
+        TurnError::InvalidTransition { .. } => ironclaw_loop_host::raw_agent_loop_host_error(
             "checkpoint_state",
             "write",
             AgentLoopHostErrorKind::CheckpointRejected,
             "checkpoint state write was invalid for current turn state",
             &error,
         ),
-        TurnError::LeaseMismatch => ironclaw_loop_support::raw_agent_loop_host_error(
+        TurnError::LeaseMismatch => ironclaw_loop_host::raw_agent_loop_host_error(
             "checkpoint_state",
             "write",
             AgentLoopHostErrorKind::CheckpointRejected,
@@ -2591,7 +2591,7 @@ fn turn_error_to_host_error(error: TurnError) -> AgentLoopHostError {
             &error,
         ),
         TurnError::ThreadBusy(_) | TurnError::AdmissionRejected(_) => {
-            ironclaw_loop_support::raw_agent_loop_host_error(
+            ironclaw_loop_host::raw_agent_loop_host_error(
                 "checkpoint_state",
                 "admission",
                 AgentLoopHostErrorKind::Unavailable,
@@ -2599,7 +2599,7 @@ fn turn_error_to_host_error(error: TurnError) -> AgentLoopHostError {
                 &error,
             )
         }
-        TurnError::InvalidRunOriginAdapter => ironclaw_loop_support::raw_agent_loop_host_error(
+        TurnError::InvalidRunOriginAdapter => ironclaw_loop_host::raw_agent_loop_host_error(
             "checkpoint_state",
             "request",
             AgentLoopHostErrorKind::InvalidInvocation,

@@ -1,9 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use ironclaw_loop_support::{
-    SkillBundleId, SkillBundleSource, SkillBundleSourceError, SkillFilePath,
-};
+use ironclaw_loop_host::{SkillBundleId, SkillBundleSource, SkillBundleSourceError, SkillFilePath};
 use ironclaw_turns::run_profile::LoopRunContext;
 use thiserror::Error;
 
@@ -164,7 +162,7 @@ mod tests {
 
     use async_trait::async_trait;
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
-    use ironclaw_loop_support::{SkillFilePath, SkillSourceKind};
+    use ironclaw_loop_host::{SkillFilePath, SkillSourceKind};
     use ironclaw_turns::{
         TurnId, TurnRunId, TurnScope,
         run_profile::{
@@ -223,7 +221,7 @@ mod tests {
         async fn list_skill_bundles(
             &self,
             _run_context: &LoopRunContext,
-        ) -> Result<Vec<ironclaw_loop_support::SkillBundleDescriptor>, SkillBundleSourceError>
+        ) -> Result<Vec<ironclaw_loop_host::SkillBundleDescriptor>, SkillBundleSourceError>
         {
             Ok(Vec::new())
         }

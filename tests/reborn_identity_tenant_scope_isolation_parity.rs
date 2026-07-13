@@ -11,7 +11,7 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{RwLock, watch};
 
 use async_trait::async_trait;
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
     HostIdentityMessageContent, HostManagedModelMessageRole, HostManagedModelResponse,
     IdentityApplicability, IdentityFileName,
@@ -154,7 +154,7 @@ async fn reborn_identity_tenant_scope_isolation_parity() {
     beta.shutdown().await;
 }
 
-fn system_prompt_text(request: &ironclaw_loop_support::HostManagedModelRequest) -> String {
+fn system_prompt_text(request: &ironclaw_loop_host::HostManagedModelRequest) -> String {
     request
         .messages
         .iter()

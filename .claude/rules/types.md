@@ -53,9 +53,10 @@ types live in `crates/ironclaw_common/src/identity.rs`:
   routing, Python action dispatch. Hyphens fold to underscores at
   construction time.
 
-Never cast between them. Never recompute one from the other by string
-manipulation — resolve through
-`AuthManager::resolve_extension_name_for_auth_flow`.
+Never cast between them or recompute one from the other by string manipulation.
+Carry the typed identity from the owning manifest, installation, or credential
+contract. When only credential identity is available, route conversion through
+`AuthManager::resolve_extension_name_for_auth_flow`; never cast or re-derive it.
 
 ## Canonical newtype template
 
@@ -126,30 +127,40 @@ Rules baked into the template:
   `format!("{}_token", extension_name) == credential_name.as_str()`
   rebuilds the bug #2574 fixed — route through the shared resolver.
 
-## Legacy exception — `#[serde(transparent)]` identity types
+## Persisted compatibility exception — `#[serde(transparent)]` identity types
 
 `CredentialName` and `ExtensionName` predate this template. They use
 `#[serde(transparent)]` + derived `Deserialize` and deliberately do
 *not* revalidate on the wire — the `serde_does_not_revalidate` test
-in `identity.rs` locks that contract in, because legacy persisted rows
+in `identity.rs` locks that contract in, because historical persisted rows
 may not satisfy the current rule.
 
 Don't "migrate" them to `try_from` — you will break rehydration of
 pre-existing DB rows. New code must still construct them through
 `::new()`. The `from_trusted(String)` helper on those two types is a
-legacy escape hatch for values handed over from a typed upstream (DB
+compatibility escape hatch for values handed over from a typed upstream (DB
 row, parsed `ExtensionManifest` field); do not copy that pattern onto
 new newtypes.
 
 Review flag: `#[serde(transparent)]` on a newly added validated
 newtype, or a `from_trusted` helper on anything other than the two
-legacy identity types. References: PR #2685, PR #2681, PR #2687.
+existing identity types. References: PR #2685, PR #2681, PR #2687.
 
 ## Byte-length vs. character-length
 
 A validator using `s.len()` measures bytes. If the error message says
 "N characters", switch to `s.chars().count()`. Pick one and match the
 message.
+
+Never truncate or inspect user/external text with byte-index slicing such as
+`&value[..n]`; it panics when `n` falls inside a multi-byte character. Use
+`char_indices()`, `chars()`, or verify `is_char_boundary(n)` first.
+
+Case-insensitive external values such as media types, extension suffixes, and
+platform-insensitive path keys must be normalized once at the boundary with
+`to_ascii_lowercase()` or compared with `eq_ignore_ascii_case()`. Do not apply
+case folding to secrets, opaque provider identifiers, or contracts that define
+case as significant.
 
 ## Wire-stable enums
 
@@ -167,24 +178,21 @@ vs `mission_complete`).
 When replacing a stringly-typed wire field with an enum, add
 `#[serde(alias = "...")]` for every value any running producer still
 emits. Grep the tree; check staging/production logs. Add a round-trip
-deserialization test with raw legacy JSON. Reference: PR #2678
+deserialization test with historical JSON. Reference: PR #2678
 `JobResultStatus` rejected `"error"` / `"stuck"` / case variants on
 rollout.
 
 ## Wire-contract field naming
 
-A boolean or enum exposed to the web UI has exactly one canonical
-snake_case name on the wire (`engine_v2_enabled`) and one canonical
-JS accessor (`window.bootstrap.engineV2Enabled`). Reading the same
-value from ad-hoc `data.engine_v2` inside a surface file is a bug —
-it will diverge. Delete duplicate fields in response structs (PR
-#2665 shipped both `engine_v2` and `engine_v2_enabled` in one struct).
-Frontend reads the flag from bootstrap globals, not from response
-bodies. References: PR #2683, PR #2702.
+A boolean or enum exposed to the web UI has exactly one canonical snake_case
+name on the wire and one canonical frontend accessor. Do not copy the same
+setting into ad-hoc response fields or bootstrap aliases; duplicated wire names
+will diverge. Frontend flags are read from their canonical bootstrap globals,
+never response fields, ad-hoc response bodies, or bootstrap aliases.
 
 ## Applies to
 
-`src/**`, `crates/**`, `tests/**`. Any code inside the IronClaw
-workspace. The rule doesn't apply to wire payloads (which are `String`
+`src/**`, `crates/**`, and `tests/**`. Any code inside the IronClaw workspace. The rule
+doesn't apply to wire payloads (which are `String`
 by virtue of JSON), log lines, or error messages — those *are* the
 boundary.

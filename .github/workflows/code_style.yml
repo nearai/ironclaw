@@ -392,10 +392,20 @@ jobs:
       - gateway-boundaries
       - webui-v2-js-lint
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
       - run: |
           if [[ "${{ needs.changes.outputs.has_code }}" == "false" ]]; then
             echo "No code changes — style checks skipped correctly"
             exit 0
+          fi
+
+          # shellcheck disable=SC1091
+          if ! source .github/scripts/ci-job-result-ok.sh; then
+            echo "Unable to source .github/scripts/ci-job-result-ok.sh"
+            exit 1
           fi
 
           for job_result in \
@@ -408,7 +418,7 @@ jobs:
             "webui-v2-js-lint=${{ needs.webui-v2-js-lint.result }}"; do
             name="${job_result%%=*}"
             result="${job_result##*=}"
-            if [[ "$result" != "success" ]]; then
+            if ! job_result_ok "$name" "$result" false "allow"; then
               echo "$name failed: $result"
               exit 1
             fi
@@ -420,7 +430,7 @@ jobs:
             "clippy-windows=${{ needs.clippy-windows.result }}"; do
             name="${job_result%%=*}"
             result="${job_result##*=}"
-            if [[ "$result" != "success" && "$result" != "skipped" ]]; then
+            if ! job_result_ok "$name" "$result" true "allow"; then
               echo "$name failed: $result"
               exit 1
             fi

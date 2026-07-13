@@ -19,6 +19,7 @@
 
 use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::ResourceGovernor;
+use ironclaw_turns::run_profile::LoopHostMilestoneKind;
 use rust_decimal::Decimal;
 
 use super::builder::RebornIntegrationHarness;
@@ -386,6 +387,43 @@ impl RebornIntegrationHarness {
         Err(format!("no recorded turn event of kind {kind:?}; saw {seen:?}").into())
     }
 
+    /// Assert a `LoopHostMilestoneKind::CompactionFailed` milestone was
+    /// recorded whose `reason_kind` equals `reason_kind`, scoped to the
+    /// milestones recorded SINCE `baseline` (a value from
+    /// [`RebornIntegrationHarness::milestone_len`] captured at the start of
+    /// the turn under test) — proves forced compaction failed safety
+    /// validation for that turn specifically, not a stale milestone from an
+    /// earlier turn on a multi-turn harness (mirrors the `_since` pattern
+    /// used by the tool-error and history assertions).
+    pub async fn assert_compaction_failed_since(
+        &self,
+        baseline: usize,
+        reason_kind: &str,
+    ) -> HarnessResult<()> {
+        let milestones = self.loop_milestones();
+        let Some(since) = milestones.get(baseline..) else {
+            return Err(format!(
+                "milestone baseline {baseline} exceeds current milestone count {} — stale baseline",
+                milestones.len()
+            )
+            .into());
+        };
+        if since.iter().any(|milestone| {
+            matches!(
+                &milestone.kind,
+                LoopHostMilestoneKind::CompactionFailed { reason_kind: actual, .. }
+                    if actual.as_str() == reason_kind
+            )
+        }) {
+            return Ok(());
+        }
+        let seen: Vec<_> = since.iter().map(|milestone| &milestone.kind).collect();
+        Err(format!(
+            "no CompactionFailed milestone with reason_kind {reason_kind:?} since baseline {baseline}; saw {seen:?}"
+        )
+        .into())
+    }
+
     /// Assert a captured model request carried a multimodal `data:` image part
     /// holding exactly `bytes` under `mime_type` (C-ATTACH) — proves the landed
     /// attachment round-tripped intact (lander → project filesystem →
@@ -710,6 +748,57 @@ impl RebornIntegrationHarness {
         Ok(self.persisted_history().await?.len())
     }
 
+    /// The MOST RECENT persisted `ToolResultReference` message (highest
+    /// `sequence`), for durable tool-result projection scenarios (issue
+    /// #5838) that need to script a dependent `result_read` call with a
+    /// server-minted value (`result_ref`, `next_offset`) `push_script`
+    /// couldn't know ahead of time. Errors when no such message exists.
+    async fn latest_tool_result_reference_message(
+        &self,
+    ) -> HarnessResult<ironclaw_threads::ThreadMessageRecord> {
+        let history = self.persisted_history().await?;
+        history
+            .into_iter()
+            .filter(|message| message.kind == ironclaw_threads::MessageKind::ToolResultReference)
+            .max_by_key(|message| message.sequence)
+            .ok_or_else(|| "no persisted ToolResultReference message".into())
+    }
+
+    /// The `result_ref` of the most recent persisted `ToolResultReference`
+    /// message. See [`latest_tool_result_reference_message`].
+    ///
+    /// [`latest_tool_result_reference_message`]: Self::latest_tool_result_reference_message
+    pub async fn latest_tool_result_ref(&self) -> HarnessResult<String> {
+        self.latest_tool_result_reference_message()
+            .await?
+            .tool_result_ref
+            .ok_or_else(|| "latest ToolResultReference message has no result_ref".into())
+    }
+
+    /// The `model_observation.detail.next_offset` of the most recent
+    /// persisted `ToolResultReference` message's `ResultReference`
+    /// observation — the server-computed continuation offset a `result_read`
+    /// script must use, since the preview's char-boundary floor can move it
+    /// off a fixed byte constant when the payload contains multi-byte UTF-8.
+    /// Errors when the message has no observation or no `next_offset` (i.e.
+    /// the preview already covered the whole payload).
+    pub async fn latest_tool_result_next_offset(&self) -> HarnessResult<u64> {
+        let message = self.latest_tool_result_reference_message().await?;
+        let content = message
+            .content
+            .ok_or("latest ToolResultReference message has no content")?;
+        let envelope: serde_json::Value = serde_json::from_str(&content).map_err(|error| {
+            format!("latest ToolResultReference content is not valid JSON: {error}")
+        })?;
+        envelope["model_observation"]["detail"]["next_offset"]
+            .as_u64()
+            .ok_or_else(|| {
+                "latest ToolResultReference observation has no next_offset (preview may cover \
+                 the whole payload)"
+                    .into()
+            })
+    }
+
     /// Slice `history[baseline..]`, failing loud on an out-of-range `baseline` —
     /// a baseline greater than the current history length is always a caller bug
     /// (a stale or foreign-thread value; history never shrinks). Degrading it to
@@ -908,6 +997,20 @@ impl RebornIntegrationHarness {
         needle: &str,
     ) -> HarnessResult<()> {
         self.conversation_history_contains_impl(0, Some(kind), needle)
+            .await
+    }
+
+    /// [`assert_conversation_history_role_contains`], scoped to the
+    /// `[baseline..]` slice (a [`history_len`] value from the start of the
+    /// turn under test) — the multi-turn variant, mirroring
+    /// [`assert_conversation_history_contains_since`].
+    pub async fn assert_conversation_history_role_contains_since(
+        &self,
+        baseline: usize,
+        kind: ironclaw_threads::MessageKind,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        self.conversation_history_contains_impl(baseline, Some(kind), needle)
             .await
     }
 }

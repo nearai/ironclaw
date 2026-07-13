@@ -20,7 +20,7 @@ use super::prompt::build_prompt_bundle_for_surface;
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, FailedExitDetails,
     HostStage, MAX_MODEL_RETRIES, StageContext, exit_id, failed_exit, honor_retry_alteration,
-    loop_gate_kind, model_error_class, model_error_failure_category, model_preference_to_host,
+    loop_gate_kind, model_error_class, model_error_failure_summary, model_preference_to_host,
     sanitized_strategy_summary,
 };
 
@@ -227,9 +227,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
                                 Some(checked.checkpoint_id),
                                 FailedExitDetails {
                                     diagnostic_ref: summary.diagnostic_ref.clone(),
-                                    safe_summary: Some(model_error_failure_category(
-                                        summary.class,
-                                    )?),
+                                    safe_summary: Some(model_error_failure_summary(&summary)?),
                                     explanation_message_ref: None,
                                 },
                             )?));

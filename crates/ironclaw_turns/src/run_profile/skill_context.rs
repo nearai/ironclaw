@@ -1,4 +1,4 @@
-//! Skill context selection for the agent loop-support boundary.
+//! Skill context selection for the agent loop-host boundary.
 //!
 //! This module provides [`SkillContextService`] and the [`SkillContextSource`] trait,
 //! which select model-visible skill context from a host-approved run snapshot.

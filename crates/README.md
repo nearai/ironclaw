@@ -12,7 +12,7 @@ IronClaw Reborn keeps authority narrow and explicit:
 2. Policy gates decide: authorization, trust, runtime policy, resources, approvals, secrets, safety, filesystem, network, hooks, and prompt-envelope crates each own one kind of decision, label, or side effect.
 3. Capability hosts coordinate: capabilities, dispatcher, processes, scripts, MCP, WASM, shared WASM limiting, and host-runtime crates compose validated requests into sandboxed execution.
 4. State is durable and replayable: events, event streams, run state, threads, conversations, memory, outbound, product workflow storage, traces, and event projections keep the host observable without leaking secrets.
-5. Product surfaces adapt: agent loop, engine, loop support, gateway, WebChat v2, TUI, skills, first-party extensions, product adapters, and Reborn composition crates turn those lower-level boundaries into agent and user experiences.
+5. Product surfaces adapt: agent loop, engine, loop host, gateway, WebChat v2, TUI, skills, first-party extensions, product adapters, and Reborn composition crates turn those lower-level boundaries into agent and user experiences.
 
 A good rule of thumb: if a change adds new authority or persistence, put it in the crate that owns that boundary instead of threading it through a UI or runtime crate.
 
@@ -85,10 +85,10 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 | `ironclaw_reborn_openai_compat` | `ironclaw_reborn_openai_compat` | OpenAI-compatible Chat/Responses DTOs, route descriptors, sanitized errors, fail-closed route fragment, and feature-gated durable ref/idempotency storage. |
 | `ironclaw_llm` | `ironclaw_llm` | LLM provider routing and abstraction used by Reborn product surfaces and the agent loop. |
 | `ironclaw_agent_loop` | `ironclaw_agent_loop` | Agent-loop framework state, planner/executor, strategy/family contracts, and test support. |
-| `ironclaw_loop_support` | `ironclaw_loop_support` | Adapts durable Reborn support boundaries into the narrow agent-loop host port. It should not own provider clients or runtime dispatchers. |
+| `ironclaw_loop_host` | `ironclaw_loop_host` | Adapts durable Reborn support boundaries into the narrow agent-loop host port. It should not own provider clients or runtime dispatchers. |
 | `ironclaw_turns` | `ironclaw_turns` | Host-layer turn coordination contracts. Use it for turn lifecycle boundaries between loop/product code and host services. |
 | `ironclaw_first_party_extensions` | `ironclaw_first_party_extensions` | Concrete first-party userland extension implementations behind scoped handles. |
-| `ironclaw_first_party_extension_ports` | `ironclaw_first_party_extension_ports` | Loop-facing adapters for first-party extensions: skill activation/context/execution ports over loop-support and turn-run contracts. |
+| `ironclaw_first_party_extension_ports` | `ironclaw_first_party_extension_ports` | Loop-facing adapters for first-party extensions: skill activation/context/execution ports over loop-host and turn-run contracts. |
 | `ironclaw_product_adapters` | `ironclaw_product_adapters` | Product-adapter contracts for mapping Reborn state and events into product-facing shapes. |
 | `ironclaw_product_adapter_registry` | `ironclaw_product_adapter_registry` | ProductAdapter host-api projection and installation registry. |
 | `ironclaw_product_workflow` | `ironclaw_product_workflow` | Product-facing workflow facade: inbound turn service, idempotency ledger, binding resolution. |
@@ -117,7 +117,7 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 - **Current invocation state**: use `ironclaw_run_state`, not event logs.
 - **User-visible read models and live projection streams**: prefer `ironclaw_event_projections`, `ironclaw_event_streams`, or `ironclaw_product_adapters` over parsing storage rows in UI code.
 - **Product workflow persistence**: keep orchestration and durable ledger adapters in `ironclaw_product_workflow`; concrete adapters stay behind the `storage`/`libsql`/`postgres` features and the `IdempotencyLedger` port.
-- **Agent loop/product orchestration**: use `ironclaw_agent_loop`, `ironclaw_loop_support`, `ironclaw_turns`, `ironclaw_engine`, or `ironclaw_runner` depending on layer.
+- **Agent loop/product orchestration**: use `ironclaw_agent_loop`, `ironclaw_loop_host`, `ironclaw_turns`, `ironclaw_engine`, or `ironclaw_runner` depending on layer.
 - **Web or terminal UI**: use `ironclaw_gateway`, `ironclaw_webui_v2`, `ironclaw_reborn_webui_ingress`, or `ironclaw_tui`; keep authority and persistence in lower crates.
 
 ## Boundary rules

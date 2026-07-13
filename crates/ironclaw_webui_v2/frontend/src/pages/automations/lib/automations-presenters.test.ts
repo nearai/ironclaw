@@ -198,6 +198,74 @@ test("normalizeAutomations preserves legacy last_run_at when recent history is e
   assert.equal(automations[0].last_status_label, "Done");
 });
 
+test("normalizeAutomations does not treat a running fire timestamp as last completed", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "running-only",
+        name: "Running only",
+        source: { type: "schedule", cron: "* * * * *" },
+        state: "active",
+        last_run_at: "2026-06-05T16:00:01Z",
+        last_status: "ok",
+        recent_runs: [
+          {
+            status: "running",
+            fired_at: "2026-06-05T16:00:00Z",
+            submitted_at: "2026-06-05T16:00:01Z",
+            thread_id: "thread-running",
+            run_id: "run-running",
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(automations.length, 1);
+  assert.equal(automations[0].last_run_label, "No runs yet");
+  assert.equal(automations[0].success_rate_label, "No completed runs");
+  assert.equal(automations[0].current_run.run_id, "run-running");
+});
+
+test("normalizeAutomations uses a legacy terminal run timestamp beside an active run", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "missing-completed-at",
+        name: "Missing completed timestamp",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "active",
+        last_run_at: "2026-06-05T16:00:01Z",
+        last_status: "ok",
+        recent_runs: [
+          {
+            status: "running",
+            fired_at: "2026-06-05T16:00:00Z",
+            submitted_at: "2026-06-05T16:00:01Z",
+            thread_id: "thread-running",
+            run_id: "run-running",
+          },
+          {
+            status: "ok",
+            submitted_at: "2026-06-04T16:00:01Z",
+            thread_id: "thread-ok",
+            run_id: "run-ok",
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(automations.length, 1);
+  assert.match(automations[0].last_run_label, /Jun 4/);
+  assert.doesNotMatch(automations[0].last_run_label, /Jun 5/);
+  assert.equal(automations[0].last_status_label, "Done");
+  assert.equal(automations[0].success_rate_label, "100% visible runs");
+  assert.equal(automations[0].recent_runs[1].completed_label, "Not completed");
+  assert.equal(automations[0].recent_runs[1].timestamp_source, "2026-06-04T16:00:01Z");
+  assert.equal(automations[0].current_run.run_id, "run-running");
+});
+
 test("scheduleLabel presents common recurring schedules in friendly language", () => {
   assert.equal(scheduleLabel("30 14 * * *"), "Every day at 2:30 PM");
   assert.equal(scheduleLabel("0 30 14 * * *"), "Every day at 2:30 PM");

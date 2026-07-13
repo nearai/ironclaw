@@ -18,8 +18,8 @@ pub fn wrap_project_create_capability_for_test(
     project_service: std::sync::Arc<dyn ironclaw_product_workflow::ProjectService>,
     fallback_user_id: ironclaw_host_api::UserId,
     run_context: ironclaw_turns::run_profile::LoopRunContext,
-    input_resolver: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
-    result_writer: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
+    input_resolver: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
+    result_writer: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
 ) -> Result<
     std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
     ironclaw_turns::run_profile::AgentLoopHostError,

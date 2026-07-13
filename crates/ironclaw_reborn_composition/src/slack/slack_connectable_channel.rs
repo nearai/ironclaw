@@ -175,7 +175,7 @@ fn slack_admin_managed_channel_connectable_channel() -> RebornConnectableChannel
 #[cfg(test)]
 mod tests {
     use ironclaw_host_api::{AgentId, TenantId, UserId};
-    use ironclaw_loop_support::{
+    use ironclaw_loop_host::{
         HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
         HostManagedModelResponse,
     };
