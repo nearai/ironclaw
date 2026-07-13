@@ -21,7 +21,7 @@ use ironclaw_auth::{
     AuthFlowStatus, AuthProductError, AuthProductScope, AuthProviderId, CredentialAccountLabel,
     OAuthAuthorizationEndpoint, OAuthAuthorizeUrlRequest, OAuthCallbackState,
     OAuthCallbackStateKind, OAuthProviderIdentity, OAuthScopeParam, PkceVerifierSecret,
-    ProviderScope, SLACK_PERSONAL_AUTHORIZATION_ENDPOINT, SLACK_PERSONAL_PROVIDER_ID,
+    ProviderScope, SLACK_PERSONAL_AUTHORIZATION_ENDPOINT, SLACK_PROVIDER_ID,
     build_authorization_url_with_scope_param, opaque_state_hash, pkce_s256_challenge,
     pkce_verifier_hash,
 };
@@ -95,10 +95,10 @@ impl fmt::Debug for SlackPersonalOAuthGateLifecycle {
 /// standard `scope` field, so the exchange falls back to the requested scopes.
 pub(crate) fn slack_personal_provider_spec() -> HostOAuthProviderSpec {
     HostOAuthProviderSpec {
-        provider_id: SLACK_PERSONAL_PROVIDER_ID,
+        provider_id: SLACK_PROVIDER_ID,
         capability_id: "ironclaw_auth.slack_personal_oauth",
         token_endpoint: ironclaw_auth::SLACK_PERSONAL_TOKEN_ENDPOINT,
-        secret_handle_prefix: "slack_personal",
+        secret_handle_prefix: "slack",
         resource: None,
         exchange_scope_policy: ExchangeScopePolicy::FallbackToRequested,
         token_response_shape: TokenResponseShape::SlackAuthedUser,
@@ -135,8 +135,8 @@ pub(crate) async fn start_extension_oauth_flow(
             AuthErrorCode::BackendUnavailable,
         )
     };
-    let provider = AuthProviderId::new(SLACK_PERSONAL_PROVIDER_ID)
-        .map_err(|_| internal_invariant("provider_id"))?;
+    let provider =
+        AuthProviderId::new(SLACK_PROVIDER_ID).map_err(|_| internal_invariant("provider_id"))?;
     let account_label = CredentialAccountLabel::new(request.account_label)
         .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
     let requested_scopes = slack_personal_oauth_setup_scopes()
@@ -283,7 +283,7 @@ pub(crate) fn slack_lifecycle_start_failure(
 pub(crate) static SLACK_PERSONAL_CALLBACK_DESCRIPTOR: OAuthCallbackDescriptor =
     OAuthCallbackDescriptor {
         state_kind: OAuthCallbackStateKind::SLACK_PERSONAL,
-        provider_id: SLACK_PERSONAL_PROVIDER_ID,
+        provider_id: SLACK_PROVIDER_ID,
         scope_resolution: CallbackScopeResolution::RequestedOnly,
         identity_hook: slack_personal_identity_hook,
         on_terminal_failure: Some(slack_personal_oauth_abandon_hook),
@@ -392,7 +392,7 @@ fn slack_personal_oauth_abandon_hook(
         match config
             .binding_rollback_store
             .user_identity_bindings_for_user_at_epoch(
-                crate::slack::slack_actor_identity::SLACK_IDENTITY_PROVIDER,
+                crate::slack::slack_channel_connection::SLACK_IDENTITY_PROVIDER,
                 &callback_scope.resource.user_id,
                 Some(provider_user_id_prefix.as_str()),
                 Some(connection_epoch),
@@ -604,7 +604,7 @@ impl SlackPersonalOAuthGateProvider {
 #[async_trait::async_trait]
 impl OAuthGateProvider for SlackPersonalOAuthGateProvider {
     fn provider_id(&self) -> &'static str {
-        SLACK_PERSONAL_PROVIDER_ID
+        SLACK_PROVIDER_ID
     }
 
     fn pkce_secret_handle_label(&self) -> &'static str {
@@ -625,7 +625,7 @@ impl OAuthGateProvider for SlackPersonalOAuthGateProvider {
             .map_err(slack_lifecycle_gate_failure)?;
         if connection_state.is_none()
             && let Some(exact) = exact.as_ref()
-            && exact.provider.as_str() == SLACK_PERSONAL_PROVIDER_ID
+            && exact.provider.as_str() == SLACK_PROVIDER_ID
             && exact.status == AuthFlowStatus::AwaitingUser
             && exact.expires_at > Utc::now()
         {
@@ -667,14 +667,14 @@ impl OAuthGateProvider for SlackPersonalOAuthGateProvider {
         }
         match flow {
             Some(flow)
-                if flow.provider.as_str() == SLACK_PERSONAL_PROVIDER_ID
+                if flow.provider.as_str() == SLACK_PROVIDER_ID
                     && flow.status == AuthFlowStatus::AwaitingUser
                     && flow.expires_at > now =>
             {
                 Ok(Some(flow))
             }
             Some(flow)
-                if flow.provider.as_str() == SLACK_PERSONAL_PROVIDER_ID
+                if flow.provider.as_str() == SLACK_PROVIDER_ID
                     && (matches!(
                         flow.status,
                         AuthFlowStatus::Canceled | AuthFlowStatus::Expired | AuthFlowStatus::Failed
@@ -706,7 +706,7 @@ impl OAuthGateProvider for SlackPersonalOAuthGateProvider {
             tracing::debug!(error = %e, "Slack personal OAuth credentials not configured");
             AuthProductError::BackendUnavailable
         })?;
-        let account_label = CredentialAccountLabel::new("slack_personal")?;
+        let account_label = CredentialAccountLabel::new("slack")?;
         let state = OAuthCallbackState::new(
             OAuthCallbackStateKind::SLACK_PERSONAL,
             flow_id,

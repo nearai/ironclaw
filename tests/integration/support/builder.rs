@@ -818,7 +818,7 @@ impl RebornIntegrationHarness {
             text,
             ProductTriggerReason::DirectChat,
         )?;
-        Ok(self.workflow.accept_inbound(envelope).await?)
+        Ok(self.workflow.submit_inbound(envelope).await?)
     }
 
     /// Submit a user turn and wait until it blocks on an approval gate, returning

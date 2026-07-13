@@ -1,9 +1,10 @@
 use std::{sync::Arc, time::Duration};
 
+use ironclaw_host_api::CapabilitySurfaceKind;
 use ironclaw_product_workflow::{
-    LifecycleExtensionSurfaceKind, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
-    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductSurfaceContext,
-    OutboundPreferencesProductFacade, RebornOutboundDeliveryTargetStatus, WebUiAuthenticatedCaller,
+    LifecyclePhase, LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
+    LifecycleProductPayload, LifecycleProductSurfaceContext, OutboundPreferencesProductFacade,
+    RebornOutboundDeliveryTargetStatus, WebUiAuthenticatedCaller,
 };
 use ironclaw_turns::{
     run_profile::{
@@ -220,7 +221,7 @@ fn extension_is_channel_surface(
     extension
         .summary
         .surface_kinds
-        .contains(&LifecycleExtensionSurfaceKind::ExternalChannel)
+        .contains(&CapabilitySurfaceKind::Channel)
 }
 
 #[cfg(test)]
@@ -228,13 +229,13 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+    use ironclaw_host_api::{AgentId, CapabilitySurfaceKind, ProjectId, TenantId, UserId};
     use ironclaw_product_workflow::{
         LifecycleExtensionRuntimeKind, LifecycleExtensionSource, LifecycleExtensionSummary,
-        LifecycleExtensionSurfaceKind, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
-        LifecyclePackageRef, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
-        LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
-        OutboundPreferencesProductFacade, ProductWorkflowError, RebornOutboundDeliveryTargetId,
+        LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
+        LifecyclePhase, LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
+        LifecycleProductPayload, LifecycleProductResponse, OutboundPreferencesProductFacade,
+        ProductWorkflowError, RebornOutboundDeliveryTargetId,
         RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetStatus,
         RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
         RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
@@ -445,7 +446,9 @@ mod tests {
                 description: "channel extension".to_string(),
                 source: LifecycleExtensionSource::HostBundled,
                 runtime_kind: LifecycleExtensionRuntimeKind::FirstParty,
-                surface_kinds: vec![LifecycleExtensionSurfaceKind::ExternalChannel],
+                surface_kinds: vec![CapabilitySurfaceKind::Channel],
+                channel_directions: None,
+                channel_connection: None,
                 visible_capability_ids: Vec::new(),
                 visible_read_only_capability_ids: Vec::new(),
                 credential_requirements: Vec::new(),
@@ -467,6 +470,8 @@ mod tests {
                 source: LifecycleExtensionSource::HostBundled,
                 runtime_kind: LifecycleExtensionRuntimeKind::WasmTool,
                 surface_kinds: Vec::new(),
+                channel_directions: None,
+                channel_connection: None,
                 visible_capability_ids: Vec::new(),
                 visible_read_only_capability_ids: Vec::new(),
                 credential_requirements: Vec::new(),

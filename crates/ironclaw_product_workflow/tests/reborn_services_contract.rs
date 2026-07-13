@@ -19,6 +19,7 @@ use ironclaw_approvals::{
 };
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{CredentialAccountId, CredentialAccountProjection};
+use ironclaw_host_api::CapabilitySurfaceKind;
 use ironclaw_host_api::{
     AgentId, ApprovalRequestId, CapabilityId, EffectKind, ExtensionId, InvocationId,
     PermissionMode, Principal, ProjectId, ResourceScope, SecretHandle, TenantId, ThreadId, UserId,
@@ -33,9 +34,10 @@ use ironclaw_product_workflow::{
     AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, ApprovalInteractionActionView,
     ApprovalInteractionDecision, ApprovalInteractionScope, ApprovalInteractionService,
     AuthInteractionDecision, AuthInteractionService, AutomationListRequest, AutomationName,
-    AutomationProductFacade, CodexLoginStart, ExtensionCredentialSetupService,
-    ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, InboundAttachmentLander,
-    InboundAttachmentReader, LifecycleExtensionCredentialRequirement,
+    AutomationProductFacade, ChannelConnectionRequirement, CodexLoginStart,
+    ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
+    ExtensionCredentialSubmitRequest, InboundAttachmentLander, InboundAttachmentReader,
+    LifecycleChannelDirections, LifecycleExtensionCredentialRequirement,
     LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
     LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductAction,
@@ -52,8 +54,8 @@ use ironclaw_product_workflow::{
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornConnectableChannelInfo, RebornCreateProjectRequest, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornExtensionOnboardingState, RebornGetProjectRequest,
+    RebornCreateProjectRequest, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
+    RebornExtensionOnboardingState, RebornExtensionSurface, RebornGetProjectRequest,
     RebornGetRunStateRequest, RebornListMembersRequest, RebornListMembersResponse,
     RebornListProjectsRequest, RebornListProjectsResponse, RebornLogLevel, RebornLogQueryRequest,
     RebornLogQueryResponse, RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigSetRequest,
@@ -73,13 +75,12 @@ use ironclaw_product_workflow::{
     RebornSubmitTurnResponse, RebornTimelineRequest, RebornUpdateMemberRoleRequest,
     RebornUpdateProjectRequest, ResolveApprovalInteractionRequest,
     ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, SetActiveLlmRequest, StaticConnectableChannelsProductFacade,
-    StaticOperatorStatusService, TriggerRunThreadScope, UpsertLlmProviderRequest,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
-    automation_trigger_thread_metadata_json,
+    ResolveAuthInteractionResponse, SetActiveLlmRequest, StaticOperatorStatusService,
+    TriggerRunThreadScope, UpsertLlmProviderRequest, WebUiAuthenticatedCaller,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiRenameAutomationRequest,
+    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest, approval_gate_ref, automation_trigger_thread_metadata_json,
 };
 use ironclaw_product_workflow::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
@@ -899,6 +900,8 @@ impl RecordingLifecycleFacade {
             source: LifecycleExtensionSource::HostBundled,
             runtime_kind: LifecycleExtensionRuntimeKind::FirstParty,
             surface_kinds: Vec::new(),
+            channel_directions: None,
+            channel_connection: None,
             visible_capability_ids: Vec::new(),
             visible_read_only_capability_ids: Vec::new(),
             credential_requirements: self.credential_requirements.clone(),
@@ -935,7 +938,7 @@ impl LifecycleProductFacade for RecordingLifecycleFacade {
             .expect("lock")
             .push(package_ref.clone());
         let phase = if self.credential_requirements.is_empty() {
-            LifecyclePhase::UnsupportedOrLegacy
+            LifecyclePhase::Unsupported
         } else {
             LifecyclePhase::Configured
         };
@@ -4105,7 +4108,7 @@ async fn resolve_gate_rejects_missing_run_state_actor() {
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
                 "gate_ref": "gate-alpha",
-                "resolution": "denied"
+                "resolution": "declined"
             }))
             .expect("request"),
         )
@@ -4137,7 +4140,7 @@ async fn resolve_gate_rejects_mismatched_run_state_actor() {
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
                 "gate_ref": "gate-alpha",
-                "resolution": "denied"
+                "resolution": "declined"
             }))
             .expect("request"),
         )
@@ -4200,7 +4203,7 @@ async fn blocked_auth_run_routes_non_prefixed_gate_to_auth_interaction_service()
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
                 "gate_ref": "custom-auth-gate",
-                "resolution": "denied"
+                "resolution": "declined"
             }))
             .expect("request"),
         )
@@ -4308,7 +4311,7 @@ async fn blocked_approval_run_with_stale_gate_ref_returns_conflict() {
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
                 "gate_ref": "gate-stale",
-                "resolution": "denied"
+                "resolution": "declined"
             }))
             .expect("request"),
         )
@@ -4418,7 +4421,7 @@ async fn approval_gate_denial_uses_approval_interaction_service_and_returns_canc
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
                 "gate_ref": gate_ref.as_str(),
-                "resolution": "denied"
+                "resolution": "declined"
             }))
             .expect("request"),
         )
@@ -4529,7 +4532,7 @@ async fn hook_auth_gate_denial_uses_auth_interaction_service() {
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
                 "gate_ref": "gate:hook-auth-alpha",
-                "resolution": "denied"
+                "resolution": "declined"
             }))
             .expect("request"),
         )
@@ -4597,7 +4600,7 @@ async fn hook_auth_gate_denial_maps_to_reborn_resumed() {
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
                 "gate_ref": "gate:hook-auth-denial-resumed",
-                "resolution": "denied"
+                "resolution": "declined"
             }))
             .expect("request"),
         )
@@ -4634,7 +4637,7 @@ async fn missing_run_state_for_auth_gate_still_routes_to_auth_interaction_servic
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
                 "gate_ref": "gate:hook-auth-missing",
-                "resolution": "denied"
+                "resolution": "declined"
             }))
             .expect("request"),
         )
@@ -4672,7 +4675,7 @@ async fn denied_gate_resolution_cancels_run() {
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
                 "gate_ref": "gate-alpha",
-                "resolution": "denied"
+                "resolution": "declined"
             }))
             .expect("request"),
         )
@@ -4793,7 +4796,7 @@ async fn resolve_gate_rejects_cross_user_access() {
                 "thread_id": "thread-alice",
                 "run_id": run_id_string(),
                 "gate_ref": "gate-alpha",
-                "resolution": "denied"
+                "resolution": "declined"
             }))
             .expect("request"),
         )
@@ -4916,7 +4919,7 @@ async fn denied_gate_resolution_with_stale_gate_ref_returns_conflict() {
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
                 "gate_ref": "gate-stale",
-                "resolution": "denied"
+                "resolution": "declined"
             }))
             .expect("request"),
         )
@@ -5035,7 +5038,7 @@ async fn setup_extension_projects_through_configured_lifecycle_facade() {
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
             .expect("valid package ref")
     );
-    assert_eq!(response.phase, LifecyclePhase::UnsupportedOrLegacy);
+    assert_eq!(response.phase, LifecyclePhase::Unsupported);
     assert!(response.blockers.iter().any(|blocker| matches!(
         blocker,
         LifecycleReadinessBlocker::Runtime { ref_id: Some(ref_id) }
@@ -5154,63 +5157,65 @@ async fn list_automation_dispatches_through_product_facade() {
 }
 
 #[tokio::test]
-async fn list_connectable_channels_unwired_returns_empty_list() {
-    let services = RebornServices::new(
-        Arc::new(InMemorySessionThreadService::default()),
-        Arc::new(FakeTurnCoordinator::default()),
-    );
-
-    let response = services
-        .list_connectable_channels(caller())
-        .await
-        .expect("connectable channels response");
-
-    assert!(response.channels.is_empty());
-}
-
-#[tokio::test]
-async fn list_connectable_channels_returns_configured_action_metadata() {
+async fn list_extensions_projects_channel_surface_with_directions_and_connection() {
+    // Channel discovery is extension-surface data: an installed extension
+    // whose summary declares an inbound+outbound channel surface projects a
+    // typed `channel` surface with its connect affordance — there is no
+    // separate connectable-channel registry or route.
+    let mut summary = extension_summary("slack", Vec::new(), None);
+    summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
+    summary.channel_directions = Some(LifecycleChannelDirections {
+        inbound: true,
+        outbound: true,
+    });
+    summary.channel_connection = Some(ChannelConnectionRequirement {
+        channel: "slack".to_string(),
+        strategy: RebornChannelConnectStrategy::OAuth,
+        instructions: "Connect Slack with OAuth.".to_string(),
+        input_placeholder: String::new(),
+        submit_label: "Connect Slack".to_string(),
+        error_message: "Slack OAuth connection failed.".to_string(),
+    });
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_connectable_channels_facade(Arc::new(StaticConnectableChannelsProductFacade::new(vec![
-        RebornConnectableChannelInfo {
-            channel: "telegram".to_string(),
-            display_name: "Telegram".to_string(),
-            strategy: RebornChannelConnectStrategy::InboundProofCode,
-            action: RebornChannelConnectAction {
-                title: "Telegram account connection".to_string(),
-                instructions: "Message the Telegram bot to get a code, then paste it here. Codes expire in 10 minutes.".to_string(),
-                input_placeholder: "Enter Telegram pairing code...".to_string(),
-                submit_label: "Connect".to_string(),
-                success_message: "Telegram account connected.".to_string(),
-                error_message: "Invalid or expired Telegram pairing code. Message the bot to get a new one.".to_string(),
-            },
-            command_aliases: vec!["telegram".to_string(), "telegram account".to_string()],
+    .with_lifecycle_product_facade(Arc::new(ListingLifecycleFacade {
+        extension: LifecycleInstalledExtensionSummary {
+            summary,
+            phase: LifecyclePhase::Active,
+            install_scope: None,
         },
-    ])));
+    }));
 
     let response = services
-        .list_connectable_channels(caller())
+        .list_extensions(caller())
         .await
-        .expect("connectable channels response");
+        .expect("extensions response");
 
-    let channel = response.channels.first().expect("configured channel");
-    assert_eq!(channel.channel, "telegram");
-    assert_eq!(channel.display_name, "Telegram");
-    assert_eq!(
-        channel.strategy,
-        RebornChannelConnectStrategy::InboundProofCode
-    );
-    assert_eq!(
-        channel.action.instructions,
-        "Message the Telegram bot to get a code, then paste it here. Codes expire in 10 minutes."
-    );
-    assert_eq!(
-        channel.command_aliases,
-        vec!["telegram".to_string(), "telegram account".to_string()]
-    );
+    let info = response
+        .extensions
+        .iter()
+        .find(|extension| extension.package_ref.id.as_str() == "slack")
+        .expect("channel extension listed");
+    let channel = info
+        .surfaces
+        .iter()
+        .find_map(|surface| match surface {
+            RebornExtensionSurface::Channel {
+                inbound,
+                outbound,
+                connection,
+                ..
+            } => Some((*inbound, *outbound, connection.clone())),
+            _ => None,
+        })
+        .expect("channel surface projected");
+    assert!(channel.0, "inbound direction must project");
+    assert!(channel.1, "outbound direction must project");
+    let connection = channel.2.expect("connect affordance carried");
+    assert_eq!(connection.strategy, RebornChannelConnectStrategy::OAuth);
+    assert_eq!(connection.submit_label, "Connect Slack");
 }
 
 #[test]
@@ -9679,6 +9684,8 @@ fn extension_summary(
         source: LifecycleExtensionSource::HostBundled,
         runtime_kind: LifecycleExtensionRuntimeKind::FirstParty,
         surface_kinds: Vec::new(),
+        channel_directions: None,
+        channel_connection: None,
         visible_capability_ids: vec![format!("{package_id}.read"), format!("{package_id}.write")],
         visible_read_only_capability_ids: Vec::new(),
         credential_requirements,

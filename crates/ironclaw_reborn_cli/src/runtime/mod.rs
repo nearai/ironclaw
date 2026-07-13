@@ -3254,7 +3254,7 @@ poll_interval_secs = 15
     #[test]
     fn resolve_slack_personal_oauth_redirect_uri_returns_uri_when_set() {
         const REDIRECT_URI: &str =
-            "http://127.0.0.1:3000/api/reborn/product-auth/oauth/slack_personal/callback";
+            "http://127.0.0.1:3000/api/reborn/product-auth/oauth/slack/callback";
         let vars = HashMap::from([(
             "IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI",
             REDIRECT_URI,

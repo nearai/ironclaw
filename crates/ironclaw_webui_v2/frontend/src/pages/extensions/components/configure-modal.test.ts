@@ -5,7 +5,13 @@ import { test } from "vitest";
 import vm from "node:vm";
 
 import { rememberChannelConnectionWaiter } from "../../../lib/channel-connection-events";
+import { hasChannelSurface } from "../lib/extensions-schema";
 import { redeemPairingCode as realRedeemPairingCode } from "../lib/pairing-api";
+
+// Wire-shaped surface fixtures: a channel extension declares a channel
+// surface; a plain tool extension declares only a tool surface.
+const channelSurfaces = [{ kind: "channel", inbound: true, outbound: true }];
+const toolSurfaces = [{ kind: "tool" }];
 
 function configureModalSourceForTest() {
   const source = readFileSync(new URL("./configure-modal.tsx", import.meta.url), "utf8");
@@ -26,7 +32,7 @@ function configureModalSourceForTest() {
 }
 
 function renderModal({
-  kind = "channel",
+  surfaces = channelSurfaces,
   packageRef = { kind: "extension", id: "slack" },
   channel = undefined,
   displayName = "Slack",
@@ -112,7 +118,9 @@ function renderModal({
       extension?.activationStatus ||
       (extension?.active ? "active" : "installed"),
     setupReadyForActivation: () => setupReady,
-    isChannelExtensionKind: (k) => k === "channel" || k === "wasm_channel",
+    // The real surface-taxonomy helper: modal routing must key off declared
+    // channel surfaces, exactly as production does.
+    hasChannelSurface,
     redeemPairingCode: redeem,
     notifyChannelConnected: async (payload) => {
       notifications.push(payload);
@@ -142,7 +150,7 @@ function renderModal({
     extension: {
       packageRef,
       displayName,
-      kind,
+      surfaces,
       channel,
       onboarding_state: onboardingState,
     },
@@ -199,7 +207,7 @@ function findHandler(node, bodyMarker, seen = new Set()) {
 
 test("ConfigureModal renders the code-entry panel for a channel extension that uses manual setup", () => {
   const { rendered, mutationConfig } = renderModal({
-    kind: "channel",
+    surfaces: channelSurfaces,
     packageRef: { kind: "extension", id: "telegram" },
     channel: "telegram",
     displayName: "Telegram",
@@ -213,19 +221,19 @@ test("ConfigureModal renders the code-entry panel for a channel extension that u
 
 test("ConfigureModal renders Slack OAuth without opening the popup automatically", () => {
   const slackOauthSecret = {
-    name: "slack_personal_oauth",
-    provider: "slack_personal",
+    name: "slack_oauth",
+    provider: "slack",
     prompt: "Slack credential",
     provided: false,
     setup: {
       kind: "oauth",
-      account_label: "slack slack_personal",
+      account_label: "slack slack",
       scopes: ["users:read"],
       invocation_id: "invocation-alpha",
     },
   };
   const { rendered, oauthCalls, openedPopups } = renderModal({
-    kind: "channel",
+    surfaces: channelSurfaces,
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
@@ -253,19 +261,19 @@ test("ConfigureModal renders Slack OAuth without opening the popup automatically
 
 test("ConfigureModal does not show a generic activate action beside Slack OAuth", () => {
   const slackOauthSecret = {
-    name: "slack_personal_oauth",
-    provider: "slack_personal",
+    name: "slack_oauth",
+    provider: "slack",
     prompt: "Slack credential",
     provided: true,
     setup: {
       kind: "oauth",
-      account_label: "slack slack_personal",
+      account_label: "slack slack",
       scopes: ["users:read"],
       invocation_id: "invocation-alpha",
     },
   };
   const { rendered } = renderModal({
-    kind: "channel",
+    surfaces: channelSurfaces,
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
@@ -288,22 +296,22 @@ test("ConfigureModal does not show a generic activate action beside Slack OAuth"
   assert.doesNotMatch(body, /extensions\.activate/);
 });
 
-test("ConfigureModal broadcasts public wasm-tool Slack OAuth completion without duplicate activation", async () => {
+test("ConfigureModal activates the Slack extension after OAuth setup completes", async () => {
   const slackOauthSecret = {
-    name: "slack_personal_oauth",
-    provider: "slack_personal",
+    name: "slack_oauth",
+    provider: "slack",
     prompt: "Slack credential",
     provided: false,
     setup: {
       kind: "oauth",
-      account_label: "slack slack_personal",
+      account_label: "slack slack",
       scopes: ["users:read"],
       invocation_id: "invocation-alpha",
     },
   };
   let closed = false;
   const { calls, invalidations, notifications, oauthSetupArgs } = renderModal({
-    kind: "wasm_tool",
+    surfaces: channelSurfaces,
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
@@ -329,7 +337,9 @@ test("ConfigureModal broadcasts public wasm-tool Slack OAuth completion without 
 
   await oauthSetupArgs[0][1].onConfigured();
 
-  assert.deepEqual(JSON.parse(JSON.stringify(calls)), []);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
+    ["activate", { id: "slack" }],
+  ]);
   assert.deepEqual(JSON.parse(JSON.stringify(invalidations)), [
     ["extensions"],
     ["extension-registry"],
@@ -346,7 +356,7 @@ test("ConfigureModal broadcasts public wasm-tool Slack OAuth completion without 
 
 test("ConfigureModal surfaces a failed OAuth flow as a retryable error", () => {
   const { rendered } = renderModal({
-    kind: "channel",
+    surfaces: channelSurfaces,
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
@@ -354,8 +364,8 @@ test("ConfigureModal surfaces a failed OAuth flow as a retryable error", () => {
     setupResult: {
       secrets: [
         {
-          name: "slack_personal_oauth",
-          provider: "slack_personal",
+          name: "slack_oauth",
+          provider: "slack",
           provided: false,
           setup: { kind: "oauth", invocation_id: "invocation-alpha" },
         },
@@ -376,13 +386,13 @@ test("ConfigureModal surfaces a failed OAuth flow as a retryable error", () => {
 
 test("ConfigureModal closes as soon as Slack OAuth setup completes", async () => {
   const slackOauthSecret = {
-    name: "slack_personal_oauth",
-    provider: "slack_personal",
+    name: "slack_oauth",
+    provider: "slack",
     prompt: "Slack credential",
     provided: false,
     setup: {
       kind: "oauth",
-      account_label: "slack slack_personal",
+      account_label: "slack slack",
       scopes: ["users:read"],
       invocation_id: "invocation-alpha",
     },
@@ -393,7 +403,7 @@ test("ConfigureModal closes as soon as Slack OAuth setup completes", async () =>
     releaseActivation = resolve;
   });
   const { oauthSetupArgs } = renderModal({
-    kind: "channel",
+    surfaces: channelSurfaces,
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
@@ -425,19 +435,19 @@ test("ConfigureModal closes as soon as Slack OAuth setup completes", async () =>
 
 test("ConfigureModal keeps Slack OAuth visibly loading while waiting for authorization", () => {
   const slackOauthSecret = {
-    name: "slack_personal_oauth",
-    provider: "slack_personal",
+    name: "slack_oauth",
+    provider: "slack",
     prompt: "Slack credential",
     provided: false,
     setup: {
       kind: "oauth",
-      account_label: "slack slack_personal",
+      account_label: "slack slack",
       scopes: ["users:read"],
       invocation_id: "invocation-alpha",
     },
   };
   const { rendered } = renderModal({
-    kind: "channel",
+    surfaces: channelSurfaces,
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
@@ -464,14 +474,14 @@ test("ConfigureModal keeps Slack OAuth visibly loading while waiting for authori
 });
 
 test("ConfigureModal does not render the pairing panel for a non-channel extension", () => {
-  const { rendered } = renderModal({ kind: "mcp_server" });
+  const { rendered } = renderModal({ surfaces: toolSurfaces });
   const body = JSON.stringify(rendered);
   assert.doesNotMatch(body, /pairing\.placeholder/);
 });
 
 test("ConfigureModal does not route setup-required channels to the pairing panel", () => {
   const { rendered } = renderModal({
-    kind: "channel",
+    surfaces: channelSurfaces,
     onboardingState: "setup_required",
   });
 
@@ -480,7 +490,7 @@ test("ConfigureModal does not route setup-required channels to the pairing panel
 
 test("ConfigureModal localizes channel pairing copy", () => {
   const { rendered } = renderModal({
-    kind: "channel",
+    surfaces: channelSurfaces,
     packageRef: { kind: "extension", id: "telegram" },
     channel: "telegram",
     displayName: "Telegram",
@@ -506,7 +516,7 @@ test("ConfigureModal localizes channel pairing copy", () => {
 
 test("ConfigureModal renders a localized close label through ModalShell", () => {
   const { context, rendered } = renderModal({
-    kind: "channel",
+    surfaces: channelSurfaces,
     onboardingState: "pairing_required",
     translate: (key) =>
       ({
@@ -527,7 +537,7 @@ test("ConfigureModal renders a localized close label through ModalShell", () => 
 test("ConfigureModal pairing redeems then activates, invalidates queries, and closes", async () => {
   let closed = false;
   const { calls, invalidations, mutationConfig } = renderModal({
-    kind: "channel",
+    surfaces: channelSurfaces,
     packageRef: { kind: "extension", id: "telegram" },
     channel: "telegram",
     displayName: "Telegram",
@@ -547,7 +557,6 @@ test("ConfigureModal pairing redeems then activates, invalidates queries, and cl
   assert.deepEqual(result, { success: true });
   assert.deepEqual(JSON.parse(JSON.stringify(invalidations)), [
     ["extensions"],
-    ["connectable-channels"],
     ["pairing", "telegram"],
   ]);
   assert.equal(closed, true);
@@ -555,7 +564,7 @@ test("ConfigureModal pairing redeems then activates, invalidates queries, and cl
 
 test("ConfigureModal pairing redeems by channel slug and activates package id", async () => {
   const { calls, invalidations, mutationConfig } = renderModal({
-    kind: "channel",
+    surfaces: channelSurfaces,
     onboardingState: "pairing_required",
     packageRef: { kind: "extension", id: "telegram-host-package" },
     channel: "telegram",
@@ -571,7 +580,6 @@ test("ConfigureModal pairing redeems by channel slug and activates package id", 
   ]);
   assert.deepEqual(JSON.parse(JSON.stringify(invalidations)), [
     ["extensions"],
-    ["connectable-channels"],
     ["pairing", "telegram"],
   ]);
 });
@@ -630,7 +638,7 @@ test("ConfigureModal pairing through the real API waits for blocked chats to res
     };
 
     const { mutationConfig } = renderModal({
-      kind: "channel",
+      surfaces: channelSurfaces,
       packageRef: { kind: "extension", id: "telegram" },
       channel: "telegram",
       displayName: "Telegram",
@@ -674,7 +682,7 @@ test("ConfigureModal pairing through the real API waits for blocked chats to res
 
 test("ConfigureModal treats post-redeem activation failure as best-effort", async () => {
   const { calls, mutationConfig } = renderModal({
-    kind: "channel",
+    surfaces: channelSurfaces,
     packageRef: { kind: "extension", id: "telegram" },
     channel: "telegram",
     displayName: "Telegram",
@@ -697,19 +705,19 @@ test("ConfigureModal treats post-redeem activation failure as best-effort", asyn
 
 test("ConfigureModal surfaces a blocked popup and does not start the OAuth flow", () => {
   const slackOauthSecret = {
-    name: "slack_personal_oauth",
-    provider: "slack_personal",
+    name: "slack_oauth",
+    provider: "slack",
     prompt: "Slack credential",
     provided: false,
     setup: {
       kind: "oauth",
-      account_label: "slack slack_personal",
+      account_label: "slack slack",
       scopes: ["users:read"],
       invocation_id: "invocation-alpha",
     },
   };
   const { rendered, oauthCalls, openedPopups, stateSets } = renderModal({
-    kind: "channel",
+    surfaces: channelSurfaces,
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
@@ -746,19 +754,19 @@ test("ConfigureModal surfaces a blocked popup and does not start the OAuth flow"
 
 test("ConfigureModal starts the OAuth flow when the popup pre-open succeeds", () => {
   const slackOauthSecret = {
-    name: "slack_personal_oauth",
-    provider: "slack_personal",
+    name: "slack_oauth",
+    provider: "slack",
     prompt: "Slack credential",
     provided: false,
     setup: {
       kind: "oauth",
-      account_label: "slack slack_personal",
+      account_label: "slack slack",
       scopes: ["users:read"],
       invocation_id: "invocation-alpha",
     },
   };
   const { rendered, oauthCalls, openedPopups } = renderModal({
-    kind: "channel",
+    surfaces: channelSurfaces,
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",

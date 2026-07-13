@@ -15,14 +15,10 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::RebornRuntime;
-use crate::extension_host::extension_lifecycle::{
-    ExtensionActivationMode, RebornLocalExtensionManagementPort,
-};
+use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
-use crate::slack::slack_actor_identity::{
-    RebornUserIdentityLookup, SlackUserIdentityActorResolver,
-};
+use crate::provider_identity::{ProviderIdentityActorResolver, RebornUserIdentityLookup};
 use crate::slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteAssignment, SlackChannelRouteError,
     SlackChannelRouteStore, SlackChannelRouteSubjectResolver, SlackChannelSetupActivation,
@@ -243,7 +239,7 @@ impl SlackChannelSetupActivation for DynamicSlackChannelSetupActivation {
     async fn activate_slack_channel_after_setup_save(
         &self,
     ) -> Result<(), SlackChannelSetupActivationError> {
-        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack_bot")
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
             .map_err(slack_setup_activation_error)?;
         // Slack is a tenant-shared channel; host setup activates it as the
         // tenant operator so it operates the shared install (#5459 P1).
@@ -263,7 +259,7 @@ impl SlackChannelSetupActivation for DynamicSlackChannelSetupActivation {
         // activate path (WebUI activateExtension after the connect flow),
         // which routes through activate_with_credential_gate.
         self.extension_management
-            .activate(package_ref, ExtensionActivationMode::Static, &caller)
+            .activate_for_channel_setup(package_ref, &caller)
             .await
             .map_err(slack_setup_activation_error)?;
         Ok(())
@@ -668,10 +664,10 @@ impl DynamicSlackInstallationResolver {
             .map_err(map_build_error_to_ingress_not_found(
                 "build Slack setup config",
             ))?;
-        let identity_lookup: Arc<dyn crate::slack::slack_actor_identity::RebornUserIdentityLookup> =
+        let identity_lookup: Arc<dyn crate::provider_identity::RebornUserIdentityLookup> =
             self.state.clone();
         let actor_user_resolver = Arc::new(SlackHostBetaActorUserResolver::new(Arc::new(
-            SlackUserIdentityActorResolver::new(Arc::clone(&identity_lookup)),
+            slack_provider_identity_actor_resolver(Arc::clone(&identity_lookup)),
         )));
         let subject_route_resolver: Arc<dyn ProductConversationSubjectRouteResolver> =
             Arc::new(SlackChannelRouteSubjectResolver::new(
@@ -1005,6 +1001,21 @@ fn map_setup_error_to_dynamic_target_unavailable(
         );
         slack_dynamic_target_unavailable()
     }
+}
+
+/// The Slack channel surface's actor→user resolver: the generic
+/// provider-identity resolver parameterized with Slack's adapter id, actor
+/// kind, and credential-authority provider — data from the Slack surface
+/// declarations, not a Slack-specific resolver implementation.
+pub(crate) fn slack_provider_identity_actor_resolver(
+    lookup: Arc<dyn RebornUserIdentityLookup>,
+) -> ProviderIdentityActorResolver {
+    ProviderIdentityActorResolver::new(
+        crate::slack::slack_channel_connection::SLACK_IDENTITY_PROVIDER,
+        ironclaw_slack_v2_adapter::SLACK_V2_ADAPTER_ID,
+        ironclaw_slack_v2_adapter::SLACK_USER_ACTOR_KIND,
+        lookup,
+    )
 }
 
 #[cfg(test)]

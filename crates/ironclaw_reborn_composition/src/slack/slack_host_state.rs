@@ -27,9 +27,9 @@ use ironclaw_product_adapters::AdapterInstallationId;
 use rand::RngExt as _;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::slack::slack_actor_identity::{
+use crate::provider_identity::{
     RebornUserIdentityLookup, RebornUserIdentityLookupError,
-    parse_slack_user_identity_provider_user_id,
+    parse_installation_scoped_provider_user_id,
 };
 use crate::slack::slack_channel_routes::{
     SlackChannelRoute, SlackChannelRouteAssignment, SlackChannelRouteError, SlackChannelRouteKey,
@@ -1471,13 +1471,13 @@ where
         let Some(epoch) = record.epoch else {
             return Ok(Some((user_id, None)));
         };
-        if provider != crate::slack::slack_actor_identity::SLACK_IDENTITY_PROVIDER {
+        if provider != crate::slack::slack_channel_connection::SLACK_IDENTITY_PROVIDER {
             return Err(RebornUserIdentityLookupError::Backend(
                 "only Slack identities may carry Slack connection epochs".to_string(),
             ));
         }
         let Some((installation_id, _)) =
-            parse_slack_user_identity_provider_user_id(provider_user_id)
+            parse_installation_scoped_provider_user_id(provider_user_id)
         else {
             return Err(RebornUserIdentityLookupError::Backend(
                 "stored Slack provider user identity is malformed".to_string(),
@@ -1938,14 +1938,15 @@ where
         &self,
         binding: &RebornUserIdentityBinding,
     ) -> Result<AdapterInstallationId, RebornUserIdentityBindingError> {
-        if binding.provider.as_str() != crate::slack::slack_actor_identity::SLACK_IDENTITY_PROVIDER
+        if binding.provider.as_str()
+            != crate::slack::slack_channel_connection::SLACK_IDENTITY_PROVIDER
         {
             return Err(RebornUserIdentityBindingError::Backend(
                 "connection epochs are only supported for Slack identities".to_string(),
             ));
         }
         let Some((installation_id, _)) =
-            parse_slack_user_identity_provider_user_id(binding.provider_user_id.as_str())
+            parse_installation_scoped_provider_user_id(binding.provider_user_id.as_str())
         else {
             return Err(RebornUserIdentityBindingError::Backend(
                 "Slack provider user identity is malformed".to_string(),
@@ -5368,6 +5369,42 @@ mod tests {
 
         assert_eq!(routes.routes.len(), 1);
         assert_eq!(routes.routes[0].channel_id, "CENG");
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_user_identity_bindings_survive_state_recreation() {
+        let root = Arc::new(InMemoryBackend::default());
+        state_with_root(Arc::clone(&root))
+            .bind_user_identity(RebornUserIdentityBinding {
+                provider: RebornIdentityProviderId::new("slack").unwrap(),
+                provider_user_id: RebornIdentityProviderUserId::new("install-alpha:U123").unwrap(),
+                user_id: user("user:alice"),
+            })
+            .await
+            .expect("bind succeeds");
+
+        // Reopen: a brand-new host-state instance over the same filesystem
+        // must resolve the binding — actor identity resolution is durable
+        // state, not a property of the process that wrote it.
+        let reopened = state_with_root(Arc::clone(&root));
+        assert_eq!(
+            reopened
+                .resolve_user_identity("slack", "install-alpha:U123")
+                .await
+                .expect("reopened lookup succeeds"),
+            Some(user("user:alice"))
+        );
+
+        // Negative control: the same lookup over a fresh root resolves
+        // nothing, so the reopen assertion above cannot pass vacuously.
+        let fresh = state();
+        assert_eq!(
+            fresh
+                .resolve_user_identity("slack", "install-alpha:U123")
+                .await
+                .expect("fresh lookup succeeds"),
+            None
+        );
     }
 
     fn state() -> FilesystemSlackHostState<InMemoryBackend> {

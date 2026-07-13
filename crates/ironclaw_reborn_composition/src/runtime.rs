@@ -1806,7 +1806,7 @@ impl RebornRuntime {
     /// call is silently ignored. Returns `false` when the local-runtime slot is
     /// unavailable or already occupied, `true` on first successful set. Shares
     /// the same `OnceLock` the handler reads
-    /// (`RebornLocalRuntimeServices::channel_connection_facade_slot`).
+    /// (`RebornLocalRuntimeServices::channel_connection_facade`).
     #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) fn set_channel_connection_facade(
         &self,
@@ -1815,10 +1815,7 @@ impl RebornRuntime {
         let Some(local_runtime) = self.services.local_runtime.as_ref() else {
             return false;
         };
-        local_runtime
-            .channel_connection_facade_slot
-            .set(facade)
-            .is_ok()
+        local_runtime.channel_connection_facade.set(facade).is_ok()
     }
 
     #[cfg(test)]
@@ -4651,6 +4648,17 @@ fn build_stub_gateway() -> Arc<dyn ironclaw_loop_host::HostManagedModelGateway> 
 
 #[cfg(test)]
 mod tests {
+
+    fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+        let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+        contracts
+            .register(std::sync::Arc::new(
+                ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                    .expect("capability provider contract"),
+            ))
+            .expect("register capability provider contract");
+        contracts
+    }
     use std::sync::{
         Arc, Mutex as StdMutex,
         atomic::{AtomicUsize, Ordering},
@@ -4695,7 +4703,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/approval-provider.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "approval-provider.write"
 description = "write"
 effects = ["external_write"]
@@ -4708,6 +4722,7 @@ output_schema_ref = "schemas/write.output.json"
             manifest,
             ironclaw_extensions::ManifestSource::HostBundled,
             &ironclaw_host_api::HostPortCatalog::empty(),
+            &capability_provider_contracts(),
         )
         .expect("manifest parses");
         let package = ironclaw_extensions::ExtensionPackage::from_manifest(
@@ -10436,7 +10451,7 @@ output_schema_ref = "schemas/write.output.json"
                     thread_id: Some(created.thread.thread_id.to_string()),
                     run_id: Some(TurnRunId::new().to_string()),
                     gate_ref: Some("gate:hook-auth-missing".to_string()),
-                    resolution: Some("denied".to_string()),
+                    resolution: Some("declined".to_string()),
                     always: None,
                     credential_ref: None,
                 },

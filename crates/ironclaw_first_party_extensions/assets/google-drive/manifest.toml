@@ -9,7 +9,13 @@ trust = "first_party_requested"
 kind = "wasm"
 module = "wasm/google_drive_tool.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "google-drive.list_files"
 description = "Search or list files and folders, including Google Sheets/spreadsheets by name or title."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -23,7 +29,7 @@ output_schema_ref = "schemas/google-drive/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-drive/list_files.md"
 required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "google-drive.get_file"
 description = "Get file metadata."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -37,7 +43,7 @@ output_schema_ref = "schemas/google-drive/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-drive/get_file.md"
 required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "google-drive.download_file"
 description = "Download a file's content as text — including binary documents (PDF, PPTX, DOCX, XLSX), which are converted to extracted text automatically — or export a Google Workspace file. No shell or separate downloader needed."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -51,7 +57,7 @@ output_schema_ref = "schemas/google-drive/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-drive/download_file.md"
 required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "google-drive.upload_file"
 description = "Upload a new text file."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -65,7 +71,7 @@ output_schema_ref = "schemas/google-drive/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-drive/upload_file.md"
 required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "google-drive.update_file"
 description = "Update file metadata or move/star a file."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -79,7 +85,7 @@ output_schema_ref = "schemas/google-drive/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-drive/update_file.md"
 required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "google-drive.create_folder"
 description = "Create a folder."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -93,7 +99,7 @@ output_schema_ref = "schemas/google-drive/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-drive/create_folder.md"
 required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "google-drive.delete_file"
 description = "Permanently delete a file or folder."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -107,7 +113,7 @@ output_schema_ref = "schemas/google-drive/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-drive/delete_file.md"
 required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "google-drive.trash_file"
 description = "Move a file or folder to trash."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -121,7 +127,7 @@ output_schema_ref = "schemas/google-drive/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-drive/trash_file.md"
 required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "google-drive.share_file"
 description = "Share a file or folder with someone."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -135,7 +141,7 @@ output_schema_ref = "schemas/google-drive/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-drive/share_file.md"
 required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "google-drive.list_permissions"
 description = "List file permissions."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -149,7 +155,7 @@ output_schema_ref = "schemas/google-drive/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-drive/list_permissions.md"
 required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "google-drive.remove_permission"
 description = "Revoke a file permission."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -163,7 +169,7 @@ output_schema_ref = "schemas/google-drive/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-drive/remove_permission.md"
 required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "google-drive.list_shared_drives"
 description = "List shared drives."
 effects = ["dispatch_capability", "network", "use_secret"]

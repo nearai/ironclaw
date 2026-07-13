@@ -8,7 +8,7 @@
 use std::fmt;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_host_api::{AgentId, CapabilitySurfaceKind, ProjectId, TenantId, UserId};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
 
@@ -144,7 +144,7 @@ pub enum LifecyclePhase {
     Failed,
     Removing,
     Removed,
-    UnsupportedOrLegacy,
+    Unsupported,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -351,6 +351,18 @@ pub enum LifecycleProductPayload {
     },
 }
 
+/// Directional shape of an extension's channel surface, derived from the
+/// manifest's product-adapter capability flags: `inbound` when the surface
+/// receives external messages (`inbound_messages`), `outbound` when the host
+/// can push final replies/notifications to it (`external_final_reply_push`).
+/// The agent-facing rule this pins: final answers are delivered by the host
+/// on outbound channel surfaces; model tools never deliver them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LifecycleChannelDirections {
+    pub inbound: bool,
+    pub outbound: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LifecycleExtensionSummary {
     pub package_ref: LifecyclePackageRef,
@@ -360,7 +372,14 @@ pub struct LifecycleExtensionSummary {
     pub source: LifecycleExtensionSource,
     pub runtime_kind: LifecycleExtensionRuntimeKind,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub surface_kinds: Vec<LifecycleExtensionSurfaceKind>,
+    pub surface_kinds: Vec<CapabilitySurfaceKind>,
+    /// Present iff `surface_kinds` contains [`CapabilitySurfaceKind::Channel`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_directions: Option<LifecycleChannelDirections>,
+    /// Connect affordance for the channel surface (strategy + copy), present
+    /// when the surface requires a caller-scoped account binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_connection: Option<ChannelConnectionRequirement>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub visible_capability_ids: Vec<String>,
     pub visible_read_only_capability_ids: Vec<String>,
@@ -437,12 +456,6 @@ pub enum LifecycleExtensionSource {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum LifecycleExtensionSurfaceKind {
-    ExternalChannel,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum LifecycleExtensionRuntimeKind {
     WasmTool,
     McpServer,
@@ -452,12 +465,15 @@ pub enum LifecycleExtensionRuntimeKind {
 }
 
 impl LifecycleExtensionRuntimeKind {
-    pub fn wire_kind(self) -> &'static str {
+    /// Honest runtime name for the wire: implementation detail, clearly
+    /// labeled — never product taxonomy (surfaces carry that).
+    pub fn runtime_wire_name(self) -> &'static str {
         match self {
-            Self::McpServer => "mcp_server",
+            Self::McpServer => "mcp",
             Self::FirstParty => "first_party",
             Self::System => "system",
-            Self::WasmTool | Self::Script => "wasm_tool",
+            Self::WasmTool => "wasm",
+            Self::Script => "script",
         }
     }
 }
@@ -590,7 +606,7 @@ impl UnsupportedLifecycleProductFacade {
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         Ok(LifecycleProductResponse::projection(
             package_ref,
-            LifecyclePhase::UnsupportedOrLegacy,
+            LifecyclePhase::Unsupported,
             vec![LifecycleReadinessBlocker::runtime(Some(
                 self.runtime_ref.clone(),
             ))?],

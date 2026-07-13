@@ -628,7 +628,7 @@ where
     ///
     /// Per-directory and per-owner errors are silently skipped (annotated below)
     /// so one bad subtree never aborts the sweep.
-    pub(crate) async fn list_refresh_candidates(&self) -> Vec<CredentialAccount> {
+    pub(crate) async fn sweep_all_accounts(&self) -> Vec<CredentialAccount> {
         let Some(root) = &self.root else {
             // Local-dev / test path: no root wired, nothing to enumerate.
             return Vec::new();
@@ -638,7 +638,7 @@ where
         let tenants_path = match VirtualPath::new("/tenants") {
             Ok(p) => p,
             Err(error) => {
-                tracing::debug!(%error, "list_refresh_candidates: /tenants is not a valid virtual path");
+                tracing::debug!(%error, "account sweep: /tenants is not a valid virtual path");
                 return Vec::new();
             }
         };
@@ -648,7 +648,7 @@ where
                 return Vec::new();
             }
             Err(error) => {
-                tracing::debug!(%error, "list_refresh_candidates: failed to list /tenants");
+                tracing::debug!(%error, "account sweep: failed to list /tenants");
                 return Vec::new();
             }
         };
@@ -675,7 +675,7 @@ where
                     tracing::debug!(
                         tenant = %tenant_entry.name,
                         %error,
-                        "list_refresh_candidates: failed to list users for tenant"
+                        "account sweep: failed to list users for tenant"
                     );
                     continue;
                 }
@@ -767,7 +767,7 @@ where
                                                 user = %user_entry.name,
                                                 agent = %agent_entry.name,
                                                 %error,
-                                                "list_refresh_candidates: failed to list agent/projects dir; skipping"
+                                                "account sweep: failed to list agent/projects dir; skipping"
                                                 // silent-ok: one bad agent subtree must not abort the sweep
                                             );
                                         }
@@ -783,7 +783,7 @@ where
                                 tenant = %tenant_entry.name,
                                 user = %user_entry.name,
                                 %error,
-                                "list_refresh_candidates: failed to list agents dir; skipping"
+                                "account sweep: failed to list agents dir; skipping"
                                 // silent-ok: one bad user subtree must not abort the sweep
                             );
                         }
@@ -825,7 +825,7 @@ where
                                 tenant = %tenant_entry.name,
                                 user = %user_entry.name,
                                 %error,
-                                "list_refresh_candidates: failed to list projects dir; skipping"
+                                "account sweep: failed to list projects dir; skipping"
                                 // silent-ok: one bad user subtree must not abort the sweep
                             );
                         }
@@ -843,24 +843,13 @@ where
                                 tenant = %tenant_entry.name,
                                 user = %user_entry.name,
                                 %error,
-                                "list_refresh_candidates: account_records_for_owner failed; skipping owner"
+                                "account sweep: account_records_for_owner failed; skipping owner"
                                 // silent-ok: one bad owner subtree must not abort the sweep
                             );
                             continue;
                         }
                     };
-                    for account in records {
-                        if account.provider.as_str() != ironclaw_auth::GOOGLE_PROVIDER_ID {
-                            continue;
-                        }
-                        if account.status != CredentialAccountStatus::Configured {
-                            continue;
-                        }
-                        if account.refresh_secret.is_none() {
-                            continue;
-                        }
-                        candidates.push(account);
-                    }
+                    candidates.extend(records);
                 }
             }
         }
@@ -869,6 +858,58 @@ where
         candidates.sort_by_key(|a| a.id);
         candidates.dedup_by_key(|a| a.id);
         candidates
+    }
+
+    /// Google keepalive candidates: Configured accounts with a refresh
+    /// secret handle, filtered from the full durable-account sweep.
+    pub(crate) async fn list_refresh_candidates(&self) -> Vec<CredentialAccount> {
+        self.sweep_all_accounts()
+            .await
+            .into_iter()
+            .filter(|account| {
+                account.provider.as_str() == ironclaw_auth::GOOGLE_PROVIDER_ID
+                    && account.status == CredentialAccountStatus::Configured
+                    && account.refresh_secret.is_some()
+            })
+            .collect()
+    }
+
+    /// One-time forward migration (NEA-25 unified Slack extension): the Slack
+    /// user-OAuth credential authority was renamed from `slack_personal` to
+    /// `slack` when the Slack channel and tools unified under one extension
+    /// identity. Rewrites persisted credential-account records in place and
+    /// returns the number migrated. Idempotent: after the first run no record
+    /// matches, so subsequent boots rewrite nothing. This is a data
+    /// migration executed at composition build, not a runtime alias — no code
+    /// path resolves the retired provider id.
+    pub(crate) async fn migrate_retired_slack_personal_provider(&self) -> usize {
+        let retired: Vec<CredentialAccount> = self
+            .sweep_all_accounts()
+            .await
+            .into_iter()
+            .filter(|account| account.provider.as_str() == "slack_personal")
+            .collect();
+        let mut migrated = 0usize;
+        for mut account in retired {
+            match ironclaw_auth::AuthProviderId::new("slack") {
+                Ok(provider) => account.provider = provider,
+                Err(error) => {
+                    tracing::warn!(%error, "slack provider migration: unified provider id invalid");
+                    return migrated;
+                }
+            }
+            match self.write_account(&account, CasExpectation::Any).await {
+                Ok(_) => migrated += 1,
+                Err(error) => {
+                    tracing::warn!(
+                        account_id = %account.id,
+                        %error,
+                        "slack provider migration: failed to rewrite account record"
+                    );
+                }
+            }
+        }
+        migrated
     }
 
     async fn create_account_with_id(

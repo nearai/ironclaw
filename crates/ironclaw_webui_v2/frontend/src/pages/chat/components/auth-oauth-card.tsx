@@ -38,11 +38,11 @@ import { AuthGateShell } from "./auth-gate-shell";
 const CLOSED_NOTICE_GRACE_MS = 1500;
 
 // User-facing names for OAuth provider ids. The gate payload carries the raw
-// provider id (e.g. `slack_personal`), which must never leak into copy —
+// provider id (e.g. `slack`), which must never leak into copy —
 // "Re-open Slack_personal authorization" is not a sentence.
 const PROVIDER_DISPLAY_NAMES = {
   google: "Google",
-  slack_personal: "Slack",
+  slack: "Slack",
   github: "GitHub",
   notion: "Notion",
   nearai: "NEAR AI",

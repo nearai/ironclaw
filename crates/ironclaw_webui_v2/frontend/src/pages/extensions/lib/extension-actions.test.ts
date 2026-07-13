@@ -10,12 +10,15 @@ import {
 } from "./extension-actions";
 
 const notionRef = { kind: "extension", id: "notion" };
+const channelSurfaces = [{ kind: "channel", inbound: true, outbound: true }];
+const toolSurfaces = [{ kind: "tool" }];
 
 test("primaryExtensionAction opens configuration before OAuth-required activation", () => {
   assert.equal(
     primaryExtensionAction({
       package_ref: notionRef,
-      kind: "mcp_server",
+      runtime: "mcp",
+      surfaces: toolSurfaces,
       onboarding_state: "auth_required",
     }),
     "configure",
@@ -26,7 +29,8 @@ test("primaryExtensionAction activates configured inactive MCP extensions", () =
   assert.equal(
     primaryExtensionAction({
       package_ref: notionRef,
-      kind: "mcp_server",
+      runtime: "mcp",
+      surfaces: toolSurfaces,
       activation_status: "installed",
     }),
     "activate",
@@ -34,10 +38,13 @@ test("primaryExtensionAction activates configured inactive MCP extensions", () =
 });
 
 test("primaryExtensionAction suppresses activation for channel-surface extensions", () => {
+  // The suppression is surface-driven, not runtime-driven: a first-party and a
+  // WASM channel extension behave identically.
   assert.equal(
     primaryExtensionAction({
       package_ref: { kind: "extension", id: "slack" },
-      kind: "channel",
+      runtime: "first_party",
+      surfaces: channelSurfaces,
       activation_status: "installed",
     }),
     null,
@@ -45,40 +52,44 @@ test("primaryExtensionAction suppresses activation for channel-surface extension
   assert.equal(
     primaryExtensionAction({
       package_ref: { kind: "extension", id: "telegram" },
-      kind: "wasm_channel",
+      runtime: "wasm",
+      surfaces: channelSurfaces,
       activation_status: "installed",
     }),
     null,
   );
 });
 
-test("primaryExtensionAction suppresses Activate for channel kind in pairing states", () => {
+test("primaryExtensionAction suppresses Activate for channel surfaces in pairing states", () => {
   assert.equal(
     primaryExtensionAction({
       package_ref: { kind: "extension", id: "slack" },
-      kind: "channel",
+      runtime: "first_party",
+      surfaces: channelSurfaces,
       onboarding_state: "pairing_required",
     }),
     null,
-    "kind:channel + pairing_required should return null (pairing section owns it)",
+    "channel surface + pairing_required should return null (pairing section owns it)",
   );
   assert.equal(
     primaryExtensionAction({
       package_ref: { kind: "extension", id: "slack" },
-      kind: "channel",
+      runtime: "first_party",
+      surfaces: channelSurfaces,
       onboarding_state: "pairing",
     }),
     null,
-    "kind:channel + installed should return null (configure/setup owns it)",
+    "channel surface + pairing should return null (configure/setup owns it)",
   );
   assert.equal(
     primaryExtensionAction({
       package_ref: { kind: "extension", id: "slack" },
-      kind: "channel",
+      runtime: "first_party",
+      surfaces: channelSurfaces,
       activation_status: "installed",
     }),
     null,
-    "kind:channel + installed should hand off to channel configure/setup UI",
+    "channel surface + installed should hand off to channel configure/setup UI",
   );
 });
 
@@ -86,7 +97,8 @@ test("primaryExtensionAction hides activation for active extensions", () => {
   assert.equal(
     primaryExtensionAction({
       package_ref: notionRef,
-      kind: "mcp_server",
+      runtime: "mcp",
+      surfaces: toolSurfaces,
       active: true,
     }),
     null,

@@ -1,21 +1,33 @@
+// Tabs are product-taxonomy views over surfaces. Runtime (wasm/mcp/...) is
+// an implementation badge on cards, never a grouping axis.
 export const EXTENSIONS_TABS = [
   { id: "registry", labelKey: "extensions.registry", icon: "plus" },
   { id: "channels", labelKey: "extensions.channels", icon: "send" },
-  { id: "mcp", labelKey: "extensions.mcp", icon: "pulse" },
+  { id: "tools", labelKey: "extensions.tools", icon: "pulse" },
 ];
 
-export const KIND_LABELS = {
-  wasm_tool: "WASM Tool",
-  wasm_channel: "Channel",
-  channel: "Channel",
-  mcp_server: "MCP Server",
+// Runtime implementation labels — the wire's `runtime` field is an honest
+// implementation name; product taxonomy travels in `surfaces`.
+export const RUNTIME_LABELS = {
+  wasm: "WASM",
+  mcp: "MCP",
   first_party: "First-party",
   system: "System",
-  channel_relay: "Relay",
+  script: "Script",
 };
 
-export function isChannelExtensionKind(kind) {
-  return kind === "wasm_channel" || kind === "channel";
+// Product taxonomy is surface-based: an extension is a channel view when its
+// surfaces declare a channel; a tools view when they declare tools.
+export function extensionSurfaces(item) {
+  return item?.surfaces || [];
+}
+
+export function hasChannelSurface(item) {
+  return extensionSurfaces(item).some((surface) => surface?.kind === "channel");
+}
+
+export function hasToolSurface(item) {
+  return extensionSurfaces(item).some((surface) => surface?.kind === "tool");
 }
 
 export const STATE_TONES = {

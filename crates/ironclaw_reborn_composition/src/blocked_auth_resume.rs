@@ -342,8 +342,7 @@ mod tests {
 
     fn slack_requirement() -> RuntimeCredentialAuthRequirement {
         RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new("slack_personal")
-                .expect("provider id"),
+            provider: RuntimeCredentialAccountProviderId::new("slack").expect("provider id"),
             setup: RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
             requester_extension: ExtensionId::new("slack").expect("extension id"),
             provider_scopes: Vec::new(),
@@ -550,7 +549,7 @@ mod tests {
 
         fanout
             .dispatch_auth_continuation(event(
-                "slack_personal",
+                "slack",
                 AuthContinuationRef::TurnGateResume {
                     turn_run_ref: TurnRunRef::new(primary.run_id.to_string())
                         .expect("turn run ref"),
@@ -586,7 +585,7 @@ mod tests {
         let (fanout, coordinator, _inner) = fanout_with(snapshot, false);
 
         fanout
-            .dispatch_auth_continuation(event("slack_personal", AuthContinuationRef::SetupOnly))
+            .dispatch_auth_continuation(event("slack", AuthContinuationRef::SetupOnly))
             .await
             .expect("dispatch succeeds");
 
@@ -612,7 +611,7 @@ mod tests {
         let (fanout, coordinator, inner) = fanout_with(snapshot, true);
 
         let error = fanout
-            .dispatch_auth_continuation(event("slack_personal", AuthContinuationRef::SetupOnly))
+            .dispatch_auth_continuation(event("slack", AuthContinuationRef::SetupOnly))
             .await
             .expect_err("resume failures must prevent dispatched acknowledgement");
 

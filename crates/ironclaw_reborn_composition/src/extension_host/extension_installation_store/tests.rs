@@ -86,6 +86,7 @@ async fn load_at_persists_state_to_custom_path() {
         ExtensionInstallationId::new("gmail".to_string()).expect("valid installation id");
     let extension_id = ExtensionId::new("gmail").expect("valid extension id");
     let manifest_ref = ExtensionManifestRef::new(extension_id.clone(), None);
+    let contracts = product_extension_host_api_contract_registry().expect("host api contracts");
     let manifest = ExtensionManifestRecord::from_toml(
         format!(
             r#"
@@ -100,7 +101,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/gmail.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "gmail.echo"
 description = "Echoes input"
 default_permission = "allow"
@@ -114,6 +121,7 @@ prompt_doc_ref = "prompts/gmail/echo.md"
         ManifestSource::HostBundled,
         &HostPortCatalog::empty(),
         None,
+        &contracts,
     )
     .expect("valid manifest");
     store
@@ -504,14 +512,16 @@ async fn seed_state(
 
 fn test_manifest_record() -> ExtensionManifestRecord {
     let manifest = format!(
-        "schema_version = \"{}\"\nid = \"canonical-tools\"\nname = \"Canonical Tools\"\nversion = \"0.1.0\"\ndescription = \"test\"\ntrust = \"third_party\"\n\n[runtime]\nkind = \"wasm\"\nmodule = \"wasm/canonical-tools.wasm\"\n\n[[capabilities]]\nid = \"canonical-tools.echo\"\ndescription = \"Echo\"\ndefault_permission = \"allow\"\nvisibility = \"model\"\ninput_schema_ref = \"schemas/echo.input.json\"\noutput_schema_ref = \"schemas/echo.output.json\"\n",
+        "schema_version = \"{}\"\nid = \"canonical-tools\"\nname = \"Canonical Tools\"\nversion = \"0.1.0\"\ndescription = \"test\"\ntrust = \"third_party\"\n\n[runtime]\nkind = \"wasm\"\nmodule = \"wasm/canonical-tools.wasm\"\n\n[[host_api]]\nid = \"ironclaw.capability_provider/v1\"\nsection = \"capability_provider.tools\"\n\n[capability_provider.tools]\n\n[[capability_provider.tools.capabilities]]\nid = \"canonical-tools.echo\"\ndescription = \"Echo\"\ndefault_permission = \"allow\"\nvisibility = \"model\"\ninput_schema_ref = \"schemas/echo.input.json\"\noutput_schema_ref = \"schemas/echo.output.json\"\n",
         MANIFEST_SCHEMA_VERSION
     );
+    let contracts = product_extension_host_api_contract_registry().expect("host api contracts");
     ExtensionManifestRecord::from_toml(
         manifest,
         ManifestSource::HostBundled,
         &HostPortCatalog::empty(),
         None,
+        &contracts,
     )
     .unwrap()
 }

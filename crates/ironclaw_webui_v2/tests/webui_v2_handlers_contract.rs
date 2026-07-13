@@ -33,17 +33,16 @@ use ironclaw_product_workflow::{
     RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentBytes,
     RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
     RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
-    RebornChannelConnectStrategy, RebornConnectableChannelInfo,
-    RebornConnectableChannelListResponse, RebornCreateThreadResponse, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornFsListRequest,
-    RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse, RebornFsReadRequest,
-    RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornListAutomationsResponse, RebornListThreadsResponse, RebornLogQueryRequest,
-    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
-    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornAutomationState, RebornCancelRunResponse, RebornCreateThreadResponse,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
+    RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse,
+    RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
     RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
     RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
@@ -274,8 +273,6 @@ struct StubServices {
     set_outbound_preferences_calls: Mutex<Vec<RebornSetOutboundPreferencesRequest>>,
     next_set_outbound_preferences_error: Mutex<Option<RebornServicesError>>,
     list_outbound_delivery_targets_calls: Mutex<usize>,
-    list_connectable_channels_calls: Mutex<usize>,
-    next_list_connectable_channels_error: Mutex<Option<RebornServicesError>>,
     get_operator_setup_calls: Mutex<usize>,
     run_operator_setup_calls: Mutex<Vec<OperatorSetupCall>>,
     list_operator_config_calls: Mutex<usize>,
@@ -355,13 +352,6 @@ impl StubServices {
     fn fail_set_outbound_preferences(&self, error: RebornServicesError) {
         *self
             .next_set_outbound_preferences_error
-            .lock()
-            .expect("lock") = Some(error);
-    }
-
-    fn fail_list_connectable_channels(&self, error: RebornServicesError) {
-        *self
-            .next_list_connectable_channels_error
             .lock()
             .expect("lock") = Some(error);
     }
@@ -1017,37 +1007,6 @@ impl RebornServicesApi for StubServices {
         })
     }
 
-    async fn list_connectable_channels(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornConnectableChannelListResponse, RebornServicesError> {
-        *self.list_connectable_channels_calls.lock().expect("lock") += 1;
-        if let Some(error) = self
-            .next_list_connectable_channels_error
-            .lock()
-            .expect("lock")
-            .take()
-        {
-            return Err(error);
-        }
-        Ok(RebornConnectableChannelListResponse {
-            channels: vec![RebornConnectableChannelInfo {
-                channel: "telegram".to_string(),
-                display_name: "Telegram".to_string(),
-                strategy: RebornChannelConnectStrategy::InboundProofCode,
-                action: RebornChannelConnectAction {
-                    title: "Telegram account connection".to_string(),
-                    instructions: "Message the Telegram bot to get a code, then paste it here. Codes expire in 10 minutes.".to_string(),
-                    input_placeholder: "Enter Telegram pairing code...".to_string(),
-                    submit_label: "Connect".to_string(),
-                    success_message: "Telegram account connected.".to_string(),
-                    error_message: "Invalid or expired Telegram pairing code. Message the bot to get a new one.".to_string(),
-                },
-                command_aliases: vec!["telegram".to_string()],
-            }],
-        })
-    }
-
     async fn get_operator_setup(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -1386,7 +1345,7 @@ impl RebornServicesApi for StubServices {
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
         Ok(RebornSetupExtensionResponse {
             package_ref,
-            phase: LifecyclePhase::UnsupportedOrLegacy,
+            phase: LifecyclePhase::Unsupported,
             blockers: Vec::new(),
             payload: None,
             secrets: Vec::new(),
@@ -3122,43 +3081,6 @@ async fn list_outbound_delivery_targets_dispatches_through_facade() {
 }
 
 #[tokio::test]
-async fn list_connectable_channels_dispatches_through_facade() {
-    let services = Arc::new(StubServices::default());
-    let router = router_with(services.clone());
-
-    let response = router
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/api/webchat/v2/channels/connectable")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = read_json(response).await;
-    assert_eq!(body["channels"][0]["channel"], "telegram");
-    assert_eq!(body["channels"][0]["strategy"], "inbound_proof_code");
-    assert_eq!(
-        body["channels"][0]["action"]["instructions"],
-        "Message the Telegram bot to get a code, then paste it here. Codes expire in 10 minutes."
-    );
-    assert_eq!(
-        body["channels"][0]["action"]["error_message"],
-        "Invalid or expired Telegram pairing code. Message the bot to get a new one."
-    );
-    assert_eq!(
-        *services
-            .list_connectable_channels_calls
-            .lock()
-            .expect("lock"),
-        1
-    );
-}
-
-#[tokio::test]
 async fn get_session_returns_caller_identity_and_capabilities() {
     let services = Arc::new(StubServices::default());
     let router = router_with_capabilities(
@@ -4236,37 +4158,6 @@ async fn operator_config_set_failure_does_not_echo_secret_value() {
 }
 
 #[tokio::test]
-async fn list_connectable_channels_error_maps_to_http_status() {
-    let services = Arc::new(StubServices::default());
-    services.fail_list_connectable_channels(RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
-        status_code: 503,
-        retryable: true,
-        field: None,
-        validation_code: None,
-    });
-    let router = router_with(services);
-
-    let response = router
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/api/webchat/v2/channels/connectable")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let body = read_json(response).await;
-    assert_eq!(body["error"], "unavailable");
-    assert_eq!(body["kind"], "service_unavailable");
-    assert_eq!(body["retryable"], true);
-}
-
-#[tokio::test]
 async fn extension_list_and_registry_dispatch_through_facade() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
@@ -4547,7 +4438,7 @@ async fn get_extension_setup_dispatches_package_ref_to_facade() {
     let body = read_json(response).await;
     assert_eq!(body["package_ref"]["id"], "telegram");
     assert_eq!(body["package_ref"]["kind"], "extension");
-    assert_eq!(body["phase"], "unsupported_or_legacy");
+    assert_eq!(body["phase"], "unsupported");
 }
 
 // The path segment must become a lifecycle package ref at the
@@ -4577,7 +4468,7 @@ async fn setup_extension_dispatches_package_ref_to_facade() {
         "facade must echo the package id from the path",
     );
     assert_eq!(body["package_ref"]["kind"], "extension");
-    assert_eq!(body["phase"], "unsupported_or_legacy");
+    assert_eq!(body["phase"], "unsupported");
     assert!(
         body.get("status").is_none(),
         "setup_extension must not expose legacy status aliases: {body}"

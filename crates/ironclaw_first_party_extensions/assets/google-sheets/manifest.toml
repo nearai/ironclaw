@@ -9,7 +9,13 @@ trust = "first_party_requested"
 kind = "wasm"
 module = "wasm/google_sheets_tool.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "google-sheets.create_spreadsheet"
 description = "Create a new spreadsheet."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -23,7 +29,7 @@ output_schema_ref = "schemas/google-sheets/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-sheets/create_spreadsheet.md"
 required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "google-sheets.get_spreadsheet"
 description = "Get spreadsheet metadata by spreadsheet ID. If the user only provided a spreadsheet name/title, search Google Drive first."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -37,7 +43,7 @@ output_schema_ref = "schemas/google-sheets/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-sheets/get_spreadsheet.md"
 required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "google-sheets.read_values"
 description = "Read cell values from a range by spreadsheet ID. If the user only provided a spreadsheet name/title, search Google Drive first."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -51,7 +57,7 @@ output_schema_ref = "schemas/google-sheets/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-sheets/read_values.md"
 required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "google-sheets.batch_read_values"
 description = "Read values from multiple ranges."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -65,7 +71,7 @@ output_schema_ref = "schemas/google-sheets/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-sheets/batch_read_values.md"
 required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "google-sheets.write_values"
 description = "Write values to a range."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -79,7 +85,7 @@ output_schema_ref = "schemas/google-sheets/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-sheets/write_values.md"
 required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "google-sheets.append_values"
 description = "Append rows after existing data by spreadsheet ID. If the user only provided a spreadsheet name/title, search Google Drive first."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -93,7 +99,7 @@ output_schema_ref = "schemas/google-sheets/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-sheets/append_values.md"
 required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "google-sheets.clear_values"
 description = "Clear values from a range."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -107,7 +113,7 @@ output_schema_ref = "schemas/google-sheets/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-sheets/clear_values.md"
 required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "google-sheets.add_sheet"
 description = "Add a sheet tab."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -121,7 +127,7 @@ output_schema_ref = "schemas/google-sheets/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-sheets/add_sheet.md"
 required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "google-sheets.delete_sheet"
 description = "Delete a sheet tab."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -135,7 +141,7 @@ output_schema_ref = "schemas/google-sheets/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-sheets/delete_sheet.md"
 required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "google-sheets.rename_sheet"
 description = "Rename a sheet tab."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -149,7 +155,7 @@ output_schema_ref = "schemas/google-sheets/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-sheets/rename_sheet.md"
 required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "google-sheets.format_cells"
 description = "Format cells in a range."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]

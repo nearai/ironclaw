@@ -9,6 +9,9 @@
 //! - manifests carry a loader-supplied [`ManifestSource`]; first-party / system
 //!   trust and runtime are only ever effective for [`ManifestSource::HostBundled`];
 //! - extension IDs starting with `ironclaw.` are reserved for HostBundled;
+//! - every manifest declares at least one `[[host_api]]` contract; top-level
+//!   `[[capabilities]]` is rejected — capabilities are declared under
+//!   `ironclaw.capability_provider/v1` sections;
 //! - installed manifests must use `wasm` / `mcp` / `script` runtimes only;
 //! - every capability declares `visibility`, relative
 //!   [`CapabilityProfileSchemaRef`] input/output schema refs, optional lazy
@@ -38,11 +41,12 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
 use ironclaw_host_api::{
-    CapabilityId, CapabilityProfileId, CapabilityProfileSchemaRef, EffectKind, ExtensionId,
-    HostApiError, HostPortCatalog, HostPortId, NetworkScheme, NetworkTargetPattern, PermissionMode,
-    RequestedTrustClass, ResourceProfile, RuntimeCredentialRequirement,
-    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeKind, SecretHandle,
-    TrustClass,
+    CapabilityId, CapabilityProfileId, CapabilityProfileSchemaRef, CapabilitySurfaceKind,
+    EffectKind, ExtensionId, HostApiError, HostPortCatalog, HostPortId, NetworkScheme,
+    NetworkTargetPattern, PermissionMode, RequestedTrustClass, ResourceProfile,
+    RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
+    RuntimeCredentialRequirement, RuntimeCredentialRequirementSource, RuntimeCredentialTarget,
+    RuntimeKind, SecretHandle, TrustClass,
 };
 use serde::{Deserialize, Deserializer};
 use thiserror::Error;
@@ -238,13 +242,51 @@ pub struct HostApiManifestContext<'a> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HostApiManifestProjection {
     pub capabilities: Vec<CapabilityDeclV2>,
+    /// Product-facing surface kinds the validated section declares (e.g. a
+    /// `channel` surface for an external-channel product-adapter section).
+    /// Tool and auth kinds are rejected here — they have dedicated
+    /// declaration paths (capability declarations and product-auth
+    /// credential requirements); see [`CapabilitySurfaceDeclV2`].
+    pub surfaces: Vec<CapabilitySurfaceKind>,
+}
+
+/// Error a host API contract raises for one manifest section.
+///
+/// Contracts that validate with this crate's own vocabulary (the
+/// capability-provider contract parses [`CapabilityDeclV2`] declarations)
+/// preserve the typed [`ManifestV2Error`] so callers keep precise variants
+/// (`DuplicateEffect`, `UnknownHostPort`, ...). Domain crates outside this
+/// crate report a redacted reason string, which the parse path wraps as
+/// [`ManifestV2Error::HostApiSectionRejected`].
+#[derive(Debug)]
+pub enum HostApiSectionError {
+    Manifest(Box<ManifestV2Error>),
+    Contract(String),
+}
+
+impl From<ManifestV2Error> for HostApiSectionError {
+    fn from(error: ManifestV2Error) -> Self {
+        Self::Manifest(Box::new(error))
+    }
+}
+
+impl From<String> for HostApiSectionError {
+    fn from(reason: String) -> Self {
+        Self::Contract(reason)
+    }
+}
+
+impl From<&str> for HostApiSectionError {
+    fn from(reason: &str) -> Self {
+        Self::Contract(reason.to_string())
+    }
 }
 
 /// Host API contract validator registered by composition.
 ///
 /// `ironclaw_extensions` owns the generic envelope and section dispatch. Domain
-/// crates own section patterns, cardinality, typed schema validation, and
-/// projection into their read models.
+/// crates own section patterns, cardinality, typed section schema validation,
+/// and projection into their read models.
 pub trait HostApiManifestContract: Send + Sync {
     fn id(&self) -> &HostApiId;
 
@@ -258,14 +300,14 @@ pub trait HostApiManifestContract: Send + Sync {
         &self,
         host_api: &HostApiRefV2,
         section: &toml::Value,
-    ) -> Result<(), String>;
+    ) -> Result<(), HostApiSectionError>;
 
     fn validate_section_with_context(
         &self,
         context: &HostApiManifestContext<'_>,
         host_api: &HostApiRefV2,
         section: &toml::Value,
-    ) -> Result<(), String> {
+    ) -> Result<(), HostApiSectionError> {
         let _ = context;
         self.validate_section(host_api, section)
     }
@@ -275,7 +317,7 @@ pub trait HostApiManifestContract: Send + Sync {
         context: &HostApiManifestContext<'_>,
         host_api: &HostApiRefV2,
         section: &toml::Value,
-    ) -> Result<HostApiManifestProjection, String> {
+    ) -> Result<HostApiManifestProjection, HostApiSectionError> {
         self.validate_section_with_context(context, host_api, section)?;
         Ok(HostApiManifestProjection::default())
     }
@@ -310,9 +352,9 @@ impl HostApiContractRegistry {
         manifest: &ExtensionManifestV2,
         sections: &ManifestSectionsV2,
         host_port_catalog: &HostPortCatalog,
-    ) -> Result<HostApiManifestProjection, ManifestV2Error> {
+    ) -> Result<ProjectedManifestV2, ManifestV2Error> {
         let mut counts: BTreeMap<&HostApiId, usize> = BTreeMap::new();
-        let mut projected = HostApiManifestProjection::default();
+        let mut projected = ProjectedManifestV2::default();
         let mut seen_capabilities = BTreeSet::new();
         for host_api in &manifest.host_apis {
             let contract = self.contracts.get(&host_api.id).ok_or_else(|| {
@@ -341,16 +383,47 @@ impl HostApiContractRegistry {
             };
             let section_projection = contract
                 .project_section_with_context(&context, host_api, section)
-                .map_err(|reason| ManifestV2Error::HostApiSectionRejected {
-                    id: host_api.id.clone(),
-                    section: host_api.section.clone(),
-                    reason,
+                .map_err(|error| match error {
+                    HostApiSectionError::Manifest(error) => *error,
+                    HostApiSectionError::Contract(reason) => {
+                        ManifestV2Error::HostApiSectionRejected {
+                            id: host_api.id.clone(),
+                            section: host_api.section.clone(),
+                            reason,
+                        }
+                    }
                 })?;
             for capability in section_projection.capabilities {
                 if !seen_capabilities.insert(capability.id.clone()) {
                     return Err(ManifestV2Error::DuplicateCapability { id: capability.id });
                 }
                 projected.capabilities.push(capability);
+            }
+            for kind in section_projection.surfaces {
+                if matches!(
+                    kind,
+                    CapabilitySurfaceKind::Tool | CapabilitySurfaceKind::Auth
+                ) {
+                    // Fail closed: tool and auth surfaces derive from their
+                    // dedicated declaration paths. A contract projecting them
+                    // as opaque section surfaces is an implementation bug.
+                    return Err(ManifestV2Error::HostApiSectionRejected {
+                        id: host_api.id.clone(),
+                        section: host_api.section.clone(),
+                        reason: format!(
+                            "host API contracts must not project '{kind}' section surfaces; \
+                             tool surfaces derive from capability declarations and auth \
+                             surfaces from product-auth credential requirements"
+                        ),
+                    });
+                }
+                projected
+                    .surfaces
+                    .push(CapabilitySurfaceDeclV2::HostApiSection {
+                        kind,
+                        host_api: host_api.id.clone(),
+                        section: host_api.section.clone(),
+                    });
             }
         }
         sections.reject_unreferenced_operational_sections(&manifest.host_apis)?;
@@ -362,6 +435,15 @@ impl Default for HostApiContractRegistry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Aggregate of every host API contract projection for one manifest:
+/// projected capability declarations plus origin-stamped section surfaces.
+/// Internal to the parse path — contracts see [`HostApiManifestProjection`].
+#[derive(Debug, Default)]
+struct ProjectedManifestV2 {
+    capabilities: Vec<CapabilityDeclV2>,
+    surfaces: Vec<CapabilitySurfaceDeclV2>,
 }
 
 /// Validated v2 capability declaration.
@@ -383,6 +465,50 @@ pub struct CapabilityDeclV2 {
     /// this to populate its egress allowlist directly from the manifest.
     pub network_targets: Vec<NetworkTargetPattern>,
     pub resource_profile: Option<ResourceProfile>,
+}
+
+/// One product-facing surface a validated manifest declares, with the
+/// manifest declaration it derives from.
+///
+/// The surface set answers "which faces of this extension can be configured
+/// and enabled?" — tools, an external channel, provider accounts. It is
+/// derived vocabulary: the owning declarations (capability entries, host API
+/// sections, credential requirements) stay the single source of truth, and
+/// [`ExtensionManifestV2::capability_surfaces`] projects them on demand.
+/// Runtime kind deliberately plays no part in this taxonomy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CapabilitySurfaceDeclV2 {
+    /// A model/host-callable capability. One per capability declaration
+    /// (top-level or host-API projected).
+    Tool { capability: CapabilityId },
+    /// A provider-account requirement, derived from `product_auth_account`
+    /// runtime-credential sources across all capabilities: one surface per
+    /// distinct provider. When several requirements name the same provider,
+    /// OAuth setups fold to the union of their scopes (sorted, deduplicated)
+    /// and mask weaker manual-token setups — the account is shared, so its
+    /// grant is the union of what the declaring capabilities need.
+    Auth {
+        provider: RuntimeCredentialAccountProviderId,
+        setup: RuntimeCredentialAccountSetup,
+    },
+    /// A surface projected by a host API contract section, stamped with the
+    /// owning contract id and section path (e.g. a `channel` surface from an
+    /// `ironclaw.product_adapter/v1` external-channel section).
+    HostApiSection {
+        kind: CapabilitySurfaceKind,
+        host_api: HostApiId,
+        section: ManifestSectionPath,
+    },
+}
+
+impl CapabilitySurfaceDeclV2 {
+    pub fn kind(&self) -> CapabilitySurfaceKind {
+        match self {
+            Self::Tool { .. } => CapabilitySurfaceKind::Tool,
+            Self::Auth { .. } => CapabilitySurfaceKind::Auth,
+            Self::HostApiSection { kind, .. } => *kind,
+        }
+    }
 }
 
 /// v2 runtime declaration.
@@ -460,8 +586,9 @@ pub struct ExtensionManifestV2 {
     /// the policy; they must not read this field as authoritative.
     pub descriptor_trust_default: TrustClass,
     pub runtime: ExtensionRuntimeV2,
-    /// Host API contracts this extension implements. Empty only for legacy v2
-    /// capability-only manifests during cutover.
+    /// Host API contracts this extension implements. Never empty: every
+    /// manifest declares at least one contract, and every capability and
+    /// surface reaches the manifest through one.
     ///
     /// Contract handlers must treat manifest trust fields as untrusted
     /// declaration metadata. Runtime authority and effective trust must come
@@ -470,6 +597,13 @@ pub struct ExtensionManifestV2 {
     /// [`requested_trust`](Self::requested_trust) request.
     pub host_apis: Vec<HostApiRefV2>,
     pub capabilities: Vec<CapabilityDeclV2>,
+    /// Surfaces projected by host API contract sections during
+    /// [`Self::parse`] (channel and future section-declared
+    /// kinds). Tool and auth surfaces are *not* stored here — they derive on
+    /// demand from capability declarations; [`Self::capability_surfaces`]
+    /// returns the complete set. Empty when the manifest was parsed without
+    /// contracts or declares no surface-projecting sections.
+    pub host_api_surfaces: Vec<CapabilitySurfaceDeclV2>,
     /// Declarative hook entries the extension wants installed. Carried as
     /// structurally-typed [`HookSectionEntryV2`] payloads; the composition
     /// loader projects them into typed `ironclaw_hooks::HookManifestEntry`
@@ -533,10 +667,6 @@ pub enum ManifestV2Error {
         prefix: &'static str,
     },
     #[error(
-        "manifest source {manifest_source:?} is not allowed to use legacy top-level capabilities; declare ironclaw.capability_provider/v1 host_api instead"
-    )]
-    LegacyTopLevelCapabilitiesForInstalledSource { manifest_source: ManifestSource },
-    #[error(
         "capability {capability} declares unknown host port '{port}' (not in host-defined catalog)"
     )]
     UnknownHostPort {
@@ -598,13 +728,21 @@ impl ExtensionManifestV2 {
         self.runtime.kind()
     }
 
-    /// Parse a v2 manifest TOML body and validate it against `host_port_catalog`.
+    /// Parse a v2 manifest TOML body: validate the envelope against
+    /// `host_port_catalog`, require at least one `[[host_api]]` contract,
+    /// and validate/project every declared contract section through the
+    /// composition-supplied registry.
+    ///
+    /// This is the only parse entry point. Every capability, surface, and
+    /// operational section reaches the manifest through a registered host
+    /// API contract — there is no contract-free manifest form.
     ///
     /// `source` is supplied by the loader/install path, never read from TOML.
     pub fn parse(
         input: &str,
         source: ManifestSource,
         host_port_catalog: &HostPortCatalog,
+        registry: &HostApiContractRegistry,
     ) -> Result<Self, ManifestV2Error> {
         // Fail closed on pathological inputs *before* invoking the TOML parser.
         // `toml::from_str` will otherwise read and allocate the full input.
@@ -615,84 +753,12 @@ impl ExtensionManifestV2 {
             });
         }
         let document = RawManifestDocumentV2::parse(input)?;
-        if !document.raw.host_api.is_empty() {
-            return Err(ManifestV2Error::Invalid {
-                reason: "host_api manifests require parse_with_host_api_contracts".to_string(),
-            });
-        }
-        if let Some(key) = document.sections.first_non_envelope_top_level_key() {
-            return Err(ManifestV2Error::Parse {
-                reason: format!("unknown top-level field {key:?}"),
-            });
-        }
-        Self::from_raw(document.raw, source, host_port_catalog, &document.sections)
-    }
-
-    /// Parse a v2 manifest and validate every `[[host_api]]` contract through
-    /// the composition-supplied registry.
-    pub fn parse_with_host_api_contracts(
-        input: &str,
-        source: ManifestSource,
-        host_port_catalog: &HostPortCatalog,
-        registry: &HostApiContractRegistry,
-    ) -> Result<Self, ManifestV2Error> {
-        if input.len() > MAX_MANIFEST_BYTES {
-            return Err(ManifestV2Error::ManifestTooLarge {
-                bytes: input.len(),
-                max: MAX_MANIFEST_BYTES,
-            });
-        }
-        let document = RawManifestDocumentV2::parse(input)?;
-        let mut manifest =
-            Self::from_raw(document.raw, source, host_port_catalog, &document.sections)?;
+        let mut manifest = Self::from_raw(document.raw, source, &document.sections)?;
         manifest.project_and_extend_capabilities(
             &document.sections,
             host_port_catalog,
             registry,
         )?;
-        Ok(manifest)
-    }
-
-    /// Parse a v2 manifest for production discovery.
-    ///
-    /// Legacy top-level capability manifests keep the stricter no-extra-table
-    /// rule from [`Self::parse`]. Manifests that declare `[[host_api]]` are
-    /// validated through the composition-supplied contract registry.
-    pub fn parse_with_optional_host_api_contracts(
-        input: &str,
-        source: ManifestSource,
-        host_port_catalog: &HostPortCatalog,
-        registry: &HostApiContractRegistry,
-    ) -> Result<Self, ManifestV2Error> {
-        if input.len() > MAX_MANIFEST_BYTES {
-            return Err(ManifestV2Error::ManifestTooLarge {
-                bytes: input.len(),
-                max: MAX_MANIFEST_BYTES,
-            });
-        }
-        let document = RawManifestDocumentV2::parse(input)?;
-        let mut manifest =
-            Self::from_raw(document.raw, source, host_port_catalog, &document.sections)?;
-        if manifest.host_apis.is_empty() {
-            if let Some(key) = document.sections.first_non_envelope_top_level_key() {
-                return Err(ManifestV2Error::Parse {
-                    reason: format!("unknown top-level field {key:?}"),
-                });
-            }
-            if !source.allows_first_party() && !manifest.capabilities.is_empty() {
-                return Err(
-                    ManifestV2Error::LegacyTopLevelCapabilitiesForInstalledSource {
-                        manifest_source: source,
-                    },
-                );
-            }
-        } else {
-            manifest.project_and_extend_capabilities(
-                &document.sections,
-                host_port_catalog,
-                registry,
-            )?;
-        }
         Ok(manifest)
     }
 
@@ -704,14 +770,104 @@ impl ExtensionManifestV2 {
     ) -> Result<(), ManifestV2Error> {
         let projection = registry.project_manifest(self, sections, host_port_catalog)?;
         self.capabilities.extend(projection.capabilities);
+        self.host_api_surfaces.extend(projection.surfaces);
         Ok(())
     }
 
+    /// Derived, order-stable projection of every product-facing surface this
+    /// manifest declares: one tool surface per capability (declaration
+    /// order), then host-API projected surfaces (declaration order), then
+    /// one auth surface per distinct product-auth provider (sorted by
+    /// provider id).
+    ///
+    /// This is the product taxonomy of the extension. Runtime kind (`wasm`,
+    /// `mcp`, `first_party`, ...) deliberately plays no part in it: how an
+    /// adapter loads never decides whether the extension is a tool provider,
+    /// a channel, or both.
+    pub fn capability_surfaces(&self) -> Vec<CapabilitySurfaceDeclV2> {
+        capability_surfaces_from_parts(&self.capabilities, &self.host_api_surfaces)
+    }
+}
+
+/// Shared surface derivation for the v2 manifest and the package-level
+/// [`crate::ExtensionManifest`] mirror: one tool surface per capability
+/// (declaration order), then host-API projected surfaces (declaration
+/// order), then one auth surface per distinct product-auth provider
+/// (sorted by provider id).
+pub(crate) fn capability_surfaces_from_parts(
+    capabilities: &[CapabilityDeclV2],
+    host_api_surfaces: &[CapabilitySurfaceDeclV2],
+) -> Vec<CapabilitySurfaceDeclV2> {
+    {
+        let mut surfaces: Vec<CapabilitySurfaceDeclV2> = capabilities
+            .iter()
+            .map(|capability| CapabilitySurfaceDeclV2::Tool {
+                capability: capability.id.clone(),
+            })
+            .collect();
+        surfaces.extend(host_api_surfaces.iter().cloned());
+
+        // One auth surface per provider. OAuth setups fold to the union of
+        // their scopes and mask manual-token setups; a provider referenced
+        // only through retired setups still surfaces (as Retired) so
+        // discovery can see the unserviceable requirement instead of
+        // silently dropping it.
+        #[derive(Default)]
+        struct AuthAccumulator {
+            oauth_scopes: Option<BTreeSet<String>>,
+            saw_manual_token: bool,
+        }
+        let mut providers: BTreeMap<RuntimeCredentialAccountProviderId, AuthAccumulator> =
+            BTreeMap::new();
+        for capability in capabilities {
+            for credential in &capability.runtime_credentials {
+                let RuntimeCredentialRequirementSource::ProductAuthAccount { provider, setup } =
+                    &credential.source
+                else {
+                    continue;
+                };
+                let accumulator = providers.entry(provider.clone()).or_default();
+                match setup {
+                    RuntimeCredentialAccountSetup::OAuth { scopes } => {
+                        accumulator
+                            .oauth_scopes
+                            .get_or_insert_with(BTreeSet::new)
+                            .extend(scopes.iter().cloned());
+                    }
+                    RuntimeCredentialAccountSetup::ManualToken => {
+                        accumulator.saw_manual_token = true;
+                    }
+                    RuntimeCredentialAccountSetup::Retired => {}
+                }
+            }
+        }
+        surfaces.extend(providers.into_iter().map(|(provider, accumulator)| {
+            CapabilitySurfaceDeclV2::Auth {
+                provider,
+                setup: match accumulator {
+                    AuthAccumulator {
+                        oauth_scopes: Some(scopes),
+                        ..
+                    } => RuntimeCredentialAccountSetup::OAuth {
+                        scopes: scopes.into_iter().collect(),
+                    },
+                    AuthAccumulator {
+                        saw_manual_token: true,
+                        ..
+                    } => RuntimeCredentialAccountSetup::ManualToken,
+                    AuthAccumulator { .. } => RuntimeCredentialAccountSetup::Retired,
+                },
+            }
+        }));
+        surfaces
+    }
+}
+
+impl ExtensionManifestV2 {
     /// Construct a manifest from an already-deserialized raw representation.
     fn from_raw(
         raw: RawManifestV2,
         source: ManifestSource,
-        host_port_catalog: &HostPortCatalog,
         sections: &ManifestSectionsV2,
     ) -> Result<Self, ManifestV2Error> {
         if raw.schema_version != MANIFEST_SCHEMA_VERSION {
@@ -739,17 +895,16 @@ impl ExtensionManifestV2 {
                 reason: "description must not be empty".to_string(),
             });
         }
-        if raw.capabilities.is_empty() && raw.host_api.is_empty() {
+        if !raw.capabilities.is_empty() {
             return Err(ManifestV2Error::Invalid {
-                reason: "at least one host_api contract or legacy capability is required"
+                reason: "top-level [[capabilities]] is not supported; declare capabilities \
+                         under an ironclaw.capability_provider/v1 host_api section"
                     .to_string(),
             });
         }
-        if !raw.host_api.is_empty() && !raw.capabilities.is_empty() {
+        if raw.host_api.is_empty() {
             return Err(ManifestV2Error::Invalid {
-                reason:
-                    "top-level capabilities are not allowed when host_api contracts are declared"
-                        .to_string(),
+                reason: "at least one host_api contract is required".to_string(),
             });
         }
 
@@ -788,16 +943,9 @@ impl ExtensionManifestV2 {
 
         let hooks = validate_hook_entries(raw.hooks)?;
 
-        let mut seen_capabilities = BTreeSet::new();
-        let mut capabilities = Vec::with_capacity(raw.capabilities.len());
-        for raw_cap in raw.capabilities {
-            let cap = CapabilityDeclV2::from_raw(raw_cap, &id, host_port_catalog)?;
-            if !seen_capabilities.insert(cap.id.clone()) {
-                return Err(ManifestV2Error::DuplicateCapability { id: cap.id });
-            }
-            capabilities.push(cap);
-        }
-
+        // `capabilities` and `host_api_surfaces` start empty and are filled
+        // exclusively by host API contract projection in
+        // [`Self::project_and_extend_capabilities`].
         Ok(Self {
             schema_version: raw.schema_version,
             id,
@@ -809,7 +957,8 @@ impl ExtensionManifestV2 {
             descriptor_trust_default,
             runtime,
             host_apis,
-            capabilities,
+            capabilities: Vec::new(),
+            host_api_surfaces: Vec::new(),
             hooks,
         })
     }
@@ -1327,13 +1476,6 @@ struct ManifestSectionsV2 {
 }
 
 impl ManifestSectionsV2 {
-    fn first_non_envelope_top_level_key(&self) -> Option<&str> {
-        self.table
-            .keys()
-            .find(|key| !is_envelope_key(key))
-            .map(String::as_str)
-    }
-
     fn get(&self, path: &ManifestSectionPath) -> Result<&toml::Value, ManifestV2Error> {
         let mut current = &self.table;
         let mut segments = path.segments().peekable();
@@ -1447,8 +1589,12 @@ struct RawManifestV2 {
     runtime: RawRuntimeV2,
     #[serde(default)]
     host_api: Vec<RawHostApiRefV2>,
+    /// Legacy top-level `[[capabilities]]` payload. Kept only so its
+    /// presence can be rejected with an actionable error; entries are never
+    /// parsed. Capabilities are declared under
+    /// `ironclaw.capability_provider/v1` host_api sections.
     #[serde(default)]
-    capabilities: Vec<RawCapabilityV2>,
+    capabilities: Vec<toml::Value>,
     /// Raw `[[hooks]]` entries. Each is an arbitrary TOML table validated
     /// structurally here (table shape, non-empty `id`, size bound) and
     /// projected into a typed hook entry by the composition loader. Kept as

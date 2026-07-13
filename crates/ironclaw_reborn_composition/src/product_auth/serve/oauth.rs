@@ -1366,7 +1366,7 @@ mod tests {
     #[cfg(feature = "slack-v2-host-beta")]
     async fn slack_personal_oauth_test_slot() -> SlackPersonalSetupServiceSlot {
         let redirect_uri = ironclaw_auth::OAuthRedirectUri::new(
-            "http://127.0.0.1:3000/api/reborn/product-auth/oauth/slack_personal/callback",
+            "http://127.0.0.1:3000/api/reborn/product-auth/oauth/slack/callback",
         )
         .expect("slack oauth redirect uri");
         let slot = SlackPersonalSetupServiceSlot::new(redirect_uri);
@@ -1562,8 +1562,7 @@ mod tests {
         let run_id = TurnRunId::new();
         let gate_ref = "gate:slack-personal-auth";
         let requirements = vec![RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new(SLACK_PERSONAL_PROVIDER_ID)
-                .expect("provider"),
+            provider: RuntimeCredentialAccountProviderId::new(SLACK_PROVIDER_ID).expect("provider"),
             setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
                 scopes: slack_personal_oauth_setup_scopes()
                     .iter()
@@ -1786,7 +1785,7 @@ mod tests {
             )),
             Path("slack".to_string()),
             Json(ExtensionOAuthStartRequest {
-                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                provider: SLACK_PROVIDER_ID.to_string(),
                 account_label: "personal slack replacement".to_string(),
                 scopes: vec![],
                 expires_at: Utc::now() + ChronoDuration::minutes(5),
@@ -2313,7 +2312,7 @@ mod tests {
             )),
             Path("slack".to_string()),
             Json(ExtensionOAuthStartRequest {
-                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                provider: SLACK_PROVIDER_ID.to_string(),
                 account_label: "personal slack".to_string(),
                 scopes: vec!["admin".to_string()],
                 expires_at: Utc::now() + ChronoDuration::minutes(5),
@@ -2397,7 +2396,7 @@ mod tests {
             )),
             Path("slack".to_string()),
             Json(ExtensionOAuthStartRequest {
-                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                provider: SLACK_PROVIDER_ID.to_string(),
                 account_label: "personal slack".to_string(),
                 scopes: Vec::new(),
                 expires_at: Utc::now() + ChronoDuration::minutes(5),
@@ -2448,7 +2447,7 @@ mod tests {
             )),
             Path("notion".to_string()),
             Json(ExtensionOAuthStartRequest {
-                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                provider: SLACK_PROVIDER_ID.to_string(),
                 account_label: "personal slack".to_string(),
                 scopes: Vec::new(),
                 expires_at: Utc::now() + ChronoDuration::minutes(5),
@@ -2646,7 +2645,7 @@ mod tests {
             )),
             Path("slack".to_string()),
             Json(ExtensionOAuthStartRequest {
-                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                provider: SLACK_PROVIDER_ID.to_string(),
                 account_label: "personal slack".to_string(),
                 scopes: vec!["search:read".to_string()],
                 expires_at: Utc::now() + ChronoDuration::minutes(5),
@@ -2778,7 +2777,7 @@ mod tests {
             Extension(caller.clone()),
             Path("slack".to_string()),
             Json(ExtensionOAuthStartRequest {
-                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                provider: SLACK_PROVIDER_ID.to_string(),
                 account_label: "personal slack".to_string(),
                 scopes: vec![],
                 expires_at: Utc::now() + ChronoDuration::minutes(5),
@@ -2834,7 +2833,7 @@ mod tests {
             Extension(caller.clone()),
             Path("slack".to_string()),
             Json(ExtensionOAuthStartRequest {
-                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                provider: SLACK_PROVIDER_ID.to_string(),
                 account_label: "personal slack retry".to_string(),
                 scopes: vec![],
                 expires_at: Utc::now() + ChronoDuration::minutes(5),
@@ -2880,7 +2879,7 @@ mod tests {
             Extension(caller.clone()),
             Path("slack".to_string()),
             Json(ExtensionOAuthStartRequest {
-                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                provider: SLACK_PROVIDER_ID.to_string(),
                 account_label: "personal slack pkce retry".to_string(),
                 scopes: vec![],
                 expires_at: Utc::now() + ChronoDuration::minutes(5),
@@ -2939,7 +2938,7 @@ mod tests {
             Extension(caller),
             Path("slack".to_string()),
             Json(ExtensionOAuthStartRequest {
-                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                provider: SLACK_PROVIDER_ID.to_string(),
                 account_label: "personal slack final retry".to_string(),
                 scopes: vec![],
                 expires_at: Utc::now() + ChronoDuration::minutes(5),
@@ -3007,7 +3006,7 @@ mod tests {
             )),
             Path("slack".to_string()),
             Json(ExtensionOAuthStartRequest {
-                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                provider: SLACK_PROVIDER_ID.to_string(),
                 account_label: "personal slack".to_string(),
                 scopes: vec!["users:read".to_string()],
                 expires_at: Utc::now() + ChronoDuration::minutes(5),
@@ -3124,7 +3123,7 @@ mod tests {
             )),
             Path("slack".to_string()),
             Json(ExtensionOAuthStartRequest {
-                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                provider: SLACK_PROVIDER_ID.to_string(),
                 account_label: "personal slack".to_string(),
                 scopes: vec!["users:read".to_string()],
                 expires_at: Utc::now() + ChronoDuration::minutes(5),
@@ -3202,9 +3201,7 @@ mod tests {
             .cleanup_credentials_for_lifecycle(ironclaw_auth::SecretCleanupRequest {
                 scope: owner_scope.clone(),
                 extension_id: ExtensionId::new("slack").expect("extension"),
-                provider: Some(
-                    AuthProviderId::new(SLACK_PERSONAL_PROVIDER_ID).expect("Slack provider"),
-                ),
+                provider: Some(AuthProviderId::new(SLACK_PROVIDER_ID).expect("Slack provider")),
                 action: ironclaw_auth::SecretCleanupAction::Uninstall,
             })
             .await
@@ -3276,7 +3273,7 @@ mod tests {
             )),
             Path("slack".to_string()),
             Json(ExtensionOAuthStartRequest {
-                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                provider: SLACK_PROVIDER_ID.to_string(),
                 account_label: "personal slack".to_string(),
                 scopes: vec!["search:read".to_string()],
                 expires_at: Utc::now() + ChronoDuration::minutes(5),
@@ -4417,7 +4414,7 @@ mod tests {
             )),
             Path("slack".to_string()),
             Json(ExtensionOAuthStartRequest {
-                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                provider: SLACK_PROVIDER_ID.to_string(),
                 account_label: "personal slack".to_string(),
                 scopes: vec!["search:read".to_string()],
                 expires_at: Utc::now() + ChronoDuration::minutes(5),
@@ -5160,7 +5157,7 @@ mod tests {
             )),
             Path("slack".to_string()),
             Json(ExtensionOAuthStartRequest {
-                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                provider: SLACK_PROVIDER_ID.to_string(),
                 account_label: "personal slack".to_string(),
                 scopes: vec!["search:read".to_string()],
                 expires_at: Utc::now() + ChronoDuration::minutes(5),
@@ -5269,7 +5266,7 @@ mod tests {
             Extension(caller.clone()),
             Path("slack".to_string()),
             Json(ExtensionOAuthStartRequest {
-                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                provider: SLACK_PROVIDER_ID.to_string(),
                 account_label: "personal slack".to_string(),
                 scopes: vec!["search:read".to_string()],
                 expires_at: Utc::now() + ChronoDuration::minutes(5),
@@ -5320,7 +5317,7 @@ mod tests {
             .expect("disconnect begins");
         binding_store
             .delete_user_identity_bindings_for_user_at_epoch(
-                crate::slack::slack_actor_identity::SLACK_IDENTITY_PROVIDER,
+                crate::slack::slack_channel_connection::SLACK_IDENTITY_PROVIDER,
                 &user_id,
                 Some("install-alpha:"),
                 fence.cleanup_selector().epoch(),
@@ -5338,7 +5335,7 @@ mod tests {
             Extension(caller),
             Path("slack".to_string()),
             Json(ExtensionOAuthStartRequest {
-                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                provider: SLACK_PROVIDER_ID.to_string(),
                 account_label: "personal slack retry".to_string(),
                 scopes: vec!["search:read".to_string()],
                 expires_at: Utc::now() + ChronoDuration::minutes(5),

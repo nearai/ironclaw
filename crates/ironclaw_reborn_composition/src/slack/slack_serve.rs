@@ -227,7 +227,7 @@ pub fn slack_events_route_descriptors() -> Vec<IngressRouteDescriptor> {
 /// the process lifetime).
 ///
 /// The route's path/method/policy are declared as data in
-/// `assets/slack_bot/manifest.toml` (`[[product_adapter.inbound.host_ingress]]`)
+/// `assets/slack/manifest.toml` (`[[product_adapter.inbound.host_ingress]]`)
 /// and validated by `ironclaw_host_api` (incl. the fail-closed floor that a
 /// `public_webhook` listener must require `webhook_signature`) plus
 /// `ironclaw_product_adapter_registry` (ingress credential coherence). Only the
@@ -240,7 +240,7 @@ pub fn slack_events_route_descriptors() -> Vec<IngressRouteDescriptor> {
 /// surfaced at startup.
 static SLACK_INGRESS_DESCRIPTORS: LazyLock<SlackIngressDescriptors> = LazyLock::new(|| {
     let descriptors = crate::host_ingress::bundled_host_ingress_descriptors(
-        crate::extension_host::available_extensions::slack_bot_manifest_toml(),
+        crate::extension_host::available_extensions::slack_manifest_toml(),
     )
     .unwrap_or_else(|error| {
         panic!("bundled Slack manifest must project host-ingress routes: {error}")
@@ -427,9 +427,8 @@ mod tests {
     use ironclaw_product_adapters::{
         AuthRequirement, OutboundDeliverySink, ParsedProductInbound, ProductAdapter,
         ProductAdapterError, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
-        ProductOutboundEnvelope, ProductRenderOutcome, ProductTriggerReason,
-        ProjectionSubscriptionRequest, ProtocolAuthEvidence, ProtocolAuthFailure,
-        ProtocolHttpEgress, UserMessagePayload,
+        ProductOutboundEnvelope, ProductRenderOutcome, ProductTriggerReason, ProtocolAuthEvidence,
+        ProtocolAuthFailure, ProtocolHttpEgress, UserMessagePayload,
     };
     use ironclaw_slack_v2_adapter::SlackPayloadParseError;
     use ironclaw_wasm_product_adapters::{
@@ -696,17 +695,6 @@ mod tests {
         ) -> Result<ProductInboundAck, ProductAdapterError> {
             self.accepted_count.fetch_add(1, Ordering::SeqCst);
             Ok(ProductInboundAck::NoOp)
-        }
-
-        async fn resolve_projection_subscription(
-            &self,
-            _envelope: ProductInboundEnvelope,
-        ) -> Result<ProjectionSubscriptionRequest, ProductAdapterError> {
-            Err(ProductAdapterError::Internal {
-                detail: ironclaw_product_adapters::redaction::RedactedString::new(
-                    "test stub: resolve_projection_subscription not supported",
-                ),
-            })
         }
     }
 

@@ -4,7 +4,8 @@ use serde::Deserialize;
 
 use crate::v2::{
     CapabilityDeclV2, HostApiId, HostApiManifestContext, HostApiManifestContract,
-    HostApiManifestProjection, HostApiRefV2, ManifestSectionPath, ManifestV2Error, RawCapabilityV2,
+    HostApiManifestProjection, HostApiRefV2, HostApiSectionError, ManifestSectionPath,
+    ManifestV2Error, RawCapabilityV2,
 };
 
 pub const CAPABILITY_PROVIDER_HOST_API_ID: &str = "ironclaw.capability_provider/v1";
@@ -36,8 +37,10 @@ impl HostApiManifestContract for CapabilityProviderHostApiContract {
         &self,
         _host_api: &HostApiRefV2,
         _section: &toml::Value,
-    ) -> Result<(), String> {
-        Err("capability provider validation requires manifest context".to_string())
+    ) -> Result<(), HostApiSectionError> {
+        Err(HostApiSectionError::from(
+            "capability provider validation requires manifest context",
+        ))
     }
 
     fn validate_section_with_context(
@@ -45,7 +48,7 @@ impl HostApiManifestContract for CapabilityProviderHostApiContract {
         context: &HostApiManifestContext<'_>,
         _host_api: &HostApiRefV2,
         section: &toml::Value,
-    ) -> Result<(), String> {
+    ) -> Result<(), HostApiSectionError> {
         let _ = project_capabilities(context, section)?;
         Ok(())
     }
@@ -55,9 +58,10 @@ impl HostApiManifestContract for CapabilityProviderHostApiContract {
         context: &HostApiManifestContext<'_>,
         _host_api: &HostApiRefV2,
         section: &toml::Value,
-    ) -> Result<HostApiManifestProjection, String> {
+    ) -> Result<HostApiManifestProjection, HostApiSectionError> {
         Ok(HostApiManifestProjection {
             capabilities: project_capabilities(context, section)?,
+            surfaces: Vec::new(),
         })
     }
 }
@@ -65,26 +69,27 @@ impl HostApiManifestContract for CapabilityProviderHostApiContract {
 fn project_capabilities(
     context: &HostApiManifestContext<'_>,
     section: &toml::Value,
-) -> Result<Vec<CapabilityDeclV2>, String> {
+) -> Result<Vec<CapabilityDeclV2>, HostApiSectionError> {
     let parsed: CapabilityProviderToolsSection = section
         .clone()
         .try_into()
-        .map_err(|error: toml::de::Error| error.to_string())?;
+        .map_err(|error: toml::de::Error| HostApiSectionError::from(error.to_string()))?;
     if parsed.capabilities.is_empty() {
-        return Err("capability_provider.tools must declare at least one capability".to_string());
+        return Err(HostApiSectionError::from(
+            "capability_provider.tools must declare at least one capability",
+        ));
     }
 
     let mut seen = BTreeSet::new();
     let mut capabilities = Vec::with_capacity(parsed.capabilities.len());
     for raw in parsed.capabilities {
+        // `from_raw` errors keep their typed `ManifestV2Error` variants so
+        // capability validation reports identically however the capability
+        // is declared.
         let capability =
-            CapabilityDeclV2::from_raw(raw, context.extension_id, context.host_port_catalog)
-                .map_err(|error| error.to_string())?;
+            CapabilityDeclV2::from_raw(raw, context.extension_id, context.host_port_catalog)?;
         if !seen.insert(capability.id.clone()) {
-            return Err(format!(
-                "duplicate capability id {}",
-                capability.id.as_str()
-            ));
+            return Err(ManifestV2Error::DuplicateCapability { id: capability.id }.into());
         }
         capabilities.push(capability);
     }

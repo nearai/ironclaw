@@ -45,7 +45,7 @@ use ironclaw_auth::{
     CredentialRefreshReport, CredentialRefreshRequest, GOOGLE_PROVIDER_ID, GoogleOAuthRouteConfig,
     OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthCallbackState, OAuthCallbackStateKind,
     OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret,
-    ProviderScope, SLACK_PERSONAL_PROVIDER_ID, SecretCleanupAction, SecretCleanupReport,
+    ProviderScope, SLACK_PROVIDER_ID, SecretCleanupAction, SecretCleanupReport,
     SecretCleanupRequest, Timestamp, TurnRunRef, binding_scope_owns_account,
     build_google_authorization_url, parse_google_callback_scopes, parse_google_requested_scopes,
     pkce_s256_challenge,
@@ -96,7 +96,7 @@ pub(crate) const GOOGLE_OAUTH_CALLBACK_PATH: &str =
     "/api/reborn/product-auth/oauth/google/callback";
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) const SLACK_PERSONAL_OAUTH_CALLBACK_PATH: &str =
-    "/api/reborn/product-auth/oauth/slack_personal/callback";
+    "/api/reborn/product-auth/oauth/slack/callback";
 pub(crate) const EXTENSION_OAUTH_START_PATH: &str =
     "/api/webchat/v2/extensions/{package_id}/setup/oauth/start";
 pub(crate) const MANUAL_TOKEN_SUBMIT_PATH: &str = "/api/reborn/product-auth/manual-token/submit";
@@ -566,7 +566,7 @@ async fn extension_oauth_start_handler(
     state
         .require_installed_extension(&caller, &requester_extension)
         .await?;
-    let response = if request.provider == SLACK_PERSONAL_PROVIDER_ID {
+    let response = if request.provider == SLACK_PROVIDER_ID {
         #[cfg(feature = "slack-v2-host-beta")]
         let response = crate::slack::slack_personal_oauth::start_extension_oauth_flow(
             state.clone(),

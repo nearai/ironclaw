@@ -167,6 +167,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                 service: "builtin".to_string(),
             },
             host_apis: Vec::new(),
+            host_api_surfaces: Vec::new(),
             capabilities: {
                 let mut capabilities = vec![
                     echo::manifest()?,

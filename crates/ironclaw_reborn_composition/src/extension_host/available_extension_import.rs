@@ -8,8 +8,8 @@ use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef, Produ
 
 use super::available_extensions::{
     AvailableExtensionAsset, AvailableExtensionAssetContent, AvailableExtensionPackage,
-    bytes_asset, map_binding_error, reserved_host_bundled_extension_id,
-    surface_kinds_from_manifest_record,
+    bytes_asset, channel_directions_from_manifest_record, map_binding_error,
+    reserved_host_bundled_extension_id, surface_kinds_from_manifest_record,
 };
 use super::extension_bundle::{
     MAX_EXTENSION_BUNDLE_FILES, MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES,
@@ -172,7 +172,7 @@ pub(crate) fn imported_extension_package(
         })?;
     // Uploads are always validated as InstalledLocal. Only binary-compiled
     // packages may claim the HostBundled trust/runtime tier.
-    let record = ExtensionManifestRecord::from_toml_with_contracts(
+    let record = ExtensionManifestRecord::from_toml(
         manifest_toml,
         ManifestSource::InstalledLocal,
         &host_ports,
@@ -196,6 +196,7 @@ pub(crate) fn imported_extension_package(
     let id = extension_id.as_str();
     let root = VirtualPath::new(format!("/system/extensions/{id}")).map_err(map_binding_error)?;
     let surface_kinds = surface_kinds_from_manifest_record(&record, id)?;
+    let channel_directions = channel_directions_from_manifest_record(&record, id)?;
     let manifest = record
         .manifest()
         .clone()
@@ -244,6 +245,7 @@ pub(crate) fn imported_extension_package(
         package,
         cleanup_requirements: Vec::new(),
         surface_kinds,
+        channel_directions,
         assets,
     })
 }
@@ -413,7 +415,7 @@ output_schema_ref = "schemas/search.output.json"
     #[tokio::test]
     async fn filesystem_catalog_skips_reserved_host_bundled_extension_ids() {
         let fs = InMemoryBackend::default();
-        for id in ["gmail", "slack_bot"] {
+        for id in ["gmail", "slack"] {
             fs.write_file(
                 &VirtualPath::new(format!("/system/extensions/{id}/manifest.toml")).unwrap(),
                 b"not parsed because the id is host-bundled",
@@ -428,7 +430,7 @@ output_schema_ref = "schemas/search.output.json"
         .await
         .unwrap();
         assert_eq!(catalog.search("").count(), 0);
-        assert_eq!(catalog.search("slack_bot").count(), 0);
+        assert_eq!(catalog.search("slack").count(), 0);
     }
 
     #[tokio::test]
@@ -605,7 +607,7 @@ prompt_doc_ref = "prompts/run.md"
                 ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog");
             let contracts = ironclaw_host_runtime::default_host_api_contract_registry()
                 .expect("host API contracts");
-            let record = ExtensionManifestRecord::from_toml_with_contracts(
+            let record = ExtensionManifestRecord::from_toml(
                 manifest,
                 ManifestSource::InstalledLocal,
                 &host_ports,

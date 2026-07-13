@@ -387,8 +387,9 @@ mod reborn_support_tests {
         AuthRequirement, DeliveryStatus, ExternalConversationRef, FakeProjectionStream,
         FakeProtocolHttpEgress, FinalReplyView, OutboundDeliverySink, ProductAdapter,
         ProductAdapterError, ProductInboundAck, ProductOutboundEnvelope, ProductOutboundPayload,
-        ProductOutboundTarget, ProductProjectionItem, ProductProjectionState, ProductRenderOutcome,
-        ProductWorkflow, ProjectionCursor, ProjectionStream, ProtocolAuthEvidence,
+        ProductOutboundTarget, ProductProjectionItem, ProductProjectionState,
+        ProductProjectionSubscribeInput, ProductRenderOutcome, ProductWorkflow, ProjectionCursor,
+        ProjectionStream, ProtocolAuthEvidence,
     };
     use ironclaw_product_workflow::{
         ActionDispatchKind, ActionFingerprintKey, ConversationBindingService,
@@ -1778,11 +1779,11 @@ mod reborn_support_tests {
         let envelope = test_envelope("event-workflow", "alice", "room-workflow", "hi");
 
         let first = workflow
-            .accept_inbound(envelope.clone())
+            .submit_inbound(envelope.clone())
             .await
             .expect("first accept");
         assert!(matches!(first, ProductInboundAck::Accepted { .. }));
-        let duplicate = workflow.accept_inbound(envelope).await.expect("duplicate");
+        let duplicate = workflow.submit_inbound(envelope).await.expect("duplicate");
         assert!(matches!(duplicate, ProductInboundAck::Duplicate { .. }));
         assert_eq!(
             coordinator.submission_count(),
@@ -1812,7 +1813,7 @@ mod reborn_support_tests {
         let envelope = test_envelope("event-workflow-busy", "alice", "room-workflow-busy", "hi");
 
         let first = workflow
-            .accept_inbound(envelope.clone())
+            .submit_inbound(envelope.clone())
             .await
             .expect("busy accept");
         assert!(
@@ -1826,7 +1827,7 @@ mod reborn_support_tests {
         // the replay path must return Duplicate — never resubmit.
         coordinator.set_accepting();
         let replayed = workflow
-            .accept_inbound(envelope)
+            .submit_inbound(envelope)
             .await
             .expect("replay of rejected-busy envelope");
         assert!(
@@ -1954,11 +1955,17 @@ mod reborn_support_tests {
             .expect("tenant B subscription envelope");
 
         let subscription_a = workflow_a
-            .resolve_projection_subscription(envelope_a)
+            .subscribe_projection(
+                ProductProjectionSubscribeInput::from_inbound_envelope(&envelope_a)
+                    .expect("projection input"),
+            )
             .await
             .expect("tenant A subscription");
         let subscription_b = workflow_b
-            .resolve_projection_subscription(envelope_b)
+            .subscribe_projection(
+                ProductProjectionSubscribeInput::from_inbound_envelope(&envelope_b)
+                    .expect("projection input"),
+            )
             .await
             .expect("tenant B subscription");
         assert_eq!(subscription_a.scope.tenant_id, binding_a.tenant_id);
@@ -2062,7 +2069,10 @@ mod reborn_support_tests {
             .expect("cross hint envelope");
 
         let error = workflow_a
-            .resolve_projection_subscription(cross_hint)
+            .subscribe_projection(
+                ProductProjectionSubscribeInput::from_inbound_envelope(&cross_hint)
+                    .expect("projection input"),
+            )
             .await
             .expect_err("tenant A subscription must reject tenant B thread hint");
         assert!(matches!(

@@ -4,16 +4,16 @@ use std::{
 };
 
 use futures::{StreamExt, TryStreamExt, stream};
-use ironclaw_host_api::ExtensionId;
+use ironclaw_host_api::{CapabilitySurfaceKind, ExtensionId};
 
 use crate::{
-    ChannelConnectionFacade, LifecycleExtensionSummary, LifecycleExtensionSurfaceKind,
-    LifecycleInstalledExtensionSummary, LifecyclePackageRef, LifecyclePhase,
-    LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-    LifecycleProductPayload, LifecycleProductResponse, LifecycleProductSurfaceContext,
-    RebornExtensionActionResponse, RebornExtensionInfo, RebornExtensionListResponse,
-    RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
-    RebornServicesError, WebUiAuthenticatedCaller,
+    ChannelConnectionFacade, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
+    LifecyclePackageRef, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
+    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleProductSurfaceContext, RebornExtensionActionResponse, RebornExtensionInfo,
+    RebornExtensionListResponse, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
+    RebornExtensionRegistryResponse, RebornExtensionSurface, RebornServicesError,
+    WebUiAuthenticatedCaller,
 };
 
 use super::{
@@ -250,16 +250,18 @@ fn registry_entry(
     summary: LifecycleExtensionSummary,
     installed_ids: &HashSet<String>,
 ) -> RebornExtensionRegistryEntry {
-    let kind = extension_kind(&summary).to_string();
+    let runtime = summary.runtime_kind.runtime_wire_name().to_string();
+    let surfaces = wire_surfaces(&summary, None);
     let installed = installed_ids.contains(summary.package_ref.id.as_str());
     RebornExtensionRegistryEntry {
         package_ref: summary.package_ref,
         display_name: summary.name,
-        kind,
+        runtime,
         description: summary.description,
         installed,
         keywords: Vec::new(),
         version: Some(summary.version),
+        surfaces,
     }
 }
 
@@ -302,7 +304,7 @@ fn extension_info(
     let install_scope = installed.install_scope;
     let summary = installed.summary;
     let has_external_channel_surface = has_external_channel_surface(&summary);
-    let kind = extension_kind(&summary).to_string();
+    let runtime = summary.runtime_kind.runtime_wire_name().to_string();
     let channel_unconnected = has_external_channel_surface
         && connections.get(summary.package_ref.id.as_str()) == Some(&false);
     // A channel extension the calling user has not personally connected (for
@@ -316,10 +318,16 @@ fn extension_info(
     } else {
         onboarding.state
     };
+    let connected = if has_external_channel_surface {
+        connections.get(summary.package_ref.id.as_str()).copied()
+    } else {
+        None
+    };
+    let surfaces = wire_surfaces(&summary, connected);
     RebornExtensionInfo {
         package_ref: summary.package_ref,
         display_name: summary.name,
-        kind,
+        runtime,
         description: summary.description,
         authenticated: authenticated && !channel_unconnected,
         active: phase == LifecyclePhase::Active,
@@ -337,21 +345,45 @@ fn extension_info(
         onboarding_state,
         onboarding: onboarding.onboarding,
         install_scope,
+        surfaces,
     }
 }
 
-fn extension_kind(summary: &LifecycleExtensionSummary) -> &'static str {
-    if has_external_channel_surface(summary) {
-        "channel"
-    } else {
-        summary.runtime_kind.wire_kind()
-    }
+/// Wire surfaces for a lifecycle summary: tool/auth pass through; the
+/// channel surface carries typed direction, the caller's connection state
+/// (when a connections map applies), and the connect affordance.
+fn wire_surfaces(
+    summary: &LifecycleExtensionSummary,
+    connected: Option<bool>,
+) -> Vec<RebornExtensionSurface> {
+    summary
+        .surface_kinds
+        .iter()
+        .filter_map(|kind| match kind {
+            CapabilitySurfaceKind::Tool => Some(RebornExtensionSurface::Tool),
+            CapabilitySurfaceKind::Auth => Some(RebornExtensionSurface::Auth),
+            CapabilitySurfaceKind::Channel => Some(RebornExtensionSurface::Channel {
+                inbound: summary
+                    .channel_directions
+                    .map(|directions| directions.inbound)
+                    .unwrap_or(false),
+                outbound: summary
+                    .channel_directions
+                    .map(|directions| directions.outbound)
+                    .unwrap_or(false),
+                connected,
+                connection: summary.channel_connection.clone(),
+            }),
+            // Reserved kinds have no manifest section yet, so no wire form.
+            CapabilitySurfaceKind::Trigger | CapabilitySurfaceKind::File => None,
+        })
+        .collect()
 }
 
 fn has_external_channel_surface(summary: &LifecycleExtensionSummary) -> bool {
     summary
         .surface_kinds
-        .contains(&LifecycleExtensionSurfaceKind::ExternalChannel)
+        .contains(&CapabilitySurfaceKind::Channel)
 }
 
 fn phase_status(phase: LifecyclePhase) -> &'static str {
@@ -360,7 +392,7 @@ fn phase_status(phase: LifecyclePhase) -> &'static str {
         LifecyclePhase::Disabled => "disabled",
         LifecyclePhase::Removed => "removed",
         LifecyclePhase::Failed => "failed",
-        LifecyclePhase::UnsupportedOrLegacy => "unsupported",
+        LifecyclePhase::Unsupported => "unsupported",
         LifecyclePhase::Discovered => "available",
         LifecyclePhase::Installing => "installing",
         LifecyclePhase::Installed => "installed",
@@ -378,7 +410,7 @@ fn action_response(
 ) -> RebornExtensionActionResponse {
     let success = !matches!(
         lifecycle.phase,
-        LifecyclePhase::Failed | LifecyclePhase::UnsupportedOrLegacy
+        LifecyclePhase::Failed | LifecyclePhase::Unsupported
     );
     let onboarding = projection
         .map(extension_onboarding::from_lifecycle)
@@ -411,7 +443,7 @@ mod tests {
 
     use async_trait::async_trait;
     use ironclaw_auth::{CredentialAccountId, CredentialAccountProjection};
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+    use ironclaw_host_api::{AgentId, CapabilitySurfaceKind, ProjectId, TenantId, UserId};
 
     use super::*;
     use crate::reborn_services::StaticChannelConnectionFacade;
@@ -419,7 +451,7 @@ mod tests {
         ChannelConnectionFacade, ExtensionCredentialStatusRequest,
         ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialRequirement,
         LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding,
-        LifecycleExtensionRuntimeKind, LifecycleExtensionSource, LifecycleExtensionSurfaceKind,
+        LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
         LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecycleSearchExtensionSummary,
         ProductWorkflowError, RebornExtensionOnboardingState, RebornServicesError,
         RebornServicesErrorCode, RebornServicesErrorKind, WebUiAuthenticatedCaller,
@@ -724,43 +756,52 @@ mod tests {
     fn product_adapter_surface_projects_channel_kind() {
         let mut summary = summary_with_onboarding();
         summary.runtime_kind = LifecycleExtensionRuntimeKind::FirstParty;
-        summary.surface_kinds = vec![LifecycleExtensionSurfaceKind::ExternalChannel];
+        summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
 
         let entry = registry_entry(summary, &HashSet::new());
 
-        assert_eq!(entry.kind, "channel");
+        assert!(
+            entry
+                .surfaces
+                .iter()
+                .any(|surface| matches!(surface, RebornExtensionSurface::Channel { .. })),
+            "{:?}",
+            entry.surfaces
+        );
     }
 
     #[test]
-    fn non_channel_extension_keeps_runtime_wire_kind() {
-        // wasm_tool runtime with no channel surface → "wasm_tool"
-        let mut wasm_summary = summary_with_onboarding();
-        wasm_summary.runtime_kind = LifecycleExtensionRuntimeKind::WasmTool;
-        wasm_summary.surface_kinds = Vec::new();
+    fn runtime_wire_names_are_implementation_labels_not_taxonomy() {
+        // The wire carries the honest runtime name; product taxonomy travels
+        // in `surfaces`, so runtime never masquerades as a product kind.
         assert_eq!(
-            extension_kind(&wasm_summary),
-            "wasm_tool",
-            "WasmTool with empty surface_kinds must wire as wasm_tool"
+            LifecycleExtensionRuntimeKind::WasmTool.runtime_wire_name(),
+            "wasm"
+        );
+        assert_eq!(
+            LifecycleExtensionRuntimeKind::McpServer.runtime_wire_name(),
+            "mcp"
+        );
+        assert_eq!(
+            LifecycleExtensionRuntimeKind::Script.runtime_wire_name(),
+            "script"
         );
 
-        // mcp_server runtime with no channel surface → "mcp_server"
-        let mut mcp_summary = summary_with_onboarding();
-        mcp_summary.runtime_kind = LifecycleExtensionRuntimeKind::McpServer;
-        mcp_summary.surface_kinds = Vec::new();
-        assert_eq!(
-            extension_kind(&mcp_summary),
-            "mcp_server",
-            "McpServer with empty surface_kinds must wire as mcp_server"
-        );
-
-        // channel surface overrides runtime kind → "channel"
+        // A channel-surface extension keeps its runtime label AND projects
+        // the channel surface — two separate axes.
         let mut channel_summary = summary_with_onboarding();
         channel_summary.runtime_kind = LifecycleExtensionRuntimeKind::WasmTool;
-        channel_summary.surface_kinds = vec![LifecycleExtensionSurfaceKind::ExternalChannel];
+        channel_summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
         assert_eq!(
-            extension_kind(&channel_summary),
-            "channel",
-            "ExternalChannel surface must override runtime kind to channel"
+            channel_summary.runtime_kind.runtime_wire_name(),
+            "wasm",
+            "runtime label is unchanged by the channel surface"
+        );
+        assert!(
+            wire_surfaces(&channel_summary, None)
+                .iter()
+                .any(|surface| matches!(surface, RebornExtensionSurface::Channel { .. })),
+            "the channel surface projects alongside the runtime label"
         );
     }
 
@@ -768,7 +809,7 @@ mod tests {
     async fn list_projects_external_channel_surface_kind_through_extension_info() {
         let mut summary = summary_with_onboarding();
         summary.runtime_kind = LifecycleExtensionRuntimeKind::FirstParty;
-        summary.surface_kinds = vec![LifecycleExtensionSurfaceKind::ExternalChannel];
+        summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
         summary.credential_requirements = Vec::new();
         let facade = ListingFacade {
             extension: LifecycleInstalledExtensionSummary {
@@ -783,11 +824,18 @@ mod tests {
             .expect("list extensions");
         let extension = response.extensions.first().expect("one extension");
 
-        assert_eq!(extension.kind, "channel");
+        assert!(
+            extension
+                .surfaces
+                .iter()
+                .any(|surface| matches!(surface, RebornExtensionSurface::Channel { .. })),
+            "{:?}",
+            extension.surfaces
+        );
 
         let mut unconnected_summary = summary_with_onboarding();
         unconnected_summary.runtime_kind = LifecycleExtensionRuntimeKind::FirstParty;
-        unconnected_summary.surface_kinds = vec![LifecycleExtensionSurfaceKind::ExternalChannel];
+        unconnected_summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
         unconnected_summary.credential_requirements = Vec::new();
         let unconnected = list_extensions(
             Arc::new(ListingFacade {
@@ -830,14 +878,14 @@ mod tests {
         let installed_summary = {
             let mut summary = summary_with_onboarding_for("installed-fixture");
             summary.runtime_kind = LifecycleExtensionRuntimeKind::FirstParty;
-            summary.surface_kinds = vec![LifecycleExtensionSurfaceKind::ExternalChannel];
+            summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
             summary
         };
         let registry_installed_summary = installed_summary.clone();
         let registry_uninstalled_summary = {
             let mut summary = summary_with_onboarding_for("uninstalled-fixture");
             summary.runtime_kind = LifecycleExtensionRuntimeKind::FirstParty;
-            summary.surface_kinds = vec![LifecycleExtensionSurfaceKind::ExternalChannel];
+            summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
             summary
         };
         let facade = RegistryListingFacade {
@@ -864,7 +912,12 @@ mod tests {
             .iter()
             .find(|entry| entry.package_ref.id.as_str() == "installed-fixture")
             .expect("installed entry");
-        assert_eq!(installed_entry.kind, "channel");
+        assert!(
+            installed_entry
+                .surfaces
+                .iter()
+                .any(|surface| matches!(surface, RebornExtensionSurface::Channel { .. }))
+        );
         assert!(installed_entry.installed);
 
         let uninstalled_entry = response
@@ -872,7 +925,12 @@ mod tests {
             .iter()
             .find(|entry| entry.package_ref.id.as_str() == "uninstalled-fixture")
             .expect("uninstalled entry");
-        assert_eq!(uninstalled_entry.kind, "channel");
+        assert!(
+            uninstalled_entry
+                .surfaces
+                .iter()
+                .any(|surface| matches!(surface, RebornExtensionSurface::Channel { .. }))
+        );
         assert!(!uninstalled_entry.installed);
 
         let calls = facade.calls.lock().expect("lock");
@@ -1187,8 +1245,7 @@ mod tests {
                 LifecycleProductAction::ExtensionList => {
                     let mut summary = self.summary.clone();
                     if self.channel {
-                        summary.surface_kinds =
-                            vec![LifecycleExtensionSurfaceKind::ExternalChannel];
+                        summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
                     }
                     Ok(LifecycleProductResponse {
                         package_ref: None,
@@ -1263,6 +1320,8 @@ mod tests {
             source: LifecycleExtensionSource::HostBundled,
             runtime_kind: LifecycleExtensionRuntimeKind::WasmTool,
             surface_kinds: Vec::new(),
+            channel_directions: None,
+            channel_connection: None,
             visible_capability_ids: Vec::new(),
             visible_read_only_capability_ids: Vec::new(),
             credential_requirements: vec![LifecycleExtensionCredentialRequirement {
@@ -1292,6 +1351,8 @@ mod tests {
             source: LifecycleExtensionSource::HostBundled,
             runtime_kind: LifecycleExtensionRuntimeKind::McpServer,
             surface_kinds: Vec::new(),
+            channel_directions: None,
+            channel_connection: None,
             visible_capability_ids: vec!["nearai.web_search".to_string()],
             visible_read_only_capability_ids: vec!["nearai.web_search".to_string()],
             credential_requirements: Vec::new(),

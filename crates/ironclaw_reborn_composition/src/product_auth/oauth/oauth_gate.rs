@@ -34,7 +34,7 @@ const GATE_FLOW_TTL_SECONDS: i64 = 600;
 /// implementors (Google, Slack personal) share that driver through this trait.
 #[async_trait]
 pub(crate) trait OAuthGateProvider: Send + Sync + fmt::Debug {
-    /// Stable Reborn provider id (`google`, `slack_personal`, ...).
+    /// Stable Reborn provider id (`google`, `slack`, ...).
     fn provider_id(&self) -> &'static str;
 
     /// Prefix for the per-flow PKCE verifier secret handle. The driver appends
@@ -884,7 +884,7 @@ mod tests {
 
     /// A registered-but-unconfigured provider (Slack before the operator saves
     /// OAuth client credentials) must not swallow the whole gate: pre-fix, a
-    /// requirements list with `slack_personal` first errored `challenge_for_gate`
+    /// requirements list with the Slack provider first errored `challenge_for_gate`
     /// entirely and the user got no auth prompt at all.
     #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
@@ -897,7 +897,7 @@ mod tests {
             Arc::new(SlackPersonalOAuthGateProvider::new(
                 SlackPersonalSetupServiceSlot::new(
                     ironclaw_auth::OAuthRedirectUri::new(
-                        "https://host.example/api/reborn/product-auth/oauth/slack_personal/callback",
+                        "https://host.example/api/reborn/product-auth/oauth/slack/callback",
                     )
                     .unwrap(),
                 ),
@@ -907,7 +907,7 @@ mod tests {
         let registry =
             OAuthGateProviderRegistry::new(vec![slack_driver, Arc::new(fixture.driver.clone())]);
         let slack_requirement = RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new("slack_personal").unwrap(),
+            provider: RuntimeCredentialAccountProviderId::new("slack").unwrap(),
             setup: Default::default(),
             requester_extension: ExtensionId::new("slack").unwrap(),
             provider_scopes: Vec::new(),

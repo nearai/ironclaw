@@ -14,7 +14,7 @@ import {
   extensionLifecycleState,
   setupReadyForActivation,
 } from "../lib/extension-actions";
-import { isChannelExtensionKind } from "../lib/extensions-schema";
+import { hasChannelSurface } from "../lib/extensions-schema";
 import { redeemPairingCode } from "../lib/pairing-api";
 import { activateExtension } from "../lib/extensions-api";
 import { notifyChannelConnected } from "../../../lib/channel-connection-events";
@@ -37,14 +37,18 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
       : extension?.packageRef?.id || "";
   const channelId = extension?.channel || packageId;
   const lifecycleState = extensionLifecycleState(extension);
-  // Slack tools use OAuth rather than the proof-code pairing flow below.
+  // This flag gates the tools extension's post-OAuth auto-activate.
   const isSlackToolsExtension =
     channelId.toLowerCase() === SLACK_TOOLS_EXTENSION_ID;
   const handleOauthConfigured = React.useCallback(async () => {
-    // Extension-scoped OAuth completion is atomic on the backend: the callback
-    // is not marked complete until lifecycle activation has published tools.
-    // A second client-side activation races that committed state and used to
-    // surface a misleading Conflict after an otherwise successful popup.
+    onClose();
+    if (isSlackToolsExtension && packageId) {
+      try {
+        await activateExtension({ id: packageId });
+      } catch {
+        console.error("Slack activation after OAuth failed.");
+      }
+    }
     // invalidateQueries refetches active queries and resolves when they
     // settle (TanStack v5), so no follow-up refetchQueries pass is needed.
     await Promise.all(
@@ -55,7 +59,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     // Broadcast channel-connected (same event pairing redemption sends) so an
     // open chat card for this channel clears and its parked request resumes —
     // connecting from the Extensions page must not strand the chat surface.
-    if ((isChannelExtensionKind(extension?.kind) || isSlackToolsExtension) && channelId) {
+    if (hasChannelSurface(extension) && channelId) {
       try {
         await notifyChannelConnected({ channel: channelId, source: "extensions-oauth" });
       } catch {
@@ -63,8 +67,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
       }
     }
     if (onSaved) onSaved();
-    onClose();
-  }, [channelId, extension?.kind, isSlackToolsExtension, onClose, onSaved, packageId, queryClient]);
+  }, [channelId, extension?.surfaces, isSlackToolsExtension, onClose, onSaved, packageId, queryClient]);
   const oauthMutation = useOauthSetup(extension?.packageRef, {
     onConfigured: handleOauthConfigured,
   });
@@ -113,7 +116,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
   );
   const isPairingChannel =
     !isSlackToolsExtension &&
-    isChannelExtensionKind(extension?.kind) &&
+    hasChannelSurface(extension) &&
     (lifecycleState === "pairing" || lifecycleState === "pairing_required");
   const channelPairingInstructions = t("pairing.instructions");
   const channelPairingPlaceholder = t("pairing.placeholder");
@@ -132,7 +135,6 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     onSuccess: () => {
       for (const queryKey of [
         ["extensions"],
-        ["connectable-channels"],
         ["pairing", channelId],
       ]) {
         queryClient.invalidateQueries({ queryKey });
@@ -150,7 +152,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
   const canSave = manualSecrets.length > 0 || fields.length > 0;
   const isActive = extensionIsActive(extension);
   const canActivate =
-    !isChannelExtensionKind(extension?.kind) &&
+    !hasChannelSurface(extension) &&
     setupReadyForActivation({ extension, secrets, fields });
   const oauthBusy = oauthMutation.isPending || oauthMutation.isAuthorizing;
   const setupUrl = httpsUrl(onboarding?.setup_url);

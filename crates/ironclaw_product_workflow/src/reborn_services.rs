@@ -130,17 +130,16 @@ pub use types::{
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
-    RebornChannelConnectStrategy, RebornConnectableChannelInfo,
-    RebornConnectableChannelListResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
+    RebornChannelConnectStrategy, RebornCreateThreadResponse, RebornDeleteThreadRequest,
     RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionCredentialSetup,
     RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionOnboardingPayload,
     RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
-    RebornExtensionSetupField, RebornExtensionSetupSecret, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
-    RebornLogEntry, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorArea, RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornExtensionSetupField, RebornExtensionSetupSecret, RebornExtensionSurface,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
+    RebornListThreadsResponse, RebornLogEntry, RebornLogLevel, RebornLogQueryRequest,
+    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
     RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
     RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
@@ -219,39 +218,6 @@ fn rejected_busy_notice(status: TurnStatus) -> String {
         TurnStatus::BlockedApproval => NOTICE_BLOCKED_APPROVAL.to_string(),
         TurnStatus::BlockedAuth => NOTICE_BLOCKED_AUTH.to_string(),
         _ => NOTICE_BUSY_GENERIC.to_string(),
-    }
-}
-
-#[async_trait]
-pub trait ConnectableChannelsProductFacade: Send + Sync {
-    async fn list_connectable_channels(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornConnectableChannelListResponse, RebornServicesError>;
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct StaticConnectableChannelsProductFacade {
-    channels: Arc<[RebornConnectableChannelInfo]>,
-}
-
-impl StaticConnectableChannelsProductFacade {
-    pub fn new(channels: impl Into<Vec<RebornConnectableChannelInfo>>) -> Self {
-        Self {
-            channels: Arc::from(channels.into()),
-        }
-    }
-}
-
-#[async_trait]
-impl ConnectableChannelsProductFacade for StaticConnectableChannelsProductFacade {
-    async fn list_connectable_channels(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornConnectableChannelListResponse, RebornServicesError> {
-        Ok(RebornConnectableChannelListResponse {
-            channels: self.channels.iter().cloned().collect(),
-        })
     }
 }
 
@@ -2182,15 +2148,6 @@ pub trait RebornServicesApi: Send + Sync {
         Ok(RebornTraceHoldAuthorizeResponse { authorized })
     }
 
-    async fn list_connectable_channels(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornConnectableChannelListResponse, RebornServicesError> {
-        Ok(RebornConnectableChannelListResponse {
-            channels: Vec::new(),
-        })
-    }
-
     /// Return the authenticated caller's scoped outbound preferences.
     ///
     /// Implementations must scope stored preferences by the caller's
@@ -2700,7 +2657,6 @@ pub struct RebornServices {
     lifecycle_facade: Arc<dyn LifecycleProductFacade>,
     automation_facade: Arc<dyn AutomationProductFacade>,
     skills_facade: Arc<dyn SkillsProductFacade>,
-    connectable_channels_facade: Arc<dyn ConnectableChannelsProductFacade>,
     channel_connection_facade: Arc<dyn ChannelConnectionFacade>,
     outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade>,
     operator_status: Arc<dyn OperatorStatusService>,
@@ -2736,7 +2692,6 @@ impl RebornServices {
             )),
             automation_facade: Arc::new(UnsupportedAutomationProductFacade::new_static()),
             skills_facade: Arc::new(UnsupportedSkillsProductFacade::new_static()),
-            connectable_channels_facade: Arc::new(StaticConnectableChannelsProductFacade::default()),
             channel_connection_facade: Arc::new(StaticChannelConnectionFacade),
             outbound_preferences_facade: Arc::new(
                 UnsupportedOutboundPreferencesProductFacade::new_static(),
@@ -2856,14 +2811,6 @@ impl RebornServices {
         skills_facade: Arc<dyn SkillsProductFacade>,
     ) -> Self {
         self.skills_facade = skills_facade;
-        self
-    }
-
-    pub fn with_connectable_channels_facade(
-        mut self,
-        connectable_channels_facade: Arc<dyn ConnectableChannelsProductFacade>,
-    ) -> Self {
-        self.connectable_channels_facade = connectable_channels_facade;
         self
     }
 
@@ -4633,15 +4580,6 @@ impl RebornServicesApi for RebornServices {
         };
         self.automation_facade
             .delete_automation(caller, automation_id)
-            .await
-    }
-
-    async fn list_connectable_channels(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornConnectableChannelListResponse, RebornServicesError> {
-        self.connectable_channels_facade
-            .list_connectable_channels(caller)
             .await
     }
 

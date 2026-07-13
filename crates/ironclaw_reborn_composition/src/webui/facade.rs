@@ -10,14 +10,13 @@ use ironclaw_host_api::{
 };
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
-    ChannelConnectionFacade, ConnectableChannelsProductFacade, OperatorStatusService,
-    RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
-    RebornOperatorStatusState, RebornOperatorToolCatalog, RebornOperatorToolInfo,
-    RebornServices as ProductRebornServices, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel, SkillsProductFacade,
-    WebUiAuthenticatedCaller,
+    ChannelConnectionFacade, OperatorStatusService, RebornOperatorStatusCheck,
+    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
+    RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornServices as ProductRebornServices,
+    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornSkillTrustLevel, SkillsProductFacade, WebUiAuthenticatedCaller,
 };
 
 use ironclaw_triggers::TriggerRepository;
@@ -176,13 +175,12 @@ pub fn build_webui_services(
     runtime: &RebornRuntime,
     event_stream: Option<Arc<dyn ProjectionStream>>,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
-    build_webui_services_with_connectable_channels(runtime, event_stream, None, None, Vec::new())
+    build_webui_services_with_channel_connection(runtime, event_stream, None, Vec::new())
 }
 
-pub(crate) fn build_webui_services_with_connectable_channels(
+pub(crate) fn build_webui_services_with_channel_connection(
     runtime: &RebornRuntime,
     event_stream: Option<Arc<dyn ProjectionStream>>,
-    connectable_channels: Option<Arc<dyn ConnectableChannelsProductFacade>>,
     channel_connection: Option<Arc<dyn ChannelConnectionFacade>>,
     mut outbound_delivery_target_providers: Vec<Arc<dyn OutboundDeliveryTargetProvider>>,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
@@ -390,9 +388,6 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         return Err(RebornBuildError::InvalidConfig {
             reason: "outbound delivery target providers require local runtime services".to_string(),
         });
-    }
-    if let Some(connectable_channels) = connectable_channels {
-        api = api.with_connectable_channels_facade(connectable_channels);
     }
     if let Some(channel_connection) = channel_connection {
         api = api.with_channel_connection_facade(channel_connection);
@@ -1032,6 +1027,17 @@ fn status_check(
 
 #[cfg(test)]
 mod tests {
+
+    fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+        let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+        contracts
+            .register(std::sync::Arc::new(
+                ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                    .expect("capability provider contract"),
+            ))
+            .expect("register capability provider contract");
+        contracts
+    }
     use super::*;
     use async_trait::async_trait;
     use ironclaw_extensions::{
@@ -1109,7 +1115,9 @@ mod tests {
                  id = \"{ext}\"\nname = \"{ext}\"\nversion = \"0.1.0\"\n\
                  description = \"test\"\ntrust = \"third_party\"\n\n\
                  [runtime]\nkind = \"wasm\"\nmodule = \"wasm/{ext}.wasm\"\n\n\
-                 [[capabilities]]\nid = \"{ext}.{capability}\"\ndescription = \"{capability}\"\n\
+                 [[host_api]]\nid = \"ironclaw.capability_provider/v1\"\nsection = \"capability_provider.tools\"\n\n\
+                 [capability_provider.tools]\n\n\
+                 [[capability_provider.tools.capabilities]]\nid = \"{ext}.{capability}\"\ndescription = \"{capability}\"\n\
                  effects = [\"network\"]\ndefault_permission = \"ask\"\nvisibility = \"model\"\n\
                  input_schema_ref = \"schemas/{capability}.input.json\"\n\
                  output_schema_ref = \"schemas/{capability}.output.json\"\n"
@@ -1119,6 +1127,7 @@ mod tests {
                 ManifestSource::HostBundled,
                 &HostPortCatalog::empty(),
                 None,
+                &capability_provider_contracts(),
             )
             .expect("manifest record")
         }
@@ -1810,7 +1819,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/{extension_id}.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "{extension_id}.{capability_name}"
 description = "{capability_name}"
 effects = ["network"]
@@ -1824,6 +1839,7 @@ output_schema_ref = "schemas/{capability_name}.output.json"
             &manifest_toml,
             ManifestSource::HostBundled,
             &HostPortCatalog::empty(),
+            &capability_provider_contracts(),
         )
         .expect("manifest parses");
         ExtensionPackage::from_manifest(

@@ -156,31 +156,10 @@ impl ExtensionManifestRecord {
         source: ManifestSource,
         host_port_catalog: &HostPortCatalog,
         manifest_hash: Option<ManifestHash>,
-    ) -> Result<Self, ExtensionInstallationError> {
-        let contracts = HostApiContractRegistry::new();
-        Self::from_toml_with_contracts(
-            raw_toml,
-            source,
-            host_port_catalog,
-            manifest_hash,
-            &contracts,
-        )
-    }
-
-    pub fn from_toml_with_contracts(
-        raw_toml: impl Into<String>,
-        source: ManifestSource,
-        host_port_catalog: &HostPortCatalog,
-        manifest_hash: Option<ManifestHash>,
         contracts: &HostApiContractRegistry,
     ) -> Result<Self, ExtensionInstallationError> {
         let raw_toml = raw_toml.into();
-        let manifest = ExtensionManifestV2::parse_with_optional_host_api_contracts(
-            &raw_toml,
-            source,
-            host_port_catalog,
-            contracts,
-        )?;
+        let manifest = ExtensionManifestV2::parse(&raw_toml, source, host_port_catalog, contracts)?;
         Ok(Self {
             raw_toml,
             manifest,
@@ -1160,12 +1139,23 @@ mod tests {
         assert!(store.get_manifest(&extension_id).await.unwrap().is_some());
     }
 
+    fn capability_provider_contracts() -> crate::HostApiContractRegistry {
+        let mut contracts = crate::HostApiContractRegistry::new();
+        contracts
+            .register(std::sync::Arc::new(
+                crate::CapabilityProviderHostApiContract::new().expect("contract"),
+            ))
+            .expect("register capability provider contract");
+        contracts
+    }
+
     fn manifest_record(extension_id: &str, hash: Option<&str>) -> ExtensionManifestRecord {
         ExtensionManifestRecord::from_toml(
             manifest_toml(extension_id),
             ManifestSource::HostBundled,
             &HostPortCatalog::empty(),
             hash.map(|value| ManifestHash::new(value).expect("hash")),
+            &capability_provider_contracts(),
         )
         .expect("manifest record")
     }
@@ -1271,7 +1261,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/{extension_id}.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "{extension_id}.read"
 description = "read"
 effects = ["network"]

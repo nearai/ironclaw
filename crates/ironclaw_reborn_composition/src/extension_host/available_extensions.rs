@@ -1,6 +1,8 @@
-// arch-exempt: large_file, bundled extension catalog and manifest projection, plan #5905
+// arch-exempt: large_file, first-party asset catalog remains 2.9k lines after import/materialization extraction; future asset-registry split, plan #5499
+use std::sync::Arc;
+
 #[cfg(feature = "slack-v2-host-beta")]
-use ironclaw_auth::SLACK_PERSONAL_PROVIDER_ID;
+use ironclaw_auth::SLACK_PROVIDER_ID;
 use ironclaw_extensions::{
     CapabilityDeclV2, CapabilityVisibility, ExtensionManifestRecord, ExtensionPackage,
     ExtensionRuntime, HostApiContractRegistry, ManifestSource,
@@ -8,29 +10,21 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::{DirEntry, FileType, FilesystemError, RootFilesystem};
 use ironclaw_first_party_extensions::is_gsuite_extension_id;
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, HostPortCatalog, RuntimeCredentialAccountProviderId, VirtualPath,
-    sha256_digest_token,
+    CapabilityId, CapabilitySurfaceKind, ExtensionId, HostPortCatalog,
+    RuntimeCredentialAccountProviderId, VirtualPath, sha256_digest_token,
 };
-use ironclaw_product_adapter_registry::product_adapter_sections;
-use ironclaw_product_adapters::ProductSurfaceKind;
+use ironclaw_product_adapters::{ProductCapabilityFlag, ProductSurfaceKind};
 use ironclaw_product_workflow::{
+    ChannelConnectionRequirement, LifecycleChannelDirections,
     LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
     LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
-    LifecycleExtensionSummary, LifecycleExtensionSurfaceKind, LifecyclePackageKind,
-    LifecyclePackageRef, ProductWorkflowError,
+    LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError,
 };
-use std::sync::Arc;
 use toml::Value;
 
 use crate::extension_host::extension_credential_requirements::{
     can_merge_lifecycle_credential_setup, merge_lifecycle_credential_setup,
     product_auth_credential_source,
-};
-use crate::extension_host::extension_removal_cleanup::ExtensionRemovalCleanupRequirement;
-#[cfg(feature = "slack-v2-host-beta")]
-use crate::extension_host::extension_removal_cleanup::{
-    ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapterId,
-    SLACK_EXTENSION_REMOVAL_CHANNEL_ID, SLACK_PERSONAL_CONNECTION_CLEANUP_ADAPTER_ID,
 };
 use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 use crate::llm_admin::nearai_mcp::{
@@ -83,13 +77,7 @@ const WEB_ACCESS_MANIFEST: &str =
     include_str!("../../../ironclaw_first_party_extensions/assets/web-access/manifest.toml");
 const NEARAI_MCP_MANIFEST: &str =
     include_str!("../../../ironclaw_first_party_extensions/assets/nearai-mcp/manifest.toml");
-#[cfg(feature = "slack-v2-host-beta")]
-const SLACK_BOT_MANIFEST: &str =
-    include_str!("../../../ironclaw_first_party_extensions/assets/slack_bot/manifest.toml");
 const NEARAI_EXTENSION_ID: &str = HostManagedCredentialExtension::NearAi.id();
-#[cfg(feature = "slack-v2-host-beta")]
-pub(crate) const SLACK_BOT_EXTENSION_ID: &str = "slack_bot";
-#[cfg(feature = "slack-v2-host-beta")]
 pub(crate) const SLACK_EXTENSION_ID: &str = "slack";
 #[cfg(feature = "slack-v2-host-beta")]
 const SLACK_PERSONAL_OAUTH_REQUIREMENT_NAME: &str = "slack_personal_oauth";
@@ -102,7 +90,7 @@ const SLACK_PERSONAL_OAUTH_REQUIREMENT_NAME: &str = "slack_personal_oauth";
 // enforces that this list equals the union of the manifest capabilities' scopes
 // and that only write-effect capabilities declare chat:write.
 #[cfg(feature = "slack-v2-host-beta")]
-const SLACK_PERSONAL_OAUTH_SETUP_SCOPES: &[&str] = &[
+const SLACK_OAUTH_SETUP_SCOPES: &[&str] = &[
     "search:read",
     "channels:history",
     "groups:history",
@@ -118,7 +106,7 @@ const SLACK_PERSONAL_OAUTH_SETUP_SCOPES: &[&str] = &[
 
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) fn slack_personal_oauth_setup_scopes() -> &'static [&'static str] {
-    SLACK_PERSONAL_OAUTH_SETUP_SCOPES
+    SLACK_OAUTH_SETUP_SCOPES
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,15 +168,17 @@ pub(crate) struct AvailableExtensionPackage {
     /// first-party/system trust and runtime claims.
     pub(crate) source: ManifestSource,
     pub(crate) package: ExtensionPackage,
-    /// Trusted host-catalog declarations for mandatory external cleanup before
-    /// local removal. Never inferred from manifest presentation metadata.
-    pub(crate) cleanup_requirements: Vec<ExtensionRemovalCleanupRequirement>,
     /// Surface kinds projected once from the manifest record at construction and
     /// cached here. Deliberately not re-derived in `summary()`: the projection
     /// (`product_adapter_sections`) needs the full `ExtensionManifestRecord`, and
     /// each loader parses the manifest exactly once (see
     /// `surface_kinds_from_manifest_record`). Keep in sync at construction.
-    pub(crate) surface_kinds: Vec<LifecycleExtensionSurfaceKind>,
+    pub(crate) surface_kinds: Vec<CapabilitySurfaceKind>,
+    /// Directional shape of the channel surface (from the product-adapter
+    /// section's capability flags), present iff `surface_kinds` contains
+    /// [`CapabilitySurfaceKind::Channel`]. Cached at construction like
+    /// `surface_kinds`.
+    pub(crate) channel_directions: Option<LifecycleChannelDirections>,
     pub(crate) assets: Vec<AvailableExtensionAsset>,
 }
 
@@ -208,12 +198,32 @@ impl AvailableExtensionPackage {
             source: LifecycleExtensionSource::HostBundled,
             runtime_kind: runtime_kind(&self.package.manifest.runtime),
             surface_kinds: self.surface_kinds.clone(),
+            channel_directions: self.channel_directions,
+            channel_connection: channel_connection_for_package(&self.package_ref, self),
             visible_capability_ids,
             visible_read_only_capability_ids,
             credential_requirements: credential_requirements(self),
             onboarding: onboarding(&self.package_ref),
         }
     }
+}
+
+/// Connect affordance for the package's channel surface: inbound channel
+/// surfaces require a caller-scoped account binding before messages map to a
+/// user, so their summaries carry the connect strategy + copy. Outbound-only
+/// and non-channel packages have nothing to connect.
+fn channel_connection_for_package(
+    package_ref: &LifecyclePackageRef,
+    package: &AvailableExtensionPackage,
+) -> Option<ChannelConnectionRequirement> {
+    let directions = package.channel_directions?;
+    if !directions.inbound {
+        return None;
+    }
+    Some(super::extension_lifecycle::channel_connection_requirement(
+        package_ref.id.as_str(),
+        &package.package.manifest.name,
+    ))
 }
 
 fn onboarding(package_ref: &LifecyclePackageRef) -> Option<LifecycleExtensionOnboarding> {
@@ -244,11 +254,11 @@ fn onboarding(package_ref: &LifecyclePackageRef) -> Option<LifecycleExtensionOnb
             "After authorization completes, activate Gmail to publish its tools.",
         )),
         #[cfg(feature = "slack-v2-host-beta")]
-        "slack_bot" => Some(onboarding_message(
-            "Slack needs OAuth authorization before the Slack bot can recognize your DMs.",
+        "slack" => Some(onboarding_message(
+            "Slack needs OAuth authorization before the Slack channel can recognize your DMs and before the user-scoped Slack tools can run.",
             Some("Authorize the Slack account you will use to DM IronClaw."),
             None,
-            "After authorization completes, DM the Slack bot directly.",
+            "After authorization completes, DM the Slack bot directly or use the Slack tools from any chat.",
         )),
         "google-calendar" => Some(onboarding_message(
             "Google Calendar needs Google OAuth authorization before calendar tools can run.",
@@ -365,10 +375,10 @@ fn credential_requirements(
 fn slack_personal_oauth_credential_requirements() -> Vec<LifecycleExtensionCredentialRequirement> {
     vec![LifecycleExtensionCredentialRequirement {
         name: SLACK_PERSONAL_OAUTH_REQUIREMENT_NAME.to_string(),
-        provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+        provider: SLACK_PROVIDER_ID.to_string(),
         required: true,
         setup: LifecycleExtensionCredentialSetup::OAuth {
-            scopes: SLACK_PERSONAL_OAUTH_SETUP_SCOPES
+            scopes: SLACK_OAUTH_SETUP_SCOPES
                 .iter()
                 .map(|scope| (*scope).to_string())
                 .collect(),
@@ -428,8 +438,6 @@ impl AvailableExtensionCatalog {
             gmail_package()?,
         ];
         #[cfg(feature = "slack-v2-host-beta")]
-        packages.push(slack_bot_package()?);
-        #[cfg(feature = "slack-v2-host-beta")]
         packages.push(slack_package()?);
         Ok(Self::from_packages(packages))
     }
@@ -467,7 +475,6 @@ impl AvailableExtensionCatalog {
         let normalized_query = query.trim().to_ascii_lowercase();
         self.packages
             .iter()
-            .filter(|package| !is_internal_extension_package_ref(&package.package_ref))
             .filter(move |package| package_matches_search(package, &normalized_query))
             .cloned()
     }
@@ -615,27 +622,14 @@ fn gmail_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
 
 #[cfg(feature = "slack-v2-host-beta")]
 fn slack_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    let mut package =
-        bundled_extension_package(SLACK_EXTENSION_ID, "Slack", SLACK_MANIFEST, slack_assets())?;
-    package
-        .cleanup_requirements
-        .push(ExtensionRemovalCleanupRequirement::channel_connection(
-            ExtensionRemovalCleanupAdapterId::new(SLACK_PERSONAL_CONNECTION_CLEANUP_ADAPTER_ID)
-                .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
-                    reason: error.to_string(),
-                })?,
-            ExtensionRemovalChannelId::new(SLACK_EXTENSION_REMOVAL_CHANNEL_ID).map_err(
-                |error| ProductWorkflowError::InvalidBindingRequest {
-                    reason: error.to_string(),
-                },
-            )?,
-        ));
-    Ok(package)
+    bundled_extension_package(SLACK_EXTENSION_ID, "Slack", SLACK_MANIFEST, slack_assets())
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
-fn slack_bot_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package("slack_bot", "Slack", SLACK_BOT_MANIFEST, slack_bot_assets())
+/// After the slack_bot/slack unification there is no separate internal
+/// operator-provisioned Slack package to hide; the unified `slack` extension is
+/// user-installable, so no package ref is treated as internal.
+pub(crate) fn is_internal_extension_package_ref(_package_ref: &LifecyclePackageRef) -> bool {
+    false
 }
 
 pub(crate) fn google_calendar_manifest_digest() -> String {
@@ -659,20 +653,6 @@ pub(crate) fn slack_manifest_digest() -> String {
     sha256_digest_token(SLACK_MANIFEST.as_bytes())
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
-pub(crate) fn is_internal_extension_package_ref(package_ref: &LifecyclePackageRef) -> bool {
-    // Model B: the Slack bot channel is operator-provisioned infrastructure
-    // (mounted from operator config, not the user catalog), so it is hidden.
-    // The user-installable Slack extension is the tools package (`slack`).
-    package_ref.kind == LifecyclePackageKind::Extension
-        && package_ref.id.as_str() == SLACK_BOT_EXTENSION_ID
-}
-
-#[cfg(not(feature = "slack-v2-host-beta"))]
-pub(crate) fn is_internal_extension_package_ref(_package_ref: &LifecyclePackageRef) -> bool {
-    false
-}
-
 pub(crate) fn google_slides_manifest_digest() -> String {
     sha256_digest_token(GOOGLE_SLIDES_MANIFEST.as_bytes())
 }
@@ -689,18 +669,13 @@ pub(crate) fn web_access_manifest_digest() -> String {
     sha256_digest_token(WEB_ACCESS_MANIFEST.as_bytes())
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
-pub(crate) fn slack_bot_manifest_digest() -> String {
-    sha256_digest_token(SLACK_BOT_MANIFEST.as_bytes())
-}
-
 /// The Slack **bot** channel manifest — the model-B product adapter that owns
 /// the Slack Events host-ingress route. `slack_serve` projects the route
 /// descriptor from here; the tools package manifest (`SLACK_MANIFEST`)
 /// carries only WASM tool capabilities, not channel ingress.
 #[cfg(feature = "slack-v2-host-beta")]
-pub(crate) fn slack_bot_manifest_toml() -> &'static str {
-    SLACK_BOT_MANIFEST
+pub(crate) fn slack_manifest_toml() -> &'static str {
+    SLACK_MANIFEST
 }
 
 pub(crate) fn nearai_mcp_manifest_toml_for_config(
@@ -730,9 +705,17 @@ fn nearai_mcp_manifest_toml_for_endpoint(
     runtime.insert("url".to_string(), Value::String(endpoint.url.clone()));
 
     let capabilities = manifest
-        .get_mut("capabilities")
+        .get_mut("capability_provider")
+        .and_then(Value::as_table_mut)
+        .and_then(|section| section.get_mut("tools"))
+        .and_then(Value::as_table_mut)
+        .and_then(|tools| tools.get_mut("capabilities"))
         .and_then(Value::as_array_mut)
-        .ok_or_else(|| map_binding_error("bundled NEAR AI manifest lacks capabilities array"))?;
+        .ok_or_else(|| {
+            map_binding_error(
+                "bundled NEAR AI manifest lacks capability_provider.tools capabilities array",
+            )
+        })?;
     let search = capabilities
         .first_mut()
         .and_then(Value::as_table_mut)
@@ -786,7 +769,7 @@ fn bundled_extension_package(
             reason: format!("host API contracts rejected bundled {label} extension: {error}"),
         }
     })?;
-    let record = ExtensionManifestRecord::from_toml_with_contracts(
+    let record = ExtensionManifestRecord::from_toml(
         manifest_toml,
         ManifestSource::HostBundled,
         &host_ports,
@@ -797,6 +780,7 @@ fn bundled_extension_package(
         reason: format!("bundled {label} extension manifest is invalid: {error}"),
     })?;
     let surface_kinds = surface_kinds_from_manifest_record(&record, label)?;
+    let channel_directions = channel_directions_from_manifest_record(&record, label)?;
     let manifest = record.manifest().clone().try_into().map_err(|error| {
         ProductWorkflowError::InvalidBindingRequest {
             reason: format!("bundled {label} extension manifest is invalid: {error}"),
@@ -812,29 +796,57 @@ fn bundled_extension_package(
         manifest_toml: record.raw_toml().to_string(),
         source: ManifestSource::HostBundled,
         package,
-        cleanup_requirements: Vec::new(),
         surface_kinds,
+        channel_directions,
         assets,
     })
 }
 
 pub(crate) fn surface_kinds_from_manifest_record(
     record: &ExtensionManifestRecord,
-    label: &str,
-) -> Result<Vec<LifecycleExtensionSurfaceKind>, ProductWorkflowError> {
-    let adapters = product_adapter_sections(record).map_err(|error| {
-        ProductWorkflowError::InvalidBindingRequest {
-            reason: format!("{label} ProductAdapter manifest projection is invalid: {error}"),
-        }
-    })?;
+    _label: &str,
+) -> Result<Vec<CapabilitySurfaceKind>, ProductWorkflowError> {
+    // Deduplicated, order-stable projection of the manifest's declared
+    // surfaces (tool, channel, auth, ...) — the manifest is the single source
+    // of truth; no section re-parse.
     let mut surface_kinds = Vec::new();
-    if adapters
-        .iter()
-        .any(|adapter| adapter.surface_kind() == ProductSurfaceKind::ExternalChannel)
-    {
-        surface_kinds.push(LifecycleExtensionSurfaceKind::ExternalChannel);
+    for surface in record.manifest().capability_surfaces() {
+        let kind = surface.kind();
+        if !surface_kinds.contains(&kind) {
+            surface_kinds.push(kind);
+        }
     }
     Ok(surface_kinds)
+}
+
+/// Directional shape of the package's channel surface, read from the
+/// product-adapter section's typed capability flags: `inbound_messages` marks
+/// message ingress, `external_final_reply_push` marks host-owned outbound
+/// delivery. `None` when the manifest declares no external-channel section.
+pub(crate) fn channel_directions_from_manifest_record(
+    record: &ExtensionManifestRecord,
+    label: &str,
+) -> Result<Option<LifecycleChannelDirections>, ProductWorkflowError> {
+    let sections =
+        ironclaw_product_adapter_registry::product_adapter_sections(record).map_err(|error| {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("{label} ProductAdapter manifest projection is invalid: {error}"),
+            }
+        })?;
+    let mut directions: Option<LifecycleChannelDirections> = None;
+    for section in sections
+        .iter()
+        .filter(|section| section.surface_kind() == ProductSurfaceKind::ExternalChannel)
+    {
+        let flags = section.capabilities();
+        let entry = directions.get_or_insert(LifecycleChannelDirections {
+            inbound: false,
+            outbound: false,
+        });
+        entry.inbound |= flags.contains(ProductCapabilityFlag::InboundMessages);
+        entry.outbound |= flags.contains(ProductCapabilityFlag::ExternalFinalReplyPush);
+    }
+    Ok(directions)
 }
 
 fn github_assets() -> Vec<AvailableExtensionAsset> {
@@ -1595,11 +1607,6 @@ fn gmail_assets() -> Vec<AvailableExtensionAsset> {
     ]
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
-fn slack_bot_assets() -> Vec<AvailableExtensionAsset> {
-    vec![bytes_asset("manifest.toml", SLACK_BOT_MANIFEST.as_bytes())]
-}
-
 pub(crate) fn bytes_asset(path: &str, bytes: &[u8]) -> AvailableExtensionAsset {
     AvailableExtensionAsset {
         path: path.to_string(),
@@ -1702,7 +1709,7 @@ where
             reason: format!("available extension manifest is not UTF-8: {error}"),
         }
     })?;
-    let record = ExtensionManifestRecord::from_toml_with_contracts(
+    let record = ExtensionManifestRecord::from_toml(
         manifest_toml,
         ManifestSource::InstalledLocal,
         host_ports,
@@ -1711,6 +1718,7 @@ where
     )
     .map_err(map_binding_error)?;
     let surface_kinds = surface_kinds_from_manifest_record(&record, entry.name.as_str())?;
+    let channel_directions = channel_directions_from_manifest_record(&record, entry.name.as_str())?;
     let manifest = record
         .manifest()
         .clone()
@@ -1743,8 +1751,8 @@ where
         // first-party trust (#5459 review: import → restart → install).
         source: ManifestSource::InstalledLocal,
         package,
-        cleanup_requirements: Vec::new(),
         surface_kinds,
+        channel_directions,
         assets,
     }))
 }
@@ -1752,7 +1760,7 @@ where
 pub(crate) fn reserved_host_bundled_extension_id(extension_id: &ExtensionId) -> bool {
     matches!(
         extension_id.as_str(),
-        "github" | "notion" | "web-access" | "slack_bot" | NEARAI_EXTENSION_ID
+        "github" | "notion" | "web-access" | "slack" | NEARAI_EXTENSION_ID
     ) || is_gsuite_extension_id(extension_id)
 }
 
@@ -1789,6 +1797,17 @@ fn visible_capabilities(
 
 #[cfg(test)]
 mod tests {
+
+    fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+        let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+        contracts
+            .register(std::sync::Arc::new(
+                ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                    .expect("capability provider contract"),
+            ))
+            .expect("register capability provider contract");
+        contracts
+    }
     use std::{
         collections::{BTreeSet, HashMap, HashSet},
         sync::{Arc, Mutex},
@@ -2029,7 +2048,7 @@ mod tests {
                 "Google Calendar needs Google OAuth authorization",
             ),
             #[cfg(feature = "slack-v2-host-beta")]
-            ("slack_bot", "Slack needs OAuth authorization"),
+            ("slack", "Slack needs OAuth authorization"),
             ("notion", "Notion needs OAuth authorization"),
             #[cfg(feature = "root-llm-provider")]
             (
@@ -2077,7 +2096,7 @@ mod tests {
                         }),
                     "{extension_id} configure next step should describe post-authorization activation"
                 );
-            } else if extension_id == "slack_bot" {
+            } else if extension_id == "slack" {
                 assert!(
                     onboarding
                         .credential_instructions
@@ -2237,7 +2256,7 @@ mod tests {
         assert_eq!(
             slack_results,
             vec!["slack".to_string()],
-            "model B: the operator-provisioned bot channel (slack_bot) is hidden from the catalog; the user-visible Slack extension is the user-tools package (slack)"
+            "the unified slack extension is the single Slack catalog entry"
         );
     }
 
@@ -2254,7 +2273,7 @@ mod tests {
         assert_eq!(summary.credential_requirements.len(), 1);
         let requirement = &summary.credential_requirements[0];
         assert_eq!(requirement.name, "slack_personal_oauth");
-        assert_eq!(requirement.provider, "slack_personal");
+        assert_eq!(requirement.provider, "slack");
         assert!(requirement.required);
         assert!(matches!(
             &requirement.setup,
@@ -2577,7 +2596,7 @@ mod tests {
                         capability.id
                     );
                 };
-                assert_eq!(provider.as_str(), "slack_personal");
+                assert_eq!(provider.as_str(), "slack");
                 let RuntimeCredentialAccountSetup::OAuth { scopes } = setup else {
                     panic!(
                         "slack capability {} should declare OAuth setup",
@@ -2601,7 +2620,7 @@ mod tests {
                 .iter()
                 .map(|scope| scope.to_string())
                 .collect::<BTreeSet<_>>(),
-            "SLACK_PERSONAL_OAUTH_SETUP_SCOPES must equal the union of the manifest capabilities' scopes"
+            "SLACK_OAUTH_SETUP_SCOPES must equal the union of the manifest capabilities' scopes"
         );
     }
 
@@ -2653,18 +2672,21 @@ mod tests {
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[test]
-    fn bundled_slack_bot_package_declares_product_adapter_channel_surface() {
+    fn bundled_slack_package_declares_product_adapter_channel_surface() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
         let package_ref =
-            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack_bot").unwrap();
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").unwrap();
         let package = catalog.resolve(&package_ref).unwrap();
 
-        assert_eq!(package.package.manifest.id.as_str(), "slack_bot");
+        assert_eq!(package.package.manifest.id.as_str(), "slack");
         assert!(matches!(
             package.package.manifest.runtime,
-            ExtensionRuntime::FirstParty { ref service } if service == "slack_v2_host_beta"
+            ExtensionRuntime::Wasm { .. }
         ));
-        assert_eq!(package.package.manifest.capabilities.len(), 0);
+        assert!(
+            !package.package.manifest.capabilities.is_empty(),
+            "unified slack declares the user-scoped tool capabilities"
+        );
         assert!(package.package.manifest.host_apis.iter().any(|host_api| {
             host_api.id.as_str() == "ironclaw.product_adapter/v1"
                 && host_api.section.as_str() == "product_adapter.inbound"
@@ -2673,41 +2695,23 @@ mod tests {
         let summary = package.summary();
         assert_eq!(
             summary.surface_kinds,
-            vec![LifecycleExtensionSurfaceKind::ExternalChannel]
+            // Derivation order: tools, then host-API projected surfaces
+            // (channel), then auth (per provider).
+            vec![
+                CapabilitySurfaceKind::Tool,
+                CapabilitySurfaceKind::Channel,
+                CapabilitySurfaceKind::Auth,
+            ],
+            "unified slack projects tool + auth + channel surfaces"
         );
-        assert_eq!(summary.visible_capability_ids, Vec::<String>::new());
-    }
-
-    #[cfg(feature = "slack-v2-host-beta")]
-    #[test]
-    fn bundled_extension_removal_cleanup_metadata_is_explicit_and_slack_personal_only() {
-        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
-        let slack = catalog
-            .resolve(&LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").unwrap())
-            .unwrap();
-        let slack_bot = catalog
-            .resolve(
-                &LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack_bot").unwrap(),
-            )
-            .unwrap();
-        let github = catalog
-            .resolve(&LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").unwrap())
-            .unwrap();
-
-        assert_eq!(
-            slack.cleanup_requirements,
-            vec![ExtensionRemovalCleanupRequirement::channel_connection(
-                ExtensionRemovalCleanupAdapterId::new("slack.personal_connection").unwrap(),
-                ExtensionRemovalChannelId::new("slack").unwrap(),
-            )]
-        );
+        let directions = summary
+            .channel_directions
+            .expect("unified slack summary carries channel directions");
+        assert!(directions.inbound, "Slack channel surface is inbound");
+        assert!(directions.outbound, "Slack channel surface is outbound");
         assert!(
-            slack_bot.cleanup_requirements.is_empty(),
-            "operator-owned slack_bot must not inherit personal cleanup"
-        );
-        assert!(
-            github.cleanup_requirements.is_empty(),
-            "ordinary bundled packages default to no host-owned cleanup"
+            !summary.visible_capability_ids.is_empty(),
+            "unified slack publishes model-visible tools"
         );
     }
 
@@ -2809,7 +2813,7 @@ handle = "web_token"
         assert!(google_slides_manifest_digest().starts_with("sha256:"));
         assert!(gmail_manifest_digest().starts_with("sha256:"));
         #[cfg(feature = "slack-v2-host-beta")]
-        assert!(slack_bot_manifest_digest().starts_with("sha256:"));
+        assert!(slack_manifest_digest().starts_with("sha256:"));
     }
 
     #[test]
@@ -2826,15 +2830,10 @@ handle = "web_token"
             manifest["runtime"]["url"].as_str(),
             Some("https://10.0.0.12:8443/%22%0Atrust=%22system/mcp")
         );
-        assert_eq!(
-            manifest["capabilities"][0]["runtime_credentials"][0]["audience"]["host_pattern"]
-                .as_str(),
-            Some("10.0.0.12")
-        );
-        assert_eq!(
-            manifest["capabilities"][0]["runtime_credentials"][0]["audience"]["port"].as_integer(),
-            Some(8443)
-        );
+        let audience = &manifest["capability_provider"]["tools"]["capabilities"][0]["runtime_credentials"]
+            [0]["audience"];
+        assert_eq!(audience["host_pattern"].as_str(), Some("10.0.0.12"));
+        assert_eq!(audience["port"].as_integer(), Some(8443));
     }
 
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
@@ -2926,6 +2925,85 @@ handle = "web_token"
     }
 
     #[tokio::test]
+    async fn filesystem_catalog_loads_manifest_and_runtime_assets() {
+        let fs = InMemoryBackend::default();
+        let extension = test_extension_package();
+        for asset in &extension.assets {
+            let path = extension_asset_path(&extension.package.id, &asset.path).unwrap();
+            let AvailableExtensionAssetContent::Bytes(bytes) = &asset.content;
+            fs.write_file(&path, bytes).await.unwrap();
+        }
+
+        let catalog = AvailableExtensionCatalog::from_filesystem_root(
+            &fs,
+            &VirtualPath::new("/system/extensions").unwrap(),
+        )
+        .await
+        .unwrap();
+        let results = catalog.search("fixture").collect::<Vec<_>>();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].package_ref, extension.package_ref);
+        assert_eq!(
+            results[0]
+                .assets
+                .iter()
+                .map(|asset| asset.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["manifest.toml", "wasm/fixture.wasm"]
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_catalog_skips_extension_dirs_without_manifest() {
+        let fs = InMemoryBackend::default();
+        fs.write_file(
+            &VirtualPath::new("/system/extensions/incomplete/cache/leftover").unwrap(),
+            b"stale",
+        )
+        .await
+        .unwrap();
+
+        let catalog = AvailableExtensionCatalog::from_filesystem_root(
+            &fs,
+            &VirtualPath::new("/system/extensions").unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(catalog.search("").count(), 0);
+    }
+
+    #[tokio::test]
+    async fn filesystem_catalog_skips_reserved_host_bundled_extension_ids() {
+        let fs = InMemoryBackend::default();
+        fs.write_file(
+            &VirtualPath::new("/system/extensions/gmail/manifest.toml").unwrap(),
+            b"not parsed because gmail is host-bundled",
+        )
+        .await
+        .unwrap();
+        fs.write_file(
+            &VirtualPath::new("/system/extensions/slack/manifest.toml").unwrap(),
+            b"not parsed because slack is host-bundled",
+        )
+        .await
+        .unwrap();
+
+        let catalog = AvailableExtensionCatalog::from_filesystem_root(
+            &fs,
+            &VirtualPath::new("/system/extensions").unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(catalog.search("").count(), 0);
+        // The reserved host-bundled id is skipped on filesystem load; the
+        // unified slack package ships built-in, not from this directory.
+        assert_eq!(catalog.search("slack").count(), 0);
+    }
+
+    #[tokio::test]
     async fn filesystem_manifest_external_channel_surface_kind_projects_to_lifecycle_surface() {
         // Filesystem-discovered manifests validate as `InstalledLocal`, which
         // forbids first-party trust/runtime claims — so the fixture is a
@@ -2988,12 +3066,8 @@ credential_handle = "channel_ext_token"
         let package = results.into_iter().next().unwrap();
         assert_eq!(
             package.summary().surface_kinds,
-            vec![LifecycleExtensionSurfaceKind::ExternalChannel],
+            vec![CapabilitySurfaceKind::Channel],
             "filesystem-loaded external_channel manifest must project ExternalChannel surface kind"
-        );
-        assert!(
-            package.cleanup_requirements.is_empty(),
-            "ExternalChannel presentation metadata must not infer host-owned cleanup"
         );
     }
 
@@ -3137,7 +3211,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/fixture.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "fixture.search"
 description = "Search"
 effects = ["network"]
@@ -3146,7 +3226,7 @@ visibility = "model"
 input_schema_ref = "schemas/search.input.json"
 output_schema_ref = "schemas/search.output.json"
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "fixture.write"
 description = "Write"
 effects = ["external_write"]
@@ -3159,6 +3239,7 @@ output_schema_ref = "schemas/write.output.json"
             MANIFEST,
             ManifestSource::HostBundled,
             &HostPortCatalog::empty(),
+            &capability_provider_contracts(),
         )
         .expect("manifest");
         let package = ExtensionPackage::from_manifest(
@@ -3172,8 +3253,8 @@ output_schema_ref = "schemas/write.output.json"
             manifest_toml: MANIFEST.to_string(),
             source: ManifestSource::HostBundled,
             package,
-            cleanup_requirements: Vec::new(),
             surface_kinds: Vec::new(),
+            channel_directions: None,
             assets: vec![
                 AvailableExtensionAsset {
                     path: "manifest.toml".to_string(),

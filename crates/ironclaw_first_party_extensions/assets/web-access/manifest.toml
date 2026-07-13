@@ -9,7 +9,13 @@ trust = "first_party_requested"
 kind = "first_party"
 service = "web-access"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "web-access.search"
 description = "Search the web with zero-config Exa MCP and return cited source results. Prefer GitHub extension capabilities for GitHub repository, issue, pull request, release, or workflow data when they are available."
 effects = ["dispatch_capability", "network"]
@@ -19,7 +25,7 @@ input_schema_ref = "schemas/web-access/search.input.v1.json"
 output_schema_ref = "schemas/web-access/search.output.v1.json"
 prompt_doc_ref = "prompts/web-access/search.md"
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "web-access.get_content"
 description = "Retrieve full web page content through Exa MCP, or read content cached from a previous web search response."
 effects = ["dispatch_capability", "network"]

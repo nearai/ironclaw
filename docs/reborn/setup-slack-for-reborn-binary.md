@@ -56,7 +56,7 @@ Slack personal OAuth must also redirect back to the Reborn product-auth
 callback:
 
 ```text
-https://<public-host>/api/reborn/product-auth/oauth/slack_personal/callback
+https://<public-host>/api/reborn/product-auth/oauth/slack/callback
 ```
 
 For local development, expose the local listener through a tunnel and use the
@@ -156,7 +156,7 @@ OAuth & Permissions:
 - Add the redirect URL:
 
 ```text
-https://<public-host>/api/reborn/product-auth/oauth/slack_personal/callback
+https://<public-host>/api/reborn/product-auth/oauth/slack/callback
 ```
 
 - Add bot token scopes:
@@ -210,7 +210,7 @@ features:
     always_online: false
 oauth_config:
   redirect_urls:
-    - https://<public-host>/api/reborn/product-auth/oauth/slack_personal/callback
+    - https://<public-host>/api/reborn/product-auth/oauth/slack/callback
   scopes:
     bot:
       - chat:write
@@ -293,7 +293,7 @@ Add or confirm chat:write, reinstall the Slack app, and update the bot token in 
 
 ### Slack OAuth callback fails
 
-Confirm the Slack redirect URL is exactly https://<public-host>/api/reborn/product-auth/oauth/slack_personal/callback, the user scope includes users:read, the app was reinstalled after changing OAuth settings, and the WebUI Slack setup client id/client secret match the Slack app.
+Confirm the Slack redirect URL is exactly https://<public-host>/api/reborn/product-auth/oauth/slack/callback, the user scope includes users:read, the app was reinstalled after changing OAuth settings, and the WebUI Slack setup client id/client secret match the Slack app.
 
 ### Channel mention does not reach Reborn
 

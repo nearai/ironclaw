@@ -4,6 +4,11 @@ import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
 import { productAuthOAuthEventsSource } from "../../../lib/product-auth-oauth-events.vm-inline";
+import { hasChannelSurface } from "../lib/extensions-schema";
+
+// Wire-shaped surface fixtures for the surfaces/runtime extension model.
+const channelSurfaces = [{ kind: "channel", inbound: true, outbound: true }];
+const toolSurfaces = [{ kind: "tool" }];
 
 function useExtensionsSourceForTest() {
   const source = readFileSync(new URL("./useExtensions.ts", import.meta.url), "utf8");
@@ -31,11 +36,12 @@ function contextFor(mutationState, queryCalls) {
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
-    listConnectableChannels: () => {},
     fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
-    isChannelExtensionKind: (kind) => kind === "wasm_channel" || kind === "channel",
+    // The real surface-taxonomy helper: grouping and install routing must key
+    // off declared channel surfaces, exactly as production does.
+    hasChannelSurface,
     installExtension: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
@@ -80,9 +86,6 @@ test("useExtensions points channel install success at the setup panel", () => {
       if (queryKey[0] === "extension-registry") {
         return { data: { entries: [] }, isLoading: false };
       }
-      if (queryKey[0] === "connectable-channels") {
-        return { data: { channels: [] }, isLoading: false };
-      }
       return { data: {}, isLoading: false };
     },
   };
@@ -91,7 +94,7 @@ test("useExtensions points channel install success at the setup panel", () => {
   context.globalThis.__testExports.useExtensions();
   mutationConfigs[0].onSuccess(
     { success: true, message: "Slack is installed. Activate it to make its tools available." },
-    { displayName: "Slack", kind: "channel" }
+    { displayName: "Slack", surfaces: channelSurfaces }
   );
 
   assert.deepEqual(JSON.parse(JSON.stringify(actionResults[0])), {
@@ -100,7 +103,7 @@ test("useExtensions points channel install success at the setup panel", () => {
   });
 });
 
-test("useExtensions install→configure hands the modal the channel kind (so it shows Connect, not 'no config')", () => {
+test("useExtensions install→configure hands the modal the channel surfaces (so it shows Connect, not 'no config')", () => {
   const mutationConfigs = [];
   const needsSetupPayloads = [];
   const context = {
@@ -121,7 +124,6 @@ test("useExtensions install→configure hands the modal the channel kind (so it 
     useQuery: ({ queryKey }) => {
       if (queryKey[0] === "extensions") return { data: { extensions: [] }, isLoading: false };
       if (queryKey[0] === "extension-registry") return { data: { entries: [] }, isLoading: false };
-      if (queryKey[0] === "connectable-channels") return { data: { channels: [] }, isLoading: false };
       return { data: {}, isLoading: false };
     },
   };
@@ -129,13 +131,13 @@ test("useExtensions install→configure hands the modal the channel kind (so it 
 
   context.globalThis.__testExports.useExtensions();
   // Install a connectable channel with auto-configure — the modal is opened via
-  // onNeedsSetup. Its payload MUST carry `kind` or the modal cannot tell it is a
-  // channel and wrongly renders "No configuration required".
+  // onNeedsSetup. Its payload MUST carry `surfaces` or the modal cannot tell it
+  // is a channel and wrongly renders "No configuration required".
   mutationConfigs[0].onSuccess(
     { success: true },
     {
       displayName: "Slack",
-      kind: "channel",
+      surfaces: channelSurfaces,
       packageRef: { kind: "extension", id: "slack" },
       configureAfterInstall: true,
       onNeedsSetup: (payload) => needsSetupPayloads.push(payload),
@@ -143,11 +145,11 @@ test("useExtensions install→configure hands the modal the channel kind (so it 
   );
 
   assert.equal(needsSetupPayloads.length, 1, "install-configure must open the modal");
-  assert.equal(needsSetupPayloads[0].kind, "channel");
+  assert.deepEqual(needsSetupPayloads[0].surfaces, channelSurfaces);
   assert.equal(needsSetupPayloads[0].authenticated, false);
 });
 
-test("useExtensions places uninstalled wasm_channel registry entry in channelRegistry not toolRegistry", () => {
+test("useExtensions places uninstalled wasm channel-surface registry entry in channelRegistry not toolRegistry", () => {
   const context = {
     ...contextFor(
       { mutate: () => {}, isPending: false, isSuccess: false, isError: false },
@@ -167,14 +169,16 @@ test("useExtensions places uninstalled wasm_channel registry entry in channelReg
         return {
           data: {
             entries: [
-              { kind: "wasm_channel", package_ref: { id: "telegram" }, installed: false },
+              {
+                runtime: "wasm",
+                surfaces: channelSurfaces,
+                package_ref: { id: "telegram" },
+                installed: false,
+              },
             ],
           },
           isLoading: false,
         };
-      }
-      if (queryKey[0] === "connectable-channels") {
-        return { data: { channels: [] }, isLoading: false };
       }
       return { data: {}, isLoading: false };
     },
@@ -186,12 +190,12 @@ test("useExtensions places uninstalled wasm_channel registry entry in channelReg
   assert.deepEqual(
     extensions.channelRegistry.map((entry) => entry.package_ref.id),
     ["telegram"],
-    "wasm_channel registry entry must appear in channelRegistry"
+    "wasm channel-surface registry entry must appear in channelRegistry"
   );
   assert.deepEqual(
     extensions.toolRegistry.map((entry) => entry.package_ref.id),
     [],
-    "wasm_channel registry entry must NOT appear in toolRegistry"
+    "wasm channel-surface registry entry must NOT appear in toolRegistry"
   );
 });
 
@@ -212,9 +216,18 @@ test("useExtensions groups manifest-backed channels with channel entries", () =>
         return {
           data: {
             extensions: [
-              { kind: "channel", package_ref: { id: "slack" } },
-              { kind: "wasm_channel", package_ref: { id: "telegram" } },
-              { kind: "wasm_tool", package_ref: { id: "github" } },
+              {
+                runtime: "first_party",
+                surfaces: channelSurfaces,
+                package_ref: { id: "slack" },
+              },
+              {
+                runtime: "wasm",
+                surfaces: channelSurfaces,
+                package_ref: { id: "telegram" },
+              },
+              { runtime: "wasm", surfaces: toolSurfaces, package_ref: { id: "github" } },
+              { runtime: "mcp", surfaces: toolSurfaces, package_ref: { id: "notion" } },
             ],
           },
           isLoading: false,
@@ -224,15 +237,22 @@ test("useExtensions groups manifest-backed channels with channel entries", () =>
         return {
           data: {
             entries: [
-              { kind: "channel", package_ref: { id: "slack" }, installed: false },
-              { kind: "wasm_tool", package_ref: { id: "web-access" }, installed: false },
+              {
+                runtime: "first_party",
+                surfaces: channelSurfaces,
+                package_ref: { id: "slack" },
+                installed: false,
+              },
+              {
+                runtime: "wasm",
+                surfaces: toolSurfaces,
+                package_ref: { id: "web-access" },
+                installed: false,
+              },
             ],
           },
           isLoading: false,
         };
-      }
-      if (queryKey[0] === "connectable-channels") {
-        return { data: { channels: [] }, isLoading: false };
       }
       return { data: {}, isLoading: false };
     },
@@ -247,7 +267,13 @@ test("useExtensions groups manifest-backed channels with channel entries", () =>
   );
   assert.deepEqual(
     extensions.tools.map((entry) => entry.package_ref.id),
-    ["github"]
+    ["github", "notion"],
+    "tools = every non-channel extension; MCP-backed tools sit beside wasm ones"
+  );
+  assert.equal(
+    extensions.mcpServers,
+    undefined,
+    "runtime is a badge, never a grouping axis — no mcpServers rail"
   );
   assert.deepEqual(
     extensions.channelRegistry.map((entry) => entry.package_ref.id),

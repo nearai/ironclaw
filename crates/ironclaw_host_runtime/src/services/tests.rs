@@ -1123,6 +1123,7 @@ fn test_package(manifest: &str, extension_id: &str) -> ExtensionPackage {
         manifest,
         ManifestSource::HostBundled,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .expect("test manifest should parse");
     ExtensionPackage::from_manifest(
@@ -1384,7 +1385,13 @@ runner = "sandboxed_process"
 command = "sh"
 args = ["-c", "cat"]
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "test-script.run"
 description = "Run script"
 effects = ["execute_code"]
@@ -1406,7 +1413,13 @@ trust = "untrusted"
 kind = "wasm"
 module = "test.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "test-wasm.run"
 description = "Run WASM"
 effects = ["network"]
@@ -1577,4 +1590,15 @@ async fn registered_runtime_health_returns_empty_when_all_required_available() {
         missing.is_empty(),
         "expected no missing kinds; got {missing:?}"
     );
+}
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
 }

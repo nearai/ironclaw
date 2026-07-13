@@ -616,7 +616,7 @@ fn unsupported_projection(
 ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
     Ok(LifecycleProductResponse::projection(
         package_ref,
-        LifecyclePhase::UnsupportedOrLegacy,
+        LifecyclePhase::Unsupported,
         vec![LifecycleReadinessBlocker::runtime(Some(
             "extension_lifecycle_local_runtime_unwired".to_string(),
         ))?],
@@ -628,7 +628,7 @@ fn unsupported_extension_auth_configure_projection(
 ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
     Ok(LifecycleProductResponse::projection(
         package_ref,
-        LifecyclePhase::UnsupportedOrLegacy,
+        LifecyclePhase::Unsupported,
         vec![LifecycleReadinessBlocker::runtime(Some(
             "extension_auth_and_configure_not_yet_wired".to_string(),
         ))?],

@@ -92,7 +92,8 @@ pub trait BeforeInboundPolicy: Send + Sync {
     ) -> Result<BeforeInboundPolicyOutcome, ProductWorkflowError>;
 }
 
-/// Backwards-compatible policy used when no production policy is wired.
+/// Pass-through policy for compositions that wire no inbound policy;
+/// admission then rests entirely on adapter-level auth verification.
 #[derive(Debug, Clone, Default)]
 pub struct NoopBeforeInboundPolicy;
 

@@ -62,9 +62,15 @@ async fn discovery_rejects_oversized_manifest_before_reading_the_body() {
     let fs = OversizedManifestFs;
     let root = VirtualPath::new("/system/extensions").expect("root");
 
-    let err = ExtensionDiscovery::discover(&fs, &root)
-        .await
-        .expect_err("oversized manifest must be rejected");
+    let err = ExtensionDiscovery::discover_with_manifest_contracts(
+        &fs,
+        &root,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+        &HostApiContractRegistry::new(),
+    )
+    .await
+    .expect_err("oversized manifest must be rejected");
 
     match err {
         ExtensionError::InvalidManifest { reason } => {
@@ -116,9 +122,12 @@ async fn discovery_within_bound_proceeds_to_read() {
         }
     }
 
-    let err = ExtensionDiscovery::discover(
+    let err = ExtensionDiscovery::discover_with_manifest_contracts(
         &WithinBoundFs,
         &VirtualPath::new("/system/extensions").unwrap(),
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+        &HostApiContractRegistry::new(),
     )
     .await
     .expect_err("within-bound manifest reaches the body read (which errors here)");

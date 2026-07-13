@@ -307,16 +307,26 @@ mod tests {
 
         let setup_panel = source_text("components/slack-setup-panel.tsx");
         assert!(setup_panel.contains("SlackChannelPicker"));
-        assert!(setup_panel.contains("<SlackChannelPicker action={action} />"));
+        assert!(
+            setup_panel.contains("<SlackChannelPicker />"),
+            "the picker takes no connect-action prop; copy comes from i18n"
+        );
+        assert!(
+            setup_panel.contains("if (setupQuery.isError)"),
+            "the admin section self-gates on the operator-scoped setup query"
+        );
 
         let channels_tab = source_text("pages/extensions/components/channels-tab.tsx");
-        assert!(channels_tab.contains("showBuiltinSlackConnectActions"));
-        assert!(channels_tab.contains("admin_managed_channels"));
+        assert!(
+            channels_tab.contains("channelConnection"),
+            "connect affordances come from the extension's channel surface"
+        );
         assert!(channels_tab.contains("inbound_proof_code"));
         assert!(channels_tab.contains("SlackAdminManagedSection"));
-        assert!(channels_tab.contains("findSlackConnectActions"));
-        assert!(channels_tab.contains("slackConnectActions"));
-        assert!(channels_tab.contains("action={action.action}"));
+        assert!(
+            channels_tab.contains("copy={connection}"),
+            "pairing copy is the surface connection requirement"
+        );
 
         let regression = source_text("pages/chat/lib/useChat-send.test.ts");
         assert!(regression.contains("connect-like prompts submit to the model"));
@@ -785,8 +795,8 @@ mod tests {
             "the modal Activate button must be gated by lifecycle-aware setup readiness"
         );
         assert!(
-            configure_modal.contains("!isChannelExtensionKind(extension?.kind)"),
-            "channel extensions activate via OAuth/pairing, not the generic Activate button"
+            configure_modal.contains("!hasChannelSurface(extension)"),
+            "channel-surface extensions activate via OAuth/pairing, not the generic Activate button"
         );
         assert!(configure_modal.contains("extensions.activeConfigured"));
 

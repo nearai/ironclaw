@@ -2177,14 +2177,13 @@ mod slack_personal_oauth_serve {
         OAuthRedirectUri, SlackPersonalOAuthBindingConfig, SlackPersonalSetupServiceSlot,
     };
 
-    const SLACK_PERSONAL_CALLBACK_PATH: &str =
-        "/api/reborn/product-auth/oauth/slack_personal/callback";
+    const SLACK_PERSONAL_CALLBACK_PATH: &str = "/api/reborn/product-auth/oauth/slack/callback";
     const SLACK_START_PATH: &str = "/api/webchat/v2/extensions/slack/setup/oauth/start";
 
     async fn slack_personal_slot() -> SlackPersonalSetupServiceSlot {
         SlackPersonalSetupServiceSlot::filled_with_in_memory_setup_for_tests(
             OAuthRedirectUri::new(
-                "http://127.0.0.1:3000/api/reborn/product-auth/oauth/slack_personal/callback",
+                "http://127.0.0.1:3000/api/reborn/product-auth/oauth/slack/callback",
             )
             .expect("slack redirect uri"),
             "slack-client-id",
@@ -2223,7 +2222,7 @@ mod slack_personal_oauth_serve {
 
     fn slack_oauth_start_body() -> serde_json::Value {
         json!({
-            "provider": "slack_personal",
+            "provider": "slack",
             "account_label": "personal slack",
             "scopes": ["search:read"],
             "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),

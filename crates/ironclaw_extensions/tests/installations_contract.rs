@@ -2,10 +2,11 @@ use std::collections::BTreeSet;
 
 use chrono::Utc;
 use ironclaw_extensions::{
-    ExtensionActivationState, ExtensionCredentialBinding, ExtensionCredentialHandle,
-    ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
-    ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationPersistedParts,
-    ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef,
+    CapabilityProviderHostApiContract, ExtensionActivationState, ExtensionCredentialBinding,
+    ExtensionCredentialHandle, ExtensionHealthMessage, ExtensionHealthSnapshot,
+    ExtensionHealthStatus, ExtensionInstallation, ExtensionInstallationError,
+    ExtensionInstallationId, ExtensionInstallationPersistedParts, ExtensionInstallationStore,
+    ExtensionManifestRecord, ExtensionManifestRef, HostApiContractRegistry,
     InMemoryExtensionInstallationStore, InstallationOwner, MANIFEST_SCHEMA_VERSION, ManifestHash,
     ManifestSource, ManifestV2Error,
 };
@@ -23,7 +24,7 @@ fn manifest_hash(value: &str) -> ManifestHash {
     ManifestHash::new(value).unwrap()
 }
 
-fn raw_legacy_capability_manifest() -> String {
+fn raw_capability_provider_manifest() -> String {
     format!(
         r#"
 schema_version = "{schema}"
@@ -37,7 +38,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/acme.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "acme-tools.echo"
 description = "Echoes input"
 default_permission = "allow"
@@ -50,12 +57,23 @@ prompt_doc_ref = "prompts/acme/echo.md"
     )
 }
 
+fn contracts() -> HostApiContractRegistry {
+    let mut registry = HostApiContractRegistry::new();
+    registry
+        .register(std::sync::Arc::new(
+            CapabilityProviderHostApiContract::new().unwrap(),
+        ))
+        .unwrap();
+    registry
+}
+
 fn manifest(hash: &str) -> ExtensionManifestRecord {
     ExtensionManifestRecord::from_toml(
-        raw_legacy_capability_manifest(),
+        raw_capability_provider_manifest(),
         ManifestSource::HostBundled,
         &HostPortCatalog::empty(),
         Some(manifest_hash(hash)),
+        &contracts(),
     )
     .unwrap()
 }
@@ -87,23 +105,39 @@ fn installation_with_manifest_hash(hash: Option<&str>) -> ExtensionInstallation 
 }
 
 #[test]
-fn installed_legacy_top_level_capabilities_are_rejected() {
-    let err = ExtensionManifestRecord::from_toml(
-        raw_legacy_capability_manifest(),
-        ManifestSource::InstalledLocal,
-        &HostPortCatalog::empty(),
-        Some(manifest_hash("sha256:abc")),
-    )
-    .unwrap_err();
-
-    assert!(matches!(
-        err,
-        ExtensionInstallationError::Manifest(
-            ManifestV2Error::LegacyTopLevelCapabilitiesForInstalledSource {
-                manifest_source: ManifestSource::InstalledLocal
-            }
+fn top_level_capabilities_are_rejected_for_every_source() {
+    // The legacy manifest form is gone: capabilities are declared under an
+    // ironclaw.capability_provider/v1 host_api section, for host-bundled
+    // manifests exactly as for installed ones.
+    let legacy = raw_capability_provider_manifest()
+        .replace(
+            "[[host_api]]\nid = \"ironclaw.capability_provider/v1\"\nsection = \"capability_provider.tools\"\n\n[capability_provider.tools]\n\n",
+            "",
         )
-    ));
+        .replace("[[capability_provider.tools.capabilities]]", "[[capabilities]]");
+    for source in [
+        ManifestSource::InstalledLocal,
+        ManifestSource::RegistryInstalled,
+        ManifestSource::HostBundled,
+    ] {
+        let err = ExtensionManifestRecord::from_toml(
+            legacy.clone(),
+            source,
+            &HostPortCatalog::empty(),
+            Some(manifest_hash("sha256:abc")),
+            &contracts(),
+        )
+        .unwrap_err();
+        match err {
+            ExtensionInstallationError::Manifest(ManifestV2Error::Invalid { reason }) => {
+                assert!(
+                    reason.contains("top-level [[capabilities]] is not supported"),
+                    "{source:?}: {reason}"
+                );
+            }
+            other => panic!("{source:?}: expected Invalid, got {other:?}"),
+        }
+    }
 }
 
 #[tokio::test]
@@ -255,10 +289,11 @@ async fn manifest_hash_presence_mismatch_is_rejected() {
 
     let store = InMemoryExtensionInstallationStore::default();
     let manifest_without_hash = ExtensionManifestRecord::from_toml(
-        raw_legacy_capability_manifest(),
+        raw_capability_provider_manifest(),
         ManifestSource::HostBundled,
         &HostPortCatalog::empty(),
         None,
+        &contracts(),
     )
     .unwrap();
     store.upsert_manifest(manifest_without_hash).await.unwrap();

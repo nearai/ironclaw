@@ -257,7 +257,6 @@ test("SlackChannelPicker edits saved channels and blocks save after load failure
     ["slack-allowed-channels"],
     ["slack-routable-subjects"],
     ["extensions"],
-    ["connectable-channels"],
   ]);
 
   query.isSuccess = false;

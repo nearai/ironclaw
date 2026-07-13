@@ -32,9 +32,9 @@ test("startExtensionOauth sends an expiry safely below the backend max TTL", asy
   await context.globalThis.__testExports.startExtensionOauth(
     { kind: "extension", id: "slack" },
     {
-      provider: "slack_personal",
+      provider: "slack",
       setup: {
-        account_label: "slack slack_personal",
+        account_label: "slack slack",
         scopes: ["users:read"],
         invocation_id: "invocation-alpha",
       },

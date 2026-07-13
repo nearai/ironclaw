@@ -69,19 +69,22 @@ test("RegistryTab renders only real installed extensions with management actions
   const installedExtension = {
     package_ref: { kind: "extension", id: "google-calendar" },
     display_name: "Google Runtime",
-    kind: "wasm_tool",
+    runtime: "wasm",
+    surfaces: [{ kind: "tool" }],
     active: true,
   };
   const registryOnlyInstalled = {
     package_ref: { kind: "extension", id: "calendar-registry-only" },
     display_name: "Calendar Registry Only",
-    kind: "wasm_tool",
+    runtime: "wasm",
+    surfaces: [{ kind: "tool" }],
     installed: true,
   };
   const availableEntry = {
     package_ref: { kind: "extension", id: "github" },
     display_name: "GitHub",
-    kind: "mcp_server",
+    runtime: "mcp",
+    surfaces: [{ kind: "tool" }],
   };
   const { ExtensionCard, RegistryCard, rendered } = renderRegistryTab({
     catalogEntries: [
@@ -92,7 +95,8 @@ test("RegistryTab renders only real installed extensions with management actions
           package_ref: installedExtension.package_ref,
           display_name: "Google Calendar",
           description: "Calendar metadata",
-          kind: "wasm_tool",
+          runtime: "wasm",
+          surfaces: [{ kind: "tool" }],
         },
         extension: installedExtension,
       },
@@ -113,7 +117,6 @@ test("RegistryTab renders only real installed extensions with management actions
     onActivate: () => {},
     onConfigure: () => {},
     onRemove: () => {},
-    connectableChannels: [],
     isBusy: false,
   });
 
@@ -133,7 +136,8 @@ test("RegistryTab searches installed entries using registry metadata", () => {
   const installedExtension = {
     package_ref: { kind: "extension", id: "google-calendar" },
     display_name: "Runtime Name",
-    kind: "wasm_tool",
+    runtime: "wasm",
+    surfaces: [{ kind: "tool" }],
     active: true,
   };
   const { ExtensionCard, rendered } = renderRegistryTab(
@@ -147,7 +151,8 @@ test("RegistryTab searches installed entries using registry metadata", () => {
             display_name: "Google Calendar",
             description: "Calendar integration",
             keywords: ["schedule"],
-            kind: "wasm_tool",
+            runtime: "wasm",
+            surfaces: [{ kind: "tool" }],
           },
           extension: installedExtension,
         },
@@ -156,7 +161,6 @@ test("RegistryTab searches installed entries using registry metadata", () => {
       onActivate: () => {},
       onConfigure: () => {},
       onRemove: () => {},
-      connectableChannels: [],
       isBusy: false,
     },
     "calendar",

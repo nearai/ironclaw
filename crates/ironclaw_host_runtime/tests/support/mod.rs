@@ -28,7 +28,7 @@ fn legacy_capability_fixture_to_v2_with_refs(
     schema_refs: impl Fn(&str) -> (String, String),
 ) -> String {
     if manifest.contains("schema_version") {
-        return manifest.to_string();
+        return project_top_level_capabilities_to_host_api(manifest.to_string());
     }
     let mut converted = "schema_version = \"reborn.extension_manifest.v2\"\n".to_string();
     for line in manifest.lines() {
@@ -47,5 +47,23 @@ fn legacy_capability_fixture_to_v2_with_refs(
             converted.push('\n');
         }
     }
-    converted
+    project_top_level_capabilities_to_host_api(converted)
+}
+
+/// Project a v2-legacy fixture (top-level `[[capabilities]]`) onto the
+/// host_api capability-provider form the parser requires.
+fn project_top_level_capabilities_to_host_api(manifest: String) -> String {
+    if !manifest.contains("[[capabilities]]") || manifest.contains("[[host_api]]") {
+        return manifest;
+    }
+    let host_api_block = "[[host_api]]\nid = \"ironclaw.capability_provider/v1\"\nsection = \"capability_provider.tools\"\n\n[capability_provider.tools]\n\n";
+    let idx = manifest.find("[[capabilities]]").expect("checked above");
+    let mut out = String::with_capacity(manifest.len() + host_api_block.len());
+    out.push_str(&manifest[..idx]);
+    out.push_str(host_api_block);
+    out.push_str(&manifest[idx..]);
+    out.replace(
+        "[[capabilities]]",
+        "[[capability_provider.tools.capabilities]]",
+    )
 }
