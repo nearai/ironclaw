@@ -354,4 +354,47 @@ mod tests {
         assert!(output.contains("\\u{1b}"));
         assert!(output.contains("\\r"));
     }
+
+    /// Sibling to `human_renderer_escapes_terminal_control_characters`
+    /// (which only covers `HostBundled`): a `UserRegistered` search result
+    /// must render the `user_registered` source label, not silently reuse
+    /// `host_bundled` or omit the source entirely.
+    #[test]
+    fn human_renderer_renders_user_registered_source_label() {
+        let response = LifecycleProductResponse {
+            package_ref: None,
+            phase: LifecyclePhase::Discovered,
+            blockers: Vec::new(),
+            message: None,
+            payload: Some(LifecycleProductPayload::ExtensionSearch {
+                count: 1,
+                extensions: vec![LifecycleSearchExtensionSummary {
+                    summary: LifecycleExtensionSummary {
+                        package_ref: LifecyclePackageRef::new(
+                            LifecyclePackageKind::Extension,
+                            "acme-mcp-registered",
+                        )
+                        .expect("package ref"),
+                        name: "Acme Registered MCP".to_string(),
+                        version: "0.1.0".to_string(),
+                        description: "User-registered hosted MCP server".to_string(),
+                        source: LifecycleExtensionSource::UserRegistered,
+                        runtime_kind:
+                            ironclaw_product_workflow::LifecycleExtensionRuntimeKind::WasmTool,
+                        surface_kinds: Vec::new(),
+                        visible_capability_ids: Vec::new(),
+                        visible_read_only_capability_ids: Vec::new(),
+                        credential_requirements: Vec::new(),
+                        onboarding: None,
+                    },
+                    installation_phase: None,
+                }],
+            }),
+        };
+
+        let output = render_reborn_extension_lifecycle_response("search", &response);
+
+        assert!(output.contains("(user_registered)"), "output: {output:?}");
+        assert!(!output.contains("(host_bundled)"), "output: {output:?}");
+    }
 }
