@@ -427,6 +427,54 @@ def ironclaw_reborn_openai_compat_binary():
 
 
 @pytest.fixture(scope="session")
+def ironclaw_reborn_channel_host_binary():
+    """Ensure `ironclaw-reborn` is built with the channel host delivery half.
+
+    The generic channel stack (bundled channel adapter binding + delivery
+    coordinator + outbound stores) is still compile-gated behind
+    `slack-v2-host-beta` until the P6 extraction dissolves the gate. The
+    channel-lane serve routes stay inert at runtime without `[slack]`
+    enablement, so this binary exercises the GENERIC channel surfaces only.
+    Fold this fixture into `ironclaw_reborn_binary` when the gate dissolves.
+    """
+    target_dir = _cargo_target_dir()
+    binary = target_dir / "debug" / "ironclaw-reborn"
+    stamp = target_dir / "debug" / ".ironclaw-reborn-channel-host.stamp"
+    input_mtime = max(
+        _latest_mtime(ROOT / "Cargo.toml"),
+        _latest_mtime(ROOT / "Cargo.lock"),
+        _latest_mtime(ROOT / "build.rs"),
+        _latest_mtime(ROOT / "providers.json"),
+        _latest_mtime(ROOT / "src"),
+        _latest_mtime(ROOT / "channels-src"),
+        _latest_mtime(ROOT / "crates"),
+    )
+    if (
+        _binary_needs_rebuild(binary)
+        or not stamp.exists()
+        or stamp.stat().st_mtime < input_mtime
+    ):
+        print("Building ironclaw-reborn (slack-v2-host-beta; this may take a while)...")
+        subprocess.run(
+            [
+                "cargo", "build",
+                "-p", "ironclaw_reborn_cli",
+                "--features", "slack-v2-host-beta",
+            ],
+            cwd=ROOT,
+            check=True,
+            timeout=900,
+        )
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.touch()
+    assert binary.exists(), (
+        f"Binary not found at {binary}. "
+        f"Cargo target dir resolved to: {target_dir}"
+    )
+    return str(binary)
+
+
+@pytest.fixture(scope="session")
 def server_ports():
     """Reserve dynamic ports for the gateway and HTTP webhook channel."""
     reserved = _reserve_loopback_sockets(2)

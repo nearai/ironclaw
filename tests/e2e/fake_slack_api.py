@@ -27,6 +27,10 @@ class FakeSlackState:
         self.rate_limit_count = 0
         self.fail_post_message = False
         self.fail_file_downloads = False
+        # Identity returned by the OAuth v2 token endpoint (user-token flow).
+        self.oauth_authed_user_id = "U42OWNER"
+        self.oauth_team_id = "T0001"
+        self.oauth_app_id = "A0001"
 
 
 # -- Slack API handlers ----------------------------------------------------
@@ -88,6 +92,42 @@ async def download_file(request: web.Request) -> web.Response:
     )
 
 
+async def oauth_v2_access(request: web.Request) -> web.Response:
+    """Slack OAuth v2 token endpoint (authorization-code exchange).
+
+    Shape mirrors Slack's user-token (`user_scope`) response: the personal
+    access token and proven identity ride `authed_user`, workspace/app
+    claims ride `team` / `app_id`.
+    """
+    state: FakeSlackState = request.app["state"]
+    body = dict(await request.post())
+    state.api_calls.append(
+        {
+            "method": "oauth.v2.access",
+            "body": {k: v for k, v in body.items() if k not in ("client_secret",)},
+            "time": time.time(),
+        }
+    )
+    return web.json_response(
+        {
+            "ok": True,
+            "app_id": state.oauth_app_id,
+            "authed_user": {
+                "id": state.oauth_authed_user_id,
+                "scope": (
+                    "search:read,channels:history,groups:history,im:history,"
+                    "mpim:history,channels:read,groups:read,im:read,mpim:read,"
+                    "users:read,chat:write"
+                ),
+                "access_token": "xoxp-FAKE-SLACK-USER-TOKEN",
+                "token_type": "user",
+            },
+            "team": {"id": state.oauth_team_id, "name": "Fake Workspace"},
+            "enterprise": None,
+        }
+    )
+
+
 # -- Control endpoints -----------------------------------------------------
 
 
@@ -145,6 +185,7 @@ def main():
 
     # Slack Web API
     app.router.add_post("/api/chat.postMessage", chat_post_message)
+    app.router.add_post("/api/oauth.v2.access", oauth_v2_access)
 
     # File downloads (Slack serves files from files.slack.com/files-pri/...)
     app.router.add_get("/files-pri/{file_path:.*}", download_file)
