@@ -1,5 +1,5 @@
-//! Caller-level tests for the Reborn-owned WebChat v2 HTTP gateway
-//! composition (`webui_serve`).
+//! Caller-level integration tests for the Reborn-owned WebChat v2 HTTP gateway
+//! (`ironclaw_reborn_webui_ingress::webui_v2_app`) with a composition facade.
 //!
 //! These tests drive [`webui_v2_app`] through `tower::ServiceExt::oneshot`
 //! so the middleware stack — bearer auth, `?token=` shim for SSE,
@@ -217,6 +217,7 @@ mod openai_compat_mount_tests {
             .await
             .expect("oneshot");
         assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+        eprintln!("EVIDENCE openai_compat_unauthenticated status=401");
         assert_eq!(workflow.submit_count(), 0);
 
         let authenticated = app
@@ -228,6 +229,7 @@ mod openai_compat_mount_tests {
             .await
             .expect("body");
         let body: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        eprintln!("EVIDENCE openai_compat_authenticated status=200 body={body}");
         assert_eq!(
             body["choices"][0]["message"]["content"],
             "hello through composition"
@@ -2056,9 +2058,9 @@ async fn rate_limit_is_independent_per_caller() {
 /// Every descriptor returned by `webui_v2_routes()` must be reachable on
 /// the composed `webui_v2_app` Router. Sends a request with a bogus
 /// bearer token to each route and asserts the response is anything *but*
-/// 404. A 404 means the descriptor exists but host composition forgot to
+/// 404. A 404 means the descriptor exists but ingress forgot to
 /// mount the matching handler — exactly the regression Lane 7 step 1
-/// ("Mount WebUI v2 routes in production composition") guards against.
+/// ("Mount WebUI v2 routes in production ingress") guards against.
 ///
 /// 401 is the expected status for a mounted route receiving a wrong
 /// token; some routes may also legitimately surface 400/405/413/426 (WS

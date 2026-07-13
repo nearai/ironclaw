@@ -36,10 +36,12 @@ projection cursors stay internal.
 | `/api/v1/responses/{response_id}/cancel` | POST | `ProductWorkflow` | none |
 | `/v1/responses/{response_id}/cancel` | POST | `ProductWorkflow` | none |
 
-All routes require bearer auth and authenticated-caller scope. Host composition
-owns listener binding, bearer/session auth, CORS, body limits, rate limits,
-audit, and mounting. Product/API crates expose descriptors only and must never
-bind sockets or call `axum::serve`.
+All routes require bearer auth and authenticated-caller scope. Reborn
+composition injects workflow/projection state and builds the protected route
+fragment; `ironclaw_reborn_webui_ingress` owns listener binding,
+bearer/session auth, CORS, body limits, rate limits, and mounting. Product/API
+crates expose descriptors only and must never bind sockets or call
+`axum::serve`.
 
 ## Compatibility Rules
 

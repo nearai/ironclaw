@@ -71,7 +71,7 @@ const RATE_LIMIT_PER_SHARD_CAPACITY: NonZeroUsize = match NonZeroUsize::new(512)
     None => unreachable!(),
 };
 
-/// Error returned when [`build_rate_limit_state`] cannot accept a
+/// Error returned when `build_rate_limit_state` cannot accept a
 /// descriptor — typically because the host has shipped a scope that
 /// the gateway doesn't yet implement.
 #[derive(Debug, thiserror::Error)]

@@ -2,7 +2,7 @@
 //!
 //! The WebUI v2 descriptors are the route-policy contract. This module
 //! derives the operator-only request matcher from descriptors so auth
-//! enforcement cannot drift from the route table mounted by composition.
+//! enforcement cannot drift from the route table mounted by ingress.
 
 use std::sync::Arc;
 

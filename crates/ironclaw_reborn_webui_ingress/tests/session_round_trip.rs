@@ -409,7 +409,7 @@ fn build_app() -> (axum::Router, Arc<StubServices>, Arc<InMemorySessionStore>) {
 
 /// Helper: tag a request with `ConnectInfo` so the descriptor-
 /// driven PerIp rate-limit middleware can resolve a peer address.
-/// In production, host composition injects this through
+/// In production, host ingress injects this through
 /// `into_make_service_with_connect_info`; the `oneshot` harness
 /// has to do it explicitly.
 fn with_peer(mut req: Request<Body>) -> Request<Body> {

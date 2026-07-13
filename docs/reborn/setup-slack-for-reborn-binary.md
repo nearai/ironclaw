@@ -121,6 +121,12 @@ overrides only the route enablement gate: `true`/`1` mounts Slack, while
 Slack enablement mounts `POST /webhooks/slack/events`, exposes Slack channel
 setup in WebUI, and makes personal Slack connection available through the Slack
 extension's OAuth configuration flow.
+The Events endpoint remains public and authenticates Slack's signed payload,
+not a WebUI bearer. Workspace setup and channel-route administration are a
+separate operator surface: use the deployment's env operator bearer. An
+accepted SSO/session bearer is intentionally denied with `403`, and deployments
+whose authenticator exposes no operator routes leave those admin endpoints
+unmounted.
 Slack installation ids, team/app ids, the bot token, the signing secret,
 and channel mappings are configured after startup from WebUI channel setup.
 

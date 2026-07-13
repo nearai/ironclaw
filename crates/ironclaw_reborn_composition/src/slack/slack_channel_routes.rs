@@ -767,6 +767,11 @@ pub(crate) fn slack_channel_route_admin_route_mount(
     }
 }
 
+/// Convert Slack channel administration routes into an ingress protected mount.
+///
+/// The caller must attach this with `WebuiServeConfig::with_operator_route_mount`,
+/// never the ordinary protected mount seam, so its descriptors participate in
+/// the operator matcher and non-operator tokens receive `403 Forbidden`.
 pub fn slack_channel_route_admin_protected_mount(
     config: SlackChannelRouteAdminRouteConfig,
 ) -> ProtectedRouteMount {

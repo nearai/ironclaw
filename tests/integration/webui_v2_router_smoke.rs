@@ -7,8 +7,8 @@
 //! suite names.
 //!
 //! Drives the BARE crate router (`webui_v2_router()` over a minimal fake
-//! `RebornServicesApi`), not composition's `webui_v2_app` wrapper — the
-//! wrapper needs the heavier `build_reborn_runtime` tier (named follow-on).
+//! `RebornServicesApi`), not ingress's `webui_v2_app` wrapper — the wrapper
+//! needs the heavier `build_reborn_runtime` tier (named follow-on).
 //! Composition deliberately does not re-export the bare router/state
 //! (facade-only rule), so this suite carries the root DEV-dependency on
 //! `ironclaw_webui_v2` itself — production binaries are unaffected.
@@ -290,7 +290,7 @@ impl RebornServicesApi for MinimalWebuiServices {
 
 /// Router exactly as the crate's contract suite builds it: real
 /// `webui_v2_router`, auth bypassed by injecting the authenticated-caller
-/// `Extension` directly (production composition's bearer middleware
+/// `Extension` directly (production ingress's bearer middleware
 /// constructs it).
 fn smoke_router(services: Arc<MinimalWebuiServices>) -> Router {
     webui_v2_router(WebUiV2State::new(

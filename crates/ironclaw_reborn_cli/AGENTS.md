@@ -58,10 +58,10 @@ themselves feature-gated so default `cargo test -p ironclaw_reborn_cli`
 runs do not regress on a missing feature flag.
 
 The descriptor-level "all v2 routes are actually mounted" regression
-lives at the composition layer in
+lives in the composition integration suite at
 `crates/ironclaw_reborn_composition/tests/webui_v2_serve.rs`
 (`every_webui_v2_descriptor_is_mounted_on_composed_app`), not here —
-that test drives the same `webui_v2_app` the CLI's `serve` hands to
+that test drives the ingress-owned `webui_v2_app` the CLI's `serve` hands to
 `serve_webui_v2`, so a route that's declared in `webui_v2_routes()` but
 forgotten by composition fails the build before the CLI binary smoke
 tests run.

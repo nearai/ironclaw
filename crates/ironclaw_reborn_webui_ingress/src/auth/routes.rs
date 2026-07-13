@@ -1,6 +1,6 @@
 //! HTTP route handlers for the WebChat v2 OAuth login flow.
 //!
-//! Mounted by composition as an UNAUTHENTICATED route group — the
+//! Mounted by ingress as an UNAUTHENTICATED route group — the
 //! browser hits `/auth/providers`, `/auth/login/{provider}`, and
 //! `/auth/callback/{provider}` before it has a session, so the
 //! bearer-auth middleware must not run in front of them.
@@ -158,7 +158,7 @@ const SSO_EXCHANGE_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(60).expect("60 != 
 const SSO_LOGOUT_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(60).expect("60 != 0"); // safety: const-evaluated, literal non-zero
 
 /// Build the unauthenticated axum sub-router that mounts the OAuth
-/// login endpoints plus the route descriptors composition needs to
+/// login endpoints plus the route descriptors ingress needs to
 /// install the per-route policy middleware around them.
 pub fn webui_v2_auth_router(config: OAuthRouterConfig) -> PublicRouteMount {
     let state: RouterStateHandle = Arc::new(RouterState {
@@ -570,7 +570,7 @@ async fn session_exchange_handler(
 /// `POST /auth/logout` — revoke the bearer session and clear it from
 /// the durable session store. Honors `Authorization: Bearer <token>`
 /// only — query-token shim is reserved for the SSE route per the
-/// composition's `extract_bearer_token` policy.
+/// ingress's `extract_bearer_token` policy.
 ///
 /// **Status contract:**
 /// - `204 No Content` when there is no bearer header (idempotent

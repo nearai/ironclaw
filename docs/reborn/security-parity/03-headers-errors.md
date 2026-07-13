@@ -8,7 +8,7 @@ sanitized-auth/validation-error slice; see `01-auth.md` and
   `platform/router.rs` (header layers), with auth-error text in
   `platform/auth.rs`.
 - **v2** applies headers via outer `SetResponseHeaderLayer`s in
-  `crates/ironclaw_reborn_composition/src/webui/webui_serve.rs`; errors are
+  `crates/ironclaw_reborn_webui_ingress/src/webui/serve.rs`; errors are
   sanitized at the `WebuiAuthenticator` boundary (auth), the
   `WebUiV2HttpError` type (`ironclaw_webui_v2/src/error.rs`), and the
   axum `Json` extractor (validation).
@@ -19,17 +19,17 @@ Decision legend as in `01-auth.md`: **Keep** / **Change** / **Beta-break**.
 
 | # | Rule | v1 | v2 | Decision |
 |---|------|----|----|----------|
-| 1 | `X-Content-Type-Options` | `nosniff` (`platform/router.rs:593-597`) | `nosniff` via outer `SetResponseHeaderLayer` (`webui_serve.rs:708`) | **Keep** |
-| 2 | `X-Frame-Options` | `DENY` (`platform/router.rs:598-601`) | `DENY` (`webui_serve.rs:712`) | **Keep** |
-| 3a | CSP — API/JSON routes | `build_csp()` allows CDN/font/img/frame sources for the SPA (`static_files.rs:78-116`) | `default-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'`, applied by the composition layer with `SetResponseHeaderLayer::if_not_present` (`webui_serve.rs:92,716`) | **Change** — strict default for every route that does not set its own CSP (all `/api/webchat/v2/*` JSON routes). Does **not** apply to the HTML document, which sets its own CSP first (3b) |
+| 1 | `X-Content-Type-Options` | `nosniff` (`platform/router.rs:593-597`) | `nosniff` via outer `SetResponseHeaderLayer` (`webui/serve.rs`) | **Keep** |
+| 2 | `X-Frame-Options` | `DENY` (`platform/router.rs:598-601`) | `DENY` (`webui/serve.rs`) | **Keep** |
+| 3a | CSP — API/JSON routes | `build_csp()` allows CDN/font/img/frame sources for the SPA (`static_files.rs:78-116`) | `default-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'`, applied by ingress with `SetResponseHeaderLayer::if_not_present` (`webui/serve.rs`) | **Change** — strict default for every route that does not set its own CSP (all `/api/webchat/v2/*` JSON routes). Does **not** apply to the HTML document, which sets its own CSP first (3b) |
 | 3b | CSP — SPA document (`/v2` index) | `build_csp()` (CDN/font allowances) | `render_index_with_nonce` sets a per-request nonce CSP allowing **three CDN script origins** (`script-src 'self' 'nonce-…' https://esm.sh https://cdn.jsdelivr.net https://cdnjs.cloudflare.com`) plus `style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net` and Google-Fonts `font-src` (`ironclaw_webui_v2_static/src/router.rs:213-225`). Because the composition CSP is `if_not_present`, this document CSP wins on the shell | **Keep** — comparable to v1 (the SPA loads React / Tailwind / fonts from CDNs at runtime; it does **not** bundle them). Hardened over v1 with a per-request nonce + `object-src 'none'`; no `unsafe-eval`, and `script-src` relies on the nonce, not `'unsafe-inline'` |
 | 3c | CSP — wallet-connect popup | (n/a) | `script-src 'self' 'unsafe-inline' https:; style-src 'self' 'unsafe-inline'; connect-src 'self' https:; frame-src 'self' https: data:` (`ironclaw_webui_v2_static/src/router.rs:114-127`) | **Change (looser, scoped)** — the isolated wallet popup deliberately relaxes `script-src` to `'unsafe-inline' https:` so the wallet connector can load remote executors and reach relays; scoped to the single `/v2/wallet-connect` route, not the app shell |
-| 4 | `Referrer-Policy` | (not set by v1 gateway) | `no-referrer` on every response — defense for the SSE `?token=` shim (`webui_serve.rs:728-731`) | **Change** — v2 adds a header v1 lacked |
+| 4 | `Referrer-Policy` | (not set by v1 gateway) | `no-referrer` on every response — defense for the SSE `?token=` shim (`webui/serve.rs`) | **Change** — v2 adds a header v1 lacked |
 | 5 | Headers on error responses | layers applied router-wide | `SetResponseHeaderLayer` is outermost, so 401/413/429 carry the same headers | **Keep** — locked by `static_security_headers_present_on_error_response` |
-| 6 | Sanitized auth failure | generic `"Invalid or missing auth token"` 401; detail logged not echoed (`auth.rs:1127-1133`) | all auth failures collapse to a generic 401; reason never leaked (`WebuiAuthenticator` contract; `webui_serve.rs:107-125`) | **Keep** |
+| 6 | Sanitized auth failure | generic `"Invalid or missing auth token"` 401; detail logged not echoed (`auth.rs:1127-1133`) | all auth failures collapse to a generic 401; reason never leaked (`WebuiAuthenticator` contract; `webui/serve.rs`) | **Keep** |
 | 7 | Sanitized validation error | axum extractor rejection → 4xx | `Json<T>` extractor → 400 on malformed body, before the facade. The body is axum's **standard `JsonRejection`** text (e.g. `Failed to parse the request body as JSON: …line N column M`) — it carries no filesystem paths, Rust type names, tracebacks, or secrets, but it is **not** a fully opaque string (it includes serde's structural parse position, which is not sensitive) | **Keep** — locked by `malformed_request_body_returns_sanitized_client_error` (asserts no path / type-name / traceback / token leak) |
 | 8 | Sanitized OAuth error | v1 OAuth error handling | callback failures redirect to `?login_error=<opaque enum>`; provider/JWT/SessionStore detail logged not echoed (`auth/routes.rs`) | **Keep** — locked by `google_oauth_routes.rs` error-redirect tests |
-| 9 | Panic boundary | `CatchPanicLayer` truncates payload (`platform/router.rs:566-592`) | `CatchPanicLayer::custom(panic_handler)` logs truncated detail (`tracing::error!`, not echoed), returns a generic `500 Internal Server Error`; sits inside the header layer so the 500 still carries the static security headers (`webui_serve.rs:706,926-953`) | **Keep** — locked by `panic_boundary_returns_sanitized_500` (a panicking handler with a sensitive message → 500 whose body is exactly `Internal Server Error`, leaking no path / SQL / token / `::`) |
+| 9 | Panic boundary | `CatchPanicLayer` truncates payload (`platform/router.rs:566-592`) | `CatchPanicLayer::custom(panic_handler)` logs truncated detail (`tracing::error!`, not echoed), returns a generic `500 Internal Server Error`; sits inside the header layer so the 500 still carries the static security headers (`webui/serve.rs`) | **Keep** — locked by `panic_boundary_returns_sanitized_500` (a panicking handler with a sensitive message → 500 whose body is exactly `Internal Server Error`, leaking no path / SQL / token / `::`) |
 
 ## Test coverage
 

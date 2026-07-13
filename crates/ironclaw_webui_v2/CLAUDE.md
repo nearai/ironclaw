@@ -2,23 +2,23 @@
 
 Reborn WebChat v2 HTTP route surface. Off by default — compile in with
 the `webui-v2-beta` Cargo feature. The descriptors and handlers in this
-crate are the route-layer; the gateway-layer (see "Host composition
-still owes" below) is a separate piece host composition must land.
+crate are the route layer; `ironclaw_reborn_webui_ingress` owns the
+gateway layer that exposes it.
 
 ## Purpose
 
 Owns the minimal native WebUI v2 route set on top of
 `ironclaw_product_workflow::RebornServicesApi`. Handlers are the only
-public surface; host composition consumes the
+public surface; host ingress consumes the
 `IngressRouteDescriptor`s returned by `webui_v2_routes()` and mounts
 each handler under the matching pattern after running its own bearer
 auth, CORS, body-limit, and rate-limit middleware.
 
-## Host composition still owes
+## Host ingress contract
 
 Compiling this crate into a binary is not enough to expose the v2
-routes to a browser. Host composition (gateway / app startup) still
-owns:
+routes to a browser. `ironclaw_reborn_webui_ingress::webui_v2_app`
+implements the gateway responsibilities:
 
 1. **Mounting the router.** Call `webui_v2_router(state)` and merge
    the resulting `axum::Router` into the gateway's main router under
@@ -43,9 +43,9 @@ owns:
    policy level (`CorsPolicy::SameOriginOnly`) but enforced in the
    gateway's middleware stack.
 
-Until those four steps land, the routes here compile and lock the
-contract host composition will mount against, but they are not yet
-browser-reachable.
+The standalone `ironclaw-reborn serve` path supplies the composition-built
+`RebornServicesApi` facade and typed product route mounts to that gateway, then
+uses ingress's host-owned listener lifecycle.
 
 ## Route table
 
@@ -141,14 +141,14 @@ plane.
 
 The LLM configuration, operator setup/config/service-control, and extension
 zip-import (`webui.v2.import_extension`, #5499) routes are operator-wide.
-Host composition mounts them only when the authenticator says
+Host ingress mounts them only when the authenticator says
 the deployment has an operator configuration surface, and must still authorize
 each request from the matched token's `operator_webui_config` capability.
 Multi-user session/OIDC authenticators should leave those routes unmounted or
 return non-operator capabilities until an admin role boundary exists. The
 route handlers also reject mounted operator config requests with `403` when
 the injected `WebUiV2Capabilities` lacks `operator_webui_config`, so host
-composition and handler dispatch share the same fail-closed capability
+ingress and handler dispatch share the same fail-closed capability
 boundary. `webui.v2.operator.logs` follows the same operator-capability
 boundary, while non-operator users use `webui.v2.logs` in the v2 surface and
 the separate gateway logs surface in the main Web UI.
@@ -206,7 +206,7 @@ existence oracle.
 `stream_events`. It uses the same `RebornServicesApi` event stream
 surface as SSE and emits each `ProductOutboundEnvelope` as a JSON text
 frame. The descriptor declares
-`WebSocketOriginPolicy::SameOriginRequired`; host composition runs
+`WebSocketOriginPolicy::SameOriginRequired`; host ingress runs
 the same-origin check before the upgrade reaches this crate's
 handler.
 

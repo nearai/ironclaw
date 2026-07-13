@@ -118,7 +118,7 @@ fn too_large_for(policy: ResolvedBodyPolicy) -> Response {
 
 /// Axum middleware enforcing the descriptor's [`BodyLimitPolicy`] for
 /// every matched v2 route. Unmatched paths pass through — the outer
-/// global `RequestBodyLimitLayer` (set in `webui_serve`) still caps
+/// global `RequestBodyLimitLayer` (set in `webui::serve`) still caps
 /// them as defense in depth.
 pub(crate) async fn enforce_body_limit(
     State(state): State<BodyLimitState>,

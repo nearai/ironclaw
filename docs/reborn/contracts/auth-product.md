@@ -17,9 +17,9 @@ login flows.
 This slice is contract-first. `ironclaw_auth` defines Reborn-native vocabulary,
 traits, validation helpers, and fake services. `ironclaw_reborn_composition`
 owns the production filesystem-backed adapter and factory wiring. #3811 adds a
-Reborn composition seam, #3812 adds callback completion handling, #3881 mounts
-the first Reborn-native OAuth start/callback HTTP routes through
-`ironclaw_reborn_composition`, #3882 adds the composition-facing manual-token
+Reborn composition seam, #3812 adds callback completion handling, #3881 adds
+the first Reborn-native OAuth start/callback HTTP route state in
+`ironclaw_reborn_composition` (now mounted by WebUI ingress), #3882 adds the composition-facing manual-token
 secure-submit entrypoint, #3883 adds recovery/selection facade coverage, and
 #3884 adds refresh/cleanup lifecycle contracts. It does not migrate production
 extension setup routes, CLI/setup flows, a production refresh scheduler/HTTP
@@ -491,9 +491,10 @@ pretending cleanup succeeded.
 
 ## Product Facing HTTP Surfaces (#4201)
 
-The Reborn composition mounts host-owned HTTP routes that enter
+Reborn composition builds scoped host-owned route mounts that enter
 `RebornProductAuthServices` (see
-`crates/ironclaw_reborn_composition/src/product_auth/serve/mod.rs`). All mutation
+`crates/ironclaw_reborn_composition/src/product_auth/serve/mod.rs`), and WebUI
+ingress mounts their public/protected halves and enforces descriptor policy. All mutation
 routes share the same `LocalGateway` + `BearerToken` + per-caller body and
 rate-limit posture as the original `oauth/start` route and derive
 `AuthProductScope` from the authenticated caller, never from caller-supplied
@@ -562,8 +563,8 @@ Rules:
 
 | Product behavior | V1 evidence path | Reborn owner | First-slice status |
 | --- | --- | --- | --- |
-| Extension/provider OAuth start | `src/extensions/manager.rs`, `src/auth/mod.rs` | `AuthFlowManager`, `CredentialSetupService`, `AuthProviderClient` | Reborn-native route mounted in composition; production provider wiring deferred |
-| Hosted OAuth callback | `src/channels/web/features/oauth/mod.rs` | `RebornProductAuthServices::handle_oauth_callback`, `ProductAuthTurnGateResumeDispatcher` for turn-gate resume continuations | Reborn-native route mounted in composition; production provider wiring deferred |
+| Extension/provider OAuth start | `src/extensions/manager.rs`, `src/auth/mod.rs` | `AuthFlowManager`, `CredentialSetupService`, `AuthProviderClient` | Composition builds a scoped Reborn-native route mount; ingress mounts its protected half; production provider wiring deferred |
+| Hosted OAuth callback | `src/channels/web/features/oauth/mod.rs` | `RebornProductAuthServices::handle_oauth_callback`, `ProductAuthTurnGateResumeDispatcher` for turn-gate resume continuations | Composition builds a scoped Reborn-native route mount; ingress mounts its public half; production provider wiring deferred |
 | Local OAuth callback | `src/extensions/manager.rs`, `src/auth/oauth.rs` | `AuthFlowManager`, `AuthProviderClient` | Inventory only |
 | Manual token entry from chat | `src/agent/agent_loop.rs`, `src/agent/thread_ops.rs` | `AuthInteractionService` secure submit via `RebornProductAuthServices::{request_manual_token_setup,submit_manual_token}` | Reborn facade ready; route migration deferred |
 | Engine/gate auth credential submit | `src/bridge/router.rs` | `AuthInteractionService`, `CredentialSetupService`, typed continuation | Contracted; migration deferred |

@@ -313,7 +313,7 @@ impl RebornServicesApi for StubServices {
 /// Tag a request with a specific peer address. The per-IP rate limiter
 /// keys on the peer **IP** (port is ignored), so tests that need
 /// distinct buckets must vary the IP octets, not just the port. Host
-/// composition injects this via `into_make_service_with_connect_info`;
+/// ingress injects this via `into_make_service_with_connect_info`;
 /// the `oneshot` harness has to do it explicitly.
 pub fn with_peer_addr(mut req: Request<Body>, addr: SocketAddr) -> Request<Body> {
     req.extensions_mut().insert(ConnectInfo(addr));

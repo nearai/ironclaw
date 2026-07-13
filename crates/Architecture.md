@@ -292,7 +292,8 @@ authority decision.
 ```mermaid
 flowchart TD
     CLI["ironclaw_reborn_cli\nUX shell"]
-    WebUI["ironclaw_webui_v2 /\nweb ingress"]
+    WebUI["ironclaw_webui_v2\nhandlers + descriptors"]
+    WebIngress["ironclaw_reborn_webui_ingress\ngateway + listener"]
     Runtime["ironclaw_reborn_composition::RebornRuntime\nproduct-facing handle"]
     Factory["build_reborn_runtime /\nbuild_reborn_services"]
     Coordinator["ironclaw_turns::TurnCoordinator\nadapter-safe turn API"]
@@ -310,7 +311,8 @@ flowchart TD
     Events["ironclaw_events + projections\nredacted events and streams"]
 
     CLI --> Runtime
-    WebUI --> Runtime
+    WebUI --> WebIngress
+    WebIngress --> Runtime
     Runtime --> Factory
     Runtime --> Threads
     Runtime --> Coordinator
@@ -338,6 +340,7 @@ flowchart TD
 | Crate | Owns | Does not own |
 | --- | --- | --- |
 | `ironclaw_reborn_composition` | Product-facing runtime assembly, facade handles, local/prod profiles, WebUI/runtime integration, projection services. | Low-level policy internals or direct product traffic bypassing Reborn adapters. |
+| `ironclaw_reborn_webui_ingress` | WebChat v2 router composition, typed route mounts, bearer/operator policy middleware, security headers, listener lifecycle. | Product workflow, runtime assembly, provider-specific route state, transcript storage. |
 | `ironclaw_runner` | Trusted worker-side control plane: claiming/heartbeat scheduler (`TurnRunScheduler`), per-run executor (`RebornTurnRunExecutor`), concrete loop driver registry, planned/text driver adapters, loop host factory, and exit-applier wiring. | Loop strategy internals, neutral turn contracts, product idempotency/binding policy, or host-runtime service implementation. |
 | `ironclaw_turns` | Turn/run IDs, scopes, coordinator API, runner transition ports, state machine contracts, loop-exit DTOs, run profiles, checkpoint contracts. | Runtime dispatch, product adapters, raw prompts/tool inputs/secrets. |
 | `ironclaw_agent_loop` | Canonical executor, loop families, sealed strategy composition, resumable loop state. | Host services, runtime lanes, product transport, provider auth. |

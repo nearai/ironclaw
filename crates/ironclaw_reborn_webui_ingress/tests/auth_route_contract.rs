@@ -696,7 +696,7 @@ async fn cookie_session_not_honored_on_protected_route() {
 
 /// `GET /api/webchat/v2/llm/providers` with no auth. Whether this route
 /// exists at all depends on the authenticator's
-/// `allows_operator_webui_config()`; sending no credential lets us read
+/// `mounts_operator_webui_config_routes()`; sending no credential lets us read
 /// the verdict as 401 (mounted, behind bearer auth) vs 404 (not
 /// mounted) without invoking the facade.
 fn llm_providers_unauthenticated() -> Request<Body> {

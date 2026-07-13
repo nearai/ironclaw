@@ -20,7 +20,7 @@
 ## Do Not Move In Here
 
 - Bearer-token validation, CSRF/origin enforcement, body/rate-limit
-  middleware. Those live in host composition, gated by the
+  middleware. Those live in `ironclaw_reborn_webui_ingress`, gated by the
   `IngressPolicy` the descriptor declares.
 - Direct access to dispatcher, `HostRuntime`, run-state, DB stores,
   capability hosts, or any runtime lane.

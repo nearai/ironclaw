@@ -10,8 +10,9 @@ This crate is a product/API route surface, not a host runtime:
   feature-gated axum route fragments for host composition.
 - It must not bind sockets, call `axum::serve`, read v1 gateway state, or proxy
   directly to `ironclaw_llm`.
-- Host composition owns listener binding, bearer/session auth, CORS/origin,
-  body/rate limits, mounting, audit, and product workflow wiring.
+- Host composition wires product workflow/projection state and builds the route
+  fragment; `ironclaw_reborn_webui_ingress` owns listener binding,
+  bearer/session auth, CORS/origin, body/rate limits, and mounting.
 - Chat, Responses, and streaming paths route through the channel-neutral
   `ProductWorkflow` plus projection-reader/streamer ports rather than
   recreating v1 `/v1/chat/completions` LLM proxy behavior.
@@ -41,9 +42,10 @@ The `refs` module owns the OpenAI-compatible identity contract:
 
 With `openai-compat-beta`, the default router remains fail-closed unless host
 composition injects `OpenAiCompatRouterState::with_chat_completions(...)`.
-`ironclaw_reborn_composition::build_openai_compat_route_mount` performs that
-host wiring for `ironclaw-reborn serve` by mounting the router inside the
-protected Reborn route stack. The injected `OpenAiChatCompletionsWorkflow`
+`ironclaw_reborn_composition::build_openai_compat_route_mount` performs the
+workflow/state wiring for `ironclaw-reborn serve`; the CLI hands the returned
+fragment to `ironclaw_reborn_webui_ingress`'s ordinary protected route stack.
+The injected `OpenAiChatCompletionsWorkflow`
 handles Chat Completions create and optional projection-backed SSE streaming:
 
 - `POST /v1/chat/completions` parses the OpenAI-compatible DTO, reserves an

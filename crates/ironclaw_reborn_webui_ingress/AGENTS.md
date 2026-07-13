@@ -31,7 +31,7 @@ ingress owns how those are exposed over HTTP.
 
 - `ironclaw_host_api` (identity types: `TenantId`, `UserId`)
 - `ironclaw_product_adapters` (optional, `openai-compat-beta`
-  authenticated-caller evidence only)
+  host-auth evidence minting only)
 - `ironclaw_product_workflow` (`RebornServicesApi` and authenticated
   WebUI caller contract)
 - `ironclaw_reborn_openai_compat` (optional, `openai-compat-beta`

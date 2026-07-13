@@ -173,12 +173,19 @@ impl std::fmt::Debug for RebornWebuiBundle {
 
 #[cfg(feature = "webui-v2-beta")]
 impl RebornWebuiBundle {
+    /// Project the composition-owned service facade into the narrow bundle
+    /// consumed by the ingress-owned gateway.
     pub fn gateway_bundle(&self) -> WebuiGatewayBundle {
         WebuiGatewayBundle {
             api: Arc::clone(&self.api),
         }
     }
 
+    /// Build the mixed public/protected product-auth route mount for ingress.
+    ///
+    /// Returns `Ok(None)` when product auth is unavailable. The supplied route
+    /// scope must exactly match the tenant/default-agent/default-project that
+    /// ingress stamps onto authenticated callers; a mismatch fails closed.
     pub fn product_auth_route_mount(
         &self,
         config: ProductAuthWebuiRouteMountConfig,
@@ -219,6 +226,8 @@ impl RebornWebuiBundle {
 }
 
 #[cfg(feature = "webui-v2-beta")]
+/// Errors raised while projecting composition-owned product-auth state into an
+/// ingress route mount.
 #[derive(Debug, thiserror::Error)]
 pub enum ProductAuthWebuiRouteMountError {
     #[error(
@@ -228,6 +237,7 @@ pub enum ProductAuthWebuiRouteMountError {
 }
 
 #[cfg(feature = "webui-v2-beta")]
+/// Host scope and optional provider bindings used to build product-auth routes.
 pub struct ProductAuthWebuiRouteMountConfig {
     tenant_id: TenantId,
     default_agent_id: Option<AgentId>,
@@ -242,6 +252,7 @@ pub struct ProductAuthWebuiRouteMountConfig {
 
 #[cfg(feature = "webui-v2-beta")]
 impl ProductAuthWebuiRouteMountConfig {
+    /// Create route state for the exact scope ingress will stamp onto callers.
     pub fn new(
         tenant_id: TenantId,
         default_agent_id: Option<AgentId>,
@@ -259,12 +270,14 @@ impl ProductAuthWebuiRouteMountConfig {
         }
     }
 
+    /// Enable the static Google product-auth OAuth routes.
     pub fn with_google_oauth(mut self, config: GoogleOAuthRouteConfig) -> Self {
         self.google_oauth = Some(config);
         self
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
+    /// Enable Slack personal OAuth using the lazily populated setup slot.
     pub fn with_slack_personal_oauth(
         mut self,
         slot: crate::slack::slack_setup::SlackPersonalSetupServiceSlot,
@@ -274,6 +287,7 @@ impl ProductAuthWebuiRouteMountConfig {
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
+    /// Attach the host-owned Slack identity-binding service used after OAuth.
     pub fn with_slack_personal_oauth_binding(
         mut self,
         config: crate::product_auth::serve::SlackPersonalOAuthBindingConfig,

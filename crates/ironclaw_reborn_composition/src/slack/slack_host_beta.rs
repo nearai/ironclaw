@@ -410,7 +410,12 @@ pub enum SlackHostBetaBuildError {
 
 #[non_exhaustive]
 pub struct SlackHostBetaMounts {
+    /// Public Slack Events API webhook mount. Attach outside bearer auth with
+    /// `WebuiServeConfig::with_public_route_mount`.
     pub events: PublicRouteMount,
+    /// State for operator-only Slack workspace/channel administration routes.
+    /// Convert with `slack_channel_route_admin_protected_mount` and attach via
+    /// `WebuiServeConfig::with_operator_route_mount`.
     pub channel_routes: SlackChannelRouteAdminRouteConfig,
     pub(crate) tenant_id: TenantId,
     pub(crate) personal_connection_scope: Option<SlackPersonalConnectionScope>,
@@ -1586,6 +1591,10 @@ mod tests {
             .await
             .expect("body collects")
             .to_bytes();
+        eprintln!(
+            "EVIDENCE slack_events_public status=200 body={}",
+            String::from_utf8_lossy(&bytes)
+        );
         assert!(String::from_utf8_lossy(&bytes).contains("reborn-slack-ok"));
 
         runtime.shutdown().await.expect("runtime shuts down");
@@ -2328,6 +2337,16 @@ mod tests {
             .await
             .expect("admin route responds");
         assert_eq!(session_admin_response.status(), StatusCode::FORBIDDEN);
+        let session_admin_body = axum::body::to_bytes(
+            session_admin_response.into_body(),
+            64 * 1024,
+        )
+        .await
+        .expect("session admin response body");
+        eprintln!(
+            "EVIDENCE slack_admin_session status=403 body={}",
+            String::from_utf8_lossy(&session_admin_body)
+        );
 
         let response = app
             .oneshot(
@@ -2420,6 +2439,7 @@ mod tests {
             .await
             .expect("empty list body");
         let body: serde_json::Value = serde_json::from_slice(&body).expect("empty list json");
+        eprintln!("EVIDENCE slack_admin_operator status=200 body={body}");
         assert_eq!(body["routes"], serde_json::json!([]));
         assert_eq!(body["next_cursor"], serde_json::Value::Null);
 
@@ -2729,6 +2749,13 @@ mod tests {
             .expect("route responds");
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let hidden_body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("hidden route response body");
+        eprintln!(
+            "EVIDENCE slack_admin_hidden status=404 body={}",
+            String::from_utf8_lossy(&hidden_body)
+        );
 
         runtime.shutdown().await.expect("runtime shuts down");
     }

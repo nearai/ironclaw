@@ -2,14 +2,13 @@
 //!
 //! The `ironclaw_webui_v2` crate ships handlers that dispatch through
 //! `RebornServicesApi` but is deliberately unaware of bearer tokens,
-//! OIDC, CORS, body limits, and static security headers — its CLAUDE.md
-//! lists these as "host composition still owes". This module is the
+//! OIDC, CORS, body limits, and static security headers. This module is the
 //! host-ingress home for that work: it exposes [`webui_v2_app`], the
 //! fully-composed axum [`Router`] (auth + rate limit + CORS + body
 //! limit + security headers + v2 route surface). Tests drive it
 //! through `tower::ServiceExt::oneshot`; the standalone
-//! `ironclaw-reborn serve` subcommand (on a follow-up PR) consumes the
-//! same `Router` and owns the listener lifecycle on the host side.
+//! `ironclaw-reborn serve` subcommand consumes the same [`Router`] and
+//! delegates its listener lifecycle to this crate's host-owned serve loop.
 //!
 //! ### Why no serve-and-bind helper here
 //!
@@ -20,7 +19,7 @@
 //! feature. Substrate-only callers (v1 `AppBuilder`, diagnostic
 //! harnesses) stay off the feature and carry no HTTP surface code.
 //!
-//! The composition is intentionally Reborn-owned and does **not** share
+//! The gateway is intentionally Reborn-owned and does **not** share
 //! middleware with the v1 gateway under `/src/channels/web/`. Path A in
 //! `docs/reborn/how-to-port-channel-to-reborn.md` requires native
 //! surfaces to keep host auth host-owned and route/body/CORS security
@@ -73,14 +72,15 @@ pub(crate) const DEFAULT_WEBUI_CSP: &str =
 
 const REBORN_HEALTH_PATH: &str = "/api/health";
 
-/// Authentication contract the Reborn binary supplies. The composition
-/// layer is intentionally agnostic about WHERE bearer tokens come from
+/// Authentication contract the Reborn host supplies. The gateway is
+/// intentionally agnostic about where bearer tokens come from
 /// — env vars, the host's `SecretStore`, OIDC JWTs verified by the
 /// caller — so the same `webui_v2_app` works for the CLI binary and
 /// for any future ingress fronting the same routes.
 ///
-/// Implementations return `Some(UserId)` on success and `None` to
-/// reject. Concrete failure reasons stay inside the implementation
+/// Implementations return a [`WebuiAuthentication`] containing the verified
+/// user and the capabilities of that exact token, or `None` to reject it.
+/// Concrete failure reasons stay inside the implementation
 /// (the gateway emits a generic 401), per the
 /// `docs/reborn/how-to-port-channel-to-reborn.md` Path A guidance that
 /// auth evidence is host-owned and never leaks to clients.
@@ -119,12 +119,14 @@ pub trait WebuiAuthenticator: Send + Sync + 'static {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Verified WebUI identity and the capabilities granted to this exact bearer.
 pub struct WebuiAuthentication {
     pub user_id: UserId,
     pub capabilities: WebUiV2Capabilities,
 }
 
 impl WebuiAuthentication {
+    /// Construct an authentication result with explicit token capabilities.
     pub fn new(user_id: UserId, capabilities: WebUiV2Capabilities) -> Self {
         Self {
             user_id,
@@ -132,10 +134,12 @@ impl WebuiAuthentication {
         }
     }
 
+    /// Construct a regular authenticated user without operator capabilities.
     pub fn user(user_id: UserId) -> Self {
         Self::new(user_id, WebUiV2Capabilities::default())
     }
 
+    /// Construct a trusted operator authentication result.
     pub fn operator(user_id: UserId) -> Self {
         Self::new(
             user_id,
@@ -268,10 +272,8 @@ pub trait PublicRouteDrain: Send + Sync {
     fn drain<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 }
 
-/// A host-supplied public sub-router plus the descriptors composition
-/// needs to install the per-route policy middleware around it.
-/// Mirrors the shape `ProductAuthRouteMount` uses internally so the
-/// two public surfaces ride on the same machinery.
+/// A host-supplied public sub-router plus the descriptors ingress needs to
+/// install the per-route policy middleware around it.
 #[derive(Clone)]
 pub struct PublicRouteMount {
     pub router: Router,
@@ -279,8 +281,8 @@ pub struct PublicRouteMount {
     pub drain: Option<Arc<dyn PublicRouteDrain>>,
 }
 
-/// A host-supplied protected sub-router plus the descriptors composition
-/// needs to install the shared per-route policy middleware around it.
+/// A host-supplied protected sub-router plus the descriptors ingress needs to
+/// install the shared per-route policy middleware around it.
 #[derive(Clone)]
 pub struct ProtectedRouteMount {
     pub router: Router,
@@ -299,6 +301,7 @@ pub struct WebuiRouteMount {
 }
 
 impl WebuiRouteMount {
+    /// Build a mixed route group. At least one router should be present.
     pub fn new(
         public: Option<Router>,
         protected: Option<Router>,
@@ -313,6 +316,7 @@ impl WebuiRouteMount {
 }
 
 impl ProtectedRouteMount {
+    /// Pair an authenticated sub-router with all descriptors it implements.
     pub fn new(router: Router, descriptors: Vec<IngressRouteDescriptor>) -> Self {
         Self {
             router,
@@ -322,6 +326,7 @@ impl ProtectedRouteMount {
 }
 
 impl PublicRouteMount {
+    /// Pair an unauthenticated sub-router with all descriptors it implements.
     pub fn new(router: Router, descriptors: Vec<IngressRouteDescriptor>) -> Self {
         Self {
             router,
@@ -330,6 +335,7 @@ impl PublicRouteMount {
         }
     }
 
+    /// Register work that must drain during graceful host shutdown.
     pub fn with_drain(mut self, drain: Arc<dyn PublicRouteDrain>) -> Self {
         self.drain = Some(drain);
         self
@@ -337,6 +343,7 @@ impl PublicRouteMount {
 }
 
 #[derive(Clone, Default)]
+/// Aggregate graceful-shutdown hooks collected from public route mounts.
 pub struct PublicRouteDrains {
     drains: Arc<Vec<Arc<dyn PublicRouteDrain>>>,
 }
@@ -348,10 +355,12 @@ impl PublicRouteDrains {
         }
     }
 
+    /// Whether no mounted public route registered a drain hook.
     pub fn is_empty(&self) -> bool {
         self.drains.is_empty()
     }
 
+    /// Await every registered public-route drain in mount order.
     pub async fn drain(&self) {
         for drain in self.drains.iter() {
             drain.drain().await;
@@ -359,12 +368,14 @@ impl PublicRouteDrains {
     }
 }
 
+/// Composed WebUI router plus lifecycle hooks owned by mounted public routes.
 pub struct WebuiV2App {
     router: Router,
     public_route_drains: PublicRouteDrains,
 }
 
 impl WebuiV2App {
+    /// Split the app into the router to serve and hooks to drain on shutdown.
     pub fn into_parts(self) -> (Router, PublicRouteDrains) {
         (self.router, self.public_route_drains)
     }
@@ -465,7 +476,7 @@ impl WebuiServeConfig {
     }
 
     /// Set the canonical host for WebSocket same-origin checks. See
-    /// [`Self::canonical_host`] for why this is more robust than
+    /// `canonical_host` for why this is more robust than
     /// trusting the request's `Host` header.
     pub fn with_canonical_host(mut self, host: impl Into<String>) -> Self {
         self.canonical_host = Some(host.into());
@@ -507,13 +518,13 @@ impl WebuiServeConfig {
             .collect()
     }
 
-    /// Override [`Self::max_body_bytes`] in a builder-style.
+    /// Override `max_body_bytes` in a builder-style.
     pub fn with_max_body_bytes(mut self, bytes: usize) -> Self {
         self.max_body_bytes = bytes;
         self
     }
 
-    /// Override [`Self::csp_header`] in a builder-style. The supplied
+    /// Override `csp_header` in a builder-style. The supplied
     /// string is parsed into a `HeaderValue`; invalid values surface
     /// as [`WebuiServeConfigError::InvalidCspHeader`].
     pub fn with_csp_header_str(mut self, csp: &str) -> Result<Self, WebuiServeConfigError> {
@@ -535,12 +546,10 @@ pub enum WebuiServeConfigError {
     InvalidCspHeader { reason: String },
 }
 
-/// Errors raised while composing the WebChat v2 gateway `Router`.
+/// Errors raised while composing the WebChat v2 gateway [`Router`].
 ///
-/// No I/O variant: this crate sits in the Reborn product/API boundary
-/// and never binds a listener or drives the axum serve loop. Host
-/// composition owns the I/O lifecycle and surfaces its own errors
-/// there.
+/// Listener binding and serve-loop errors are reported separately through
+/// [`crate::RebornWebuiServeError`].
 #[derive(Debug, thiserror::Error)]
 pub enum WebuiServeError {
     #[error("invalid CSP header value: {0}")]
@@ -557,7 +566,7 @@ pub enum WebuiServeError {
 /// - outer global request body limit (defense in depth for unmatched paths)
 /// - per-route body limit, resolved from the
 ///   WebUI v2 descriptors plus product-auth descriptors when mounted
-///   (16 KiB for create_thread/product-auth start, 1 MiB for
+///   (16 KiB for create_thread/product-auth start, 14 MiB for
 ///   send_message, 4 KiB for cancel_run / resolve_gate, NoBody for
 ///   timeline / SSE / product-auth callback)
 /// - bearer auth (+ `?token=` on the v2 SSE path) → injects
@@ -568,14 +577,10 @@ pub enum WebuiServeError {
 ///   callback is per peer IP)
 /// - WebChat v2 route set from `ironclaw_webui_v2::webui_v2_router`
 ///
-/// The returned [`Router`] is the seam between this composition crate
-/// and host-owned ingress code: tests drive it via
-/// `tower::ServiceExt::oneshot`, and the standalone `ironclaw-reborn
-/// serve` subcommand on a follow-up PR will hand it to axum's serve
-/// loop from a host-owned listener. This crate intentionally never
-/// binds a socket or drives the serve loop itself — that boundary is
-/// enforced by `reborn_product_api_crates_do_not_bind_http_ingress`
-/// in `ironclaw_architecture`.
+/// Composition supplies [`WebuiGatewayBundle`] and typed route mounts; this
+/// ingress crate owns the resulting router and the separate
+/// [`crate::serve_webui_v2`] listener lifecycle. Tests can drive the router via
+/// `tower::ServiceExt::oneshot` without binding a socket.
 pub fn webui_v2_app(
     bundle: WebuiGatewayBundle,
     config: WebuiServeConfig,

@@ -65,7 +65,7 @@ impl std::fmt::Display for SessionId {
 /// `HashMap` lookup key in the in-memory impl (or its hash in a
 /// durable backend) and is deliberately ABSENT from this struct so
 /// `Debug` / `Serialize` impls cannot accidentally surface live
-/// bearer material. The non-secret [`SessionId`] is a UUID stamped
+/// bearer material. The non-secret `SessionId` is a UUID stamped
 /// at creation; safe to log and audit-trace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRecord {

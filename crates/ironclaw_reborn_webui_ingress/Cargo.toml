@@ -18,6 +18,7 @@ default = []
 webui-v2-beta = ["ironclaw_webui_v2/webui-v2-beta"]
 openai-compat-beta = [
     "dep:ironclaw_product_adapters",
+    "ironclaw_product_adapters/host-auth-mint",
     "dep:ironclaw_reborn_openai_compat",
     "ironclaw_reborn_openai_compat/openai-compat-beta",
 ]

@@ -15,6 +15,9 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Whether the product facade advertises Slack's operator channel-management
+/// strategy. This does not authorize or mount HTTP routes; ingress separately
+/// gates operator mounts and each matched token's capability.
 pub enum SlackOperatorRouteVisibility {
     Hidden,
     Visible,
@@ -27,6 +30,10 @@ enum SlackConnectableChannelVisibility {
     PersonalOAuthAndAdminChannelManagement,
 }
 
+/// Compose WebUI product services with Slack connection choices and outbound
+/// targets. `operator_route_visibility` controls only the advertised product
+/// strategy; callers must attach Slack admin HTTP routes through ingress's
+/// operator-only mount seam.
 pub fn build_webui_services_with_slack_host_beta_mounts(
     runtime: &RebornRuntime,
     event_stream: Option<Arc<dyn ProjectionStream>>,

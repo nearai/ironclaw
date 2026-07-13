@@ -17,6 +17,10 @@ v1 secrets / settings / DB.
 | `webui_v2_app(bundle, config)` | Compose the WebChat v2 router, auth, route mounts, descriptor policy middleware, static assets, and security headers |
 | `serve_webui_v2(opts)` | Bind a `TcpListener` + run `axum::serve` with graceful shutdown |
 | `RebornWebuiServeOptions` | Owner-supplied input (addr, router, shutdown receiver) |
+| `WebuiGatewayBundle` | Narrow ingress input containing the composition-built `RebornServicesApi` facade; product-specific routes travel as typed mounts instead of entering the bundle |
+| `WebuiRouteMount` | Optional public and protected routers sharing one descriptor set; used by composition-built product-auth routes |
+| `ProtectedRouteMount` | Authenticated router + descriptors for ordinary protected product surfaces such as OpenAI-compatible routes |
+| `WebuiServeConfig::with_operator_route_mount` | Operator-only protected mount: included only when the authenticator exposes operator routes, with its descriptors added to the operator matcher so accepted non-operator tokens receive `403` |
 | `EnvBearerAuthenticator` | Single-token `WebuiAuthenticator` for the standalone CLI / local dev; accepted tokens map to operator WebUI capabilities |
 | `SessionStore` trait | Pluggable session storage; durable impl is host's; `InMemorySessionStore` for local dev / tests |
 | `SessionAuthenticator` | `WebuiAuthenticator` that resolves bearer tokens through a `SessionStore`; accepted tokens map to non-operator WebUI capabilities |
@@ -29,6 +33,20 @@ v1 secrets / settings / DB.
 | `OAuthRouterConfig` | Tenant + `SessionStore` + `UserDirectory` + provider list + base URL |
 | `UserDirectory` trait | Host-supplied mapping from `(provider, OAuthUserProfile)` to `UserId` |
 | `EmailUserDirectory` | Local-dev default impl (verified email → `UserId`); gated on `dev-in-memory-session` |
+
+Ordinary protected mounts require any accepted bearer but do not imply operator
+authority. Operator mounts have two independent fail-closed gates: the
+authenticator must opt into mounting the route family through
+`mounts_operator_webui_config_routes()`, and the bearer accepted for the
+request must carry `operator_webui_config`. This distinction lets a composite
+env-token-plus-session authenticator expose operator routes while returning
+`403` to an accepted SSO/session token. An authenticator that does not expose
+operator routes leaves them unmounted (`404`).
+
+Slack follows all three mount classes: Events API is a public mount,
+personal/product-auth routes use the mixed route mount, and workspace/channel
+administration must use the operator mount. Never attach Slack administration
+through the ordinary protected seam.
 
 ## Why the OAuth login router lives here
 
@@ -164,6 +182,12 @@ pub trait OAuthProvider: Send + Sync + 'static {
 
 ## Test layout
 
+- `src/webui/{serve,route_match,rate_limit,body_limit,operator_auth,ws_origin}.rs`
+  — unit coverage for router composition, descriptor matching, policy
+  enforcement, operator authorization, and WebSocket origins.
+- `tests/{auth_route_contract,network_limits_contract,headers_errors_contract}.rs`
+  — caller-level ingress contracts for authentication, limits, and sanitized
+  security headers/errors.
 - `src/{auth, oidc, session}/tests` — unit tests per module
   (provider URL building, PKCE math, ID-token decode, pending
   store, redirect sanitization, session lookup).
