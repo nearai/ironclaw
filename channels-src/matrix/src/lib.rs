@@ -14,6 +14,13 @@ use serde::Deserialize;
 
 const WEBHOOK_PATH: &str = "/webhook/matrix";
 const MIN_POLL_INTERVAL_MS: u32 = 30_000;
+const SUPPORTED_CALLBACKS: &[&str] = &[
+    "on_start",
+    "on_http_request",
+    "on_poll",
+    "on_status",
+    "on_shutdown",
+];
 
 #[derive(Debug, Deserialize)]
 struct MatrixConfig {
@@ -100,13 +107,19 @@ impl Guest for MatrixChannel {
     }
 
     fn on_respond(_response: AgentResponse) -> Result<(), String> {
-        Err("Matrix outbound send is not implemented in the R001 skeleton".to_string())
+        Err(unsupported_callback_error(
+            "on_respond",
+            "Matrix outbound send is not implemented in the R001 skeleton",
+        ))
     }
 
     fn on_status(_update: StatusUpdate) {}
 
     fn on_broadcast(_user_id: String, _response: AgentResponse) -> Result<(), String> {
-        Err("Matrix broadcast is not implemented in the R001 skeleton".to_string())
+        Err(unsupported_callback_error(
+            "on_broadcast",
+            "Matrix broadcast is not implemented in the R001 skeleton",
+        ))
     }
 
     fn on_shutdown() {
@@ -131,6 +144,15 @@ fn json_response(status: u16, value: serde_json::Value) -> OutgoingHttpResponse 
         headers_json: serde_json::json!({"content-type": "application/json"}).to_string(),
         body: value.to_string().into_bytes(),
     }
+}
+
+fn unsupported_callback_error(callback: &str, reason: &str) -> String {
+    format!(
+        "{} unsupported: {}. Supported callbacks: {}",
+        callback,
+        reason,
+        SUPPORTED_CALLBACKS.join(", ")
+    )
 }
 
 export!(MatrixChannel);
@@ -269,6 +291,25 @@ mod tests {
             <MatrixChannel as Guest>::on_broadcast("@alice:example.org".to_string(), response)
                 .expect_err("broadcast should not silently succeed");
         assert!(broadcast_err.contains("Matrix broadcast is not implemented"));
+    }
+
+    #[test]
+    fn supported_callbacks_are_declared_as_non_empty_array() {
+        assert!(!SUPPORTED_CALLBACKS.is_empty());
+        assert_eq!(SUPPORTED_CALLBACKS[0], "on_start");
+        assert!(SUPPORTED_CALLBACKS.contains(&"on_http_request"));
+        assert!(SUPPORTED_CALLBACKS.contains(&"on_poll"));
+    }
+
+    #[test]
+    fn unsupported_callback_errors_include_callback_name_and_supported_callbacks() {
+        let err = unsupported_callback_error("on_respond", "not implemented");
+
+        assert!(err.contains("on_respond"));
+        assert!(err.contains("not implemented"));
+        assert!(err.contains("Supported callbacks"));
+        assert!(err.contains("on_start"));
+        assert!(err.contains("on_http_request"));
     }
 
     #[test]
