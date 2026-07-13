@@ -359,12 +359,19 @@ impl RebornLocalExtensionManagementPort {
             base.resolved(),
             active_package,
         );
+        // Durable per-installation `[channel.config]` values ride the
+        // published record so `ChannelAdapter::activate` sees them.
+        let config = self
+            .installation_store
+            .channel_config(extension_id)
+            .await
+            .map_err(map_extension_installation_error)?;
         let record = ironclaw_extension_host::InstallationRecord {
             extension_id: extension_id.as_str().to_string(),
             installation_id: installation_id.as_str().to_string(),
             state: ironclaw_extension_host::InstallationState::Installed,
             resolved: Arc::new(effective),
-            config: Vec::new(),
+            config,
             last_error: None,
         };
         host.install(record).await.map_err(generic_host_error)?;

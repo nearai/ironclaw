@@ -535,6 +535,29 @@ pub trait ExtensionInstallationStore: Send + Sync {
         installation_id: &ExtensionInstallationId,
         health: ExtensionHealthSnapshot,
     ) -> Result<(), ExtensionInstallationError>;
+
+    /// Non-secret `[channel.config]` values for the extension's installation,
+    /// keyed by field handle. Stores without durable channel-config support
+    /// report empty (config completeness then derives as "nothing provided").
+    async fn channel_config(
+        &self,
+        _extension_id: &ExtensionId,
+    ) -> Result<Vec<(String, String)>, ExtensionInstallationError> {
+        Ok(Vec::new())
+    }
+
+    /// Replace the stored non-secret `[channel.config]` values for the
+    /// extension's installation. Fails closed on stores without durable
+    /// channel-config support so a save can never silently vanish.
+    async fn set_channel_config(
+        &self,
+        _extension_id: &ExtensionId,
+        _values: Vec<(String, String)>,
+    ) -> Result<(), ExtensionInstallationError> {
+        Err(ExtensionInstallationError::InvalidInstallation {
+            reason: "channel config persistence is not supported by this store".to_string(),
+        })
+    }
 }
 
 #[async_trait]
@@ -627,6 +650,21 @@ where
     ) -> Result<(), ExtensionInstallationError> {
         (**self).update_health(installation_id, health).await
     }
+
+    async fn channel_config(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<Vec<(String, String)>, ExtensionInstallationError> {
+        (**self).channel_config(extension_id).await
+    }
+
+    async fn set_channel_config(
+        &self,
+        extension_id: &ExtensionId,
+        values: Vec<(String, String)>,
+    ) -> Result<(), ExtensionInstallationError> {
+        (**self).set_channel_config(extension_id, values).await
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -638,6 +676,24 @@ pub struct InMemoryExtensionInstallationStore {
 struct InMemoryState {
     manifests: HashMap<ExtensionId, ExtensionManifestRecord>,
     installations: HashMap<ExtensionInstallationId, ExtensionInstallation>,
+    /// Non-secret `[channel.config]` values per extension installation,
+    /// keyed by field handle.
+    channel_configs: HashMap<ExtensionId, Vec<(String, String)>>,
+}
+
+impl InMemoryExtensionInstallationStore {
+    /// Every stored channel config, sorted by extension id (deterministic
+    /// snapshot order for durable stores that wrap this one).
+    pub async fn channel_configs(&self) -> Vec<(ExtensionId, Vec<(String, String)>)> {
+        let inner = self.inner.read().await;
+        let mut configs: Vec<_> = inner
+            .channel_configs
+            .iter()
+            .map(|(extension_id, values)| (extension_id.clone(), values.clone()))
+            .collect();
+        configs.sort_by(|a, b| a.0.cmp(&b.0));
+        configs
+    }
 }
 
 #[async_trait]
@@ -754,6 +810,7 @@ impl ExtensionInstallationStore for InMemoryExtensionInstallationStore {
         let InMemoryState {
             manifests,
             installations,
+            channel_configs: _,
         } = &mut *inner;
         let installation = installations.get_mut(installation_id).ok_or_else(|| {
             ExtensionInstallationError::InstallationNotFound {
@@ -774,15 +831,16 @@ impl ExtensionInstallationStore for InMemoryExtensionInstallationStore {
         &self,
         installation_id: &ExtensionInstallationId,
     ) -> Result<(), ExtensionInstallationError> {
-        self.inner
-            .write()
-            .await
-            .installations
-            .remove(installation_id)
-            .map(|_| ())
-            .ok_or_else(|| ExtensionInstallationError::InstallationNotFound {
+        let mut inner = self.inner.write().await;
+        let removed = inner.installations.remove(installation_id).ok_or_else(|| {
+            ExtensionInstallationError::InstallationNotFound {
                 installation_id: installation_id.clone(),
-            })
+            }
+        })?;
+        // Channel config is installation-owned state (removal order §6.2
+        // step 5): it does not survive the installation.
+        inner.channel_configs.remove(removed.extension_id());
+        Ok(())
     }
 
     async fn delete_manifest(
@@ -799,6 +857,7 @@ impl ExtensionInstallationStore for InMemoryExtensionInstallationStore {
                 reason: format!("extension {extension_id} still has installations"),
             });
         }
+        inner.channel_configs.remove(extension_id);
         inner
             .manifests
             .remove(extension_id)
@@ -824,6 +883,34 @@ impl ExtensionInstallationStore for InMemoryExtensionInstallationStore {
             .set_health(health);
         Ok(())
     }
+
+    async fn channel_config(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<Vec<(String, String)>, ExtensionInstallationError> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .channel_configs
+            .get(extension_id)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn set_channel_config(
+        &self,
+        extension_id: &ExtensionId,
+        values: Vec<(String, String)>,
+    ) -> Result<(), ExtensionInstallationError> {
+        let mut inner = self.inner.write().await;
+        if values.is_empty() {
+            inner.channel_configs.remove(extension_id);
+        } else {
+            inner.channel_configs.insert(extension_id.clone(), values);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -832,6 +919,67 @@ mod tests {
 
     use super::*;
     use crate::ManifestSource;
+
+    #[tokio::test]
+    async fn channel_config_round_trips_and_is_deleted_with_the_installation() {
+        let store = InMemoryExtensionInstallationStore::default();
+        let manifest = manifest_record("fixture", Some("hash-1"));
+        let extension_id = manifest.extension_id().clone();
+        store
+            .upsert_manifest(manifest)
+            .await
+            .expect("upsert manifest");
+        let installed = installation("fixture", Some("hash-1"));
+        let installation_id = installed.installation_id().clone();
+        store
+            .upsert_installation(installed)
+            .await
+            .expect("upsert installation");
+
+        assert!(
+            store
+                .channel_config(&extension_id)
+                .await
+                .expect("read empty config")
+                .is_empty(),
+            "no config is provided until a save"
+        );
+        store
+            .set_channel_config(
+                &extension_id,
+                vec![("public_endpoint_url".to_string(), "https://x.example".to_string())],
+            )
+            .await
+            .expect("save config");
+        assert_eq!(
+            store
+                .channel_config(&extension_id)
+                .await
+                .expect("read config"),
+            vec![("public_endpoint_url".to_string(), "https://x.example".to_string())]
+        );
+        assert_eq!(
+            store.channel_configs().await,
+            vec![(
+                extension_id.clone(),
+                vec![("public_endpoint_url".to_string(), "https://x.example".to_string())]
+            )]
+        );
+
+        // Channel config is installation-owned state: deleting the
+        // installation deletes it (removal order §6.2 step 5).
+        store
+            .delete_installation(&installation_id)
+            .await
+            .expect("delete installation");
+        assert!(
+            store
+                .channel_config(&extension_id)
+                .await
+                .expect("read after delete")
+                .is_empty()
+        );
+    }
 
     #[tokio::test]
     async fn delete_manifest_rejects_active_installations() {

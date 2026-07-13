@@ -201,6 +201,23 @@ impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
         self.inner.update_health(installation_id, health).await?;
         self.save_snapshot().await
     }
+
+    async fn channel_config(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<Vec<(String, String)>, ExtensionInstallationError> {
+        self.inner.channel_config(extension_id).await
+    }
+
+    async fn set_channel_config(
+        &self,
+        extension_id: &ExtensionId,
+        values: Vec<(String, String)>,
+    ) -> Result<(), ExtensionInstallationError> {
+        let _guard = self.save_lock.lock().await;
+        self.inner.set_channel_config(extension_id, values).await?;
+        self.save_snapshot().await
+    }
 }
 
 /// One-time forward migration (NEA-25 unified Slack extension): the Slack
@@ -316,6 +333,18 @@ fn migrate_retired_slack_bot_identity(state: &mut WireState) -> bool {
 struct WireState {
     manifests: Vec<WireManifestRecord>,
     installations: Vec<ExtensionInstallation>,
+    /// Per-installation non-secret `[channel.config]` values keyed by field
+    /// handle. Serde-defaulted (and omitted when empty) so state files
+    /// written before the configure surface existed load unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    channel_configs: Vec<WireChannelConfig>,
+}
+
+/// One installation's stored non-secret channel-config values.
+#[derive(Debug, Serialize, Deserialize)]
+struct WireChannelConfig {
+    extension_id: String,
+    values: Vec<(String, String)>,
 }
 
 impl WireState {
@@ -329,9 +358,19 @@ impl WireState {
             .map(WireManifestRecord::from)
             .collect();
         let installations = store.list_installations().await?;
+        let channel_configs = store
+            .channel_configs()
+            .await
+            .into_iter()
+            .map(|(extension_id, values)| WireChannelConfig {
+                extension_id: extension_id.as_str().to_string(),
+                values,
+            })
+            .collect();
         Ok(Self {
             manifests,
             installations,
+            channel_configs,
         })
     }
 
@@ -351,6 +390,11 @@ impl WireState {
         }
         for installation in self.installations {
             store.upsert_installation(installation).await?;
+        }
+        for config in self.channel_configs {
+            let extension_id =
+                ExtensionId::new(&config.extension_id).map_err(invalid_installation_error)?;
+            store.set_channel_config(&extension_id, config.values).await?;
         }
         Ok(backfilled)
     }
@@ -525,6 +569,7 @@ mod tests {
                 )
                 .expect("tools installation"),
             ],
+            channel_configs: Vec::new(),
         };
         filesystem
             .write_file(
@@ -906,6 +951,108 @@ output_schema_ref = "schemas/oldtimer/echo.output.v1.json"
         assert_eq!(
             backfilled_bytes, second_bytes,
             "second load must be a no-op (idempotent backfill)"
+        );
+    }
+
+    /// Channel-config persistence (extension-runtime §6.4): values round-trip
+    /// through the durable snapshot, state files written BEFORE the configure
+    /// surface existed load unchanged (serde default), and a snapshot with no
+    /// config keeps the old wire shape (no `channel_configs` key).
+    #[tokio::test]
+    async fn channel_config_round_trips_and_old_state_files_load() {
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+        let store =
+            FilesystemExtensionInstallationStore::load_at(Arc::clone(&filesystem), state_path())
+                .await
+                .expect("empty store loads");
+        let record = ExtensionManifestRecord::from_toml(
+            RESOLVED_RECORD_V3_MANIFEST,
+            ManifestSource::InstalledLocal,
+            &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
+            None,
+            &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+        )
+        .expect("v3 manifest parses");
+        let extension_id = ExtensionId::new("zephyrite").expect("id");
+        let installation_id =
+            ExtensionInstallationId::new("zephyrite".to_string()).expect("installation id");
+        store
+            .upsert_manifest_and_installation(
+                record,
+                ExtensionInstallation::new(
+                    installation_id.clone(),
+                    extension_id.clone(),
+                    ExtensionActivationState::Installed,
+                    ExtensionManifestRef::new(extension_id.clone(), None),
+                    Vec::new(),
+                    Utc::now(),
+                )
+                .expect("installation"),
+            )
+            .await
+            .expect("persist install");
+
+        // No config saved yet: the snapshot keeps the pre-configure wire
+        // shape, so this snapshot IS an "old state file" for the reload below.
+        let bytes = filesystem
+            .read_file(&state_path())
+            .await
+            .expect("state file exists");
+        let state: serde_json::Value = serde_json::from_slice(&bytes).expect("state is JSON");
+        assert!(
+            state.get("channel_configs").is_none(),
+            "an empty channel-config set must not change the wire shape"
+        );
+        drop(store);
+        let store =
+            FilesystemExtensionInstallationStore::load_at(Arc::clone(&filesystem), state_path())
+                .await
+                .expect("old-shape state loads");
+        assert!(
+            store
+                .channel_config(&extension_id)
+                .await
+                .expect("read config")
+                .is_empty()
+        );
+
+        // Save, reload from disk, and read back: the values are durable.
+        let values = vec![(
+            "public_endpoint_url".to_string(),
+            "https://hooks.example.test/updates".to_string(),
+        )];
+        store
+            .set_channel_config(&extension_id, values.clone())
+            .await
+            .expect("save config");
+        drop(store);
+        let store =
+            FilesystemExtensionInstallationStore::load_at(Arc::clone(&filesystem), state_path())
+                .await
+                .expect("state with config loads");
+        assert_eq!(
+            store
+                .channel_config(&extension_id)
+                .await
+                .expect("read config"),
+            values
+        );
+
+        // Deleting the installation deletes its config from the snapshot too.
+        store
+            .delete_installation(&installation_id)
+            .await
+            .expect("delete installation");
+        drop(store);
+        let store = FilesystemExtensionInstallationStore::load_at(filesystem, state_path())
+            .await
+            .expect("state reloads after delete");
+        assert!(
+            store
+                .channel_config(&extension_id)
+                .await
+                .expect("read config after delete")
+                .is_empty()
         );
     }
 

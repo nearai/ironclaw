@@ -147,12 +147,21 @@ pub(crate) async fn build_generic_extension_host(
         else {
             continue;
         };
+        // Durable per-installation `[channel.config]` values ride into the
+        // host's working record so `ChannelAdapter::activate` revalidates
+        // them on boot exactly as it did on the configure-time cycle.
+        let config = installation_store
+            .channel_config(&extension_id)
+            .await
+            .map_err(|error| crate::RebornBuildError::InvalidConfig {
+                reason: format!("extension channel config could not be loaded: {error}"),
+            })?;
         let record = InstallationRecord {
             extension_id: extension_id.as_str().to_string(),
             installation_id: installation.installation_id().as_str().to_string(),
             state: InstallationState::Installed,
             resolved: Arc::new(manifest_record.resolved().clone()),
-            config: Vec::new(),
+            config,
             last_error: None,
         };
         if let Err(error) = host.install(record).await {
