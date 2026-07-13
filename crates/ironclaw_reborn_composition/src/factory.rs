@@ -223,6 +223,19 @@ const LOCAL_DEV_LEGACY_SKILLS_BACKFILL_MAX_DEPTH: usize = 64;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 const LOCAL_DEV_SECRETS_MASTER_KEY_PATH: &str = ".reborn-local-dev-secrets-master-key";
 
+/// Drains the generic ingress registry for the MIG-5 alias mounts — the
+/// same settle-before-teardown contract the canonical ingress mount carries.
+#[cfg(feature = "webui-v2-beta")]
+struct RegistryChannelIngressDrain(Arc<crate::ExtensionIngressRegistry>);
+
+#[cfg(feature = "webui-v2-beta")]
+#[async_trait::async_trait]
+impl crate::ChannelIngressDrain for RegistryChannelIngressDrain {
+    async fn drain(&self) {
+        self.0.drain().await;
+    }
+}
+
 /// The ONE construction seam for host HTTP egress: policy enforcement over
 /// the reqwest transport, honoring the env-gated test-only host rewrite map
 /// ([`ironclaw_network::TEST_HTTP_REWRITE_MAP_ENV`]). Every composition path
@@ -606,6 +619,70 @@ impl RebornServices {
         Some(Arc::new(
             crate::extension_host::channel_config::RebornChannelConfigFacade::new(service),
         ))
+    }
+
+    /// The MIG-5 legacy channel ingress alias mounts over the generic
+    /// ingress router (`extension_host/legacy_ingress_aliases.rs`), draining
+    /// through the same registry the canonical mount drains. The serve layer
+    /// mounts these when no channel lane owns the alias paths; the table
+    /// (and this accessor's callers) shrink to nothing as aliases retire.
+    #[cfg(feature = "webui-v2-beta")]
+    pub fn extension_ingress_legacy_alias_mounts(
+        &self,
+    ) -> Result<Vec<crate::PublicRouteMount>, RebornBuildError> {
+        let Some(parts) = self.extension_ingress.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let drain: Arc<dyn crate::ChannelIngressDrain> =
+            Arc::new(RegistryChannelIngressDrain(Arc::clone(&parts.registry)));
+        crate::extension_host::legacy_ingress_aliases::legacy_channel_ingress_alias_mounts(
+            &parts.router,
+            Some(drain),
+        )
+    }
+
+    /// The generic post-OAuth channel identity binding wiring (extension-
+    /// runtime §5.5): discovery over the durable installation store, binding
+    /// storage in the generic channel-identity store (the SAME store the
+    /// channel host assembly resolves inbound actors through), and generic
+    /// DM-target provisioning as post-bind residue when the delivery half is
+    /// composed. `None` when this composition path has no generic channel
+    /// storage. A channel lane that predates `[channel.config]` layers its
+    /// override on top of this config at the serve layer instead.
+    pub fn generic_channel_identity_binding_config(
+        &self,
+        tenant_id: ironclaw_host_api::TenantId,
+    ) -> Option<crate::ChannelIdentityBindingConfig> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        let identity_store = local_runtime.channel_identity_store.clone()?;
+        let installation_store = local_runtime
+            .extension_management
+            .as_ref()
+            .map(|management| management.installation_store_handle());
+        let post_bind_factory = match (
+            self.channel_delivery_resolver(),
+            local_runtime.channel_dm_target_store.clone(),
+        ) {
+            (Some(delivery), Some(store)) => Some(Arc::new(
+                crate::extension_host::channel_dm_provisioning::ChannelDmTargetProvisioning::new(
+                    delivery, store,
+                ),
+            )
+                as Arc<
+                    dyn crate::extension_host::channel_identity::ChannelIdentityPostBindFactory,
+                >),
+            _ => None,
+        };
+        Some(crate::ChannelIdentityBindingConfig {
+            tenant_id,
+            installation_store,
+            binding_store: Arc::clone(&identity_store)
+                as Arc<dyn crate::provider_identity::RebornUserIdentityBindingStore>,
+            rollback_store: identity_store
+                as Arc<dyn crate::provider_identity::RebornUserIdentityBindingDeleteStore>,
+            post_bind_factory,
+            overrides: Vec::new(),
+        })
     }
 
     /// Start the generic channel host assembly (extension-runtime P6 S2):

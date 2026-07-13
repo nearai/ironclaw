@@ -336,6 +336,35 @@ pub(crate) fn build_webui_services_with_channel_connection(
             reason: "outbound delivery target providers require local runtime services".to_string(),
         });
     }
+    // Lane-absent generic wiring: pure-manifest channel extensions get the
+    // generic per-user connection facade (discovery over the durable
+    // installation store, bindings in the generic channel-identity store).
+    // A channel lane's builder passes its own facade (lane entries layered
+    // over the same generic discovery) and wins here.
+    let channel_connection = channel_connection.or_else(|| {
+        let local_runtime = services.local_runtime.as_ref()?;
+        let identity_store = local_runtime.channel_identity_store.clone()?;
+        Some(Arc::new(
+            crate::extension_host::channel_connection::GenericChannelConnectionFacade::new(
+                runtime.webui_tenant_id().clone(),
+                Vec::new(),
+                local_runtime
+                    .extension_management
+                    .as_ref()
+                    .map(|management| management.installation_store_handle()),
+                Arc::clone(&identity_store) as Arc<dyn crate::RebornUserIdentityLookup>,
+                identity_store
+                    as Arc<dyn crate::provider_identity::RebornUserIdentityBindingDeleteStore>,
+                services.product_auth.clone().map(|product_auth| {
+                    product_auth
+                        as Arc<
+                            dyn crate::extension_host::channel_connection::ChannelCredentialCleanup,
+                        >
+                }),
+                local_runtime.channel_dm_target_store.clone(),
+            ),
+        ) as Arc<dyn ChannelConnectionFacade>)
+    });
     if let Some(channel_connection) = channel_connection {
         api = api.with_channel_connection_facade(channel_connection);
     }

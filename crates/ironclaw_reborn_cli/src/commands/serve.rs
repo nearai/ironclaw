@@ -529,6 +529,7 @@ impl ServeCommand {
                 &bundle.readiness,
             );
 
+            let generic_identity_tenant = tenant_id.clone();
             let mut serve_config = WebuiServeConfig::new(tenant_id, authenticator, allowed_origins)
                 .with_default_agent_id(default_agent_id.clone());
             if let Some(project_id) = default_project_id.clone() {
@@ -564,6 +565,31 @@ impl ServeCommand {
                     ironclaw_reborn_composition::extension_ingress_route_mount(&ingress_parts)
                         .context("failed to compose the extension ingress route mount")?;
                 serve_config = serve_config.with_public_route_mount(ingress_mount);
+            }
+            // Lane-absent generic channel wiring: when no channel lane owns
+            // them, the MIG-5 legacy webhook aliases mount from their generic
+            // home and the generic post-OAuth channel identity binding hook
+            // is installed over the generic channel-identity store (pure
+            // manifest channel extensions bind through generic discovery).
+            #[cfg(feature = "slack-v2-host-beta")]
+            let channel_lane_active = slack_mounts.is_some();
+            #[cfg(not(feature = "slack-v2-host-beta"))]
+            let channel_lane_active = false;
+            if !channel_lane_active {
+                for alias_mount in runtime
+                    .services()
+                    .extension_ingress_legacy_alias_mounts()
+                    .context("failed to compose the legacy channel ingress alias mounts")?
+                {
+                    serve_config = serve_config.with_public_route_mount(alias_mount);
+                }
+                if let Some(channel_identity_binding) = runtime
+                    .services()
+                    .generic_channel_identity_binding_config(generic_identity_tenant.clone())
+                {
+                    serve_config =
+                        serve_config.with_channel_identity_binding(channel_identity_binding);
+                }
             }
             #[cfg(feature = "slack-v2-host-beta")]
             if let Some(slack_mounts) = slack_mounts {
