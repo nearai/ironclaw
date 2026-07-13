@@ -22,8 +22,8 @@ use ironclaw_host_api::{InvocationId, ResourceScope, TenantId, UserId, VirtualPa
 use ironclaw_product_workflow::{LifecyclePackageRef, ProductWorkflowError};
 
 use crate::extension_host::available_extensions::{
-    AvailableExtensionPackage, is_internal_extension_package_ref, load_filesystem_packages,
-    package_matches_search,
+    AssetLoading, AvailableExtensionPackage, is_internal_extension_package_ref,
+    load_filesystem_packages, package_matches_search,
 };
 
 const REGISTERED_ROOT: &str = "/system/extensions/registered";
@@ -58,9 +58,13 @@ impl RegisteredExtensionStore {
 
     /// One tenant-owner's registered packages, reusing the shared filesystem
     /// package parser tagged with `ManifestSource::UserRegistered`.
+    /// `asset_loading` (item 6): search/list callers pass `Skip` since they
+    /// never read `.assets`; callers that resolve a package for
+    /// install/restore pass `Inline`.
     pub(crate) async fn list_for_scope<F>(
         fs: &F,
         scope: &ResourceScope,
+        asset_loading: AssetLoading,
     ) -> Result<Vec<AvailableExtensionPackage>, ProductWorkflowError>
     where
         F: RootFilesystem + ?Sized,
@@ -73,6 +77,7 @@ impl RegisteredExtensionStore {
                 tenant_id: scope.tenant_id.clone(),
                 owner: scope.user_id.clone(),
             },
+            asset_loading,
         )
         .await
     }
@@ -268,7 +273,9 @@ where
     F: RootFilesystem + ?Sized,
 {
     let normalized_query = query.trim().to_ascii_lowercase();
-    let packages = RegisteredExtensionStore::list_for_scope(fs, scope).await?;
+    // Item 6: search never reads `.assets`, only the summary — skip the
+    // per-entry directory-asset read.
+    let packages = RegisteredExtensionStore::list_for_scope(fs, scope, AssetLoading::Skip).await?;
     Ok(packages
         .into_iter()
         .filter(|package| !is_internal_extension_package_ref(&package.package_ref))
@@ -292,10 +299,14 @@ pub(crate) async fn resolve_registered_for_scope<F>(
 where
     F: RootFilesystem + ?Sized,
 {
-    Ok(RegisteredExtensionStore::list_for_scope(fs, scope)
-        .await?
-        .into_iter()
-        .find(|package| &package.package_ref == package_ref))
+    // Item 6: resolution feeds install/project, which materializes
+    // `.assets` — keep `Inline`.
+    Ok(
+        RegisteredExtensionStore::list_for_scope(fs, scope, AssetLoading::Inline)
+            .await?
+            .into_iter()
+            .find(|package| &package.package_ref == package_ref),
+    )
 }
 
 /// One (tenant, owner)'s full registered set, read ONCE. Boot-only restore
@@ -320,5 +331,7 @@ where
     let mut scope = ResourceScope::local_default(owner.clone(), InvocationId::new())
         .map_err(map_binding_error)?;
     scope.tenant_id = tenant_id.clone();
-    RegisteredExtensionStore::list_for_scope(fs, &scope).await
+    // Item 6: boot restore publishes/materializes the resolved package —
+    // keep `Inline`.
+    RegisteredExtensionStore::list_for_scope(fs, &scope, AssetLoading::Inline).await
 }

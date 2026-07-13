@@ -210,7 +210,16 @@ impl RebornLocalExtensionManagementPort {
         &self,
         scope: &ResourceScope,
     ) -> HashMap<ExtensionId, Arc<AvailableExtensionPackage>> {
-        match RegisteredExtensionStore::list_for_scope(self.filesystem.as_ref(), scope).await {
+        // Item 6: `installed_summaries` (this method's only caller) reads
+        // only summary fields, never `.assets` — skip the per-entry
+        // directory-asset read.
+        match RegisteredExtensionStore::list_for_scope(
+            self.filesystem.as_ref(),
+            scope,
+            crate::extension_host::available_extensions::AssetLoading::Skip,
+        )
+        .await
+        {
             Ok(packages) => packages
                 .into_iter()
                 .map(|package| (package.package.id.clone(), Arc::new(package)))

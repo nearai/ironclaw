@@ -751,6 +751,55 @@ output_schema_ref = "schemas/search.output.json"
     ));
 }
 
+/// Item 6: search/list callers only ever read a package's manifest-derived
+/// summary fields, never `.assets`, so `search_with_owner_overlay_for_scope`
+/// must skip the per-entry directory-asset read
+/// (`inline_extension_dir_assets`) entirely, while a resolution path that
+/// feeds install/restore (`resolve_registered_for_scope`) must still inline
+/// them. Pins both sides of the seam directly against the raw
+/// `AvailableExtensionPackage`, since the product-facing summary types don't
+/// expose `.assets` to observe the difference through `port.search`.
+#[tokio::test]
+async fn search_overlay_skips_assets_while_resolve_still_inlines_them() {
+    let owner_scope = resource_scope_for("default", "owner-a");
+    let (dir, port, package_ref, _active_registry, _installation_store) =
+        user_registered_isolation_fixture(&owner_scope, true).await;
+
+    // An extra asset file alongside manifest.toml makes a non-empty
+    // `.assets` result trivially observable (manifest.toml alone would
+    // already make `Inline` non-empty, but this rules out an accidental
+    // "assets == just the manifest" coincidence).
+    let descriptor_dir = dir
+        .path()
+        .join("local-dev/system/extensions/registered")
+        .join(owner_scope.tenant_id.as_str())
+        .join(owner_scope.user_id.as_str())
+        .join("acme-mcp-registered");
+    std::fs::write(descriptor_dir.join("extra.txt"), b"asset bytes")
+        .expect("write extra asset file");
+
+    let search_results =
+        search_with_owner_overlay_for_scope(port.filesystem.as_ref(), &owner_scope, "acme")
+            .await
+            .expect("owner overlay search runs");
+    assert_eq!(search_results.len(), 1);
+    assert!(
+        search_results[0].assets.is_empty(),
+        "search must skip asset inlining entirely, got: {:?}",
+        search_results[0].assets
+    );
+
+    let resolved =
+        resolve_registered_for_scope(port.filesystem.as_ref(), &owner_scope, &package_ref)
+            .await
+            .expect("resolve runs")
+            .expect("registered package resolves");
+    assert!(
+        !resolved.assets.is_empty(),
+        "resolve (install/restore path) must still inline assets"
+    );
+}
+
 /// Regression: the installation row is a single flat map keyed only by
 /// extension id (no tenant axis), so the SAME user registering the SAME
 /// extension id under two different tenants must not let an install row

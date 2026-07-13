@@ -474,7 +474,13 @@ impl AvailableExtensionCatalog {
         F: RootFilesystem + ?Sized,
     {
         Ok(Self::from_packages(
-            load_filesystem_packages(fs, root, ManifestSource::InstalledLocal).await?,
+            load_filesystem_packages(
+                fs,
+                root,
+                ManifestSource::InstalledLocal,
+                AssetLoading::Inline,
+            )
+            .await?,
         ))
     }
 
@@ -1628,6 +1634,21 @@ pub(crate) fn bytes_asset(path: &str, bytes: &[u8]) -> AvailableExtensionAsset {
     }
 }
 
+/// Whether [`load_filesystem_packages`]/[`load_filesystem_package`] should
+/// read and inline every asset file under an extension's directory (item 6).
+/// Search and list callers only ever read a package's manifest-derived
+/// summary fields — never `.assets` — so making them pay for
+/// `inline_extension_dir_assets`'s full-directory read on every entry, on
+/// every search/list call, is pure waste. Callers that resolve a package for
+/// install/restore (where `.assets` gets materialized) still need `Inline`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AssetLoading {
+    /// Read and inline every asset file under the extension directory.
+    Inline,
+    /// Skip asset reads entirely; `.assets` is `Vec::new()`.
+    Skip,
+}
+
 /// Load extension packages from every immediate child directory of `root`
 /// that has a `manifest.toml`, tagging each with `source`. Reused for both
 /// the shared first-party catalog root (`/system/extensions`, `source =
@@ -1639,11 +1660,12 @@ pub(crate) fn bytes_asset(path: &str, bytes: &[u8]) -> AvailableExtensionAsset {
 /// (see [`canonical_extension_root`]), never `root` itself, so a package
 /// loaded from a nested owner subtree still satisfies `ExtensionPackage`'s
 /// own root/id matching invariant. Asset bytes are still read from the real
-/// `entry.path` location.
+/// `entry.path` location, subject to `asset_loading` (item 6).
 pub(crate) async fn load_filesystem_packages<F>(
     fs: &F,
     root: &VirtualPath,
     source: ManifestSource,
+    asset_loading: AssetLoading,
 ) -> Result<Vec<AvailableExtensionPackage>, ProductWorkflowError>
 where
     F: RootFilesystem + ?Sized,
@@ -1690,6 +1712,7 @@ where
             source.clone(),
             &host_ports,
             &contracts,
+            asset_loading,
         )
         .await
         {
@@ -1741,6 +1764,7 @@ async fn load_filesystem_package<F>(
     source: ManifestSource,
     host_ports: &HostPortCatalog,
     contracts: &HostApiContractRegistry,
+    asset_loading: AssetLoading,
 ) -> Result<Option<AvailableExtensionPackage>, ProductWorkflowError>
 where
     F: RootFilesystem + ?Sized,
@@ -1787,7 +1811,12 @@ where
     // remove -> available -> reinstall flow with
     // "failed to read available extension asset"; and cataloging only
     // manifest + wasm module would lose schemas/prompt docs on reinstall.
-    let assets = inline_extension_dir_assets(fs, &entry.path).await?;
+    // Search/list callers never read `.assets` (item 6): `Skip` avoids
+    // paying for this full-directory read on every search/list entry.
+    let assets = match asset_loading {
+        AssetLoading::Inline => inline_extension_dir_assets(fs, &entry.path).await?,
+        AssetLoading::Skip => Vec::new(),
+    };
     let package_root = canonical_extension_root(&extension_id)?;
     let package = ExtensionPackage::from_manifest_toml(manifest, package_root, record.raw_toml())
         .map_err(map_binding_error)?;
@@ -2356,6 +2385,7 @@ url = "http://127.0.0.1:9/mcp"
             &fs,
             &VirtualPath::new("/system/extensions/registered").unwrap(),
             registered_loader_test_source(),
+            AssetLoading::Inline,
         )
         .await
         .expect(
@@ -2406,6 +2436,7 @@ url = "http://127.0.0.1:9/mcp"
             &fs,
             &VirtualPath::new("/system/extensions/registered").unwrap(),
             registered_loader_test_source(),
+            AssetLoading::Inline,
         )
         .await
         .expect(

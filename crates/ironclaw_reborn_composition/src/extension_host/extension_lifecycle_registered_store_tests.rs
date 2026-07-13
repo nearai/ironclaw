@@ -21,7 +21,7 @@ use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{InvocationId, ResourceScope, TenantId, UserId, VirtualPath};
 use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef};
 
-use crate::extension_host::available_extensions::AvailableExtensionCatalog;
+use crate::extension_host::available_extensions::{AssetLoading, AvailableExtensionCatalog};
 use crate::extension_host::extension_lifecycle::restore_extension_lifecycle_state;
 use crate::extension_host::registered_extension_store::{
     RegisteredExtensionStore, migrate_legacy_owner_layout,
@@ -231,13 +231,16 @@ async fn corrupt_manifest_under_one_owner_does_not_break_other_owners_listing_or
     // ── (i) owner A's OTHER registered entries still list ───────────────────
     let owner_a_scope = ResourceScope::local_default(owner_a.clone(), InvocationId::new())
         .expect("default tenant owner scope");
-    let owner_a_packages =
-        RegisteredExtensionStore::list_for_scope(filesystem.as_ref(), &owner_a_scope)
-            .await
-            .expect(
-                "owner A's listing must skip the corrupt sibling manifest and return the healthy \
+    let owner_a_packages = RegisteredExtensionStore::list_for_scope(
+        filesystem.as_ref(),
+        &owner_a_scope,
+        AssetLoading::Inline,
+    )
+    .await
+    .expect(
+        "owner A's listing must skip the corrupt sibling manifest and return the healthy \
              entry, not propagate an error for the whole directory",
-            );
+    );
     assert_eq!(
         owner_a_packages.len(),
         1,
@@ -380,9 +383,13 @@ async fn restore_migrates_legacy_owner_only_layout_into_default_tenant() {
         InvocationId::new(),
     )
     .expect("default tenant owner scope");
-    let packages = RegisteredExtensionStore::list_for_scope(filesystem.as_ref(), &owner_scope)
-        .await
-        .expect("scoped listing after migration");
+    let packages = RegisteredExtensionStore::list_for_scope(
+        filesystem.as_ref(),
+        &owner_scope,
+        AssetLoading::Inline,
+    )
+    .await
+    .expect("scoped listing after migration");
     assert_eq!(
         packages.len(),
         1,

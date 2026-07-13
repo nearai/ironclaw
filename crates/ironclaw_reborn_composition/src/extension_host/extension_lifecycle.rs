@@ -694,7 +694,12 @@ impl RebornLocalExtensionManagementPort {
             .await
             .map_err(map_extension_installation_error)?
             .into_iter()
-            .map(|record| (record.extension_id().clone(), record.manifest().source.clone()))
+            .map(|record| {
+                (
+                    record.extension_id().clone(),
+                    record.manifest().source.clone(),
+                )
+            })
             .collect();
         let mut summaries = Vec::with_capacity(installations.len());
         for installation in installations {
