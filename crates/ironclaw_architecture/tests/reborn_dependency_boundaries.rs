@@ -1139,6 +1139,30 @@ fn composition_runtime_has_no_slack_output_policy() {
     assert!(production.contains("production_after"));
     assert!(!production.contains("shell_tests"));
 
+    let test_support_module = r#"
+        #[cfg(any(test, feature = "test-support"))]
+        mod runtime_support {
+            fn feature_enabled_runtime_policy() {}
+        }
+    "#;
+    let production = source_without_cfg_test_modules(test_support_module);
+    assert!(
+        production.contains("feature_enabled_runtime_policy"),
+        "modules available through a production feature must remain visible to the neutrality scan"
+    );
+
+    let production_only_module = r#"
+        #[cfg(not(test))]
+        mod slack_host_state {
+            fn production_runtime_policy() {}
+        }
+    "#;
+    let production = source_without_cfg_test_modules(production_only_module);
+    assert!(
+        production.contains("production_runtime_policy"),
+        "cfg(not(test)) modules are production code and must remain visible to the neutrality scan"
+    );
+
     let root = workspace_root();
     let composition_sources = production_composition_sources(&root);
     let violations = composition_sources
@@ -1221,7 +1245,7 @@ fn source_without_cfg_test_modules(source: &str) -> String {
 
     while index < lines.len() {
         let trimmed = lines[index].trim();
-        if trimmed.starts_with("#[cfg(") && trimmed.contains("test") {
+        if cfg_attribute_is_test_only(trimmed) {
             let mut module_line = index + 1;
             while module_line < lines.len()
                 && (lines[module_line].trim().is_empty()
@@ -1260,6 +1284,32 @@ fn source_without_cfg_test_modules(source: &str) -> String {
     }
 
     output.join("\n")
+}
+
+fn cfg_attribute_is_test_only(attribute: &str) -> bool {
+    if !attribute.starts_with("#[cfg(") {
+        return false;
+    }
+    let compact = attribute
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    let Some(expression) = compact
+        .strip_prefix("#[cfg(")
+        .and_then(|value| value.strip_suffix(")]"))
+    else {
+        return false;
+    };
+    if expression == "test" {
+        return true;
+    }
+    let Some(all_terms) = expression
+        .strip_prefix("all(")
+        .and_then(|value| value.strip_suffix(')'))
+    else {
+        return false;
+    };
+    all_terms.split(',').any(|term| term == "test")
 }
 
 fn source_has_slack_specific_model_output_policy(source: &str) -> bool {
