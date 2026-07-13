@@ -6150,6 +6150,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         encoded_id, encoded_id_calls = drive(
             "Canary Person (<@WABCDEFGH>) should sync the fixture."
         )
+        redaction_marker, redaction_marker_calls = drive(
+            "Canary Person ([Slack identifier redacted]) should sync the fixture."
+        )
         missing_name, missing_name_calls = drive("Someone should sync the fixture.")
 
         self.assertTrue(natural.success)
@@ -6157,6 +6160,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(raw_id.details["failure_class"], "product")
         self.assertFalse(encoded_id.success)
         self.assertNotIn("WABCDEFGH", json.dumps(encoded_id.details))
+        self.assertTrue(redaction_marker.success)
         self.assertFalse(missing_name.success)
         self.assertEqual(missing_name.details["failure_class"], "product")
         self.assertEqual(
@@ -6164,9 +6168,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 natural_calls,
                 raw_id_calls,
                 encoded_id_calls,
+                redaction_marker_calls,
                 missing_name_calls,
             ),
-            (1, 1, 1, 1),
+            (1, 1, 1, 1, 1),
             "10I is a one-shot behavioral observation and must never retry",
         )
 

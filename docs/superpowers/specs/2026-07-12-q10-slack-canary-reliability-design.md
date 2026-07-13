@@ -86,7 +86,8 @@ A lucky or fabricated final answer is not a pass.
 - Require a completed `slack.list_conversations` invocation.
 - Preserve the positive member and negative non-member assertions.
 - Clarify the model-visible tool contracts so `is_member` is authoritative and
-  outbound delivery targets explicitly do not read Slack membership or content.
+  the generic outbound-delivery surface remains integration-neutral while
+  directing read requests to the corresponding integration.
 
 #### 10G: most recently sent message
 
@@ -148,8 +149,9 @@ incidents and writes explicit inconclusive results instead of spending nine
 Update and pin these descriptions:
 
 - `builtin.outbound_delivery_targets_list` is only for routing final replies and
-  trigger/routine results; it cannot read Slack conversations, messages,
-  membership, status, or profiles.
+  trigger/routine results; its generic description names no specific integration
+  and directs conversation, message, membership, status, and profile reads to
+  the corresponding integration's capabilities.
 - `slack.search_messages` is indexed search and must not be used to determine
   the single newest message when conversation history is available.
 - `slack.list_conversations` returns visible conversations, not only membership;

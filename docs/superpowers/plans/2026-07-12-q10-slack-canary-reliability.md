@@ -37,14 +37,18 @@
 
 **Interfaces:**
 - Consumes: OUTBOUND_DELIVERY_TARGETS_LIST_DESCRIPTION and the bundled Slack manifest catalog.
-- Produces: caller-visible descriptions that distinguish delivery routing from Slack reads and direct the model to is_member, newest-first history, humanized text, and display-name fields.
+- Produces: caller-visible descriptions that keep the generic delivery-routing
+  surface integration-neutral, while Slack-owned descriptions direct the model
+  to `is_member`, newest-first history, humanized text, and display-name fields.
 
 - [ ] **Step 1: Write failing caller-visible tests**
 
 Extend tests that build the real local-dev provider tool and AvailableExtensionCatalog. Require these semantics:
 
 ~~~rust
-assert!(outbound.description.contains("cannot read Slack conversations"));
+assert!(outbound.description.contains("cannot read conversations"));
+assert!(outbound.description.contains("corresponding integration's read capabilities"));
+assert!(!outbound.description.to_ascii_lowercase().contains("slack"));
 assert!(search.description.contains("single newest message"));
 assert!(search.description.contains("get_conversation_history"));
 assert!(list.description.contains("is_member"));
@@ -70,7 +74,9 @@ Expected: at least the delivery-routing and newest-message assertions fail.
 
 Use the same rules in manifest and prompt docs:
 
-- outbound delivery targets route final replies and routine/trigger results only and cannot read Slack content, membership, status, or profiles;
+- outbound delivery targets route final replies and routine/trigger results only;
+  their generic description names no extension and directs read requests to the
+  corresponding integration's capabilities;
 - search.messages is indexed search and must not answer the single newest message when a conversation is known;
 - list_conversations returns visible conversations and is_member=true is authoritative;
 - history prose uses humanized text, user_display_name, and is_current_user; raw IDs are only for subsequent tool calls.

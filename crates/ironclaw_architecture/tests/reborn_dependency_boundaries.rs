@@ -1008,18 +1008,59 @@ fn reborn_internal_crate_keeps_directory_of_modules_lib_rs() {
 
 #[test]
 fn composition_runtime_has_no_slack_output_policy() {
-    let root = workspace_root();
-    let runtime_path = root.join("crates/ironclaw_reborn_composition/src/runtime.rs");
-    let runtime_source = std::fs::read_to_string(&runtime_path)
-        .expect("ironclaw_reborn_composition runtime.rs must be readable");
+    let disguised_policy = r#"
+        struct WorkspaceEntityMaskingGateway;
 
-    for forbidden in ["SlackOutputHygieneGateway", "mod slack_output_hygiene"] {
-        assert!(
-            !runtime_source.contains(forbidden),
-            "Reborn composition must remain integration-neutral and must not install \
-             Slack-specific model output policy via `{forbidden}`"
-        );
-    }
+        impl HostManagedModelGateway for WorkspaceEntityMaskingGateway {
+            async fn stream_model(&self, request: HostManagedModelRequest) {
+                let uses_integration = request.capabilities.iter()
+                    .any(|capability| capability.starts_with("slack."));
+                if uses_integration {
+                    response.output = ParentLoopOutput::AssistantReply(
+                        response.content.replace("W0FIXTURE1", "[redacted]")
+                    );
+                }
+            }
+        }
+    "#;
+    assert!(
+        source_has_slack_specific_model_output_policy(disguised_policy),
+        "the boundary classifier must catch a renamed or moved Slack model-output decorator"
+    );
+
+    let allowed_outbound_delivery = r#"
+        struct SlackOutboundDeliveryTargetProvider;
+
+        impl OutboundDeliveryTargetProvider for SlackOutboundDeliveryTargetProvider {
+            async fn deliver(&self, payload: ProductOutboundPayload) {
+                self.slack_client.send(payload).await;
+            }
+        }
+    "#;
+    assert!(
+        !source_has_slack_specific_model_output_policy(allowed_outbound_delivery),
+        "normal integration-owned outbound delivery must remain allowed"
+    );
+
+    let root = workspace_root();
+    let runtime_sources = production_composition_runtime_sources(&root);
+    let violations = runtime_sources
+        .iter()
+        .filter_map(|(path, source)| {
+            source_has_slack_specific_model_output_policy(source).then(|| {
+                path.strip_prefix(&root)
+                    .unwrap_or(path)
+                    .display()
+                    .to_string()
+            })
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        violations.is_empty(),
+        "Reborn composition runtime must remain integration-neutral and must not \
+         intercept model output with Slack-specific policy. Violations:\n{}",
+        violations.join("\n")
+    );
 
     let slack_policy_module =
         root.join("crates/ironclaw_reborn_composition/src/runtime/slack_output_hygiene.rs");
@@ -1028,6 +1069,88 @@ fn composition_runtime_has_no_slack_output_policy() {
         "Reborn composition must not own the Slack-specific output policy module at {}",
         slack_policy_module.display()
     );
+}
+
+fn production_composition_runtime_sources(root: &std::path::Path) -> Vec<(PathBuf, String)> {
+    let composition_src = root.join("crates/ironclaw_reborn_composition/src");
+    let runtime_file = composition_src.join("runtime.rs");
+    let runtime_dir = composition_src.join("runtime");
+    let mut paths = vec![runtime_file];
+    let mut pending = vec![runtime_dir];
+
+    while let Some(dir) = pending.pop() {
+        let entries = std::fs::read_dir(&dir)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", dir.display()));
+        for entry in entries {
+            let path = entry
+                .unwrap_or_else(|error| panic!("failed to read runtime dir entry: {error}"))
+                .path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
+                paths.push(path);
+            }
+        }
+    }
+
+    paths.sort();
+    paths
+        .into_iter()
+        .filter(|path| {
+            let relative = path.strip_prefix(root).unwrap_or(path).to_string_lossy();
+            !is_rust_test_source_path(&relative)
+        })
+        .map(|path| {
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            let production = source
+                .find("#[cfg(test)]\nmod ")
+                .map_or(source.as_str(), |index| &source[..index])
+                .to_string();
+            (path, production)
+        })
+        .collect()
+}
+
+fn source_has_slack_specific_model_output_policy(source: &str) -> bool {
+    const GATEWAY_INTERCEPTION_MARKERS: &[&str] = &[
+        "HostManagedModelGateway for",
+        "HostManagedModelStreamSink for",
+    ];
+    const OUTPUT_MUTATION_MARKERS: &[&str] = &[
+        "safe_text_update",
+        "safe_reasoning_update",
+        "safe_text_deltas",
+        "safe_reasoning_deltas",
+        "parentloopoutput::assistantreply",
+        "response.output =",
+        ".content =",
+        ".content.replace",
+        "redact",
+        "sanitize",
+        "mask",
+    ];
+
+    let lines = source.lines().collect::<Vec<_>>();
+    lines.iter().enumerate().any(|(index, line)| {
+        if !GATEWAY_INTERCEPTION_MARKERS
+            .iter()
+            .any(|marker| line.contains(marker))
+        {
+            return false;
+        }
+
+        // Inspect the gateway implementation and its nearby helpers/wiring,
+        // without conflating a large composition file's unrelated adapter
+        // wiring with its model-gateway assembly.
+        let start = index.saturating_sub(160);
+        let end = (index + 161).min(lines.len());
+        let window = lines[start..end].join("\n").to_ascii_lowercase();
+        window.contains("slack")
+            && OUTPUT_MUTATION_MARKERS
+                .iter()
+                .any(|marker| window.contains(marker))
+    })
 }
 
 /// Lock the boot-config TOML + provider-catalog layering for the
