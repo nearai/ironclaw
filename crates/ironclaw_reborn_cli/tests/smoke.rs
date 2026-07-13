@@ -2047,8 +2047,10 @@ fn doctor_uses_reborn_home_override_without_touching_v1_state() {
     assert!(stdout.contains("local-dev"), "stdout: {stdout}");
     assert!(stdout.contains("text_only_driver"), "stdout: {stdout}");
     assert!(
-        !stdout.contains("v1_state"),
-        "doctor output should not include v1_state"
+        stdout
+            .lines()
+            .any(|line| line.contains("v1_state") && line.contains("not-used")),
+        "stdout: {stdout}"
     );
     assert!(
         !reborn_home.exists(),

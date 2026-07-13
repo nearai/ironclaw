@@ -284,6 +284,8 @@ fn onboard_migrate_v1_invokes_plan_only_after_an_explicit_flag() {
             "plan",
             "--source-libsql",
             source.to_str().unwrap(),
+            "--source-home",
+            v1_home.to_str().unwrap(),
             "--manifest",
             reborn_home
                 .join("v1-migration-manifest.json")
