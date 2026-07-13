@@ -6,4 +6,4 @@ Do not tell the prompt to send results back to the requesting user. Each fire's 
 
 When the user asks for this trigger's results on a specific product or channel, pass delivery_target_id with an id from builtin__outbound_delivery_targets_list; builtin__outbound_delivery_target_set changes only the user-wide default shared by everything else.
 
-In the user-facing reply, call it a routine and summarize its name, task, plain-language schedule, and delivery only. Never expose trigger, agent, project, or delivery-target ids, raw cron, stored prompts, internal capability names, result references, or host metadata.
+In the user-facing reply, call it a routine and summarize its name, task, plain-language schedule, and delivery only; never expose trigger, agent, project, or delivery-target ids, raw cron, stored prompts, internal capability names, result references, or host metadata.
