@@ -117,7 +117,7 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
 - `doubles/` — one file per production-port test double substituted into the
   harness (`RecordingTestCapabilityPort`, `RecordingHostRuntime`,
   `RecordingRuntimeHttpEgress`, `RecordingNetworkHttpEgress`,
-  `RecordingApprovalRequestStore`, `RecordingCapabilityResultWriter`,
+  `RecordingCapabilityResultWriter`, `UnavailableProjectService`,
   `GithubHarnessAuthorizer`, `StaticSecretStore`,
   `StaticCapabilitySurfaceProfileResolver`,
   `FixedRuntimeCredentialAccountResolver`, `EmptyIdentityContextSource`,

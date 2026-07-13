@@ -409,6 +409,10 @@ fn test_parts(
         capability_execution_mount_overrides,
         additional_provider_trust,
         capability_id_filter,
+        // Extension-lane seams (harness-port-seam P1 Change 3): None/empty =
+        // the no-op surface this stub-runtime suite always ran with.
+        extension_management: None,
+        additional_capability_grants: Vec::new(),
     }
 }
 

@@ -108,7 +108,9 @@ pub use project_create::{PROJECT_CREATE_CAPABILITY_ID, wrap_project_create_capab
 pub use projection::build_webui_event_stream_for_test;
 #[cfg(feature = "test-support")]
 pub use refreshing_capability_port::{
-    RefreshingLocalDevCapabilityPortTestParts, create_refreshing_local_dev_capability_port_for_test,
+    ExtensionManagementTestHandle, RefreshingLocalDevCapabilityPortTestParts,
+    build_local_dev_extension_management_for_test,
+    create_refreshing_local_dev_capability_port_for_test,
 };
 #[cfg(feature = "test-support")]
 pub use result_read::{RESULT_READ_CAPABILITY_ID, wrap_result_read_capability_for_test};

@@ -82,6 +82,23 @@ pub(crate) struct RefreshingLocalDevCapabilityPortConfig {
     /// `create_capability_port`); populated only by the `test-support`
     /// constructor.
     pub(super) capability_id_filter: HashSet<CapabilityId>,
+    /// Synthetic grants for capability ids that neither the static builtin
+    /// policy nor `extension_surface_source` produces -- the ad-hoc test-only
+    /// `HostRuntime` backends (mock MCP, GitHub/web-access WASM wired directly
+    /// onto a standalone runtime rather than through a real `RebornServices`
+    /// extension activation) need a grant minted by hand, same as the
+    /// pre-seam harness's removed `capability_grants()` free function did for
+    /// every id in its allowlist. Grantees must match the execution principal
+    /// `local_dev_visible_capability_request` builds
+    /// (`Principal::Extension(loop_driver_execution_extension_id(..))`, the
+    /// same grantee `LocalDevExtensionSurface::grants` mints) or
+    /// authorization skips them. Applied in `build_inner` BEFORE
+    /// `capability_id_filter`'s retain, and only for ids not already granted
+    /// (never shadows or double-grants a real builtin/extension grant).
+    /// Always empty at the sole production call site (`local_dev.rs`'s
+    /// `create_capability_port`); populated only by the `test-support`
+    /// constructor.
+    pub(super) additional_capability_grants: Vec<ironclaw_host_api::CapabilityGrant>,
 }
 
 pub(crate) async fn create_refreshing_local_dev_capability_port(
@@ -114,6 +131,7 @@ pub(crate) async fn create_refreshing_local_dev_capability_port(
         capability_execution_mount_overrides: config.capability_execution_mount_overrides,
         additional_provider_trust: config.additional_provider_trust,
         capability_id_filter: config.capability_id_filter,
+        additional_capability_grants: config.additional_capability_grants,
         current: StdMutex::new(None),
         refresh_lock: AsyncMutex::new(()),
     });
@@ -150,6 +168,7 @@ struct RefreshingLocalDevCapabilityPort {
     capability_execution_mount_overrides: HashMap<CapabilityId, MountView>,
     additional_provider_trust: BTreeMap<ExtensionId, TrustDecision>,
     capability_id_filter: HashSet<CapabilityId>,
+    additional_capability_grants: Vec<ironclaw_host_api::CapabilityGrant>,
     current: StdMutex<Option<Arc<dyn LoopCapabilityPort>>>,
     refresh_lock: AsyncMutex<()>,
 }
@@ -173,6 +192,62 @@ impl RefreshingLocalDevCapabilityPort {
                 extension_surface: &extension_surface,
             },
         )?;
+        // Test-support-only synthetic grants (empty in production, see the
+        // config field doc-comment). Two lanes, both skipping any id the
+        // extension surface owns (the manifest-derived credentials/network
+        // policy stay the single choke point, exactly like the old harness's
+        // active-authority replacement step):
+        //
+        // 1. OVERLAY network + secrets onto a same-id builtin-policy grant.
+        //    Authorization checks the grant's constraints, so keeping the
+        //    builtin grant's production-default network policy would silently
+        //    bypass the harness's allowlist (S1 real-egress coverage) — but
+        //    the builtin grant's mounts/effects stay authoritative (a full
+        //    replace clobbers e.g. the extension-lifecycle mount profile).
+        // 2. INSERT the whole synthetic grant when the id has no grant at all
+        //    (ad-hoc test-only runtimes: mock MCP, GitHub/web-access WASM).
+        if !self.additional_capability_grants.is_empty() {
+            let mut missing: Vec<ironclaw_host_api::CapabilityGrant> = Vec::new();
+            for synthetic in &self.additional_capability_grants {
+                if extension_surface
+                    .capability(&synthetic.capability)
+                    .is_some()
+                {
+                    continue;
+                }
+                match visible_request
+                    .context
+                    .grants
+                    .grants
+                    .iter_mut()
+                    .find(|existing| existing.capability == synthetic.capability)
+                {
+                    Some(existing) => {
+                        existing.constraints.network = synthetic.constraints.network.clone();
+                        existing.constraints.secrets = synthetic.constraints.secrets.clone();
+                    }
+                    None => missing.push(synthetic.clone()),
+                }
+            }
+            visible_request.context.grants.grants.extend(missing);
+        }
+        // Test-support-only grant-constraint mount overrides (empty in
+        // production, see `capability_execution_mount_overrides`'s
+        // doc-comment): the pre-seam harness applied its per-capability mount
+        // overrides to the GRANT constraints as well as the execution mounts,
+        // and authorization checks the grant's mounts — overriding only the
+        // execution side would leave e.g. the memory capabilities granted
+        // against the wrong (workspace) view and denied at dispatch.
+        if !self.capability_execution_mount_overrides.is_empty() {
+            for grant in &mut visible_request.context.grants.grants {
+                if let Some(mounts) = self
+                    .capability_execution_mount_overrides
+                    .get(&grant.capability)
+                {
+                    grant.constraints.mounts = mounts.clone();
+                }
+            }
+        }
         // Test-support-only narrowing (empty in production, see the config
         // field doc-comment): restrict the FULL granted capability set --
         // builtin grants plus any activated extension grants the call above
@@ -188,7 +263,12 @@ impl RefreshingLocalDevCapabilityPort {
         // Test-support-only extra provider-trust entries (empty in production,
         // see the config field doc-comment): merge after the canonical helper
         // has built the base provider-trust map, so the production helper
-        // stays byte-identical to the pre-seam version.
+        // stays byte-identical to the pre-seam version. Overwrite semantics
+        // (a test entry wins over a same-id baseline entry) — pinned by
+        // `additional_provider_trust_is_forwarded_to_visible_request`, so a
+        // harness that supplies an entry for the builtin provider must supply
+        // its FULL effect set (the integration harness's primary-provider
+        // entry carries the profile's whole `effect_kinds` list).
         if !self.additional_provider_trust.is_empty() {
             visible_request
                 .provider_trust
@@ -426,6 +506,8 @@ pub(crate) async fn create_refreshing_local_dev_capability_port_for_test(
         capability_execution_mount_overrides,
         additional_provider_trust,
         capability_id_filter,
+        extension_management,
+        additional_capability_grants,
     } = parts;
 
     let policy = Arc::new(
@@ -453,7 +535,15 @@ pub(crate) async fn create_refreshing_local_dev_capability_port_for_test(
         skill_mounts,
         memory_mounts,
         system_extensions_lifecycle_mounts,
-        extension_surface_source: LocalDevExtensionSurfaceSource::new(None),
+        // Harness-port-seam P1 Change 3: same constructor production's
+        // `capability_wiring` calls (`runtime/local_dev.rs:132-133`), fed the
+        // harness's `extension_management` handle recovered from the opaque
+        // `ExtensionManagementTestHandle` (see its doc-comment); `None` when
+        // the harness never wired one, reproducing the prior always-no-op
+        // surface.
+        extension_surface_source: LocalDevExtensionSurfaceSource::new(
+            extension_management.map(|handle| handle.extension_management()),
+        ),
         input_resolver,
         result_writer,
         milestone_sink,
@@ -470,6 +560,7 @@ pub(crate) async fn create_refreshing_local_dev_capability_port_for_test(
         capability_execution_mount_overrides,
         additional_provider_trust,
         capability_id_filter,
+        additional_capability_grants,
     })
     .await
 }

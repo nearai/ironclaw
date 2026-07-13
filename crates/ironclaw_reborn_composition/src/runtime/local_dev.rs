@@ -260,6 +260,7 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             capability_execution_mount_overrides: HashMap::new(),
             additional_provider_trust: BTreeMap::new(),
             capability_id_filter: HashSet::new(),
+            additional_capability_grants: Vec::new(),
         })
         .await
     }
