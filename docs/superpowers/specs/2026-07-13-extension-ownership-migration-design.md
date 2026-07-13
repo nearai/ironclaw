@@ -82,9 +82,11 @@ On the existing port-8745 hosted-volume stack:
 The Reborn Railway runtime image must include the existing
 `ironclaw-reborn-extension-ownership-migration` binary so an operator can run
 the migration against a volume-backed libSQL database. The binary is built with
-only the `libsql` backend enabled and copied into the runtime image beside
-`ironclaw-reborn`. The normal image entrypoint and application startup behavior
-remain unchanged; merely deploying the image never runs the migration.
+only the `libsql` backend enabled and without the optional legacy full-migration
+read stack, then copied into the runtime image beside `ironclaw-reborn`. Default
+migration crate builds still include the full legacy-to-Reborn migrator. The
+normal image entrypoint and application startup behavior remain unchanged;
+merely deploying the image never runs the migration.
 
 The existing CLI Dockerfile smoke suite must verify both sides of this contract:
 
