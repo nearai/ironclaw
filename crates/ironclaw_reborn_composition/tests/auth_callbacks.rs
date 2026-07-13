@@ -616,17 +616,17 @@ async fn concurrent_lifecycle_callbacks_dispatch_once_and_never_reexchange() {
 
     let second_services = services.clone();
     let second_owner = owner.clone();
-    let mut second = tokio::spawn(async move {
+    let second = tokio::spawn(async move {
         second_services
             .handle_oauth_callback(authorized_request(second_owner, flow_id))
             .await
     });
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(50), &mut second)
-            .await
-            .is_err(),
-        "the second callback waits for claim, side effect, and settlement to finish"
-    );
+    let concurrent = second
+        .await
+        .expect("second callback task")
+        .expect_err("an active continuation lease is retryable");
+    assert_eq!(concurrent.code, AuthErrorCode::BackendUnavailable);
+    assert!(concurrent.retryable);
     assert_eq!(provider_client.calls(), 1);
     assert_eq!(dispatcher.calls(), 1);
 
@@ -635,10 +635,10 @@ async fn concurrent_lifecycle_callbacks_dispatch_once_and_never_reexchange() {
         .await
         .expect("first callback task")
         .expect("claim owner completes callback");
-    let replay = second
+    let replay = services
+        .handle_oauth_callback(authorized_request(owner.clone(), flow_id))
         .await
-        .expect("second callback task")
-        .expect("second callback observes the acknowledged success");
+        .expect("retry observes the acknowledged success");
     assert_eq!(winner.status, ironclaw_auth::AuthFlowStatus::Completed);
     assert_eq!(replay.status, ironclaw_auth::AuthFlowStatus::Completed);
     assert_eq!(provider_client.calls(), 1);
@@ -735,10 +735,11 @@ async fn oauth_callback_handler_returns_sanitized_failures_without_dispatch() {
         .expect_err("unknown flow fails");
     assert_eq!(stale.code, AuthErrorCode::UnknownOrExpiredFlow);
 
+    let malformed_flow = create_flow(&services, owner.clone()).await;
     let malformed = services
         .handle_oauth_callback(RebornOAuthCallbackRequest {
             scope: owner.clone(),
-            flow_id: AuthFlowId::new(),
+            flow_id: malformed_flow,
             opaque_state_hash: state_hash("state-hash"),
             outcome: RebornOAuthCallbackOutcome::Malformed,
         })
