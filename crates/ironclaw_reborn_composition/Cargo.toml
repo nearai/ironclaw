@@ -138,7 +138,10 @@ ironclaw_outbound = { path = "../ironclaw_outbound" }
 ironclaw_processes = { path = "../ironclaw_processes" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters", features = ["host-auth-mint"] }
 ironclaw_product_adapter_registry = { path = "../ironclaw_product_adapter_registry" }
-ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
+# The generic channel host assembly (extension_host/channel_host.rs) is
+# ungated production code and builds per-extension durable idempotency
+# ledgers, so the storage-backed ledger surface is a base requirement.
+ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = ["storage"] }
 ironclaw_reborn = { path = "../ironclaw_reborn" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
 ironclaw_reborn_identity = { path = "../ironclaw_reborn_identity", optional = true }
