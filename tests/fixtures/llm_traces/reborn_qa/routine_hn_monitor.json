@@ -102,7 +102,7 @@
       },
       "response": {
         "type": "text",
-        "content": "All set! Here's what's been configured:\n\n---\n\n### ✅ Hourly HN Monitor → Slack DM\n\n| Setting | Value |\n|---|---|\n| **Trigger** | Every hour at :00 (UTC) |\n| **First run** | 2026-06-19 at 19:00 UTC |\n| **Searches** | `IronClaw` and `NEAR AI` on Hacker News |\n| **Filter** | Only posts from the last hour |\n| **Delivery** | Slack DM (QA trace channel) |\n\n**Each hourly summary will include:**\n- Post title with link\n- Author, points, and comment count\n- Separate sections for each keyword\n- \"No new mentions\" if nothing new was posted\n\nTo stop or modify this trigger at any time, just ask.",
+        "content": "All set! Here's what's been configured:\n\n---\n\n### ✅ Hourly HN Monitor → Slack DM\n\n| Setting | Value |\n|---|---|\n| **Routine** | Every hour at :00 (UTC) |\n| **First run** | 2026-06-19 at 19:00 UTC |\n| **Searches** | `IronClaw` and `NEAR AI` on Hacker News |\n| **Filter** | Only posts from the last hour |\n| **Delivery** | Slack DM (QA trace channel) |\n\n**Each hourly summary will include:**\n- Post title with link\n- Author, points, and comment count\n- Separate sections for each keyword\n- \"No new mentions\" if nothing new was posted\n\nTo stop or modify this routine at any time, just ask.",
         "input_tokens": 13390,
         "output_tokens": 196
       },

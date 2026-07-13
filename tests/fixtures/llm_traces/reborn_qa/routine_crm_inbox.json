@@ -153,7 +153,7 @@
       },
       "response": {
         "type": "text",
-        "content": "The routine is set up and active. Here's a summary:\n\n**Trigger: \"Check Gmail for near.ai emails → ABC Sheet\"**\n\n| Detail | Value |\n|---|---|\n| **Schedule** | Every 30 minutes (`:00` and `:30`) in UTC |\n| **Next run** | 2026-06-19T18:30:00Z |\n| **What it does** | Searches Gmail inbox for emails from any `@near.ai` sender |\n| **On match** | Appends a row to your Google Sheet **\"ABC\"** with: Date/Time Received, Sender, Subject, Snippet |\n| **On no match** | Does nothing |\n\n> **Note:** When the trigger first fires, make sure your \"ABC\" sheet has headers in place (e.g. `Date/Time Received`, `Sender`, `Subject`, `Snippet`). If you'd like me to add those headers to the sheet now, just say the word!",
+        "content": "The routine is set up and active. Here's a summary:\n\n**Routine: \"Check Gmail for near.ai emails → ABC Sheet\"**\n\n| Detail | Value |\n|---|---|\n| **Schedule** | Every 30 minutes (`:00` and `:30`) in UTC |\n| **Next run** | 2026-06-19T18:30:00Z |\n| **What it does** | Searches Gmail inbox for emails from any `@near.ai` sender |\n| **On match** | Appends a row to your Google Sheet **\"ABC\"** with: Date/Time Received, Sender, Subject, Snippet |\n| **On no match** | Does nothing |\n\n> **Note:** When the routine first runs, make sure your \"ABC\" sheet has headers in place (e.g. `Date/Time Received`, `Sender`, `Subject`, `Snippet`). If you'd like me to add those headers to the sheet now, just say the word!",
         "input_tokens": 17610,
         "output_tokens": 226
       },

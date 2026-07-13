@@ -90,7 +90,7 @@
       },
       "response": {
         "type": "text",
-        "content": "All set! Here's what's configured:\n\n- **Trigger:** `NEAR AI Health Check (every 5 min)` — runs every 5 minutes (next fire: `2026-06-19T18:25:00Z`)\n- **Check:** `GET https://cloud-api.near.ai/health`\n- **Alert:** If the response is **not 200**, you'll get a **Slack DM** with the status code and response details\n- **Silence:** No message sent on a healthy 200 response",
+        "content": "All set! Here's what's configured:\n\n- **Routine:** `NEAR AI Health Check (every 5 min)` — runs every 5 minutes (next run: `2026-06-19T18:25:00Z`)\n- **Check:** `GET https://cloud-api.near.ai/health`\n- **Alert:** If the response is **not 200**, you'll get a **Slack DM** with the status code and response details\n- **Silence:** No message sent on a healthy 200 response",
         "input_tokens": 13061,
         "output_tokens": 124
       },

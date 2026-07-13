@@ -90,7 +90,7 @@
       },
       "response": {
         "type": "text",
-        "content": "The routine is set up and ready. Here's a summary of what was configured:\n\n---\n\n### ✅ nearai/ironclaw GitHub Release Monitor\n\n| Setting | Value |\n|---|---|\n| **Schedule** | Every 5 minutes (UTC) |\n| **First run** | 2026-06-19T18:25:00Z |\n| **Delivery** | Slack DM |\n| **API used** | `https://api.github.com/repos/nearai/ironclaw/releases` (public, no auth) |\n| **Trigger ID** | `01KVGHWSZ5SCSG5X9CNDF7MNWQ` |\n\n**How it works:**\n1. Fetches the public GitHub Releases API for `nearai/ironclaw` (no GitHub account needed).\n2. Compares releases against a persistent memory log of previously seen release IDs.\n3. If new releases are found → sends you a Slack DM with the release name, tag, publish date, and link.\n4. If nothing is new → runs silently with no message.",
+        "content": "The routine is set up and ready. Here's a summary of what was configured:\n\n---\n\n### ✅ nearai/ironclaw GitHub Release Monitor\n\n| Setting | Value |\n|---|---|\n| **Schedule** | Every 5 minutes (UTC) |\n| **First run** | 2026-06-19T18:25:00Z |\n| **Delivery** | Slack DM |\n| **API used** | `https://api.github.com/repos/nearai/ironclaw/releases` (public, no auth) |\n\n**How it works:**\n1. Fetches the public GitHub Releases API for `nearai/ironclaw` (no GitHub account needed).\n2. Compares releases against a persistent memory log of previously seen release IDs.\n3. If new releases are found → sends you a Slack DM with the release name, tag, publish date, and link.\n4. If nothing is new → runs silently with no message.",
         "input_tokens": 13276,
         "output_tokens": 259
       },

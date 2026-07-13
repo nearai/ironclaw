@@ -172,10 +172,38 @@ fn assert_tool_called_with(trace: &LlmTrace, tool: &str, argument_fragments: &[&
 fn assert_routine_contract(case: &QaPhrase, cron_fragment: &str) {
     let trace = load_qa_trace(case.fixture);
     assert_tool_called_with(&trace, "builtin.trigger_create", &[cron_fragment]);
+    let reply = final_text_reply(&trace).unwrap_or_else(|| {
+        panic!(
+            "{} should end with a finalized assistant reply",
+            case.fixture
+        )
+    });
+    let normalized = reply.to_ascii_lowercase();
     assert!(
-        final_text_reply(&trace).is_some(),
-        "routine phrase should end with a finalized assistant reply"
+        normalized.contains("routine"),
+        "{} should describe the user-facing routine: {reply}",
+        case.fixture
     );
+    assert!(
+        !reply.contains(cron_fragment),
+        "{} leaked the raw cron expression {cron_fragment}: {reply}",
+        case.fixture
+    );
+    for internal_term in [
+        "trigger",
+        "trigger_id",
+        "agent_id",
+        "project_id",
+        "delivery_target_id",
+        "builtin.",
+        "builtin__",
+    ] {
+        assert!(
+            !normalized.contains(internal_term),
+            "{} leaked internal term {internal_term:?}: {reply}",
+            case.fixture
+        );
+    }
 }
 
 #[tokio::test]
