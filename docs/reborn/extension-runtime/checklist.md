@@ -684,12 +684,13 @@ Rules — kept short on purpose:
   state enum.
 - [x] MIG-5 `/webhooks/slack/events` forwards to the canonical route for one
   release; a removal note names the release that deletes it. — The legacy
-  path is an internal forwarding alias into the generic router
-  (`slack_events_alias_mount`, `composition/src/slack/slack_serve.rs`; the
-  whole `slack_serve/e2e_tests.rs` suite posts to it). REMOVAL NOTE: delete
-  the alias (and `SLACK_EVENTS_PATH`) in the first release after the P4
-  cutover ships; vendors reconfigure their Events URL to
-  `/webhooks/extensions/slack/events`.
+  path is an internal forwarding alias into the generic router, homed in the
+  sanctioned compatibility table
+  (`composition/src/extension_host/legacy_ingress_aliases.rs`; the whole
+  ported `extension_host/channel_host/e2e_tests.rs` suite posts to it).
+  REMOVAL NOTE: delete the slack alias entry (and the module when the table
+  empties) in the first release after the P4 cutover ships; vendors
+  reconfigure their Events URL to `/webhooks/extensions/slack/events`.
 - [ ] MIG-6 OAuth callback URLs are unchanged (no vendor reconfiguration
   needed) — verified by the route tests.
 - [ ] MIG-7 Migrations are idempotent (second run is a no-op) and skip
