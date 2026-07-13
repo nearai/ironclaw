@@ -708,8 +708,13 @@ impl RebornLocalExtensionManagementPort {
                 let catalog = self.catalog.read().await;
                 catalog.resolve(&package_ref).ok()
             };
-            let available = match catalog_hit
-                .or_else(|| registered_by_id.get(installation.extension_id()).cloned())
+            // Row-provenance-wins (item 3): matches `resolve_available_for_scope`'s
+            // contract that `project`/`install` follow — the caller's own
+            // registered row is authoritative over a same-id catalog collision.
+            let available = match registered_by_id
+                .get(installation.extension_id())
+                .cloned()
+                .or(catalog_hit)
             {
                 Some(available) => available,
                 None => continue,

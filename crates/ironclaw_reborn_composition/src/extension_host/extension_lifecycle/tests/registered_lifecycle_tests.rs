@@ -775,6 +775,46 @@ async fn project_prefers_registered_row_over_same_id_catalog_package() {
     ));
 }
 
+/// Item 3 regression, list tier: `installed_summaries` resolves an
+/// installed id via `catalog_hit.or_else(|| registered_by_id...)` —
+/// catalog-first — which disagrees with `resolve_available_for_scope`'s
+/// row-provenance-wins contract that `project`/`install` follow (see
+/// `project_prefers_registered_row_over_same_id_catalog_package` above).
+/// A same-id shared-catalog collision must still list the caller's own
+/// registered descriptor, not the colliding catalog one. Red before the
+/// fix: `list_installed` reports the colliding catalog package's name.
+#[tokio::test]
+async fn list_installed_prefers_registered_row_over_same_id_catalog_package() {
+    let owner_scope = resource_scope_for("default", "owner-a");
+    let (_dir, port, _package_ref, _active_registry, _installation_store) =
+        user_registered_isolation_fixture(&owner_scope, true).await;
+
+    let colliding_package = fixture_extension_package_from_manifest_with_root(
+        COLLIDING_CATALOG_MANIFEST_TOML,
+        "acme-mcp-registered",
+    );
+    {
+        let mut catalog = port.catalog.write().await;
+        catalog.extend(AvailableExtensionCatalog::from_packages(vec![
+            colliding_package,
+        ]));
+    }
+
+    let list = port
+        .list_installed(&owner_scope)
+        .await
+        .expect("owner's list must still resolve despite the catalog collision");
+    let Some(LifecycleProductPayload::ExtensionList { extensions, count }) = list.payload else {
+        panic!("expected extension list payload");
+    };
+    assert_eq!(count, 1);
+    assert_eq!(
+        extensions[0].summary.name, "Acme Registered MCP",
+        "row-provenance must win: the registered descriptor must be served, not the \
+         colliding shared-catalog package"
+    );
+}
+
 /// Item 1 regression: `install`'s existing-row arm must key the registered
 /// guard off the EXISTING row's own effective owner scope, never off the
 /// freshly resolved package's manifest source. A foreign, non-operator
