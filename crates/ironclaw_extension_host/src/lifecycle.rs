@@ -106,6 +106,13 @@ pub struct ExtensionHost {
     /// `lifecycle_lock`, so readers observe exactly the published
     /// generations in order.
     snapshot_cell: Arc<RwLock<Arc<ActiveSnapshot>>>,
+    /// Publish notifications for [`SnapshotWatch::subscribe`] — carries the
+    /// published generation so subscribers can coalesce and re-read
+    /// `current()`. `send_replace` never fails with zero receivers.
+    snapshot_published: tokio::sync::watch::Sender<u64>,
+    /// Receiver template cloned into every [`SnapshotWatch`]; also keeps the
+    /// channel alive independent of external subscribers.
+    snapshot_published_rx: tokio::sync::watch::Receiver<u64>,
 }
 
 struct LifecycleState {
@@ -117,6 +124,7 @@ struct LifecycleState {
 #[derive(Clone)]
 pub struct SnapshotWatch {
     cell: Arc<RwLock<Arc<ActiveSnapshot>>>,
+    published: tokio::sync::watch::Receiver<u64>,
 }
 
 impl SnapshotWatch {
@@ -129,6 +137,14 @@ impl SnapshotWatch {
             // resolution staying available beats propagating the panic.
             Err(poisoned) => Arc::clone(&poisoned.into_inner()),
         }
+    }
+
+    /// Subscribe to snapshot publishes: the receiver wakes on every new
+    /// generation (values coalesce under contention — always re-read
+    /// [`Self::current`] after a wake). The channel closes when the host is
+    /// dropped.
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.published.clone()
     }
 }
 
@@ -155,6 +171,7 @@ pub enum LifecycleError {
 
 impl ExtensionHost {
     pub async fn new(deps: ExtensionHostDeps) -> Self {
+        let (snapshot_published, snapshot_published_rx) = tokio::sync::watch::channel(0);
         Self {
             deps,
             lifecycle_lock: Mutex::new(LifecycleState {
@@ -162,6 +179,8 @@ impl ExtensionHost {
                 generation: 0,
             }),
             snapshot_cell: Arc::new(RwLock::new(ActiveSnapshot::empty())),
+            snapshot_published,
+            snapshot_published_rx,
         }
     }
 
@@ -176,15 +195,22 @@ impl ExtensionHost {
     pub fn snapshot_watch(&self) -> SnapshotWatch {
         SnapshotWatch {
             cell: Arc::clone(&self.snapshot_cell),
+            published: self.snapshot_published_rx.clone(),
         }
     }
 
     fn mirror_snapshot(&self, snapshot: &Arc<ActiveSnapshot>) {
-        let mut cell = match self.snapshot_cell.write() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        *cell = Arc::clone(snapshot);
+        {
+            let mut cell = match self.snapshot_cell.write() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            *cell = Arc::clone(snapshot);
+        }
+        // Notify AFTER the mirror write so a woken subscriber's `current()`
+        // read always observes at least this generation.
+        self.snapshot_published
+            .send_replace(snapshot.generation().0);
     }
 
     /// Install a resolved extension in `Installed` state (idempotent upsert).

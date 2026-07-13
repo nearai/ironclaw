@@ -441,6 +441,35 @@ async fn in_flight_snapshot_survives_a_later_swap() {
     assert_eq!(in_flight.generation(), generation_before);
 }
 
+#[tokio::test]
+async fn snapshot_watch_subscription_observes_every_publish() {
+    let channel = Arc::new(FakeChannelAdapter::default());
+    let h = harness_with(
+        tool_and_channel_bindings(Arc::clone(&channel)),
+        Arc::clone(&channel),
+    )
+    .await;
+    let watch = h.host.snapshot_watch();
+    let mut subscription = watch.subscribe();
+
+    h.host
+        .install(record("acme", tool_and_channel_manifest()))
+        .await
+        .unwrap();
+    h.host.activate("acme").await.unwrap();
+
+    // The activation published a new generation: the subscription wakes and
+    // the watch's current snapshot already carries the extension.
+    subscription.changed().await.unwrap();
+    let activated_generation = watch.current().generation();
+    assert!(watch.current().extension("acme").is_some());
+
+    h.host.deactivate("acme").await.unwrap();
+    subscription.changed().await.unwrap();
+    assert!(watch.current().generation() > activated_generation);
+    assert!(watch.current().extension("acme").is_none());
+}
+
 // ── Snapshot resolution at the dispatch seam (TOOL-1 snapshot side, TOOL-10) ──
 
 #[tokio::test]

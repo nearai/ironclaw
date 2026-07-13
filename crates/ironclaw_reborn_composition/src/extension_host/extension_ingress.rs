@@ -116,22 +116,108 @@ pub trait ChannelIngressDrain: Send + Sync {
     async fn drain(&self);
 }
 
+/// One registry slot: the registration plus whether the generic channel
+/// host assembly manages its lifetime (snapshot-driven register/replace/
+/// unregister). Lane-owned registrations (`managed: false`) are never
+/// touched by the assembly's reconcile passes.
+struct RegisteredChannel {
+    entry: Arc<ChannelIngressRegistration>,
+    managed: bool,
+}
+
+/// Outcome of a managed (assembly-driven) registration attempt.
+pub(crate) enum ManagedRegistrationOutcome {
+    /// The managed entry is now registered; `replaced` carries a previously
+    /// managed entry whose post-admission work still needs draining.
+    Registered {
+        replaced: Option<Arc<ChannelIngressRegistration>>,
+    },
+    /// A lane-owned (unmanaged) registration already serves this extension;
+    /// the managed entry was not installed.
+    SkippedUnmanaged,
+}
+
 /// The per-extension registration table behind the generic router's ports.
 /// Registrations are data: concrete channel graphs (and the integration
 /// harness) register their extension id; the router itself stays generic.
 #[derive(Default)]
 pub struct ExtensionIngressRegistry {
-    registrations: RwLock<HashMap<String, Arc<ChannelIngressRegistration>>>,
+    registrations: RwLock<HashMap<String, RegisteredChannel>>,
 }
 
 impl ExtensionIngressRegistry {
-    /// Register (or replace) one extension's inbound wiring.
+    /// Register (or replace) one extension's inbound wiring. Lane-owned:
+    /// the generic assembly's reconcile passes never replace or remove it.
     pub fn register(&self, extension_id: impl Into<String>, entry: ChannelIngressRegistration) {
         let mut registrations = match self.registrations.write() {
             Ok(registrations) => registrations,
             Err(poisoned) => poisoned.into_inner(),
         };
-        registrations.insert(extension_id.into(), Arc::new(entry));
+        registrations.insert(
+            extension_id.into(),
+            RegisteredChannel {
+                entry: Arc::new(entry),
+                managed: false,
+            },
+        );
+    }
+
+    /// Register an assembly-managed entry. Installs only when the slot is
+    /// empty or currently holds another managed entry — a lane-owned
+    /// registration always wins (check-and-insert under one write lock, so
+    /// a concurrent lane registration cannot be clobbered).
+    pub(crate) fn register_managed(
+        &self,
+        extension_id: impl Into<String>,
+        entry: ChannelIngressRegistration,
+    ) -> ManagedRegistrationOutcome {
+        let mut registrations = match self.registrations.write() {
+            Ok(registrations) => registrations,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let slot = extension_id.into();
+        match registrations.get(&slot) {
+            Some(existing) if !existing.managed => ManagedRegistrationOutcome::SkippedUnmanaged,
+            existing => {
+                let replaced = existing.map(|existing| Arc::clone(&existing.entry));
+                registrations.insert(
+                    slot,
+                    RegisteredChannel {
+                        entry: Arc::new(entry),
+                        managed: true,
+                    },
+                );
+                ManagedRegistrationOutcome::Registered { replaced }
+            }
+        }
+    }
+
+    /// Remove an assembly-managed entry (no-op for lane-owned entries).
+    /// Returns the removed registration so the caller can drain it.
+    pub(crate) fn unregister_managed(
+        &self,
+        extension_id: &str,
+    ) -> Option<Arc<ChannelIngressRegistration>> {
+        let mut registrations = match self.registrations.write() {
+            Ok(registrations) => registrations,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        match registrations.get(extension_id) {
+            Some(existing) if existing.managed => registrations
+                .remove(extension_id)
+                .map(|removed| removed.entry),
+            _ => None,
+        }
+    }
+
+    /// Whether any inbound wiring (lane-owned or managed) is registered for
+    /// this extension.
+    pub fn is_registered(&self, extension_id: &str) -> bool {
+        let registrations = match self.registrations.read() {
+            Ok(registrations) => registrations,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        registrations.contains_key(extension_id)
     }
 
     fn registration(&self, extension_id: &str) -> Option<Arc<ChannelIngressRegistration>> {
@@ -139,7 +225,9 @@ impl ExtensionIngressRegistry {
             Ok(registrations) => registrations,
             Err(poisoned) => poisoned.into_inner(),
         };
-        registrations.get(extension_id).cloned()
+        registrations
+            .get(extension_id)
+            .map(|registered| Arc::clone(&registered.entry))
     }
 
     /// Drain every registration's post-admission work (graceful shutdown).
@@ -151,7 +239,7 @@ impl ExtensionIngressRegistry {
             };
             registrations
                 .values()
-                .filter_map(|entry| entry.drain.clone())
+                .filter_map(|registered| registered.entry.drain.clone())
                 .collect()
         };
         for drain in drains {
@@ -621,5 +709,109 @@ mod serve_mount {
             }
             None => (status, response.body).into_response(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FailingSink;
+
+    #[async_trait]
+    impl InboundSink for FailingSink {
+        async fn admit(
+            &self,
+            _admission: InboundAdmission,
+        ) -> Result<InboundAdmissionAck, InboundSinkError> {
+            Err(InboundSinkError {
+                retryable: true,
+                reason: "test sink".to_string(),
+            })
+        }
+    }
+
+    fn registration(secret: &[u8]) -> ChannelIngressRegistration {
+        ChannelIngressRegistration {
+            secrets: Arc::new(StaticIngressSecrets::new(vec![VerificationCandidate {
+                installation_id: "install".to_string(),
+                secret: secret.to_vec(),
+            }])),
+            sink: Arc::new(FailingSink),
+            drain: None,
+        }
+    }
+
+    async fn registered_secret(registry: &ExtensionIngressRegistry, extension_id: &str) -> Vec<u8> {
+        registry
+            .verification_candidates(extension_id, "install", None)
+            .await
+            .expect("registration present")
+            .first()
+            .expect("one candidate")
+            .secret
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn managed_registration_never_replaces_a_lane_owned_entry() {
+        let registry = ExtensionIngressRegistry::default();
+        registry.register("vendorx", registration(b"lane"));
+
+        assert!(matches!(
+            registry.register_managed("vendorx", registration(b"managed")),
+            ManagedRegistrationOutcome::SkippedUnmanaged
+        ));
+        assert_eq!(registered_secret(&registry, "vendorx").await, b"lane");
+        assert!(
+            registry.unregister_managed("vendorx").is_none(),
+            "a lane-owned entry must survive managed unregistration"
+        );
+        assert!(registry.is_registered("vendorx"));
+    }
+
+    #[tokio::test]
+    async fn managed_registration_installs_replaces_and_unregisters_managed_entries() {
+        let registry = ExtensionIngressRegistry::default();
+        assert!(!registry.is_registered("vendorx"));
+
+        let ManagedRegistrationOutcome::Registered { replaced } =
+            registry.register_managed("vendorx", registration(b"one"))
+        else {
+            panic!("empty slot must accept a managed entry");
+        };
+        assert!(replaced.is_none());
+        assert_eq!(registered_secret(&registry, "vendorx").await, b"one");
+
+        let ManagedRegistrationOutcome::Registered { replaced } =
+            registry.register_managed("vendorx", registration(b"two"))
+        else {
+            panic!("a managed entry must be replaceable by the assembly");
+        };
+        assert!(
+            replaced.is_some(),
+            "the replaced managed entry is returned for draining"
+        );
+        assert_eq!(registered_secret(&registry, "vendorx").await, b"two");
+
+        assert!(registry.unregister_managed("vendorx").is_some());
+        assert!(!registry.is_registered("vendorx"));
+    }
+
+    #[tokio::test]
+    async fn lane_registration_reclaims_a_managed_slot() {
+        let registry = ExtensionIngressRegistry::default();
+        let ManagedRegistrationOutcome::Registered { .. } =
+            registry.register_managed("vendorx", registration(b"managed"))
+        else {
+            panic!("empty slot must accept a managed entry");
+        };
+
+        registry.register("vendorx", registration(b"lane"));
+        assert_eq!(registered_secret(&registry, "vendorx").await, b"lane");
+        assert!(matches!(
+            registry.register_managed("vendorx", registration(b"managed-again")),
+            ManagedRegistrationOutcome::SkippedUnmanaged
+        ));
     }
 }
