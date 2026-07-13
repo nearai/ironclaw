@@ -26,22 +26,32 @@ function loadConnectionStatusForTest() {
   return context.globalThis.__testExports.ConnectionStatus;
 }
 
-test("ConnectionStatus suppresses non-actionable transport states", () => {
+test("ConnectionStatus hides stable states and renders connection interruptions", () => {
   const ConnectionStatus = loadConnectionStatusForTest();
 
   for (const status of [
     undefined,
     CONNECTION_STATUS.IDLE,
-    CONNECTION_STATUS.CONNECTING,
     CONNECTION_STATUS.CONNECTED,
-    CONNECTION_STATUS.RECONNECTING,
-    CONNECTION_STATUS.DISCONNECTED,
-    CONNECTION_STATUS.PAUSED,
   ]) {
     assert.equal(ConnectionStatus({ status }), null, status);
+  }
+
+  for (const [status, style] of [
+    [CONNECTION_STATUS.CONNECTING, "bg-iron-700/50"],
+    [CONNECTION_STATUS.RECONNECTING, "bg-copper/20"],
+    [CONNECTION_STATUS.DISCONNECTED, "bg-red-500/20"],
+    [CONNECTION_STATUS.PAUSED, "bg-iron-700/50"],
+  ]) {
+    const rendered = ConnectionStatus({ status });
+    assert.notEqual(rendered, null, status);
+    assert.equal(rendered.props.role, "status", status);
+    assert.match(rendered.props.className, new RegExp(style.replace("/", "\\/")), status);
+    assert.equal(rendered.children[0], status, status);
   }
 
   const unknown = ConnectionStatus({ status: "blocked" });
   assert.notEqual(unknown, null);
   assert.equal(typeof unknown, "object");
+  assert.match(unknown.props.className, /bg-iron-700\/50/);
 });
