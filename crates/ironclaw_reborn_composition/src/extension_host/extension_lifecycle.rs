@@ -1062,14 +1062,21 @@ impl RebornLocalExtensionManagementPort {
             return Err(error);
         }
         if let Err(error) = self.persist_install_plan(plan).await {
-            if let Err(cleanup_error) = self
-                .delete_materialized_extension_files(&available.package.id)
-                .await
-            {
-                tracing::debug!(
-                    error = ?cleanup_error,
-                    "best-effort extension file cleanup failed"
-                );
+            // Mirror the materialize guard above (and the REMOVE path's
+            // identical `is_owner_registered` guard): only delete files this
+            // operation actually materialized, or a persistence failure on a
+            // registered install deletes a pre-existing shared directory it
+            // never created.
+            if !is_owner_registered(&available.package.manifest.source) {
+                if let Err(cleanup_error) = self
+                    .delete_materialized_extension_files(&available.package.id)
+                    .await
+                {
+                    tracing::debug!(
+                        error = ?cleanup_error,
+                        "best-effort extension file cleanup failed"
+                    );
+                }
             }
             if let Err(rollback_error) =
                 self.rollback_lifecycle_install(&available.package.id).await

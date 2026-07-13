@@ -846,3 +846,81 @@ async fn owner_remove_of_registered_install_tears_down_without_residue() {
         "registered extension must be unpublished after the owner's remove"
     );
 }
+
+/// Item A regression: a registered install is never materialized under
+/// `/system/extensions/<id>/` (mirrors the remove path's `is_owner_registered`
+/// guard), so a DB failure during `persist_install_plan` must not delete
+/// pre-existing content there — this operation never created it. Red before
+/// the fix: the compensating cleanup ran unconditionally on every
+/// `persist_install_plan` failure and deleted the caller's pre-seeded file.
+#[tokio::test]
+async fn failed_registered_install_persist_does_not_delete_preexisting_extension_files() {
+    let owner_scope = resource_scope_for("default", "owner-a");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage_root = dir.path().join("local-dev");
+    let descriptor_dir = storage_root
+        .join("system/extensions/registered")
+        .join(owner_scope.tenant_id.as_str())
+        .join(owner_scope.user_id.as_str())
+        .join("acme-mcp-registered");
+    std::fs::create_dir_all(&descriptor_dir).expect("registered descriptor dir");
+    std::fs::write(
+        descriptor_dir.join("manifest.toml"),
+        REGISTERED_ISOLATION_MANIFEST_TOML,
+    )
+    .expect("write registered descriptor");
+
+    // Pre-existing content at the shared materialization path this
+    // operation must never touch for a registered install.
+    let preexisting_dir = storage_root
+        .join("system/extensions")
+        .join("acme-mcp-registered");
+    std::fs::create_dir_all(&preexisting_dir).expect("preexisting extension dir");
+    std::fs::write(preexisting_dir.join("leftover.txt"), b"do not delete")
+        .expect("seed preexisting extension file");
+
+    let mut local_filesystem = LocalFilesystem::new();
+    local_filesystem
+        .mount_local(
+            VirtualPath::new("/system/extensions").expect("valid virtual path"),
+            HostPath::from_path_buf(storage_root.join("system/extensions")),
+        )
+        .expect("mount system extensions");
+    let filesystem: Arc<dyn RootFilesystem> = Arc::new(local_filesystem);
+
+    let failing_store = DeleteInstallationFailingStore::default();
+    failing_store
+        .fail_next_upsert_installation
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let installation_store: Arc<dyn ExtensionInstallationStore> = Arc::new(failing_store);
+
+    let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+    let port = RebornLocalExtensionManagementPort::new(
+        filesystem,
+        AvailableExtensionCatalog::from_packages(Vec::new()),
+        installation_store,
+        Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        ))),
+        test_active_extension_publisher(
+            Arc::clone(&active_registry),
+            test_extension_trust_policy(),
+        ),
+        None,
+        owner_scope.user_id.clone(),
+    );
+    let package_ref =
+        LifecyclePackageRef::new(LifecyclePackageKind::Extension, "acme-mcp-registered")
+            .expect("valid ref");
+
+    port.install(package_ref, &owner_scope)
+        .await
+        .expect_err("injected persistence failure must fail the install");
+
+    assert!(
+        preexisting_dir.join("leftover.txt").exists(),
+        "a DB failure during a registered install must not delete pre-existing shared \
+         extension files this operation never created"
+    );
+}
