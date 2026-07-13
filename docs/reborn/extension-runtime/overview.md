@@ -291,9 +291,13 @@ The manifest is compiled **once** per install/upgrade into a typed
 egress, credentials) plus a `manifest_digest` of the source bytes. That record
 is persisted; discovery, lifecycle, dispatch, ingress, auth, and the frontend
 consume the record. Production code never reparses raw TOML. On upgrade, the
-host diffs the old and new resolved contracts: **widening** (new scopes, egress
-hosts, effects, routes, credential handles) requires renewed user approval;
-equal or narrower contracts do not.
+resolved-contract diff classifies the change — equal / narrowed / **widening**
+(new scopes, egress hosts, effects, routes, credential handles). A widening
+*consent gate* is deliberately **not built** in this train (§7): packages are
+host-bundled, so a contract changes only via a reviewed binary release, and
+boot-time adoption of the new bundled record is the accepted path. The
+classifier (`diff_resolved_contracts`) ships as data-model code — the seed for
+a future registry/third-party-distribution trigger.
 
 ## 4. The adapters
 
@@ -526,8 +530,7 @@ one narrow call — or nothing:
 
 ### 5.1 Activation
 
-1. Load the persisted resolved record (compile the manifest if new/changed;
-   widening diff → approval).
+1. Load the persisted resolved record (compile the manifest if new/changed).
 2. Loader produces the entrypoint; `bind` returns adapters; the binding rule is
    checked; global conflicts (duplicate capability id, duplicate route) are
    checked against the staged next snapshot. MCP loaders run bounded discovery
@@ -760,8 +763,9 @@ behavior without a wire break.
 - Startup restores all enabled generations from persisted records and publishes
   once; an invalid extension is skipped with a typed error and does not block
   valid ones.
-- Upgrade stages the new generation, applies the widening rule (§3.3), swaps
-  atomically; the old generation drains via its `Arc`.
+- Upgrade — boot-time adoption of a changed host-bundled contract — swaps the
+  new generation atomically; the old generation drains via its `Arc`. A
+  widening consent gate is deliberately not built (§3.3, §7).
 - Editing `[channel.config]` while `Active` runs an automatic deactivate →
   reactivate cycle: adapters are rebuilt with the new values and `activate()`
   revalidates them. There is no separate `Reconfiguring` state.
@@ -777,6 +781,7 @@ reintroduced without one.
 | --- | --- | --- |
 | Manifest fragments / multi-file compilation | largest manifest ≈ 700 lines; single file is reviewable | a manifest becomes genuinely unreviewable |
 | Content-addressed package blob store, generation leases, GC | packages are host-bundled; the binary is the immutable store | registry distributes mutable third-party packages |
+| Upgrade widening approval (parked generation, consent gate) | packages are host-bundled — upgrades happen only via reviewed binary releases + boot adoption; the diff classifier exists as data-model code | third-party/registry package distribution |
 | Package signing (Ed25519, trust store, revocation) | no third-party distribution channel yet; own project | same as above |
 | Serving-leader lease / fencing tokens | single serving process documented | multi-replica deployment is real (new ADR) |
 | Digest-pinned shared vendor implementation packages | shared vendor = identical-recipe rule (§3.2); native code shares via crate deps | third-party binary vendor-implementation sharing exists |

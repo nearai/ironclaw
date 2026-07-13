@@ -124,8 +124,12 @@ engine, or the router.
   raw source only for diagnostics and recompilation. Startup backfills legacy
   raw-TOML records by compiling once through the v2 reader (idempotent).
 - Widening diff: compare old/new resolved contracts on upgrade — new scopes,
-  egress hosts, effects, credential handles, or an ingress route change →
-  approval required through the existing trust/approval flow.
+  egress hosts, effects, credential handles, or an ingress route change → the
+  diff *classifies* the change. A widening consent gate is deliberately **not
+  built** (overview §7): host-bundled contracts change only via reviewed binary
+  releases, so boot-time adoption of the new record is the accepted path.
+  `diff_resolved_contracts` ships as the data-model seed for a future
+  registry/third-party-distribution trigger.
 
 **Tests first:** `manifest_v3_contract.rs` in `ironclaw_extensions/tests` —
 v3 Slack-shaped fixture resolves to the same surfaces as its v2 equivalent
@@ -481,8 +485,9 @@ carries a removal note in `checklist.md`.
   vendor): manifest with 1 tool + channel (hmac recipe) + oauth recipe + config
   fields; a tiny native factory registered only in tests. Drives every generic
   integration path end-to-end (install → configure → connect → inbound → turn
-  → outbound → upgrade-with-widening → remove) — proof that no generic path
-  needs a real product.
+  → outbound → remove) — proof that no generic path needs a real product.
+  (The upgrade-with-widening approval leg is removed — see overview §7; the
+  contract diff ships as data-model code without a consent gate.)
 - **Architecture gates** (`crates/ironclaw_architecture/tests/`):
   - keep `reborn_retired_taxonomy.rs`;
   - add `reborn_extension_specificity.rs`: scans generic `crates/**/src`,

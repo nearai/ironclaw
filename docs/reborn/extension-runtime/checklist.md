@@ -101,10 +101,15 @@ Rules — kept short on purpose:
   a byte-identical no-op.
 - [ ] REC-4 Upgrade diff classifies equal / narrowed / widened contracts;
   widening (scopes, egress, effects, credentials, route) requires approval
-  before activation; approval denial leaves the old generation active. —
-  NOT BUILT: upgrades run through the lifecycle facade's install/update
-  path without a contract diff; the classify + widen-approval legs remain
-  open (post-P6).
+  before activation; approval denial leaves the old generation active. — Not
+  built — owner decision 2026-07-13: an upgrade-approval gate is net-new
+  functionality, outside the train's consolidation mandate. Upgrades exist only
+  as silent boot-time adoption of bundled contracts
+  (`migrate_host_bundled_manifest_hash`); first-party manifests change via
+  reviewed PRs. The classifier (`diff_resolved_contracts`,
+  `crates/ironclaw_extensions/src/resolved.rs`) exists and stays tested. Revisit
+  trigger: third-party/registry package distribution (overview §7). REL-1's
+  sweep counts this row as dispositioned by owner decision.
 
 ## 3. Binding, loaders, lifecycle (LIFE)
 
