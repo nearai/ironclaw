@@ -526,24 +526,17 @@ impl LocalDevCapabilityIo {
     }
 }
 
-/// Test-support constructor exposing a real `LocalDevCapabilityIo`, wired
-/// exactly the way production's `capability_wiring` builds it above (see
-/// `new_with_durable_previews` at this function's sole production call site,
-/// `capability_wiring`, ~L142-151): durable previews over the caller's
-/// `thread_service` and `fallback_user_id`, no trajectory observer. Returns
-/// two `Arc` clones of ONE underlying io object -- input resolver and result
-/// writer MUST stay two views of the same object, mirroring the production
-/// invariant `RefreshingLocalDevCapabilityPortTestParts`'s doc-comment
-/// states, so a call's input-ref and result-ref correlate by `call_id`.
+/// Test-support constructor wired exactly like production's
+/// `capability_wiring` (`new_with_durable_previews`): durable previews over
+/// the caller's `thread_service` and `fallback_user_id`, no trajectory
+/// observer. Returns two `Arc` clones of ONE underlying io object -- input
+/// resolver and result writer MUST stay two views of the same object so a
+/// call's input-ref and result-ref correlate by `call_id`.
 ///
 /// Lets the integration-test harness drive durable tool-result projection
-/// (`write_capability_result` -> `SessionThreadService::put_tool_result_record`,
-/// the `result_read` continuation path) instead of the ephemeral
-/// `ProductLiveCapabilityIo` test double, which never persists a durable
-/// record.
-///
-/// For tests only -- gated behind `test-support`, ships zero bytes in
-/// production builds.
+/// instead of the ephemeral `ProductLiveCapabilityIo` test double, which
+/// never persists a durable record. For tests only -- gated behind
+/// `test-support`, ships zero bytes in production builds.
 #[cfg(feature = "test-support")]
 pub(super) fn local_dev_capability_io_for_test(
     thread_service: Arc<dyn SessionThreadService>,
@@ -763,11 +756,7 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
         // record stores, before `output_content` is moved into persistence,
         // so its offsets line up exactly with what `result_read` returns.
         let preview = first_look_result_preview(&output_content);
-        // `InlineOnly` skips the durable write only: the content is already
-        // fully model-visible inline (e.g. a `result_read` continuation
-        // chunk), so a new durable record would be a redundant copy nobody
-        // reads. In-memory staging below still happens either way, so an
-        // immediate re-read from cache still succeeds.
+        // See `DurablePersistence` doc comment for the Persist/InlineOnly split.
         if matches!(durable_persistence, DurablePersistence::Persist) {
             self.persist_tool_result(run_context, &result_ref, output_content)
                 .await?;

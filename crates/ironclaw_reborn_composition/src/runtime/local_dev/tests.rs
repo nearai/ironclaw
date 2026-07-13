@@ -2587,29 +2587,10 @@ mod tests {
             "result_read must be visible through the production LocalDev port"
         );
 
-        let mut invalid_call = provider_tool_call_with_name(
-            "builtin__result_read",
-            serde_json::json!({
-                "result_ref": original_result_ref.clone(),
-                "offset": 0,
-                "max_bytes": 1,
-            }),
-        );
-        invalid_call.id = "call-result-read-invalid".to_string();
-        let invalid_candidate = port
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(invalid_call))
-            .await
-            .expect("invalid result_read call still stages for model recovery");
-        let invalid = port
-            .invoke_capability(invocation_for_candidate(&invalid_candidate))
-            .await
-            .expect("invalid result_read remains model-recoverable");
-        assert!(matches!(
-            invalid,
-            CapabilityOutcome::Failed(failure)
-                if failure.error_kind == CapabilityFailureKind::InvalidInput
-        ));
-
+        // The below-min-bytes InvalidInput case is covered exactly (kind +
+        // exact safe_summary) by
+        // `local_dev_result_read_rejects_malformed_arguments_matrix`; only
+        // the malformed-ref-format case below is unique to this test.
         let invalid_reference_candidate = port
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(
                 provider_tool_call_with_name(

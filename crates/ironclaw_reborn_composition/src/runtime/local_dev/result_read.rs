@@ -178,15 +178,10 @@ impl LocalDevSyntheticCapabilityHandler for ResultReadHandler {
             "total_bytes": total_bytes,
             "next_offset": next_offset,
         });
-        // `result_read`'s own chunk is already fully delivered to the model
-        // inline (below, via `result_read_observation`'s `preview`), so the
-        // durable write is skipped -- persisting it again would mint a new
-        // durable record per chunk with no reader that needs it (issue
-        // #5838). In-memory staging still happens, so an immediate re-read
-        // from cache still works; a later durable read against this ref
-        // fails gracefully as unavailable (`unavailable_result_reference`).
-        // The ORIGINAL result this chunk was paged from stays durable and
-        // untouched -- nothing is deleted.
+        // `InlineOnly` (see `DurablePersistence` doc comment): this chunk is
+        // already fully delivered to the model inline via
+        // `result_read_observation`'s `preview`. The ORIGINAL result this
+        // chunk was paged from stays durable and untouched.
         let mut write = invocation
             .result_writer
             .write_capability_result(CapabilityResultWrite {
