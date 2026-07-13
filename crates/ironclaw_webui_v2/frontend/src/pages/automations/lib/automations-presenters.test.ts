@@ -13,7 +13,7 @@ import {
 } from "./automations-presenters";
 
 // Schedule labels are now localized: the presenter takes a translator + locale.
-// Mirror the en.js `automations.schedule.*` templates so these tests exercise
+// Mirror the en.ts `automations.schedule.*` templates so these tests exercise
 // the real key→template→interpolation path and assert human-readable English.
 const EN_SCHEDULE = {
   "automations.schedule.custom": "Custom schedule",
@@ -26,7 +26,7 @@ const EN_SCHEDULE = {
   "automations.schedule.monthlyAt": "Day {day} of each month at {time}",
   "automations.schedule.dateAt": "{date} at {time}",
   "automations.schedule.onceAt": "Once on {datetime}",
-  // Status / state / date-fallback labels are now localized too; mirror en.js
+  // Status / state / date-fallback labels are now localized too; mirror en.ts
   // so assertions read human English.
   "automations.state.active": "Active",
   "automations.state.scheduled": "Scheduled",

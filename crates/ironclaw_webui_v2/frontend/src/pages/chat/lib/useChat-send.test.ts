@@ -41,8 +41,8 @@ import {
   rememberChannelConnectionWaiter,
   subscribeChannelConnected,
 } from "../../../lib/channel-connection-events";
-import { productAuthOAuthEventsSource } from "../../../lib/product-auth-oauth-events.vm-inline.mjs";
-import { moduleSourceForVm } from "../../../lib/vm-inline-source.mjs";
+import { productAuthOAuthEventsSource } from "../../../lib/product-auth-oauth-events.vm-inline";
+import { moduleSourceForVm } from "../../../lib/vm-inline-source";
 
 const STATE_SLOT = Object.freeze({
   cooldownUntil: 0,
@@ -4104,7 +4104,7 @@ function channelConnectionContext({
     useHistory: () => ({
       messages,
       // The thread the loaded `messages` belong to. Real useHistory swaps this in
-      // step with `messages` (see useHistory.js); tests default it to the active
+      // step with `messages` (see useHistory.ts); tests default it to the active
       // thread, and override it to model the post-navigation render where
       // `threadId` has advanced but `messages` is still the previous thread's.
       messagesThreadId: messagesThreadId ?? threadId,

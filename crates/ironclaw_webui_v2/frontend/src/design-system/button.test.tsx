@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
-import type { ReactElement } from "react";
+import { isValidElement, type ReactElement } from "react";
 import { test } from "vitest";
 
 import { Button } from "./button";
+import { Spinner } from "./spinner";
 
 type ButtonElementProps = {
+  "aria-busy"?: boolean;
+  children?: unknown;
   disabled?: boolean;
   "aria-disabled"?: boolean;
+  href?: string;
   tabIndex?: number;
   to?: string;
   onClick?: (event: { preventDefault: () => void; stopPropagation: () => void }) => void;
@@ -14,6 +18,72 @@ type ButtonElementProps = {
 
 function LinkLike() {
   return null;
+}
+
+function includesElementType(node: unknown, elementType: unknown): boolean {
+  if (Array.isArray(node)) {
+    return node.some((child) => includesElementType(child, elementType));
+  }
+  if (!isValidElement<{ children?: unknown }>(node)) return false;
+  return node.type === elementType || includesElementType(node.props.children, elementType);
+}
+
+for (const variant of ["primary", "secondary"] as const) {
+  test(`Button loading (${variant}) renders a spinner, disables, and sets aria-busy`, () => {
+    const rendered = Button({
+      variant,
+      loading: true,
+      children: "Connect",
+    }) as ReactElement<ButtonElementProps>;
+
+    assert.equal(rendered.props.disabled, true);
+    assert.equal(rendered.props["aria-busy"], true);
+    assert.ok(includesElementType(rendered.props.children, Spinner));
+  });
+
+  test(`Button idle (${variant}) has no spinner and is enabled`, () => {
+    const rendered = Button({
+      variant,
+      loading: false,
+      children: "Connect",
+    }) as ReactElement<ButtonElementProps>;
+
+    assert.equal(rendered.props.disabled, false);
+    assert.equal(rendered.props["aria-busy"], undefined);
+    assert.equal(includesElementType(rendered.props.children, Spinner), false);
+  });
+
+  test(`Button loading anchor (${variant}) blocks clicks and marks itself disabled`, () => {
+    let clicked = false;
+    let prevented = false;
+    let stopped = false;
+    const rendered = Button({
+      as: "a",
+      href: "https://example.com/auth",
+      variant,
+      loading: true,
+      onClick: () => {
+        clicked = true;
+      },
+      children: "Connect",
+    }) as ReactElement<ButtonElementProps>;
+
+    rendered.props.onClick?.({
+      preventDefault: () => {
+        prevented = true;
+      },
+      stopPropagation: () => {
+        stopped = true;
+      },
+    });
+
+    assert.equal(clicked, false);
+    assert.equal(prevented, true);
+    assert.equal(stopped, true);
+    assert.equal(rendered.props.disabled, undefined);
+    assert.equal(rendered.props["aria-disabled"], true);
+    assert.equal(rendered.props.tabIndex, -1);
+  });
 }
 
 test("disabled Link-like Buttons use aria-disabled without native disabled", () => {
@@ -53,4 +123,8 @@ test("disabled native Buttons keep the disabled attribute", () => {
   assert.equal(rendered.type, "button");
   assert.equal(rendered.props.disabled, true);
   assert.equal(rendered.props["aria-disabled"], undefined);
+  const children = rendered.props.children as ReactElement[];
+  const content = children[1] as ReactElement<{ children: [unknown, unknown] }>;
+  assert.equal(content.props.children[0], false, "disabled without loading renders no spinner");
+  assert.equal(content.props.children[1], "Save");
 });

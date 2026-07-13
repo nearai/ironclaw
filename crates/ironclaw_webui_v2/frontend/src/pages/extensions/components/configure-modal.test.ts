@@ -4,8 +4,8 @@ import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
 
-import { rememberChannelConnectionWaiter } from "../../../lib/channel-connection-events.js";
-import { redeemPairingCode as realRedeemPairingCode } from "../lib/pairing-api.js";
+import { rememberChannelConnectionWaiter } from "../../../lib/channel-connection-events";
+import { redeemPairingCode as realRedeemPairingCode } from "../lib/pairing-api";
 
 function configureModalSourceForTest() {
   const source = readFileSync(new URL("./configure-modal.tsx", import.meta.url), "utf8");

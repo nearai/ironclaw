@@ -8,28 +8,28 @@ import {
   notifyChannelConnected,
   rememberChannelConnectionWaiter,
   subscribeChannelConnected,
-} from "../../../lib/channel-connection-events.js";
+} from "../../../lib/channel-connection-events";
 import {
   completionMatchesFlow,
   failureMatchesFlow,
   openAuthPopup,
   readLatestProductAuthOAuthCompletion,
   subscribeProductAuthOAuthCompletion,
-} from "../../../lib/product-auth-oauth-events.js";
-import { queryClient } from "../../../lib/query-client.js";
+} from "../../../lib/product-auth-oauth-events";
+import { queryClient } from "../../../lib/query-client";
 import {
   fetchExtensionSetup,
   fetchExtensions,
   startExtensionOauth,
-} from "../../extensions/lib/extensions-api.js";
-import { redeemPairingCode } from "../../extensions/lib/pairing-api.js";
+} from "../../extensions/lib/extensions-api";
+import { redeemPairingCode } from "../../extensions/lib/pairing-api";
 
 const DISMISSED_ONBOARDING_STORAGE_PREFIX =
   "ironclaw.chat.dismissedOnboarding.v1:";
 const DISMISSED_ONBOARDING_STORAGE_LIMIT = 100;
 
 // In-chat OAuth watcher bounds. Mirror the Extensions page watcher
-// (`OAUTH_SETUP_TIMEOUT_MS` / `OAUTH_SETUP_REFRESH_MS` in useExtensions.js) so
+// (`OAUTH_SETUP_TIMEOUT_MS` / `OAUTH_SETUP_REFRESH_MS` in useExtensions.ts) so
 // an abandoned popup cannot leave the card polling the server forever.
 const CHAT_OAUTH_TIMEOUT_MS = 10 * 60 * 1000;
 const CHAT_OAUTH_POLL_MS = 2000;
@@ -165,7 +165,7 @@ function threadResumedAfterConnection(messages, cardIndex, channel) {
 // activation card can never re-open the panel for an already-connected account.
 function channelConnectionIsSatisfied(extensions, channel) {
   // Normalize both operands the same way the waiter bus does
-  // (lib/channel-connection-events.js) so a multi-word channel id (e.g.
+  // (lib/channel-connection-events.ts) so a multi-word channel id (e.g.
   // `telegram_bot`) can't satisfy the gate here while the bus keys on a different
   // normalized string — which would re-open the panel for a connected account.
   const expected = normalizeConnectionChannel(channel);
@@ -195,7 +195,7 @@ function channelConnectionIsSatisfied(extensions, channel) {
 // durable connection-required tool card, drives OAuth/pairing redemption, and
 // resumes the parked chat on channel connect. `useChat` keeps the gate/send
 // state and threads the handles it shares (gate, send) in here; the values this
-// returns are re-exposed verbatim from `useChat` for `chat.js`.
+// returns are re-exposed verbatim from `useChat` for `chat.tsx`.
 //
 // `pendingOnboarding` MUST be the hook's (and this composition's) first
 // `useState` so it stays the sixth overall in `useChat` — the WebUI has no live
@@ -208,7 +208,7 @@ export function useChannelOnboarding(
   const pendingOnboardingRef = React.useRef(pendingOnboarding);
   // Known limitation: single in-flight onboarding-OAuth flow per useChat
   // instance. This hook is one non-remounted instance across thread switches
-  // (chat.js keys nothing on threadId), so starting OAuth in thread A and then
+  // (chat.tsx keys nothing on threadId), so starting OAuth in thread A and then
   // thread B (same channel) before A completes overwrites this ref with B's
   // flow — A's later callback no longer matches `pending.flowId` and its
   // resume is dropped. Keying the pending flow by flow_id (a Map) would fix it

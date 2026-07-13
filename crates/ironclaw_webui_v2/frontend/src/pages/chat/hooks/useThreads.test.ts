@@ -5,8 +5,8 @@ import { test } from "vitest";
 import vm from "node:vm";
 
 // Load useThreads.ts into a fresh VM context with its imports stripped, the
-// same harness pattern useHistory.test.mts uses. The hook's collaborators
-// (React, react-query, the api.js requests, the query client) are injected as
+// same harness pattern useHistory.test.ts uses. The hook's collaborators
+// (React, react-query, the api.ts requests, the query client) are injected as
 // context globals so the test can drive `handleCreateThread` directly.
 function useThreadsSourceForTest() {
   const source = readFileSync(new URL("./useThreads.ts", import.meta.url), "utf8");

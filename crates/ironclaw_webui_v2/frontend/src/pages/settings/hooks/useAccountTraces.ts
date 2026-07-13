@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { fetchAccountTraces } from "../lib/settings-api.js";
+import { fetchAccountTraces } from "../lib/settings-api";
 
 export function useAccountTraces() {
   const query = useQuery({

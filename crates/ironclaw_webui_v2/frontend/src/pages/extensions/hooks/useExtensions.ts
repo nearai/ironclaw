@@ -33,7 +33,7 @@ const OAUTH_SETUP_TIMEOUT_MS = 10 * 60 * 1000;
 
 // OAuth callback constants, HTTPS-auth-URL/popup helpers, and completion
 // parsing/matching are the shared product-auth OAuth event contract — see
-// `lib/product-auth-oauth-events.js`. This hook keeps only its setup-watcher
+// `lib/product-auth-oauth-events.ts`. This hook keeps only its setup-watcher
 // state machine below.
 
 function authPopupFailureMessage(reason) {
@@ -61,7 +61,7 @@ function extensionListItemIsConfigured(extension) {
     return true;
   }
   // Same snake/camel fallback chain as `extensionLifecycleState`
-  // (lib/extension-actions.js) so a camelCase snapshot cannot read as
+  // (lib/extension-actions.ts) so a camelCase snapshot cannot read as
   // "not configured" here while the rest of the page treats it as active.
   const state =
     extension.onboarding_state ||

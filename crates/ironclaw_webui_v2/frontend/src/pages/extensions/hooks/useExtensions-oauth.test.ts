@@ -1,8 +1,9 @@
+// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
-import { productAuthOAuthEventsSource } from "../../../lib/product-auth-oauth-events.vm-inline.mjs";
+import { productAuthOAuthEventsSource } from "../../../lib/product-auth-oauth-events.vm-inline";
 
 // The origin-independent flow-status poll is fire-and-forget: the interval
 // callback kicks off `fetchOauthFlowStatus(...)` without awaiting it, so the

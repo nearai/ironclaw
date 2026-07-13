@@ -6,7 +6,7 @@
 // The server DTO keys the user by `user_id`; the admin components read
 // `user.id`, so every record is normalized to carry both.
 
-import { apiFetch } from "../../../lib/api.js";
+import { apiFetch } from "../../../lib/api";
 
 const ADMIN_BASE = "/api/webchat/v2/admin";
 
@@ -98,7 +98,7 @@ export async function activateAdminUser(id) {
 // The admin UI no longer calls this: the re-issue "Create Token" controls were
 // removed from the existing-user views (user-detail + users-tab) so an admin
 // can't trigger a guaranteed rejection. The export is kept only so the
-// contract stays covered by admin-api.test.js until a real endpoint lands.
+// contract stays covered by admin-api.test.ts until a real endpoint lands.
 export function createUserToken(_userId, _name) {
   return Promise.reject(
     new Error("API tokens are issued only when a user is created (re-issue not yet supported)"),
@@ -132,7 +132,7 @@ export async function deleteUserSecret(userId, handle) {
 // The usage dashboard is intentionally NOT part of this admin port. These
 // exports remain as inert empty stubs so the (now-unrouted) dashboard/usage
 // components still import cleanly; the corresponding sub-routes are dropped in
-// `app/routes.js`, so they are never rendered.
+// `app/routes.ts`, so they are never rendered.
 
 export function fetchUsageSummary() {
   return Promise.resolve({
