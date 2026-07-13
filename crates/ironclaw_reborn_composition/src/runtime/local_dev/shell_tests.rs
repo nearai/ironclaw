@@ -148,7 +148,7 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
             &run_context,
             &provider_tool_call(serde_json::json!({
                 "command": if cfg!(windows) {
-                    "if not exist /workspace exit /b 1 && if not exist /host exit /b 1 && echo local-dev-shell-ok"
+                    "if exist /workspace if exist /host echo local-dev-shell-ok"
                 } else {
                     "mkdir -p /workspace/qa-coding-smoke && test -d /host && printf '%s:%s' local-dev-shell-ok \"$PWD\""
                 },

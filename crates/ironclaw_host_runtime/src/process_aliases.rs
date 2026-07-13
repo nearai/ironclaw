@@ -254,14 +254,17 @@ fn command_path_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || matches!(ch, '/' | '_' | '-' | '.')
 }
 
+#[cfg(not(windows))]
 fn shell_quote_path(path: &str) -> String {
     format!("'{}'", escape_for_single_quote_context(path))
 }
 
+#[cfg(not(windows))]
 fn escape_for_single_quote_context(path: &str) -> String {
     path.replace('\'', "'\\''")
 }
 
+#[cfg(not(windows))]
 fn escape_for_double_quote_context(path: &str) -> String {
     let mut escaped = String::with_capacity(path.len());
     for ch in path.chars() {
@@ -310,6 +313,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn command_alias_rewrite_quotes_unquoted_paths_with_spaces() {
         let alias = alias("/workspace", "/tmp/work space");
@@ -320,6 +324,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn command_alias_rewrite_escapes_single_quote_context() {
         let alias = alias("/workspace", "/tmp/work'space");
@@ -330,6 +335,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn command_alias_rewrite_escapes_double_quote_context() {
         let alias = alias("/workspace", "/tmp/work$space`quoted`");
@@ -340,6 +346,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn command_alias_rewrite_respects_escaped_aliases() {
         let alias = alias("/workspace", "/tmp/workspace");
@@ -350,6 +357,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn command_alias_rewrite_at_start_of_command() {
         let alias = alias("/workspace", "/tmp/workspace");
@@ -360,6 +368,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn command_alias_rewrite_followed_by_semicolon_boundary() {
         let alias = alias("/workspace", "/tmp/workspace");
@@ -370,6 +379,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn command_alias_rewrite_handles_command_substitution_paths() {
         let alias = alias("/workspace", "/tmp/workspace");
