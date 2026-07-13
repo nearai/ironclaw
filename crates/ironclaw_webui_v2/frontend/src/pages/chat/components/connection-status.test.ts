@@ -46,15 +46,14 @@ test("ConnectionStatus hides routine states and renders connection interruptions
     const rendered = ConnectionStatus({ status });
     assert.notEqual(rendered, null, status);
     assert.equal(rendered.props.role, "status", status);
-    assert.match(rendered.props.className, /\babsolute\b/, status);
-    assert.match(rendered.props.className, /\bw-max\b/, status);
-    assert.match(rendered.props.className, /\bright-3\b/, status);
-    assert.match(rendered.props.className, /\bsm:right-4\b/, status);
-    assert.match(rendered.props.className, /max-w-\[calc\(100%_-_1\.5rem\)\]/, status);
+    assert.equal(rendered.props["aria-label"], status, status);
+    assert.doesNotMatch(rendered.props.className, /\babsolute\b/, status);
+    assert.match(rendered.props.className, /\bmax-w-32\b/, status);
+    assert.match(rendered.props.className, /\bsm:max-w-48\b/, status);
     assert.doesNotMatch(rendered.props.className, /\bsticky\b/, status);
-    assert.doesNotMatch(rendered.props.className, /\binset-x-4\b/, status);
     assert.ok(rendered.props.className.includes(style), status);
     assert.match(rendered.children[0].props.className, /\bshrink-0\b/, status);
+    assert.match(rendered.children[1].props.className, /\btruncate\b/, status);
     assert.equal(rendered.children[1].children[0], status, status);
   }
 

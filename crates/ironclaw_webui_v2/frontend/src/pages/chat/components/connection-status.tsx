@@ -33,8 +33,10 @@ export function ConnectionStatus({ status }: ConnectionStatusProps) {
   return (
     <div
       role="status"
+      aria-label={label !== labelKey ? label : status}
+      title={label !== labelKey ? label : status}
       className={[
-        "pointer-events-none absolute right-3 top-3 z-20 inline-flex w-max max-w-[calc(100%_-_1.5rem)] items-center gap-2 rounded-lg border px-3 py-2 text-left text-xs font-medium leading-4 shadow-[0_12px_28px_-14px_rgba(0,0,0,0.72)] backdrop-blur-xl sm:right-4 sm:top-4 sm:max-w-sm",
+        "inline-flex h-7 max-w-32 shrink-0 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium shadow-[0_8px_20px_-14px_rgba(0,0,0,0.72)] sm:max-w-48",
         STATUS_STYLES[status] || DEFAULT_STATUS_STYLE,
       ].join(" ")}
     >
@@ -47,7 +49,7 @@ export function ConnectionStatus({ status }: ConnectionStatusProps) {
             : "",
         ].join(" ")}
       />
-      <span>{label !== labelKey ? label : status}</span>
+      <span className="truncate">{label !== labelKey ? label : status}</span>
     </div>
   );
 }
