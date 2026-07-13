@@ -179,14 +179,13 @@ pub fn read_excerpt(
     let parsed: serde_json::Value =
         serde_json::from_str(&response).map_err(|e| format!("Failed to parse response: {}", e))?;
 
+    let content = required_body_content(&parsed)?;
     let mut text = String::new();
     let mut outline = Vec::new();
-    if let Some(content) = parsed["body"]["content"].as_array() {
-        extract_text_from_elements(content, &mut text);
-        if include_outline {
-            let mut offset = 0;
-            extract_outline_from_elements(content, &mut offset, &mut outline);
-        }
+    extract_text_from_elements(content, &mut text);
+    if include_outline {
+        let mut offset = 0;
+        extract_outline_from_elements(content, &mut offset, &mut outline);
     }
 
     let total_chars = text.chars().count();
@@ -218,6 +217,13 @@ pub fn read_excerpt(
         truncated_after: end_char < total_chars,
         outline,
     })
+}
+
+fn required_body_content(document: &serde_json::Value) -> Result<&[serde_json::Value], String> {
+    document["body"]["content"]
+        .as_array()
+        .map(Vec::as_slice)
+        .ok_or_else(|| "Google Docs response missing body.content".to_string())
 }
 
 /// Recursively extract plain text from structural elements.
@@ -722,5 +728,19 @@ mod tests {
     #[test]
     fn query_char_offset_handles_non_ascii_case_folding() {
         assert_eq!(query_char_offset("Intro CAFÉ notes", "café"), Some(6));
+    }
+
+    #[test]
+    fn required_body_content_rejects_missing_or_malformed_content() {
+        for document in [
+            serde_json::json!({}),
+            serde_json::json!({"body": {"content": null}}),
+            serde_json::json!({"body": {"content": {}}}),
+        ] {
+            assert_eq!(
+                required_body_content(&document),
+                Err("Google Docs response missing body.content".to_string())
+            );
+        }
     }
 }

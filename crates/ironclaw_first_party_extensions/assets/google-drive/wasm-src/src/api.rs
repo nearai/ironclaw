@@ -208,12 +208,13 @@ fn compact_files_result(result: ListFilesResult) -> CompactFilesResult {
 }
 
 fn compact_file(file: DriveFile) -> CompactDriveFile {
-    let owner = file.owners.first().map(|owner| {
+    let owner = file.owners.first().and_then(|owner| {
         owner
             .display_name
             .as_deref()
-            .unwrap_or(&owner.email)
-            .to_string()
+            .filter(|value| !value.is_empty())
+            .or_else(|| (!owner.email.is_empty()).then_some(owner.email.as_str()))
+            .map(str::to_owned)
     });
     CompactDriveFile {
         id: file.id,
@@ -701,5 +702,19 @@ mod tests {
         // Multi-GB sizes must parse (u64), not overflow `usize` on wasm32 and
         // silently skip the guard.
         assert!(declared_oversize_message(Some("5000000000")).is_some());
+    }
+
+    #[test]
+    fn compact_file_omits_owner_when_name_and_email_are_empty() {
+        let file = parse_file(&serde_json::json!({
+            "id": "file-1",
+            "name": "Untitled",
+            "mimeType": "text/plain",
+            "owners": [{}]
+        }));
+
+        let compact = serde_json::to_value(compact_file(file)).unwrap();
+
+        assert!(compact.get("owner").is_none());
     }
 }

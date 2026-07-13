@@ -86,7 +86,7 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 4000,
-      "description": "Maximum email snippet/body preview characters per message. Defaults to 500."
+      "description": "Maximum characters retained from Gmail's already-short API snippet per message. This does not fetch or expand the full message body. Defaults to 500."
     }
   },
   "allOf": [
