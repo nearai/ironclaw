@@ -11,6 +11,7 @@ mod egress;
 mod error;
 mod policy;
 mod resolver;
+mod test_rewrite;
 mod transport;
 mod types;
 mod url_target;
@@ -19,6 +20,10 @@ pub use egress::{NetworkHttpEgress, NetworkHttpTransport, PolicyNetworkHttpEgres
 pub use error::NetworkHttpError;
 pub use policy::{StaticNetworkPolicyEnforcer, target_matches_pattern};
 pub use resolver::NetworkResolver;
+pub use test_rewrite::{
+    HostRewriteMap, HostRewriteMapError, RewriteNetworkTransport, TEST_HTTP_REWRITE_MAP_ENV,
+    default_policy_http_egress,
+};
 pub use transport::ReqwestNetworkTransport;
 pub use types::{
     DEFAULT_RESPONSE_BODY_LIMIT, NetworkHttpRequest, NetworkHttpResponse, NetworkRequest,
