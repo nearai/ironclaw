@@ -6,12 +6,16 @@ type ConnectionStatusProps = {
 };
 
 const STATUS_STYLES: Partial<Record<ConnectionStatus, string>> = {
-  [CONNECTION_STATUS.RECONNECTING]: "bg-copper/20 text-copper border-copper/30",
-  [CONNECTION_STATUS.DISCONNECTED]: "bg-red-500/20 text-red-200 border-red-400/30",
-  [CONNECTION_STATUS.PAUSED]: "bg-iron-700/50 text-iron-200 border-iron-700/50",
+  [CONNECTION_STATUS.RECONNECTING]:
+    "border-[color-mix(in_srgb,var(--v2-warning-text)_34%,var(--v2-panel-border))] bg-[var(--v2-warning-soft)] text-[var(--v2-warning-text)]",
+  [CONNECTION_STATUS.DISCONNECTED]:
+    "border-[color-mix(in_srgb,var(--v2-danger-text)_34%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] text-[var(--v2-danger-text)]",
+  [CONNECTION_STATUS.PAUSED]:
+    "border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] text-[var(--v2-text-muted)]",
 };
 
-const DEFAULT_STATUS_STYLE = "bg-iron-700/50 text-iron-200 border-iron-700/50";
+const DEFAULT_STATUS_STYLE =
+  "border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] text-[var(--v2-text-muted)]";
 
 const HIDDEN_STATUSES: ReadonlySet<ConnectionStatus> = new Set([
   CONNECTION_STATUS.IDLE,
@@ -30,11 +34,20 @@ export function ConnectionStatus({ status }: ConnectionStatusProps) {
     <div
       role="status"
       className={[
-        "pointer-events-none absolute left-1/2 top-4 z-20 w-max max-w-[calc(100%_-_2rem)] -translate-x-1/2 rounded-full border px-4 py-1.5 text-center text-xs font-medium shadow-lg backdrop-blur-xl",
+        "pointer-events-none absolute right-3 top-3 z-20 inline-flex w-max max-w-[calc(100%_-_1.5rem)] items-center gap-2 rounded-lg border px-3 py-2 text-left text-xs font-medium leading-4 shadow-[0_12px_28px_-14px_rgba(0,0,0,0.72)] backdrop-blur-xl sm:right-4 sm:top-4 sm:max-w-sm",
         STATUS_STYLES[status] || DEFAULT_STATUS_STYLE,
       ].join(" ")}
     >
-      {label !== labelKey ? label : status}
+      <span
+        aria-hidden="true"
+        className={[
+          "h-1.5 w-1.5 shrink-0 rounded-full bg-current",
+          status === CONNECTION_STATUS.RECONNECTING
+            ? "animate-[v2-breathe_1.6s_ease-in-out_infinite]"
+            : "",
+        ].join(" ")}
+      />
+      <span>{label !== labelKey ? label : status}</span>
     </div>
   );
 }

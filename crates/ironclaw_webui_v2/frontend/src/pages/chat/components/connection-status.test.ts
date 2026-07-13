@@ -39,23 +39,27 @@ test("ConnectionStatus hides routine states and renders connection interruptions
   }
 
   for (const [status, style] of [
-    [CONNECTION_STATUS.RECONNECTING, "bg-copper/20"],
-    [CONNECTION_STATUS.DISCONNECTED, "bg-red-500/20"],
-    [CONNECTION_STATUS.PAUSED, "bg-iron-700/50"],
+    [CONNECTION_STATUS.RECONNECTING, "--v2-warning-soft"],
+    [CONNECTION_STATUS.DISCONNECTED, "--v2-danger-soft"],
+    [CONNECTION_STATUS.PAUSED, "--v2-surface-soft"],
   ]) {
     const rendered = ConnectionStatus({ status });
     assert.notEqual(rendered, null, status);
     assert.equal(rendered.props.role, "status", status);
     assert.match(rendered.props.className, /\babsolute\b/, status);
     assert.match(rendered.props.className, /\bw-max\b/, status);
+    assert.match(rendered.props.className, /\bright-3\b/, status);
+    assert.match(rendered.props.className, /\bsm:right-4\b/, status);
+    assert.match(rendered.props.className, /max-w-\[calc\(100%_-_1\.5rem\)\]/, status);
     assert.doesNotMatch(rendered.props.className, /\bsticky\b/, status);
     assert.doesNotMatch(rendered.props.className, /\binset-x-4\b/, status);
-    assert.match(rendered.props.className, new RegExp(style.replace("/", "\\/")), status);
-    assert.equal(rendered.children[0], status, status);
+    assert.ok(rendered.props.className.includes(style), status);
+    assert.match(rendered.children[0].props.className, /\bshrink-0\b/, status);
+    assert.equal(rendered.children[1].children[0], status, status);
   }
 
   const unknown = ConnectionStatus({ status: "blocked" });
   assert.notEqual(unknown, null);
   assert.equal(typeof unknown, "object");
-  assert.match(unknown.props.className, /bg-iron-700\/50/);
+  assert.ok(unknown.props.className.includes("--v2-surface-soft"));
 });
