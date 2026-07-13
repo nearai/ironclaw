@@ -493,6 +493,15 @@ async def test_reborn_v2_disconnected_run_shows_status_and_stops_typing(
         assert status_box["width"] < 320
 
         await page.set_viewport_size({"width": 390, "height": 844})
+        connection_status_label = page.get_by_test_id("connection-status-label")
+        await expect(connection_status_label).to_be_hidden()
+        collapsed_status_box = await connection_status.bounding_box()
+        assert collapsed_status_box is not None
+        assert collapsed_status_box["width"] <= 32
+
+        await connection_status.click()
+        await expect(connection_status_label).to_be_visible()
+        await expect(connection_status_label).to_have_text("Reconnecting...")
         mobile_status_box = await connection_status.bounding_box()
         assert mobile_status_box is not None
         assert mobile_status_box["x"] >= 12
