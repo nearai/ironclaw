@@ -2641,6 +2641,14 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "run_id": "run-current",
                 "invocation_ids": {capability_id: ["invocation-current"]},
                 "statuses": {capability_id: ["completed"]},
+                "terminal_sequence": [
+                    {
+                        "seq": 1,
+                        "capability_id": capability_id,
+                        "invocation_id": "invocation-current",
+                        "status": "completed",
+                    }
+                ],
             },
         )
         self.assertTrue(replay_current.success)
@@ -2744,6 +2752,91 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(chat.details["failure_status"], "inconclusive")
         self.assertTrue(chat.details["inconclusive"])
         self.assertFalse(chat.details["blocking"])
+
+    def test_slack_correctness_requires_lookup_before_write(self):
+        async def fake_live_chat_case(_ctx, **kwargs):
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=True,
+                latency_ms=1,
+                details={
+                    "full_reply_text": "posted",
+                    "submission_identity": {
+                        "accepted_message_ref": "msg:current",
+                        "thread_id": "thread-current",
+                        "turn_id": "turn-current",
+                        "run_id": "run-current",
+                    },
+                },
+            )
+
+        def drive(sequence: list[str]) -> run_live_qa.ProbeResult:
+            evidence = {
+                "accepted_message_ref": "msg:current",
+                "thread_id": "thread-current",
+                "turn_id": "turn-current",
+                "run_id": "run-current",
+                "invocation_ids": {
+                    "slack.get_conversation_info": ["invocation-lookup"],
+                    "slack.send_message": ["invocation-send"],
+                },
+                "statuses": {
+                    "slack.get_conversation_info": ["completed"],
+                    "slack.send_message": ["completed"],
+                },
+                "terminal_sequence": [
+                    {
+                        "seq": index + 1,
+                        "capability_id": capability_id,
+                        "invocation_id": f"invocation-{index + 1}",
+                        "status": "completed",
+                    }
+                    for index, capability_id in enumerate(sequence)
+                ],
+            }
+            with (
+                patch.object(
+                    run_live_qa,
+                    "_live_chat_case",
+                    side_effect=fake_live_chat_case,
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_current_turn_capability_evidence",
+                    return_value=evidence,
+                ),
+            ):
+                result, _ = asyncio.run(
+                    run_live_qa._slack_correctness_chat_reply(
+                        self._dummy_ctx(),
+                        case_name="qa_10_order_test",
+                        started=run_live_qa.time.monotonic(),
+                        prompt="Resolve the DM, then send the message.",
+                        answer_marker="ANSWER_MARKER",
+                        extra_details={},
+                        expected_capability="slack.get_conversation_info",
+                        expected_capability_sequence=(
+                            "slack.get_conversation_info",
+                            "slack.send_message",
+                        ),
+                    )
+                )
+            return result
+
+        ordered = drive(
+            ["slack.get_conversation_info", "slack.send_message"]
+        )
+        reversed_order = drive(
+            ["slack.send_message", "slack.get_conversation_info"]
+        )
+
+        self.assertTrue(ordered.success)
+        self.assertFalse(reversed_order.success)
+        self.assertEqual(
+            reversed_order.details["failure_category"],
+            "unexpected_capability_order",
+        )
 
     def test_qa_10e_prompt_echo_without_current_turn_history_call_fails(self):
         captured: dict[str, object] = {}
@@ -6491,6 +6584,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "mention_targets_counterpart",
                 "_wait_for_authored_slack_message",
                 "author_mismatch",
+                "expected_capability_sequence",
+                "slack.send_message",
             ),
             run_live_qa.case_qa_10g_slack_last_message_sent: (
                 "LASTSENT_",

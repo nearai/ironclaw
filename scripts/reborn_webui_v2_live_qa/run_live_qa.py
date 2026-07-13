@@ -3386,6 +3386,7 @@ def _current_turn_capability_evidence(
         **identity,
         "invocation_ids": {capability_id: [] for capability_id in capability_ids},
         "statuses": {capability_id: [] for capability_id in capability_ids},
+        "terminal_sequence": [],
     }
     if not all(identity[field] for field in _SUBMISSION_CORRELATION_FIELDS):
         return evidence
@@ -3398,9 +3399,10 @@ def _current_turn_capability_evidence(
         with closing(sqlite3.connect(database_uri, uri=True)) as db:
             event_rows = db.execute(
                 """
-                SELECT payload
+                SELECT seq, payload
                 FROM root_filesystem_events
                 WHERE path LIKE '/events/runtime/%'
+                ORDER BY seq ASC
                 """
             ).fetchall()
             run_state_rows = db.execute(
@@ -3417,8 +3419,8 @@ def _current_turn_capability_evidence(
         return evidence
 
     wanted = set(capability_ids)
-    terminal_events: dict[str, dict[str, str]] = {}
-    for (raw_payload,) in event_rows:
+    terminal_events: dict[str, tuple[str, str, int]] = {}
+    for raw_seq, raw_payload in event_rows:
         try:
             payload = json.loads(
                 raw_payload.decode("utf-8", errors="replace")
@@ -3444,12 +3446,13 @@ def _current_turn_capability_evidence(
             continue
         invocation_id = str(scope.get("invocation_id") or "")
         if invocation_id:
-            terminal_events[invocation_id] = {
-                "capability_id": capability_id,
-                "status": event_status,
-            }
+            terminal_events[invocation_id] = (
+                capability_id,
+                event_status,
+                int(raw_seq),
+            )
 
-    matched: dict[str, list[tuple[str, str]]] = {
+    matched: dict[str, list[tuple[int, str, str]]] = {
         capability_id: [] for capability_id in capability_ids
     }
     for (raw_contents,) in run_state_rows:
@@ -3467,24 +3470,46 @@ def _current_turn_capability_evidence(
         event = terminal_events.get(invocation_id)
         scope = payload.get("scope")
         status = str(payload.get("status") or "unknown")
+        event_capability_id, event_status, event_seq = event or ("", "", 0)
         if (
             event is None
-            or payload.get("capability_id") != event["capability_id"]
-            or status != event["status"]
+            or payload.get("capability_id") != event_capability_id
+            or status != event_status
             or not isinstance(scope, dict)
             or scope.get("thread_id") != identity["thread_id"]
         ):
             continue
-        matched[event["capability_id"]].append((invocation_id, status))
+        matched[event_capability_id].append((event_seq, invocation_id, status))
+
+    ordered_matches = sorted(
+        (
+            (seq, capability_id, invocation_id, status)
+            for capability_id, matches in matched.items()
+            for seq, invocation_id, status in matches
+        ),
+        key=lambda item: item[0],
+    )
 
     evidence["invocation_ids"] = {
-        capability_id: [invocation_id for invocation_id, _ in matched[capability_id]]
+        capability_id: [
+            invocation_id
+            for _, invocation_id, _ in sorted(matched[capability_id])
+        ]
         for capability_id in capability_ids
     }
     evidence["statuses"] = {
-        capability_id: [status for _, status in matched[capability_id]]
+        capability_id: [status for _, _, status in sorted(matched[capability_id])]
         for capability_id in capability_ids
     }
+    evidence["terminal_sequence"] = [
+        {
+            "seq": seq,
+            "capability_id": capability_id,
+            "invocation_id": invocation_id,
+            "status": status,
+        }
+        for seq, capability_id, invocation_id, status in ordered_matches
+    ]
     return evidence
 
 
@@ -6267,6 +6292,7 @@ async def _slack_correctness_chat_reply(
     extra_details: dict[str, object],
     expected_capability: str | None = None,
     expected_capability_statuses: tuple[str, ...] = ("completed",),
+    expected_capability_sequence: tuple[str, ...] = (),
     timeout: float = 240.0,
 ) -> tuple[ProbeResult, str]:
     """Chat arm shared by the QA-10 Slack tool-correctness probes.
@@ -6278,8 +6304,17 @@ async def _slack_correctness_chat_reply(
     full text is stripped from persisted details on both paths; a failed chat
     result is ready to return as-is with latency re-anchored to the case start.
     """
-    expected_capabilities = (
-        [expected_capability] if expected_capability is not None else []
+    expected_capabilities = list(
+        dict.fromkeys(
+            [
+                *(
+                    [expected_capability]
+                    if expected_capability is not None
+                    else []
+                ),
+                *expected_capability_sequence,
+            ]
+        )
     )
     chat = await _live_chat_case(
         ctx,
@@ -6292,7 +6327,7 @@ async def _slack_correctness_chat_reply(
         extra_details=extra_details,
         expose_full_reply_text=True,
         enforce_marker=False,
-        capture_submission_identity=expected_capability is not None,
+        capture_submission_identity=bool(expected_capabilities),
     )
     reply_text = str(
         chat.details.pop("full_reply_text", None)
@@ -6307,7 +6342,7 @@ async def _slack_correctness_chat_reply(
         chat.latency_ms = int((time.monotonic() - started) * 1000)
         return chat, reply_text
 
-    if expected_capability is not None:
+    if expected_capabilities:
         submission_identity = chat.details.get("submission_identity")
         evidence = _current_turn_capability_evidence(
             ctx.reborn_home,
@@ -6319,14 +6354,19 @@ async def _slack_correctness_chat_reply(
             {
                 "expected_capabilities": expected_capabilities,
                 "expected_capability_statuses": list(expected_capability_statuses),
+                "expected_capability_sequence": list(expected_capability_sequence),
                 "capability_evidence": evidence,
             }
         )
         statuses = evidence.get("statuses")
-        matching_statuses = (
-            statuses.get(expected_capability, [])
+        missing_capabilities = (
+            [
+                capability_id
+                for capability_id in expected_capabilities
+                if not statuses.get(capability_id, [])
+            ]
             if isinstance(statuses, dict)
-            else []
+            else expected_capabilities
         )
         evidence_read_error = evidence.get("read_error")
         if evidence_read_error:
@@ -6344,20 +6384,53 @@ async def _slack_correctness_chat_reply(
                     "blocking": False,
                 }
             )
-        elif not matching_statuses:
+        elif missing_capabilities:
             chat.success = False
             chat.details.update(
                 {
                     "error": (
                         "Slack correctness reply did not produce current-turn "
-                        "terminal evidence for the expected capability: "
-                        f"{expected_capability}"
+                        "terminal evidence for the expected capabilities: "
+                        f"{missing_capabilities!r}"
                     ),
                     "failure_class": "model_quality",
                     "failure_category": "missing_expected_capability",
                     "failure_status": "failed",
                 }
             )
+        elif expected_capability_sequence:
+            terminal_sequence = evidence.get("terminal_sequence")
+            observed_sequence = [
+                str(item.get("capability_id") or "")
+                for item in (
+                    terminal_sequence if isinstance(terminal_sequence, list) else []
+                )
+                if isinstance(item, dict)
+            ]
+            first_positions = [
+                observed_sequence.index(capability_id)
+                for capability_id in expected_capability_sequence
+                if capability_id in observed_sequence
+            ]
+            if (
+                len(first_positions) != len(expected_capability_sequence)
+                or first_positions != sorted(first_positions)
+                or len(set(first_positions)) != len(first_positions)
+            ):
+                chat.success = False
+                chat.details.update(
+                    {
+                        "error": (
+                            "Slack correctness reply used capabilities in the "
+                            "wrong order: expected "
+                            f"{list(expected_capability_sequence)!r}, observed "
+                            f"{observed_sequence!r}"
+                        ),
+                        "failure_class": "model_quality",
+                        "failure_category": "unexpected_capability_order",
+                        "failure_status": "failed",
+                    }
+                )
     chat.latency_ms = int((time.monotonic() - started) * 1000)
     return chat, reply_text
 
@@ -6868,6 +6941,10 @@ async def case_qa_10f_slack_mention_encoding(ctx: LiveQaContext) -> ProbeResult:
             answer_marker=answer_marker,
             extra_details=details,
             expected_capability="slack.get_conversation_info",
+            expected_capability_sequence=(
+                "slack.get_conversation_info",
+                "slack.send_message",
+            ),
         )
         if not chat.success:
             return chat
