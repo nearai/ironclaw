@@ -33,6 +33,23 @@ pub const CAPABILITY_DISPLAY_RESULT_REF_MAX_BYTES: usize = 256;
 const APPROVAL_PROMPT_TEXT_MAX_BYTES: usize = 2 * 1024;
 const APPROVAL_PROMPT_DETAIL_MAX_ITEMS: usize = 16;
 
+/// Decodes stored preference reply-target bindings into conversations. The
+/// binding-ref grammar is authored by the channel's target provider, so the
+/// decoder lives with the vendor integration (the channel extension crate);
+/// this port is the only place vendor knowledge enters the generic
+/// triggered-delivery path.
+pub trait PreferenceTargetCodec: Send + Sync {
+    /// Decode a preference binding ref into the conversation it targets.
+    fn conversation_for_target(
+        &self,
+        target: &ReplyTargetBindingRef,
+    ) -> Option<ExternalConversationRef>;
+
+    /// Whether the binding ref targets a personal 1:1 direct message (the
+    /// only surface OAuth authorization URLs may land on).
+    fn is_personal_direct_message(&self, target: &ReplyTargetBindingRef) -> bool;
+}
+
 fn serialize_failure_category<S>(
     value: &Option<SanitizedFailure>,
     serializer: S,

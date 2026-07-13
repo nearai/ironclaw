@@ -62,7 +62,6 @@ use crate::slack::slack_preference_targets::{
     SlackConfiguredChannelRoute, SlackHostBetaOutboundTargetProvider,
     SlackOutboundTargetProviderConfig, SlackPersonalDmTarget, SlackPersonalDmTargetError,
     SlackPersonalDmTargetProvisioner, SlackPersonalDmTargetStore,
-    slack_conversation_id_from_reply_target_binding_ref, slack_reply_target_is_personal_dm,
 };
 use crate::slack::slack_serve::{
     RunDeliveryObserverAdapter, SlackInstallationSelector, SlackTeamId, SlackUserId,
@@ -791,30 +790,10 @@ impl crate::extension_host::channel_egress::ChannelEgressCredentialsPort
     }
 }
 
-/// Decodes Slack preference reply-target binding refs for the generic
-/// triggered driver (the vendor half of `PreferenceTargetCodec`).
-pub(crate) struct SlackPreferenceTargetCodec;
-
-impl PreferenceTargetCodec for SlackPreferenceTargetCodec {
-    fn conversation_for_target(
-        &self,
-        target: &ironclaw_turns::ReplyTargetBindingRef,
-    ) -> Option<ironclaw_product_adapters::ExternalConversationRef> {
-        let (conversation_id, space_id) =
-            slack_conversation_id_from_reply_target_binding_ref(target)?;
-        ironclaw_product_adapters::ExternalConversationRef::new(
-            space_id.as_deref(),
-            &conversation_id,
-            None,
-            None,
-        )
-        .ok()
-    }
-
-    fn is_personal_direct_message(&self, target: &ironclaw_turns::ReplyTargetBindingRef) -> bool {
-        slack_reply_target_is_personal_dm(target)
-    }
-}
+// The vendor half of `PreferenceTargetCodec` lives in the adapter crate
+// (`ironclaw_slack_v2_adapter::SlackPreferenceTargetCodec`); re-imported here
+// so the retiring lane's call sites keep compiling until the lane deletes.
+pub(crate) use ironclaw_slack_v2_adapter::SlackPreferenceTargetCodec;
 
 /// The Slack post-submit delivery hook: translates a trigger fire into the
 /// generic triggered-delivery request and hands it to the generic driver.

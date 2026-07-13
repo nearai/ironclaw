@@ -15,11 +15,9 @@ use ironclaw_outbound::{
     TriggerCommunicationContext, TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryRecord,
     TriggeredRunDeliveryStore, ValidatedReplyTargetBinding,
 };
-use ironclaw_product_adapters::{ExternalConversationRef, OutboundPart};
+use ironclaw_product_adapters::OutboundPart;
 use ironclaw_threads::{FinalizedAssistantMessageByRunRequest, ThreadScope};
-use ironclaw_turns::{
-    ReplyTargetBindingRef, TurnActor, TurnRunId, TurnRunState, TurnScope, TurnStatus,
-};
+use ironclaw_turns::{TurnActor, TurnRunId, TurnRunState, TurnScope, TurnStatus};
 use tokio::sync::Semaphore;
 
 use super::observer::AllowNoProjectionAccess;
@@ -36,21 +34,11 @@ use crate::delivery_coordinator::{
 };
 use crate::{ProductOutboundTargetResolver, ProductWorkflowError};
 
-/// Decodes stored preference reply-target bindings into conversations. The
-/// binding-ref grammar is authored by the channel's target provider, so the
-/// decoder lives with the vendor integration; this port is the only place
-/// vendor knowledge enters the triggered path.
-pub trait PreferenceTargetCodec: Send + Sync {
-    /// Decode a preference binding ref into the conversation it targets.
-    fn conversation_for_target(
-        &self,
-        target: &ReplyTargetBindingRef,
-    ) -> Option<ExternalConversationRef>;
-
-    /// Whether the binding ref targets a personal 1:1 direct message (the
-    /// only surface OAuth authorization URLs may land on).
-    fn is_personal_direct_message(&self, target: &ReplyTargetBindingRef) -> bool;
-}
+// The codec contract lives in `ironclaw_product_adapters` (the vendor half
+// is implemented by channel extension crates, which never depend on this
+// crate); re-exported here so the triggered-delivery consumers keep one
+// import surface.
+pub use ironclaw_product_adapters::PreferenceTargetCodec;
 
 /// One trigger-submitted run to watch and deliver, in generic vocabulary.
 /// The composition's post-submit hook translates its trigger-fire type into
