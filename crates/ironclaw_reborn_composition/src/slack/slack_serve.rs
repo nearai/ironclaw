@@ -13,21 +13,16 @@
 //!
 //! Transitional (deleted with `composition/src/slack/**` in P6).
 
-use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use axum::{
-    Router, body::Bytes, extract::State, http::HeaderMap, response::Response, routing::post,
-};
 use ironclaw_extension_host::ingress::ExtensionIngressRouter;
 use ironclaw_product_adapters::{ProductInboundAck, ProductInboundEnvelope};
 
 use crate::extension_host::extension_ingress::{
     ChannelIngressDrain, InboundPayloadClassifier, PostAdmissionObserver, VerifiedEvidenceMint,
-    forward_alias_request,
 };
-use crate::webui::webui_serve::{PublicRouteDrain, PublicRouteMount};
+use crate::webui::webui_serve::PublicRouteMount;
 
 mod installation;
 pub use installation::{
@@ -41,9 +36,6 @@ pub use installation::{
 /// vendors reconfigure their event URL to the canonical path.
 pub const SLACK_EVENTS_PATH: &str = "/webhooks/slack/events";
 
-const SLACK_EVENTS_ROUTE_ID: &str = "slack.events";
-const SLACK_EXTENSION_ID: &str = "slack";
-const SLACK_EVENTS_ROUTE_SUFFIX: &str = "events";
 const SLACK_SIGNATURE_HEADER: &str = "X-Slack-Signature";
 const SLACK_TIMESTAMP_HEADER: &str = "X-Slack-Request-Timestamp";
 
@@ -85,54 +77,22 @@ impl PostAdmissionObserver for RunDeliveryObserverAdapter {
     }
 }
 
-/// Build the one-release `/webhooks/slack/events` forwarding alias: the
-/// handler drives the SAME generic router as the canonical
-/// `/webhooks/extensions/slack/events` route (an internal forward — Slack
-/// does not follow HTTP redirects for event delivery). Removal note: delete
-/// in the first release after the P4 cutover ships (MIG-5).
+/// Build the one-release `/webhooks/slack/events` forwarding alias. The
+/// implementation lives in the generic legacy-alias home
+/// (`extension_host/legacy_ingress_aliases.rs`, MIG-5); this wrapper keeps
+/// the retiring lane's call sites compiling until the lane deletes.
 pub(crate) fn slack_events_alias_mount(
     router: Arc<ExtensionIngressRouter>,
     drain: Option<Arc<dyn ChannelIngressDrain>>,
 ) -> Result<PublicRouteMount, crate::RebornBuildError> {
-    let descriptor = crate::host_ingress::bundled_channel_ingress_descriptor(
-        crate::extension_host::available_extensions::slack_manifest_toml(),
-        SLACK_EVENTS_ROUTE_ID,
-        SLACK_EVENTS_PATH,
-    )
-    .map_err(|error| crate::RebornBuildError::InvalidConfig {
-        reason: format!("legacy channel events alias descriptor invalid: {error}"),
-    })?;
-    let axum_router = Router::new()
-        .route(SLACK_EVENTS_PATH, post(alias_handler))
-        .with_state(router);
-    let mut mount = PublicRouteMount::new(axum_router, vec![descriptor]);
-    if let Some(drain) = drain {
-        mount = mount.with_drain(Arc::new(AliasDrain(drain)));
-    }
-    Ok(mount)
-}
-
-async fn alias_handler(
-    State(router): State<Arc<ExtensionIngressRouter>>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    forward_alias_request(
-        &router,
-        SLACK_EXTENSION_ID,
-        SLACK_EVENTS_ROUTE_SUFFIX,
-        &headers,
-        body,
-    )
-    .await
-}
-
-struct AliasDrain(Arc<dyn ChannelIngressDrain>);
-
-impl PublicRouteDrain for AliasDrain {
-    fn drain<'a>(&'a self) -> Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-        Box::pin(self.0.drain())
-    }
+    crate::extension_host::legacy_ingress_aliases::legacy_channel_ingress_alias_mounts(
+        &router, drain,
+    )?
+    .into_iter()
+    .next()
+    .ok_or_else(|| crate::RebornBuildError::InvalidConfig {
+        reason: "legacy channel ingress alias table has no slack entry".to_string(),
+    })
 }
 
 #[cfg(test)]

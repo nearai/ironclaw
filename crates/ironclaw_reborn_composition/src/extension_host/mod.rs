@@ -33,6 +33,8 @@ pub(crate) mod extension_lifecycle_capabilities_auth_tests;
 pub(crate) mod extension_lifecycle_command;
 pub(crate) mod generic_host;
 pub(crate) mod gsuite;
+#[cfg(feature = "webui-v2-beta")]
+pub(crate) mod legacy_ingress_aliases;
 pub(crate) mod lifecycle;
 pub(crate) mod mcp;
 pub(crate) mod mcp_discovery;

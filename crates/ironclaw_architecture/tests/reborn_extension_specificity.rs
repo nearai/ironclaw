@@ -233,6 +233,10 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
 const SANCTIONED_PATHS: &[&str] = &[
     "extension_host/channel_state_folds.rs",
     "extension_host/extension_installation_store.rs",
+    // One-release legacy webhook-path aliases (MIG-5): the compatibility
+    // table names the concrete legacy paths it forwards; each entry carries
+    // its own removal note.
+    "extension_host/legacy_ingress_aliases.rs",
     "product_auth/durable/",
 ];
 
