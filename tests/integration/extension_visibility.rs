@@ -16,6 +16,7 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
+use ironclaw_auth::{GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE};
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
@@ -64,4 +65,62 @@ async fn host_internal_capability_is_hidden_from_the_model_and_uncallable() {
         .assert_reply_contains("audit denied")
         .await
         .expect("run recovered after the rejected call");
+}
+
+/// Install -> activate -> dispatch a newly-activated capability within ONE run: activation clears
+/// `CapabilitySurfaceState` (`capability_may_change_visible_surface`), so the next iteration's
+/// surface rebuild picks up the just-activated extension. Discriminator: without that refresh,
+/// `assert_tool_invoked("google-calendar.list_calendars")` below fails because the capability id
+/// wouldn't resolve against the turn-start surface. Uses "google-calendar" — not active at the
+/// start of this run and therefore absent from the initial surface.
+#[tokio::test]
+async fn same_run_activation_refresh_dispatches_newly_activated_capability() {
+    let group = RebornIntegrationGroup::extension_lifecycle()
+        .await
+        .expect("extension-lifecycle group builds");
+    let h = group
+        .thread("ext-same-run-activation-refresh")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.extension_install",
+                json!({"extension_id": "google-calendar"}),
+            ),
+            RebornScriptedReply::tool_call(
+                "builtin.extension_activate",
+                json!({"extension_id": "google-calendar"}),
+            ),
+            RebornScriptedReply::tool_call("google-calendar.list_calendars", json!({})),
+            RebornScriptedReply::text("calendars listed"),
+        ])
+        .build()
+        .await
+        .expect("thread builds");
+    // Credential material must exist BEFORE submit_turn — activation's
+    // credential gate resolves inline only if an account is already seeded,
+    // else the run would park at BlockedAuth instead of completing this turn.
+    h.seed_capability_credential_account(
+        "google",
+        "itest google calendar",
+        &[GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_CALENDAR_EVENTS_SCOPE],
+    )
+    .await
+    .expect("credential account seeds");
+
+    h.submit_turn("install, activate, and list my calendars")
+        .await
+        .expect("turn completes");
+    h.assert_tool_result_contains("\"installed\":true")
+        .await
+        .expect("install reported success");
+    h.assert_tool_result_contains("\"activated\":true")
+        .await
+        .expect("activate reported success");
+    // The discriminating proof: dispatch reached the capability port in the
+    // SAME run that activated it, i.e. the surface refresh fired.
+    h.assert_tool_invoked("google-calendar.list_calendars")
+        .await
+        .expect("newly-activated capability dispatched within the same run");
+    h.assert_reply_contains("calendars listed")
+        .await
+        .expect("run completed with the expected reply");
 }

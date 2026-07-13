@@ -5749,6 +5749,62 @@ mod tests {
         assert_eq!(services.readiness.state, RebornReadinessState::DevOnly);
     }
 
+    /// No-op `ChannelConnectionFacade` double — only its identity (via `Arc`
+    /// pointer equality) matters to the slot-fill tests below, not its behavior.
+    #[derive(Default)]
+    struct NoopChannelConnectionFacade;
+
+    #[async_trait::async_trait]
+    impl ChannelConnectionFacade for NoopChannelConnectionFacade {
+        async fn caller_channel_connections(
+            &self,
+            _caller: ironclaw_product_workflow::WebUiAuthenticatedCaller,
+        ) -> Result<
+            std::collections::HashMap<String, bool>,
+            ironclaw_product_workflow::RebornServicesError,
+        > {
+            Ok(std::collections::HashMap::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn fill_channel_connection_facade_slot_rejects_second_fill_and_keeps_first() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "channel-facade-slot-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+
+        let first: Arc<dyn ChannelConnectionFacade> = Arc::new(NoopChannelConnectionFacade);
+        assert!(services.fill_channel_connection_facade_slot(Arc::clone(&first)));
+
+        let second: Arc<dyn ChannelConnectionFacade> = Arc::new(NoopChannelConnectionFacade);
+        assert!(!services.fill_channel_connection_facade_slot(second));
+
+        // The slot is a `OnceLock`: a rejected second fill must not replace
+        // the facade the first call installed.
+        let installed = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime")
+            .channel_connection_facade_slot
+            .get()
+            .expect("slot filled by first call");
+        assert!(Arc::ptr_eq(installed, &first));
+    }
+
+    #[test]
+    fn fill_channel_connection_facade_slot_without_local_runtime_returns_false() {
+        // `disabled()` composes no local-dev runtime, so the slot the accessor
+        // would write into does not exist; the call must fail closed, not panic.
+        let services = RebornServices::disabled();
+
+        let facade: Arc<dyn ChannelConnectionFacade> = Arc::new(NoopChannelConnectionFacade);
+        assert!(!services.fill_channel_connection_facade_slot(facade));
+    }
+
     #[tokio::test]
     async fn hosted_single_tenant_rejects_local_dev_storage_input() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -1,4 +1,4 @@
-//! Scenario 7: `builtin.extension_remove` on a channel extension must drive
+//! Scenario 6: `builtin.extension_remove` on a channel extension must drive
 //! `extension_lifecycle.rs::remove` -> `cleanup_channel_before_remove` ->
 //! `disconnect_channel_for_cleanup` correctly for both channel-cleanup kinds
 //! (#5851). Slack (`RemovableChannelCleanup::Required`) disconnects
@@ -7,7 +7,7 @@
 //! first and, with no "google-drive" key in the facade's connection map,
 //! disconnects zero times.
 //!
-//! Uses "slack" and "google-drive" (both untouched by Scenarios 1-6; slack's
+//! Uses "slack" and "google-drive" (both untouched by Scenarios 1-5; slack's
 //! catalog entry is `slack-v2-host-beta`-gated, unified on by the workspace
 //! root's `[dev-dependencies]` for every `tests/integration/` binary).
 
@@ -102,13 +102,14 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // Exact equality: slack must disconnect exactly once, and the
     // google-drive removal above must not have added a second entry.
     let expected_user = capability_harness.capability_user_id().as_str().to_string();
+    let expected = vec![(expected_user, "slack".to_string())];
     let disconnects = facade.disconnects();
-    if disconnects != vec![(expected_user.clone(), "slack".to_string())] {
+    if disconnects != expected {
         return Err(format!(
             "builtin.extension_remove must disconnect the run owner's slack channel binding \
              exactly once (Required cleanup) and never google-drive \
              (IfConnectionFacadeSupportsChannel, key absent); expected \
-             [({expected_user:?}, \"slack\")], got {disconnects:?}"
+             {expected:?}, got {disconnects:?}"
         )
         .into());
     }

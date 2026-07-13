@@ -24,7 +24,6 @@ mod scenario_install_then_visible_cross_thread;
 mod scenario_install_unknown_extension_id_fails_safely;
 mod scenario_remove_channel_extension_disconnects_channel;
 mod scenario_remove_then_absent_cross_thread;
-mod scenario_same_run_activation_refresh_dispatches;
 mod scenario_uninstalled_tool_call_denied_until_activated;
 
 use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
@@ -74,16 +73,7 @@ async fn extensions_group_e2e() {
         scenario_uninstalled_tool_call_denied_until_activated::run(&g).await,
     );
 
-    // Scenario 6 (harness-port-seam P2, A1): install -> activate -> dispatch
-    // within ONE run, proving the RefreshingLocalDevCapabilityPort surface
-    // refresh (not just cross-run re-dispatch, already covered by Scenario 5).
-    // Uses "google-calendar" (untouched by Scenarios 1-5).
-    report.record(
-        "same_run_activation_refresh_dispatches",
-        scenario_same_run_activation_refresh_dispatches::run(&g).await,
-    );
-
-    // Scenario 7 (extension-remove channel cleanup, #5851 int-tier salvage):
+    // Scenario 6 (extension-remove channel cleanup, #5851 int-tier salvage):
     // slack (Required) disconnects, google-drive
     // (IfConnectionFacadeSupportsChannel, key absent) doesn't.
     report.record(

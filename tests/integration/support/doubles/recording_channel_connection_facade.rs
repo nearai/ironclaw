@@ -1,10 +1,7 @@
 /// Test double substituting the production `ChannelConnectionFacade` impl
 /// (`SlackChannelConnectionFacade`,
 /// `crates/ironclaw_reborn_composition/src/slack/slack_channel_connection.rs`).
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, sync::Mutex};
 
 use async_trait::async_trait;
 use ironclaw_product_workflow::{
@@ -17,7 +14,7 @@ use ironclaw_product_workflow::{
 #[derive(Default)]
 pub(crate) struct RecordingChannelConnectionFacade {
     connections: HashMap<String, bool>,
-    disconnects: Arc<Mutex<Vec<(String, String)>>>,
+    disconnects: Mutex<Vec<(String, String)>>,
 }
 
 impl RecordingChannelConnectionFacade {
@@ -27,7 +24,7 @@ impl RecordingChannelConnectionFacade {
                 .iter()
                 .map(|(channel, connected)| ((*channel).to_string(), *connected))
                 .collect(),
-            disconnects: Arc::new(Mutex::new(Vec::new())),
+            disconnects: Mutex::new(Vec::new()),
         }
     }
 
