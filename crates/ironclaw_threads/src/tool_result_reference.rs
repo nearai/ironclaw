@@ -318,7 +318,7 @@ fn normalized_model_observation(
             let repaired = strip_unsafe_result_reference_preview(&mut model_observation)
                 || strip_unsafe_invalid_input_issue_text(&mut model_observation);
             if repaired && validate_model_observation(&model_observation).is_ok() {
-                tracing::warn!(
+                tracing::debug!(
                     reason = %error,
                     result_ref = %result_ref,
                     "scrubbed unsafe model-observation fields while preserving the observation"
@@ -666,6 +666,13 @@ fn validate_model_observation_detail(value: &serde_json::Value) -> Result<(), St
             }
             if let Some(preview) = optional_string(object, "preview", "model observation detail")? {
                 validate_model_observation_text(preview)?;
+            }
+            if object.contains_key("item_count")
+                && (!object.contains_key("preview") || !object.contains_key("next_offset"))
+            {
+                return Err(
+                    "model observation item_count requires preview and next_offset".to_string(),
+                );
             }
             Ok(())
         }
@@ -1333,6 +1340,40 @@ mod tests {
         assert!(
             envelope.model_observation.is_none(),
             "a non-u64 item_count must drop the observation, not persist it"
+        );
+        assert_eq!(
+            envelope.model_visible_content_or_safe_summary(),
+            "tool completed"
+        );
+    }
+
+    /// `item_count` is only meaningful alongside a truncated preview -- an
+    /// observation carrying `item_count` without `preview`/`next_offset`
+    /// must drop through the best-effort constructor and fall back to the
+    /// safe summary, mirroring the malformed-type case above.
+    #[test]
+    fn best_effort_observation_drops_item_count_without_preview() {
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            "result:item-count-without-preview",
+            ToolResultSafeSummary::new("tool completed").expect("summary"),
+            Some(serde_json::json!({
+                "schema_version": 1,
+                "status": "success",
+                "summary": "Tool completed.",
+                "detail": {
+                    "kind": "result_reference",
+                    "result_ref": "result:item-count-without-preview",
+                    "byte_len": 4096,
+                    "item_count": 600
+                },
+                "trust": "untrusted_tool_output"
+            })),
+        )
+        .expect("envelope construction is fail-open");
+
+        assert!(
+            envelope.model_observation.is_none(),
+            "item_count without preview/next_offset must drop the observation, not persist it"
         );
         assert_eq!(
             envelope.model_visible_content_or_safe_summary(),
