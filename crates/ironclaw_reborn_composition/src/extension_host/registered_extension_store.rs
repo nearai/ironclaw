@@ -337,7 +337,17 @@ where
         else {
             continue;
         };
-        let minted = HostedMcpExtensionId::mint(tenant_id, owner, url, "")?;
+        let minted = match HostedMcpExtensionId::mint(tenant_id, owner, url, "") {
+            Ok(minted) => minted,
+            Err(error) => {
+                tracing::debug!(
+                    extension_id = manifest_record.extension_id().as_str(),
+                    %error,
+                    "skipping registered extension id migration: failed to mint id"
+                );
+                continue;
+            }
+        };
         if HostedMcpExtensionId::parse(manifest_record.extension_id())
             .is_ok_and(|parsed| parsed == minted)
         {
@@ -508,7 +518,20 @@ where
         }
         found_descriptor = true;
         let manifest_bytes = fs.read_file(&manifest).await.map_err(map_transient)?;
-        let (minted_id, minted_manifest) = minted_manifest_for_legacy(&manifest_bytes, owner)?;
+        let (minted_id, minted_manifest) = match minted_manifest_for_legacy(&manifest_bytes, owner)
+        {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::debug!(
+                    owner = owner.as_str(),
+                    extension = child.name.as_str(),
+                    %error,
+                    "skipping legacy registered descriptor: failed to mint id"
+                );
+                migrated_all = false;
+                continue;
+            }
+        };
         let source = VirtualPath::new(format!(
             "{REGISTERED_ROOT}/{}/{}",
             owner.as_str(),
