@@ -130,7 +130,7 @@ export function ProjectFilesystemPanel({ threadId }) {
           const target = `${PROJECT_FS_ROOT}/${segments.slice(0, index + 1).join("/")}`;
           return (
             <React.Fragment key={target}>
-              <span className="text-iron-500">/</span>
+              <span className="text-[var(--v2-text-muted)]">/</span>
               <button
                 type="button"
                 onClick={() => setPath(target)}
@@ -179,8 +179,8 @@ export function ProjectFilesystemPanel({ threadId }) {
                   />
                   <span className="min-w-0 flex-1 truncate text-sm text-white">{entry.name}</span>
                   {entry.kind === "directory"
-                    ? (<Icon name="chevron" className="h-3.5 w-3.5 shrink-0 -rotate-90 text-iron-500" />)
-                    : (<Icon name="download" className="h-3.5 w-3.5 shrink-0 text-iron-500" />)}
+                    ? (<Icon name="chevron" className="h-3.5 w-3.5 shrink-0 -rotate-90 text-[var(--v2-text-muted)]" />)
+                    : (<Icon name="download" className="h-3.5 w-3.5 shrink-0 text-[var(--v2-text-muted)]" />)}
                 </button>
               )
             )

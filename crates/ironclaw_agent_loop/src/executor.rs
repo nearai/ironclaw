@@ -47,7 +47,10 @@ use gates::{AwaitDependentRunGateInput, AwaitDependentRunGateStage, GateInput, G
 #[cfg(test)]
 use input::consume_drainable_inputs;
 use input::{DrainInput, InputStage, InputStep, UserFacingInputDrainMode};
-use loop_exit::{ExitInput, ExitStage};
+use loop_exit::{
+    COMPLETION_NUDGE_LIMIT, ExitInput, ExitStage, completion_nudge_control_message,
+    reply_trailed_off,
+};
 use mapping::{
     batch_policy_kind, blocked_kind, capability_batch_counts, capability_error_class,
     capability_error_failure_category, capability_failure_kind, capability_host_error,
@@ -73,7 +76,7 @@ use ironclaw_turns::{
 use crate::{
     family::LoopFamily,
     state::{CheckpointKind, LoopExecutionState},
-    strategies::TurnSummary,
+    strategies::{StopKind, TurnSummary},
 };
 
 const MAX_CAPABILITY_RETRIES: usize = 8;

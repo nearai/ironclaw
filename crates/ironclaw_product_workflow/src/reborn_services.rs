@@ -3971,8 +3971,9 @@ impl RebornServicesApi for RebornServices {
         request: RebornFsListRequest,
     ) -> Result<RebornFsListResponse, RebornServicesError> {
         let browser = self.require_filesystem_browser(request.mount)?;
-        // Scope is derived from the authenticated caller, never the request.
-        let scope = caller_browse_scope(&caller);
+        let scope = self
+            .authorize_browse_scope(caller, request.project_id)
+            .await?;
         // dispatch-exempt: read-only, caller-scoped internal-filesystem listing
         // through the facade's own port — not an in-turn mutating tool call.
         let entries = browser
@@ -3992,7 +3993,9 @@ impl RebornServicesApi for RebornServices {
         request: RebornFsStatRequest,
     ) -> Result<RebornFsStatResponse, RebornServicesError> {
         let browser = self.require_filesystem_browser(request.mount)?;
-        let scope = caller_browse_scope(&caller);
+        let scope = self
+            .authorize_browse_scope(caller, request.project_id)
+            .await?;
         // dispatch-exempt: read-only, caller-scoped internal-filesystem stat.
         let stat = browser
             .stat(&scope, request.mount, &request.path)
@@ -4007,7 +4010,9 @@ impl RebornServicesApi for RebornServices {
         request: RebornFsReadRequest,
     ) -> Result<ProjectFsFile, RebornServicesError> {
         let browser = self.require_filesystem_browser(request.mount)?;
-        let scope = caller_browse_scope(&caller);
+        let scope = self
+            .authorize_browse_scope(caller, request.project_id)
+            .await?;
         // dispatch-exempt: read-only, caller-scoped internal-filesystem download.
         browser
             .read_file(&scope, request.mount, &request.path)
@@ -5993,7 +5998,7 @@ impl RebornServices {
     /// scope is returned unchanged.
     async fn authorize_create_thread_project(
         &self,
-        mut caller: WebUiAuthenticatedCaller,
+        caller: WebUiAuthenticatedCaller,
         requested_project_id: Option<String>,
     ) -> Result<WebUiAuthenticatedCaller, RebornServicesError> {
         let Some(raw) = requested_project_id else {
@@ -6009,6 +6014,16 @@ impl RebornServices {
                 WebUiInboundValidationCode::InvalidId,
             ))
         })?;
+        self.authorize_project_caller(caller, project_id).await
+    }
+
+    /// Authorize a project selector through the project service and adopt it
+    /// only after the access probe succeeds.
+    async fn authorize_project_caller(
+        &self,
+        mut caller: WebUiAuthenticatedCaller,
+        project_id: ProjectId,
+    ) -> Result<WebUiAuthenticatedCaller, RebornServicesError> {
         self.get_project(
             caller.clone(),
             RebornGetProjectRequest {
@@ -6018,6 +6033,20 @@ impl RebornServices {
         .await?;
         caller.project_id = Some(project_id);
         Ok(caller)
+    }
+
+    /// Resolve the one authorized scope used by all standalone browse reads.
+    /// An omitted selector preserves the caller's existing project scope.
+    async fn authorize_browse_scope(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        project_id: Option<ProjectId>,
+    ) -> Result<ResourceScope, RebornServicesError> {
+        let caller = match project_id {
+            Some(project_id) => self.authorize_project_caller(caller, project_id).await?,
+            None => caller,
+        };
+        Ok(caller_browse_scope(&caller))
     }
 
     /// Verify the caller may access the thread and return the project-scoped

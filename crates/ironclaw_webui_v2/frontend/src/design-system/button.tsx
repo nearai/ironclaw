@@ -52,9 +52,10 @@ const SIZES = {
 
 const VARIANTS = {
   outline:
-    "border border-[rgba(76,167,230,0.7)] bg-transparent text-[#8fc8f2] " +
-    "hover:bg-[rgba(76,167,230,0.1)] hover:border-[#4ca7e6] " +
-    "active:bg-[rgba(76,167,230,0.15)]",
+    "border border-[color-mix(in_srgb,var(--v2-accent)_60%,var(--v2-panel-border))] " +
+    "bg-transparent text-[var(--v2-accent-text)] " +
+    "hover:bg-[var(--v2-accent-soft)] hover:border-[var(--v2-accent)] " +
+    "active:bg-[color-mix(in_srgb,var(--v2-accent)_18%,transparent)]",
 
   secondary:
     "border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] text-[var(--v2-text-strong)] " +
@@ -66,8 +67,10 @@ const VARIANTS = {
     "hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-text-strong)]",
 
   danger:
-    "border border-[rgba(217,101,116,0.6)] bg-transparent text-[#ff6480] " +
-    "hover:bg-[rgba(217,101,116,0.08)] active:bg-[rgba(217,101,116,0.14)]",
+    "border border-[color-mix(in_srgb,var(--v2-danger-text)_55%,var(--v2-panel-border))] " +
+    "bg-transparent text-[var(--v2-danger-text)] " +
+    "hover:bg-[var(--v2-danger-soft)] " +
+    "active:bg-[color-mix(in_srgb,var(--v2-danger-text)_18%,transparent)]",
 };
 
 type ButtonOwnProps = {

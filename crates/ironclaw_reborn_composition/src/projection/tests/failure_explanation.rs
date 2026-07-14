@@ -1,10 +1,10 @@
 use super::*;
 use ironclaw_runner::failure_categories::{
-    HOST_STAGE_UNAVAILABLE_CAPABILITY_CATEGORY, HOST_STAGE_UNAVAILABLE_CHECKPOINT_CATEGORY,
-    HOST_STAGE_UNAVAILABLE_INPUT_CATEGORY, HOST_STAGE_UNAVAILABLE_MODEL_CATEGORY,
-    HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY, HOST_STAGE_UNAVAILABLE_TRANSCRIPT_CATEGORY,
-    HOST_STAGE_UNAVAILABLE_UNKNOWN_CATEGORY, MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
-    MODEL_CREDITS_EXHAUSTED_CATEGORY,
+    BUDGET_ACCOUNTING_FAILED_CATEGORY, HOST_STAGE_UNAVAILABLE_CAPABILITY_CATEGORY,
+    HOST_STAGE_UNAVAILABLE_CHECKPOINT_CATEGORY, HOST_STAGE_UNAVAILABLE_INPUT_CATEGORY,
+    HOST_STAGE_UNAVAILABLE_MODEL_CATEGORY, HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY,
+    HOST_STAGE_UNAVAILABLE_TRANSCRIPT_CATEGORY, HOST_STAGE_UNAVAILABLE_UNKNOWN_CATEGORY,
+    MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
 };
 use ironclaw_turns::LoopFailureKind;
 
@@ -192,6 +192,10 @@ fn failure_summary_covers_reborn_failure_category_constants() {
         (
             MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
             "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL, then try again.",
+        ),
+        (
+            BUDGET_ACCOUNTING_FAILED_CATEGORY,
+            "The run failed because resource accounting was temporarily unavailable. Retry the run, and contact support if it keeps happening.",
         ),
         (
             HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY,
@@ -598,6 +602,16 @@ async fn webui_event_stream_projects_model_credentials_failure_summary() {
         "webui-events-model-credentials-thread",
         MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
         "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL, then try again.",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn webui_event_stream_projects_budget_accounting_failure_summary() {
+    assert_failed_run_status_summary(
+        "webui-events-budget-accounting-thread",
+        BUDGET_ACCOUNTING_FAILED_CATEGORY,
+        "The run failed because resource accounting was temporarily unavailable. Retry the run, and contact support if it keeps happening.",
     )
     .await;
 }

@@ -6,6 +6,7 @@ import { Button } from "./button";
 import { Spinner } from "./spinner";
 
 type ButtonElementProps = {
+  className?: string;
   "aria-busy"?: boolean;
   children?: unknown;
   disabled?: boolean;
@@ -127,4 +128,22 @@ test("disabled native Buttons keep the disabled attribute", () => {
   const content = children[1] as ReactElement<{ children: [unknown, unknown] }>;
   assert.equal(content.props.children[0], false, "disabled without loading renders no spinner");
   assert.equal(content.props.children[1], "Save");
+});
+
+test("outline and danger Buttons use theme-aware semantic colors (#6039)", () => {
+  const outline = Button({
+    variant: "outline",
+    children: "Configure",
+  }) as ReactElement<ButtonElementProps>;
+  const danger = Button({
+    variant: "danger",
+    children: "Remove",
+  }) as ReactElement<ButtonElementProps>;
+
+  assert.match(outline.props.className ?? "", /text-\[var\(--v2-accent-text\)\]/);
+  assert.match(outline.props.className ?? "", /hover:bg-\[var\(--v2-accent-soft\)\]/);
+  assert.match(danger.props.className ?? "", /text-\[var\(--v2-danger-text\)\]/);
+  assert.match(danger.props.className ?? "", /hover:bg-\[var\(--v2-danger-soft\)\]/);
+  assert.doesNotMatch(outline.props.className ?? "", /#8fc8f2|#4ca7e6/i);
+  assert.doesNotMatch(danger.props.className ?? "", /#ff6480|rgba\(217,101,116/i);
 });

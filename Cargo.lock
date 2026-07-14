@@ -4883,6 +4883,7 @@ dependencies = [
  "ironclaw_llm",
  "ironclaw_loop_host",
  "ironclaw_mcp",
+ "ironclaw_memory",
  "ironclaw_network",
  "ironclaw_observability",
  "ironclaw_outbound",

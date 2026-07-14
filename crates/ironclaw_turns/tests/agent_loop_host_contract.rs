@@ -1,3 +1,4 @@
+// arch-exempt: large_file, model accounting assertions extend the existing whole-port contract fixture, plan #6089
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -3384,6 +3385,7 @@ impl LoopModelPolicyGuard for DenyAllPolicyGuard {
 struct RecordingBudgetAccountant {
     pre_called: AtomicBool,
     post_called: AtomicBool,
+    release_called: AtomicBool,
     reject_pre: AtomicBool,
     reject_post: AtomicBool,
     post_saw_failure: AtomicBool,
@@ -3394,6 +3396,7 @@ impl RecordingBudgetAccountant {
         Self {
             pre_called: AtomicBool::new(false),
             post_called: AtomicBool::new(false),
+            release_called: AtomicBool::new(false),
             reject_pre: AtomicBool::new(false),
             reject_post: AtomicBool::new(false),
             post_saw_failure: AtomicBool::new(false),
@@ -3422,6 +3425,10 @@ impl RecordingBudgetAccountant {
 
     fn post_saw_failure(&self) -> bool {
         self.post_saw_failure.load(Ordering::SeqCst)
+    }
+
+    fn was_release_called(&self) -> bool {
+        self.release_called.load(Ordering::SeqCst)
     }
 }
 
@@ -3461,6 +3468,10 @@ impl LoopModelBudgetAccountant for RecordingBudgetAccountant {
             .expect("safe summary is valid"));
         }
         Ok(())
+    }
+
+    fn release_in_flight(&self, _context: &LoopRunContext) {
+        self.release_called.store(true, Ordering::SeqCst);
     }
 }
 
@@ -3752,6 +3763,10 @@ async fn post_accounting_failure_after_success_fails_closed() {
     assert!(accountant.was_pre_called());
     assert!(accountant.was_post_called());
     assert!(!accountant.post_saw_failure());
+    assert!(
+        accountant.was_release_called(),
+        "a failed post-call accounting hook must leave the cleanup guard armed"
+    );
     assert_eq!(gateway.requests().len(), 1);
 }
 
@@ -3820,6 +3835,7 @@ async fn budget_accounting_on_failure_still_fires_post() {
     assert!(accountant.was_pre_called());
     assert!(accountant.was_post_called());
     assert!(accountant.post_saw_failure());
+    assert!(!accountant.was_release_called());
 }
 
 /// Post-call accounting failure after provider failure must fail closed so
@@ -3853,6 +3869,10 @@ async fn post_accounting_failure_after_gateway_failure_fails_closed() {
     assert!(accountant.was_pre_called());
     assert!(accountant.was_post_called());
     assert!(accountant.post_saw_failure());
+    assert!(
+        accountant.was_release_called(),
+        "a failed post-call accounting hook must leave the cleanup guard armed"
+    );
     assert_eq!(gateway.requests().len(), 1);
     assert_eq!(
         milestone_sink

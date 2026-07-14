@@ -1,3 +1,4 @@
+// arch-exempt: large_file, host-managed model error contract remains at the crate facade, plan #4088
 //! Loop host adapters for IronClaw Reborn.
 //!
 //! This crate adapts durable Reborn support boundaries (threads/transcripts plus
@@ -1843,6 +1844,10 @@ pub enum HostManagedModelErrorKind {
     ConfigurationError,
     BudgetExceeded,
     BudgetApprovalRequired,
+    /// Durable host-side resource accounting failed. This is an
+    /// infrastructure failure, not a provider credit or configured-budget
+    /// outcome, and must remain distinct while it crosses the model port.
+    BudgetAccountingFailed,
     /// Provider credentials are missing, expired, or otherwise unavailable.
     CredentialUnavailable,
     Unavailable,
@@ -2231,6 +2236,9 @@ fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {
         HostManagedModelErrorKind::BudgetApprovalRequired => {
             AgentLoopHostErrorKind::BudgetApprovalRequired
         }
+        HostManagedModelErrorKind::BudgetAccountingFailed => {
+            AgentLoopHostErrorKind::BudgetAccountingFailed
+        }
         HostManagedModelErrorKind::CredentialUnavailable => {
             AgentLoopHostErrorKind::CredentialUnavailable
         }
@@ -2247,6 +2255,9 @@ fn safe_model_summary(kind: HostManagedModelErrorKind) -> &'static str {
         HostManagedModelErrorKind::ConfigurationError => "model route configuration is invalid",
         HostManagedModelErrorKind::BudgetExceeded => "model request exceeded its budget",
         HostManagedModelErrorKind::BudgetApprovalRequired => "model request needs budget approval",
+        HostManagedModelErrorKind::BudgetAccountingFailed => {
+            "resource accounting storage is unavailable"
+        }
         HostManagedModelErrorKind::CredentialUnavailable => "model credentials are unavailable",
         HostManagedModelErrorKind::Unavailable => "model service is unavailable",
         HostManagedModelErrorKind::Cancelled => "model request was cancelled",
@@ -2270,6 +2281,22 @@ mod tests {
         assert_eq!(
             host_error.detail.as_deref(),
             Some("HTTP 404 model not found")
+        );
+    }
+
+    #[test]
+    fn model_gateway_error_preserves_budget_accounting_failure_kind() {
+        let error = HostManagedModelError::safe(
+            HostManagedModelErrorKind::BudgetAccountingFailed,
+            "resource accounting storage is unavailable",
+        );
+
+        let mapped = model_gateway_error(error);
+
+        assert_eq!(mapped.kind, AgentLoopHostErrorKind::BudgetAccountingFailed);
+        assert_eq!(
+            mapped.safe_summary,
+            "resource accounting storage is unavailable"
         );
     }
 
