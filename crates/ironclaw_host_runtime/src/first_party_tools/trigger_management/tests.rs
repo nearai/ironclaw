@@ -98,7 +98,16 @@ fn trigger_create_input_rejects_invalid_timezone() {
     });
     let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
     let result = parsed.schedule.into_schedule();
-    assert!(result.is_err(), "invalid timezone must be rejected");
+    assert!(
+        matches!(
+            result,
+            Err(TriggerError::InvalidSchedule {
+                kind: TriggerScheduleValidationKind::InvalidTimezone,
+                ..
+            })
+        ),
+        "expected InvalidSchedule(InvalidTimezone) error, got {result:?}"
+    );
 }
 
 #[test]
@@ -169,8 +178,14 @@ fn trigger_create_input_rejects_dst_ambiguous_time() {
     let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
     let result = parsed.schedule.into_schedule();
     assert!(
-        result.is_err(),
-        "DST-ambiguous time must be rejected as input error"
+        matches!(
+            result,
+            Err(TriggerError::InvalidSchedule {
+                kind: TriggerScheduleValidationKind::AmbiguousDateTime,
+                ..
+            })
+        ),
+        "expected InvalidSchedule(AmbiguousDateTime) error, got {result:?}"
     );
 }
 
@@ -185,8 +200,14 @@ fn trigger_create_input_rejects_dst_gap_time() {
     let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
     let result = parsed.schedule.into_schedule();
     assert!(
-        result.is_err(),
-        "DST-gap time must be rejected as input error"
+        matches!(
+            result,
+            Err(TriggerError::InvalidSchedule {
+                kind: TriggerScheduleValidationKind::NonexistentDateTime,
+                ..
+            })
+        ),
+        "expected InvalidSchedule(NonexistentDateTime) error, got {result:?}"
     );
 }
 

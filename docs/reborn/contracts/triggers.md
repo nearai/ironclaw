@@ -518,3 +518,48 @@ V1 acceptance does not require external delivery. A valid V1 trigger fire is one
   trigger and slot.
 - Unit tests must prove trigger fire identity derivation is collision-safe for
   delimiter-like or prefix-overlapping component values.
+- Caller-level tests must prove `active_hold` (§11) is present on both
+  `list_automations` and `trigger_list` while a fire is gate-parked, and absent
+  once the fire reaches a terminal outcome — already covered by
+  `tests/integration/group_triggers/scenario_triggered_gate_hold_visible.rs`.
+
+---
+
+## 11. Active-hold read-time projection (#5886)
+
+`active_hold` is a **derived, non-persisted, read-time-only** projection
+surfaced by product read paths. It adds nothing to `TriggerRunHistoryStatus`,
+`TriggerRunStatus`, or any other persisted status enum, and it does not change
+poller behavior: the poller still skips a due fire while a previous fire is
+active (§5) and never delivers outbound messages itself. This is a
+read-surface addition only — it does not relax the §7 constraint that
+`ApprovalBlocked`/`TimedOut` must not enter the V1 persisted status model, and
+it does not relax the §7/§9 constraint that later lifecycle/notification work
+must define notification paths without making the trigger poller deliver
+outbound messages directly.
+
+- `active_hold` appears on both `RebornAutomationProductFacade::list_automations`
+  (WebUI automations panel) and the model-visible `trigger_list` capability
+  (§8). Both surfaces use the same reason vocabulary because both compute it
+  through the same shared `ironclaw_triggers::worker::ports` derivation
+  (`active_hold_projection` / `active_holds_for_records`); the two read paths
+  cannot drift from each other.
+- Reason vocabulary (`RebornAutomationHoldReason` / `ActiveHoldReason`):
+  - `approval` — the held run is parked on an approval gate.
+  - `auth` — the held run is parked on an auth gate.
+  - `in_progress` — the previous run is still executing and is not gate-parked.
+  - `other` — any other blocked/held state, including the window between
+    `claim_due_fire` and `mark_fire_accepted` where `active_fire_slot` is set
+    but `active_run_ref` is not yet populated.
+- `since` is the held fire's claimed slot timestamp (`TriggerRecord.active_fire_slot`);
+  may be absent.
+- `skipped_runs` is the count of schedule slots skipped while held, computed
+  from the schedule between `since` and now, capped at
+  `ACTIVE_HOLD_SKIPPED_RUNS_CAP` (99). At the cap, `skipped_runs_capped = true`
+  signals truncation — the value must never be presented as an exact count
+  above the cap.
+- Omission rule: `active_hold` is absent entirely when the active run resolves
+  to `Terminal` or `Missing` (nothing to report), or when the underlying
+  active-run lookup or schedule-slot derivation fails or times out. This is a
+  display-only projection and must never fail the read; any lookup problem
+  degrades to omission, not an error.

@@ -604,4 +604,52 @@ mod tests {
         .await;
         assert!(holds.is_empty(), "timed-out lookup must degrade to no hold");
     }
+
+    /// A malformed persisted schedule (shouldn't happen given create-time
+    /// validation, but storage can be corrupted) must not panic or fail the
+    /// caller: `skipped_slots_between` errors, and `active_hold_projection`
+    /// silently omits `skipped_runs` while still surfacing the hold (#5886).
+    #[test]
+    fn active_hold_projection_omits_skipped_runs_on_malformed_schedule() {
+        let now = Utc::now();
+        let mut record = test_record(
+            Some(now - chrono::Duration::days(1)),
+            Some(TurnRunId::new()),
+        );
+        record.schedule = TriggerSchedule::Cron {
+            expression: "not a valid cron expression".to_string(),
+            timezone: "UTC".to_string(),
+        };
+
+        let hold = active_hold_projection(&record, Some(TriggerActiveRunState::Nonterminal), now)
+            .expect("malformed schedule must still yield a hold");
+        assert_eq!(hold.reason, ActiveHoldReason::InProgress);
+        assert_eq!(hold.since, record.active_fire_slot);
+        assert!(
+            hold.skipped_runs.is_none(),
+            "skip-count derivation must degrade silently, not surface a stale count"
+        );
+    }
+
+    /// An empty batch must return immediately without invoking the lookup at
+    /// all, mirroring the claimed-but-unaccepted "never calls the lookup"
+    /// pattern above (#5886).
+    #[tokio::test]
+    async fn active_holds_for_records_empty_slice_skips_lookup() {
+        struct PanicLookup;
+
+        #[async_trait]
+        impl TriggerActiveRunLookup for PanicLookup {
+            async fn active_run_state(
+                &self,
+                _request: TriggerActiveRunStateRequest,
+            ) -> Result<TriggerActiveRunState, TriggerError> {
+                panic!("lookup must not be called for an empty batch");
+            }
+        }
+
+        let holds =
+            active_holds_for_records(&PanicLookup, &[], Utc::now(), Duration::from_secs(5)).await;
+        assert!(holds.is_empty());
+    }
 }

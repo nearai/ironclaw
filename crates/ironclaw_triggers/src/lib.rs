@@ -606,15 +606,8 @@ impl TriggerSchedule {
                 timezone,
             } => {
                 let tz = parse_timezone(timezone)?;
-                let next = if tz == Tz::UTC {
-                    parse_cron_schedule(expression)?.after(&after).next()
-                } else {
-                    parse_cron_schedule(expression)?
-                        .after(&after.with_timezone(&tz))
-                        .next()
-                        .map(|dt| dt.with_timezone(&Utc))
-                };
-                Ok(next)
+                let schedule = parse_cron_schedule(expression)?;
+                Ok(next_cron_slot_after(&schedule, &tz, after))
             }
             Self::Once { at, .. } => Ok(if *at > after { Some(*at) } else { None }),
         }
@@ -630,16 +623,29 @@ impl TriggerSchedule {
         now: Timestamp,
         cap: u32,
     ) -> Result<SkippedSlotCount, TriggerError> {
-        if matches!(self, Self::Once { .. }) {
-            return Ok(SkippedSlotCount {
-                count: 0,
-                capped: false,
-            });
-        }
+        let (expression, timezone) = match self {
+            Self::Once { .. } => {
+                return Ok(SkippedSlotCount {
+                    count: 0,
+                    capped: false,
+                });
+            }
+            Self::Cron {
+                expression,
+                timezone,
+            } => (expression, timezone),
+        };
+        // Parse the timezone and cron schedule once up front: the loop below
+        // can call next_slot_after up to `cap` times, and re-parsing the same
+        // loop-invariant schedule/timezone on every iteration is wasted work
+        // (#5886 follow-up).
+        let tz = parse_timezone(timezone)?;
+        let schedule = parse_cron_schedule(expression)?;
+
         let mut count = 0u32;
         let mut cursor = after;
         while count < cap {
-            match self.next_slot_after(cursor)? {
+            match next_cron_slot_after(&schedule, &tz, cursor) {
                 Some(slot) if slot <= now => {
                     count += 1;
                     cursor = slot;
@@ -652,8 +658,24 @@ impl TriggerSchedule {
                 }
             }
         }
-        let capped = matches!(self.next_slot_after(cursor)?, Some(slot) if slot <= now);
+        let capped =
+            matches!(next_cron_slot_after(&schedule, &tz, cursor), Some(slot) if slot <= now);
         Ok(SkippedSlotCount { count, capped })
+    }
+}
+
+/// Cron-branch core of [`TriggerSchedule::next_slot_after`], factored to
+/// accept an already-parsed `Schedule`/`Tz` so callers that need repeated
+/// lookups (e.g. [`TriggerSchedule::skipped_slots_between`]'s loop) can parse
+/// once and reuse it instead of re-parsing the schedule string every call.
+fn next_cron_slot_after(schedule: &Schedule, tz: &Tz, after: Timestamp) -> Option<Timestamp> {
+    if *tz == Tz::UTC {
+        schedule.after(&after).next()
+    } else {
+        schedule
+            .after(&after.with_timezone(tz))
+            .next()
+            .map(|dt| dt.with_timezone(&Utc))
     }
 }
 

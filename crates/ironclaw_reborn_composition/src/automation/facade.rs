@@ -155,11 +155,13 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
         .map_err(|_| backend_timeout_error())?
         .map_err(map_trigger_error)?;
 
-        let mut holds = self
-            .active_holds_for_records(&records, deadline, chrono::Utc::now())
-            .await;
-
+        // The required run-history fetch runs before the optional hold lookup
+        // in both branches below so a slow hold derivation (#5886) can never
+        // steal deadline budget from data the caller actually needs.
         if records.is_empty() || request.run_limit == 0 {
+            let mut holds = self
+                .active_holds_for_records(&records, deadline, chrono::Utc::now())
+                .await;
             return Ok(records
                 .into_iter()
                 .map(|record| {
@@ -182,6 +184,10 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
             .await
             .map_err(|_| backend_timeout_error())?
             .map_err(map_trigger_error)?;
+
+        let mut holds = self
+            .active_holds_for_records(&records, deadline, chrono::Utc::now())
+            .await;
 
         Ok(records
             .into_iter()

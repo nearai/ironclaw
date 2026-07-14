@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(reborn)* automations and `trigger_list` now surface why a scheduled trigger is currently held (approval/auth/in-progress) and how many scheduled runs were skipped while held ([#5886](https://github.com/nearai/ironclaw/issues/5886)).
+
 ### Fixed
 
 - *(slack)* resolve known DM conversation IDs through an exact Slack lookup before encoding mentions, avoiding wrong-target posts when conversation lists are long or display names are ambiguous.

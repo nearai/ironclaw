@@ -477,6 +477,10 @@ enum ScriptedActiveRunOutcome {
     /// Proves a request was never issued — used for records with no active
     /// fire, which `active_holds_for_records` must skip entirely (#5886).
     Panic,
+    /// Sleeps past the facade's deadline before resolving, for proving the
+    /// required run-history fetch is unaffected by a stalled optional hold
+    /// lookup (#5886 ordering fix).
+    Sleep(std::time::Duration),
 }
 
 struct ScriptedActiveRunLookup {
@@ -496,6 +500,10 @@ impl TriggerActiveRunLookup for ScriptedActiveRunLookup {
             }),
             ScriptedActiveRunOutcome::Panic => {
                 panic!("active_run_state must not be called for a record with no active fire")
+            }
+            ScriptedActiveRunOutcome::Sleep(duration) => {
+                tokio::time::sleep(*duration).await;
+                Ok(TriggerActiveRunState::Nonterminal)
             }
         }
     }
@@ -1319,6 +1327,55 @@ async fn automation_facade_active_hold_lookup_failure_is_silent_ok() {
     assert!(
         found.active_hold.is_none(),
         "a lookup error must omit the hold, not surface one"
+    );
+}
+
+#[tokio::test]
+async fn automation_facade_stalled_hold_lookup_does_not_starve_run_history() {
+    // The required run-history fetch now runs before the optional hold lookup
+    // (#5886 ordering fix), so a hold lookup that stalls past the shared
+    // deadline must degrade to "no hold" without failing the whole list or
+    // dropping `recent_runs`.
+    let c = caller();
+    let id = TriggerId::new();
+    let record = make_active_fire_record(id, &c, now());
+    let run = make_run_record(id, TriggerRunHistoryStatus::Ok);
+    let mut runs_by_trigger = HashMap::new();
+    runs_by_trigger.insert(id, vec![run]);
+
+    let facade = RebornAutomationProductFacade::with_backend_timeout(
+        Arc::new(ScriptedRepository {
+            scoped: ScriptedOutcome::Records(vec![record]),
+            batch: ScriptedOutcome::Runs(runs_by_trigger),
+            thread_lookup: None,
+            limits: None,
+        }),
+        Arc::new(ScriptedActiveRunLookup {
+            outcome: ScriptedActiveRunOutcome::Sleep(std::time::Duration::from_secs(5)),
+        }),
+        std::time::Duration::from_millis(20),
+    );
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        facade.list_automations(c, automation_list_request(10, 5)),
+    )
+    .await
+    .expect("facade must not hang waiting on the stalled hold lookup")
+    .expect("required run history must survive a stalled optional hold lookup");
+
+    let found = result
+        .iter()
+        .find(|a| a.automation_id == id.to_string())
+        .expect("record present");
+    assert_eq!(
+        found.recent_runs.len(),
+        1,
+        "run history must be populated even though the hold lookup exhausted its budget"
+    );
+    assert!(
+        found.active_hold.is_none(),
+        "a stalled hold lookup must degrade to no hold, not fail the list"
     );
 }
 
