@@ -234,6 +234,11 @@ SEL_V2 = {
     "login_token":    "#v2-token",         # token input on the login/connect view
     "sidebar":        "#gateway-sidebar",  # app navigation sidebar
     "sidebar_button": "#gateway-sidebar button",
+    "thread_delete_for": (
+        '[data-testid="thread-delete"][data-thread-id="{id}"]'
+    ),
+    "confirm_dialog_cancel": '[data-testid="confirm-dialog-cancel"]',
+    "confirm_dialog_confirm": '[data-testid="confirm-dialog-confirm"]',
     "sidebar_toggle": "button[aria-label='Toggle sidebar']",
     "sign_out_button": "button[title='Sign out']",
     "chat_composer":  "[data-testid='chat-composer']",  # message textarea on /chat
