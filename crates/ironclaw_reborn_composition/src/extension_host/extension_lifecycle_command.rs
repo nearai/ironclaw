@@ -314,6 +314,42 @@ mod tests {
         );
     }
 
+    /// #5970 review (Low): malformed lifecycle ids only had coverage at the
+    /// facade/`into_action` unit level, not through the public command
+    /// handler. Uses real local-dev services (so `local_runtime` is present)
+    /// to prove the error is `into_action()`'s `Product` variant specifically
+    /// — not `LocalRuntimeUnavailable` — for all three id-bearing variants.
+    #[tokio::test]
+    async fn invalid_extension_id_returns_product_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let owner = "extension-lifecycle-command-invalid-id-owner";
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            owner,
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+
+        for command in [
+            RebornExtensionLifecycleCommand::Install { id: String::new() },
+            RebornExtensionLifecycleCommand::Activate { id: String::new() },
+            RebornExtensionLifecycleCommand::Remove { id: String::new() },
+        ] {
+            let error = execute_reborn_extension_lifecycle_command(&services, command)
+                .await
+                .expect_err("malformed lifecycle id must be rejected before reaching the facade");
+            assert!(
+                matches!(
+                    error,
+                    RebornExtensionLifecycleCommandError::Product(
+                        ProductWorkflowError::InvalidBindingRequest { .. }
+                    )
+                ),
+                "expected the command's into_action() product error, got: {error:?}"
+            );
+        }
+    }
+
     #[test]
     fn human_renderer_escapes_terminal_control_characters() {
         let response = LifecycleProductResponse {
