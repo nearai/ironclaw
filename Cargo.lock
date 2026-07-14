@@ -3958,8 +3958,8 @@ dependencies = [
  "ironclaw_safety",
  "ironclaw_secrets",
  "ironclaw_skills",
- "ironclaw_slack_v2_adapter",
- "ironclaw_telegram_v2_adapter",
+ "ironclaw_slack_extension",
+ "ironclaw_telegram_extension",
  "ironclaw_threads",
  "ironclaw_triggers",
  "ironclaw_trust",
@@ -4818,7 +4818,7 @@ dependencies = [
  "ironclaw_reborn_composition",
  "ironclaw_reborn_traces",
  "ironclaw_run_state",
- "ironclaw_telegram_v2_adapter",
+ "ironclaw_telegram_extension",
  "ironclaw_threads",
  "ironclaw_trust",
  "ironclaw_turns",
@@ -4925,8 +4925,8 @@ dependencies = [
  "ironclaw_reborn_config",
  "ironclaw_reborn_traces",
  "ironclaw_reborn_webui_ingress",
- "ironclaw_slack_v2_adapter",
- "ironclaw_telegram_v2_adapter",
+ "ironclaw_slack_extension",
+ "ironclaw_telegram_extension",
  "reqwest 0.12.28",
  "secrecy",
  "serde",
@@ -5000,7 +5000,7 @@ dependencies = [
  "ironclaw_secrets",
  "ironclaw_skill_learning",
  "ironclaw_skills",
- "ironclaw_slack_v2_adapter",
+ "ironclaw_slack_extension",
  "ironclaw_threads",
  "ironclaw_triggers",
  "ironclaw_trust",
@@ -5365,7 +5365,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_slack_v2_adapter"
+name = "ironclaw_slack_extension"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -5408,7 +5408,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_telegram_v2_adapter"
+name = "ironclaw_telegram_extension"
 version = "0.1.0"
 dependencies = [
  "async-trait",

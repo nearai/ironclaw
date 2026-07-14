@@ -1,9 +1,9 @@
 [package]
-name = "ironclaw_telegram_v2_adapter"
+name = "ironclaw_telegram_extension"
 version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
-description = "Telegram WASM v2 ProductAdapter for IronClaw Reborn (#3285 tracer-bullet)"
+description = "Telegram channel extension for IronClaw Reborn (#3285)"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/nearai/ironclaw"

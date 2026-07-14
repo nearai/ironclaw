@@ -10,7 +10,7 @@ use ironclaw_product_adapters::test_support::conformance::{
 use ironclaw_product_adapters::{
     ExternalConversationRef, OutboundEnvelope, OutboundPart, OutboundTarget,
 };
-use ironclaw_telegram_v2_adapter::{
+use ironclaw_telegram_extension::{
     GroupTriggerPolicy, TELEGRAM_WEBHOOK_URL_CONFIG, TelegramChannelAdapter,
 };
 

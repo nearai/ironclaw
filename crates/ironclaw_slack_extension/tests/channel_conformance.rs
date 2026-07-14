@@ -10,7 +10,7 @@ use ironclaw_product_adapters::test_support::conformance::{
 use ironclaw_product_adapters::{
     ExternalConversationRef, OutboundEnvelope, OutboundPart, OutboundTarget,
 };
-use ironclaw_slack_v2_adapter::SlackChannelAdapter;
+use ironclaw_slack_extension::SlackChannelAdapter;
 
 fn scripted_slack_api(request: &RestrictedEgressRequest) -> RestrictedEgressResponse {
     let body = if request.url.ends_with("/api/chat.postMessage") {

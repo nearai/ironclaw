@@ -1,4 +1,4 @@
-# Agent Map — ironclaw_telegram_v2_adapter
+# Agent Map — ironclaw_telegram_extension
 
 ## Start Here
 
@@ -24,7 +24,7 @@
 
 ## Validation
 
-- Fast local check: `cargo test -p ironclaw_telegram_v2_adapter`
+- Fast local check: `cargo test -p ironclaw_telegram_extension`
 - Run `cargo test -p ironclaw_product_adapters` when shared DTO assumptions change.
 - Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture`
 

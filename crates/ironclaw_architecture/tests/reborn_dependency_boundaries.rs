@@ -476,8 +476,8 @@ fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
         "crates/ironclaw_product_workflow/src",
         "crates/ironclaw_reborn_webui_ingress/src",
         "crates/ironclaw_webui_v2/src",
-        "crates/ironclaw_telegram_v2_adapter/src",
-        "crates/ironclaw_slack_v2_adapter/src",
+        "crates/ironclaw_telegram_extension/src",
+        "crates/ironclaw_slack_extension/src",
     ];
 
     let mut violations = Vec::new();
@@ -570,8 +570,8 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
             "ironclaw_reborn_config",
             "ironclaw_reborn_traces",
             "ironclaw_reborn_webui_ingress",
-            "ironclaw_slack_v2_adapter",
-            "ironclaw_telegram_v2_adapter",
+            "ironclaw_slack_extension",
+            "ironclaw_telegram_extension",
         ],
         "ironclaw_reborn_cli should enter Reborn through ironclaw_reborn_composition (assembled-runtime and provider-admin facade), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), and ironclaw_reborn_webui_ingress (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract) and concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
     );
@@ -1299,8 +1299,8 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
         "crates/ironclaw_product_adapters/src",
         "crates/ironclaw_product_adapter_registry/src",
         "crates/ironclaw_product_workflow/src",
-        "crates/ironclaw_telegram_v2_adapter/src",
-        "crates/ironclaw_slack_v2_adapter/src",
+        "crates/ironclaw_telegram_extension/src",
+        "crates/ironclaw_slack_extension/src",
         "crates/ironclaw_outbound/src",
         "crates/ironclaw_conversations/src",
         "crates/ironclaw_turns/src",
@@ -2361,7 +2361,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_scripts",
                 "ironclaw_secrets",
                 "ironclaw_skills",
-                "ironclaw_telegram_v2_adapter",
+                "ironclaw_telegram_extension",
                 "ironclaw_threads",
                 "ironclaw_trust",
                 "ironclaw_tui",
@@ -2379,7 +2379,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // product_adapters CONTRACT types only (`RestrictedEgress`,
             // `SecretHandle` — extension-runtime implementation.md §3), which
             // the P4 `ChannelAdapter` signatures require.
-            crate_name: "ironclaw_slack_v2_adapter",
+            crate_name: "ironclaw_slack_extension",
             forbidden: vec![
                 "ironclaw",
                 "ironclaw_authorization",
@@ -2416,7 +2416,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_scripts",
                 "ironclaw_secrets",
                 "ironclaw_skills",
-                "ironclaw_telegram_v2_adapter",
+                "ironclaw_telegram_extension",
                 "ironclaw_threads",
                 "ironclaw_trust",
                 "ironclaw_tui",

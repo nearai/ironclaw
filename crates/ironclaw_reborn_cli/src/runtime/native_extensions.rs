@@ -11,7 +11,7 @@ use ironclaw_extension_host::{
     NativeExtensionFactory,
 };
 use ironclaw_reborn_composition::ChannelExtensionBinding;
-use ironclaw_telegram_v2_adapter::TelegramChannelAdapter;
+use ironclaw_telegram_extension::TelegramChannelAdapter;
 
 /// Every native factory the binary assembles (`first_party`-runtime
 /// extensions bind their adapters through these).
@@ -27,15 +27,15 @@ pub(crate) fn bundled_native_extension_factories() -> Vec<Arc<dyn NativeExtensio
 pub(crate) fn bundled_channel_extension_bindings() -> Vec<ChannelExtensionBinding> {
     vec![ChannelExtensionBinding {
         extension_id: "slack".to_string(),
-        adapter: Arc::new(ironclaw_slack_v2_adapter::SlackChannelAdapter),
+        adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
         inbound_payload_classifier: Some(Arc::new(|message| {
-            ironclaw_slack_v2_adapter::classify_interaction_resolution(
+            ironclaw_slack_extension::classify_interaction_resolution(
                 &message.text,
                 message.trigger,
             )
         })),
         preference_target_codec: Some(Arc::new(
-            ironclaw_slack_v2_adapter::SlackPreferenceTargetCodec,
+            ironclaw_slack_extension::SlackPreferenceTargetCodec,
         )),
     }]
 }

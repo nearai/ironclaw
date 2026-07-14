@@ -74,7 +74,7 @@ has_reborn_tests=true"
 
 assert_scope \
   "reborn v2 adapter crate" \
-  "crates/ironclaw_telegram_v2_adapter/src/lib.rs" \
+  "crates/ironclaw_telegram_extension/src/lib.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false

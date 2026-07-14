@@ -31,7 +31,7 @@ wire with directions and connection affordance
 (`crates/ironclaw_product_workflow/src/reborn_services/{types,extensions}.rs`);
 a narrow channel protocol adapter trait
 (`crates/ironclaw_product_adapters/src/adapter.rs`) implemented by
-`crates/ironclaw_slack_v2_adapter`; retired-taxonomy architecture gate.
+`crates/ironclaw_slack_extension`; retired-taxonomy architecture gate.
 
 Not generic yet — the work:
 
@@ -50,7 +50,7 @@ Not generic yet — the work:
 | Concrete channel formatting in LLM prompt construction | `crates/ironclaw_llm/src/reasoning.rs` |
 | Concrete channel variants in trace contributions | `crates/ironclaw_reborn_traces/src/contribution.rs` |
 | Slack CLI command, cargo feature, config types | `crates/ironclaw_reborn_cli/src/commands/serve_slack.rs`, `slack-v2-host-beta` feature, `crates/ironclaw_reborn_config` |
-| Telegram adapter exists but is test-only | `crates/ironclaw_telegram_v2_adapter` |
+| Telegram adapter exists but is test-only | `crates/ironclaw_telegram_extension` |
 
 ## 3. Target crate and module map
 
@@ -59,8 +59,8 @@ Not generic yet — the work:
 | Crate | Owns |
 | --- | --- |
 | `ironclaw_extension_host` | `ExtensionEntrypoint`, `ExtensionBindings`, binding check, loaders (native/wasm/mcp), immutable active snapshot + resolver views, installation state machine, activation/deactivation/removal/upgrade/restore, generic ingress router module, restricted-egress implementation |
-| `ironclaw_slack_extension` | All Slack protocol behavior: tool adapters (wrapping the existing WASM artifact initially), channel adapter (parse, render, deliver, targets, activate/cleanup), fixtures. Absorbs `ironclaw_slack_v2_adapter` and everything Slack in composition |
-| `ironclaw_telegram_extension` | Telegram channel adapter (updates parsing, Bot API rendering, `setWebhook`/`deleteWebhook` hooks). Absorbs `ironclaw_telegram_v2_adapter` |
+| `ironclaw_slack_extension` | All Slack protocol behavior: tool adapters (wrapping the existing WASM artifact initially), channel adapter (parse, render, deliver, targets, activate/cleanup), fixtures. Absorbs `ironclaw_slack_extension` and everything Slack in composition |
+| `ironclaw_telegram_extension` | Telegram channel adapter (updates parsing, Bot API rendering, `setWebhook`/`deleteWebhook` hooks). Absorbs `ironclaw_telegram_extension` |
 
 **Changed crates:**
 
@@ -80,7 +80,7 @@ Not generic yet — the work:
 | `ironclaw_architecture` | New specificity scanner + dependency gates (section 12) |
 | `ironclaw_reborn_migration` | One-time migrations (section 11) |
 
-**Deleted crates (2):** `ironclaw_slack_v2_adapter`, `ironclaw_telegram_v2_adapter` (folded into their extension crates).
+**Deleted crates (2):** `ironclaw_slack_extension`, `ironclaw_telegram_extension` (folded into their extension crates).
 
 **Dependency rule (gated):** generic crates never depend on concrete extension
 crates. Only `ironclaw_reborn_cli` (assembly of the native factory registry)

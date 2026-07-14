@@ -390,8 +390,6 @@ const REBORN_LAYERS: &[&str] = &[
 /// directory is tolerated so the planned extension crates are covered from
 /// the day they appear.
 const CONCRETE_EXTENSION_CRATES: &[&str] = &[
-    "ironclaw_slack_v2_adapter",
-    "ironclaw_telegram_v2_adapter",
     "ironclaw_slack_extension",
     "ironclaw_telegram_extension",
 ];

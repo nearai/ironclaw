@@ -576,7 +576,7 @@ Rules — kept short on purpose:
   `respond_outcome_answers_without_enqueue_within_bounds`
   (`ingress_router_contract.rs`);
   `url_verification_challenge_becomes_an_immediate_response`
-  (`crates/ironclaw_slack_v2_adapter/src/channel.rs`); production-mount leg
+  (`crates/ironclaw_slack_extension/src/channel.rs`); production-mount leg
   in `tests/integration/extension_ingress.rs`.
 - [x] ING-10 Normalized messages flow through existing identity/conversation
   binding and turn submission (integration: signed vendor POST → turn). —
@@ -709,8 +709,8 @@ Rules — kept short on purpose:
 - [x] OUT-10 Slack rendering/splitting/DM-provisioning and Telegram rendering
   live only in their crates (fixture unit tests) with one outbound
   integration proof each. — Rendering/splitting/`conversations.open` DM
-  opening live in `ironclaw_slack_v2_adapter` /
-  `ironclaw_telegram_v2_adapter` (fixture tests in each crate's
+  opening live in `ironclaw_slack_extension` /
+  `ironclaw_telegram_extension` (fixture tests in each crate's
   `channel.rs` + TEST-1 conformance); outbound integration proofs:
   `slack_final_reply_flows_through_the_real_delivery_coordinator` and
   `telegram_update_becomes_a_turn_and_a_coordinated_reply`
@@ -752,14 +752,20 @@ Rules — kept short on purpose:
   `[channel.config]` + the generic outbound-target provider and
   triggered-delivery hook replaced every lane surface; the H.3/H.4 folds
   (`channel_state_folds.rs`) carry retired durable state forward.
-- [ ] DEL-2 `ironclaw_slack_v2_adapter` and `ironclaw_telegram_v2_adapter` are
-  folded into their extension crates and removed from the workspace. —
-  OWNER CALL (P6): the fold ran in the opposite direction — the lane's
-  vendor glue folded INTO `ironclaw_slack_v2_adapter`, making it the
-  de-facto extension crate (adapter + codecs + preference-target codec);
-  the pure crate rename to `ironclaw_slack_extension` /
-  `ironclaw_telegram_extension` is deferred to P7 (the deletion-gate
-  crate lists already reserve both names).
+- [x] DEL-2 The concrete extension crates are renamed
+  `ironclaw_slack_v2_adapter` → `ironclaw_slack_extension` and
+  `ironclaw_telegram_v2_adapter` → `ironclaw_telegram_extension`. — P7b pure
+  crate rename: the fold had already run INTO these crates in P6 (making them
+  the de-facto extension crates), and DEL-5 removed their dead `ProductAdapter`
+  impls, leaving the live `ChannelAdapter` + codecs + preference-target codec.
+  `git mv` preserves history; all dependency declarations, `use` paths, the
+  `assert_workspace_deps_exactly` allowlist, the retired
+  `ironclaw_wasm_product_adapters` BoundaryRule / forbidden entries, CI crate
+  lists, and docs are renamed. The deletion-gate crate lists (specificity
+  `CONCRETE_EXTENSION_CRATES`, `check-generic-without-concrete.sh`) already
+  reserved both new names, so the old entries were removed rather than
+  duplicated. `cargo check --workspace --tests` + `ironclaw_architecture` (42)
+  green.
 - [x] DEL-3 `serve_slack.rs` and the `slack-v2-host-beta` cargo feature are
   deleted; no channel-specific config type remains in
   `ironclaw_reborn_config`. — `SlackSection`/`SlackChannelRouteSection` are
@@ -824,7 +830,7 @@ Rules — kept short on purpose:
   empty `CONCRETE_DEPENDENCY_EXCEPTIONS`).
 - [x] DEL-7 Only `ironclaw_reborn_cli` and tests depend on concrete extension
   crates (`cargo metadata` gate). — `CONCRETE_DEPENDENCY_EXCEPTIONS` is
-  empty; composition keeps `ironclaw_slack_v2_adapter` as a dev-dependency
+  empty; composition keeps `ironclaw_slack_extension` as a dev-dependency
   only (the sanctioned test linkage); the CLI supplies the Slack channel
   adapter + extras through `RebornBuildInput::with_channel_extension_bindings`.
 - [ ] DEL-8 The concrete-name scanner allowlist is empty. — Not yet: the
@@ -845,7 +851,7 @@ Rules — kept short on purpose:
   `TelegramChannelAdapter::{inbound,activate,cleanup}` with
   `shared_secret_header` verification host-side and `setWebhook`/
   `deleteWebhook` over `RestrictedEgress`
-  (`crates/ironclaw_telegram_v2_adapter/src/channel.rs`). P5 completed the
+  (`crates/ironclaw_telegram_extension/src/channel.rs`). P5 completed the
   chain: bundled package assets + catalog entry
   (`ironclaw_first_party_extensions/assets/telegram/manifest.toml`,
   `available_extensions.rs::telegram_package`), the binary-assembled
@@ -1021,8 +1027,8 @@ Rules — kept short on purpose:
   bounds + malformed-never-panics + challenge, full-envelope delivery with
   structured per-part reports against a scripted vendor server,
   activate/cleanup idempotency, unsupported surfaces fail cleanly.
-  Consumers: `crates/ironclaw_slack_v2_adapter/tests/channel_conformance.rs`,
-  `crates/ironclaw_telegram_v2_adapter/tests/channel_conformance.rs`, and
+  Consumers: `crates/ironclaw_slack_extension/tests/channel_conformance.rs`,
+  `crates/ironclaw_telegram_extension/tests/channel_conformance.rs`, and
   the acme fixture in `tests/integration/extension_runtime.rs`.
 - [x] TEST-2 The tool-adapter conformance checks run against static, WASM,
   and MCP lanes. (P2 landed the WASM-lane proof — the five Slack tools

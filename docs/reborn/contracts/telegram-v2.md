@@ -1,7 +1,7 @@
 # Telegram WASM v2 ProductAdapter
 
 **Status:** First-slice tracer-bullet for #3285 (default off).
-**Crate:** `ironclaw_telegram_v2_adapter`.
+**Crate:** `ironclaw_telegram_extension`.
 **Host runtime:** `ironclaw_wasm_product_adapters`.
 **Contract:** `ironclaw_product_adapters` (see `product-adapters.md`).
 
@@ -127,7 +127,7 @@ fails closed when both are active.
 ## Test coverage (issue #3285 acceptance criteria)
 
 Coverage today lives in the crate's per-module `mod tests` blocks
-(`cargo test -p ironclaw_telegram_v2_adapter --lib`, 46 tests at the
+(`cargo test -p ironclaw_telegram_extension --lib`, 46 tests at the
 time of writing). The tests are not yet named `ac<N>_*`; they are
 organised by the source surface they exercise:
 
@@ -154,7 +154,7 @@ organised by the source surface they exercise:
   used by `text_entity_windows`.
 
 **Deferred:** the integration contract suite at
-`crates/ironclaw_telegram_v2_adapter/tests/product_adapter_telegram_contract.rs`
+`crates/ironclaw_telegram_extension/tests/product_adapter_telegram_contract.rs`
 (referenced in earlier revisions of this doc with `ac<N>_*`
 acceptance-bullet test names) was removed pending a case-by-case
 port to the post-#3352 product-adapter API
@@ -164,7 +164,7 @@ returning `ProductRenderOutcome`, `EgressRequest` builder API,
 paired `(host, credential)` egress policy, and
 `parse_inbound -> Result<ParsedProductInbound, _>`). The recorded
 Telegram payload fixtures under
-`crates/ironclaw_telegram_v2_adapter/tests/fixtures/*.json` are
+`crates/ironclaw_telegram_extension/tests/fixtures/*.json` are
 retained for that followup. Once the port lands, each restored test
 should carry an `ac<N>_*` name referencing the exact AC bullet from
 issue #3285.

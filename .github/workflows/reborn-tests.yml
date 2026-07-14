@@ -119,8 +119,8 @@ jobs:
                         (.name | startswith("ironclaw_reborn"))
                         or (.name | startswith("ironclaw_product"))
                         or (.name == "ironclaw_architecture")
-                        or (.name == "ironclaw_slack_v2_adapter")
-                        or (.name == "ironclaw_telegram_v2_adapter")
+                        or (.name == "ironclaw_slack_extension")
+                        or (.name == "ironclaw_telegram_extension")
                         or (.name | startswith("ironclaw_webui_v2"))
                       )
                     | .name

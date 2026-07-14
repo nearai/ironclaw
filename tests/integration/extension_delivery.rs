@@ -595,7 +595,7 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
         .expect("group binding service");
     let vendor_scope = preresolve_vendor_turn_scope(
         &slack_binding_service,
-        &ironclaw_slack_v2_adapter::SlackChannelAdapter,
+        &ironclaw_slack_extension::SlackChannelAdapter,
         "slack",
         SLACK_INSTALLATION,
         &evidence,
@@ -856,7 +856,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply(#[case] storage:
     // the admitted run executes under.
     let vendor_scope = preresolve_vendor_turn_scope(
         &telegram_binding_service,
-        &ironclaw_telegram_v2_adapter::TelegramChannelAdapter::default(),
+        &ironclaw_telegram_extension::TelegramChannelAdapter::default(),
         "telegram",
         TELEGRAM_INSTALLATION,
         &evidence,

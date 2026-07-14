@@ -27,8 +27,6 @@ if [ "${1:-}" = "--trees-only" ]; then
 fi
 
 CONCRETE_CRATES=(
-  ironclaw_slack_v2_adapter
-  ironclaw_telegram_v2_adapter
   ironclaw_slack_extension
   ironclaw_telegram_extension
 )
@@ -46,8 +44,6 @@ import json, sys
 REBORN_LAYERS = {"contracts", "substrates", "runtimes", "kernel", "loops", "products", "app"}
 EXCLUDED = {
     # Concrete extension crates (the deletion test subjects, not its scope).
-    "ironclaw_slack_v2_adapter",
-    "ironclaw_telegram_v2_adapter",
     "ironclaw_slack_extension",
     "ironclaw_telegram_extension",
     # The package inventory crate owns the concrete packages.

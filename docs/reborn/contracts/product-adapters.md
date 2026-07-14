@@ -3,7 +3,7 @@
 **Status:** Draft (first slice landing for #3285).
 **Owner crate:** `ironclaw_product_adapters`.
 **Host runtime:** `ironclaw_wasm_product_adapters`.
-**First concrete adapter:** `ironclaw_telegram_v2_adapter`.
+**First concrete adapter:** `ironclaw_telegram_extension`.
 **Related issues:** #3269 (this contract), #3285 (Telegram tracer bullet),
 #3266 (outbound policy), #3193 (conversation binding), #3094 (gate UX).
 
@@ -235,7 +235,7 @@ configured for the same installation; see
 | Webhook auth verifiers (HMAC, shared-secret-header) | `[implemented slice]` |
 | Egress policy enforcement | `[implemented slice]` |
 | `NativeProductAdapterRunner` | `[implemented slice]` |
-| Telegram v2 native adapter | `[implemented slice]` (`ironclaw_telegram_v2_adapter`) |
+| Telegram v2 native adapter | `[implemented slice]` (`ironclaw_telegram_extension`) |
 | wasmtime component-model glue | `[implemented slice]` (`ProductAdapterComponentRuntime` loads `crates/ironclaw_wasm_product_adapters/wit/product_adapter.wit`; parse/render-only, component `http-egress` import fails closed until production egress wiring lands) |
 | Web / Slack / Discord / WhatsApp / Feishu / Signal v2 adapters | `[not implemented]` |
 | Production wiring of v2 webhook route | `[not implemented]` (default-off flag exists; route registration is a follow-up) |

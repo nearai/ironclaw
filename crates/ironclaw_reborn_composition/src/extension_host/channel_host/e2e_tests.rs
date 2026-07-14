@@ -65,7 +65,7 @@ use ironclaw_product_workflow::{
     TriggeredRunDeliveryRequest,
 };
 use ironclaw_secrets::InMemorySecretStore;
-use ironclaw_slack_v2_adapter::{
+use ironclaw_slack_extension::{
     SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID, SlackPreferenceTargetCodec,
 };
 use ironclaw_threads::{
@@ -465,7 +465,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
 /// closure the binary-side native registration provides.
 fn slack_gate_reply_classifier() -> Arc<InboundPayloadClassifier> {
     Arc::new(|message| {
-        ironclaw_slack_v2_adapter::classify_interaction_resolution(&message.text, message.trigger)
+        ironclaw_slack_extension::classify_interaction_resolution(&message.text, message.trigger)
     })
 }
 
@@ -573,7 +573,7 @@ async fn slack_test_extension_host() -> Arc<ironclaw_extension_host::ExtensionHo
         fn bind(&self, _ctx: BindContext) -> Result<ExtensionBindings, BindError> {
             Ok(ExtensionBindings {
                 tools: Some(Arc::new(FakeToolAdapter)),
-                channel: Some(Arc::new(ironclaw_slack_v2_adapter::SlackChannelAdapter)),
+                channel: Some(Arc::new(ironclaw_slack_extension::SlackChannelAdapter)),
             })
         }
     }
@@ -925,7 +925,7 @@ fn dm_reply_target_binding_ref() -> ReplyTargetBindingRef {
         seg("actor_kind", SLACK_USER_ACTOR_KIND),
         seg("actor", SLACK_USER),
     );
-    ironclaw_slack_v2_adapter::slack_reply_target_binding_ref_from_raw(raw)
+    ironclaw_slack_extension::slack_reply_target_binding_ref_from_raw(raw)
         .expect("DM reply target binding ref") // safety: static test binding ref is valid.
 }
 
@@ -1353,7 +1353,7 @@ fn non_dm_channel_reply_target_binding_ref() -> ReplyTargetBindingRef {
         seg("actor_kind", SLACK_USER_ACTOR_KIND),
         seg("actor", SLACK_USER),
     );
-    ironclaw_slack_v2_adapter::slack_reply_target_binding_ref_from_raw(raw)
+    ironclaw_slack_extension::slack_reply_target_binding_ref_from_raw(raw)
         .expect("channel reply target binding ref") // safety: static test binding ref is valid.
 }
 
@@ -4096,7 +4096,7 @@ async fn generic_outbound_targets_tolerate_retired_installation_id_binding_refs(
     let durable_segment = format!("installation:{}:{INSTALLATION};", INSTALLATION.len());
 
     // Shared-channel preference saved under the retired setup id.
-    let retired_shared = ironclaw_slack_v2_adapter::slack_shared_channel_reply_target_binding_ref(
+    let retired_shared = ironclaw_slack_extension::slack_shared_channel_reply_target_binding_ref(
         &retired_installation,
         &agent,
         Some(&project),
@@ -4119,7 +4119,7 @@ async fn generic_outbound_targets_tolerate_retired_installation_id_binding_refs(
     );
 
     // Personal-DM preference saved under the retired setup id.
-    let retired_dm = ironclaw_slack_v2_adapter::slack_personal_dm_reply_target_binding_ref(
+    let retired_dm = ironclaw_slack_extension::slack_personal_dm_reply_target_binding_ref(
         &retired_installation,
         &agent,
         Some(&project),
@@ -4144,7 +4144,7 @@ async fn generic_outbound_targets_tolerate_retired_installation_id_binding_refs(
 
     // Fail-closed arms: a tampered actor never resolves; an unrouted
     // conversation never resolves (regardless of which id the ref carries).
-    let tampered_actor = ironclaw_slack_v2_adapter::slack_personal_dm_reply_target_binding_ref(
+    let tampered_actor = ironclaw_slack_extension::slack_personal_dm_reply_target_binding_ref(
         &retired_installation,
         &agent,
         Some(&project),
@@ -4161,7 +4161,7 @@ async fn generic_outbound_targets_tolerate_retired_installation_id_binding_refs(
             .is_none(),
         "a DM ref with a foreign actor must not resolve"
     );
-    let unrouted = ironclaw_slack_v2_adapter::slack_shared_channel_reply_target_binding_ref(
+    let unrouted = ironclaw_slack_extension::slack_shared_channel_reply_target_binding_ref(
         &retired_installation,
         &agent,
         Some(&project),

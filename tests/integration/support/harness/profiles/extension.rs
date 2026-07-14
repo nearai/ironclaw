@@ -575,7 +575,7 @@ impl ironclaw_extension_host::ExtensionEntrypoint for TelegramFixtureEntrypoint 
         Ok(ironclaw_extension_host::ExtensionBindings {
             tools: None,
             channel: Some(Arc::new(
-                ironclaw_telegram_v2_adapter::TelegramChannelAdapter::default(),
+                ironclaw_telegram_extension::TelegramChannelAdapter::default(),
             )),
         })
     }
