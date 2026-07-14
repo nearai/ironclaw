@@ -1292,7 +1292,8 @@ registerPack("hi", {
   "automations.hold.meta.inProgress": "{since} को शुरू हुआ · अगला रन इसके पूरा होने के बाद शुरू होगा",
   "automations.hold.meta.paused":
     "{since} से रुका हुआ · रुके रहने के दौरान {count} निर्धारित अवसर बीत गए",
-  "automations.hold.meta.pausedUnknownCount": "{since} से रुका हुआ · छोड़े गए रन की संख्या उपलब्ध नहीं है",
+  "automations.hold.meta.pausedUnknownCount":
+    "{since} से रुका हुआ · बीते हुए निर्धारित अवसरों की संख्या उपलब्ध नहीं है",
   "automations.hold.other": "पिछला रन अभी पूरा नहीं हुआ है",
   "automations.status.needsReview": "समीक्षा चाहिए",
   "automations.status.running": "चल रहा है",

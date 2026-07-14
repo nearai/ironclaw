@@ -1292,7 +1292,8 @@ registerPack("pt-BR", {
   "automations.hold.meta.inProgress": "Iniciado {since} · a próxima execução começa após esta terminar",
   "automations.hold.meta.paused":
     "Pausado desde {since} · {count} ocorrências programadas transcorreram enquanto pausado",
-  "automations.hold.meta.pausedUnknownCount": "Pausado desde {since} · contagem de execuções ignoradas indisponível",
+  "automations.hold.meta.pausedUnknownCount":
+    "Pausado desde {since} · contagem de ocorrências programadas transcorridas indisponível",
   "automations.hold.other": "A execução anterior ainda não terminou",
   "automations.status.needsReview": "Precisa de revisão",
   "automations.status.running": "Em execução",

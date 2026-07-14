@@ -1292,7 +1292,8 @@ registerPack("ja", {
   "automations.hold.meta.inProgress": "{since}に開始 · 完了後に次の実行が始まります",
   "automations.hold.meta.paused":
     "{since}から一時停止中 · 保留中に{count}件の予定された実行時刻が経過しました",
-  "automations.hold.meta.pausedUnknownCount": "{since}から一時停止中 · スキップされた実行数は不明です",
+  "automations.hold.meta.pausedUnknownCount":
+    "{since}から一時停止中 · 経過した予定実行時刻の件数は不明です",
   "automations.hold.other": "前回の実行がまだ完了していません",
   "automations.status.needsReview": "確認が必要",
   "automations.status.running": "実行中",

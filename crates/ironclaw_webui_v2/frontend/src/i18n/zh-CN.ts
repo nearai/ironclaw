@@ -1292,7 +1292,8 @@ registerPack("zh-CN", {
   "automations.hold.meta.inProgress": "于{since}开始 · 下一次运行将在此次完成后开始",
   "automations.hold.meta.paused":
     "自{since}起已暂停 · 暂停期间已过去 {count} 次计划执行时刻",
-  "automations.hold.meta.pausedUnknownCount": "自{since}起已暂停 · 跳过次数不可用",
+  "automations.hold.meta.pausedUnknownCount":
+    "自{since}起已暂停 · 已过去的计划执行次数不可用",
   "automations.hold.other": "上一次运行尚未完成",
   "automations.status.needsReview": "需要审核",
   "automations.status.running": "运行中",

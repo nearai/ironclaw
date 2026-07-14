@@ -1292,7 +1292,8 @@ registerPack("ar", {
   "automations.hold.meta.inProgress": "بدأ {since} · سيبدأ التشغيل التالي بعد انتهاء هذا",
   "automations.hold.meta.paused":
     "متوقف مؤقتًا منذ {since} · مرّت {count} من الأوقات المجدولة أثناء التوقف",
-  "automations.hold.meta.pausedUnknownCount": "متوقف مؤقتًا منذ {since} · عدد التشغيلات المتخطاة غير متوفر",
+  "automations.hold.meta.pausedUnknownCount":
+    "متوقف مؤقتًا منذ {since} · عدد الأوقات المجدولة المنقضية غير متوفر",
   "automations.hold.other": "التشغيل السابق لم ينتهِ بعد",
   "automations.status.needsReview": "بحاجة إلى مراجعة",
   "automations.status.running": "قيد التشغيل",
