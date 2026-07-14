@@ -140,9 +140,7 @@ use crate::extension_host::lifecycle::{
 use crate::extension_host::mcp::hosted_http_mcp_runtime;
 use crate::extension_host::{
     available_extensions::{
-        AvailableExtensionCatalog, google_calendar_manifest_digest, google_docs_manifest_digest,
-        google_drive_manifest_digest, google_sheets_manifest_digest, google_slides_manifest_digest,
-        notion_mcp_manifest_digest, web_access_manifest_digest,
+        AvailableExtensionCatalog, notion_mcp_manifest_digest, web_access_manifest_digest,
     },
     extension_installation_store::FilesystemExtensionInstallationStore,
     extension_lifecycle::{
@@ -4043,56 +4041,6 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
             None,
         ),
         AdminEntry::for_local_manifest(
-            PackageId::new("google-calendar").map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("Google Calendar first-party package id is invalid: {error}"),
-            })?,
-            "/system/extensions/google-calendar/manifest.toml".to_string(),
-            Some(google_calendar_manifest_digest()),
-            HostTrustAssignment::first_party(),
-            gsuite_allowed_effects(),
-            None,
-        ),
-        AdminEntry::for_local_manifest(
-            PackageId::new("google-docs").map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("Google Docs first-party package id is invalid: {error}"),
-            })?,
-            "/system/extensions/google-docs/manifest.toml".to_string(),
-            Some(google_docs_manifest_digest()),
-            HostTrustAssignment::first_party(),
-            gsuite_allowed_effects(),
-            None,
-        ),
-        AdminEntry::for_local_manifest(
-            PackageId::new("google-drive").map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("Google Drive first-party package id is invalid: {error}"),
-            })?,
-            "/system/extensions/google-drive/manifest.toml".to_string(),
-            Some(google_drive_manifest_digest()),
-            HostTrustAssignment::first_party(),
-            gsuite_allowed_effects(),
-            None,
-        ),
-        AdminEntry::for_local_manifest(
-            PackageId::new("google-sheets").map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("Google Sheets first-party package id is invalid: {error}"),
-            })?,
-            "/system/extensions/google-sheets/manifest.toml".to_string(),
-            Some(google_sheets_manifest_digest()),
-            HostTrustAssignment::first_party(),
-            gsuite_allowed_effects(),
-            None,
-        ),
-        AdminEntry::for_local_manifest(
-            PackageId::new("google-slides").map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("Google Slides first-party package id is invalid: {error}"),
-            })?,
-            "/system/extensions/google-slides/manifest.toml".to_string(),
-            Some(google_slides_manifest_digest()),
-            HostTrustAssignment::first_party(),
-            gsuite_allowed_effects(),
-            None,
-        ),
-        AdminEntry::for_local_manifest(
             PackageId::new("notion").map_err(|error| RebornBuildError::InvalidConfig {
                 reason: format!("Notion MCP first-party package id is invalid: {error}"),
             })?,
@@ -4140,15 +4088,6 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
             reason: format!("built-in first-party trust policy is invalid: {error}"),
         }
     })
-}
-
-fn gsuite_allowed_effects() -> Vec<EffectKind> {
-    vec![
-        EffectKind::DispatchCapability,
-        EffectKind::Network,
-        EffectKind::UseSecret,
-        EffectKind::ExternalWrite,
-    ]
 }
 
 fn slack_user_allowed_effects() -> Vec<EffectKind> {
@@ -7640,7 +7579,12 @@ mod tests {
                     grantee: Principal::Extension(extension_id),
                     issued_by: Principal::HostRuntime,
                     constraints: GrantConstraints {
-                        allowed_effects: gsuite_allowed_effects(),
+                        allowed_effects: vec![
+                            EffectKind::DispatchCapability,
+                            EffectKind::Network,
+                            EffectKind::UseSecret,
+                            EffectKind::ExternalWrite,
+                        ],
                         mounts: MountView::new(Vec::new()).expect("valid empty mount view"),
                         network: NetworkPolicy::default(),
                         secrets: vec![SecretHandle::new("missing-google-access-token").unwrap()],

@@ -1018,46 +1018,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     (
         "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
-        "google-calendar",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
-        "google-docs",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
-        "google-drive",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
-        "google-sheets",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
-        "google-slides",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
-        "google_calendar",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
-        "google_docs",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
-        "google_drive",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
-        "google_sheets",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
-        "google_slides",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
         "nearai-mcp",
     ),
     (
@@ -1107,46 +1067,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     (
         "crates/ironclaw_reborn_composition/src/factory.rs",
         "google",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/factory.rs",
-        "google-calendar",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/factory.rs",
-        "google-docs",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/factory.rs",
-        "google-drive",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/factory.rs",
-        "google-sheets",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/factory.rs",
-        "google-slides",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/factory.rs",
-        "google_calendar",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/factory.rs",
-        "google_docs",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/factory.rs",
-        "google_drive",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/factory.rs",
-        "google_sheets",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/factory.rs",
-        "google_slides",
     ),
     (
         "crates/ironclaw_reborn_composition/src/factory.rs",

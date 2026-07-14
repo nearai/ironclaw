@@ -26,32 +26,10 @@ use crate::llm_admin::nearai_mcp::{
     nearai_mcp_endpoint_from_base, nearai_mcp_endpoint_from_env,
 };
 
-const GOOGLE_CALENDAR_MANIFEST: &str =
-    include_str!("../../../ironclaw_first_party_extensions/assets/google-calendar/manifest.toml");
-const GOOGLE_DOCS_MANIFEST: &str =
-    include_str!("../../../ironclaw_first_party_extensions/assets/google-docs/manifest.toml");
-const GOOGLE_DOCS_WASM_MODULE: &[u8] = include_bytes!(
-    "../../../ironclaw_first_party_extensions/assets/google-docs/wasm/google_docs_tool.wasm"
-);
-const GOOGLE_DRIVE_MANIFEST: &str =
-    include_str!("../../../ironclaw_first_party_extensions/assets/google-drive/manifest.toml");
-const GOOGLE_DRIVE_WASM_MODULE: &[u8] = include_bytes!(
-    "../../../ironclaw_first_party_extensions/assets/google-drive/wasm/google_drive_tool.wasm"
-);
-const GOOGLE_SHEETS_MANIFEST: &str =
-    include_str!("../../../ironclaw_first_party_extensions/assets/google-sheets/manifest.toml");
-const GOOGLE_SHEETS_WASM_MODULE: &[u8] = include_bytes!(
-    "../../../ironclaw_first_party_extensions/assets/google-sheets/wasm/google_sheets_tool.wasm"
-);
 const SLACK_MANIFEST: &str =
     include_str!("../../../ironclaw_first_party_extensions/assets/slack/manifest.toml");
 const SLACK_WASM_MODULE: &[u8] = include_bytes!(
     "../../../ironclaw_first_party_extensions/assets/slack/wasm/slack_user_tool.wasm"
-);
-const GOOGLE_SLIDES_MANIFEST: &str =
-    include_str!("../../../ironclaw_first_party_extensions/assets/google-slides/manifest.toml");
-const GOOGLE_SLIDES_WASM_MODULE: &[u8] = include_bytes!(
-    "../../../ironclaw_first_party_extensions/assets/google-slides/wasm/google_slides_tool.wasm"
 );
 const NOTION_MCP_MANIFEST: &str =
     include_str!("../../../ironclaw_first_party_extensions/assets/notion-mcp/manifest.toml");
@@ -229,12 +207,6 @@ fn onboarding(package: &AvailableExtensionPackage) -> Option<LifecycleExtensionO
             None,
             "After authorization completes, DM the Slack bot directly or use the Slack tools from any chat.",
         )),
-        "google-calendar" => Some(onboarding_message(
-            "Google Calendar needs Google OAuth authorization before calendar tools can run.",
-            Some("Authorize the Google account that IronClaw should use for Google Calendar."),
-            None,
-            "After authorization completes, activate Google Calendar to publish its tools.",
-        )),
         "notion" => Some(onboarding_message(
             "Notion needs OAuth authorization before MCP tools can run.",
             Some("Authorize the Notion workspace that IronClaw should access."),
@@ -393,11 +365,6 @@ impl AvailableExtensionCatalog {
             notion_mcp_package()?,
             web_access_package()?,
             nearai_mcp_package(nearai_mcp_config)?,
-            google_calendar_package()?,
-            google_docs_package()?,
-            google_drive_package()?,
-            google_sheets_package()?,
-            google_slides_package()?,
         ];
         packages.push(slack_package()?);
         // Packages migrated to the self-contained inventory
@@ -576,77 +543,12 @@ fn nearai_mcp_package(
     )
 }
 
-fn google_calendar_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package(
-        "google-calendar",
-        "Google Calendar",
-        GOOGLE_CALENDAR_MANIFEST,
-        google_calendar_assets(),
-    )
-}
-
-fn google_docs_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package(
-        "google-docs",
-        "Google Docs",
-        GOOGLE_DOCS_MANIFEST,
-        google_docs_assets(),
-    )
-}
-
-fn google_drive_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package(
-        "google-drive",
-        "Google Drive",
-        GOOGLE_DRIVE_MANIFEST,
-        google_drive_assets(),
-    )
-}
-
-fn google_sheets_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package(
-        "google-sheets",
-        "Google Sheets",
-        GOOGLE_SHEETS_MANIFEST,
-        google_sheets_assets(),
-    )
-}
-
-fn google_slides_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package(
-        "google-slides",
-        "Google Slides",
-        GOOGLE_SLIDES_MANIFEST,
-        google_slides_assets(),
-    )
-}
-
 pub(crate) fn slack_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     bundled_extension_package(SLACK_EXTENSION_ID, "Slack", SLACK_MANIFEST, slack_assets())
 }
 
-pub(crate) fn google_calendar_manifest_digest() -> String {
-    sha256_digest_token(GOOGLE_CALENDAR_MANIFEST.as_bytes())
-}
-
-pub(crate) fn google_docs_manifest_digest() -> String {
-    sha256_digest_token(GOOGLE_DOCS_MANIFEST.as_bytes())
-}
-
-pub(crate) fn google_drive_manifest_digest() -> String {
-    sha256_digest_token(GOOGLE_DRIVE_MANIFEST.as_bytes())
-}
-
-pub(crate) fn google_sheets_manifest_digest() -> String {
-    sha256_digest_token(GOOGLE_SHEETS_MANIFEST.as_bytes())
-}
-
 pub(crate) fn slack_manifest_digest() -> String {
     sha256_digest_token(SLACK_MANIFEST.as_bytes())
-}
-
-pub(crate) fn google_slides_manifest_digest() -> String {
-    sha256_digest_token(GOOGLE_SLIDES_MANIFEST.as_bytes())
 }
 
 pub(crate) fn notion_mcp_manifest_digest() -> String {
@@ -1015,292 +917,11 @@ fn nearai_mcp_assets(manifest: &str) -> Vec<AvailableExtensionAsset> {
     ]
 }
 
-fn google_calendar_assets() -> Vec<AvailableExtensionAsset> {
-    vec![
-        bytes_asset("manifest.toml", GOOGLE_CALENDAR_MANIFEST.as_bytes()),
-        bytes_asset(
-            "schemas/google-calendar/list_calendars.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/list_calendars.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/list_calendars.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/list_calendars.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/list_events.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/list_events.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/list_events.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/list_events.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/get_event.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/get_event.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/get_event.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/get_event.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/find_free_slots.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/find_free_slots.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/find_free_slots.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/find_free_slots.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/create_event.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/create_event.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/create_event.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/create_event.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/update_event.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/update_event.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/update_event.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/update_event.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/delete_event.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/delete_event.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/delete_event.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/delete_event.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/add_attendees.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/add_attendees.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/add_attendees.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/add_attendees.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/set_reminder.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/set_reminder.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/set_reminder.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/set_reminder.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "prompts/google-calendar/list_calendars.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/list_calendars.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/google-calendar/list_events.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/list_events.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/google-calendar/get_event.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/get_event.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/google-calendar/find_free_slots.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/find_free_slots.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/google-calendar/create_event.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/create_event.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/google-calendar/update_event.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/update_event.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/google-calendar/delete_event.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/delete_event.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/google-calendar/add_attendees.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/add_attendees.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/google-calendar/set_reminder.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/set_reminder.md"
-            ),
-        ),
-    ]
-}
-
-macro_rules! google_wasm_assets {
-    ($id:literal, $manifest:expr, $wasm_file:literal, $wasm_module:expr, [$($operation:literal),+ $(,)?]) => {{
-        vec![
-            bytes_asset("manifest.toml", $manifest.as_bytes()),
-            bytes_asset(
-                concat!("schemas/", $id, "/raw_output.v1.json"),
-                include_bytes!(concat!(
-                    "../../../ironclaw_first_party_extensions/assets/",
-                    $id,
-                    "/schemas/",
-                    $id,
-                    "/raw_output.v1.json"
-                )),
-            ),
-            $(
-                bytes_asset(
-                    concat!("schemas/", $id, "/", $operation, ".input.v1.json"),
-                    include_bytes!(concat!(
-                        "../../../ironclaw_first_party_extensions/assets/",
-                        $id,
-                        "/schemas/",
-                        $id,
-                        "/",
-                        $operation,
-                        ".input.v1.json"
-                    )),
-                ),
-                bytes_asset(
-                    concat!("prompts/", $id, "/", $operation, ".md"),
-                    include_bytes!(concat!(
-                        "../../../ironclaw_first_party_extensions/assets/",
-                        $id,
-                        "/prompts/",
-                        $id,
-                        "/",
-                        $operation,
-                        ".md"
-                    )),
-                ),
-            )+
-            bytes_asset(concat!("wasm/", $wasm_file), $wasm_module),
-        ]
-    }};
-}
-
-fn google_docs_assets() -> Vec<AvailableExtensionAsset> {
-    google_wasm_assets!(
-        "google-docs",
-        GOOGLE_DOCS_MANIFEST,
-        "google_docs_tool.wasm",
-        GOOGLE_DOCS_WASM_MODULE,
-        [
-            "create_document",
-            "get_document",
-            "read_content",
-            "insert_text",
-            "delete_content",
-            "replace_text",
-            "format_text",
-            "format_paragraph",
-            "insert_table",
-            "create_list",
-            "batch_update"
-        ]
-    )
-}
-
-fn google_drive_assets() -> Vec<AvailableExtensionAsset> {
-    google_wasm_assets!(
-        "google-drive",
-        GOOGLE_DRIVE_MANIFEST,
-        "google_drive_tool.wasm",
-        GOOGLE_DRIVE_WASM_MODULE,
-        [
-            "list_files",
-            "get_file",
-            "download_file",
-            "upload_file",
-            "update_file",
-            "create_folder",
-            "delete_file",
-            "trash_file",
-            "share_file",
-            "list_permissions",
-            "remove_permission",
-            "list_shared_drives"
-        ]
-    )
-}
-
-fn google_sheets_assets() -> Vec<AvailableExtensionAsset> {
-    google_wasm_assets!(
-        "google-sheets",
-        GOOGLE_SHEETS_MANIFEST,
-        "google_sheets_tool.wasm",
-        GOOGLE_SHEETS_WASM_MODULE,
-        [
-            "create_spreadsheet",
-            "get_spreadsheet",
-            "read_values",
-            "batch_read_values",
-            "write_values",
-            "append_values",
-            "clear_values",
-            "add_sheet",
-            "delete_sheet",
-            "rename_sheet",
-            "format_cells"
-        ]
-    )
-}
-
 fn slack_assets() -> Vec<AvailableExtensionAsset> {
     // The schema/prompt asset dirs now match the extension id (`slack`), but the
     // WASM binary keeps its legacy `slack_user_tool.wasm` filename (and the tool
-    // uses the `slack_user_token` credential handle). `google_wasm_assets!` ties
-    // the wasm filename to the extension id, so it can't be used here — spell the
-    // assets out.
+    // uses the `slack_user_token` credential handle), so the assets are spelled
+    // out here rather than derived from the id.
     macro_rules! slack_schema_asset {
         ($path:literal) => {
             bytes_asset(
@@ -1340,31 +961,6 @@ fn slack_assets() -> Vec<AvailableExtensionAsset> {
         slack_prompt_asset!("send_message"),
         bytes_asset("wasm/slack_user_tool.wasm", SLACK_WASM_MODULE),
     ]
-}
-
-fn google_slides_assets() -> Vec<AvailableExtensionAsset> {
-    google_wasm_assets!(
-        "google-slides",
-        GOOGLE_SLIDES_MANIFEST,
-        "google_slides_tool.wasm",
-        GOOGLE_SLIDES_WASM_MODULE,
-        [
-            "create_presentation",
-            "get_presentation",
-            "get_thumbnail",
-            "create_slide",
-            "delete_object",
-            "insert_text",
-            "delete_text",
-            "replace_all_text",
-            "create_shape",
-            "insert_image",
-            "format_text",
-            "format_paragraph",
-            "replace_shapes_with_image",
-            "batch_update"
-        ]
-    )
 }
 
 fn bytes_asset(path: &str, bytes: &[u8]) -> AvailableExtensionAsset {
@@ -2495,11 +2091,6 @@ handle = "web_token"
     #[test]
     fn bundled_manifest_digests_are_sha256_tokens() {
         assert!(notion_mcp_manifest_digest().starts_with("sha256:"));
-        assert!(google_calendar_manifest_digest().starts_with("sha256:"));
-        assert!(google_docs_manifest_digest().starts_with("sha256:"));
-        assert!(google_drive_manifest_digest().starts_with("sha256:"));
-        assert!(google_sheets_manifest_digest().starts_with("sha256:"));
-        assert!(google_slides_manifest_digest().starts_with("sha256:"));
         assert!(slack_manifest_digest().starts_with("sha256:"));
         // gmail migrated to the inventory; its digest (still sha256-token) is
         // asserted through the trust policy in
