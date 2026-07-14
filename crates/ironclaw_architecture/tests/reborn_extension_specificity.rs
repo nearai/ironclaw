@@ -993,10 +993,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "github",
     ),
     (
-        "crates/ironclaw_llm/src/tool_schema/placeholder_stripping.rs",
-        "notion",
-    ),
-    (
         "crates/ironclaw_loop_support/src/capability_port.rs",
         "gmail",
     ),
