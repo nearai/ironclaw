@@ -66,6 +66,19 @@ a feature. Schema `reborn.extension_manifest.v3` is v2 plus explicit `[channel]`
 and `[auth.*]` sections; the v2 reader continues to parse old manifests and
 normalizes them into the same resolved model.
 
+**The package is the unit of self-containment.** Everything an extension
+needs ships inside its package directory — the manifest, input schemas,
+prompt docs, WASM modules, and any bespoke display or onboarding copy that
+cannot be derived from the manifest. Host code consumes a package as one
+opaque, cleanly built bundle (id, display name, manifest source, assets);
+nothing outside the package enumerates or re-describes its contents, and
+generic crates never name one. There is no hand-maintained catalog: the
+bundled inventory (`ironclaw_first_party_extensions`) holds exactly one
+small module per package (`src/packages/<id>.rs`) beside its
+`assets/<id>/` directory, and a collector concatenates the per-module
+bundles. Adding an integration is a new assets directory plus its module;
+removing one deletes both; no other file changes anywhere.
+
 The unified Slack manifest, complete except three tools elided:
 
 ```toml

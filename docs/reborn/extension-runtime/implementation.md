@@ -72,7 +72,8 @@ Not generic yet — the work:
 | `ironclaw_auth` | `AuthEngine` (oauth2_code + api_key), auth account state machine, recipe execution, flow/grant stores kept |
 | `ironclaw_dispatcher` | Resolve prebound `ToolAdapter` via injected resolver; delete per-invocation package/runtime-kind selection |
 | `ironclaw_product_workflow` | Generic delivery coordinator (all outbound intents); delete Slack cleanup literals |
-| `ironclaw_reborn_composition` | Assembly only: construct stores/ports/host/engine, mount routers, inject resolvers. `src/slack/**` deleted by P6 |
+| `ironclaw_reborn_composition` | Assembly only: construct stores/ports/host/engine, mount routers, inject resolvers. `src/slack/**` deleted by P6; consumes the first-party package inventory as opaque bundles — no catalog, no extension names (P7) |
+| `ironclaw_first_party_extensions` | The package inventory: one module per package (`src/packages/<id>.rs`) owning that package's embeds, asset descriptors, digest, and bespoke copy, beside `assets/<id>/`; exports opaque bundles consumed by composition and the CLI |
 | `ironclaw_webui_v2` | Generic surface/config/connect UI from wire data; Slack components deleted |
 | `ironclaw_reborn_cli` | Assembles the native factory registry (the only generic-side crate allowed to link concrete extension crates); `serve_slack.rs` and Slack feature deleted |
 | `ironclaw_llm` | `CommunicationPresentationPolicy` input replaces concrete channel formatting |
