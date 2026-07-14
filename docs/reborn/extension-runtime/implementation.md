@@ -31,7 +31,7 @@ wire with directions and connection affordance
 (`crates/ironclaw_product_workflow/src/reborn_services/{types,extensions}.rs`);
 a narrow channel protocol adapter trait
 (`crates/ironclaw_product_adapters/src/adapter.rs`) implemented by
-`crates/ironclaw_slack_v2_adapter`; retired-taxonomy architecture gate.
+`crates/ironclaw_slack_extension`; retired-taxonomy architecture gate.
 
 Not generic yet — the work:
 
@@ -50,7 +50,7 @@ Not generic yet — the work:
 | Concrete channel formatting in LLM prompt construction | `crates/ironclaw_llm/src/reasoning.rs` |
 | Concrete channel variants in trace contributions | `crates/ironclaw_reborn_traces/src/contribution.rs` |
 | Slack CLI command, cargo feature, config types | `crates/ironclaw_reborn_cli/src/commands/serve_slack.rs`, `slack-v2-host-beta` feature, `crates/ironclaw_reborn_config` |
-| Telegram adapter exists but is test-only | `crates/ironclaw_telegram_v2_adapter` |
+| Telegram adapter exists but is test-only | `crates/ironclaw_telegram_extension` |
 
 ## 3. Target crate and module map
 
@@ -59,8 +59,8 @@ Not generic yet — the work:
 | Crate | Owns |
 | --- | --- |
 | `ironclaw_extension_host` | `ExtensionEntrypoint`, `ExtensionBindings`, binding check, loaders (native/wasm/mcp), immutable active snapshot + resolver views, installation state machine, activation/deactivation/removal/upgrade/restore, generic ingress router module, restricted-egress implementation |
-| `ironclaw_slack_extension` | All Slack protocol behavior: tool adapters (wrapping the existing WASM artifact initially), channel adapter (parse, render, deliver, targets, activate/cleanup), fixtures. Absorbs `ironclaw_slack_v2_adapter` and everything Slack in composition |
-| `ironclaw_telegram_extension` | Telegram channel adapter (updates parsing, Bot API rendering, `setWebhook`/`deleteWebhook` hooks). Absorbs `ironclaw_telegram_v2_adapter` |
+| `ironclaw_slack_extension` | All Slack protocol behavior: tool adapters (wrapping the existing WASM artifact initially), channel adapter (parse, render, deliver, targets, activate/cleanup), fixtures. Absorbs `ironclaw_slack_extension` and everything Slack in composition |
+| `ironclaw_telegram_extension` | Telegram channel adapter (updates parsing, Bot API rendering, `setWebhook`/`deleteWebhook` hooks). Absorbs `ironclaw_telegram_extension` |
 
 **Changed crates:**
 
@@ -72,7 +72,8 @@ Not generic yet — the work:
 | `ironclaw_auth` | `AuthEngine` (oauth2_code + api_key), auth account state machine, recipe execution, flow/grant stores kept |
 | `ironclaw_dispatcher` | Resolve prebound `ToolAdapter` via injected resolver; delete per-invocation package/runtime-kind selection |
 | `ironclaw_product_workflow` | Generic delivery coordinator (all outbound intents); delete Slack cleanup literals |
-| `ironclaw_reborn_composition` | Assembly only: construct stores/ports/host/engine, mount routers, inject resolvers. `src/slack/**` deleted by P6 |
+| `ironclaw_reborn_composition` | Assembly only: construct stores/ports/host/engine, mount routers, inject resolvers. `src/slack/**` deleted by P6; consumes the first-party package inventory as opaque bundles — no catalog, no extension names (P7) |
+| `ironclaw_first_party_extensions` | The package inventory: one module per package (`src/packages/<id>.rs`) owning that package's embeds, asset descriptors, digest, and bespoke copy, beside `assets/<id>/`; exports opaque bundles consumed by composition and the CLI |
 | `ironclaw_webui_v2` | Generic surface/config/connect UI from wire data; Slack components deleted |
 | `ironclaw_reborn_cli` | Assembles the native factory registry (the only generic-side crate allowed to link concrete extension crates); `serve_slack.rs` and Slack feature deleted |
 | `ironclaw_llm` | `CommunicationPresentationPolicy` input replaces concrete channel formatting |
@@ -80,7 +81,7 @@ Not generic yet — the work:
 | `ironclaw_architecture` | New specificity scanner + dependency gates (section 12) |
 | `ironclaw_reborn_migration` | One-time migrations (section 11) |
 
-**Deleted crates (2):** `ironclaw_slack_v2_adapter`, `ironclaw_telegram_v2_adapter` (folded into their extension crates).
+**Deleted crates (2):** `ironclaw_slack_extension`, `ironclaw_telegram_extension` (folded into their extension crates).
 
 **Dependency rule (gated):** generic crates never depend on concrete extension
 crates. Only `ironclaw_reborn_cli` (assembly of the native factory registry)
@@ -124,8 +125,12 @@ engine, or the router.
   raw source only for diagnostics and recompilation. Startup backfills legacy
   raw-TOML records by compiling once through the v2 reader (idempotent).
 - Widening diff: compare old/new resolved contracts on upgrade — new scopes,
-  egress hosts, effects, credential handles, or an ingress route change →
-  approval required through the existing trust/approval flow.
+  egress hosts, effects, credential handles, or an ingress route change → the
+  diff *classifies* the change. A widening consent gate is deliberately **not
+  built** (overview §7): host-bundled contracts change only via reviewed binary
+  releases, so boot-time adoption of the new record is the accepted path.
+  `diff_resolved_contracts` ships as the data-model seed for a future
+  registry/third-party-distribution trigger.
 
 **Tests first:** `manifest_v3_contract.rs` in `ironclaw_extensions/tests` —
 v3 Slack-shaped fixture resolves to the same surfaces as its v2 equivalent
@@ -246,7 +251,12 @@ branch anywhere in dispatch (`tests/integration/extension_runtime.rs`).
   parameter carries the vendor id and is resolved via `AuthRecipeResolver` —
   never a match arm.
 - Refresh is on-demand at credential-injection time with single-flight per
-  account; there is no background refresher job.
+  account. A recipe may additionally declare an idle keepalive threshold
+  (`refresh.keepalive_idle_seconds` — a vendor lifetime constraint for vendors
+  that expire refresh tokens after a fixed idle window); the engine executes
+  it once as a generic, vendor-blind background sweep (leader-locked per
+  deployment tick, due at half the declared lifetime, soonest-death-first
+  under the per-tick cap). There is no per-vendor refresher code.
 - Shared vendors: unify recipes at activation (identical except
   `scopes`/`display_name`, else conflict); scope union and incremental
   re-consent keep today's behavior; grants are vendor-scoped and survive
@@ -399,9 +409,14 @@ config types in `ironclaw_reborn_config`; `serve_slack.rs` and the
 **Frontend** (`crates/ironclaw_webui_v2/frontend`):
 
 - Wire additions (backend `reborn_services/types.rs`): full surface key per
-  surface; installation state enum (§6.1); auth account state enum (§6.3);
-  `[channel.config]` field descriptors; presentation/display data. Freeze one
-  golden wire fixture with an arbitrary channel + a multi-surface extension.
+  surface; installation state enum (§6.1); auth account state enum (§6.3),
+  exposed as a per-vendor **accounts list** (`account_id`, `label`, state,
+  `is_default`) plus each surface's `resolved_account_id` — length ≤ 1 until
+  the post-P7 multi-account follow-up
+  (`adr/0001-multiple-accounts-per-vendor.md`), list-first so the golden
+  fixture never breaks; `[channel.config]` field descriptors;
+  presentation/display data. Freeze one golden wire fixture with an arbitrary
+  channel + a multi-surface extension.
 - Add generic components: `surface-card`, `config-form` (schema-driven,
   secret-masking, never echoes stored secrets), `connect-card` (renders the
   auth state enum), optional `target-picker`. The channels tab keys by surface
@@ -471,8 +486,9 @@ carries a removal note in `checklist.md`.
   vendor): manifest with 1 tool + channel (hmac recipe) + oauth recipe + config
   fields; a tiny native factory registered only in tests. Drives every generic
   integration path end-to-end (install → configure → connect → inbound → turn
-  → outbound → upgrade-with-widening → remove) — proof that no generic path
-  needs a real product.
+  → outbound → remove) — proof that no generic path needs a real product.
+  (The upgrade-with-widening approval leg is removed — see overview §7; the
+  contract diff ships as data-model code without a consent gate.)
 - **Architecture gates** (`crates/ironclaw_architecture/tests/`):
   - keep `reborn_retired_taxonomy.rs`;
   - add `reborn_extension_specificity.rs`: scans generic `crates/**/src`,
@@ -520,3 +536,10 @@ blob store/leases, signing, fencing, shared vendor packages, per-vendor auth
 adapters, trigger/file runtime, evidence tooling, second e2e harness) and the
 named triggers for revisiting each. Reintroducing any of them requires a new
 ADR that cites its trigger.
+
+One exclusion's trigger has already fired: **multiple accounts per vendor**
+(accepted 2026-07-13,
+`docs/reborn/extension-runtime/adr/0001-multiple-accounts-per-vendor.md`).
+It is implemented as a dedicated PR after P7 — within P0–P7 only the
+list-shaped wire exposure lands (Workstream G; checklist UI-1 / AUTH-9
+evidence must name the list shape).

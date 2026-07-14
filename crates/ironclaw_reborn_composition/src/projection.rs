@@ -59,7 +59,6 @@ use runtime_replay::{
     replay_payload_candidates, snapshot_payload_candidates,
 };
 // Only the Slack delivery path (feature-gated) consumes this re-export.
-#[cfg(feature = "slack-v2-host-beta")]
 pub(crate) use turn_events::approval_prompt_context_view;
 use turn_events::{
     FailureExplanationProvider, ModelFailureExplanationProvider, TurnEventBridge, TurnEventPayload,

@@ -78,8 +78,14 @@ pub use local_dev_boot::{
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use oauth_product_auth::build_google_oauth_product_auth_for_test;
+#[cfg(feature = "libsql")]
+pub use oauth_product_auth::build_oauth_product_auth_for_test_on_libsql;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub use oauth_product_auth::build_oauth_product_auth_for_test_on_root;
 pub use oauth_product_auth::{
     OAuthProductAuthTestBundle, ScriptedOAuthTokenEgress, build_oauth_product_auth_for_test,
+    build_oauth_product_auth_with_identity_for_test,
+    handle_oauth_callback_with_channel_identity_binding_for_test,
 };
 #[cfg(feature = "test-support")]
 pub use outbound_delivery::{

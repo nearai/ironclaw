@@ -3,7 +3,19 @@ pub use product_auth::api::auth_prompt::{
 };
 pub use admin_token::AdminApiTokenMinter;
 pub use automation::facade::RebornAutomationProductFacade;
+pub use automation::trigger_poller::{NoopPostSubmitDeliveryHook, PostSubmitDeliveryHook};
 pub use error::RebornBuildError;
+pub use extension_host::channel_host::{ChannelHostIdentity, GenericChannelHostAssembly};
+pub use extension_host::channel_identity::ChannelIdentityBindingConfig;
+pub use extension_host::extension_ingress::{
+    ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
+    ExtensionIngressParts, ExtensionIngressRegistry, GenericChannelInboundSink,
+    InboundPayloadClassifier, PostAdmissionObserver, StaticIngressSecrets, VerifiedEvidenceMint,
+};
+#[cfg(feature = "webui-v2-beta")]
+pub use extension_host::extension_ingress::{
+    EXTENSION_INGRESS_ROUTE_PATTERN, extension_ingress_route_mount, forward_alias_request,
+};
 pub use extension_host::extension_lifecycle_command::{
     RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,
     execute_reborn_extension_lifecycle_command, render_reborn_extension_lifecycle_response,
@@ -11,9 +23,13 @@ pub use extension_host::extension_lifecycle_command::{
 pub use extension_host::gsuite::{
     bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers,
 };
+#[cfg(feature = "webui-v2-beta")]
+pub use extension_host::legacy_ingress_aliases::legacy_extension_ingress_alias_mounts;
 pub use extension_host::skill_listing::{RebornSkillListError, list_reborn_local_skills};
 #[cfg(feature = "test-support")]
 pub use factory::AttachmentTestSupport;
+#[cfg(feature = "test-support")]
+pub use factory::ChannelHostAssemblyTestWiring;
 #[cfg(feature = "test-support")]
 pub use factory::RebornLocalDevApprovalTestParts;
 #[cfg(feature = "migration-support")]
@@ -21,10 +37,12 @@ pub use factory::extension_installation_store_for_migration;
 pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
 pub use failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
 pub use failure_summary::reborn_failure_summary_for_category;
-pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
-#[cfg(feature = "webui-v2-beta")]
-pub use ironclaw_auth::GoogleOAuthRouteConfig;
+pub use input::{
+    ChannelExtensionBinding, OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding,
+};
 pub use ironclaw_auth::OAuthRedirectUri;
+pub use ironclaw_product_adapters::{ChannelAdapter, NormalizedInboundMessage};
+pub use ironclaw_product_workflow::PreferenceTargetCodec;
 pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleSearchExtensionSummary,
@@ -90,14 +108,13 @@ pub use product_auth::api::auth::{
     RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
     RebornProductAuthServicePorts, RebornProductAuthServices,
 };
-#[cfg(feature = "slack-v2-host-beta")]
-pub use product_auth::serve::SlackPersonalOAuthBindingConfig;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
 pub use provider_identity::{
     ProviderIdentityActorResolver, RebornIdentityProviderId, RebornIdentityProviderUserId,
-    RebornUserIdentityBinding, RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
-    RebornUserIdentityLookup, RebornUserIdentityLookupError, installation_scoped_provider_user_id,
+    RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
+    RebornUserIdentityBindingError, RebornUserIdentityBindingStore, RebornUserIdentityLookup,
+    RebornUserIdentityLookupError, installation_scoped_provider_user_id,
 };
 pub use readiness::{
     RebornFacadeReadiness, RebornReadiness, RebornReadinessDiagnostic,
@@ -120,65 +137,13 @@ pub use runtime::{
     RebornSkillExecutionResult, RebornSkillSourceKind, build_reborn_runtime,
 };
 pub use runtime_input::{
-    CredentialRefreshSettings, DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL,
-    DEFAULT_TURN_RUNNER_POLL_INTERVAL, PollSettings, RebornRuntimeIdentity, RebornRuntimeInput,
+    DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL, DEFAULT_TURN_RUNNER_POLL_INTERVAL,
+    KeepaliveSweepSettings, PollSettings, RebornRuntimeIdentity, RebornRuntimeInput,
     TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
     TriggerFireAccessError, TriggerPollerSettings, TurnRunnerSettings,
 };
 #[cfg(feature = "root-llm-provider")]
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_channel_connection::build_webui_services_with_slack_host_beta_mounts;
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_channel_routes::{
-    SlackChannelRouteAdminRouteConfig, WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH,
-    WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH, WEBUI_V2_CHANNELS_SLACK_SUBJECTS_PATH,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_delivery::{
-    NoopPostSubmitDeliveryHook, PostSubmitDeliveryHook, TriggeredRunDeliveryDriver,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_delivery::{
-    SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
-    SlackFinalReplyDeliverySettings,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_egress::{
-    SlackEgressCredential, SlackEgressCredentialError, SlackEgressCredentialProvider,
-    SlackProtocolHttpEgress, StaticSlackEgressCredentialProvider,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_host_beta::{
-    SlackHostBetaBuildError, SlackHostBetaChannelRoute, SlackHostBetaConfig,
-    SlackHostBetaConfigInput, SlackHostBetaMounts, SlackHostBetaRuntimeConfig,
-    build_slack_events_route_mount, build_slack_events_route_mount_with_actor_user_resolver,
-    build_slack_host_beta_mounts, build_slack_host_beta_runtime_mounts,
-    build_triggered_run_delivery_hook,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_personal_binding::{
-    SlackPersonalBindingInstallation, SlackPersonalBindingPrincipal, SlackPersonalUserBindingError,
-    SlackPersonalUserBindingRequest, SlackPersonalUserBindingService,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_personal_binding_serve::{
-    SLACK_PERSONAL_BINDING_OAUTH_CALLBACK_PATH, SLACK_PERSONAL_BINDING_OAUTH_START_PATH,
-    SlackPersonalBindingAuthorizationUrl, SlackPersonalBindingOAuthClient,
-    SlackPersonalBindingOAuthError, SlackPersonalBindingOAuthIdentity,
-    SlackPersonalBindingRouteConfig, SlackPersonalBindingRouteConfigError,
-    SlackPersonalBindingStartResponse,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_serve;
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_serve::{
-    SLACK_EVENTS_PATH, SlackEventsRouteState, SlackEventsWebhookDispatcher,
-    SlackInstallationSelector, SlackTeamId, slack_events_route_descriptors,
-    slack_events_route_mount,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_setup::SlackPersonalSetupServiceSlot;
 pub use web_access::register_bundled_web_access_first_party_handlers;
 pub use webui::facade::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]

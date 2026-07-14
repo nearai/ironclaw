@@ -10,8 +10,8 @@ use ironclaw_host_api::{
     CorrelationId, CredentialStageError, Decision, EffectKind, ExecutionContext, ExtensionId,
     GrantConstraints, HostPath, InvocationId, MissionId, MountView, NetworkMethod, NetworkPolicy,
     NetworkScheme, NetworkTargetPattern, Obligation, Obligations, PackageId, Principal, ProjectId,
-    ResourceEstimate, ResourceScope, RuntimeCredentialAccountProviderId, RuntimeKind, SecretHandle,
-    TenantId, TrustClass, UserId, VirtualPath,
+    ResourceEstimate, ResourceScope, RuntimeKind, SecretHandle, TenantId, TrustClass, UserId,
+    VendorId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
@@ -53,7 +53,7 @@ macro_rules! github_wasm_services_for_test {
                 },
                 Obligation::InjectCredentialAccountOnce {
                     handle: SecretHandle::new("github_runtime_token").unwrap(),
-                    provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                    provider: VendorId::new("github").unwrap(),
                     setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
                     provider_scopes: Vec::new(),
                     requester_extension: ExtensionId::new("github").unwrap(),
@@ -96,7 +96,7 @@ macro_rules! google_wasm_services_for_test {
                 },
                 Obligation::InjectCredentialAccountOnce {
                     handle: SecretHandle::new("google_runtime_token").unwrap(),
-                    provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+                    provider: VendorId::new("google").unwrap(),
                     setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
                         scopes: required_scopes.clone(),
                     },
@@ -146,7 +146,7 @@ async fn host_runtime_services_routes_structured_github_wasm_search_through_runt
             },
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
-                provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                provider: VendorId::new("github").unwrap(),
                 setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
                 provider_scopes: Vec::new(),
                 requester_extension: ExtensionId::new("github").unwrap(),
@@ -234,7 +234,7 @@ async fn host_runtime_services_restages_github_product_auth_for_multi_request_wa
             },
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
-                provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                provider: VendorId::new("github").unwrap(),
                 setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
                 provider_scopes: Vec::new(),
                 requester_extension: ExtensionId::new("github").unwrap(),
@@ -327,7 +327,7 @@ async fn host_runtime_services_routes_google_drive_wasm_list_files_with_scoped_g
             },
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
-                provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+                provider: VendorId::new("google").unwrap(),
                 setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
                     scopes: required_scopes.clone(),
                 },
@@ -527,10 +527,7 @@ async fn host_runtime_services_maps_google_drive_wasm_401_to_auth_required() {
             // re-auth fallback, so the gate must surface provider + OAuth setup.
             assert_eq!(gate.credential_requirements.len(), 1);
             let requirement = &gate.credential_requirements[0];
-            assert_eq!(
-                requirement.provider,
-                RuntimeCredentialAccountProviderId::new("google").unwrap()
-            );
+            assert_eq!(requirement.provider, VendorId::new("google").unwrap());
             assert_eq!(
                 requirement.setup,
                 ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
@@ -603,10 +600,7 @@ async fn host_runtime_services_maps_google_drive_upload_wasm_401_to_auth_require
             // submittable (#5174). Empty would be the regressed provider-null gate.
             assert_eq!(gate.credential_requirements.len(), 1);
             let requirement = &gate.credential_requirements[0];
-            assert_eq!(
-                requirement.provider,
-                RuntimeCredentialAccountProviderId::new("google").unwrap()
-            );
+            assert_eq!(requirement.provider, VendorId::new("google").unwrap());
             assert_eq!(
                 requirement.setup,
                 ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
@@ -943,7 +937,7 @@ async fn host_runtime_services_missing_github_runtime_secret_blocks_on_auth() {
             },
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
-                provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                provider: VendorId::new("github").unwrap(),
                 setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
                 provider_scopes: Vec::new(),
                 requester_extension: ExtensionId::new("github").unwrap(),
@@ -1021,7 +1015,7 @@ async fn host_runtime_services_injects_personal_xoxp_token_for_slack_user_search
             },
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
-                provider: RuntimeCredentialAccountProviderId::new("slack").unwrap(),
+                provider: VendorId::new("slack").unwrap(),
                 setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
                     scopes: slack_user_scopes(),
                 },
@@ -1127,7 +1121,7 @@ async fn host_runtime_services_missing_slack_account_blocks_slack_user_on_auth()
             },
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
-                provider: RuntimeCredentialAccountProviderId::new("slack").unwrap(),
+                provider: VendorId::new("slack").unwrap(),
                 setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
                     scopes: slack_user_scopes(),
                 },
@@ -2031,13 +2025,17 @@ impl RuntimeCredentialAccountResolver for FixedSlackRuntimeCredentialAccountReso
 }
 
 fn registry_with_slack_user_package() -> ExtensionRegistry {
-    let manifest = ExtensionManifest::parse(
-        &std::fs::read_to_string(slack_user_asset_root().join("manifest.toml")).unwrap(),
+    // Parse through the single record entry point (the bundled asset is a
+    // manifest v3 document).
+    let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
+        std::fs::read_to_string(slack_user_asset_root().join("manifest.toml")).unwrap(),
         ManifestSource::HostBundled,
         &default_host_port_catalog().unwrap(),
+        None,
         &default_host_api_contract_registry().unwrap(),
     )
     .unwrap();
+    let manifest = ExtensionManifest::try_from(record.manifest().clone()).unwrap();
     let package = ExtensionPackage::from_manifest(
         manifest,
         VirtualPath::new("/system/extensions/slack").unwrap(),
@@ -2118,13 +2116,17 @@ fn slack_user_first_party_trust_policy() -> HostTrustPolicy {
 }
 
 fn registry_with_github_package() -> ExtensionRegistry {
-    let manifest = ExtensionManifest::parse(
-        &std::fs::read_to_string(github_asset_root().join("manifest.toml")).unwrap(),
+    // Parse through the single record entry point (the bundled asset is a
+    // manifest v3 document).
+    let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
+        std::fs::read_to_string(github_asset_root().join("manifest.toml")).unwrap(),
         ManifestSource::HostBundled,
         &default_host_port_catalog().unwrap(),
+        None,
         &default_host_api_contract_registry().unwrap(),
     )
     .unwrap();
+    let manifest = ExtensionManifest::try_from(record.manifest().clone()).unwrap();
     let package = ExtensionPackage::from_manifest(
         manifest,
         VirtualPath::new("/system/extensions/github").unwrap(),
@@ -2155,13 +2157,17 @@ fn filesystem_with_google_drive_package() -> LocalFilesystem {
 }
 
 fn registry_with_google_package(package_id: &str) -> ExtensionRegistry {
-    let manifest = ExtensionManifest::parse(
-        &std::fs::read_to_string(google_asset_root(package_id).join("manifest.toml")).unwrap(),
+    // Parse through the single record entry point (the bundled asset is a
+    // manifest v3 document).
+    let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
+        std::fs::read_to_string(google_asset_root(package_id).join("manifest.toml")).unwrap(),
         ManifestSource::HostBundled,
         &default_host_port_catalog().unwrap(),
+        None,
         &default_host_api_contract_registry().unwrap(),
     )
     .unwrap();
+    let manifest = ExtensionManifest::try_from(record.manifest().clone()).unwrap();
     let package = ExtensionPackage::from_manifest(
         manifest,
         VirtualPath::new(format!("/system/extensions/{package_id}")).unwrap(),

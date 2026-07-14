@@ -251,7 +251,7 @@ test("useOauthSetup completes reconnect when polling sees Slack become configure
     active: true,
     authenticated: false,
     needs_setup: true,
-    activation_status: "active",
+    installation_state: "active",
     onboarding_state: "setup_required",
   };
   const popup = { closed: false, location: { href: "about:blank" } };
@@ -360,7 +360,7 @@ test("useOauthSetup completes reconnect when polling sees Slack become configure
     active: true,
     authenticated: true,
     needs_setup: false,
-    activation_status: "active",
+    installation_state: "active",
     onboarding_state: null,
   };
   intervals[0]();
@@ -384,7 +384,7 @@ test("useOauthSetup keeps polling reconnect after Slack closes the OAuth popup",
     active: true,
     authenticated: false,
     needs_setup: true,
-    activation_status: "active",
+    installation_state: "active",
     onboarding_state: "setup_required",
   };
   const popup = { closed: false, location: { href: "about:blank" } };
@@ -494,7 +494,7 @@ test("useOauthSetup keeps polling reconnect after Slack closes the OAuth popup",
     active: true,
     authenticated: true,
     needs_setup: false,
-    activation_status: "active",
+    installation_state: "active",
     onboarding_state: null,
   };
   intervals[0]();
@@ -668,7 +668,7 @@ test("useOauthSetup reconnect ignores the pre-flow configured snapshot and waits
     active: true,
     authenticated: true,
     needs_setup: false,
-    activation_status: "active",
+    installation_state: "active",
     onboarding_state: null,
   };
   const popup = { closed: false, location: { href: "about:blank" } };

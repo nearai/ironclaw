@@ -16,9 +16,9 @@ use ironclaw_auth::{
     OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
     OAuthProviderCallbackRequest, OAuthProviderExchangeContext, OAuthProviderIdentity,
     OpaqueStateHash, PkceVerifierHash, ProviderBackedCredentialAccountService,
-    ProviderCallbackOutcome, ProviderScope, SecretCleanupReport, SecretCleanupRequest,
-    SecretCleanupService, SecretSubmitRequest, SecretSubmitResult, Timestamp,
-    TurnGateAuthFlowQuery, TurnRunRef, scope_matches,
+    ProviderCallbackOutcome, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
+    SecretSubmitRequest, SecretSubmitResult, Timestamp, TurnGateAuthFlowQuery, TurnRunRef,
+    scope_matches,
 };
 use ironclaw_events::{SecurityAuditEvent, SecurityAuditSink, SecurityBoundary, SecurityDecision};
 use ironclaw_product_adapters::AuthPromptChallengeKind;
@@ -41,12 +41,7 @@ use crate::product_auth::credentials::runtime_credentials::{
     RuntimeCredentialAccountRefreshPort, RuntimeCredentialAccountRefreshService,
     RuntimeCredentialAccountSelectionService,
 };
-use crate::product_auth::oauth::oauth_dcr::{
-    DcrGateChallengeRequest, DcrSetupFlowRequest, OAuthDcrProviderRegistry,
-};
-use crate::product_auth::oauth::oauth_gate::{
-    OAuthGateChallengeRequest, OAuthGateProviderRegistry,
-};
+use crate::product_auth::oauth::oauth_gate::{OAuthGateChallengeRequest, OAuthGateFlowDriver};
 use crate::{AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller};
 
 pub(crate) const AUTH_CONTINUATION_DISPATCH_FAILED_CODE: &str = "auth_continuation_dispatch_failed";
@@ -124,20 +119,6 @@ pub(crate) struct RebornOAuthStartFlowRequest {
     pub(crate) authorization_url: OAuthAuthorizationUrl,
     pub(crate) opaque_state_hash: OpaqueStateHash,
     pub(crate) pkce_verifier_hash: PkceVerifierHash,
-    pub(crate) update_binding: Option<CredentialAccountUpdateBinding>,
-    pub(crate) expires_at: ironclaw_auth::Timestamp,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(
-    dead_code,
-    reason = "used by the webui-v2-beta extension OAuth route through product-auth route composition"
-)]
-pub(crate) struct RebornDcrOAuthStartFlowRequest {
-    pub(crate) scope: AuthProductScope,
-    pub(crate) provider: AuthProviderId,
-    pub(crate) account_label: CredentialAccountLabel,
-    pub(crate) provider_scopes: Vec<ProviderScope>,
     pub(crate) update_binding: Option<CredentialAccountUpdateBinding>,
     pub(crate) expires_at: ironclaw_auth::Timestamp,
 }
@@ -495,11 +476,11 @@ pub struct RebornProductAuthServices {
     /// Secret store forwarded to the inline-refresh margin check (A2).
     secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
     host_managed_nearai_credential_scope: Option<AuthProductScope>,
-    dcr_oauth_registry: Option<Arc<OAuthDcrProviderRegistry>>,
-    /// One generic blocked-gate OAuth provider registry covering every provider
-    /// (Google + Slack personal). Unified from the former parallel per-provider
-    /// registries via `OAuthGateProvider` + `OAuthGateFlowDriver`.
-    oauth_gate_registry: Option<Arc<OAuthGateProviderRegistry>>,
+    /// The recipe-driven auth engine (also wired as `provider_client`); serve
+    /// routes use it to prepare vendor authorize URLs.
+    auth_engine: Option<Arc<ironclaw_auth::AuthEngine>>,
+    /// One recipe-driven blocked-gate OAuth driver covering every vendor.
+    oauth_gate_driver: Option<Arc<OAuthGateFlowDriver>>,
     /// Optional read projection for WebUI/local-dev auth interactions.
     ///
     /// `RebornProductAuthServices` may still support OAuth callbacks,
@@ -548,8 +529,8 @@ impl std::fmt::Debug for RebornProductAuthServices {
                 &self.host_managed_nearai_credential_scope.is_some(),
             )
             .field("flow_record_source", &self.flow_record_source.is_some())
-            .field("dcr_oauth_registry", &self.dcr_oauth_registry.is_some())
-            .field("oauth_gate_registry", &self.oauth_gate_registry.is_some());
+            .field("auth_engine", &self.auth_engine.is_some())
+            .field("oauth_gate_driver", &self.oauth_gate_driver.is_some());
         dbg.finish()
     }
 }
@@ -582,8 +563,8 @@ impl RebornProductAuthServices {
             security_audit_sink: None,
             secret_store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
             host_managed_nearai_credential_scope: None,
-            dcr_oauth_registry: None,
-            oauth_gate_registry: None,
+            auth_engine: None,
+            oauth_gate_driver: None,
             flow_record_source: None,
         }
     }
@@ -758,19 +739,22 @@ impl RebornProductAuthServices {
         self
     }
 
-    pub(crate) fn with_dcr_oauth_registry(
-        mut self,
-        registry: Arc<OAuthDcrProviderRegistry>,
-    ) -> Self {
-        self.dcr_oauth_registry = Some(registry);
+    /// Attach the recipe-driven auth engine (serve routes prepare vendor
+    /// authorize URLs through it). Public so integration tests can compose an
+    /// engine-backed bundle the same way the factory does.
+    pub fn with_auth_engine(mut self, engine: Arc<ironclaw_auth::AuthEngine>) -> Self {
+        self.auth_engine = Some(engine);
         self
     }
 
-    pub(crate) fn with_oauth_gate_registry(
-        mut self,
-        registry: Arc<OAuthGateProviderRegistry>,
-    ) -> Self {
-        self.oauth_gate_registry = Some(registry);
+    /// The recipe-driven auth engine, when composed (serve routes prepare
+    /// vendor authorize URLs through it).
+    pub(crate) fn auth_engine(&self) -> Option<Arc<ironclaw_auth::AuthEngine>> {
+        self.auth_engine.clone()
+    }
+
+    pub(crate) fn with_oauth_gate_driver(mut self, driver: Arc<OAuthGateFlowDriver>) -> Self {
+        self.oauth_gate_driver = Some(driver);
         self
     }
 
@@ -1234,19 +1218,12 @@ impl RebornProductAuthServices {
         provider: &AuthProviderId,
         flow_id: AuthFlowId,
     ) -> Result<Option<SecretString>, RebornOAuthCallbackError> {
-        if let Some(registry) = &self.oauth_gate_registry
-            && let Some(pkce) = registry
-                .pkce_verifier_for_flow(scope, provider, flow_id)
-                .await
-                .map_err(RebornOAuthCallbackError::from)?
-        {
-            return Ok(Some(pkce));
-        }
-        let Some(registry) = &self.dcr_oauth_registry else {
+        let _ = provider;
+        let Some(driver) = &self.oauth_gate_driver else {
             return Ok(None);
         };
-        registry
-            .pkce_verifier_for_flow(scope, provider, flow_id)
+        driver
+            .pkce_verifier_for_flow(scope, flow_id)
             .await
             .map_err(RebornOAuthCallbackError::from)
     }
@@ -1272,32 +1249,6 @@ impl RebornProductAuthServices {
                 pkce_verifier_hash: Some(request.pkce_verifier_hash),
                 expires_at: request.expires_at,
             })
-            .await
-    }
-
-    #[allow(
-        dead_code,
-        reason = "used by the webui-v2-beta extension OAuth route through product-auth route composition"
-    )]
-    pub(crate) async fn start_dcr_setup_oauth_flow(
-        &self,
-        request: RebornDcrOAuthStartFlowRequest,
-    ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
-        let Some(registry) = &self.dcr_oauth_registry else {
-            return Ok(None);
-        };
-        registry
-            .start_setup_flow(
-                &self.flow_manager,
-                DcrSetupFlowRequest {
-                    scope: request.scope,
-                    provider: request.provider,
-                    account_label: request.account_label,
-                    provider_scopes: request.provider_scopes,
-                    update_binding: request.update_binding,
-                    expires_at: request.expires_at,
-                },
-            )
             .await
     }
 
@@ -1522,6 +1473,21 @@ impl RuntimeCredentialAccountRefreshPort for RebornProductAuthServices {
     }
 }
 
+// The engine keepalive sweep refreshes through the same composed path as the
+// inline injection-time refresh: the per-account single-flight lock lives in
+// `ProviderBackedCredentialAccountService` below this facade.
+#[async_trait]
+impl ironclaw_auth::KeepaliveRefreshPort for RebornProductAuthServices {
+    async fn refresh_account(
+        &self,
+        request: CredentialRefreshRequest,
+    ) -> Result<CredentialRefreshReport, AuthProductError> {
+        RebornProductAuthServices::refresh_credential_account(self, request)
+            .await
+            .map_err(auth_product_error_from_reborn_error)
+    }
+}
+
 fn auth_product_error_from_reborn_error(error: RebornAuthProductError) -> AuthProductError {
     match error.code {
         AuthErrorCode::UnknownOrExpiredFlow => AuthProductError::UnknownOrExpiredFlow,
@@ -1599,24 +1565,9 @@ impl AuthChallengeProvider for RebornProductAuthServices {
         let Some(source) = self.flow_record_source.as_ref() else {
             return Ok(None);
         };
-        if let Some(registry) = &self.oauth_gate_registry
-            && let Some(view) = registry
+        if let Some(driver) = &self.oauth_gate_driver
+            && let Some(view) = driver
                 .challenge_for_blocked_gate(OAuthGateChallengeRequest {
-                    flow_manager: &self.flow_manager,
-                    flow_source: source,
-                    requirements: credential_requirements,
-                    scope,
-                    owner_user_id,
-                    run_id,
-                    gate_ref: &gate_ref,
-                })
-                .await?
-        {
-            return Ok(Some(view));
-        }
-        if let Some(registry) = &self.dcr_oauth_registry
-            && let Some(view) = registry
-                .challenge_for_blocked_gate(DcrGateChallengeRequest {
                     flow_manager: &self.flow_manager,
                     flow_source: source,
                     requirements: credential_requirements,

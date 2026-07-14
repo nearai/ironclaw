@@ -489,12 +489,21 @@ impl HostRuntimeCapabilityHarness {
             outbound_target_facade,
             network_http_egress_for_test,
             activate_bundled_extensions_for_test,
+            fixture_extension_dirs,
+            native_extension_factories,
+            recording_network_egress,
             project_service_fault_injection,
         } = options;
         let root = Arc::new(tempfile::tempdir()?);
         let storage_root = root.path().join("local-dev");
         let workspace_root = storage_root.join("workspace");
         std::fs::create_dir_all(&workspace_root)?;
+        // Fixture extensions land on disk before composition builds so the
+        // available-extension catalog discovers them.
+        for (source, extension_id) in &fixture_extension_dirs {
+            let target = storage_root.join("system/extensions").join(extension_id);
+            copy_dir_recursive(source, &target)?;
+        }
         let mut input = if runtime_policy.as_ref().is_some_and(|policy| {
             policy.resolved_profile == ironclaw_host_api::runtime_policy::RuntimeProfile::LocalYolo
         }) {
@@ -518,6 +527,28 @@ impl HostRuntimeCapabilityHarness {
         if let Some(egress) = network_http_egress_for_test {
             input = input.with_network_http_egress_for_test(egress);
         }
+        if !native_extension_factories.is_empty() {
+            input = input.with_native_extension_factories(native_extension_factories);
+        }
+        // Mirror the binary's channel-extension binding assembly (DEL-7):
+        // the slack channel adapter + extras ride the composition input seam
+        // exactly as `ironclaw_reborn_cli` supplies them, so activated slack
+        // packages bind the REAL adapter in integration runs.
+        input = input.with_channel_extension_bindings(vec![
+            ironclaw_reborn_composition::ChannelExtensionBinding {
+                extension_id: "slack".to_string(),
+                adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
+                inbound_payload_classifier: Some(Arc::new(|message| {
+                    ironclaw_slack_extension::classify_interaction_resolution(
+                        &message.text,
+                        message.trigger,
+                    )
+                })),
+                preference_target_codec: Some(Arc::new(
+                    ironclaw_slack_extension::SlackPreferenceTargetCodec,
+                )),
+            },
+        ]);
         let services = build_reborn_services(input).await?;
         if seed_extension_credentials {
             profiles::extension::seed_extension_lifecycle_credentials(&services, &user_id).await?;
@@ -526,9 +557,10 @@ impl HostRuntimeCapabilityHarness {
         // registry directly (see `HostRuntimeHarnessOptions::activate_bundled_extensions_for_test`
         // doc) so their capabilities are genuinely dispatchable, not merely
         // granted at the harness-authority layer.
-        for package in &activate_bundled_extensions_for_test {
+        for (package, resolved) in &activate_bundled_extensions_for_test {
             services
-                .publish_bundled_extension_for_test(package)
+                .publish_bundled_extension_for_test(package, resolved.as_ref())
+                .await
                 .ok_or(
                     "local-dev Reborn services missing extension management for test publish",
                 )??;
@@ -646,7 +678,7 @@ impl HostRuntimeCapabilityHarness {
             invocations: Arc::new(Mutex::new(Vec::new())),
             results: Arc::new(Mutex::new(Vec::new())),
             http_egress: None,
-            network_egress: None,
+            network_egress: recording_network_egress,
             real_egress_transport: None,
             process_port: None,
             profile_filesystem,

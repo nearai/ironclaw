@@ -165,8 +165,8 @@ function threadResumedAfterConnection(messages, cardIndex, channel) {
 // activation card can never re-open the panel for an already-connected account.
 function channelConnectionIsSatisfied(extensions, channel) {
   // Normalize both operands the same way the waiter bus does
-  // (lib/channel-connection-events.js) so a multi-word channel id (e.g.
-  // `telegram_bot`) can't satisfy the gate here while the bus keys on a different
+  // (lib/channel-connection-events.js) so a multi-word channel id (one with an
+  // underscore) can't satisfy the gate here while the bus keys on a different
   // normalized string — which would re-open the panel for a connected account.
   const expected = normalizeConnectionChannel(channel);
   const extension = (extensions || []).find(
@@ -181,8 +181,8 @@ function channelConnectionIsSatisfied(extensions, channel) {
   const state =
     extension.onboarding_state ||
     extension.onboardingState ||
-    extension.activation_status ||
-    extension.activationStatus;
+    extension.installation_state ||
+    extension.installationState;
   // Fail closed: an explicit backend connect card must not be suppressed by a
   // missing or unrecognized onboarding state. Treat the account as connected only
   // when it reports a state that is not a "needs connection" one.

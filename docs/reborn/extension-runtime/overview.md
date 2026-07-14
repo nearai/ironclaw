@@ -66,6 +66,19 @@ a feature. Schema `reborn.extension_manifest.v3` is v2 plus explicit `[channel]`
 and `[auth.*]` sections; the v2 reader continues to parse old manifests and
 normalizes them into the same resolved model.
 
+**The package is the unit of self-containment.** Everything an extension
+needs ships inside its package directory — the manifest, input schemas,
+prompt docs, WASM modules, and any bespoke display or onboarding copy that
+cannot be derived from the manifest. Host code consumes a package as one
+opaque, cleanly built bundle (id, display name, manifest source, assets);
+nothing outside the package enumerates or re-describes its contents, and
+generic crates never name one. There is no hand-maintained catalog: the
+bundled inventory (`ironclaw_first_party_extensions`) holds exactly one
+small module per package (`src/packages/<id>.rs`) beside its
+`assets/<id>/` directory, and a collector concatenates the per-module
+bundles. Adding an integration is a new assets directory plus its module;
+removing one deletes both; no other file changes anywhere.
+
 The unified Slack manifest, complete except three tools elided:
 
 ```toml
@@ -291,9 +304,13 @@ The manifest is compiled **once** per install/upgrade into a typed
 egress, credentials) plus a `manifest_digest` of the source bytes. That record
 is persisted; discovery, lifecycle, dispatch, ingress, auth, and the frontend
 consume the record. Production code never reparses raw TOML. On upgrade, the
-host diffs the old and new resolved contracts: **widening** (new scopes, egress
-hosts, effects, routes, credential handles) requires renewed user approval;
-equal or narrower contracts do not.
+resolved-contract diff classifies the change — equal / narrowed / **widening**
+(new scopes, egress hosts, effects, routes, credential handles). A widening
+*consent gate* is deliberately **not built** in this train (§7): packages are
+host-bundled, so a contract changes only via a reviewed binary release, and
+boot-time adoption of the new bundled record is the accepted path. The
+classifier (`diff_resolved_contracts`) ships as data-model code — the seed for
+a future registry/third-party-distribution trigger.
 
 ## 4. The adapters
 
@@ -465,12 +482,17 @@ There is deliberately **no auth trait in the extension ABI.** The host's
   validation, scope intersection against the recipe ceiling, token exchange
   HTTP, secret encryption and storage, identity claim extraction via the
   recipe's JSON-pointer map, grant/account records, the blocked-tool auth gate
-  and resume, revocation and grant cleanup on extension removal.
+  and resume, revocation and grant cleanup on extension removal. Refresh is
+  on-demand at injection; additionally, a recipe may declare an idle keepalive
+  threshold (a vendor lifetime constraint — some vendors expire refresh tokens
+  after a fixed idle window), executed once by the engine as a generic,
+  vendor-blind background sweep.
 - **Recipe declares (per vendor, data only):** endpoints, scope parameter
   name, extra authorize params, token-exchange auth style, token-response and
   identity field paths (RFC 6901 JSON pointers, closed vocabulary), refresh
-  rotation flags, revoke endpoint, client-credential handles — or, for
-  `api_key`: form fields and an optional validation probe:
+  rotation flags and optional idle-keepalive threshold
+  (`refresh.keepalive_idle_seconds`), revoke endpoint, client-credential
+  handles — or, for `api_key`: form fields and an optional validation probe:
 
   ```toml
   [auth.github]
@@ -521,8 +543,7 @@ one narrow call — or nothing:
 
 ### 5.1 Activation
 
-1. Load the persisted resolved record (compile the manifest if new/changed;
-   widening diff → approval).
+1. Load the persisted resolved record (compile the manifest if new/changed).
 2. Loader produces the entrypoint; `bind` returns adapters; the binding rule is
    checked; global conflicts (duplicate capability id, duplicate route) are
    checked against the staged next snapshot. MCP loaders run bounded discovery
@@ -744,13 +765,20 @@ Disconnected ──start flow──▶ Authenticating ──callback ok──▶
 Connect / Reconnect / Remove) from those two enums plus config completeness —
 no third state machine, no per-extension logic.
 
+The wire models a vendor's auth as a **list of accounts** (each carrying the
+§6.3 state and a default marker) plus each surface's resolved account, even
+while the system enforces one account per vendor — so the accepted
+multi-account follow-up (`adr/0001-multiple-accounts-per-vendor.md`) extends
+behavior without a wire break.
+
 ### 6.5 Other lifecycle rules
 
 - Startup restores all enabled generations from persisted records and publishes
   once; an invalid extension is skipped with a typed error and does not block
   valid ones.
-- Upgrade stages the new generation, applies the widening rule (§3.3), swaps
-  atomically; the old generation drains via its `Arc`.
+- Upgrade — boot-time adoption of a changed host-bundled contract — swaps the
+  new generation atomically; the old generation drains via its `Arc`. A
+  widening consent gate is deliberately not built (§3.3, §7).
 - Editing `[channel.config]` while `Active` runs an automatic deactivate →
   reactivate cycle: adapters are rebuilt with the new values and `activate()`
   revalidates them. There is no separate `Reconfiguring` state.
@@ -766,6 +794,7 @@ reintroduced without one.
 | --- | --- | --- |
 | Manifest fragments / multi-file compilation | largest manifest ≈ 700 lines; single file is reviewable | a manifest becomes genuinely unreviewable |
 | Content-addressed package blob store, generation leases, GC | packages are host-bundled; the binary is the immutable store | registry distributes mutable third-party packages |
+| Upgrade widening approval (parked generation, consent gate) | packages are host-bundled — upgrades happen only via reviewed binary releases + boot adoption; the diff classifier exists as data-model code | third-party/registry package distribution |
 | Package signing (Ed25519, trust store, revocation) | no third-party distribution channel yet; own project | same as above |
 | Serving-leader lease / fencing tokens | single serving process documented | multi-replica deployment is real (new ADR) |
 | Digest-pinned shared vendor implementation packages | shared vendor = identical-recipe rule (§3.2); native code shares via crate deps | third-party binary vendor-implementation sharing exists |
@@ -774,7 +803,7 @@ reintroduced without one.
 | Channel sub-adapter set (connection/target/action traits) | folded into `ChannelAdapter` methods + `[channel.config]` | a real action that config + hooks cannot express |
 | Multiple channel surfaces per extension | no extension has two | one does (wire already carries surface keys) |
 | Installation-scoped OAuth grants (bot-install flows) | manual `[channel.config]` fields cover today's operator setup | a vendor requires OAuth-based operator install (recipes gain an `owner` field) |
-| Multiple accounts per vendor per user | one account per vendor per user matches current behavior | a real work + personal account use case |
+| Multiple accounts per vendor per user | one account per vendor per user matches current behavior | **triggered 2026-07-13** (work + personal Google accounts; two Notion accounts) — accepted as a dedicated post-P7 PR, `adr/0001-multiple-accounts-per-vendor.md`; the train ships only the list-shaped wire (§6.4) |
 | Trigger/file runtime | reserved kinds, no implementation exists | a production trigger/file use case (fourth adapter, additive) |
 | Multi-digest canonicalization, golden canonical JSON | one source digest + resolved-contract diff suffices | never, absent a concrete need |
 | Machine-readable evidence ledger, sign-off roles, checker scripts | checklist + CI + architecture gates are the evidence | never |

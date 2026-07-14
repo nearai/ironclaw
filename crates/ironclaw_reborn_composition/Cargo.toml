@@ -68,15 +68,6 @@ webui-v2-beta = [
     "dep:tower-http",
     "dep:lru",
 ]
-# Host-mounted Slack Events API ingress fragment for the Reborn ProductAdapter
-# MVP. Off by default; host binaries opt in and mount it behind their Slack
-# enablement/config checks.
-slack-v2-host-beta = [
-    "webui-v2-beta",
-    "dep:ironclaw_slack_v2_adapter",
-    "dep:ironclaw_wasm_product_adapters",
-    "ironclaw_product_workflow/storage",
-]
 openai-compat-beta = [
     "webui-v2-beta",
     "dep:ironclaw_reborn_openai_compat",
@@ -127,6 +118,7 @@ ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions" }
 ironclaw_hooks = { path = "../ironclaw_hooks" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_extension_host = { path = "../ironclaw_extension_host" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
 ironclaw_llm = { path = "../ironclaw_llm", optional = true, default-features = false }
 ironclaw_loop_support = { path = "../ironclaw_loop_support" }
@@ -135,9 +127,12 @@ ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_observability = { path = "../ironclaw_observability" }
 ironclaw_outbound = { path = "../ironclaw_outbound" }
 ironclaw_processes = { path = "../ironclaw_processes" }
-ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters", features = ["host-auth-mint"] }
 ironclaw_product_adapter_registry = { path = "../ironclaw_product_adapter_registry" }
-ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
+# The generic channel host assembly (extension_host/channel_host.rs) is
+# ungated production code and builds per-extension durable idempotency
+# ledgers, so the storage-backed ledger surface is a base requirement.
+ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = ["storage"] }
 ironclaw_reborn = { path = "../ironclaw_reborn" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
 ironclaw_reborn_identity = { path = "../ironclaw_reborn_identity", optional = true }
@@ -152,7 +147,6 @@ ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
 ironclaw_skill_learning = { path = "../ironclaw_skill_learning" }
 ironclaw_skills = { path = "../ironclaw_skills" }
-ironclaw_slack_v2_adapter = { path = "../ironclaw_slack_v2_adapter", optional = true }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_triggers = { path = "../ironclaw_triggers" }
 ironclaw_projects = { path = "../ironclaw_projects" }
@@ -163,7 +157,6 @@ nix = { version = "0.30", default-features = false, features = ["process"] }
 # WebUI v2 route surface — feature-gated; only used by `webui_serve`.
 ironclaw_webui_v2 = { path = "../ironclaw_webui_v2", optional = true }
 # WebUI v2 static SPA bundle — feature-gated; mounted under `/v2`.
-ironclaw_wasm_product_adapters = { path = "../ironclaw_wasm_product_adapters", optional = true }
 libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 libc = "0.2"
 # axum + tower middleware stack used by the `webui_serve` module. Each
@@ -191,6 +184,7 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+ironclaw_extension_host = { path = "../ironclaw_extension_host", features = ["test-support"] }
 async-trait = "0.1"
 chrono = "0.4"
 hmac = "0.13"
@@ -209,6 +203,10 @@ ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = ["test-support"] }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
+# The ported channel-host e2e suite drives the generic assembly with slack
+# fixtures; dev-dependency linkage of concrete extension crates is the
+# sanctioned test exception (DEL-7).
+ironclaw_slack_extension = { path = "../ironclaw_slack_extension" }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 rust_decimal_macros = "1"
 sha2 = "0.11"

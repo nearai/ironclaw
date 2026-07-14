@@ -44,9 +44,9 @@ use ironclaw_host_api::{
     CapabilityId, CapabilityProfileId, CapabilityProfileSchemaRef, CapabilitySurfaceKind,
     EffectKind, ExtensionId, HostApiError, HostPortCatalog, HostPortId, NetworkScheme,
     NetworkTargetPattern, PermissionMode, RequestedTrustClass, ResourceProfile,
-    RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
-    RuntimeCredentialRequirement, RuntimeCredentialRequirementSource, RuntimeCredentialTarget,
-    RuntimeKind, SecretHandle, TrustClass,
+    RuntimeCredentialAccountSetup, RuntimeCredentialRequirement,
+    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeKind, SecretHandle,
+    TrustClass, VendorId,
 };
 use serde::{Deserialize, Deserializer};
 use thiserror::Error;
@@ -103,7 +103,7 @@ pub const MAX_HOOK_ENTRY_BYTES: usize = 8 * 1024;
 /// `id`, and its serialized size is within [`MAX_HOOK_ENTRY_BYTES`]. It does
 /// **not** interpret `kind`, `body`, `phase`, predicate trees, or windows —
 /// that is the hook crate's job, applied at the composition seam.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
 pub struct HookSectionEntryV2 {
     /// The manifest-local hook id (the `id` field of the TOML entry).
     /// Surfaced separately so the loader and diagnostics can identify the
@@ -141,7 +141,7 @@ impl ManifestSource {
 }
 
 /// Per-capability surface visibility.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityVisibility {
     /// Visible to the model through the Hot Capability Surface.
@@ -447,7 +447,12 @@ struct ProjectedManifestV2 {
 }
 
 /// Validated v2 capability declaration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Carries `Serialize`/`Deserialize` as part of the resolved-record
+/// persistence layer (`crate::resolved`): records are produced by this
+/// crate's validators and rehydrated from the trusted installation store;
+/// component newtypes re-validate on deserialize.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
 pub struct CapabilityDeclV2 {
     pub id: CapabilityId,
     pub implements: Vec<CapabilityProfileId>,
@@ -456,7 +461,10 @@ pub struct CapabilityDeclV2 {
     pub default_permission: PermissionMode,
     pub visibility: CapabilityVisibility,
     pub input_schema_ref: CapabilityProfileSchemaRef,
-    pub output_schema_ref: CapabilityProfileSchemaRef,
+    /// Optional since manifest v3 dropped output schema declarations;
+    /// v2 manifests may still carry one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema_ref: Option<CapabilityProfileSchemaRef>,
     pub prompt_doc_ref: Option<CapabilityProfileSchemaRef>,
     pub required_host_ports: Vec<HostPortId>,
     pub runtime_credentials: Vec<RuntimeCredentialRequirement>,
@@ -484,9 +492,13 @@ pub enum CapabilitySurfaceDeclV2 {
     /// and mask weaker manual-token setups — the account is shared, so its
     /// grant is the union of what the declaring capabilities need.
     Auth {
-        provider: RuntimeCredentialAccountProviderId,
+        provider: VendorId,
         setup: RuntimeCredentialAccountSetup,
     },
+    /// The extension's declared channel surface (manifest v3 `[channel]`).
+    /// The full descriptor lives on the resolved contract; this carries the
+    /// channel surface id for surface enumeration.
+    Channel { channel: String },
     /// A surface projected by a host API contract section, stamped with the
     /// owning contract id and section path (e.g. a `channel` surface from an
     /// `ironclaw.product_adapter/v1` external-channel section).
@@ -502,13 +514,20 @@ impl CapabilitySurfaceDeclV2 {
         match self {
             Self::Tool { .. } => CapabilitySurfaceKind::Tool,
             Self::Auth { .. } => CapabilitySurfaceKind::Auth,
+            Self::Channel { .. } => CapabilitySurfaceKind::Channel,
             Self::HostApiSection { kind, .. } => *kind,
         }
     }
 }
 
 /// v2 runtime declaration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Serde derives exist for the resolved-record persistence layer
+/// (`crate::resolved`); loader-facing parsing still goes through the raw
+/// document shapes, and manifest-source rules are re-checked when a stored
+/// record rehydrates (`ResolvedExtensionManifest::to_internal`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExtensionRuntimeV2 {
     Wasm {
         module: String,
@@ -813,8 +832,7 @@ pub(crate) fn capability_surfaces_from_parts(
             oauth_scopes: Option<BTreeSet<String>>,
             saw_manual_token: bool,
         }
-        let mut providers: BTreeMap<RuntimeCredentialAccountProviderId, AuthAccumulator> =
-            BTreeMap::new();
+        let mut providers: BTreeMap<VendorId, AuthAccumulator> = BTreeMap::new();
         for capability in capabilities {
             for credential in &capability.runtime_credentials {
                 let RuntimeCredentialRequirementSource::ProductAuthAccount { provider, setup } =
@@ -1082,14 +1100,18 @@ impl CapabilityDeclV2 {
                     reason: err.to_string(),
                 }
             })?;
-        let output_schema_ref =
-            CapabilityProfileSchemaRef::new(raw.output_schema_ref).map_err(|err| {
-                ManifestV2Error::InvalidSchemaRef {
-                    capability: id.clone(),
-                    field: "output_schema_ref",
-                    reason: err.to_string(),
-                }
-            })?;
+        let output_schema_ref = raw
+            .output_schema_ref
+            .map(|value| {
+                CapabilityProfileSchemaRef::new(value).map_err(|err| {
+                    ManifestV2Error::InvalidSchemaRef {
+                        capability: id.clone(),
+                        field: "output_schema_ref",
+                        reason: err.to_string(),
+                    }
+                })
+            })
+            .transpose()?;
         let prompt_doc_ref = raw
             .prompt_doc_ref
             .map(|value| {
@@ -1388,7 +1410,7 @@ fn validate_mcp_http_url(transport: &str, value: &str) -> Result<(), ManifestV2E
     Ok(())
 }
 
-fn requested_trust_to_descriptor_trust(requested: RequestedTrustClass) -> TrustClass {
+pub(crate) fn requested_trust_to_descriptor_trust(requested: RequestedTrustClass) -> TrustClass {
     match requested {
         RequestedTrustClass::ThirdParty => TrustClass::UserTrusted,
         RequestedTrustClass::Untrusted
@@ -1570,11 +1592,13 @@ struct RawManifestV2 {
     hooks: Vec<toml::Value>,
 }
 
-fn default_requested_trust() -> RequestedTrustClass {
+pub(crate) fn default_requested_trust() -> RequestedTrustClass {
     RequestedTrustClass::Untrusted
 }
 
-fn deserialize_requested_trust<'de, D>(deserializer: D) -> Result<RequestedTrustClass, D::Error>
+pub(crate) fn deserialize_requested_trust<'de, D>(
+    deserializer: D,
+) -> Result<RequestedTrustClass, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -1703,38 +1727,39 @@ impl RawRuntimeV2 {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawCapabilityV2 {
-    id: String,
+    pub(crate) id: String,
     #[serde(default)]
-    implements: Vec<String>,
-    description: String,
+    pub(crate) implements: Vec<String>,
+    pub(crate) description: String,
     #[serde(default)]
-    effects: Vec<EffectKind>,
-    default_permission: PermissionMode,
-    visibility: CapabilityVisibility,
-    input_schema_ref: String,
-    output_schema_ref: String,
+    pub(crate) effects: Vec<EffectKind>,
+    pub(crate) default_permission: PermissionMode,
+    pub(crate) visibility: CapabilityVisibility,
+    pub(crate) input_schema_ref: String,
     #[serde(default)]
-    prompt_doc_ref: Option<String>,
+    pub(crate) output_schema_ref: Option<String>,
     #[serde(default)]
-    required_host_ports: Vec<String>,
+    pub(crate) prompt_doc_ref: Option<String>,
     #[serde(default)]
-    runtime_credentials: Vec<RawRuntimeCredentialV2>,
+    pub(crate) required_host_ports: Vec<String>,
     #[serde(default)]
-    resource_profile: Option<ResourceProfile>,
+    pub(crate) runtime_credentials: Vec<RawRuntimeCredentialV2>,
+    #[serde(default)]
+    pub(crate) resource_profile: Option<ResourceProfile>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawRuntimeCredentialV2 {
-    handle: String,
+pub(crate) struct RawRuntimeCredentialV2 {
+    pub(crate) handle: String,
     #[serde(default)]
-    source: RuntimeCredentialRequirementSource,
+    pub(crate) source: RuntimeCredentialRequirementSource,
     #[serde(default)]
-    provider_scopes: Vec<String>,
-    audience: NetworkTargetPattern,
-    target: RuntimeCredentialTarget,
+    pub(crate) provider_scopes: Vec<String>,
+    pub(crate) audience: NetworkTargetPattern,
+    pub(crate) target: RuntimeCredentialTarget,
     #[serde(default = "default_runtime_credential_required")]
-    required: bool,
+    pub(crate) required: bool,
 }
 
 fn default_runtime_credential_required() -> bool {
@@ -1790,7 +1815,7 @@ mod tests {
 
     fn product_auth_source() -> RuntimeCredentialRequirementSource {
         RuntimeCredentialRequirementSource::ProductAuthAccount {
-            provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            provider: ironclaw_host_api::VendorId::new("google").unwrap(),
             setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
         }
     }

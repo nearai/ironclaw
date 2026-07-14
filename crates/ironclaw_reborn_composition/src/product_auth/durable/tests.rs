@@ -3,8 +3,8 @@ use std::sync::Arc;
 use chrono::{Duration, Utc};
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{
-    ExtensionId, InvocationId, MountAlias, MountGrant, MountPermissions,
-    RuntimeCredentialAccountProviderId, SecretHandle, ThreadId, UserId, VirtualPath,
+    ExtensionId, InvocationId, MountAlias, MountGrant, MountPermissions, SecretHandle, ThreadId,
+    UserId, VendorId, VirtualPath,
 };
 use ironclaw_host_runtime::RuntimeCredentialAccountRequest;
 use ironclaw_host_runtime::RuntimeCredentialAccountResolver;
@@ -301,7 +301,7 @@ async fn filesystem_runtime_account_selection_matches_new_thread_reusable_accoun
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &runtime_scope.resource,
-            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            provider: &VendorId::new("google").unwrap(),
             setup: &ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
             provider_scopes: &[],
             requester_extension: &ExtensionId::new("google-calendar").unwrap(),
@@ -3393,11 +3393,13 @@ fn resource_scope(
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn list_refresh_candidates_covers_agent_and_project_scopes() {
-    // Goal: verify that `list_refresh_candidates` discovers Google keepalive
+    // Goal: verify that `list_refresh_candidates` discovers keepalive
     // candidates across all four owner-scope shapes (plain, agent-only,
-    // agent+project, project-only) and excludes accounts that fail any one
-    // of the three eligibility filters (provider != google, status != Configured,
-    // refresh_secret == None).
+    // agent+project, project-only) and excludes accounts that fail either
+    // eligibility filter (status != Configured, refresh_secret == None).
+    // The enumeration is deliberately vendor-blind: idle lifetimes are
+    // per-vendor recipe data (`refresh.keepalive_idle_seconds`) applied by
+    // the engine-owned sweep, never a hardcoded vendor filter here.
     //
     // Setup uses `new_with_root` + `invocation_mount_view` so account writes
     // land at real paths (e.g. /tenants/t/users/u/secrets/agents/<a>/product-auth/…)
@@ -3499,9 +3501,10 @@ async fn list_refresh_candidates_covers_agent_and_project_scopes() {
         .await
         .unwrap();
 
-    // ── Negative cases: must be excluded ─────────────────────────────────────
+    // ── Vendor-blindness: another vendor's Configured+refresh account is a
+    // candidate too (the engine sweep applies the recipe threshold) ──────────
 
-    // 5. Non-Google provider (GitHub) — must be excluded even if Configured+refresh.
+    // 5. Non-Google provider (GitHub) — vendor-blind enumeration includes it.
     let neg_resource_github = resource_scope(tenant, user, None, None);
     let neg_scope_github = scope_for_resource(neg_resource_github);
     let github_account = service
@@ -3519,6 +3522,8 @@ async fn list_refresh_candidates_covers_agent_and_project_scopes() {
         })
         .await
         .unwrap();
+
+    // ── Negative cases: must be excluded ─────────────────────────────────────
 
     // 6. Google Revoked — must be excluded (status != Configured).
     let neg_resource_revoked = resource_scope(tenant, user, None, None);
@@ -3582,11 +3587,14 @@ async fn list_refresh_candidates_covers_agent_and_project_scopes() {
         "project-only-scoped Google account must be a keepalive candidate; found ids: {candidate_ids:?}"
     );
 
-    // ── Assert: negative cases are excluded ───────────────────────────────────
+    // ── Assert: enumeration is vendor-blind ──────────────────────────────────
     assert!(
-        !candidate_ids.contains(&github_account.id),
-        "non-Google (GitHub) account must NOT be a keepalive candidate"
+        candidate_ids.contains(&github_account.id),
+        "a Configured+refresh account of ANY vendor is a keepalive candidate; \
+         recipe-threshold filtering belongs to the engine sweep"
     );
+
+    // ── Assert: negative cases are excluded ───────────────────────────────────
     assert!(
         !candidate_ids.contains(&revoked_account.id),
         "Revoked Google account must NOT be a keepalive candidate"

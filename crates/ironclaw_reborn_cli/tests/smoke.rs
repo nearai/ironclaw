@@ -114,10 +114,7 @@ fn dockerfile_reborn_builds_with_postgres_feature() {
         .expect("Dockerfile.reborn");
 
     assert!(
-        dockerfile
-            .matches("webui-v2-beta,slack-v2-host-beta,libsql,postgres")
-            .count()
-            >= 2,
+        dockerfile.matches("webui-v2-beta,libsql,postgres").count() >= 2,
         "Dockerfile.reborn must compile both cargo-chef deps and final binary with libsql and postgres: {dockerfile}"
     );
     assert!(
@@ -1566,9 +1563,9 @@ fn serve_with_env_auth_seeds_reborn_config_before_binding() {
     );
 }
 
-#[cfg(all(feature = "webui-v2-beta", feature = "slack-v2-host-beta"))]
+#[cfg(feature = "webui-v2-beta")]
 #[test]
-fn serve_env_slack_enabled_mounts_slack_events_route() {
+fn serve_mounts_legacy_slack_events_alias_route() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
     let home = temp.path().join("home");
@@ -1589,7 +1586,6 @@ fn serve_env_slack_enabled_mounts_slack_events_route() {
             "reborn-smoke-test-token-0123456789abcdef",
         )
         .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
-        .env("IRONCLAW_REBORN_SLACK_ENABLED", "true")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -1631,8 +1627,8 @@ fn serve_env_slack_enabled_mounts_slack_events_route() {
         }
     }
 
-    let status_line = match post_slack_events_status_line(port) {
-        Ok(status_line) => status_line,
+    let response = match post_slack_events_response(port) {
+        Ok(response) => response,
         Err(error) => {
             let _ = child.kill();
             let _ = child.wait();
@@ -1642,9 +1638,13 @@ fn serve_env_slack_enabled_mounts_slack_events_route() {
 
     let _ = child.kill();
     let _ = child.wait();
+    // A fresh boot has no ACTIVE slack package, so the generic ingress
+    // router legitimately answers 404 `{"error":"unknown_route"}` — the
+    // assertion is that the alias MOUNT exists and forwards into that
+    // router (an unmounted path is a bare axum 404 with an empty body).
     assert!(
-        !status_line.contains(" 404 "),
-        "env-enabled Slack route should be mounted, got status line: {status_line}"
+        !response.contains(" 404 ") || response.contains("unknown_route"),
+        "the legacy slack events alias route should be mounted and forward          into the generic ingress router, got: {response}"
     );
 }
 
@@ -1683,9 +1683,9 @@ fn http_status_line(port: u16, request: &str, label: &str) -> Result<String, Str
     Ok(status_line)
 }
 
-#[cfg(all(feature = "webui-v2-beta", feature = "slack-v2-host-beta"))]
-fn post_slack_events_status_line(port: u16) -> Result<String, String> {
-    http_status_line(
+#[cfg(feature = "webui-v2-beta")]
+fn post_slack_events_response(port: u16) -> Result<String, String> {
+    http_full_response(
         port,
         concat!(
             "POST /webhooks/slack/events HTTP/1.1\r\n",
@@ -1698,6 +1698,32 @@ fn post_slack_events_status_line(port: u16) -> Result<String, String> {
         ),
         "Slack route probe",
     )
+}
+
+/// Like [`http_status_line`], but reads the whole response (status line,
+/// headers, and body) so callers can assert on the body shape.
+#[cfg(feature = "webui-v2-beta")]
+fn http_full_response(port: u16, request: &str, label: &str) -> Result<String, String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut stream = loop {
+        match std::net::TcpStream::connect(("127.0.0.1", port)) {
+            Ok(stream) => break stream,
+            Err(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(error) => return Err(format!("connect to serve listener failed: {error}")),
+        }
+    };
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .map_err(|error| format!("set {label} read timeout failed: {error}"))?;
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| format!("write {label} failed: {error}"))?;
+    let mut response = String::new();
+    std::io::Read::read_to_string(&mut stream, &mut response)
+        .map_err(|error| format!("read {label} response failed: {error}"))?;
+    Ok(response)
 }
 
 #[cfg(feature = "webui-v2-beta")]

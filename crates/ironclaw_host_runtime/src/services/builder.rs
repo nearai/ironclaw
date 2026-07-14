@@ -83,6 +83,7 @@ where
             run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
+            extension_tool_resolver,
             mut component_types,
         } = self;
         component_types.filesystem = ProductionComponentType::of::<T>();
@@ -127,6 +128,7 @@ where
             run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
+            extension_tool_resolver,
             component_types,
         }
     }
@@ -192,6 +194,7 @@ where
             run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
+            extension_tool_resolver,
             mut component_types,
         } = self;
         let lifecycle_governor: Arc<dyn ResourceGovernor> = governor.clone();
@@ -246,6 +249,7 @@ where
             run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
+            extension_tool_resolver,
             component_types,
         }
     }

@@ -124,7 +124,8 @@ pub use sandbox_process::{
     RebornScopedSandboxCommandTransport,
 };
 pub use services::{
-    HostRuntimeServices, ProductAuthCredentialStageError, ProductAuthProviderRuntimePorts,
+    ExtensionLaneToolBinder, ExtensionToolBindError, HostRuntimeServices,
+    ProductAuthCredentialStageError, ProductAuthProviderRuntimePorts,
     ProductionEventStoreWiringError, ProductionWiringComponent, ProductionWiringConfig,
     ProductionWiringIssue, ProductionWiringIssueKind, ProductionWiringReport,
     RegisteredRuntimeHealth,

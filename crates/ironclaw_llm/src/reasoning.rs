@@ -451,6 +451,58 @@ pub struct RespondOutput {
     pub metadata: ResponseMetadata,
 }
 
+/// Presentation facts for the conversation's channel, derived from the
+/// channel contract by the caller (`[channel.presentation]` for extension
+/// channels; the legacy monolith maps its channel registry at its call
+/// sites). Prompt construction renders whatever policy data it is given —
+/// there is no channel-name matching here.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CommunicationPresentationPolicy {
+    /// Display label for the formatting section header.
+    pub channel_label: String,
+    /// Rendered as `- <hint>` lines under "Channel Formatting".
+    pub formatting_hints: Vec<String>,
+}
+
+impl CommunicationPresentationPolicy {
+    /// Baseline policy from a channel contract's presentation facts.
+    pub fn from_presentation_facts(
+        channel_label: impl Into<String>,
+        supports_markdown: bool,
+        supports_threads: bool,
+        max_message_chars: Option<u32>,
+    ) -> Self {
+        let mut formatting_hints = Vec::new();
+        if supports_markdown {
+            formatting_hints.push("No markdown tables. Use bullet lists instead.".to_string());
+        } else {
+            formatting_hints.push("Plain text only \u{2014} no markdown formatting.".to_string());
+        }
+        if supports_threads {
+            formatting_hints
+                .push("Prefer threaded replies when responding to older messages.".to_string());
+        }
+        if let Some(max_chars) = max_message_chars
+            && max_chars <= 4_096
+        {
+            formatting_hints.push(format!(
+                "Keep messages under {max_chars} characters; longer replies are split."
+            ));
+        }
+        Self {
+            channel_label: channel_label.into(),
+            formatting_hints,
+        }
+    }
+
+    /// Append a caller-supplied hint line (channel-specific dialect notes the
+    /// caller owns as data).
+    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.formatting_hints.push(hint.into());
+        self
+    }
+}
+
 /// Reasoning engine for the agent.
 pub struct Reasoning {
     llm: Arc<dyn LlmProvider>,
@@ -460,8 +512,12 @@ pub struct Reasoning {
     skill_context: Option<String>,
     /// Names of active skills (used to suppress extension search for covered domains).
     active_skill_names: Vec<String>,
-    /// Channel name (e.g. "discord", "telegram") for formatting hints.
+    /// Channel name for runtime context (`channel=` line only; formatting
+    /// hints come from the presentation policy, never from name matching).
     channel: Option<String>,
+    /// Channel presentation policy for formatting hints (derived from the
+    /// channel contract by the caller).
+    presentation: Option<CommunicationPresentationPolicy>,
     /// Model name for runtime context.
     model_name: Option<String>,
     /// Whether this is a group chat context.
@@ -482,6 +538,7 @@ impl Reasoning {
             skill_context: None,
             active_skill_names: Vec::new(),
             channel: None,
+            presentation: None,
             model_name: None,
             is_group_chat: false,
             conversation_context: std::collections::HashMap::new(),
@@ -518,12 +575,18 @@ impl Reasoning {
         self
     }
 
-    /// Set the channel name for channel-specific formatting hints.
+    /// Set the channel name for the runtime context line.
     pub fn with_channel(mut self, channel: impl Into<String>) -> Self {
         let ch = channel.into();
         if !ch.is_empty() {
             self.channel = Some(ch);
         }
+        self
+    }
+
+    /// Set the channel presentation policy driving formatting hints.
+    pub fn with_presentation(mut self, presentation: CommunicationPresentationPolicy) -> Self {
+        self.presentation = Some(presentation);
         self
     }
 
@@ -550,11 +613,9 @@ impl Reasoning {
 
     /// Add channel-specific conversation data for the system prompt.
     ///
-    /// This provides the LLM with context about who/group it's talking to.
-    /// Examples:
-    ///   - Signal: sender, sender_uuid, target (group ID if in group)
-    ///   - Discord: guild_id, channel_id, user_id
-    ///   - Telegram: chat_id, user_id
+    /// This provides the LLM with context about who/group it's talking to
+    /// (e.g. sender ids, group/space ids, chat ids — whatever the connected
+    /// channel exposes).
     pub fn with_conversation_data(
         mut self,
         key: impl Into<String>,
@@ -1156,7 +1217,7 @@ Respond directly with your final answer. Do not wrap your response in any specia
 
         let mut section = "\n\n## Extensions\n\
          You can search, install, and activate extensions to add new capabilities:\n\
-         - **Channels** (Telegram, Slack, Discord) — connect messaging platforms so users can \
+         - **Channels** (messaging platforms) — connect messaging platforms so users can \
          talk to you there. When users ask about connecting a messaging platform, search for it \
          as a channel. Channels are not separate send-message tools; use normal assistant output \
          to reply in the current conversation, and use the `message` tool only for proactive, \
@@ -1181,58 +1242,36 @@ Respond directly with your final answer. Do not wrap your response in any specia
     }
 
     fn build_channel_section(&self) -> String {
-        let channel = match self.channel.as_deref() {
-            Some(c) => c,
-            None => return String::new(),
+        let Some(policy) = &self.presentation else {
+            return String::new();
         };
-        let hints = match channel {
-            "discord" => {
-                "\
-- No markdown tables (Discord renders them as plaintext). Use bullet lists instead.\n\
-- Wrap multiple URLs in `<>` to suppress embeds: `<https://example.com>`."
-            }
-            "whatsapp" => {
-                "\
-- No markdown headers or tables (WhatsApp ignores them). Use **bold** for emphasis.\n\
-- Keep messages concise; long replies get truncated on mobile."
-            }
-            "telegram" => {
-                "\
-- No markdown tables (Telegram strips them). Bullet lists and bold work well."
-            }
-            "slack" => {
-                "\
-- No markdown tables. Use Slack formatting: *bold*, _italic_, `code`.\n\
-- Prefer threaded replies when responding to older messages."
-            }
-            "signal" => "",
-            _ => {
-                return String::new();
-            }
-        };
+
+        let mut hints = String::new();
+        for hint in &policy.formatting_hints {
+            hints.push_str("- ");
+            hints.push_str(hint);
+            hints.push('\n');
+        }
+        let hints = hints.trim_end().to_string();
 
         let message_tool_hint = "\
 \n\n## Proactive Messaging\n\
 For ordinary replies in the current conversation, respond normally without calling `message`.\n\
-Send messages via Signal, Telegram, Slack, or other connected channels:\n\
+Send messages via connected channels with the `message` tool:\n\
 - `content` (required): the message text\n\
 - `attachments` (optional): array of file paths to send\n\
-- `channel` (optional): which channel to use (signal, telegram, slack, etc.)\n\
-- `target` (optional): who to send to (phone number, group ID, etc.)\n\
+- `channel` (optional): which connected channel to use\n\
+- `target` (optional): who to send to (a phone number, username, chat or channel id \u{2014} \
+whatever the connected channel uses)\n\
 \nOmit both `channel` and `target` for a proactive follow-up in the current conversation.\n\
-Target formats:\n\
-- Signal: E.164 phone number (`+1234567890`) or group ID\n\
-- Telegram: username or chat ID\n\
-- Slack: channel name (`#general`) or user ID\n\
 Examples (tool calls use JSON format):\n\
 - Proactive follow-up here: {\"content\": \"Hi again!\"}\n\
 - Send file here proactively: {\"content\": \"Here's the file\", \"attachments\": [\"/path/to/file.txt\"]}\n\
-- Message a different user: {\"channel\": \"signal\", \"target\": \"+1234567890\", \"content\": \"Hi!\"}\n\
-- Message a different group: {\"channel\": \"signal\", \"target\": \"group:abc123\", \"content\": \"Hi!\"}";
+- Message a different target: {\"channel\": \"<channel>\", \"target\": \"<target>\", \"content\": \"Hi!\"}";
 
         format!(
             "\n\n## Channel Formatting ({})\n{}{}",
-            channel, hints, message_tool_hint
+            policy.channel_label, hints, message_tool_hint
         )
     }
 
@@ -3158,16 +3197,37 @@ That's my plan."#;
 
     #[test]
     fn test_channel_section_separates_normal_replies_from_message_tool() {
-        let reasoning = make_test_reasoning().with_channel("telegram");
+        let reasoning = make_test_reasoning().with_presentation(
+            CommunicationPresentationPolicy::from_presentation_facts("Team chat", true, true, None),
+        );
 
         let section = reasoning.build_channel_section();
         assert!(section.contains("respond normally without calling `message`"));
         assert!(section.contains("proactive follow-up in the current conversation"));
-        assert!(section.contains("Target formats:"));
-        assert!(section.contains("Signal: E.164 phone number"));
-        assert!(section.contains("Telegram: username or chat ID"));
-        assert!(section.contains("Slack: channel name"));
         assert!(section.contains("Proactive follow-up here"));
+    }
+
+    #[test]
+    fn test_channel_section_renders_policy_data_without_name_matching() {
+        // No presentation policy: no section, regardless of the channel name.
+        let bare = make_test_reasoning().with_channel("anychannel");
+        assert!(bare.build_channel_section().is_empty());
+
+        let reasoning = make_test_reasoning().with_presentation(
+            CommunicationPresentationPolicy::from_presentation_facts(
+                "Team chat",
+                true,
+                true,
+                Some(4_000),
+            )
+            .with_hint("Use *bold* and _italic_ dialect markers."),
+        );
+        let section = reasoning.build_channel_section();
+        assert!(section.contains("## Channel Formatting (Team chat)"));
+        assert!(section.contains("- No markdown tables. Use bullet lists instead."));
+        assert!(section.contains("- Prefer threaded replies"));
+        assert!(section.contains("- Keep messages under 4000 characters"));
+        assert!(section.contains("- Use *bold* and _italic_ dialect markers."));
     }
 
     #[test]

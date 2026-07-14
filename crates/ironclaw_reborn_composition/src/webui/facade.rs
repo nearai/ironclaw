@@ -114,7 +114,16 @@ pub fn build_webui_services(
     runtime: &RebornRuntime,
     event_stream: Option<Arc<dyn ProjectionStream>>,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
-    build_webui_services_with_channel_connection(runtime, event_stream, None, Vec::new())
+    // The generic per-user channel-connection facade (extension-runtime
+    // §6.3): channel extensions are discovered from the durable installation
+    // store; no per-vendor lane registers anything.
+    let channel_connection = runtime.generic_channel_connection_facade();
+    build_webui_services_with_channel_connection(
+        runtime,
+        event_stream,
+        channel_connection,
+        Vec::new(),
+    )
 }
 
 pub(crate) fn build_webui_services_with_channel_connection(
@@ -255,6 +264,9 @@ pub(crate) fn build_webui_services_with_channel_connection(
             lifecycle_facade =
                 lifecycle_facade.with_extension_management(extension_management.clone());
         }
+        if let Some(channel_config) = &local_runtime.channel_config {
+            lifecycle_facade = lifecycle_facade.with_channel_config(channel_config.clone());
+        }
         if let Some(runtime_http_egress) = &local_runtime.runtime_http_egress {
             lifecycle_facade =
                 lifecycle_facade.with_runtime_http_egress(runtime_http_egress.clone());
@@ -265,6 +277,12 @@ pub(crate) fn build_webui_services_with_channel_connection(
             );
         }
         api = api.with_lifecycle_product_facade(Arc::new(lifecycle_facade));
+    }
+    // The generic channel-config configure port: the setup facade renders
+    // manifest-declared channel-config fields and routes submitted values
+    // through it (extension-runtime §6.4).
+    if let Some(channel_config) = services.channel_config_facade() {
+        api = api.with_channel_config_facade(channel_config);
     }
     if let Some(skill_management) = &services.skill_management {
         // Share the activation selector's live master switch so a Settings

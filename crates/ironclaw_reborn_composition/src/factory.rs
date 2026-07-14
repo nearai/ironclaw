@@ -57,9 +57,14 @@ use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, ProcessBackendKind, SecretMode,
 };
 use ironclaw_host_api::{
-    EffectKind, ExtensionId, HostPath, InvocationId, MountPermissions, MountView, PackageId,
-    ResourceScope, RuntimeHttpEgress, UserId, VirtualPath,
+    ExtensionId, HostPath, InvocationId, MountPermissions, MountView, PackageId, ResourceScope,
+    RuntimeHttpEgress, UserId, VirtualPath, sha256_digest_token,
 };
+// `EffectKind` is only referenced by the `#[cfg(test)]` trust-decision helpers
+// now that every production `*_allowed_effects` fn moved to the package
+// inventory as bundle data.
+#[cfg(test)]
+use ironclaw_host_api::EffectKind;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{HostApiError, MountAlias, MountGrant};
 use ironclaw_host_runtime::{
@@ -79,12 +84,8 @@ use ironclaw_outbound::CommunicationPreferenceRepository;
 use ironclaw_outbound::FilesystemOutboundStateStore;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 use ironclaw_outbound::InMemoryOutboundStateStore;
-#[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRunDeliveryStore};
-#[cfg(all(
-    not(any(feature = "libsql", feature = "postgres")),
-    feature = "slack-v2-host-beta"
-))]
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
 use ironclaw_outbound::{InMemoryDeliveredGateRouteStore, InMemoryTriggeredRunDeliveryStore};
 use ironclaw_processes::ProcessServices;
 use ironclaw_product_workflow::{
@@ -137,18 +138,12 @@ use ironclaw_turns::{
 use ironclaw_turns::{InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore};
 
 use crate::RebornProductAuthServicePorts;
-#[cfg(feature = "slack-v2-host-beta")]
-use crate::extension_host::available_extensions::slack_manifest_digest;
 use crate::extension_host::lifecycle::{
     RebornLocalSkillManagementPort, build_local_skill_management_port,
 };
 use crate::extension_host::mcp::hosted_http_mcp_runtime;
 use crate::extension_host::{
-    available_extensions::{
-        AvailableExtensionCatalog, gmail_manifest_digest, google_calendar_manifest_digest,
-        google_docs_manifest_digest, google_drive_manifest_digest, google_sheets_manifest_digest,
-        google_slides_manifest_digest, notion_mcp_manifest_digest, web_access_manifest_digest,
-    },
+    available_extensions::AvailableExtensionCatalog,
     extension_installation_store::FilesystemExtensionInstallationStore,
     extension_lifecycle::{
         ActiveExtensionPublisher, ExtensionCredentialCleanup, RebornLocalExtensionManagementPort,
@@ -222,6 +217,24 @@ const LOCAL_DEV_LEGACY_SKILLS_BACKFILL_MARKER: &str = ".legacy-skills-backfilled
 const LOCAL_DEV_LEGACY_SKILLS_BACKFILL_MAX_DEPTH: usize = 64;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 const LOCAL_DEV_SECRETS_MASTER_KEY_PATH: &str = ".reborn-local-dev-secrets-master-key";
+
+/// The ONE construction seam for host HTTP egress: policy enforcement over
+/// the reqwest transport, honoring the env-gated test-only host rewrite map
+/// ([`ironclaw_network::TEST_HTTP_REWRITE_MAP_ENV`]). Every composition path
+/// builds its vendor egress here so test runs redirect ALL vendor calls
+/// identically. Fail-closed: a set-but-invalid map refuses composition.
+fn default_host_http_egress() -> Result<
+    ironclaw_network::PolicyNetworkHttpEgress<
+        ironclaw_network::RewriteNetworkTransport<ironclaw_network::ReqwestNetworkTransport>,
+    >,
+    RebornBuildError,
+> {
+    ironclaw_network::default_policy_http_egress().map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        }
+    })
+}
 
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone)]
@@ -453,10 +466,7 @@ pub struct RebornServices {
     /// Shared scoped secret store. Exposed so runtime-level features (e.g.
     /// operator LLM-key storage) can reuse the same instance product-auth uses
     /// rather than standing up a second authority.
-    #[cfg_attr(
-        not(any(feature = "root-llm-provider", feature = "slack-v2-host-beta")),
-        allow(dead_code)
-    )]
+    #[cfg_attr(not(feature = "root-llm-provider"), allow(dead_code))]
     pub(crate) secret_store: Arc<dyn SecretStore>,
     #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
@@ -467,41 +477,234 @@ pub struct RebornServices {
     /// the only consumer; this field must never leak through any public facade.
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) credential_refresh_worker: CredentialRefreshWorkerReady,
+    /// The binary-assembled channel-extension bindings (extension-runtime
+    /// DEL-7): adapters were handed to the generic host at build; the extras
+    /// are consumed by `build_reborn_runtime` when the channel host assembly
+    /// starts.
+    pub(crate) channel_extension_bindings: Vec<crate::input::ChannelExtensionBinding>,
+    /// The composed generic channel ingress (extension-runtime P4): the
+    /// router over the active snapshot plus the per-extension registration
+    /// surface. `None` on composition paths that do not build the generic
+    /// extension host.
+    pub(crate) extension_ingress:
+        Option<crate::extension_host::extension_ingress::ExtensionIngressParts>,
+    /// The generic delivery coordinator (extension-runtime §5.4): the sole
+    /// writer of outbound delivery state, resolving channel adapters +
+    /// policy egress from the active snapshot. `None` when the composition
+    /// path builds no channel egress transport.
+    pub(crate) delivery_coordinator: Option<Arc<ironclaw_product_workflow::DeliveryCoordinator>>,
+    /// The snapshot-backed channel delivery resolver behind the coordinator,
+    /// exposed separately for host flows (e.g. DM target provisioning) that
+    /// need one generation-pinned adapter + egress read outside a delivery.
+    // Consumed by the DM-provisioning re-point in the deletion slice.
+    #[allow(dead_code)]
+    pub(crate) channel_delivery_resolver:
+        Option<Arc<dyn ironclaw_product_workflow::ChannelDeliveryResolver>>,
+    /// Registry of beta-era channel credential bridges (§11 compatibility):
+    /// channel hosts whose secrets predate the extension-config store
+    /// register resolution ports here.
+    pub(crate) channel_egress_credential_bridges:
+        Option<Arc<crate::extension_host::channel_egress::BridgedChannelEgressCredentials>>,
 }
 
-/// Whether the background credential keepalive worker can be started, with its
-/// dependencies bundled so they cannot be partially wired.
+/// Whether the engine-owned credential keepalive sweep
+/// (`ironclaw_auth::keepalive`) can be started, with its dependencies bundled
+/// so they cannot be partially wired.
 ///
-/// The dependencies (cross-owner candidate enumeration + deployment-wide leader
-/// lock + refresh port) are only ever produced together on the durable
-/// production path. Bundling them into one `Ready` variant makes the
-/// half-configured state — which would silently disable proactive refresh —
-/// unrepresentable, so the runtime spawn site is a clean two-arm match with no
-/// "enabled but deps missing" branch to forget about.
+/// The dependencies (cross-owner candidate enumeration + recipe data +
+/// deployment-wide leader lock + refresh port) are only ever produced together
+/// on the durable production path. Bundling them into one `Ready` variant
+/// makes the half-configured state — which would silently disable proactive
+/// refresh — unrepresentable, so the runtime spawn site is a clean two-arm
+/// match with no "enabled but deps missing" branch to forget about.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) enum CredentialRefreshWorkerReady {
     /// Deps fully wired (durable production path). The only state that can start
-    /// the worker; the `enabled` policy flag still gates the actual spawn.
+    /// the sweep; the `enabled` policy flag still gates the actual spawn.
     Ready {
-        candidate_source:
-            Arc<dyn crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshCandidateSource>,
+        candidate_source: Arc<dyn ironclaw_auth::KeepaliveCandidateSource>,
+        /// Active recipe data — declares which vendors carry an idle lifetime
+        /// (`refresh.keepalive_idle_seconds`).
+        recipes: Arc<dyn ironclaw_auth::AuthRecipeResolver>,
         leader_lock: crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock,
         refresh_port: Arc<RebornProductAuthServices>,
     },
     /// Deps intentionally absent: local-dev (single-user, no cross-owner
     /// enumeration), `disabled()`, or a caller-supplied `product_auth_ports`
-    /// override/test path. The worker never starts.
+    /// override/test path. The sweep never starts.
     Absent,
+}
+
+/// Production wiring for [`RebornServices::start_channel_host_assembly`]:
+/// the run-world services and identity the per-extension channel workflows
+/// bind under, plus the prompt-enrichment ports for the run-delivery
+/// observer half.
+pub(crate) struct ChannelHostAssemblyWiring {
+    pub(crate) thread_service: Arc<dyn SessionThreadService>,
+    pub(crate) turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
+    pub(crate) approval_interaction:
+        Option<Arc<dyn ironclaw_product_workflow::ApprovalInteractionService>>,
+    pub(crate) auth_interaction: Option<Arc<dyn ironclaw_product_workflow::AuthInteractionService>>,
+    pub(crate) identity: crate::extension_host::channel_host::ChannelHostIdentity,
+    pub(crate) approval_context:
+        Option<Arc<dyn ironclaw_product_workflow::ApprovalPromptContextSource>>,
+    pub(crate) blocked_auth_prompts:
+        Option<Arc<dyn ironclaw_product_workflow::BlockedAuthPromptSource>>,
+    pub(crate) auth_flow_cancel: Option<Arc<dyn ironclaw_product_workflow::BlockedAuthFlowCancel>>,
+    pub(crate) run_delivery_settings: ironclaw_product_workflow::RunDeliverySettings,
+}
+
+/// Harness-facing wiring for
+/// [`RebornServices::start_channel_host_assembly_for_test`]: the test group
+/// supplies its own run-world services; everything else is production.
+#[cfg(any(test, feature = "test-support"))]
+pub struct ChannelHostAssemblyTestWiring {
+    pub thread_service: Arc<dyn SessionThreadService>,
+    pub turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
+    pub identity: crate::extension_host::channel_host::ChannelHostIdentity,
+    pub run_delivery_settings: ironclaw_product_workflow::RunDeliverySettings,
 }
 
 impl RebornServices {
     /// The shared scoped secret store backing this composition.
-    #[cfg_attr(
-        not(any(feature = "root-llm-provider", feature = "slack-v2-host-beta")),
-        allow(dead_code)
-    )]
+    #[cfg_attr(not(feature = "root-llm-provider"), allow(dead_code))]
     pub(crate) fn secret_store(&self) -> Arc<dyn SecretStore> {
         Arc::clone(&self.secret_store)
+    }
+
+    /// The composed generic channel ingress (router + per-extension
+    /// registration surface), when this composition path built the generic
+    /// extension host (extension-runtime P4).
+    pub fn extension_ingress_parts(
+        &self,
+    ) -> Option<crate::extension_host::extension_ingress::ExtensionIngressParts> {
+        self.extension_ingress.clone()
+    }
+
+    /// The generic delivery coordinator (extension-runtime §5.4), when this
+    /// composition path built the channel egress transport.
+    pub fn delivery_coordinator(
+        &self,
+    ) -> Option<Arc<ironclaw_product_workflow::DeliveryCoordinator>> {
+        self.delivery_coordinator.clone()
+    }
+
+    /// The generic `[channel.config]` configure port (extension-runtime
+    /// §6.4): the production surface the WebUI setup facade and the
+    /// lifecycle configure action route operator channel config through.
+    /// `None` without a local-dev runtime.
+    pub fn channel_config_facade(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_product_workflow::ChannelConfigFacade>> {
+        let service = self.local_runtime.as_ref()?.channel_config.clone()?;
+        Some(Arc::new(
+            crate::extension_host::channel_config::RebornChannelConfigFacade::new(service),
+        ))
+    }
+
+    /// Start the generic channel host assembly (extension-runtime P6 S2):
+    /// the per-extension inbound-channel reconcile loop over the generic
+    /// host's active snapshot. `None` when this composition path has no
+    /// generic host, no ingress registry, or no `[channel.config]` service
+    /// — there is nothing to reconcile against. The run-delivery observer
+    /// half follows the delivery coordinator's availability: without a
+    /// coordinator, registrations are ingress-only.
+    pub(crate) fn start_channel_host_assembly(
+        &self,
+        wiring: ChannelHostAssemblyWiring,
+    ) -> Option<Arc<crate::extension_host::channel_host::GenericChannelHostAssembly>> {
+        use crate::extension_host::channel_host::{
+            FilesystemChannelWorkflowStateFactory, GenericChannelHostDeps,
+        };
+
+        let ChannelHostAssemblyWiring {
+            thread_service,
+            turn_coordinator,
+            approval_interaction,
+            auth_interaction,
+            identity,
+            approval_context,
+            blocked_auth_prompts,
+            auth_flow_cancel,
+            run_delivery_settings,
+        } = wiring;
+        let local_runtime = self.local_runtime.as_ref()?;
+        let generic_host = local_runtime
+            .extension_management
+            .as_ref()?
+            .generic_host()?;
+        let ingress = self.extension_ingress.as_ref()?;
+        let channel_config = local_runtime.channel_config.clone()?;
+        let workflow_state = Arc::new(FilesystemChannelWorkflowStateFactory::new(Arc::clone(
+            &local_runtime.extension_filesystem,
+        )));
+        let delivery = self.delivery_coordinator.clone().map(|coordinator| {
+            crate::extension_host::channel_host::ChannelHostDeliveryDeps {
+                coordinator,
+                outbound_store: Arc::clone(&local_runtime.outbound_state),
+                route_store: Arc::clone(&local_runtime.delivered_gate_routes),
+                communication_preferences: Arc::clone(&local_runtime.outbound_preferences),
+                approval_context,
+                blocked_auth_prompts,
+                auth_flow_cancel,
+                settings: run_delivery_settings,
+            }
+        });
+
+        let identity_lookup = local_runtime
+            .channel_identity_store
+            .clone()
+            .map(|store| store as Arc<dyn crate::provider_identity::RebornUserIdentityLookup>);
+        Some(
+            crate::extension_host::channel_host::GenericChannelHostAssembly::start(
+                GenericChannelHostDeps {
+                    watch: generic_host.snapshot_watch(),
+                    registry: Arc::clone(&ingress.registry),
+                    channel_config,
+                    workflow_state,
+                    thread_service,
+                    turn_coordinator,
+                    approval_interaction,
+                    auth_interaction,
+                    identity,
+                    identity_lookup,
+                    delivery,
+                },
+            ),
+        )
+    }
+
+    /// Test-support flavor of [`Self::start_channel_host_assembly`]: the
+    /// integration harness supplies its own run-world services (thread
+    /// service, turn coordinator, identity) because the harness's runs
+    /// execute on the test group's shared turn runtime, not this composed
+    /// runtime's. Everything else (snapshot watch, ingress registry,
+    /// channel-config secret storage, workflow state substrate, delivery
+    /// coordinator + outbound stores) is the production wiring.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn start_channel_host_assembly_for_test(
+        &self,
+        wiring: ChannelHostAssemblyTestWiring,
+    ) -> Option<Arc<crate::extension_host::channel_host::GenericChannelHostAssembly>> {
+        self.start_channel_host_assembly(ChannelHostAssemblyWiring {
+            thread_service: wiring.thread_service,
+            turn_coordinator: wiring.turn_coordinator,
+            approval_interaction: None,
+            auth_interaction: None,
+            identity: wiring.identity,
+            approval_context: None,
+            blocked_auth_prompts: None,
+            auth_flow_cancel: None,
+            run_delivery_settings: wiring.run_delivery_settings,
+        })
+    }
+
+    /// The snapshot-backed channel delivery resolver behind the coordinator.
+    #[allow(dead_code)]
+    pub(crate) fn channel_delivery_resolver(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_product_workflow::ChannelDeliveryResolver>> {
+        self.channel_delivery_resolver.clone()
     }
 
     /// Test-support access to the shared scoped secret store backing the
@@ -728,28 +931,73 @@ impl RebornServices {
             as Arc<dyn ironclaw_product_workflow::InboundAttachmentReader>)
     }
 
-    /// C-JOURNEY: publish a bundled first-party WASM extension package (e.g.
-    /// github) directly into the local-dev active-extension registry + trust
-    /// policy, bypassing the multi-turn `builtin.extension_install` →
-    /// `builtin.extension_activate` capability handshake. Reaches the SAME
-    /// `ActiveExtensionPublisher::publish` step `activate()` calls
-    /// (`extension_lifecycle.rs`) — the model-visible dispatchable surface —
-    /// so a harness that needs a bundled capability (like `github.*`)
-    /// reachable for dispatch without scripting install/activate turns can
-    /// seed it at construction time. Returns `None` for production-profile
+    /// C-JOURNEY: publish a bundled first-party WASM extension package (e.g. a
+    /// WASM tool extension) directly into the local-dev active-extension
+    /// registry + trust policy, bypassing the multi-turn
+    /// `builtin.extension_install` → `builtin.extension_activate` capability
+    /// handshake. Reaches the SAME `ActiveExtensionPublisher::publish` step
+    /// `activate()` calls (`extension_lifecycle.rs`) — the model-visible
+    /// dispatchable surface — so a harness that needs a bundled tool's
+    /// capabilities reachable for dispatch without scripting install/activate
+    /// turns can seed it at construction time. Returns `None` for
+    /// production-profile
     /// compositions without a local-dev runtime (mirrors
     /// `extension_installation_store_for_test`).
     #[cfg(feature = "test-support")]
-    pub fn publish_bundled_extension_for_test(
+    pub async fn publish_bundled_extension_for_test(
         &self,
         package: &ironclaw_extensions::ExtensionPackage,
+        resolved: Option<&ironclaw_extensions::ResolvedExtensionManifest>,
     ) -> Option<Result<(), ironclaw_product_workflow::ProductWorkflowError>> {
         let extension_management = self.local_runtime.as_ref()?.extension_management.as_ref()?;
         Some(
             extension_management
-                .active_extensions_for_test()
-                .publish(package),
+                .publish_bundled_package_for_test(package, resolved)
+                .await,
         )
+    }
+
+    /// Register a static channel-egress credential mapping
+    /// `(extension_id, handle) → material`, consulted ahead of the scoped
+    /// secret store — the test stand-in for `[channel.config]` secret
+    /// storage until the configure surface lands (P6/H). Returns `false`
+    /// when this composition built no channel-egress credential bridging
+    /// (no generic extension host).
+    #[cfg(feature = "test-support")]
+    pub fn register_static_channel_egress_credentials_for_test(
+        &self,
+        entries: Vec<(String, String, ironclaw_secrets::SecretMaterial)>,
+    ) -> bool {
+        let Some(bridges) = &self.channel_egress_credential_bridges else {
+            return false;
+        };
+        bridges.register(Arc::new(
+            crate::extension_host::channel_egress::StaticChannelEgressCredentials::new(entries),
+        ));
+        true
+    }
+
+    /// The delivery coordinator's outbound stores — the SAME instances the
+    /// factory handed the coordinator (`outbound_state`), the gate-route
+    /// recorder (`delivered_gate_routes`), and the preference facade
+    /// (`outbound_preferences`). Integration proofs build generic
+    /// run-delivery components over these so observer and coordinator share
+    /// one delivery ledger. `None` without a local-dev runtime.
+    #[cfg(feature = "test-support")]
+    #[allow(clippy::type_complexity)]
+    pub fn outbound_delivery_stores_for_test(
+        &self,
+    ) -> Option<(
+        Arc<dyn ironclaw_outbound::OutboundStateStore>,
+        Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
+        Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository>,
+    )> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        Some((
+            Arc::clone(&local_runtime.outbound_state),
+            Arc::clone(&local_runtime.delivered_gate_routes),
+            Arc::clone(&local_runtime.outbound_preferences),
+        ))
     }
 }
 
@@ -799,11 +1047,8 @@ pub(crate) struct RebornLocalRuntimeServices {
     /// Settings write flips it and the next turn's selection honors the new
     /// value without a restart.
     pub(crate) skill_auto_activate_learned: Arc<AtomicBool>,
-    #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) outbound_state: Arc<dyn OutboundStateStore>,
-    #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) delivered_gate_routes: Arc<dyn DeliveredGateRouteStore>,
-    #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     pub(crate) trigger_conversation_services: InMemoryConversationServices,
@@ -870,6 +1115,25 @@ pub(crate) struct RebornLocalRuntimeServices {
     // wiring need scoped storage/registry ownership before this is reused
     // outside local-dev composition. Tracked in #4091.
     pub(crate) extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
+    /// The generic `[channel.config]` configure service (extension-runtime
+    /// §6.4–§6.5). Built with `extension_management` over the shared scoped
+    /// secret store at the channel-egress credential scope; `None` on
+    /// composition paths without extension management.
+    pub(crate) channel_config:
+        Option<Arc<crate::extension_host::channel_config::ChannelConfigService>>,
+    /// The generic durable channel-identity binding store (extension-runtime
+    /// §5.5): the channel host assembly resolves verified inbound actors
+    /// through it for auth-declaring channel extensions.
+    pub(crate) channel_identity_store:
+        Option<Arc<crate::extension_host::channel_identity_store::FilesystemChannelIdentityStore>>,
+    /// The generic per-(extension, user) DM-target store (extension-runtime
+    /// §5.4); the H.4 fold seeds it and the channel extras consume it.
+    #[allow(
+        dead_code,
+        reason = "the generic DM-target extras consume this when the channel lane cuts over"
+    )]
+    pub(crate) channel_dm_target_store:
+        Option<Arc<crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub(crate) host_runtime_http_egress: Option<HostRuntimeHttpEgressPort>,
     pub(crate) skill_mounts: MountView,
@@ -877,11 +1141,6 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) system_extensions_lifecycle_mounts: MountView,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     pub(crate) workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
-    #[cfg(all(
-        any(feature = "libsql", feature = "postgres"),
-        feature = "slack-v2-host-beta"
-    ))]
-    pub(crate) host_state_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) subagent_goal_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     /// Tenant-scoped root filesystem used for third-party extension hook
@@ -1027,6 +1286,11 @@ impl RebornServices {
             local_dev_wasm_runtime_credential_provider_captured: false,
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             credential_refresh_worker: CredentialRefreshWorkerReady::Absent,
+            channel_extension_bindings: Vec::new(),
+            extension_ingress: None,
+            delivery_coordinator: None,
+            channel_delivery_resolver: None,
+            channel_egress_credential_bridges: None,
         }
     }
 }
@@ -1098,11 +1362,11 @@ fn compose_product_auth_services(
     if let Some(sink) = security_audit_sink {
         services = services.with_security_audit_sink(sink);
     }
-    if let Some(registry) = provider_composition.dcr_registry {
-        services = services.with_dcr_oauth_registry(registry);
+    if let Some(engine) = provider_composition.engine {
+        services = services.with_auth_engine(engine);
     }
-    if let Some(registry) = provider_composition.gate_registry {
-        services = services.with_oauth_gate_registry(registry);
+    if let Some(driver) = provider_composition.gate_driver {
+        services = services.with_oauth_gate_driver(driver);
     }
     if let Some(scope) = nearai_mcp_host_managed_scope {
         services = services.with_host_managed_nearai_credential_scope(scope)?;
@@ -1131,8 +1395,6 @@ fn production_config(
 /// backend through `RebornStorageInput::HostedSingleTenantPostgres`; local-dev
 /// keeps its historical local filesystem/libSQL default.
 async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, RebornBuildError> {
-    #[cfg(all(test, feature = "slack-v2-host-beta"))]
-    let host_runtime_http_egress_for_test = input.host_runtime_http_egress_for_test.clone();
     #[cfg(any(test, feature = "test-support"))]
     let network_http_egress_for_test = input.network_http_egress_for_test.clone();
     let RebornBuildInput {
@@ -1142,10 +1404,10 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         runtime_process_binding,
         product_auth_ports,
         oauth_provider_configs,
-        oauth_dcr_provider_configs,
-        #[cfg(feature = "slack-v2-host-beta")]
-        slack_personal_oauth_lazy_slot,
+        oauth_dcr_callback,
         nearai_mcp_bootstrap_config,
+        native_extension_factories,
+        channel_extension_bindings,
         owner_id,
         local_runtime_identity,
         turn_state_store_limits,
@@ -1355,6 +1617,9 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         owner_user_id.clone(),
         local_runtime_identity_for_nearai_mcp.as_ref(),
     )?;
+    // Same local-dev deployment identity anchors channel egress credentials
+    // ([channel.config] secret handles) and their vendor calls.
+    let channel_egress_scope = nearai_mcp_owner_scope.clone();
     let mut store_graph = build_local_dev_store_graph(RebornLocalDevStoreGraphInput {
         filesystem: Arc::clone(&filesystem),
         owner_user_id,
@@ -1444,17 +1709,13 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         )?
     } else {
         services.try_with_host_http_egress_with_body_store(
-            ironclaw_network::PolicyNetworkHttpEgress::new(
-                ironclaw_network::ReqwestNetworkTransport::default(),
-            ),
+            default_host_http_egress()?,
             http_body_filesystem,
         )?
     };
     #[cfg(not(any(test, feature = "test-support")))]
     let services = services.try_with_host_http_egress_with_body_store(
-        ironclaw_network::PolicyNetworkHttpEgress::new(
-            ironclaw_network::ReqwestNetworkTransport::default(),
-        ),
+        default_host_http_egress()?,
         http_body_filesystem,
     )?;
     let mut services = services
@@ -1477,15 +1738,18 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     services = apply_runtime_process_binding(services, runtime_process_binding);
     services = attach_hosted_mcp_runtime(services)?;
     let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
+    // The auth engine's client-credential fallback over the operator channel
+    // configuration: the configure service is built after the engine (its
+    // durable stores land below), so the engine holds a slot filled once the
+    // service exists.
+    let channel_config_credential_slot =
+        crate::product_auth::credentials::product_auth_providers::ChannelConfigCredentialSlot::default();
     let provider_composition = compose_provider_client(
         oauth_provider_configs,
-        oauth_dcr_provider_configs,
+        oauth_dcr_callback,
         Arc::clone(&secret_store),
         product_auth_runtime_ports.clone(),
-        #[cfg(feature = "slack-v2-host-beta")]
-        slack_personal_oauth_lazy_slot,
-        #[cfg(not(feature = "slack-v2-host-beta"))]
-        None,
+        channel_config_credential_slot.clone(),
     )?;
     let security_audit_sink = services.security_audit_sink();
     let nearai_mcp_host_managed_scope =
@@ -1540,12 +1804,12 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                 )
                 .with_provider_client(Arc::clone(&provider_client))
                 .with_flow_record_source(durable_services);
-                let services = match provider_composition.dcr_registry.clone() {
-                    Some(registry) => services.with_dcr_oauth_registry(registry),
+                let services = match provider_composition.engine.clone() {
+                    Some(engine) => services.with_auth_engine(engine),
                     None => services,
                 };
-                let services = match provider_composition.gate_registry.clone() {
-                    Some(registry) => services.with_oauth_gate_registry(registry),
+                let services = match provider_composition.gate_driver.clone() {
+                    Some(driver) => services.with_oauth_gate_driver(driver),
                     None => services,
                 };
                 let services = match security_audit_sink.clone() {
@@ -1570,21 +1834,16 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                     Some(provider_client) => services.with_provider_client(provider_client),
                     None => services,
                 };
-                let services = match provider_composition.dcr_registry.clone() {
-                    Some(registry) => services.with_dcr_oauth_registry(registry),
+                let services = match provider_composition.engine.clone() {
+                    Some(engine) => services.with_auth_engine(engine),
                     None => services,
                 };
                 let services = match security_audit_sink.clone() {
                     Some(sink) => services.with_security_audit_sink(sink),
                     None => services,
                 };
-                let services = match provider_composition.gate_registry.clone() {
-                    Some(registry) => services.with_oauth_gate_registry(registry),
-                    None => services,
-                };
-                #[cfg(feature = "slack-v2-host-beta")]
-                let services = match provider_composition.slack_gate_registry.clone() {
-                    Some(registry) => services.with_slack_oauth_gate_registry(registry),
+                let services = match provider_composition.gate_driver.clone() {
+                    Some(driver) => services.with_oauth_gate_driver(driver),
                     None => services,
                 };
                 Arc::new(services.with_host_managed_nearai_credential_scope(
@@ -1663,15 +1922,64 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     )
     .await?;
     nearai_mcp_bootstrap_outcome.log_completion();
+    // The generic `[channel.config]` configure service (extension-runtime
+    // §6.4–§6.5): non-secret values persist on the durable installation
+    // store; secret values land in the shared scoped secret store at the
+    // channel-egress credential scope, where the egress credential fallback
+    // resolves them with no bridge. The management port runs the §6.5
+    // reactivate cycle for saves against an active extension.
+    let channel_config_service = Arc::new(
+        crate::extension_host::channel_config::ChannelConfigService::new(
+            extension_management.installation_store_handle(),
+            Arc::clone(&secret_store),
+            channel_egress_scope.clone(),
+            Arc::clone(&extension_management)
+                as Arc<dyn crate::extension_host::channel_config::ChannelConfigReactivation>,
+        ),
+    );
+    channel_config_credential_slot.fill(Arc::clone(&channel_config_service));
+    // The generic channel-identity and DM-target stores (extension-runtime
+    // §5.4–§5.5): the fold below seeds them from retired lane state, and the
+    // channel host assembly resolves verified inbound actors through them.
+    let fold_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
+    let channel_identity_store = Arc::new(
+        crate::extension_host::channel_identity_store::FilesystemChannelIdentityStore::new(
+            Arc::clone(&fold_filesystem),
+            channel_egress_scope.tenant_id.clone(),
+            channel_egress_scope.user_id.clone(),
+        ),
+    );
+    let channel_dm_target_store = Arc::new(
+        crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore::new(
+            Arc::clone(&fold_filesystem),
+            channel_egress_scope.tenant_id.clone(),
+            channel_egress_scope.user_id.clone(),
+        ),
+    );
+    // One-time load-time folds (extension-runtime H.3/H.4): retired
+    // channel-lane state folds onto the generic channel storage. Idempotent
+    // per boot; never fails the build.
+    crate::extension_host::channel_state_folds::fold_retired_slack_channel_state(
+        &crate::extension_host::channel_state_folds::RetiredChannelStateFoldInputs {
+            filesystem: fold_filesystem,
+            installation_store: extension_management.installation_store_handle(),
+            secret_store: Arc::clone(&secret_store),
+            legacy_secret_scope: channel_egress_scope.clone(),
+            channel_config_secret_scope: channel_egress_scope.clone(),
+            identity_store: Arc::clone(&channel_identity_store),
+            dm_targets: Arc::clone(&channel_dm_target_store),
+        },
+    )
+    .await;
     if let Some(local_runtime) = Arc::get_mut(&mut store_graph.local_runtime) {
         local_runtime.extension_management = Some(Arc::clone(&extension_management));
+        local_runtime.channel_config = Some(channel_config_service);
+        local_runtime.channel_identity_store = Some(channel_identity_store);
+        local_runtime.channel_dm_target_store = Some(channel_dm_target_store);
         local_runtime.runtime_http_egress = Some(product_auth_runtime_ports.runtime_http_egress());
         local_runtime.extension_registry = Arc::clone(&extension_registry);
         local_runtime.shared_extension_registry = Some(services.shared_extension_registry());
         let host_runtime_http_egress = services.host_runtime_http_egress_port();
-        #[cfg(all(test, feature = "slack-v2-host-beta"))]
-        let host_runtime_http_egress =
-            host_runtime_http_egress_for_test.unwrap_or(host_runtime_http_egress);
         local_runtime.host_runtime_http_egress = host_runtime_http_egress;
         // Attach the admin secret provisioner now the secret-store crypto is
         // built (the store graph was constructed before it existed).
@@ -1715,6 +2023,128 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     })?;
     services = services.with_first_party_capabilities(Arc::new(first_party_registry));
 
+    // Generic extension host (extension-runtime P2): loaders over the fully
+    // configured runtime lanes, hydrated from the facade's durable state.
+    // From here extension dispatch resolves from the host's active snapshot;
+    // the registry lane serves built-ins only.
+    let (
+        extension_ingress,
+        delivery_coordinator,
+        channel_delivery_resolver,
+        channel_egress_credential_bridges,
+    ) = {
+        let reserved_capability_ids: std::collections::BTreeSet<_> = services
+            .shared_extension_registry()
+            .snapshot()
+            .capabilities()
+            .filter(|descriptor| {
+                descriptor.provider.as_str() == ironclaw_host_runtime::BUILTIN_FIRST_PARTY_PROVIDER
+            })
+            .map(|descriptor| descriptor.id.clone())
+            .collect();
+        let channel_egress_credentials = Arc::new(
+            crate::extension_host::channel_egress::BridgedChannelEgressCredentials::new(Arc::new(
+                crate::extension_host::channel_egress::SecretStoreChannelEgressCredentials::new(
+                    Arc::clone(&secret_store),
+                    channel_egress_scope.clone(),
+                ),
+            )),
+        );
+        let channel_egress_credential_bridges = Arc::clone(&channel_egress_credentials);
+        // Use the SAME effective port the rest of the runtime egresses
+        // through (test overrides included) — a transport on a different
+        // port would silently bypass recording/replay harnesses.
+        let channel_egress_transport = store_graph
+            .local_runtime
+            .host_runtime_http_egress
+            .clone()
+            .map(|port| {
+                Arc::new(
+                    crate::extension_host::channel_egress::HostRuntimeChannelEgressTransport::new(
+                        port,
+                        channel_egress_credentials,
+                        channel_egress_scope.clone(),
+                    ),
+                )
+                    as Arc<dyn ironclaw_extension_host::egress::ChannelEgressTransport>
+            });
+        let generic = crate::extension_host::generic_host::build_generic_extension_host(
+            crate::extension_host::generic_host::GenericExtensionHostParams {
+                binder: services.extension_lane_tool_binder(),
+                native_factories: native_extension_factories,
+                channel_adapters: channel_extension_bindings
+                    .iter()
+                    .map(|binding| (binding.extension_id.clone(), Arc::clone(&binding.adapter)))
+                    .collect(),
+                installation_store: store_graph
+                    .local_runtime
+                    .extension_management
+                    .as_ref()
+                    .map(|management| management.installation_store_handle())
+                    .ok_or_else(|| RebornBuildError::InvalidConfig {
+                        reason: "generic extension host requires extension management".to_string(),
+                    })?,
+                governor: Arc::clone(&store_graph.resource_governor)
+                    as Arc<dyn ironclaw_resources::ResourceGovernor>,
+                reserved_capability_ids,
+                reserved_ingress_routes:
+                    crate::extension_host::extension_ingress::reserved_fixed_ingress_routes(),
+                channel_egress_transport: channel_egress_transport.clone(),
+            },
+        )
+        .await?;
+        if let Some(management) = store_graph.local_runtime.extension_management.as_ref() {
+            management.attach_generic_host(Arc::clone(&generic.host));
+            // A fresh ports handle: the one built earlier predates the
+            // credential-account resolver wiring, and discovery staging
+            // needs the resolver.
+            if let Some(ports) = services.product_auth_provider_runtime_ports() {
+                management.attach_discovery_runtime_ports(ports);
+            }
+        }
+        services.set_extension_tool_resolver(generic.resolver);
+        // Generic channel ingress (extension-runtime P4): one router over
+        // the host's snapshot watch; the serve layer mounts it once.
+        let ingress_parts = crate::extension_host::extension_ingress::build_extension_ingress(
+            generic.host.snapshot_watch(),
+        );
+        // The delivery coordinator (§5.4): sole delivery-state writer over
+        // the SAME transport the host's channel hooks egress through and the
+        // SAME reply-context store the ingress router writes (ING-11).
+        // Interrupted (`Sending`) attempts from prior lifetimes are
+        // reconciled lazily per scope before that scope's first delivery.
+        let (delivery_coordinator, channel_delivery_resolver) = match channel_egress_transport {
+            Some(transport) => {
+                let resolver: Arc<dyn ironclaw_product_workflow::ChannelDeliveryResolver> =
+                    Arc::new(
+                        crate::extension_host::channel_delivery::SnapshotChannelDeliveryResolver::new(
+                            generic.host.snapshot_watch(),
+                            transport,
+                        ),
+                    );
+                let coordinator = Arc::new(ironclaw_product_workflow::DeliveryCoordinator::new(
+                    Arc::clone(&store_graph.local_runtime.outbound_state)
+                        as Arc<dyn ironclaw_outbound::OutboundStateStore>,
+                    Arc::clone(&resolver),
+                    Arc::new(
+                        crate::extension_host::channel_delivery::IngressReplyContextSource::new(
+                            Arc::clone(&ingress_parts.reply_context),
+                        ),
+                    ),
+                    ironclaw_product_workflow::DeliveryRetryPolicy::default(),
+                ));
+                (Some(coordinator), Some(resolver))
+            }
+            None => (None, None),
+        };
+        (
+            Some(ingress_parts),
+            delivery_coordinator,
+            channel_delivery_resolver,
+            Some(channel_egress_credential_bridges),
+        )
+    };
+
     #[cfg(any(test, feature = "test-support"))]
     let local_dev_wasm_runtime_credential_provider_captured =
         services.wasm_runtime_credential_provider_captured_for_test();
@@ -1740,6 +2170,11 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         // Local-dev is single-user; no cross-owner enumeration or leader lock needed.
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         credential_refresh_worker: CredentialRefreshWorkerReady::Absent,
+        channel_extension_bindings,
+        extension_ingress,
+        delivery_coordinator,
+        channel_delivery_resolver,
+        channel_egress_credential_bridges,
     })
 }
 
@@ -2171,8 +2606,6 @@ async fn build_local_dev_store_graph(
                 reason: error.to_string(),
             }
         })?;
-    #[cfg(feature = "slack-v2-host-beta")]
-    let host_state_filesystem = local_dev_slack_host_state_filesystem(Arc::clone(&filesystem));
     let extension_lifecycle_surface_context = local_dev_extension_lifecycle_surface_context(
         owner_user_id.clone(),
         local_runtime_identity.as_ref(),
@@ -2196,11 +2629,8 @@ async fn build_local_dev_store_graph(
         project_service: Arc::new(RebornProjectService::new(Arc::clone(&project_repository))),
         outbound_preferences: outbound_stores.outbound_preferences,
         skill_auto_activate_learned: Arc::new(AtomicBool::new(true)),
-        #[cfg(feature = "slack-v2-host-beta")]
         outbound_state: outbound_stores.outbound_state,
-        #[cfg(feature = "slack-v2-host-beta")]
         delivered_gate_routes: outbound_stores.delivered_gate_routes,
-        #[cfg(feature = "slack-v2-host-beta")]
         triggered_run_delivery: outbound_stores.triggered_run_delivery,
         #[cfg(not(any(feature = "libsql", feature = "postgres")))]
         trigger_conversation_services,
@@ -2217,6 +2647,9 @@ async fn build_local_dev_store_graph(
         budget_gate_store,
         skill_management,
         extension_management: None,
+        channel_config: None,
+        channel_identity_store: None,
+        channel_dm_target_store: None,
         runtime_http_egress: None,
         host_runtime_http_egress: None,
         skill_mounts,
@@ -2224,8 +2657,6 @@ async fn build_local_dev_store_graph(
         system_extensions_lifecycle_mounts,
         skill_filesystem,
         workspace_filesystem,
-        #[cfg(feature = "slack-v2-host-beta")]
-        host_state_filesystem,
         subagent_goal_filesystem: Arc::clone(&scoped_filesystem),
         identity_filesystem: Arc::clone(&scoped_filesystem),
         // Set later in `build_local_runtime`, once the secret-store crypto
@@ -2321,8 +2752,6 @@ async fn build_local_dev_store_graph(
                 reason: error.to_string(),
             }
         })?;
-    #[cfg(all(feature = "postgres", feature = "slack-v2-host-beta"))]
-    let host_state_filesystem = local_dev_slack_host_state_filesystem(Arc::clone(&filesystem));
     let extension_lifecycle_surface_context = local_dev_extension_lifecycle_surface_context(
         owner_user_id.clone(),
         local_runtime_identity.as_ref(),
@@ -2348,11 +2777,8 @@ async fn build_local_dev_store_graph(
         project_service: Arc::new(RebornProjectService::new(Arc::clone(&project_repository))),
         outbound_preferences: outbound_stores.outbound_preferences,
         skill_auto_activate_learned: Arc::new(AtomicBool::new(true)),
-        #[cfg(feature = "slack-v2-host-beta")]
         outbound_state: outbound_stores.outbound_state,
-        #[cfg(feature = "slack-v2-host-beta")]
         delivered_gate_routes: outbound_stores.delivered_gate_routes,
-        #[cfg(feature = "slack-v2-host-beta")]
         triggered_run_delivery: outbound_stores.triggered_run_delivery,
         #[cfg(not(any(feature = "libsql", feature = "postgres")))]
         trigger_conversation_services,
@@ -2369,6 +2795,9 @@ async fn build_local_dev_store_graph(
         budget_gate_store,
         skill_management,
         extension_management: None,
+        channel_config: None,
+        channel_identity_store: None,
+        channel_dm_target_store: None,
         runtime_http_egress: None,
         host_runtime_http_egress: None,
         skill_mounts,
@@ -3284,11 +3713,8 @@ fn local_dev_scoped_filesystem(
 /// See docs/plans/2026-05-29-trigger-loop-delivery-resolution-implementation.md.
 pub(crate) struct LocalDevOutboundStores {
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
-    #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) outbound_state: Arc<dyn OutboundStateStore>,
-    #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) delivered_gate_routes: Arc<dyn DeliveredGateRouteStore>,
-    #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
 }
 
@@ -3306,11 +3732,8 @@ fn local_dev_outbound_store(filesystem: Arc<LocalDevRootFilesystem>) -> LocalDev
     );
     LocalDevOutboundStores {
         outbound_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
-        #[cfg(feature = "slack-v2-host-beta")]
         outbound_state: Arc::clone(&store) as Arc<dyn OutboundStateStore>,
-        #[cfg(feature = "slack-v2-host-beta")]
         delivered_gate_routes: Arc::clone(&store) as Arc<dyn DeliveredGateRouteStore>,
-        #[cfg(feature = "slack-v2-host-beta")]
         triggered_run_delivery: store as Arc<dyn TriggeredRunDeliveryStore>,
     }
 }
@@ -3329,26 +3752,10 @@ fn local_dev_outbound_store(_filesystem: Arc<LocalDevRootFilesystem>) -> LocalDe
     let outbound = Arc::new(InMemoryOutboundStateStore::default());
     LocalDevOutboundStores {
         outbound_preferences: Arc::clone(&outbound) as Arc<dyn CommunicationPreferenceRepository>,
-        #[cfg(feature = "slack-v2-host-beta")]
         outbound_state: outbound as Arc<dyn OutboundStateStore>,
-        #[cfg(feature = "slack-v2-host-beta")]
         delivered_gate_routes: Arc::new(InMemoryDeliveredGateRouteStore::default()),
-        #[cfg(feature = "slack-v2-host-beta")]
         triggered_run_delivery: Arc::new(InMemoryTriggeredRunDeliveryStore::default()),
     }
-}
-
-#[cfg(all(
-    any(feature = "libsql", feature = "postgres"),
-    feature = "slack-v2-host-beta"
-))]
-fn local_dev_slack_host_state_filesystem(
-    filesystem: Arc<LocalDevRootFilesystem>,
-) -> Arc<ScopedFilesystem<LocalDevRootFilesystem>> {
-    Arc::new(ScopedFilesystem::new(
-        filesystem,
-        crate::slack_host_state_mount_view,
-    ))
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -3612,149 +4019,45 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
         local_dev_capability_policy().map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("local-dev capability policy is invalid: {error}"),
         })?;
-    #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(unused_mut))]
-    let mut entries = vec![
-        AdminEntry::for_local_manifest(
-            policy.provider.id,
-            policy.provider.manifest_path,
-            None,
-            HostTrustAssignment::first_party(),
-            // Sourced from local_dev_capability_policy.toml `[provider]
-            // authority_effects`, which includes `external_write` — required by
-            // builtin.trace_commons.onboard (operator-invite enrollment posts to
-            // an external onboarding server).
-            policy.provider.authority_effects,
-            None,
-        ),
-        AdminEntry::for_local_manifest(
-            PackageId::new("web-access").map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("Web Access first-party package id is invalid: {error}"),
-            })?,
-            "/system/extensions/web-access/manifest.toml".to_string(),
-            Some(web_access_manifest_digest()),
-            HostTrustAssignment::first_party(),
-            web_access_allowed_effects(),
-            None,
-        ),
-        AdminEntry::for_local_manifest(
-            PackageId::new("google-calendar").map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("Google Calendar first-party package id is invalid: {error}"),
-            })?,
-            "/system/extensions/google-calendar/manifest.toml".to_string(),
-            Some(google_calendar_manifest_digest()),
-            HostTrustAssignment::first_party(),
-            gsuite_allowed_effects(),
-            None,
-        ),
-        AdminEntry::for_local_manifest(
-            PackageId::new("google-docs").map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("Google Docs first-party package id is invalid: {error}"),
-            })?,
-            "/system/extensions/google-docs/manifest.toml".to_string(),
-            Some(google_docs_manifest_digest()),
-            HostTrustAssignment::first_party(),
-            gsuite_allowed_effects(),
-            None,
-        ),
-        AdminEntry::for_local_manifest(
-            PackageId::new("google-drive").map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("Google Drive first-party package id is invalid: {error}"),
-            })?,
-            "/system/extensions/google-drive/manifest.toml".to_string(),
-            Some(google_drive_manifest_digest()),
-            HostTrustAssignment::first_party(),
-            gsuite_allowed_effects(),
-            None,
-        ),
-        AdminEntry::for_local_manifest(
-            PackageId::new("google-sheets").map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("Google Sheets first-party package id is invalid: {error}"),
-            })?,
-            "/system/extensions/google-sheets/manifest.toml".to_string(),
-            Some(google_sheets_manifest_digest()),
-            HostTrustAssignment::first_party(),
-            gsuite_allowed_effects(),
-            None,
-        ),
-        AdminEntry::for_local_manifest(
-            PackageId::new("google-slides").map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("Google Slides first-party package id is invalid: {error}"),
-            })?,
-            "/system/extensions/google-slides/manifest.toml".to_string(),
-            Some(google_slides_manifest_digest()),
-            HostTrustAssignment::first_party(),
-            gsuite_allowed_effects(),
-            None,
-        ),
-        AdminEntry::for_local_manifest(
-            PackageId::new("gmail").map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("Gmail first-party package id is invalid: {error}"),
-            })?,
-            "/system/extensions/gmail/manifest.toml".to_string(),
-            Some(gmail_manifest_digest()),
-            HostTrustAssignment::first_party(),
-            gsuite_allowed_effects(),
-            None,
-        ),
-        AdminEntry::for_local_manifest(
-            PackageId::new("notion").map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("Notion MCP first-party package id is invalid: {error}"),
-            })?,
-            "/system/extensions/notion/manifest.toml".to_string(),
-            Some(notion_mcp_manifest_digest()),
-            HostTrustAssignment::first_party(),
-            notion_mcp_allowed_effects(),
-            None,
-        ),
-    ];
-    #[cfg(feature = "slack-v2-host-beta")]
-    entries.push(AdminEntry::for_local_manifest(
-        PackageId::new("slack").map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("Slack personal first-party package id is invalid: {error}"),
-        })?,
-        "/system/extensions/slack/manifest.toml".to_string(),
-        Some(slack_manifest_digest()),
-        HostTrustAssignment::first_party(),
-        slack_user_allowed_effects(),
+    let mut entries = vec![AdminEntry::for_local_manifest(
+        policy.provider.id,
+        policy.provider.manifest_path,
         None,
-    ));
+        HostTrustAssignment::first_party(),
+        // Sourced from local_dev_capability_policy.toml `[provider]
+        // authority_effects`, which includes `external_write` — required by
+        // builtin.trace_commons.onboard (operator-invite enrollment posts to
+        // an external onboarding server).
+        policy.provider.authority_effects,
+        None,
+    )];
+    // Packages migrated to the self-contained inventory supply their own trust
+    // grant as data (`PackageBundle::trust_effects`); composition still owns the
+    // decision (`first_party`) and the policy construction. Each entry is
+    // byte-identical to the explicit one it replaced — same id, local-manifest
+    // path, manifest digest, and effect list. Packages with `None` (WASM tools,
+    // channel-only) draw trust from the extension registry instead and are
+    // skipped here.
+    for bundle in ironclaw_first_party_extensions::packages::bundled_packages() {
+        let Some(effects) = bundle.trust_effects else {
+            continue;
+        };
+        entries.push(AdminEntry::for_local_manifest(
+            PackageId::new(bundle.id).map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("first-party package id '{}' is invalid: {error}", bundle.id),
+            })?,
+            format!("/system/extensions/{}/manifest.toml", bundle.id),
+            Some(sha256_digest_token(bundle.manifest_toml.as_bytes())),
+            HostTrustAssignment::first_party(),
+            effects,
+            None,
+        ));
+    }
     HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(entries))]).map_err(|error| {
         RebornBuildError::InvalidConfig {
             reason: format!("built-in first-party trust policy is invalid: {error}"),
         }
     })
-}
-
-fn gsuite_allowed_effects() -> Vec<EffectKind> {
-    vec![
-        EffectKind::DispatchCapability,
-        EffectKind::Network,
-        EffectKind::UseSecret,
-        EffectKind::ExternalWrite,
-    ]
-}
-
-#[cfg(feature = "slack-v2-host-beta")]
-fn slack_user_allowed_effects() -> Vec<EffectKind> {
-    vec![
-        EffectKind::DispatchCapability,
-        EffectKind::Network,
-        EffectKind::UseSecret,
-        EffectKind::ExternalWrite,
-    ]
-}
-
-fn web_access_allowed_effects() -> Vec<EffectKind> {
-    vec![EffectKind::DispatchCapability, EffectKind::Network]
-}
-
-fn notion_mcp_allowed_effects() -> Vec<EffectKind> {
-    vec![
-        EffectKind::DispatchCapability,
-        EffectKind::Network,
-        EffectKind::UseSecret,
-        EffectKind::ExternalWrite,
-    ]
 }
 
 #[cfg(all(test, any(feature = "libsql", feature = "postgres")))]
@@ -3785,16 +4088,14 @@ async fn build_production_shaped(
         required_runtime_backends,
         require_runtime_http_egress,
         require_wasm_credentials,
-        #[cfg(all(test, feature = "slack-v2-host-beta"))]
-            host_runtime_http_egress_for_test: _,
         #[cfg(any(test, feature = "test-support"))]
             network_http_egress_for_test: _,
         product_auth_ports,
         oauth_provider_configs,
-        oauth_dcr_provider_configs,
-        #[cfg(feature = "slack-v2-host-beta")]
-        slack_personal_oauth_lazy_slot,
+        oauth_dcr_callback,
         nearai_mcp_bootstrap_config: _,
+        native_extension_factories: _,
+        channel_extension_bindings: _,
         turn_state_store_limits,
     } = input;
     #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -3815,12 +4116,9 @@ async fn build_production_shaped(
         local_runtime_identity,
         product_auth_ports,
         oauth_provider_configs,
-        oauth_dcr_provider_configs,
+        oauth_dcr_callback,
         turn_state_store_limits,
     );
-    #[cfg(feature = "slack-v2-host-beta")]
-    let _ = slack_personal_oauth_lazy_slot;
-
     match storage {
         RebornStorageInput::Disabled | RebornStorageInput::LocalDev { .. } => {
             Err(RebornBuildError::InvalidConfig {
@@ -3868,9 +4166,7 @@ async fn build_production_shaped(
                 production_wiring,
                 product_auth_ports,
                 oauth_provider_configs,
-                oauth_dcr_provider_configs,
-                #[cfg(feature = "slack-v2-host-beta")]
-                slack_personal_oauth_lazy_slot,
+                oauth_dcr_callback,
                 owner_id,
                 local_runtime_identity,
                 turn_state_store_limits,
@@ -3915,9 +4211,7 @@ async fn build_production_shaped(
                 production_wiring,
                 product_auth_ports,
                 oauth_provider_configs,
-                oauth_dcr_provider_configs,
-                #[cfg(feature = "slack-v2-host-beta")]
-                slack_personal_oauth_lazy_slot,
+                oauth_dcr_callback,
                 owner_id,
                 local_runtime_identity,
                 turn_state_store_limits,
@@ -3960,10 +4254,7 @@ struct RebornProductionBuildContext {
     production_wiring: RebornProductionWiring,
     product_auth_ports: Option<RebornProductAuthServicePorts>,
     oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
-    oauth_dcr_provider_configs: Vec<crate::input::OAuthDcrProviderBackendConfig>,
-    #[cfg(feature = "slack-v2-host-beta")]
-    slack_personal_oauth_lazy_slot:
-        Option<crate::slack::slack_setup::SlackPersonalSetupServiceSlot>,
+    oauth_dcr_callback: Option<crate::input::OAuthDcrCallbackConfig>,
     owner_id: String,
     local_runtime_identity: Option<RebornLocalRuntimeIdentity>,
     turn_state_store_limits: ironclaw_turns::InMemoryTurnStateStoreLimits,
@@ -4267,9 +4558,11 @@ where
 
     let services = services
         .try_with_host_http_egress_with_body_store(
-            ironclaw_network::PolicyNetworkHttpEgress::new(
-                ironclaw_network::ReqwestNetworkTransport::default(),
-            ),
+            default_host_http_egress().map_err(|error| {
+                crate::RebornCompositionError::InvalidConfig {
+                    reason: error.to_string(),
+                }
+            })?,
             Arc::clone(&scoped_filesystem),
         )
         .map_err(crate::RebornCompositionError::from)?;
@@ -4445,9 +4738,7 @@ where
         production_wiring,
         product_auth_ports,
         oauth_provider_configs,
-        oauth_dcr_provider_configs,
-        #[cfg(feature = "slack-v2-host-beta")]
-        slack_personal_oauth_lazy_slot,
+        oauth_dcr_callback,
         owner_id,
         local_runtime_identity,
         turn_state_store_limits,
@@ -4545,9 +4836,7 @@ where
     .with_credential_broker(stores.secret_credentials.credential_broker)
     .with_security_audit_sink(Arc::new(ironclaw_events::TracingSecurityAuditSink))
     .try_with_host_http_egress_with_body_store(
-        ironclaw_network::PolicyNetworkHttpEgress::new(
-            ironclaw_network::ReqwestNetworkTransport::default(),
-        ),
+        default_host_http_egress()?,
         Arc::clone(&stores.scoped_filesystem),
     )?
     .with_resource_governor(Arc::clone(&resource_governor))
@@ -4558,15 +4847,14 @@ where
     .with_turn_run_wake_notifier_dyn(production_wiring.turn_run_wake_notifier);
     let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
     let services = attach_hosted_mcp_runtime(services)?;
+    // The production-shaped path has no `[channel.config]` configure service
+    // yet; the engine's fallback slot stays unfilled (resolves nothing).
     let provider_composition = compose_provider_client(
         oauth_provider_configs,
-        oauth_dcr_provider_configs,
+        oauth_dcr_callback,
         Arc::clone(&secret_store),
         product_auth_runtime_ports.clone(),
-        #[cfg(feature = "slack-v2-host-beta")]
-        slack_personal_oauth_lazy_slot,
-        #[cfg(not(feature = "slack-v2-host-beta"))]
-        None,
+        crate::product_auth::credentials::product_auth_providers::ChannelConfigCredentialSlot::default(),
     )?;
     let services = apply_production_runtime_process_binding(
         services,
@@ -4576,13 +4864,13 @@ where
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
         Arc::new(services.turn_coordinator_for_production()?);
-    // B1: track the durable FilesystemAuthProductServices so the credential-
-    // refresh worker can enumerate candidates across all owners.  When a
+    // B1: track the durable FilesystemAuthProductServices so the engine
+    // keepalive sweep can enumerate candidates across all owners. When a
     // caller pre-supplies product_auth_ports, we do not create a durable
-    // instance here, so the candidate source is None (worker finds no
+    // instance here, so the candidate source is None (sweep finds no
     // candidates, which is safe for override/test callers).
     let credential_refresh_candidate_source: Option<
-        Arc<dyn crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshCandidateSource>,
+        Arc<dyn ironclaw_auth::KeepaliveCandidateSource>,
     >;
     let product_auth_ports = match product_auth_ports {
         Some(ports) => {
@@ -4605,8 +4893,8 @@ where
                     "migrated retired slack_personal credential accounts to provider `slack`"
                 );
             }
-            credential_refresh_candidate_source = Some(Arc::clone(&durable)
-                as Arc<dyn crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshCandidateSource>);
+            credential_refresh_candidate_source =
+                Some(Arc::clone(&durable) as Arc<dyn ironclaw_auth::KeepaliveCandidateSource>);
             RebornProductAuthServicePorts::from_shared_with_provider(
                 durable,
                 provider_composition
@@ -4616,6 +4904,13 @@ where
             )
         }
     };
+    // The sweep resolves per-vendor idle lifetimes through the same recipe
+    // data the auth engine executes; capture it before `provider_composition`
+    // moves into `compose_product_auth_services`.
+    let keepalive_recipes = provider_composition
+        .engine
+        .as_ref()
+        .map(|engine| Arc::clone(engine.recipes()));
     let product_auth_services = compose_product_auth_services(
         product_auth_ports,
         turn_coordinator.clone(),
@@ -4632,17 +4927,19 @@ where
         // preserves this builder's prior behavior of never attaching it.
         None,
     )?;
-    // Bundle the keepalive worker deps so they are wired all-or-nothing. The
+    // Bundle the keepalive sweep deps so they are wired all-or-nothing. The
     // candidate source is present only when this path built a durable instance
-    // (no caller-supplied product_auth_ports); the leader lock and refresh port
-    // are always available here.
-    let credential_refresh_worker = match credential_refresh_candidate_source {
-        Some(candidate_source) => CredentialRefreshWorkerReady::Ready {
+    // (no caller-supplied product_auth_ports); recipes are present only when
+    // the auth engine was composed; the leader lock and refresh port are
+    // always available here.
+    let credential_refresh_worker = match (credential_refresh_candidate_source, keepalive_recipes) {
+        (Some(candidate_source), Some(recipes)) => CredentialRefreshWorkerReady::Ready {
             candidate_source,
+            recipes,
             leader_lock,
             refresh_port: Arc::clone(&product_auth_services),
         },
-        None => CredentialRefreshWorkerReady::Absent,
+        _ => CredentialRefreshWorkerReady::Absent,
     };
     let product_auth_ready = true;
     // Wire ProductAuthAccount runtime credential resolver before
@@ -4694,6 +4991,13 @@ where
         // caller-supplied product_auth_ports override); `Absent` otherwise. The
         // leader lock is always available on this production path.
         credential_refresh_worker,
+        // The production composition path does not build the generic
+        // extension host yet; the generic ingress mounts with it.
+        channel_extension_bindings: Vec::new(),
+        extension_ingress: None,
+        delivery_coordinator: None,
+        channel_delivery_resolver: None,
+        channel_egress_credential_bridges: None,
     })
 }
 
@@ -4848,8 +5152,7 @@ mod tests {
     };
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     use ironclaw_host_api::{
-        RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
-        RuntimeCredentialRequirementSource,
+        RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource, VendorId,
     };
     use ironclaw_host_runtime::{
         MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
@@ -4869,6 +5172,7 @@ mod tests {
     use secrecy::ExposeSecret;
 
     use crate::extension_host::extension_lifecycle::ExtensionActivationMode;
+    use crate::extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryEgress;
     use crate::local_dev_capability_policy::{
         LocalDevApprovalPolicyAction, LocalDevCapabilityPolicyError,
     };
@@ -5142,11 +5446,8 @@ mod tests {
             project_service: Arc::clone(&base_runtime.project_service),
             outbound_preferences: Arc::clone(&base_runtime.outbound_preferences),
             skill_auto_activate_learned: Arc::clone(&base_runtime.skill_auto_activate_learned),
-            #[cfg(feature = "slack-v2-host-beta")]
             outbound_state: Arc::clone(&base_runtime.outbound_state),
-            #[cfg(feature = "slack-v2-host-beta")]
             delivered_gate_routes: Arc::clone(&base_runtime.delivered_gate_routes),
-            #[cfg(feature = "slack-v2-host-beta")]
             triggered_run_delivery: Arc::clone(&base_runtime.triggered_run_delivery),
             #[cfg(not(any(feature = "libsql", feature = "postgres")))]
             trigger_conversation_services: base_runtime.trigger_conversation_services.clone(),
@@ -5162,6 +5463,9 @@ mod tests {
             budget_gate_store: Arc::clone(&base_runtime.budget_gate_store),
             skill_management: Arc::clone(&base_runtime.skill_management),
             extension_management: base_runtime.extension_management.clone(),
+            channel_config: base_runtime.channel_config.clone(),
+            channel_identity_store: base_runtime.channel_identity_store.clone(),
+            channel_dm_target_store: base_runtime.channel_dm_target_store.clone(),
             runtime_http_egress: base_runtime.runtime_http_egress.clone(),
             host_runtime_http_egress: base_runtime.host_runtime_http_egress.clone(),
             skill_mounts: base_runtime.skill_mounts.clone(),
@@ -5171,8 +5475,6 @@ mod tests {
                 .clone(),
             skill_filesystem: Arc::clone(&base_runtime.skill_filesystem),
             workspace_filesystem: Arc::clone(&base_runtime.workspace_filesystem),
-            #[cfg(feature = "slack-v2-host-beta")]
-            host_state_filesystem: Arc::clone(&base_runtime.host_state_filesystem),
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             identity_filesystem: Arc::clone(&base_runtime.identity_filesystem),
             #[cfg(feature = "webui-v2-beta")]
@@ -5503,55 +5805,6 @@ mod tests {
         assert_eq!(
             completed_flow.status,
             ironclaw_auth::AuthFlowStatus::Completed
-        );
-    }
-
-    /// Caller-level regression for the Slack durable conversation store mount
-    /// alias. `slack_host_state_mount_view` has a unit test for the grant set,
-    /// but the grant only matters through the composed path: production wraps
-    /// the local-dev root filesystem with that view via
-    /// `local_dev_slack_host_state_filesystem`, then opens the store with
-    /// `RebornFilesystemConversationServices::new`, whose init reads
-    /// `/conversations/state.json`. Without the `/conversations` alias the
-    /// ScopedFilesystem rejects that path ("no mount alias matches scoped
-    /// path"), init fails, and every inbound Slack DM is silently dropped (the
-    /// bug fixed in 7917cf89f). This drives that exact composition so a future
-    /// edit that drops the alias fails here, not just in the mount-view unit
-    /// test the composition never consults directly.
-    #[cfg(all(
-        any(feature = "libsql", feature = "postgres"),
-        feature = "slack-v2-host-beta"
-    ))]
-    #[tokio::test]
-    async fn slack_durable_conversation_store_initializes_through_composed_host_state_mount() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let local_dev_root = dir.path().join("local-dev");
-        // `local_dev_project_filesystem` mounts these host paths; they must
-        // exist before the root filesystem is built.
-        std::fs::create_dir_all(local_dev_root.join("workspace")).expect("workspace dir");
-        std::fs::create_dir_all(local_dev_root.join("system/extensions"))
-            .expect("system extensions dir");
-
-        let root_filesystem = build_local_dev_root_filesystem(
-            &local_dev_root,
-            &local_dev_root.join("workspace"),
-            None,
-            LocalDevStorageBackendInput::LocalDefault,
-        )
-        .await
-        .expect("local-dev root filesystem")
-        .filesystem;
-
-        // Exactly how production composes the Slack host-state filesystem.
-        let host_state_filesystem = local_dev_slack_host_state_filesystem(root_filesystem);
-
-        let conversations = RebornFilesystemConversationServices::new(host_state_filesystem).await;
-
-        assert!(
-            conversations.is_ok(),
-            "durable conversation store must open `/conversations/state.json` \
-             through the composed Slack host-state mount view; got {:?}",
-            conversations.err()
         );
     }
 
@@ -5908,6 +6161,11 @@ mod tests {
         let catalog = AvailableExtensionCatalog::from_first_party_assets()
             .expect("first-party extensions load");
         let notion_package = catalog.resolve(&notion_ref).expect("Notion MCP is bundled");
+        // v3 hosted-MCP manifests declare one [mcp] block instead of placeholder
+        // static tools: the only bundled capability is the synthesized
+        // host-internal connection template. Model-visible Notion tools exist
+        // only after live tools/list discovery, so this test scripts discovery
+        // below to reach the auth gate.
         let capability_ids = notion_package
             .package
             .manifest
@@ -5915,11 +6173,11 @@ mod tests {
             .iter()
             .map(|capability| capability.id.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(capability_ids.len(), 18);
-        assert!(capability_ids.contains(&"notion.notion-create-pages"));
-        assert!(capability_ids.contains(&"notion.notion-query-data-sources"));
-        assert!(capability_ids.contains(&"notion.notion-create-comment"));
-        assert!(capability_ids.contains(&"notion.notion-get-self"));
+        assert_eq!(capability_ids, vec!["notion.mcp_server"]);
+        assert_eq!(
+            notion_package.package.manifest.capabilities[0].visibility,
+            ironclaw_extensions::CapabilityVisibility::HostInternal
+        );
 
         extension_management
             .install(notion_ref.clone())
@@ -5928,10 +6186,19 @@ mod tests {
         extension_management
             .activate_with_prechecked_credentials_for_test(
                 notion_ref,
-                ExtensionActivationMode::Static,
+                ExtensionActivationMode::HostedMcpDiscovery {
+                    scope: ResourceScope::local_default(
+                        UserId::new("local-dev-notion-mcp-owner").expect("valid user"),
+                        InvocationId::new(),
+                    )
+                    .expect("valid scope"),
+                    runtime_http_egress: Arc::new(
+                        HostedMcpDiscoveryEgress::with_tool_name("notion-search").read_only(),
+                    ),
+                },
             )
             .await
-            .expect("activate Notion MCP");
+            .expect("activate Notion MCP with scripted discovery");
 
         let context = notion_mcp_context("notion.notion-search");
         enable_global_auto_approve_for_context(local_runtime, &context).await;
@@ -6410,10 +6677,55 @@ mod tests {
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
 
         let projection = extension_management
-            .project(nearai_ref)
+            .project(nearai_ref.clone())
             .await
             .expect("NEAR AI MCP projected");
         assert_eq!(projection.phase, LifecyclePhase::Active);
+
+        // v3 hosted-MCP surface: boot-time bootstrap activates the package
+        // statically, which publishes only the host-internal MCP connection
+        // template — no model-visible tools exist before live discovery.
+        let capabilities = extension_management
+            .active_model_visible_capabilities()
+            .await
+            .expect("active capabilities");
+        assert!(
+            capabilities
+                .iter()
+                .all(|capability| capability.provider.as_str() != "nearai"),
+            "activated hosted-MCP package must expose no model-visible tools before discovery"
+        );
+        let template_id = CapabilityId::new("nearai.mcp_server").unwrap();
+        let registry = extension_management.active_extensions_for_test().snapshot();
+        assert!(
+            registry.get_capability(&template_id).is_some(),
+            "host-internal MCP connection template should be published"
+        );
+        assert_eq!(
+            registry.capability_visibility(&template_id),
+            Some(ironclaw_extensions::CapabilityVisibility::HostInternal)
+        );
+
+        // Script live tools/list discovery through the hosted-MCP seam so the
+        // discovered web_search tool surfaces with the connection template's
+        // credential wiring (the injected endpoint override patches
+        // [mcp].server only; the audience derives from that server host).
+        extension_management
+            .activate_with_prechecked_credentials_for_test(
+                nearai_ref,
+                ExtensionActivationMode::HostedMcpDiscovery {
+                    scope: ResourceScope::local_default(
+                        UserId::new(owner).unwrap(),
+                        InvocationId::new(),
+                    )
+                    .expect("valid scope"),
+                    runtime_http_egress: Arc::new(HostedMcpDiscoveryEgress::with_tool_name(
+                        "web_search",
+                    )),
+                },
+            )
+            .await
+            .expect("scripted NEAR AI discovery activation");
 
         let capabilities = extension_management
             .active_model_visible_capabilities()
@@ -6434,7 +6746,7 @@ mod tests {
         assert_eq!(
             search.runtime_credentials[0].source,
             RuntimeCredentialRequirementSource::ProductAuthAccount {
-                provider: RuntimeCredentialAccountProviderId::new("nearai").unwrap(),
+                provider: VendorId::new("nearai").unwrap(),
                 setup: Default::default(),
             }
         );
@@ -6442,7 +6754,9 @@ mod tests {
             search.runtime_credentials[0].audience.host_pattern,
             "nearai-db.example.test"
         );
-        assert_eq!(search.runtime_credentials[0].audience.port, Some(9443));
+        // v3 derives the credential audience from the [mcp].server host; the
+        // audience pattern carries the host only (port unconstrained).
+        assert_eq!(search.runtime_credentials[0].audience.port, None);
 
         let auth_scope = AuthProductScope::new(
             local_dev_nearai_mcp_owner_scope(UserId::new(owner).unwrap(), None)
@@ -6492,7 +6806,7 @@ mod tests {
         let resolved = resolver
             .resolve_access_secret(RuntimeCredentialAccountRequest {
                 scope: &sso_scope,
-                provider: &RuntimeCredentialAccountProviderId::new("nearai").unwrap(),
+                provider: &VendorId::new("nearai").unwrap(),
                 setup: &RuntimeCredentialAccountSetup::ManualToken,
                 provider_scopes: &[],
                 requester_extension: &ExtensionId::new("nearai").unwrap(),
@@ -6695,6 +7009,10 @@ mod tests {
             .expect("NEAR AI MCP projected");
         assert_eq!(projection.phase, LifecyclePhase::Active);
 
+        // v3 hosted-MCP surface: reinstall-and-activate publishes only the
+        // host-internal MCP connection template; model-visible tools appear
+        // only via live tools/list discovery, which this bootstrap-focused
+        // test does not run.
         let capabilities = extension_management
             .active_model_visible_capabilities()
             .await
@@ -6702,7 +7020,18 @@ mod tests {
         assert!(
             capabilities
                 .iter()
-                .any(|capability| capability.id.as_str() == "nearai.web_search")
+                .all(|capability| capability.provider.as_str() != "nearai"),
+            "reinstalled hosted-MCP package must expose no model-visible tools before discovery"
+        );
+        let template_id = CapabilityId::new("nearai.mcp_server").unwrap();
+        let registry = extension_management.active_extensions_for_test().snapshot();
+        assert!(
+            registry.get_capability(&template_id).is_some(),
+            "host-internal MCP connection template should be published"
+        );
+        assert_eq!(
+            registry.capability_visibility(&template_id),
+            Some(ironclaw_extensions::CapabilityVisibility::HostInternal)
         );
     }
 
@@ -7198,7 +7527,12 @@ mod tests {
                     grantee: Principal::Extension(extension_id),
                     issued_by: Principal::HostRuntime,
                     constraints: GrantConstraints {
-                        allowed_effects: gsuite_allowed_effects(),
+                        allowed_effects: vec![
+                            EffectKind::DispatchCapability,
+                            EffectKind::Network,
+                            EffectKind::UseSecret,
+                            EffectKind::ExternalWrite,
+                        ],
                         mounts: MountView::new(Vec::new()).expect("valid empty mount view"),
                         network: NetworkPolicy::default(),
                         secrets: vec![SecretHandle::new("missing-google-access-token").unwrap()],
@@ -7278,7 +7612,7 @@ mod tests {
                     grantee: Principal::Extension(extension_id),
                     issued_by: Principal::HostRuntime,
                     constraints: GrantConstraints {
-                        allowed_effects: web_access_allowed_effects(),
+                        allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
                         mounts: MountView::new(Vec::new()).expect("valid empty mount view"),
                         network: web_access_network_policy(),
                         secrets: Vec::new(),
@@ -7452,10 +7786,7 @@ mod tests {
     /// `RebornLocalRuntimeServices` and compares their data halves via
     /// `std::ptr::addr_eq` (trait objects of different traits cannot be compared
     /// with `Arc::ptr_eq` directly).
-    #[cfg(all(
-        any(feature = "libsql", feature = "postgres"),
-        feature = "slack-v2-host-beta"
-    ))]
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
     #[tokio::test]
     async fn local_dev_outbound_store_durable_shares_one_allocation_across_all_roles() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -7488,7 +7819,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     fn slack_identity(
         manifest_path: &str,
         digest: Option<String>,
@@ -7503,11 +7833,19 @@ mod tests {
         )
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn builtin_first_party_trust_policy_includes_slack_local_manifest_entry() {
+        // slack migrated to the self-contained inventory; its first-party trust
+        // entry is now produced by the generic `bundled_packages()` loop. This
+        // pin locks that the migration preserved slack's first-party grant and
+        // its manifest-digest binding (wrong digest / wrong path → Sandbox).
         let policy = builtin_first_party_trust_policy().expect("trust policy");
-        let expected_digest = slack_manifest_digest();
+        let slack_bundle = ironclaw_first_party_extensions::packages::bundled_packages()
+            .into_iter()
+            .find(|bundle| bundle.id == "slack")
+            .expect("slack is in the bundled inventory");
+        let expected_digest =
+            ironclaw_host_api::sha256_digest_token(slack_bundle.manifest_toml.as_bytes());
 
         let matching = ironclaw_trust::TrustPolicy::evaluate(
             &policy,
@@ -7568,6 +7906,62 @@ mod tests {
             wrong_path.provenance,
             ironclaw_trust::TrustProvenance::Default
         );
+    }
+
+    #[test]
+    fn builtin_first_party_trust_policy_grants_migrated_gmail_via_inventory() {
+        // gmail migrated to the self-contained inventory; its first-party trust
+        // entry is now produced by the generic `bundled_packages()` loop, not a
+        // hardcoded `AdminEntry`. Lock that the migration preserved gmail's
+        // first-party grant AND its manifest-digest binding (a wrong digest must
+        // still fall back to Sandbox — the loop didn't drop the digest).
+        let policy = builtin_first_party_trust_policy().expect("trust policy");
+        let gmail_bundle = ironclaw_first_party_extensions::packages::bundled_packages()
+            .into_iter()
+            .find(|bundle| bundle.id == "gmail")
+            .expect("gmail is in the bundled inventory");
+        let expected_digest =
+            ironclaw_host_api::sha256_digest_token(gmail_bundle.manifest_toml.as_bytes());
+
+        let gmail_identity = |digest: Option<String>| {
+            ironclaw_host_api::PackageIdentity::new(
+                ironclaw_host_api::PackageId::new("gmail").expect("gmail package id"),
+                ironclaw_host_api::PackageSource::LocalManifest {
+                    path: "/system/extensions/gmail/manifest.toml".to_string(),
+                },
+                digest,
+                None,
+            )
+        };
+
+        let matching = ironclaw_trust::TrustPolicy::evaluate(
+            &policy,
+            &ironclaw_trust::TrustPolicyInput {
+                identity: gmail_identity(Some(expected_digest.clone())),
+                requested_trust: ironclaw_host_api::RequestedTrustClass::FirstPartyRequested,
+                requested_authority: Default::default(),
+            },
+        )
+        .expect("matching gmail identity should evaluate");
+        assert_eq!(matching.effective_trust.class(), TrustClass::FirstParty);
+        assert_eq!(
+            matching.provenance,
+            ironclaw_trust::TrustProvenance::AdminConfig
+        );
+
+        let wrong_digest = ironclaw_trust::TrustPolicy::evaluate(
+            &policy,
+            &ironclaw_trust::TrustPolicyInput {
+                identity: gmail_identity(Some(
+                    "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                        .to_string(),
+                )),
+                requested_trust: ironclaw_host_api::RequestedTrustClass::FirstPartyRequested,
+                requested_authority: Default::default(),
+            },
+        )
+        .expect("wrong digest gmail identity should evaluate");
+        assert_eq!(wrong_digest.effective_trust.class(), TrustClass::Sandbox);
     }
 }
 

@@ -44,8 +44,8 @@ impl HostAuthSeal {
 }
 
 /// What an adapter declares it needs in order to consider a payload
-/// authenticated. Hosts read this from [`crate::ProductAdapter::auth_requirement`]
-/// before calling [`crate::ProductAdapter::parse_inbound`].
+/// authenticated. Hosts read this control-plane metadata to build protocol-auth
+/// evidence before invoking the adapter's inbound path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthRequirement {

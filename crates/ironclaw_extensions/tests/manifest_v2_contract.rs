@@ -12,9 +12,8 @@ use ironclaw_extensions::{
 use ironclaw_host_api::{
     CapabilityProfileId, CapabilitySurfaceKind, ExtensionId, HostPortCatalog, HostPortCatalogEntry,
     HostPortId, NetworkScheme, NetworkTargetPattern, PermissionMode, RequestedTrustClass,
-    RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
-    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeKind, SecretHandle,
-    TrustClass,
+    RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource, RuntimeCredentialTarget,
+    RuntimeKind, SecretHandle, TrustClass, VendorId,
 };
 
 const TELEGRAM_TOKEN_PORT: &str = "host.secrets.telegram_bot_token";
@@ -164,7 +163,7 @@ default_permission = "allow""#,
     assert_eq!(
         manifest.capabilities[0].runtime_credentials[0].source,
         RuntimeCredentialRequirementSource::ProductAuthAccount {
-            provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            provider: VendorId::new("github").unwrap(),
             setup: Default::default(),
         }
     );
@@ -2023,10 +2022,7 @@ output_schema_ref = "schemas/acme/legacy.output.v1.json"
     assert_eq!(auth_surfaces.len(), 1, "{auth_surfaces:?}");
     match &auth_surfaces[0] {
         CapabilitySurfaceDeclV2::Auth { provider, setup } => {
-            assert_eq!(
-                provider,
-                &RuntimeCredentialAccountProviderId::new("acme").unwrap()
-            );
+            assert_eq!(provider, &VendorId::new("acme").unwrap());
             assert_eq!(
                 setup,
                 &RuntimeCredentialAccountSetup::OAuth {
@@ -2083,7 +2079,7 @@ fn extensions_sharing_one_provider_project_the_same_auth_provider() {
 
     let gmail_provider = provider_of(&gmail);
     let drive_provider = provider_of(&drive);
-    let google = RuntimeCredentialAccountProviderId::new("google").unwrap();
+    let google = VendorId::new("google").unwrap();
     assert_eq!(gmail_provider, google);
     assert_eq!(drive_provider, google);
     // The provider namespace is not the extension id.

@@ -26,6 +26,7 @@ use rstest::rstest;
 #[rstest]
 #[case(StorageMode::InMemory)]
 #[case(StorageMode::LibSql)]
+#[case(StorageMode::Postgres)]
 #[tokio::test]
 async fn backend_parity_replies_to_greeting(#[case] storage: StorageMode) {
     let harness = RebornIntegrationHarness::test_default()

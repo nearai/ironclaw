@@ -119,9 +119,8 @@ jobs:
                         (.name | startswith("ironclaw_reborn"))
                         or (.name | startswith("ironclaw_product"))
                         or (.name == "ironclaw_architecture")
-                        or (.name == "ironclaw_slack_v2_adapter")
-                        or (.name == "ironclaw_telegram_v2_adapter")
-                        or (.name == "ironclaw_wasm_product_adapters")
+                        or (.name == "ironclaw_slack_extension")
+                        or (.name == "ironclaw_telegram_extension")
                         or (.name | startswith("ironclaw_webui_v2"))
                       )
                     | .name
@@ -225,7 +224,7 @@ jobs:
             fi
 
             case "${package}" in
-              ironclaw_first_party_extension_ports|ironclaw_host_runtime|ironclaw_loop_support|ironclaw_product_workflow|ironclaw_reborn|ironclaw_reborn_cli|ironclaw_reborn_composition|ironclaw_reborn_webui_ingress|ironclaw_wasm|ironclaw_wasm_product_adapters|ironclaw_wasm_sandbox_core)
+              ironclaw_first_party_extension_ports|ironclaw_host_runtime|ironclaw_loop_support|ironclaw_product_workflow|ironclaw_reborn|ironclaw_reborn_cli|ironclaw_reborn_composition|ironclaw_reborn_webui_ingress|ironclaw_wasm|ironclaw_wasm_sandbox_core)
                 sccache_dist_enabled=false
                 ;;
             esac

@@ -361,7 +361,7 @@ def _reborn_binary() -> Path:
 def build_reborn_binary() -> Path:
     features = os.environ.get(
         "REBORN_WEBUI_V2_LIVE_QA_FEATURES",
-        "webui-v2-beta,slack-v2-host-beta",
+        "webui-v2-beta",
     )
     build_env = os.environ.copy()
     build_env.setdefault("CARGO_PROFILE_DEV_DEBUG", "0")
@@ -839,6 +839,32 @@ async def start_reborn_server(
     return proc, base_url
 
 
+def _slack_generic_setup_request(payload: dict[str, object]) -> dict[str, object]:
+    """Translate the legacy flat setup payload into the generic
+    `[channel.config]` setup submit wire shape (see
+    `crates/ironclaw_product_workflow/src/reborn_services/lifecycle_setup.rs`):
+    secret handles ride `payload.secrets`, non-secret handles ride
+    `payload.fields`, keyed by the slack manifest's `[channel.config]`
+    handles."""
+    secrets: dict[str, object] = {
+        "slack_bot_token": payload["bot_token"],
+        "slack_signing_secret": payload["signing_secret"],
+    }
+    if payload.get("oauth_client_secret"):
+        secrets["slack_oauth_client_secret"] = payload["oauth_client_secret"]
+    fields: dict[str, object] = {}
+    for legacy_key, handle in (
+        ("installation_id", "slack_installation_id"),
+        ("team_id", "slack_team_id"),
+        ("api_app_id", "slack_api_app_id"),
+        ("oauth_client_id", "slack_oauth_client_id"),
+    ):
+        value = str(payload.get(legacy_key) or "").strip()
+        if value:
+            fields[handle] = value
+    return {"action": "submit", "payload": {"secrets": secrets, "fields": fields}}
+
+
 async def _apply_slack_setup_api_after_start(
     *,
     base_url: str,
@@ -854,14 +880,54 @@ async def _apply_slack_setup_api_after_start(
     )
     if payload is None:
         return {"applied": False, "reason": "setup_payload_missing", **preflight}
+    request = _slack_generic_setup_request(payload)
+    submitted_secrets = set(request["payload"]["secrets"])
+    install_status_code: int | None = None
     try:
         import httpx
 
+        headers = {"Authorization": f"Bearer {AUTH_TOKEN}"}
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.put(
-                f"{base_url}/api/webchat/v2/channels/slack/setup",
-                headers={"Authorization": f"Bearer {AUTH_TOKEN}"},
-                json=payload,
+            # The generic lifecycle requires the extension installed before
+            # its `[channel.config]` setup submit; check the installed
+            # listing first so re-runs stay idempotent.
+            listing = await client.get(
+                f"{base_url}/api/webchat/v2/extensions",
+                headers=headers,
+            )
+            slack_installed = False
+            if 200 <= listing.status_code < 300:
+                listing_body = listing.json()
+                extensions = (
+                    listing_body.get("extensions")
+                    if isinstance(listing_body, dict)
+                    else None
+                )
+                for extension in extensions if isinstance(extensions, list) else []:
+                    if not isinstance(extension, dict):
+                        continue
+                    package_ref = extension.get("package_ref")
+                    ref_id = (
+                        package_ref.get("id") if isinstance(package_ref, dict) else None
+                    )
+                    if ref_id == "slack":
+                        slack_installed = True
+                        break
+            if not slack_installed:
+                install = await client.post(
+                    f"{base_url}/api/webchat/v2/extensions/install",
+                    headers=headers,
+                    json={"package_ref": {"kind": "extension", "id": "slack"}},
+                )
+                install_status_code = install.status_code
+                if install.status_code < 200 or install.status_code >= 300:
+                    raise LiveQaError(
+                        f"Slack extension install returned HTTP {install.status_code}"
+                    )
+            response = await client.post(
+                f"{base_url}/api/webchat/v2/extensions/slack/setup",
+                headers=headers,
+                json=request,
             )
             if response.status_code < 200 or response.status_code >= 300:
                 raise LiveQaError(
@@ -876,32 +942,50 @@ async def _apply_slack_setup_api_after_start(
         raise LiveQaError(f"Slack setup API call failed: {type(exc).__name__}: {exc}") from exc
     if not isinstance(status, dict):
         raise LiveQaError(f"Slack setup API returned non-object JSON: {status!r}")
-    required_flags = ["configured", "bot_token_configured", "signing_secret_configured"]
-    if payload.get("oauth_client_id") or payload.get("oauth_client_secret"):
-        required_flags.extend(["oauth_client_id_configured", "oauth_client_secret_configured"])
-    missing_flags = [flag for flag in required_flags if status.get(flag) is not True]
-    mismatched_identity = [
-        key
-        for key in ("installation_id", "team_id", "api_app_id")
-        if str(status.get(key) or "") != str(payload.get(key) or "")
-    ]
-    if missing_flags or mismatched_identity:
+    provided_secrets = {
+        secret.get("name")
+        for secret in status.get("secrets") or []
+        if isinstance(secret, dict) and secret.get("provided") is True
+    }
+    missing_secrets = sorted(submitted_secrets - provided_secrets)
+    if missing_secrets:
         raise LiveQaError(
             "Slack setup API returned incomplete setup status: "
-            f"missing_flags={missing_flags!r} "
-            f"mismatched_identity={mismatched_identity!r}"
+            f"missing_secrets={missing_secrets!r}"
         )
+    oauth_client_id_configured = bool(payload.get("oauth_client_id"))
+    oauth_client_secret_configured = "slack_oauth_client_secret" in provided_secrets
     return {
         "applied": True,
         "status_code": response.status_code,
+        "install_status_code": install_status_code,
         "request": {
             "installation_id": payload.get("installation_id"),
             "team_id": payload.get("team_id"),
             "api_app_id": payload.get("api_app_id"),
-            "oauth_client_id_configured": bool(payload.get("oauth_client_id")),
+            "oauth_client_id_configured": oauth_client_id_configured,
             "oauth_client_secret_configured": bool(payload.get("oauth_client_secret")),
         },
-        "status": status,
+        # Downstream consumers read identity + readiness flags from the
+        # `setup` slot; the generic setup response never echoes non-secret
+        # values, so identity rides through from the submitted payload and
+        # the secret flags come from the API's `provided` projection.
+        "status": {
+            "configured": True,
+            "installation_id": payload.get("installation_id"),
+            "team_id": payload.get("team_id"),
+            "api_app_id": payload.get("api_app_id"),
+            "bot_token_configured": "slack_bot_token" in provided_secrets,
+            "signing_secret_configured": "slack_signing_secret" in provided_secrets,
+            "oauth_client_id_configured": oauth_client_id_configured,
+            "oauth_client_secret_configured": oauth_client_secret_configured,
+            "personal_oauth_ready": oauth_client_id_configured
+            and oauth_client_secret_configured,
+            "phase": status.get("phase"),
+            "provided_secrets": sorted(
+                name for name in provided_secrets if isinstance(name, str)
+            ),
+        },
     }
 
 

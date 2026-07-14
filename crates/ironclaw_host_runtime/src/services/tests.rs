@@ -49,8 +49,10 @@ use crate::CommandExecutionRequest;
 use crate::obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
 use crate::{HostRuntimeCredentialMaterial, HostRuntimeHttpEgressRequest};
 
+mod extension_tool_binder;
 mod first_party_runtime_adapter;
 mod mcp_runtime_adapter;
+mod registry_lane_tool_resolver;
 
 #[tokio::test]
 async fn shared_extension_registry_returns_same_instance() {

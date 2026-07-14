@@ -93,7 +93,7 @@ pub trait RebornUserIdentityBindingStore: Send + Sync {
 }
 
 #[async_trait::async_trait]
-pub(crate) trait RebornUserIdentityBindingDeleteStore: Send + Sync {
+pub trait RebornUserIdentityBindingDeleteStore: Send + Sync {
     async fn delete_user_identity_bindings_for_user(
         &self,
         provider: &str,
@@ -180,7 +180,9 @@ pub trait RebornUserIdentityLookup: Send + Sync {
 pub struct ProviderIdentityActorResolver {
     provider: String,
     adapter_id: String,
-    actor_kind: String,
+    /// `None` accepts every actor kind: binding keys are already
+    /// installation-scoped, so an unbound kind simply resolves to nothing.
+    actor_kind: Option<String>,
     lookup: Arc<dyn RebornUserIdentityLookup>,
     resolved_user_cache: Arc<Mutex<HashMap<String, CachedProviderIdentity>>>,
     cache_ttl: Duration,
@@ -196,7 +198,26 @@ impl ProviderIdentityActorResolver {
         Self {
             provider: provider.into(),
             adapter_id: adapter_id.into(),
-            actor_kind: actor_kind.into(),
+            actor_kind: Some(actor_kind.into()),
+            lookup,
+            resolved_user_cache: Arc::new(Mutex::new(HashMap::new())),
+            cache_ttl: PROVIDER_IDENTITY_CACHE_TTL,
+        }
+    }
+
+    /// Resolver over every actor kind an adapter emits: the generic channel
+    /// host derives `provider`/`adapter_id` from the manifest, which
+    /// declares no actor-kind vocabulary. Unbound actors still resolve to
+    /// `None` (binding existence gates, kind does not).
+    pub fn for_any_actor_kind(
+        provider: impl Into<String>,
+        adapter_id: impl Into<String>,
+        lookup: Arc<dyn RebornUserIdentityLookup>,
+    ) -> Self {
+        Self {
+            provider: provider.into(),
+            adapter_id: adapter_id.into(),
+            actor_kind: None,
             lookup,
             resolved_user_cache: Arc::new(Mutex::new(HashMap::new())),
             cache_ttl: PROVIDER_IDENTITY_CACHE_TTL,
@@ -266,7 +287,9 @@ impl ProductActorUserResolver for ProviderIdentityActorResolver {
         if request.adapter_id.as_str() != self.adapter_id {
             return Ok(None);
         }
-        if request.external_actor_ref.kind() != self.actor_kind {
+        if let Some(actor_kind) = &self.actor_kind
+            && request.external_actor_ref.kind() != actor_kind
+        {
             return Ok(None);
         }
         let provider_user_id = installation_scoped_provider_user_id(
@@ -430,6 +453,62 @@ mod tests {
         assert_eq!(
             lookup.calls(),
             vec![("slack".to_string(), "install-alpha:U123".to_string())]
+        );
+    }
+
+    /// The generic channel host derives the resolver from manifest data,
+    /// which declares no actor-kind vocabulary: the any-kind flavor accepts
+    /// every kind the adapter emits while binding existence still gates.
+    #[tokio::test]
+    async fn any_actor_kind_resolver_matches_every_kind_for_its_adapter() {
+        let installation_id = installation("install-alpha");
+        let lookup = Arc::new(RecordingLookup::new([(
+            installation_scoped_provider_user_id(&installation_id, "U123"),
+            user("user:alice"),
+        )]));
+        let resolver = ProviderIdentityActorResolver::for_any_actor_kind(
+            "acmechat",
+            "acmechat",
+            lookup.clone() as Arc<dyn RebornUserIdentityLookup>,
+        );
+
+        for kind in ["acmechat_user", "acmechat_bot"] {
+            let resolved = resolver
+                .resolve_product_actor_user(request(
+                    "acmechat",
+                    installation_id.clone(),
+                    kind,
+                    "U123",
+                ))
+                .await
+                .expect("resolution succeeds");
+            assert_eq!(resolved, Some(user("user:alice")), "kind {kind} resolves");
+        }
+        // A foreign adapter still resolves to None so resolvers can stack.
+        assert_eq!(
+            resolver
+                .resolve_product_actor_user(request(
+                    "otherchat",
+                    installation_id.clone(),
+                    "acmechat_user",
+                    "U123",
+                ))
+                .await
+                .expect("resolution succeeds"),
+            None
+        );
+        // An unbound actor resolves to None (pairing/fail-closed fallback).
+        assert_eq!(
+            resolver
+                .resolve_product_actor_user(request(
+                    "acmechat",
+                    installation_id,
+                    "acmechat_user",
+                    "U999",
+                ))
+                .await
+                .expect("resolution succeeds"),
+            None
         );
     }
 

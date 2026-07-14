@@ -123,7 +123,6 @@ impl Default for MutableOutboundDeliveryTargetRegistry {
 }
 
 impl MutableOutboundDeliveryTargetRegistry {
-    #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(dead_code))]
     pub(crate) fn register_provider(
         &self,
         provider_key: impl Into<String>,
@@ -142,24 +141,6 @@ impl MutableOutboundDeliveryTargetRegistry {
             None => OutboundDeliveryTargetRegistrationOutcome::Registered,
         };
         Ok(outcome)
-    }
-
-    #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(dead_code))]
-    pub(crate) fn contains_provider_key(
-        &self,
-        provider_key: &str,
-    ) -> Result<bool, RebornServicesError> {
-        self.providers
-            .read()
-            .map(|providers| providers.contains_key(provider_key))
-            .map_err(|error| {
-                tracing::debug!(
-                    target = "ironclaw::reborn::outbound_preferences",
-                    error = ?error,
-                    "outbound target registry read lock failed"
-                );
-                outbound_target_registry_error()
-            })
     }
 
     fn providers(

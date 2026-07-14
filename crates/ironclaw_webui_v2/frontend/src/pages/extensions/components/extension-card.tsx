@@ -133,7 +133,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
     active: ext.active,
     authenticated: ext.authenticated,
     needs_setup: ext.needs_setup,
-    activationStatus: ext.activation_status,
+    installationState: ext.installation_state,
     onboardingState: ext.onboarding_state,
   };
 

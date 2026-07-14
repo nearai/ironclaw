@@ -10,8 +10,7 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDisplayOutputPreview, CapabilityId, ExtensionId, ProcessId,
-    ResourceEstimate, RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement,
-    RuntimeKind,
+    ResourceEstimate, RuntimeCredentialAuthRequirement, RuntimeKind, VendorId,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, HostRuntime, HostRuntimeError,
@@ -576,7 +575,7 @@ async fn runtime_auth_gate_forwards_credential_requirements() {
     let capability_id = CapabilityId::new("demo.echo").expect("capability id");
     let provider_id = ExtensionId::new("demo").expect("provider id");
     let requirement = RuntimeCredentialAuthRequirement {
-        provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        provider: VendorId::new("github").unwrap(),
         setup: Default::default(),
         requester_extension: provider_id.clone(),
         provider_scopes: Vec::new(),

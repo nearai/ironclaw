@@ -1147,6 +1147,7 @@ impl CommunicationContextProvider for StubCommunicationContextProvider {
                 name: "test-channel".to_string(),
                 authenticated: true,
                 active: true,
+                presentation: None,
             }]),
             delivery_target: DeliveryTargetState::NoneSet,
             delivery_tools_visible: false,

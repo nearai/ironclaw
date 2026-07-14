@@ -36,6 +36,7 @@ pub mod approval;
 pub mod audit;
 pub mod capability;
 pub mod capability_profile;
+pub mod channel;
 pub mod decision;
 pub mod dispatch;
 mod dotted_id;
@@ -46,11 +47,14 @@ pub mod ids;
 pub mod ingress;
 pub mod mount;
 pub mod path;
+pub mod recipe;
 pub mod resource;
 pub mod runtime;
 pub mod runtime_policy;
 pub mod scope;
+pub mod state;
 pub mod surface;
+pub mod tool_adapter;
 pub mod trust;
 
 // Flat re-exports are intentional: downstream Reborn service crates consume
@@ -61,6 +65,7 @@ pub use approval::*;
 pub use audit::*;
 pub use capability::*;
 pub use capability_profile::*;
+pub use channel::*;
 pub use decision::*;
 pub use dispatch::*;
 pub use error::*;
@@ -70,11 +75,14 @@ pub use ids::*;
 pub use ingress::*;
 pub use mount::*;
 pub use path::*;
+pub use recipe::*;
 pub use resource::*;
 pub use runtime::*;
 pub use runtime_policy::*;
 pub use scope::*;
+pub use state::*;
 pub use surface::*;
+pub use tool_adapter::*;
 pub use trust::*;
 
 /// Canonical timestamp type for host API wire contracts.

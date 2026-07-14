@@ -232,9 +232,8 @@ mod tests {
         AuthFlowId, AuthGateRef, AuthProductScope, AuthProviderId, AuthSurface, TurnRunRef,
     };
     use ironclaw_host_api::{
-        ExtensionId, InvocationId, ResourceScope, RuntimeCredentialAccountProviderId,
-        RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, TenantId, ThreadId,
-        UserId,
+        ExtensionId, InvocationId, ResourceScope, RuntimeCredentialAccountSetup,
+        RuntimeCredentialAuthRequirement, TenantId, ThreadId, UserId, VendorId,
     };
     use ironclaw_turns::{
         AcceptedMessageRef, AgentLoopDriverDescriptor, CancelRunRequest, CancelRunResponse,
@@ -337,7 +336,7 @@ mod tests {
 
     fn slack_requirement() -> RuntimeCredentialAuthRequirement {
         RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new("slack").expect("provider id"),
+            provider: VendorId::new("slack").expect("provider id"),
             setup: RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
             requester_extension: ExtensionId::new("slack").expect("extension id"),
             provider_scopes: Vec::new(),
@@ -346,7 +345,7 @@ mod tests {
 
     fn google_requirement() -> RuntimeCredentialAuthRequirement {
         RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new("google").expect("provider id"),
+            provider: VendorId::new("google").expect("provider id"),
             setup: RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
             requester_extension: ExtensionId::new("gmail").expect("extension id"),
             provider_scopes: Vec::new(),

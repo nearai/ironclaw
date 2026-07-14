@@ -18,8 +18,8 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, CapabilitySurfaceKind, EffectKind, ExtensionId,
-    PermissionMode, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement,
-    RuntimeHttpEgress, VirtualPath, sha256_digest_token,
+    PermissionMode, ResourceScope, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement,
+    RuntimeCredentialRequirement, RuntimeHttpEgress, VirtualPath, sha256_digest_token,
 };
 use ironclaw_product_adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use ironclaw_product_workflow::{
@@ -67,15 +67,15 @@ impl ExtensionCredentialCleanup for RebornProductAuthServices {
 
 mod active_publication;
 #[cfg(test)]
-mod hosted_mcp_test_support;
+pub(crate) mod hosted_mcp_test_support;
 
 use crate::extension_host::available_extensions::{
     AvailableExtensionCatalog, AvailableExtensionPackage, materialize_available_extension,
     visible_capability_ids,
 };
 use crate::extension_host::extension_activation_credentials::{
-    ChannelSetupActivationCredentialGate, ExtensionActivationCredentialGate,
-    RuntimeExtensionActivationCredentialGate, UnavailableExtensionActivationCredentialGate,
+    ExtensionActivationCredentialGate, RuntimeExtensionActivationCredentialGate,
+    UnavailableExtensionActivationCredentialGate,
 };
 use crate::extension_host::extension_credential_requirements::package_runtime_credential_auth_requirements;
 use crate::extension_host::lifecycle::response_with_payload;
@@ -107,6 +107,19 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     // product auth cannot have minted a reusable OAuth credential, so there is
     // nothing to revoke on removal.
     credential_cleanup: Option<Arc<dyn ExtensionCredentialCleanup>>,
+    // Late-attached by `build_local_runtime` after the host-runtime lanes are
+    // configured (the generic host's loaders bind through them). Attached ⟺
+    // the dispatch chain resolves extensions from the host's active snapshot;
+    // unattached compositions (focused tests) keep registry-only dispatch.
+    generic_host: std::sync::OnceLock<Arc<ironclaw_extension_host::ExtensionHost>>,
+    // Late-attached with `generic_host` (both need the fully wired host
+    // runtime): stages hosted-MCP discovery authority — the connection
+    // credential and the server network policy — under the discovery scope.
+    // Discovery runs at activation, outside the dispatch obligation
+    // pipeline, so nothing else stages these (the pre-P2 gap that made
+    // live `tools/list` always fail transient and fall back).
+    discovery_runtime_ports:
+        std::sync::OnceLock<ironclaw_host_runtime::ProductAuthProviderRuntimePorts>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -256,6 +269,223 @@ impl RebornLocalExtensionManagementPort {
             active_extensions,
             operation_lock: Arc::new(Mutex::new(())),
             credential_cleanup,
+            generic_host: std::sync::OnceLock::new(),
+            discovery_runtime_ports: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Attach the staging ports hosted-MCP discovery uses to make its
+    /// authority available under the discovery scope.
+    pub(crate) fn attach_discovery_runtime_ports(
+        &self,
+        ports: ironclaw_host_runtime::ProductAuthProviderRuntimePorts,
+    ) {
+        let _ = self.discovery_runtime_ports.set(ports);
+    }
+
+    /// Stage the hosted-MCP connection credential and server network policy
+    /// for the discovery call. Best-effort by design: a staging failure
+    /// leaves discovery to fail transient and fall back to the bundled
+    /// manifest — exactly the pre-staging behavior — while a successful
+    /// stage lets live `tools/list` run with the same injected authority a
+    /// dispatched invocation would carry.
+    async fn stage_hosted_mcp_discovery_authority(
+        &self,
+        scope: &ResourceScope,
+        package: &ExtensionPackage,
+    ) {
+        let Some(ports) = self.discovery_runtime_ports.get() else {
+            return;
+        };
+        let Some(descriptor) = package.capabilities.first() else {
+            return;
+        };
+        if let Some(policy) = hosted_mcp_discovery_network_policy(package) {
+            ports.stage_network_policy_once(scope, &descriptor.id, policy);
+        }
+        for requirement in &descriptor.runtime_credentials {
+            if let Err(error) = ports
+                .stage_credential_requirement_once(scope, &descriptor.id, requirement, &package.id)
+                .await
+            {
+                tracing::debug!(
+                    extension_id = package.id.as_str(),
+                    capability_id = descriptor.id.as_str(),
+                    required = requirement.required,
+                    error = ?error,
+                    "hosted MCP discovery credential staging failed; discovery will fall back"
+                );
+            }
+        }
+    }
+
+    /// The durable installation store handle (the generic host hydrates its
+    /// working set from it at boot).
+    pub(crate) fn installation_store_handle(&self) -> Arc<dyn ExtensionInstallationStore> {
+        Arc::clone(&self.installation_store)
+    }
+
+    /// Attach the generic extension host so lifecycle mutations publish the
+    /// active snapshot the dispatch chain resolves from.
+    pub(crate) fn attach_generic_host(&self, host: Arc<ironclaw_extension_host::ExtensionHost>) {
+        let _ = self.generic_host.set(host);
+    }
+
+    /// The attached generic host, when this facade has one — the snapshot
+    /// authority the channel host assembly reconciles against.
+    pub(crate) fn generic_host(&self) -> Option<Arc<ironclaw_extension_host::ExtensionHost>> {
+        self.generic_host.get().cloned()
+    }
+
+    /// Mirror an activation into the generic host's snapshot. Runs after the
+    /// registry publish succeeded; a failure here fails the activation (the
+    /// caller compensates) — extension dispatch resolves from the snapshot,
+    /// so an unmirrored activation would produce undispatchable tools.
+    async fn publish_to_generic_host(
+        &self,
+        extension_id: &ExtensionId,
+        installation_id: &ExtensionInstallationId,
+        active_package: &ExtensionPackage,
+    ) -> Result<(), ProductWorkflowError> {
+        let Some(host) = self.generic_host.get() else {
+            return Ok(());
+        };
+        let base = self
+            .installation_store
+            .get_manifest(extension_id)
+            .await
+            .map_err(map_extension_installation_error)?
+            .ok_or_else(|| ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "extension {} manifest is not installed",
+                    extension_id.as_str()
+                ),
+            })?;
+        let effective = crate::extension_host::generic_host::effective_resolved_for_package(
+            base.resolved(),
+            active_package,
+        );
+        // Durable per-installation `[channel.config]` values ride the
+        // published record so `ChannelAdapter::activate` sees them.
+        let config = self
+            .installation_store
+            .channel_config(extension_id)
+            .await
+            .map_err(map_extension_installation_error)?;
+        let record = ironclaw_extension_host::InstallationRecord {
+            extension_id: extension_id.as_str().to_string(),
+            installation_id: installation_id.as_str().to_string(),
+            state: ironclaw_extension_host::InstallationState::Installed,
+            resolved: Arc::new(effective),
+            config,
+            last_error: None,
+        };
+        host.install(record).await.map_err(generic_host_error)?;
+        host.activate(extension_id.as_str())
+            .await
+            .map_err(generic_host_error)
+    }
+
+    /// Test-support twin of the production activation choke point: publish a
+    /// bundled package directly into the registry AND mirror it into the
+    /// generic host's snapshot (mirrors `commit_activation` →
+    /// `publish_to_generic_host`, without the durable install/credential
+    /// legs). Direct registry publication alone would leave the package
+    /// undispatchable now that extension dispatch resolves from the snapshot.
+    /// Operator `[channel.config]` values are NOT seeded here — they flow
+    /// exclusively through the production configure surface
+    /// (`ChannelConfigService`), and this seam reads whatever that surface
+    /// durably stored, exactly like the production publish path.
+    #[cfg(feature = "test-support")]
+    pub(crate) async fn publish_bundled_package_for_test(
+        &self,
+        package: &ExtensionPackage,
+        resolved: Option<&ironclaw_extensions::ResolvedExtensionManifest>,
+    ) -> Result<(), ProductWorkflowError> {
+        self.active_extensions.publish(package)?;
+        let Some(host) = self.generic_host.get() else {
+            return Ok(());
+        };
+        // The resolved base: caller-supplied for in-code fixture packages,
+        // else parsed from the catalog entry's raw manifest.
+        let base = match resolved {
+            Some(resolved) => resolved.clone(),
+            None => {
+                let package_ref =
+                    LifecyclePackageRef::new(LifecyclePackageKind::Extension, package.id.as_str())?;
+                let available = self.catalog.resolve(&package_ref)?;
+                let host_ports =
+                    ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
+                        ProductWorkflowError::InvalidBindingRequest {
+                            reason: format!(
+                                "host port catalog rejected bundled extension: {error}"
+                            ),
+                        }
+                    })?;
+                let contracts = ironclaw_host_runtime::default_host_api_contract_registry()
+                    .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+                        reason: format!("host API contracts rejected bundled extension: {error}"),
+                    })?;
+                ironclaw_extensions::ExtensionManifestRecord::from_toml(
+                    available.manifest_toml.clone(),
+                    ironclaw_extensions::ManifestSource::HostBundled,
+                    &host_ports,
+                    None,
+                    &contracts,
+                )
+                .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+                    reason: format!("bundled extension manifest is invalid: {error}"),
+                })?
+                .resolved()
+                .clone()
+            }
+        };
+        let effective =
+            crate::extension_host::generic_host::effective_resolved_for_package(&base, package);
+        let config = self
+            .installation_store
+            .channel_config(&package.id)
+            .await
+            .map_err(map_extension_installation_error)?;
+        host.install(ironclaw_extension_host::InstallationRecord {
+            extension_id: package.id.as_str().to_string(),
+            installation_id: format!("{}-test-install", package.id.as_str()),
+            state: ironclaw_extension_host::InstallationState::Installed,
+            resolved: Arc::new(effective),
+            config,
+            last_error: None,
+        })
+        .await
+        .map_err(generic_host_error)?;
+        host.activate(package.id.as_str())
+            .await
+            .map_err(generic_host_error)
+    }
+
+    /// Mirror an unpublish into the generic host's snapshot (deactivation is
+    /// tolerant: a not-installed record is already unpublished).
+    async fn unpublish_from_generic_host(&self, extension_id: &ExtensionId) {
+        let Some(host) = self.generic_host.get() else {
+            return;
+        };
+        match host.deactivate(extension_id.as_str()).await {
+            Ok(()) | Err(ironclaw_extension_host::LifecycleError::NotInstalled { .. }) => {}
+            Err(error) => {
+                tracing::warn!(
+                    extension_id = extension_id.as_str(),
+                    error = ?error,
+                    "generic extension host could not unpublish extension"
+                );
+            }
+        }
+        if let Some(host) = self.generic_host.get()
+            && let Err(error) = host.remove_record(extension_id.as_str()).await
+        {
+            tracing::debug!(
+                extension_id = extension_id.as_str(),
+                error = %error,
+                "generic extension host record cleanup failed"
+            );
         }
     }
 
@@ -279,6 +509,7 @@ impl RebornLocalExtensionManagementPort {
     /// install→activate capability handshake through the model. For tests
     /// only — zero bytes shipped in production builds.
     #[cfg(feature = "test-support")]
+    #[cfg(test)]
     pub(crate) fn active_extensions_for_test(&self) -> &ActiveExtensionPublisher {
         &self.active_extensions
     }
@@ -540,22 +771,6 @@ impl RebornLocalExtensionManagementPort {
             .await
     }
 
-    /// Operator channel-setup activation: activates the channel surface after
-    /// workspace setup save without demanding per-caller product-auth
-    /// accounts — see [`ChannelSetupActivationCredentialGate`].
-    pub(crate) async fn activate_for_channel_setup(
-        &self,
-        package_ref: LifecyclePackageRef,
-    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        let credential_gate = ChannelSetupActivationCredentialGate;
-        self.activate_inner(
-            package_ref,
-            ExtensionActivationMode::Static,
-            &credential_gate,
-        )
-        .await
-    }
-
     pub(crate) async fn activate_with_credential_gate(
         &self,
         package_ref: LifecyclePackageRef,
@@ -616,6 +831,8 @@ impl RebornLocalExtensionManagementPort {
             }
         };
 
+        self.stage_hosted_mcp_discovery_authority(&discovery.scope, &discovery.base_package)
+            .await;
         let active_package = match discover_hosted_mcp_package(
             &discovery.base_package,
             discovery.scope,
@@ -694,6 +911,36 @@ impl RebornLocalExtensionManagementPort {
             }
             return Err(error);
         }
+        if let Err(error) = self
+            .publish_to_generic_host(extension_id, installation_id, &active_package)
+            .await
+        {
+            // Snapshot publication failed: the activation must not report
+            // success (its tools would be undispatchable). Unwind the
+            // registry publish and activation state.
+            if let Err(cleanup_error) = self.active_extensions.unpublish(&active_package) {
+                return Err(compensation_failure(
+                    "extension activation failed to publish the dispatch snapshot and registry unpublish failed",
+                    error,
+                    cleanup_error,
+                ));
+            }
+            if previous_state != ExtensionActivationState::Enabled {
+                self.disable_lifecycle_package(extension_id).await;
+            }
+            if let Err(cleanup_error) = self
+                .installation_store
+                .set_activation_state(installation_id, previous_state)
+                .await
+            {
+                return Err(compensation_failure(
+                    "extension activation failed to publish the dispatch snapshot and activation restore failed",
+                    error,
+                    map_extension_installation_error(cleanup_error),
+                ));
+            }
+            return Err(error);
+        }
 
         let visible_capability_ids = package_visible_capability_ids(&active_package);
         let message =
@@ -705,6 +952,7 @@ impl RebornLocalExtensionManagementPort {
             Some(channel_connection_requirement(
                 package_ref.id.as_str(),
                 active_package.manifest.name.as_str(),
+                channel_connect_strategy(&active_package),
             ))
         } else {
             None
@@ -945,6 +1193,7 @@ impl RebornLocalExtensionManagementPort {
             }
             return Err(error);
         }
+        self.unpublish_from_generic_host(&extension_id).await;
         if let Err(error) = self.active_extensions.unpublish(&lifecycle_package) {
             if let Err(restore_error) = self
                 .restore_lifecycle_package(&lifecycle_package, previous_state)
@@ -1316,6 +1565,53 @@ impl RebornLocalExtensionManagementPort {
     }
 }
 
+/// §6.5: editing `[channel.config]` while Active runs an automatic
+/// deactivate → reactivate cycle through the generic host — adapters are
+/// rebuilt with the new values and `activate()` revalidates them. A no-op
+/// for inactive installations (activation picks the values up when it
+/// runs) and for compositions without an attached generic host. Failure
+/// surfaces the typed error and leaves the host record per §6.1
+/// (Installed + typed last error).
+#[async_trait]
+impl crate::extension_host::channel_config::ChannelConfigReactivation
+    for RebornLocalExtensionManagementPort
+{
+    async fn reactivate_if_active(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<(), ProductWorkflowError> {
+        let _operation_guard = self.operation_lock.lock().await;
+        let installations = self
+            .installation_store
+            .list_installations()
+            .await
+            .map_err(map_extension_installation_error)?;
+        let Some(installation) = installations
+            .into_iter()
+            .find(|installation| installation.extension_id() == extension_id)
+        else {
+            return Ok(());
+        };
+        if installation.activation_state() != ExtensionActivationState::Enabled {
+            return Ok(());
+        }
+        let Some(host) = self.generic_host.get() else {
+            return Ok(());
+        };
+        match host.deactivate(extension_id.as_str()).await {
+            Ok(()) | Err(ironclaw_extension_host::LifecycleError::NotInstalled { .. }) => {}
+            Err(error) => return Err(generic_host_error(error)),
+        }
+        let active_package = self.lifecycle_package(extension_id).await?;
+        self.publish_to_generic_host(
+            extension_id,
+            installation.installation_id(),
+            &active_package,
+        )
+        .await
+    }
+}
+
 struct HostedMcpDiscoveryRequest {
     base_package: ExtensionPackage,
     scope: ResourceScope,
@@ -1483,7 +1779,11 @@ fn activation_success_message(
 ) -> String {
     if package_declares_inbound_product_adapter(package) {
         let display_name = package.manifest.name.as_str();
-        let connection = channel_connection_requirement(package_ref.id.as_str(), display_name);
+        let connection = channel_connection_requirement(
+            package_ref.id.as_str(),
+            display_name,
+            channel_connect_strategy(package),
+        );
         let connect_guidance = match connection.strategy {
             RebornChannelConnectStrategy::OAuth => format!(
                 "If WebChat shows an account connection panel, tell the user to connect \
@@ -1531,31 +1831,95 @@ fn activation_success_message(
 // backend mounts the generic proof-code redeem route — the first non-Slack
 // inbound channel must mount one alongside this requirement or its submit
 // will 404 (see PAIRING_REDEEM_PATH in the webui pairing-api.js).
+/// The discovery call's network authority: the declared hosted-MCP server
+/// host only (the same ceiling the dispatch pipeline derives for the
+/// connection-template capability).
+fn hosted_mcp_discovery_network_policy(
+    package: &ExtensionPackage,
+) -> Option<ironclaw_host_api::NetworkPolicy> {
+    let ironclaw_extensions::ExtensionRuntime::Mcp { url: Some(url), .. } =
+        &package.manifest.runtime
+    else {
+        return None;
+    };
+    let parsed = url::Url::parse(url).ok()?;
+    let host = parsed.host_str()?;
+    Some(ironclaw_host_api::NetworkPolicy {
+        allowed_targets: vec![ironclaw_host_api::NetworkTargetPattern {
+            scheme: Some(ironclaw_host_api::NetworkScheme::Https),
+            host_pattern: host.to_string(),
+            port: parsed.port(),
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: None,
+    })
+}
+
+fn generic_host_error(error: ironclaw_extension_host::LifecycleError) -> ProductWorkflowError {
+    ProductWorkflowError::InvalidBindingRequest {
+        reason: format!("generic extension host rejected the activation: {error}"),
+    }
+}
+
+/// The connect strategy for a channel surface, derived from the manifest's
+/// declared auth setup: OAuth when the extension declares an OAuth credential
+/// requirement, otherwise the generic inbound proof-code pairing. There is no
+/// per-extension branch — the manifest is the only input (DEL-4).
+pub(crate) fn channel_connect_strategy(package: &ExtensionPackage) -> RebornChannelConnectStrategy {
+    let uses_oauth = package_runtime_credential_auth_requirements(package)
+        .iter()
+        .any(|requirement| {
+            matches!(
+                requirement.setup,
+                RuntimeCredentialAccountSetup::OAuth { .. }
+            )
+        });
+    if uses_oauth {
+        RebornChannelConnectStrategy::OAuth
+    } else {
+        RebornChannelConnectStrategy::InboundProofCode
+    }
+}
+
+/// The structured connect affordance for a channel surface. Copy is generated
+/// generically from the manifest display name and the derived strategy — no
+/// per-extension branch and no inline vendor copy (DEL-4); the S5 `display_name`
+/// rides the wire so the frontend never re-derives a label from the channel id.
 pub(crate) fn channel_connection_requirement(
     channel_id: &str,
     display_name: &str,
+    strategy: RebornChannelConnectStrategy,
 ) -> ChannelConnectionRequirement {
-    if channel_id == "slack" {
-        ChannelConnectionRequirement {
-            channel: "slack".to_string(),
-            strategy: RebornChannelConnectStrategy::OAuth,
-            instructions: "Connect Slack with OAuth from the extension configuration, then message the Slack bot directly.".to_string(),
-            input_placeholder: String::new(),
-            submit_label: "Connect Slack".to_string(),
-            error_message: "Slack OAuth connection failed. Try configuring Slack again.".to_string(),
-        }
-    } else {
-        ChannelConnectionRequirement {
-            channel: channel_id.to_string(),
-            strategy: RebornChannelConnectStrategy::InboundProofCode,
-            instructions: format!(
-                "Open {}'s app or bot, get the pairing code, and paste it here.",
-                display_name
+    let (instructions, input_placeholder, submit_label, error_message) = match strategy {
+        RebornChannelConnectStrategy::OAuth => (
+            format!(
+                "Connect {display_name} with OAuth from the extension configuration, then \
+                 message {display_name} directly."
             ),
-            input_placeholder: "Enter pairing code".to_string(),
-            submit_label: "Connect".to_string(),
-            error_message: "Pairing failed. Check the code and try again.".to_string(),
-        }
+            String::new(),
+            format!("Connect {display_name}"),
+            format!(
+                "{display_name} OAuth connection failed. Try configuring {display_name} again."
+            ),
+        ),
+        RebornChannelConnectStrategy::InboundProofCode
+        | RebornChannelConnectStrategy::WebGeneratedCode
+        | RebornChannelConnectStrategy::QrCode
+        | RebornChannelConnectStrategy::AdminManagedChannels => (
+            format!("Open {display_name}'s app or bot, get the pairing code, and paste it here."),
+            "Enter pairing code".to_string(),
+            "Connect".to_string(),
+            "Pairing failed. Check the code and try again.".to_string(),
+        ),
+    };
+    ChannelConnectionRequirement {
+        channel: channel_id.to_string(),
+        display_name: display_name.to_string(),
+        strategy,
+        instructions,
+        input_placeholder,
+        submit_label,
+        error_message,
     }
 }
 
@@ -1792,6 +2156,7 @@ mod tests {
                     surface_kinds: vec![CapabilitySurfaceKind::Channel],
                     channel_directions: None,
                     channel_connection: None,
+                    channel_presentation: None,
                     visible_capability_ids: Vec::new(),
                     visible_read_only_capability_ids: Vec::new(),
                     credential_requirements: Vec::new(),
@@ -1954,79 +2319,53 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn extension_activate_returns_slack_oauth_guidance_for_external_channel_package() {
-        let (_dir, _storage_root, facade, _active_registry, _installation_store) =
-            extension_lifecycle_fixture_with_catalog_and_service(
-                AvailableExtensionCatalog::from_packages(vec![fixture_external_channel_package(
-                    "slack", "Slack",
-                )]),
-                ExtensionLifecycleService::new(ExtensionRegistry::new()),
-            );
-        let package_ref =
-            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("valid ref");
-        facade
-            .execute(
-                lifecycle_surface_context(),
-                LifecycleProductAction::ExtensionInstall {
-                    package_ref: package_ref.clone(),
-                },
-            )
-            .await
-            .expect("install slack channel");
+    #[test]
+    fn channel_connect_strategy_is_manifest_driven_not_name_based() {
+        // DEL-4: the connect strategy is derived from the manifest's declared
+        // auth setup, never from the extension id. The real Slack package
+        // declares an OAuth recipe (`[auth.slack]`), so it resolves to OAuth
+        // even though its channel ingress uses a bot token; a bot-token-only
+        // fixture — even one named "slack" — resolves to the generic
+        // proof-code pairing. That asymmetry is exactly what proves no name
+        // hardcode survives (the retired branch keyed OAuth off `id == "slack"`).
+        let catalog =
+            crate::extension_host::available_extensions::AvailableExtensionCatalog::from_first_party_assets()
+                .expect("first-party catalog");
+        let slack_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
+            .expect("slack package ref");
+        let slack = catalog.resolve(&slack_ref).expect("slack package");
+        assert_eq!(
+            channel_connect_strategy(&slack.package),
+            RebornChannelConnectStrategy::OAuth,
+            "an extension declaring an OAuth recipe resolves to OAuth from the manifest",
+        );
 
-        let activate = facade
-            .execute(
-                lifecycle_surface_context(),
-                LifecycleProductAction::ExtensionActivate {
-                    package_ref: package_ref.clone(),
-                },
-            )
-            .await
-            .expect("activate slack channel");
+        let bot_token_named_slack = fixture_external_channel_package("slack", "Slack");
+        assert_eq!(
+            channel_connect_strategy(&bot_token_named_slack.package),
+            RebornChannelConnectStrategy::InboundProofCode,
+            "a bot-token-only channel resolves to proof-code regardless of its id",
+        );
 
-        assert_eq!(activate.phase, LifecyclePhase::Active);
-        let message = activate.message.as_deref().expect("activation message");
-        assert!(
-            message.contains("connect Slack via OAuth")
-                && message.contains("WebChat")
-                && message.contains("rather than pasting anything into normal chat")
-                && message.contains("continue the user's original request")
-                && message.contains("delivered by the host's outbound delivery"),
-            "Slack activation should guide the model into OAuth setup UI, got: {message}"
+        // The connect copy renders generically from the display name + the
+        // derived strategy — no inline vendor copy (DEL-4), and the S5
+        // `display_name` rides the requirement.
+        let requirement = channel_connection_requirement(
+            "slack",
+            "Slack",
+            channel_connect_strategy(&slack.package),
         );
-        assert!(
-            !message.contains("pairing"),
-            "Slack activation must not mention legacy manual-code flows: {message}"
-        );
-        let Some(LifecycleProductPayload::ExtensionActivate {
-            visible_capability_ids,
-            connection_required,
-            ..
-        }) = activate.payload.as_ref()
-        else {
-            panic!("expected extension activate payload");
-        };
-        assert!(
-            visible_capability_ids.is_empty(),
-            "Slack channel activation must not imply model-visible Slack read tools"
-        );
-        // The structured connect requirement is what drives the in-chat
-        // connection panel; the prose message above is model guidance only.
-        let requirement = connection_required
-            .as_ref()
-            .expect("slack channel activation must carry a structured connection requirement");
-        assert_eq!(requirement.channel, "slack");
         assert_eq!(requirement.strategy, RebornChannelConnectStrategy::OAuth);
+        assert_eq!(requirement.channel, "slack");
+        assert_eq!(requirement.display_name, "Slack");
         assert_eq!(requirement.input_placeholder, "");
         assert_eq!(requirement.submit_label, "Connect Slack");
-        assert_eq!(
-            requirement.instructions,
-            "Connect Slack with OAuth from the extension configuration, then message the Slack bot directly."
-        );
-        assert_eq!(
-            requirement.error_message,
-            "Slack OAuth connection failed. Try configuring Slack again."
+        assert!(
+            requirement
+                .instructions
+                .contains("Connect Slack with OAuth"),
+            "OAuth connect copy renders from the display name: {}",
+            requirement.instructions
         );
     }
 
@@ -2165,7 +2504,6 @@ mod tests {
         assert_eq!(example.installation_phase, Some(LifecyclePhase::Active));
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_tools_extension_installs_activates_and_publishes_capabilities() {
         let (_dir, _storage_root, port, _active_registry, installation_store) =
@@ -2246,7 +2584,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_tools_extension_activation_requires_personal_oauth() {
         let (_dir, _storage_root, port, _active_registry, _installation_store) =
@@ -2302,7 +2639,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_tools_extension_removes_cleanly() {
         let (_dir, _storage_root, port, _active_registry, installation_store) =
@@ -2529,15 +2865,40 @@ mod tests {
                 },
             )
             .await
-            .expect("transient discovery failure should fall back to bundled manifest");
+            .expect("transient discovery failure must not fail activation");
 
         assert_eq!(activate.phase, LifecyclePhase::Active);
+        // v3 hosted-MCP manifests declare no placeholder static tools, so the
+        // bundled-manifest fallback publishes only the host-internal MCP
+        // connection template; model-visible tools appear solely via live
+        // tools/list discovery.
+        let snapshot = active_registry.snapshot();
         assert!(
-            active_registry
-                .snapshot()
+            snapshot
                 .get_capability(&CapabilityId::new("notion.notion-search").unwrap())
-                .is_some(),
-            "fallback activation must publish bundled Notion capabilities"
+                .is_none(),
+            "v2 placeholder tools must not reappear on fallback"
+        );
+        let template_id = CapabilityId::new("notion.mcp_server").unwrap();
+        assert!(
+            snapshot.get_capability(&template_id).is_some(),
+            "fallback activation must publish the host-internal MCP connection template"
+        );
+        assert_eq!(
+            snapshot.capability_visibility(&template_id),
+            Some(CapabilityVisibility::HostInternal),
+            "MCP connection template must never be model-visible"
+        );
+        let model_visible_notion_tools = snapshot
+            .capabilities()
+            .filter(|descriptor| descriptor.provider.as_str() == "notion")
+            .filter(|descriptor| {
+                snapshot.capability_visibility(&descriptor.id) == Some(CapabilityVisibility::Model)
+            })
+            .count();
+        assert_eq!(
+            model_visible_notion_tools, 0,
+            "fallback activation must expose zero model-visible tools"
         );
     }
 
@@ -2637,6 +2998,142 @@ mod tests {
             .expect_err("remove during discovery should be retryable");
 
         assert!(matches!(error, ProductWorkflowError::Transient { .. }));
+    }
+
+    #[tokio::test]
+    async fn hosted_mcp_rediscovery_replaces_the_published_tool_set_completely() {
+        // TOOL-9 ("a refresh replaces the set completely"): discovery is
+        // loader-owned and has no separate refresh API — a refresh is a
+        // re-activation that re-runs tools/list and atomically republishes.
+        // The second discovery returns a *different* tool, so the published set
+        // is replaced wholesale: the first discovered capability is gone (not
+        // merged), only the second remains.
+        let catalog =
+            AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets");
+        let (_dir, _storage_root, port, active_registry, _installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                catalog,
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
+
+        port.install(package_ref.clone())
+            .await
+            .expect("install Notion MCP");
+        port.activate_with_prechecked_credentials_for_test(
+            package_ref.clone(),
+            ExtensionActivationMode::HostedMcpDiscovery {
+                scope: hosted_mcp_scope("hosted-mcp-refresh"),
+                runtime_http_egress: Arc::new(HostedMcpDiscoveryEgress::with_tool_name(
+                    "search-one",
+                )),
+            },
+        )
+        .await
+        .expect("initial discovery activation");
+        assert!(
+            active_registry
+                .snapshot()
+                .get_capability(&CapabilityId::new("notion.search-one").unwrap())
+                .is_some(),
+            "the first discovered tool publishes"
+        );
+
+        // Refresh: re-activate; tools/list now yields a different tool.
+        port.activate_with_prechecked_credentials_for_test(
+            package_ref,
+            ExtensionActivationMode::HostedMcpDiscovery {
+                scope: hosted_mcp_scope("hosted-mcp-refresh"),
+                runtime_http_egress: Arc::new(HostedMcpDiscoveryEgress::with_tool_name(
+                    "search-two",
+                )),
+            },
+        )
+        .await
+        .expect("re-discovery activation");
+
+        let snapshot = active_registry.snapshot();
+        assert!(
+            snapshot
+                .get_capability(&CapabilityId::new("notion.search-two").unwrap())
+                .is_some(),
+            "the refreshed set contains the newly discovered tool"
+        );
+        assert!(
+            snapshot
+                .get_capability(&CapabilityId::new("notion.search-one").unwrap())
+                .is_none(),
+            "the refresh replaced the set completely — the prior discovered tool is gone, not merged"
+        );
+    }
+
+    #[tokio::test]
+    async fn hosted_mcp_rediscovery_failure_leaves_the_prior_tool_set_intact() {
+        // TOOL-9 ("or not at all"): when a refresh fails after discovery but
+        // before the atomic publish (here the post-discovery credential recheck
+        // fails), the swap never happens — the previously published discovered
+        // set stays live and the new set is not partially applied.
+        let catalog =
+            AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets");
+        let (_dir, _storage_root, port, active_registry, _installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                catalog,
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
+
+        port.install(package_ref.clone())
+            .await
+            .expect("install Notion MCP");
+        port.activate_with_prechecked_credentials_for_test(
+            package_ref.clone(),
+            ExtensionActivationMode::HostedMcpDiscovery {
+                scope: hosted_mcp_scope("hosted-mcp-refresh-fail"),
+                runtime_http_egress: Arc::new(HostedMcpDiscoveryEgress::with_tool_name(
+                    "search-one",
+                )),
+            },
+        )
+        .await
+        .expect("initial discovery activation");
+
+        // Refresh attempt: tools/list would yield a new tool, but the
+        // post-discovery credential recheck fails before publish.
+        let error = port
+            .activate_with_credential_gate(
+                package_ref,
+                ExtensionActivationMode::HostedMcpDiscovery {
+                    scope: hosted_mcp_scope("hosted-mcp-refresh-fail"),
+                    runtime_http_egress: Arc::new(HostedMcpDiscoveryEgress::with_tool_name(
+                        "search-two",
+                    )),
+                },
+                FailsSecondCredentialGate {
+                    calls: Arc::new(AtomicUsize::new(0)),
+                },
+            )
+            .await
+            .expect_err("post-discovery credential failure aborts the refresh");
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+
+        let snapshot = active_registry.snapshot();
+        assert!(
+            snapshot
+                .get_capability(&CapabilityId::new("notion.search-one").unwrap())
+                .is_some(),
+            "the prior discovered set survives a failed refresh"
+        );
+        assert!(
+            snapshot
+                .get_capability(&CapabilityId::new("notion.search-two").unwrap())
+                .is_none(),
+            "a failed refresh publishes nothing — no partial swap to the new set"
+        );
     }
 
     #[tokio::test]
@@ -5484,6 +5981,7 @@ output_schema_ref = "schemas/search.output.json"
             package,
             surface_kinds: Vec::new(),
             channel_directions: None,
+            channel_presentation: None,
             assets: vec![
                 AvailableExtensionAsset {
                     path: "manifest.toml".to_string(),
@@ -5496,6 +5994,8 @@ output_schema_ref = "schemas/search.output.json"
                     content: AvailableExtensionAssetContent::Bytes(b"\0asm\x01\0\0\0".to_vec()),
                 },
             ],
+            onboarding_override: None,
+            oauth_setup_override: None,
         }
     }
 

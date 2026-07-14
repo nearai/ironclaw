@@ -47,13 +47,10 @@ mod product_auth;
 mod production_runtime_policy;
 mod profile_approval_authorization;
 mod projection;
-mod slack;
 pub use product_auth::api::auth_prompt::{
     AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller,
 };
-#[cfg(feature = "slack-v2-host-beta")]
-mod delivered_gate_routing;
-#[cfg(feature = "slack-v2-host-beta")]
+#[cfg(feature = "webui-v2-beta")]
 mod host_ingress;
 mod provider_identity;
 mod readiness;
@@ -71,7 +68,19 @@ mod webui;
 
 pub use admin_token::AdminApiTokenMinter;
 pub use automation::facade::RebornAutomationProductFacade;
+pub use automation::trigger_poller::{NoopPostSubmitDeliveryHook, PostSubmitDeliveryHook};
 pub use error::RebornBuildError;
+pub use extension_host::channel_host::{ChannelHostIdentity, GenericChannelHostAssembly};
+pub use extension_host::channel_identity::ChannelIdentityBindingConfig;
+pub use extension_host::extension_ingress::{
+    ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
+    ExtensionIngressParts, ExtensionIngressRegistry, GenericChannelInboundSink,
+    InboundPayloadClassifier, PostAdmissionObserver, StaticIngressSecrets, VerifiedEvidenceMint,
+};
+#[cfg(feature = "webui-v2-beta")]
+pub use extension_host::extension_ingress::{
+    EXTENSION_INGRESS_ROUTE_PATTERN, extension_ingress_route_mount, forward_alias_request,
+};
 pub use extension_host::extension_lifecycle_command::{
     RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,
     execute_reborn_extension_lifecycle_command, render_reborn_extension_lifecycle_response,
@@ -79,9 +88,13 @@ pub use extension_host::extension_lifecycle_command::{
 pub use extension_host::gsuite::{
     bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers,
 };
+#[cfg(feature = "webui-v2-beta")]
+pub use extension_host::legacy_ingress_aliases::legacy_extension_ingress_alias_mounts;
 pub use extension_host::skill_listing::{RebornSkillListError, list_reborn_local_skills};
 #[cfg(feature = "test-support")]
 pub use factory::AttachmentTestSupport;
+#[cfg(feature = "test-support")]
+pub use factory::ChannelHostAssemblyTestWiring;
 #[cfg(feature = "test-support")]
 pub use factory::RebornLocalDevApprovalTestParts;
 #[cfg(feature = "migration-support")]
@@ -89,9 +102,9 @@ pub use factory::extension_installation_store_for_migration;
 pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
 pub use failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
 pub use failure_summary::reborn_failure_summary_for_category;
-pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
-#[cfg(feature = "webui-v2-beta")]
-pub use ironclaw_auth::GoogleOAuthRouteConfig;
+pub use input::{
+    ChannelExtensionBinding, OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding,
+};
 /// OAuth redirect-URI newtype re-exported so the `ironclaw_reborn_cli` binary
 /// can name it without a direct `ironclaw_auth` dependency. Its
 /// `runtime/mod.rs` parses `IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI`
@@ -102,6 +115,10 @@ pub use ironclaw_auth::GoogleOAuthRouteConfig;
 /// the composition-facade set, so adding `ironclaw_auth` there would fail that
 /// test — the type must travel through this facade instead.
 pub use ironclaw_auth::OAuthRedirectUri;
+/// Channel-adapter and codec contracts re-exported for the assembling
+/// binary's [`ChannelExtensionBinding`] construction.
+pub use ironclaw_product_adapters::{ChannelAdapter, NormalizedInboundMessage};
+pub use ironclaw_product_workflow::PreferenceTargetCodec;
 pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleSearchExtensionSummary,
@@ -167,14 +184,13 @@ pub use product_auth::api::auth::{
     RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
     RebornProductAuthServicePorts, RebornProductAuthServices,
 };
-#[cfg(feature = "slack-v2-host-beta")]
-pub use product_auth::serve::SlackPersonalOAuthBindingConfig;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
 pub use provider_identity::{
     ProviderIdentityActorResolver, RebornIdentityProviderId, RebornIdentityProviderUserId,
-    RebornUserIdentityBinding, RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
-    RebornUserIdentityLookup, RebornUserIdentityLookupError, installation_scoped_provider_user_id,
+    RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
+    RebornUserIdentityBindingError, RebornUserIdentityBindingStore, RebornUserIdentityLookup,
+    RebornUserIdentityLookupError, installation_scoped_provider_user_id,
 };
 pub use readiness::{
     RebornFacadeReadiness, RebornReadiness, RebornReadinessDiagnostic,
@@ -197,65 +213,13 @@ pub use runtime::{
     RebornSkillExecutionResult, RebornSkillSourceKind, build_reborn_runtime,
 };
 pub use runtime_input::{
-    CredentialRefreshSettings, DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL,
-    DEFAULT_TURN_RUNNER_POLL_INTERVAL, PollSettings, RebornRuntimeIdentity, RebornRuntimeInput,
+    DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL, DEFAULT_TURN_RUNNER_POLL_INTERVAL,
+    KeepaliveSweepSettings, PollSettings, RebornRuntimeIdentity, RebornRuntimeInput,
     TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
     TriggerFireAccessError, TriggerPollerSettings, TurnRunnerSettings,
 };
 #[cfg(feature = "root-llm-provider")]
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_channel_connection::build_webui_services_with_slack_host_beta_mounts;
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_channel_routes::{
-    SlackChannelRouteAdminRouteConfig, WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH,
-    WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH, WEBUI_V2_CHANNELS_SLACK_SUBJECTS_PATH,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_delivery::{
-    NoopPostSubmitDeliveryHook, PostSubmitDeliveryHook, TriggeredRunDeliveryDriver,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_delivery::{
-    SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
-    SlackFinalReplyDeliverySettings,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_egress::{
-    SlackEgressCredential, SlackEgressCredentialError, SlackEgressCredentialProvider,
-    SlackProtocolHttpEgress, StaticSlackEgressCredentialProvider,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_host_beta::{
-    SlackHostBetaBuildError, SlackHostBetaChannelRoute, SlackHostBetaConfig,
-    SlackHostBetaConfigInput, SlackHostBetaMounts, SlackHostBetaRuntimeConfig,
-    build_slack_events_route_mount, build_slack_events_route_mount_with_actor_user_resolver,
-    build_slack_host_beta_mounts, build_slack_host_beta_runtime_mounts,
-    build_triggered_run_delivery_hook,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_personal_binding::{
-    SlackPersonalBindingInstallation, SlackPersonalBindingPrincipal, SlackPersonalUserBindingError,
-    SlackPersonalUserBindingRequest, SlackPersonalUserBindingService,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_personal_binding_serve::{
-    SLACK_PERSONAL_BINDING_OAUTH_CALLBACK_PATH, SLACK_PERSONAL_BINDING_OAUTH_START_PATH,
-    SlackPersonalBindingAuthorizationUrl, SlackPersonalBindingOAuthClient,
-    SlackPersonalBindingOAuthError, SlackPersonalBindingOAuthIdentity,
-    SlackPersonalBindingRouteConfig, SlackPersonalBindingRouteConfigError,
-    SlackPersonalBindingStartResponse,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_serve;
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_serve::{
-    SLACK_EVENTS_PATH, SlackEventsRouteState, SlackEventsWebhookDispatcher,
-    SlackInstallationSelector, SlackTeamId, slack_events_route_descriptors,
-    slack_events_route_mount,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_setup::SlackPersonalSetupServiceSlot;
 pub use web_access::register_bundled_web_access_first_party_handlers;
 pub use webui::facade::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
@@ -581,8 +545,7 @@ use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::ProcessBackendKind;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{
-    MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, SYSTEM_RESERVED_ID,
-    VirtualPath,
+    MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, VirtualPath,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
@@ -669,9 +632,8 @@ pub fn invocation_mount_view(
     )
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-fn resource_scope_path_segment(value: &str) -> &str {
-    if value == SYSTEM_RESERVED_ID {
+pub(crate) fn resource_scope_path_segment(value: &str) -> &str {
+    if value == ironclaw_host_api::SYSTEM_RESERVED_ID {
         "__system__"
     } else {
         value
@@ -713,12 +675,6 @@ fn invocation_mount_view_for_segments(
         VirtualPath::new(format!("/tenants/{tenant_id}/shared/reborn-identity"))?,
         MountPermissions::read_write_list_delete(),
     ));
-    #[cfg(feature = "slack-v2-host-beta")]
-    grants.push(MountGrant::new(
-        MountAlias::new("/tenant-shared/slack-channel-routes")?,
-        VirtualPath::new(format!("/tenants/{tenant_id}/shared/slack-channel-routes"))?,
-        MountPermissions::read_only(),
-    ));
     for system_subroot in ["/system/settings", "/system/extensions", "/system/skills"] {
         grants.push(MountGrant::new(
             MountAlias::new(system_subroot)?,
@@ -727,51 +683,6 @@ fn invocation_mount_view_for_segments(
         ));
     }
     MountView::new(grants)
-}
-
-#[cfg(all(
-    any(feature = "libsql", feature = "postgres"),
-    feature = "slack-v2-host-beta"
-))]
-pub(crate) fn slack_host_state_mount_view(
-    scope: &ResourceScope,
-) -> Result<MountView, ironclaw_host_api::HostApiError> {
-    let tenant_id = resource_scope_path_segment(scope.tenant_id.as_str());
-    MountView::new(vec![
-        MountGrant::new(
-            MountAlias::new("/tenant-shared/slack-personal-binding")?,
-            VirtualPath::new(format!(
-                "/tenants/{tenant_id}/shared/slack-personal-binding"
-            ))?,
-            MountPermissions::read_write_list_delete(),
-        ),
-        MountGrant::new(
-            MountAlias::new("/tenant-shared/slack-channel-routes")?,
-            VirtualPath::new(format!("/tenants/{tenant_id}/shared/slack-channel-routes"))?,
-            MountPermissions::read_write_list_delete(),
-        ),
-        MountGrant::new(
-            MountAlias::new("/tenant-shared/slack-setup")?,
-            VirtualPath::new(format!("/tenants/{tenant_id}/shared/slack-setup"))?,
-            MountPermissions::read_write_list_delete(),
-        ),
-        MountGrant::new(
-            MountAlias::new("/engine/product_workflow/idempotency")?,
-            VirtualPath::new(format!(
-                "/tenants/{tenant_id}/shared/slack-product-workflow/idempotency"
-            ))?,
-            MountPermissions::read_write_list_delete(),
-        ),
-        // Durable Slack conversation-binding store: RebornFilesystemConversationServices
-        // persists `/conversations/state.json`. Without this alias the ScopedFilesystem
-        // cannot resolve that path, the conversation store fails to open, and every
-        // inbound Slack event (e.g. a DM to the bot) is dropped with a 503.
-        MountGrant::new(
-            MountAlias::new("/conversations")?,
-            VirtualPath::new(format!("/tenants/{tenant_id}/shared/slack-conversations"))?,
-            MountPermissions::read_write_list_delete(),
-        ),
-    ])
 }
 
 /// Wrap `root` in a tenant-aware [`ScopedFilesystem`] whose resolver is
@@ -992,84 +903,6 @@ mod mount_view_tests {
         assert_eq!(
             resolved.as_str(),
             &format!("/tenants/{}/shared/foo", scope.tenant_id.as_str())
-        );
-    }
-
-    #[cfg(feature = "slack-v2-host-beta")]
-    #[test]
-    fn invocation_mount_view_exposes_slack_channel_routes_read_only() {
-        let scope = sample_scope();
-        let view = invocation_mount_view(&scope).unwrap();
-        let (resolved, grant) = view
-            .resolve_with_grant(
-                &ScopedPath::new("/tenant-shared/slack-channel-routes/install/team/route.json")
-                    .unwrap(),
-            )
-            .unwrap();
-        assert_eq!(
-            resolved.as_str(),
-            &format!(
-                "/tenants/{}/shared/slack-channel-routes/install/team/route.json",
-                scope.tenant_id.as_str()
-            )
-        );
-        assert_eq!(grant.alias.as_str(), "/tenant-shared/slack-channel-routes");
-        assert_eq!(grant.permissions, MountPermissions::read_only());
-    }
-
-    #[cfg(feature = "slack-v2-host-beta")]
-    #[test]
-    fn slack_host_state_mount_view_grants_delete_only_to_slack_state_roots() {
-        let scope = sample_scope();
-        let view = slack_host_state_mount_view(&scope).unwrap();
-        for (alias, path, target) in [
-            (
-                "/tenant-shared/slack-channel-routes",
-                "/tenant-shared/slack-channel-routes/install/team/route.json",
-                "slack-channel-routes/install/team/route.json",
-            ),
-            (
-                "/tenant-shared/slack-setup",
-                "/tenant-shared/slack-setup/installation.json",
-                "slack-setup/installation.json",
-            ),
-            (
-                "/engine/product_workflow/idempotency",
-                "/engine/product_workflow/idempotency/actions/action.json",
-                "slack-product-workflow/idempotency/actions/action.json",
-            ),
-            // Regression: the durable conversation-binding store persists
-            // `/conversations/state.json`; without this alias every inbound Slack
-            // event (e.g. a DM to the bot) fails to open the store and is dropped.
-            (
-                "/conversations",
-                "/conversations/state.json",
-                "slack-conversations/state.json",
-            ),
-        ] {
-            let (resolved, grant) = view
-                .resolve_with_grant(&ScopedPath::new(path).unwrap())
-                .unwrap();
-            assert_eq!(
-                resolved.as_str(),
-                &format!("/tenants/{}/shared/{target}", scope.tenant_id.as_str())
-            );
-            assert_eq!(grant.alias.as_str(), alias);
-            assert_eq!(
-                grant.permissions,
-                MountPermissions::read_write_list_delete()
-            );
-        }
-        // /outbound is no longer in the slack-host-state mount; outbound state is
-        // served via the composition-owned per-user scoped filesystem instead.
-        assert!(
-            view.resolve(&ScopedPath::new("/outbound/deliveries/delivery.json").unwrap())
-                .is_err(),
-            "/outbound must not resolve through the slack-host-state mount after store unification"
-        );
-        assert!(
-            view.resolve(&ScopedPath::new("/tenant-shared/other.json").unwrap())
-                .is_err()
         );
     }
 

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use ironclaw_auth::{AuthProductError, CredentialAccountLabel, OAuthClientId, OAuthRedirectUri};
+use ironclaw_auth::{AuthProductError, OAuthClientId, OAuthRedirectUri};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::runtime_policy::ProcessBackendKind;
 #[cfg(feature = "postgres")]
@@ -12,8 +12,6 @@ use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, SecretMode,
 };
 use ironclaw_host_api::{AgentId, TenantId};
-#[cfg(all(test, feature = "slack-v2-host-beta"))]
-use ironclaw_host_runtime::HostRuntimeHttpEgressPort;
 use ironclaw_host_runtime::TenantSandboxProcessPort;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_network::NetworkHttpEgress;
@@ -28,12 +26,6 @@ use ironclaw_reborn_event_store::{PostgresPoolTlsOptions, RebornPostgresSslMode}
 
 #[cfg(feature = "postgres")]
 use crate::RebornBuildError;
-use crate::product_auth::oauth::google_oauth::google_provider_spec;
-use crate::product_auth::oauth::notion_oauth::notion_provider_spec;
-use crate::product_auth::oauth::oauth_dcr::OAuthDcrProviderConfig;
-use crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderSpec;
-#[cfg(feature = "slack-v2-host-beta")]
-use crate::slack::slack_setup::SlackPersonalSetupServiceSlot;
 use crate::{RebornCompositionProfile, RebornProductAuthServicePorts};
 
 #[cfg(feature = "postgres")]
@@ -101,15 +93,21 @@ impl std::fmt::Debug for OAuthClientConfig {
     }
 }
 
+/// Deployment OAuth client material for one vendor id. The vendor's recipe
+/// (from its manifest) names the client-credential handles; this config
+/// supplies their values.
 #[derive(Debug, Clone)]
 pub(crate) struct OAuthProviderBackendConfig {
-    pub(crate) spec: HostOAuthProviderSpec,
+    pub(crate) vendor: String,
     pub(crate) client: OAuthClientConfig,
 }
 
+/// The public origin serving the static vendor OAuth callback routes —
+/// enables dynamic client registration (and the engine callback base) for
+/// vendors whose recipes carry no deployment client credentials.
 #[derive(Debug, Clone)]
-pub(crate) struct OAuthDcrProviderBackendConfig {
-    pub(crate) config: OAuthDcrProviderConfig,
+pub(crate) struct OAuthDcrCallbackConfig {
+    pub(crate) callback_origin: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -187,20 +185,50 @@ pub struct RebornBuildInput {
     pub(crate) required_runtime_backends: Vec<ironclaw_host_api::RuntimeKind>,
     pub(crate) require_runtime_http_egress: bool,
     pub(crate) require_wasm_credentials: bool,
-    #[cfg(all(test, feature = "slack-v2-host-beta"))]
-    pub(crate) host_runtime_http_egress_for_test: Option<Option<HostRuntimeHttpEgressPort>>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) network_http_egress_for_test: Option<Arc<dyn NetworkHttpEgress>>,
     pub(crate) product_auth_ports: Option<RebornProductAuthServicePorts>,
     pub(crate) oauth_provider_configs: Vec<OAuthProviderBackendConfig>,
-    pub(crate) oauth_dcr_provider_configs: Vec<OAuthDcrProviderBackendConfig>,
-    #[cfg(feature = "slack-v2-host-beta")]
-    pub(crate) slack_personal_oauth_lazy_slot: Option<SlackPersonalSetupServiceSlot>,
+    pub(crate) oauth_dcr_callback: Option<OAuthDcrCallbackConfig>,
     pub(crate) nearai_mcp_bootstrap_config:
         Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
+    /// `first_party`-runtime extension factories the binary assembles
+    /// (extension-runtime P2). Empty until concrete extension crates extract
+    /// in P6; integration tests register the invented-vendor fixture factory
+    /// here.
+    pub(crate) native_extension_factories:
+        Vec<std::sync::Arc<dyn ironclaw_extension_host::NativeExtensionFactory>>,
+    /// Channel-adapter bindings + extras the binary assembles for channel
+    /// extensions whose runtime is not `first_party` (extension-runtime
+    /// DEL-7): the generic loader binds the adapter at activation and the
+    /// channel host assembly consumes the extras. Composition never names a
+    /// concrete extension crate.
+    pub(crate) channel_extension_bindings: Vec<ChannelExtensionBinding>,
     /// Concurrency limits applied to the in-memory turn-state store.
     /// Defaults to no limits (all caps `None` / unlimited).
     pub(crate) turn_state_store_limits: InMemoryTurnStateStoreLimits,
+}
+
+/// One channel extension's binary-assembled vendor binding
+/// (extension-runtime DEL-7): the channel adapter for a non-`first_party`
+/// runtime plus the composition extras the generic channel host consumes.
+/// Supplied through [`RebornBuildInput::with_channel_extension_bindings`] by
+/// the assembling binary — composition itself never names a concrete
+/// extension crate.
+#[derive(Clone)]
+pub struct ChannelExtensionBinding {
+    /// The extension id the manifest declares (also the adapter id).
+    pub extension_id: String,
+    /// The channel adapter implementation bound at activation.
+    pub adapter: std::sync::Arc<dyn ironclaw_product_adapters::ChannelAdapter>,
+    /// Protocol-specific inbound payload reclassification (gate-resolution
+    /// replies), registered on the channel host assembly.
+    pub inbound_payload_classifier:
+        Option<std::sync::Arc<crate::extension_host::extension_ingress::InboundPayloadClassifier>>,
+    /// The vendor half of the preference-target codec, consumed by the
+    /// generic outbound-target provider and triggered-delivery hook.
+    pub preference_target_codec:
+        Option<std::sync::Arc<dyn ironclaw_product_workflow::PreferenceTargetCodec>>,
 }
 
 #[derive(Clone, Debug)]
@@ -634,6 +662,27 @@ impl RebornBuildInput {
         self
     }
 
+    pub fn with_native_extension_factories(
+        mut self,
+        factories: Vec<std::sync::Arc<dyn ironclaw_extension_host::NativeExtensionFactory>>,
+    ) -> Self {
+        self.native_extension_factories = factories;
+        self
+    }
+
+    /// Supply the binary-assembled channel-adapter bindings for channel
+    /// extensions whose runtime is not `first_party` (extension-runtime
+    /// DEL-7): the generic loader binds each adapter at activation, and the
+    /// channel host assembly registers the accompanying extras (gate-reply
+    /// classifier, preference-target codec).
+    pub fn with_channel_extension_bindings(
+        mut self,
+        bindings: Vec<ChannelExtensionBinding>,
+    ) -> Self {
+        self.channel_extension_bindings = bindings;
+        self
+    }
+
     pub fn with_nearai_mcp_bootstrap_config(
         mut self,
         config: crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig,
@@ -647,15 +696,6 @@ impl RebornBuildInput {
         config: Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
     ) -> Self {
         self.nearai_mcp_bootstrap_config = config;
-        self
-    }
-
-    #[cfg(all(test, feature = "slack-v2-host-beta"))]
-    pub(crate) fn with_host_runtime_http_egress_for_test(
-        mut self,
-        egress: Option<HostRuntimeHttpEgressPort>,
-    ) -> Self {
-        self.host_runtime_http_egress_for_test = Some(egress);
         self
     }
 
@@ -681,51 +721,32 @@ impl RebornBuildInput {
         self
     }
 
-    /// Record product/bootstrap-provided Google OAuth metadata on the build input.
+    /// Record deployment OAuth client material for one vendor id. The vendor's
+    /// manifest recipe names the client-credential handles these values fill.
     ///
     /// `RebornBuildInput` owns this composition seam until a settings-backed
     /// source exists.
-    pub fn with_google_oauth_backend(mut self, config: OAuthClientConfig) -> Self {
-        self.push_oauth_provider_config(google_provider_spec(), config);
+    pub fn with_vendor_oauth_client(
+        mut self,
+        vendor: impl Into<String>,
+        config: OAuthClientConfig,
+    ) -> Self {
+        self.push_oauth_provider_config(vendor.into(), config);
         self
     }
 
-    /// Record product/bootstrap-provided Notion MCP OAuth metadata on the build input.
-    ///
-    /// This keeps Notion OAuth in the Reborn product-auth provider path; callers
-    /// that use dynamic client registration can pass the client metadata they
-    /// registered for this host callback URL.
-    pub fn with_notion_oauth_backend(mut self, config: OAuthClientConfig) -> Self {
-        self.push_oauth_provider_config(notion_provider_spec(), config);
-        self
-    }
-
-    /// Register the lazy Slack personal OAuth slot so the provider client
-    /// fetches credentials from the setup service at request time rather than
-    /// from env vars at startup.
-    #[cfg(feature = "slack-v2-host-beta")]
-    pub fn with_slack_personal_oauth_lazy(mut self, slot: SlackPersonalSetupServiceSlot) -> Self {
-        self.slack_personal_oauth_lazy_slot = Some(slot);
-        self
-    }
-
-    /// Enable Dynamic Client Registration for the bundled Notion MCP OAuth provider.
-    ///
-    /// Callers provide the public origin that serves the Reborn product-auth
-    /// callback route. Local loopback HTTP origins are accepted; non-loopback
-    /// deployments must use HTTPS.
-    pub fn with_notion_dcr_oauth_backend(
+    /// Record the public origin serving the vendor OAuth callback routes.
+    /// Enables the engine's dynamic client registration (RFC 7591) for
+    /// recipes without deployment client credentials, and anchors the static
+    /// vendor callback base. Local loopback HTTP origins are accepted;
+    /// non-loopback deployments must use HTTPS.
+    pub fn with_dcr_oauth_callback(
         mut self,
         callback_origin: impl Into<String>,
-        client_name: impl Into<String>,
     ) -> Result<Self, ironclaw_auth::AuthProductError> {
-        self.push_oauth_dcr_provider_config(OAuthDcrProviderConfig {
-            spec: notion_provider_spec(),
-            callback_origin: callback_origin.into(),
-            client_name: client_name.into(),
-            account_label: CredentialAccountLabel::new("notion")?,
-            scopes: Vec::new(),
-        });
+        let callback_origin = callback_origin.into();
+        validate_dcr_callback_origin(&callback_origin)?;
+        self.oauth_dcr_callback = Some(OAuthDcrCallbackConfig { callback_origin });
         Ok(self)
     }
 
@@ -742,35 +763,17 @@ impl RebornBuildInput {
         self
     }
 
-    fn push_oauth_provider_config(
-        &mut self,
-        spec: HostOAuthProviderSpec,
-        client: OAuthClientConfig,
-    ) {
+    fn push_oauth_provider_config(&mut self, vendor: String, client: OAuthClientConfig) {
         if let Some(existing) = self
             .oauth_provider_configs
             .iter_mut()
-            .find(|existing| existing.spec.provider_id == spec.provider_id)
+            .find(|existing| existing.vendor == vendor)
         {
-            existing.spec = spec;
             existing.client = client;
             return;
         }
         self.oauth_provider_configs
-            .push(OAuthProviderBackendConfig { spec, client });
-    }
-
-    fn push_oauth_dcr_provider_config(&mut self, config: OAuthDcrProviderConfig) {
-        if let Some(existing) = self
-            .oauth_dcr_provider_configs
-            .iter_mut()
-            .find(|existing| existing.config.spec.provider_id == config.spec.provider_id)
-        {
-            existing.config = config;
-            return;
-        }
-        self.oauth_dcr_provider_configs
-            .push(OAuthDcrProviderBackendConfig { config });
+            .push(OAuthProviderBackendConfig { vendor, client });
     }
 
     fn new(
@@ -790,16 +793,14 @@ impl RebornBuildInput {
             required_runtime_backends: Vec::new(),
             require_runtime_http_egress: false,
             require_wasm_credentials: false,
-            #[cfg(all(test, feature = "slack-v2-host-beta"))]
-            host_runtime_http_egress_for_test: None,
             #[cfg(any(test, feature = "test-support"))]
             network_http_egress_for_test: None,
             product_auth_ports: None,
             oauth_provider_configs: Vec::new(),
-            oauth_dcr_provider_configs: Vec::new(),
-            #[cfg(feature = "slack-v2-host-beta")]
-            slack_personal_oauth_lazy_slot: None,
+            oauth_dcr_callback: None,
             nearai_mcp_bootstrap_config: None,
+            native_extension_factories: Vec::new(),
+            channel_extension_bindings: Vec::new(),
             turn_state_store_limits: InMemoryTurnStateStoreLimits::default(),
         }
     }
@@ -1081,6 +1082,22 @@ fn parse_bool_opt_in(value: &str) -> Option<bool> {
         "1" | "true" | "yes" | "on" => Some(true),
         _ => None,
     }
+}
+
+/// The DCR callback origin must be a bare https (or loopback http) origin.
+fn validate_dcr_callback_origin(origin: &str) -> Result<(), AuthProductError> {
+    let parsed = url::Url::parse(origin).map_err(|_| AuthProductError::BackendUnavailable)?;
+    let is_loopback_http = parsed.scheme() == "http"
+        && parsed
+            .host_str()
+            .is_some_and(|host| matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]"));
+    if parsed.scheme() != "https" && !is_loopback_http {
+        return Err(AuthProductError::BackendUnavailable);
+    }
+    if parsed.path() != "/" || parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(AuthProductError::BackendUnavailable);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

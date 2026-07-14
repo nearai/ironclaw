@@ -236,7 +236,7 @@ test("installed channel card omits generic Activate while installed MCP card kee
     package_ref: { id: "slack" },
     runtime: "first_party",
     surfaces: channelSurfaces,
-    activation_status: "installed",
+    installation_state: "installed",
     display_name: "Slack",
   });
   assert.equal(
@@ -249,7 +249,7 @@ test("installed channel card omits generic Activate while installed MCP card kee
     package_ref: { id: "github" },
     runtime: "mcp",
     surfaces: toolSurfaces,
-    activation_status: "installed",
+    installation_state: "installed",
     display_name: "GitHub",
   });
   assert.equal(
@@ -301,7 +301,7 @@ test("active package with missing auth renders auth needed setup state", () => {
     authenticated: false,
     needs_setup: true,
     has_auth: true,
-    activation_status: "active",
+    installation_state: "active",
   });
 
   assert.equal(
@@ -404,7 +404,7 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
         package_ref: { id: "telegram" },
         runtime: "first_party",
         surfaces: channelSurfaces,
-        activation_status: "active",
+        installation_state: "active",
         display_name: "Telegram",
       };
       const { rendered, OverflowMenu } = renderExtensionCardWithInternals(ext);
@@ -423,7 +423,7 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
         package_ref: { id: "some-wasm-channel" },
         runtime: "wasm",
         surfaces: channelSurfaces,
-        activation_status: "active",
+        installation_state: "active",
         display_name: "My WASM Channel",
       };
       const { rendered, OverflowMenu } = renderExtensionCardWithInternals(ext);
@@ -442,7 +442,7 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
         package_ref: { id: "telegram" },
         runtime: "first_party",
         surfaces: channelSurfaces,
-        activation_status: "ready",
+        installation_state: "ready",
         display_name: "Telegram",
       };
       const { rendered, OverflowMenu } = renderExtensionCardWithInternals(ext);
@@ -461,7 +461,7 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
         package_ref: { id: "telegram" },
         runtime: "first_party",
         surfaces: channelSurfaces,
-        activation_status: "pairing_required",
+        installation_state: "pairing_required",
         display_name: "Telegram",
       };
       const { rendered, OverflowMenu } = renderExtensionCardWithInternals(ext);
@@ -547,7 +547,7 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
         package_ref: { id: "telegram" },
         runtime: "first_party",
         surfaces: channelSurfaces,
-        activation_status: "active",
+        installation_state: "active",
         authenticated: true,
         display_name: "Telegram",
       };
@@ -568,7 +568,7 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
       reconfigureAction.run();
       assert.deepEqual(configurePayload.packageRef, { id: "telegram" });
       assert.equal(configurePayload.displayName, "Telegram");
-      assert.equal(configurePayload.activationStatus, "active");
+      assert.equal(configurePayload.installationState, "active");
     },
   );
 });

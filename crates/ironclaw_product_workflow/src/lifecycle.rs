@@ -8,7 +8,9 @@
 use std::fmt;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{AgentId, CapabilitySurfaceKind, ProjectId, TenantId, UserId};
+use ironclaw_host_api::{
+    AgentId, CapabilitySurfaceKind, ChannelPresentation, ProjectId, TenantId, UserId,
+};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
 
@@ -301,6 +303,10 @@ impl LifecycleProductAction {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelConnectionRequirement {
     pub channel: String,
+    /// User-facing channel name from the manifest (S5 wire gap). The frontend
+    /// renders this instead of deriving a label from the channel id, so the
+    /// connect affordance carries no per-extension copy.
+    pub display_name: String,
     pub strategy: RebornChannelConnectStrategy,
     pub instructions: String,
     pub input_placeholder: String,
@@ -380,6 +386,12 @@ pub struct LifecycleExtensionSummary {
     /// when the surface requires a caller-scoped account binding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_connection: Option<ChannelConnectionRequirement>,
+    /// The channel surface's declared `[channel.presentation]` facts (markdown
+    /// support, message length cap), present iff `surface_kinds` contains
+    /// `Channel`. Fed into prompt construction so the model formats replies to
+    /// fit the channel it is answering on (OUT-11).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_presentation: Option<ChannelPresentation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub visible_capability_ids: Vec<String>,
     pub visible_read_only_capability_ids: Vec<String>,

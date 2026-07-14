@@ -1,0 +1,55 @@
+# The Telegram messaging channel — the extension runtime's second production
+# channel (the "addition test", DEL-10): a pure channel extension whose entire
+# vendor surface is one manifest plus the channel adapter crate. No tools, no
+# WASM module, no bespoke host code.
+schema_version = "reborn.extension_manifest.v3"
+id = "telegram"
+name = "Telegram"
+version = "0.1.0"
+description = "Telegram messaging channel via the Bot API"
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "telegram.extension/v1"
+
+# ---- channel surface -------------------------------------------------------
+
+[channel]
+id = "messages"
+display_name = "Telegram messages"
+inbound = true
+outbound = true
+conversation_model = "continuous"
+
+[channel.ingress]
+route_suffix = "updates"
+method = "post"
+body_limit_bytes = 1048576
+
+[channel.ingress.verification]
+kind = "shared_secret_header"
+secret_handle = "telegram_webhook_secret"
+header = "X-Telegram-Bot-Api-Secret-Token"
+
+[channel.config]
+fields = [
+  { handle = "telegram_bot_token", label = "Bot token", secret = true },
+  { handle = "telegram_webhook_secret", label = "Webhook secret token", secret = true },
+  { handle = "telegram_webhook_url", label = "Public webhook URL", secret = false },
+]
+
+[[channel.egress]]
+scheme = "https"
+host = "api.telegram.org"
+methods = ["post"]
+credential_handle = "telegram_bot_token"
+# The Bot API carries the token in the URL path (`/bot<token>/method`); the
+# adapter writes the `{telegram_bot_token}` placeholder and the host
+# substitutes the secret — token bytes never reach the adapter.
+injection = { type = "path_placeholder", placeholder = "telegram_bot_token" }
+
+[channel.presentation]
+supports_markdown = false
+supports_threads = true
+max_message_chars = 4096

@@ -1,0 +1,959 @@
+//! Reborn integration test — generic outbound delivery through the REAL
+//! coordinator (extension-runtime P5, §5.4 / OUT + DEL-10).
+//!
+//! Both proofs drive the FULL production inbound→outbound pipeline over the
+//! composed runtime: a vendor-signed POST on the production ingress mount →
+//! host-side recipe verification → the real channel adapter's normalization →
+//! durable admission through the REAL `DefaultProductWorkflow` → a real turn
+//! against a scripted model → the generic `RunDeliveryObserver` → the
+//! factory-built `DeliveryCoordinator` (sole delivery-state writer, §5.4) →
+//! the real adapter's `deliver` → the policy-enforced channel egress with
+//! host-side credential injection → the recorded network wire. Assertions
+//! land at two seams: the wire recorder (vendor call + injected credential)
+//! and the coordinator's outbound-state store (terminal `Delivered` attempt —
+//! never `wait_for_status(Completed)` alone).
+//!
+//! Pinned here, matrixed over libSQL and PostgreSQL (a provisioning failure
+//! is a test failure, never a skip):
+//! - The Slack proof: a signed DM event yields a `FinalReply` coordinated
+//!   through the REAL coordinator to `chat.postMessage`, with the §11
+//!   bridged bot token injected host-side (OUT-1/2/5, ING-11 read half).
+//!   The Slack lane still owns its ingress registration in production
+//!   (setup-store secrets + per-revision sink fed to the assembly as a
+//!   lane override), so this test keeps its lane-shaped manual
+//!   registration.
+//! - The DEL-10 Telegram proof: the bundled telegram package (manifest +
+//!   adapter crate only, zero bespoke host code) installs through the
+//!   production lifecycle tool, is configured through the PRODUCTION
+//!   `[channel.config]` configure port (bot token + webhook secret into
+//!   the scoped secret store, webhook URL into the durable installation
+//!   store — zero test-only config injection), activates (`setWebhook`
+//!   over recorded egress with host-side path-placeholder substitution of
+//!   the configured token) — and the PRODUCTION channel host assembly
+//!   (P6 S2) reconciles the activation into an ingress registration
+//!   (dynamic `[channel.config]` verification secrets + per-extension
+//!   durable workflow + run-delivery observer): NO manual sink/observer
+//!   registration → a signed update becomes a turn → the reply is
+//!   coordinated to `sendMessage` — the "addition test" for a second
+//!   production channel. A config re-save while Active proves the §6.5
+//!   automatic deactivate → reactivate cycle (a second `setWebhook` with
+//!   the new URL).
+
+#[allow(dead_code)]
+#[path = "support/mod.rs"]
+mod reborn_support;
+#[allow(dead_code)]
+#[path = "../support/mod.rs"]
+mod support;
+
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use chrono::Utc;
+use hmac::{Hmac, KeyInit, Mac};
+use http_body_util::BodyExt;
+use ironclaw_loop_support::{
+    HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
+    HostManagedModelResponse,
+};
+use ironclaw_outbound::OutboundDeliveryStatus;
+use ironclaw_product_adapters::{
+    AdapterInstallationId, ChannelAdapter, InboundOutcome, ParsedProductInbound, ProductAdapterId,
+    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProtocolAuthEvidence,
+    UserMessagePayload, VerifiedInbound,
+};
+use ironclaw_product_workflow::{
+    ConversationBindingService, ResolveBindingRequest, RunDeliveryObserver, RunDeliveryServices,
+    RunDeliverySettings,
+};
+use ironclaw_reborn_composition::{
+    ChannelHostAssemblyTestWiring, ChannelHostIdentity, ChannelInboundSinkConfig,
+    ChannelIngressRegistration, ExtensionIngressParts, GenericChannelHostAssembly,
+    GenericChannelInboundSink, PostAdmissionObserver, RebornServices, StaticIngressSecrets,
+    VerifiedEvidenceMint, extension_ingress_route_mount,
+};
+use ironclaw_turns::TurnScope;
+use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
+use reborn_support::group::RebornIntegrationGroup;
+use reborn_support::reply::RebornScriptedReply;
+use rstest::rstest;
+use serde_json::json;
+use sha2::Sha256;
+use tower::ServiceExt;
+
+const SLACK_ROUTE: &str = "/webhooks/extensions/slack/events";
+const SLACK_INSTALLATION: &str = "slack-itest-install";
+const SLACK_SIGNING_SECRET: &[u8] = b"itest-slack-signing-secret";
+const SLACK_BOT_TOKEN: &str = "xoxb-itest-bot-token";
+const SLACK_REPLY: &str = "Here is the coordinated Slack reply.";
+
+const TELEGRAM_ROUTE: &str = "/webhooks/extensions/telegram/updates";
+/// The PRODUCTION installation id: the lifecycle facade mints installation
+/// ids equal to the extension id, and the assembly's dynamic secrets port
+/// reports that id as the verification candidate.
+const TELEGRAM_INSTALLATION: &str = "telegram";
+const TELEGRAM_WEBHOOK_SECRET: &str = "itest-telegram-webhook-secret";
+const TELEGRAM_BOT_TOKEN: &str = "123456:itest-telegram-token";
+const TELEGRAM_REPLY: &str = "Here is the coordinated Telegram reply.";
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs()
+}
+
+/// Sign a body exactly as the slack manifest's recipe declares: hex
+/// HMAC-SHA256 over `v0:{timestamp}:{body}` with a `v0=` prefix.
+fn slack_signature(timestamp: &str, body: &str) -> String {
+    let mut mac = Hmac::<Sha256>::new_from_slice(SLACK_SIGNING_SECRET).expect("hmac key");
+    mac.update(format!("v0:{timestamp}:").as_bytes());
+    mac.update(body.as_bytes());
+    let digest = mac.finalize().into_bytes();
+    use std::fmt::Write as _;
+    let mut hex = String::new();
+    for byte in digest {
+        let _ = write!(&mut hex, "{byte:02x}");
+    }
+    format!("v0={hex}")
+}
+
+/// Scripted model for the vendor conversation's run: one static assistant
+/// reply, so the observer has a finalized message to deliver.
+#[derive(Debug)]
+struct StaticReplyGateway(&'static str);
+
+#[async_trait::async_trait]
+impl HostManagedModelGateway for StaticReplyGateway {
+    async fn stream_model(
+        &self,
+        _request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Ok(HostManagedModelResponse::assistant_reply(self.0))
+    }
+}
+
+/// Post-admission observer that records every ack AND forwards to the REAL
+/// generic run-delivery observer — the exact composition `serve` wires
+/// (`RunDeliveryObserverAdapter`), plus recording so the tests can assert
+/// admission outcomes.
+struct RecordingForwardObserver {
+    acks: Mutex<Vec<ProductInboundAck>>,
+    errors: Mutex<Vec<String>>,
+    inner: Arc<RunDeliveryObserver>,
+}
+
+impl RecordingForwardObserver {
+    fn new(inner: Arc<RunDeliveryObserver>) -> Self {
+        Self {
+            acks: Mutex::new(Vec::new()),
+            errors: Mutex::new(Vec::new()),
+            inner,
+        }
+    }
+
+    fn accepted_count(&self) -> usize {
+        self.acks
+            .lock()
+            .expect("acks lock")
+            .iter()
+            .filter(|ack| matches!(ack, ProductInboundAck::Accepted { .. }))
+            .count()
+    }
+
+    fn errors(&self) -> Vec<String> {
+        self.errors.lock().expect("errors lock").clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl PostAdmissionObserver for RecordingForwardObserver {
+    async fn observe_ack(&self, envelope: ProductInboundEnvelope, ack: ProductInboundAck) {
+        self.acks.lock().expect("acks lock").push(ack.clone());
+        self.inner.observe_ack(envelope, ack).await;
+    }
+
+    async fn observe_error(
+        &self,
+        envelope: ProductInboundEnvelope,
+        error: ironclaw_product_adapters::ProductAdapterError,
+    ) {
+        self.errors
+            .lock()
+            .expect("errors lock")
+            .push(format!("{error:?}"));
+        self.inner.observe_error(envelope, error).await;
+    }
+}
+
+/// Generic run-delivery services over the REAL runtime pieces: the group's
+/// binding/thread/turn services (the world the admitted run executes in)
+/// plus the composed runtime's coordinator and outbound stores (the SAME
+/// instances the factory wired — observer and coordinator share one
+/// delivery ledger).
+fn delivery_run_services(
+    harness: &RebornIntegrationHarness,
+    services: &RebornServices,
+    extension_id: &str,
+) -> RunDeliveryServices {
+    let (outbound_store, route_store, communication_preferences) = services
+        .outbound_delivery_stores_for_test()
+        .expect("composed runtime exposes the coordinator's outbound stores");
+    let coordinator = services
+        .delivery_coordinator()
+        .expect("composition built the delivery coordinator");
+    let fallback_notice_scope = TurnScope::new_with_owner(
+        harness.binding.tenant_id.clone(),
+        harness.binding.agent_id.clone(),
+        harness.binding.project_id.clone(),
+        ironclaw_host_api::ThreadId::new(format!("{extension_id}-itest-channel-notices"))
+            .expect("notice thread id"),
+        harness.binding.subject_user_id.clone(),
+    );
+    RunDeliveryServices {
+        binding_service: harness
+            .binding_service_for_test()
+            .expect("group binding service"),
+        thread_service: harness
+            .thread_service_for_test()
+            .expect("group thread service"),
+        turn_coordinator: harness.turn_coordinator_for_test(),
+        outbound_store,
+        route_store,
+        communication_preferences,
+        coordinator,
+        extension_id: extension_id.to_string(),
+        fallback_notice_scope,
+        approval_context: None,
+        blocked_auth_prompts: None,
+        auth_flow_cancel: None,
+    }
+}
+
+/// Fast watcher pacing: the scripted model completes instantly; short polls
+/// keep the drain-bounded observer wait snappy.
+fn fast_delivery_settings() -> RunDeliverySettings {
+    RunDeliverySettings {
+        poll_interval: Duration::from_millis(20),
+        max_wait: Duration::from_secs(30),
+        ..RunDeliverySettings::default()
+    }
+}
+
+/// Predict the vendor conversation's turn scope BEFORE posting: normalize
+/// the exact wire body through the REAL adapter, assemble the envelope
+/// exactly as `GenericChannelInboundSink::admit` does, and resolve the same
+/// durable binding the workflow will find at admission (through the SAME
+/// binding service the registered sink uses) — so the scripted model
+/// gateway can be registered for the run's scope up front.
+async fn preresolve_vendor_turn_scope(
+    binding_service: &Arc<dyn ConversationBindingService>,
+    adapter: &dyn ChannelAdapter,
+    adapter_id: &str,
+    installation_id: &str,
+    evidence: &ProtocolAuthEvidence,
+    body: &str,
+) -> TurnScope {
+    let outcome = adapter
+        .inbound(VerifiedInbound {
+            extension_id: adapter_id,
+            installation_id,
+            body: body.as_bytes(),
+            headers: &[],
+        })
+        .expect("the vendor body must parse through the real adapter");
+    let InboundOutcome::Messages(messages) = outcome else {
+        panic!("the vendor body must normalize to messages");
+    };
+    let message = messages.first().expect("one normalized message");
+    // Mirror of the sink's envelope assembly (`extension_ingress.rs::admit`).
+    let context = ironclaw_product_adapters::TrustedInboundContext::from_verified_evidence(
+        ProductAdapterId::new(adapter_id).expect("adapter id"),
+        AdapterInstallationId::new(installation_id).expect("installation id"),
+        Utc::now(),
+        evidence,
+    )
+    .expect("trusted inbound context");
+    let payload = ProductInboundPayload::UserMessage(
+        UserMessagePayload::new(message.text.clone(), Vec::new(), message.trigger)
+            .expect("user message payload"),
+    );
+    let parsed = ParsedProductInbound::new(
+        message.event_id.clone(),
+        message.actor.clone(),
+        message.conversation.clone(),
+        payload,
+    )
+    .expect("parsed inbound");
+    let envelope =
+        ProductInboundEnvelope::from_trusted_parse(context, parsed).expect("inbound envelope");
+    let binding = binding_service
+        .resolve_binding(ResolveBindingRequest::from_envelope(&envelope))
+        .await
+        .expect("vendor conversation binding resolves");
+    TurnScope::new_with_owner(
+        binding.tenant_id.clone(),
+        binding.agent_id.clone(),
+        binding.project_id.clone(),
+        binding.thread_id.clone(),
+        binding.subject_user_id.clone(),
+    )
+}
+
+struct VendorIngress {
+    parts: ExtensionIngressParts,
+    mount: ironclaw_reborn_composition::PublicRouteMount,
+}
+
+impl VendorIngress {
+    /// Register one extension's inbound wiring — static verification secret
+    /// plus the generic sink over THIS harness's real workflow, observed by
+    /// the REAL run-delivery observer — and build the production route mount.
+    fn register(
+        parts: ExtensionIngressParts,
+        extension_id: &str,
+        installation_id: &str,
+        secret: &[u8],
+        evidence: VerifiedEvidenceMint,
+        harness: &RebornIntegrationHarness,
+        observer: Arc<RecordingForwardObserver>,
+    ) -> Self {
+        let sink = Arc::new(GenericChannelInboundSink::new(ChannelInboundSinkConfig {
+            adapter_id: ProductAdapterId::new(extension_id).expect("adapter id"),
+            evidence,
+            classifier: None,
+            workflow: harness.product_workflow_for_test(),
+            observer: Some(observer as Arc<dyn PostAdmissionObserver>),
+        }));
+        parts.registry.register(
+            extension_id,
+            ChannelIngressRegistration {
+                secrets: Arc::new(StaticIngressSecrets::new(vec![
+                    ironclaw_extension_host::ingress::VerificationCandidate {
+                        installation_id: installation_id.to_string(),
+                        secret: secret.to_vec(),
+                    },
+                ])),
+                sink: sink.clone() as Arc<dyn ironclaw_extension_host::ingress::InboundSink>,
+                drain: Some(sink as Arc<dyn ironclaw_reborn_composition::ChannelIngressDrain>),
+            },
+        );
+        let mount = extension_ingress_route_mount(&parts).expect("production mount builds");
+        Self { parts, mount }
+    }
+
+    /// The production mount over the composed ingress WITHOUT any manual
+    /// registration — the S2 shape: the production channel host assembly
+    /// owns the per-extension registrations.
+    fn production(parts: ExtensionIngressParts) -> Self {
+        let mount = extension_ingress_route_mount(&parts).expect("production mount builds");
+        Self { parts, mount }
+    }
+
+    async fn post(
+        &self,
+        route: &str,
+        body: &str,
+        headers: Vec<(&'static str, String)>,
+    ) -> StatusCode {
+        let mut builder = Request::builder().method("POST").uri(route);
+        for (name, value) in headers {
+            builder = builder.header(name, value);
+        }
+        let response = self
+            .mount
+            .router
+            .clone()
+            .oneshot(builder.body(Body::from(body.to_string())).expect("request"))
+            .await
+            .expect("router responds");
+        let status = response.status();
+        let _ = response.into_body().collect().await.expect("body collects");
+        status
+    }
+
+    /// Await every spawned post-admission observer — the full outbound
+    /// delivery runs inside those tasks, so after this the wire and the
+    /// outbound store are settled.
+    async fn drain(&self) {
+        self.parts.registry.drain().await;
+    }
+}
+
+/// Install + activate the REAL bundled slack package through the production
+/// lifecycle tools (the same handshake `extension_runtime.rs` pins for
+/// TOOL-7), so the coordinator's snapshot resolver sees an active slack
+/// channel binding.
+async fn activate_slack(group: &RebornIntegrationGroup) {
+    let lifecycle = group
+        .thread("conv-slack-delivery-lifecycle")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.extension_install",
+                json!({"extension_id": "slack"}),
+            ),
+            RebornScriptedReply::text("installed"),
+            RebornScriptedReply::tool_call(
+                "builtin.extension_activate",
+                json!({"extension_id": "slack"}),
+            ),
+            RebornScriptedReply::text("activated"),
+        ])
+        .build()
+        .await
+        .expect("slack lifecycle thread builds");
+    lifecycle
+        .seed_capability_credential_account(
+            "slack",
+            "slack delivery account",
+            &[
+                "search:read",
+                "channels:history",
+                "groups:history",
+                "im:history",
+                "mpim:history",
+                "channels:read",
+                "groups:read",
+                "im:read",
+                "mpim:read",
+                "users:read",
+                "chat:write",
+            ],
+        )
+        .await
+        .expect("seed slack account");
+    lifecycle
+        .submit_turn("install slack")
+        .await
+        .expect("slack install completes");
+    lifecycle
+        .assert_tool_result_contains("\"installed\":true")
+        .await
+        .expect("slack install reported success");
+    lifecycle
+        .submit_turn("activate slack")
+        .await
+        .expect("slack activate completes");
+    lifecycle
+        .assert_tool_result_contains("\"activated\":true")
+        .await
+        .expect("slack activation reported success");
+}
+
+/// Assert the coordinator's ledger for `scope`: at least one attempt reached
+/// terminal `Delivered`, and none is stranded mid-lifecycle
+/// (`Prepared`/`Sending` — persist-before-egress must settle terminally).
+async fn assert_delivered_attempt(services: &RebornServices, scope: &TurnScope) {
+    let (outbound_store, _, _) = services
+        .outbound_delivery_stores_for_test()
+        .expect("outbound stores");
+    let attempts = outbound_store
+        .list_delivery_attempts(scope.clone())
+        .await
+        .expect("list delivery attempts");
+    assert!(
+        attempts
+            .iter()
+            .any(|attempt| attempt.status == OutboundDeliveryStatus::Delivered),
+        "the coordinator must record a terminal Delivered attempt; got {:?}",
+        attempts
+            .iter()
+            .map(|attempt| attempt.status)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        attempts.iter().all(|attempt| !matches!(
+            attempt.status,
+            OutboundDeliveryStatus::Prepared
+                | OutboundDeliveryStatus::Sending
+                | OutboundDeliveryStatus::Pending
+        )),
+        "no attempt may be stranded mid-lifecycle after drain; got {:?}",
+        attempts
+            .iter()
+            .map(|attempt| attempt.status)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Await the PRODUCTION assembly's snapshot reconcile: activation publishes
+/// a new generation, the assembly's watch loop registers the extension's
+/// inbound wiring, and the per-extension binding service becomes readable.
+/// Bounded — a missing registration is a test failure, never a hang.
+async fn wait_for_production_registration(
+    assembly: &Arc<GenericChannelHostAssembly>,
+    services: &RebornServices,
+    extension_id: &str,
+) -> Arc<dyn ConversationBindingService> {
+    let registry = services
+        .extension_ingress_parts()
+        .expect("composition built the generic ingress")
+        .registry;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if registry.is_registered(extension_id)
+            && let Some(binding) = assembly.binding_service_for_extension_for_test(extension_id)
+        {
+            return binding;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the production assembly must register `{extension_id}`'s ingress after activation"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn reborn_services(group: &RebornIntegrationGroup) -> &RebornServices {
+    group
+        .capability_harness()
+        .expect("host-runtime capability harness")
+        .reborn_services_for_test()
+        .expect("composed reborn services")
+}
+
+/// The Slack outbound proof (OUT-1/2/5 + ING-11 read half): a signed DM
+/// event on the production mount becomes a real turn whose `FinalReply` is
+/// coordinated through the REAL factory-built `DeliveryCoordinator` to
+/// `chat.postMessage`, with the §11 bridged bot token injected host-side —
+/// asserted on the wire recorder AND in the coordinator's outbound store.
+#[rstest]
+#[case::libsql(StorageMode::LibSql)]
+#[case::postgres(StorageMode::Postgres)]
+#[tokio::test]
+async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
+    #[case] storage: StorageMode,
+) {
+    let group = RebornIntegrationGroup::builder()
+        .storage(storage)
+        .extension_delivery()
+        .await
+        .expect("delivery group builds on this backend");
+    activate_slack(&group).await;
+    let services = reborn_services(&group);
+    assert!(
+        services.register_static_channel_egress_credentials_for_test(vec![(
+            "slack".to_string(),
+            "slack_bot_token".to_string(),
+            ironclaw_secrets::SecretMaterial::from(SLACK_BOT_TOKEN.to_string()),
+        )]),
+        "the composed runtime must expose channel-egress credential bridging"
+    );
+
+    let inbound = group
+        .thread("conv-slack-delivery-inbound")
+        .script([RebornScriptedReply::text("unused")])
+        .build()
+        .await
+        .expect("inbound thread builds");
+    let observer = Arc::new(RecordingForwardObserver::new(Arc::new(
+        RunDeliveryObserver::with_settings(
+            delivery_run_services(&inbound, services, "slack"),
+            fast_delivery_settings(),
+        ),
+    )));
+    let ingress = VendorIngress::register(
+        services
+            .extension_ingress_parts()
+            .expect("composition built the generic ingress"),
+        "slack",
+        SLACK_INSTALLATION,
+        SLACK_SIGNING_SECRET,
+        VerifiedEvidenceMint::RequestSignature {
+            signature_header: "X-Slack-Signature".to_string(),
+            timestamp_header: Some("X-Slack-Request-Timestamp".to_string()),
+        },
+        &inbound,
+        Arc::clone(&observer),
+    );
+
+    let body = json!({
+        "type": "event_callback",
+        "event_id": "Ev-delivery-slack-1",
+        "team_id": "T-A",
+        "event": {
+            "type": "message",
+            "user": "U777",
+            "channel": "D777",
+            "channel_type": "im",
+            "text": "please reply through the coordinator",
+            "ts": "1710000300.000100"
+        }
+    })
+    .to_string();
+    // The run's scope is the vendor conversation's binding, not this harness
+    // thread's — register its scripted model before the POST admits the turn.
+    let evidence = ironclaw_product_adapters::auth::mark_request_signature_verified(
+        "X-Slack-Signature".to_string(),
+        Some("X-Slack-Request-Timestamp".to_string()),
+        SLACK_INSTALLATION,
+    );
+    let slack_binding_service = inbound
+        .binding_service_for_test()
+        .expect("group binding service");
+    let vendor_scope = preresolve_vendor_turn_scope(
+        &slack_binding_service,
+        &ironclaw_slack_extension::SlackChannelAdapter,
+        "slack",
+        SLACK_INSTALLATION,
+        &evidence,
+        &body,
+    )
+    .await;
+    inbound.register_scope_gateway_for_test(
+        vendor_scope.clone(),
+        Arc::new(StaticReplyGateway(SLACK_REPLY)),
+    );
+
+    let timestamp = now_unix().to_string();
+    let signature = slack_signature(&timestamp, &body);
+    let status = ingress
+        .post(
+            SLACK_ROUTE,
+            &body,
+            vec![
+                ("X-Slack-Signature", signature),
+                ("X-Slack-Request-Timestamp", timestamp),
+            ],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "the signed event must be accepted");
+    ingress.drain().await;
+    assert_eq!(
+        observer.accepted_count(),
+        1,
+        "the signed DM must be admitted as a turn (errors: {:?})",
+        observer.errors()
+    );
+
+    // Wire seam: the coordinated FinalReply reached chat.postMessage with the
+    // bridged bot token injected host-side (the adapter never saw it).
+    let requests = inbound.captured_network_requests_for_test();
+    let post_message = requests
+        .iter()
+        .find(|request| {
+            request.url.ends_with("/api/chat.postMessage")
+                && String::from_utf8_lossy(&request.body).contains(SLACK_REPLY)
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "chat.postMessage with the reply must land on the wire; got {:?}",
+                requests.iter().map(|r| r.url.clone()).collect::<Vec<_>>()
+            )
+        });
+    let posted_body = String::from_utf8_lossy(&post_message.body);
+    assert!(
+        posted_body.contains("\"channel\":\"D777\""),
+        "the reply must target the originating DM conversation; got {posted_body}"
+    );
+    let authorization = post_message
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        .expect("host-side credential injection must add the authorization header");
+    assert_eq!(authorization.1, format!("Bearer {SLACK_BOT_TOKEN}"));
+
+    // Store seam: the coordinator (sole delivery-state writer) settled the
+    // attempt terminally under the vendor conversation's scope.
+    assert_delivered_attempt(services, &vendor_scope).await;
+}
+
+/// DEL-10: the bundled Telegram package — one manifest plus the adapter
+/// crate, zero bespoke host code — installs through the production
+/// lifecycle tool, is configured through the PRODUCTION `[channel.config]`
+/// configure port, activates (`setWebhook` over recorded egress with the
+/// CONFIGURED bot token substituted host-side into the URL path
+/// placeholder), receives a signed update through the production router
+/// mount, runs a real turn, delivers the reply through the generic
+/// observer → REAL coordinator → `sendMessage`, and re-runs activation on
+/// a config edit while Active (§6.5).
+#[rstest]
+#[case::libsql(StorageMode::LibSql)]
+#[case::postgres(StorageMode::Postgres)]
+#[tokio::test]
+async fn telegram_update_becomes_a_turn_and_a_coordinated_reply(#[case] storage: StorageMode) {
+    let group = RebornIntegrationGroup::builder()
+        .storage(storage)
+        .extension_delivery()
+        .await
+        .expect("delivery group builds on this backend");
+    let services = reborn_services(&group);
+
+    // The inbound thread first: its wire baseline precedes activation, so
+    // `captured_network_requests_for_test` sees the setWebhook call too.
+    let inbound = group
+        .thread("conv-telegram-delivery-inbound")
+        .script([RebornScriptedReply::text("unused")])
+        .build()
+        .await
+        .expect("inbound thread builds");
+
+    // Attach the PRODUCTION channel host assembly (P6 S2) over the composed
+    // runtime. The harness supplies only its run-world services — the
+    // group's shared turn runtime executes the admitted runs — while the
+    // snapshot watch, ingress registry, `[channel.config]` secret storage,
+    // durable workflow substrate, and delivery coordinator + outbound
+    // stores are the production wiring. From here NOTHING registers the
+    // telegram sink or observer manually.
+    let assembly = services
+        .start_channel_host_assembly_for_test(ChannelHostAssemblyTestWiring {
+            thread_service: inbound
+                .thread_service_for_test()
+                .expect("group thread service"),
+            turn_coordinator: inbound.turn_coordinator_for_test(),
+            identity: ChannelHostIdentity {
+                tenant_id: inbound.binding.tenant_id.clone(),
+                agent_id: inbound.binding.agent_id.clone().expect("binding agent id"),
+                project_id: inbound.binding.project_id.clone(),
+                operator_user_id: inbound
+                    .binding
+                    .subject_user_id
+                    .clone()
+                    .expect("binding subject user id"),
+            },
+            run_delivery_settings: fast_delivery_settings(),
+        })
+        .expect("the production channel host assembly starts over the composed runtime");
+
+    // Install through the production lifecycle tool (same handshake as the
+    // Slack proof), configure through the production port, THEN activate:
+    // the real operator order, with zero test-only config injection.
+    let lifecycle = group
+        .thread("conv-telegram-delivery-lifecycle")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.extension_install",
+                json!({"extension_id": "telegram"}),
+            ),
+            RebornScriptedReply::text("installed"),
+            RebornScriptedReply::tool_call(
+                "builtin.extension_activate",
+                json!({"extension_id": "telegram"}),
+            ),
+            RebornScriptedReply::text("activated"),
+        ])
+        .build()
+        .await
+        .expect("telegram lifecycle thread builds");
+    lifecycle
+        .submit_turn("install telegram")
+        .await
+        .expect("telegram install completes");
+    lifecycle
+        .assert_tool_result_contains("\"installed\":true")
+        .await
+        .expect("telegram install reported success");
+
+    // The production configure surface: secrets land in the scoped secret
+    // store (where channel egress resolves them), the webhook URL in the
+    // durable installation store.
+    let channel_config = services
+        .channel_config_facade()
+        .expect("the composed runtime exposes the channel-config configure port");
+    let telegram_id = ironclaw_host_api::ExtensionId::new("telegram").expect("extension id");
+    channel_config
+        .save_values(
+            &telegram_id,
+            vec![
+                (
+                    "telegram_webhook_url".to_string(),
+                    "https://hooks.example.test/webhooks/extensions/telegram/updates".to_string(),
+                ),
+                (
+                    "telegram_bot_token".to_string(),
+                    TELEGRAM_BOT_TOKEN.to_string(),
+                ),
+                (
+                    "telegram_webhook_secret".to_string(),
+                    TELEGRAM_WEBHOOK_SECRET.to_string(),
+                ),
+            ],
+        )
+        .await
+        .expect("telegram configures through the production port");
+    // §6.4 config completeness: every field reports provided, secrets as
+    // presence only.
+    let status = channel_config
+        .field_status(&telegram_id)
+        .await
+        .expect("field status");
+    assert_eq!(status.len(), 3, "{status:?}");
+    assert!(
+        status.iter().all(|field| field.provided),
+        "all configured fields must report provided: {status:?}"
+    );
+    assert!(
+        status
+            .iter()
+            .any(|field| field.name == "telegram_bot_token" && field.secret),
+        "the bot token is a secret field: {status:?}"
+    );
+
+    lifecycle
+        .submit_turn("activate telegram")
+        .await
+        .expect("telegram activate completes");
+    lifecycle
+        .assert_tool_result_contains("\"activated\":true")
+        .await
+        .expect("telegram activation reported success");
+
+    // Activation seam: setWebhook crossed the recorded wire with the bot
+    // token substituted host-side into the URL path (the adapter only ever
+    // names the `{telegram_bot_token}` placeholder).
+    let requests = inbound.captured_network_requests_for_test();
+    let set_webhook = requests
+        .iter()
+        .find(|request| request.url.ends_with("/setWebhook"))
+        .unwrap_or_else(|| {
+            panic!(
+                "activation must call setWebhook over recorded egress; got {:?}",
+                requests.iter().map(|r| r.url.clone()).collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(
+        set_webhook.url,
+        format!("https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook"),
+        "the path placeholder must be substituted host-side"
+    );
+    assert!(
+        String::from_utf8_lossy(&set_webhook.body)
+            .contains("https://hooks.example.test/webhooks/extensions/telegram/updates"),
+        "setWebhook must register the configured public webhook URL"
+    );
+
+    // The PRODUCTION assembly reconciled the activation into an ingress
+    // registration: dynamic `[channel.config]` verification secrets, the
+    // per-extension durable workflow, and the run-delivery observer — this
+    // test registers nothing.
+    let telegram_binding_service =
+        wait_for_production_registration(&assembly, services, "telegram").await;
+    let ingress = VendorIngress::production(
+        services
+            .extension_ingress_parts()
+            .expect("composition built the generic ingress"),
+    );
+
+    let body = json!({
+        "update_id": 501,
+        "message": {
+            "message_id": 11,
+            "date": 1710000000,
+            "text": "please reply through the coordinator",
+            "from": {"id": 9911, "is_bot": false, "first_name": "Ada"},
+            "chat": {"id": 8675309, "type": "private"}
+        }
+    })
+    .to_string();
+    let evidence = ironclaw_product_adapters::auth::mark_shared_secret_header_verified(
+        "X-Telegram-Bot-Api-Secret-Token".to_string(),
+        TELEGRAM_INSTALLATION,
+    );
+    // Pre-resolve through the SAME binding service the production-registered
+    // sink resolves with, so the scripted gateway lands on the exact scope
+    // the admitted run executes under.
+    let vendor_scope = preresolve_vendor_turn_scope(
+        &telegram_binding_service,
+        &ironclaw_telegram_extension::TelegramChannelAdapter::default(),
+        "telegram",
+        TELEGRAM_INSTALLATION,
+        &evidence,
+        &body,
+    )
+    .await;
+    inbound.register_scope_gateway_for_test(
+        vendor_scope.clone(),
+        Arc::new(StaticReplyGateway(TELEGRAM_REPLY)),
+    );
+
+    // A wrong shared secret is rejected on the wire before any admission —
+    // the production secrets port resolved the CONFIGURED webhook secret and
+    // the constant-time compare failed.
+    let status = ingress
+        .post(
+            TELEGRAM_ROUTE,
+            &body,
+            vec![("X-Telegram-Bot-Api-Secret-Token", "wrong".to_string())],
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    ingress.drain().await;
+    assert!(
+        !inbound
+            .captured_network_requests_for_test()
+            .iter()
+            .any(|request| request.url.ends_with("/sendMessage")),
+        "a rejected update must not admit a turn or deliver a reply"
+    );
+
+    let status = ingress
+        .post(
+            TELEGRAM_ROUTE,
+            &body,
+            vec![(
+                "X-Telegram-Bot-Api-Secret-Token",
+                TELEGRAM_WEBHOOK_SECRET.to_string(),
+            )],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "the signed update must be accepted");
+    ingress.drain().await;
+
+    // Wire seam: the coordinated reply reached sendMessage on the Bot API
+    // with the token substituted host-side.
+    let requests = inbound.captured_network_requests_for_test();
+    let send_message = requests
+        .iter()
+        .find(|request| {
+            request.url.ends_with("/sendMessage")
+                && String::from_utf8_lossy(&request.body).contains(TELEGRAM_REPLY)
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "sendMessage with the reply must land on the wire; got {:?}",
+                requests.iter().map(|r| r.url.clone()).collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(
+        send_message.url,
+        format!("https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage")
+    );
+    assert!(
+        String::from_utf8_lossy(&send_message.body).contains("8675309"),
+        "the reply must target the originating chat"
+    );
+
+    // Store seam: terminal Delivered attempt under the vendor scope.
+    assert_delivered_attempt(services, &vendor_scope).await;
+
+    // §6.5: editing `[channel.config]` while Active runs the automatic
+    // deactivate → reactivate cycle through the REAL generic host — the
+    // rebuilt adapter re-registers the webhook with the NEW URL.
+    let updated_url = "https://hooks.example.test/webhooks/extensions/telegram/updates-v2";
+    channel_config
+        .save_values(
+            &telegram_id,
+            vec![("telegram_webhook_url".to_string(), updated_url.to_string())],
+        )
+        .await
+        .expect("config edit while Active saves and reactivates");
+    let requests = inbound.captured_network_requests_for_test();
+    let set_webhook_calls: Vec<_> = requests
+        .iter()
+        .filter(|request| request.url.ends_with("/setWebhook"))
+        .collect();
+    assert!(
+        set_webhook_calls.len() >= 2,
+        "the reactivate cycle must re-run the activation hook; got {} setWebhook calls",
+        set_webhook_calls.len()
+    );
+    let last_set_webhook = set_webhook_calls
+        .last()
+        .expect("at least one setWebhook call");
+    assert!(
+        String::from_utf8_lossy(&last_set_webhook.body).contains(updated_url),
+        "the re-run activation must register the NEW webhook URL"
+    );
+}

@@ -29,6 +29,22 @@ pub fn is_rfc3986_unreserved_segment(segment: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~'))
 }
 
+/// Credential material substituted into one URL path segment: RFC 3986
+/// unreserved characters plus `:` (legal raw in a path segment per the
+/// `pchar` grammar, and real vendor tokens carry it — e.g. a
+/// `<bot-id>:<secret>` token). Everything else stays rejected — no `%`
+/// (validated material can never smuggle pre-encoded octets), no `/` (never
+/// adds a segment), and no other sub-delims (nothing a naive server-side
+/// parser could misread).
+pub fn is_path_segment_credential_material(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment != "."
+        && segment != ".."
+        && segment.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b':')
+        })
+}
+
 pub fn percent_decode_url_component_lossy(input: &str) -> Cow<'_, str> {
     if !input.as_bytes().contains(&b'%') {
         Cow::Borrowed(input)

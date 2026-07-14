@@ -192,7 +192,7 @@ fn discovered_capability_manifest(
         default_permission: PermissionMode::Ask,
         visibility: CapabilityVisibility::Model,
         input_schema_ref,
-        output_schema_ref,
+        output_schema_ref: Some(output_schema_ref),
         prompt_doc_ref: None,
         required_host_ports: template.required_host_ports.clone(),
         runtime_credentials: template.runtime_credentials.clone(),

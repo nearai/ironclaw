@@ -1,16 +1,12 @@
-use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
-    AuthChallenge, AuthContinuationRef, AuthFlowId, AuthFlowKind, AuthFlowManager,
+    AuthChallenge, AuthContinuationRef, AuthEngine, AuthFlowId, AuthFlowKind, AuthFlowManager,
     AuthFlowOwnerScope, AuthFlowRecord, AuthFlowRecordSource, AuthGateRef, AuthProductError,
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel, NewAuthFlow,
-    OAuthCallbackState, OAuthCallbackStateKind, PkceVerifierSecret, ProviderScope,
-    TurnGateAuthFlowQuery, TurnRunRef, build_google_authorization_url, opaque_state_hash,
-    pkce_s256_challenge, pkce_verifier_hash,
+    PrepareOAuthFlowRequest, ProviderScope, TurnGateAuthFlowQuery, TurnRunRef,
 };
 use ironclaw_host_api::{
     InvocationId, ResourceScope, RuntimeCredentialAuthRequirement, SecretHandle,
@@ -22,116 +18,8 @@ use secrecy::SecretString;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::AuthChallengeView;
-use crate::input::OAuthClientConfig;
 
 const GATE_FLOW_TTL_SECONDS: i64 = 600;
-
-/// Provider-specific pieces of a blocked-turn OAuth gate flow.
-///
-/// Everything else about the gate — challenge/turn-gate reuse, PKCE store &
-/// cleanup, expiry replacement, conflict recovery, and challenge projection —
-/// is provider-agnostic and lives in [`OAuthGateFlowDriver`]. Two production
-/// implementors (Google, Slack personal) share that driver through this trait.
-#[async_trait]
-pub(crate) trait OAuthGateProvider: Send + Sync + fmt::Debug {
-    /// Stable Reborn provider id (`google`, `slack`, ...).
-    fn provider_id(&self) -> &'static str;
-
-    /// Prefix for the per-flow PKCE verifier secret handle. The driver appends
-    /// `-{flow_id}` to build the full handle.
-    fn pkce_secret_handle_label(&self) -> &'static str;
-
-    /// Build the authorization URL + hashed state/PKCE material for a new flow.
-    ///
-    /// The only provider-specific step: Google emits `scope=` + offline-consent
-    /// extras from static client config; Slack resolves client credentials from
-    /// its setup slot and emits `user_scope=`.
-    async fn prepare_flow(
-        &self,
-        scope: &AuthProductScope,
-        flow_id: AuthFlowId,
-        scopes: Vec<ProviderScope>,
-    ) -> Result<PreparedOAuthGateFlow, AuthProductError>;
-}
-
-/// One generic registry over every OAuth gate provider (Google, Slack personal).
-///
-/// Replaces the former parallel per-provider registries: a single
-/// `Option<Arc<OAuthGateProviderRegistry>>` slot on the product-auth bundle and
-/// one dispatch arm route every provider's blocked-gate challenge and PKCE
-/// lookup through the shared [`OAuthGateFlowDriver`].
-#[derive(Clone)]
-pub(crate) struct OAuthGateProviderRegistry {
-    drivers: BTreeMap<String, Arc<OAuthGateFlowDriver>>,
-}
-
-impl OAuthGateProviderRegistry {
-    pub(crate) fn new(drivers: Vec<Arc<OAuthGateFlowDriver>>) -> Self {
-        let mut map: BTreeMap<String, Arc<OAuthGateFlowDriver>> = BTreeMap::new();
-        for driver in drivers {
-            if let Some(previous) = map.insert(driver.provider_id().to_string(), driver) {
-                tracing::warn!(
-                    provider = previous.provider_id(),
-                    "duplicate OAuth gate provider registered; last registration wins"
-                );
-            }
-        }
-        Self { drivers: map }
-    }
-
-    pub(crate) async fn challenge_for_blocked_gate(
-        &self,
-        request: OAuthGateChallengeRequest<'_>,
-    ) -> Result<Option<AuthChallengeView>, AuthProductError> {
-        for requirement in request.requirements {
-            let Some(driver) = self.drivers.get(requirement.provider.as_str()) else {
-                continue;
-            };
-            match driver
-                .challenge_for_blocked_gate(request, requirement)
-                .await
-            {
-                Ok(challenge) => return Ok(Some(challenge)),
-                // A registered-but-unconfigured provider (e.g. the Slack
-                // personal slot before the operator saves OAuth client
-                // credentials) must not swallow the whole gate: fall through to
-                // the next requirement / the generic requirement-derived
-                // prompt, matching the pre-registry behavior where an
-                // un-serviceable requirement was simply skipped.
-                Err(AuthProductError::BackendUnavailable) => {
-                    tracing::warn!(
-                        provider = requirement.provider.as_str(),
-                        "OAuth gate provider unavailable; falling through to next requirement"
-                    );
-                    continue;
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(None)
-    }
-
-    pub(crate) async fn pkce_verifier_for_flow(
-        &self,
-        scope: &AuthProductScope,
-        provider: &AuthProviderId,
-        flow_id: AuthFlowId,
-    ) -> Result<Option<SecretString>, AuthProductError> {
-        let Some(driver) = self.drivers.get(provider.as_str()) else {
-            return Ok(None);
-        };
-        driver.pkce_verifier_for_flow(scope, flow_id).await
-    }
-}
-
-impl fmt::Debug for OAuthGateProviderRegistry {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("OAuthGateProviderRegistry")
-            .field("providers", &self.drivers.keys().collect::<Vec<_>>())
-            .finish()
-    }
-}
 
 #[derive(Clone, Copy)]
 pub(crate) struct OAuthGateChallengeRequest<'a> {
@@ -144,42 +32,60 @@ pub(crate) struct OAuthGateChallengeRequest<'a> {
     pub(crate) gate_ref: &'a AuthGateRef,
 }
 
-/// Provider-agnostic blocked-turn OAuth gate driver.
+/// Recipe-driven blocked-turn OAuth gate driver.
 ///
-/// Holds the shared challenge/turn-gate-reuse/PKCE-store/cleanup/expiry logic
-/// that was previously duplicated between the Google and Slack gate providers.
-/// Delegates only the per-provider flow preparation to an [`OAuthGateProvider`].
+/// One driver for every vendor: the requirement's vendor id resolves to
+/// recipe DATA through the engine's `AuthRecipeResolver`, and the engine
+/// constructs the authorization URL/state/PKCE. The driver owns the shared
+/// challenge/turn-gate-reuse/PKCE-store/cleanup/expiry logic — there is no
+/// per-vendor gate provider and no vendor→driver registry.
 #[derive(Clone)]
 pub(crate) struct OAuthGateFlowDriver {
-    provider: Arc<dyn OAuthGateProvider>,
+    engine: Arc<AuthEngine>,
     secret_store: Arc<dyn SecretStore>,
     setup_lock: Arc<AsyncMutex<()>>,
 }
 
 impl OAuthGateFlowDriver {
-    pub(crate) fn new(
-        provider: Arc<dyn OAuthGateProvider>,
-        secret_store: Arc<dyn SecretStore>,
-    ) -> Self {
+    pub(crate) fn new(engine: Arc<AuthEngine>, secret_store: Arc<dyn SecretStore>) -> Self {
         Self {
-            provider,
+            engine,
             secret_store,
             setup_lock: Arc::new(AsyncMutex::new(())),
         }
     }
 
-    fn provider_id(&self) -> &'static str {
-        self.provider.provider_id()
+    pub(crate) async fn challenge_for_blocked_gate(
+        &self,
+        request: OAuthGateChallengeRequest<'_>,
+    ) -> Result<Option<AuthChallengeView>, AuthProductError> {
+        for requirement in request.requirements {
+            let vendor = requirement.provider.as_str();
+            if self.engine.recipes().recipe_for_vendor(vendor).is_none() {
+                continue;
+            }
+            match self.challenge_for_requirement(request, requirement).await {
+                Ok(challenge) => return Ok(Some(challenge)),
+                // A resolvable-but-unconfigured vendor (e.g. missing operator
+                // client credentials) must not swallow the whole gate: fall
+                // through to the next requirement / the generic
+                // requirement-derived prompt.
+                Err(AuthProductError::BackendUnavailable | AuthProductError::MalformedConfig) => {
+                    tracing::warn!(
+                        vendor,
+                        "OAuth gate vendor unavailable; falling through to next requirement"
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(None)
     }
 
     fn pkce_secret_handle(&self, flow_id: AuthFlowId) -> Result<SecretHandle, AuthProductError> {
-        SecretHandle::new(format!(
-            "{}-{flow_id}",
-            self.provider.pkce_secret_handle_label()
-        ))
-        .map_err(|error| {
+        SecretHandle::new(format!("oauth-gate-flow-pkce-{flow_id}")).map_err(|error| {
             tracing::warn!(
-                provider = self.provider_id(),
                 flow_id = %flow_id,
                 error = %error,
                 "failed to build OAuth gate PKCE secret handle"
@@ -188,7 +94,7 @@ impl OAuthGateFlowDriver {
         })
     }
 
-    async fn challenge_for_blocked_gate(
+    async fn challenge_for_requirement(
         &self,
         request: OAuthGateChallengeRequest<'_>,
         requirement: &RuntimeCredentialAuthRequirement,
@@ -206,10 +112,16 @@ impl OAuthGateFlowDriver {
         }
 
         let flow_id = AuthFlowId::new();
-        let scopes = provider_scopes(&requirement.provider_scopes)?;
+        let vendor = requirement.provider.as_str();
         let prepared = self
-            .provider
-            .prepare_flow(&auth_scope, flow_id, scopes)
+            .engine
+            .prepare_oauth_flow(PrepareOAuthFlowRequest {
+                vendor: vendor.to_string(),
+                scope: auth_scope.clone(),
+                flow_id,
+                account_label: CredentialAccountLabel::new(vendor)?,
+                requested_scopes: provider_scopes(&requirement.provider_scopes)?,
+            })
             .await?;
         let expires_at = Utc::now() + ChronoDuration::seconds(GATE_FLOW_TTL_SECONDS);
         self.store_pkce_verifier(
@@ -224,7 +136,7 @@ impl OAuthGateFlowDriver {
                 id: Some(flow_id),
                 scope: auth_scope.clone(),
                 kind: AuthFlowKind::IntegrationCredential,
-                provider: AuthProviderId::new(self.provider_id())?,
+                provider: AuthProviderId::new(vendor)?,
                 challenge: AuthChallenge::OAuthUrl {
                     authorization_url: prepared.authorization_url,
                     expires_at,
@@ -297,7 +209,6 @@ impl OAuthGateFlowDriver {
             .map(|_| ())
             .map_err(|error| {
                 tracing::warn!(
-                    provider = self.provider_id(),
                     flow_id = %flow_id,
                     error = %error,
                     "failed to store OAuth gate PKCE verifier"
@@ -312,14 +223,13 @@ impl OAuthGateFlowDriver {
         };
         if self.secret_store.delete(scope, &handle).await.is_err() {
             tracing::warn!(
-                provider = self.provider_id(),
                 flow_id = %flow_id,
                 "failed to clean up OAuth gate PKCE verifier after flow creation failure"
             );
         }
     }
 
-    async fn pkce_verifier_for_flow(
+    pub(crate) async fn pkce_verifier_for_flow(
         &self,
         scope: &AuthProductScope,
         flow_id: AuthFlowId,
@@ -330,7 +240,6 @@ impl OAuthGateFlowDriver {
             Err(error) if error.is_unknown_secret() => return Ok(None),
             Err(error) => {
                 tracing::warn!(
-                    provider = self.provider_id(),
                     flow_id = %flow_id,
                     error = %error,
                     "failed to lease OAuth gate PKCE verifier"
@@ -344,7 +253,6 @@ impl OAuthGateFlowDriver {
             .map(Some)
             .map_err(|error| {
                 tracing::warn!(
-                    provider = self.provider_id(),
                     flow_id = %flow_id,
                     error = %error,
                     "failed to consume OAuth gate PKCE verifier"
@@ -358,91 +266,9 @@ impl fmt::Debug for OAuthGateFlowDriver {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("OAuthGateFlowDriver")
-            .field("provider", &self.provider)
+            .field("engine", &self.engine)
             .finish()
     }
-}
-
-/// Google product-auth blocked-turn OAuth gate provider.
-///
-/// Holds static Google OAuth client config; the shared [`OAuthGateFlowDriver`]
-/// owns everything else.
-#[derive(Clone)]
-pub(crate) struct GoogleOAuthGateProvider {
-    client: OAuthClientConfig,
-}
-
-impl GoogleOAuthGateProvider {
-    pub(crate) fn new(client: OAuthClientConfig) -> Self {
-        Self { client }
-    }
-}
-
-#[async_trait]
-impl OAuthGateProvider for GoogleOAuthGateProvider {
-    fn provider_id(&self) -> &'static str {
-        ironclaw_auth::GOOGLE_PROVIDER_ID
-    }
-
-    fn pkce_secret_handle_label(&self) -> &'static str {
-        "google-oauth-gate-flow-pkce"
-    }
-
-    async fn prepare_flow(
-        &self,
-        scope: &AuthProductScope,
-        flow_id: AuthFlowId,
-        scopes: Vec<ProviderScope>,
-    ) -> Result<PreparedOAuthGateFlow, AuthProductError> {
-        let account_label = CredentialAccountLabel::new("google")?;
-        let state = OAuthCallbackState::new(
-            OAuthCallbackStateKind::GOOGLE,
-            flow_id,
-            scope.clone(),
-            account_label,
-            scopes.clone(),
-        )?
-        .encode()?;
-        let opaque_state_hash = opaque_state_hash(state.as_str())?;
-        let pkce_verifier = SecretString::from(ironclaw_common::pkce::generate_code_verifier());
-        let pkce_secret = PkceVerifierSecret::new(pkce_verifier.clone())?;
-        let pkce_verifier_hash = pkce_verifier_hash(&pkce_secret)?;
-        let pkce_challenge = pkce_s256_challenge(&pkce_secret);
-        let authorization_url = build_google_authorization_url(
-            self.client.client_id.as_str(),
-            self.client.redirect_uri.as_str(),
-            state.as_str(),
-            &pkce_challenge,
-            &scopes,
-            self.client.hosted_domain_hint.as_deref(),
-        )?;
-        Ok(PreparedOAuthGateFlow {
-            authorization_url,
-            opaque_state_hash,
-            pkce_verifier_hash,
-            pkce_verifier,
-        })
-    }
-}
-
-impl fmt::Debug for GoogleOAuthGateProvider {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("GoogleOAuthGateProvider")
-            .field("client_id", &self.client.client_id.as_str())
-            .field("redirect_uri", &self.client.redirect_uri)
-            .finish()
-    }
-}
-
-/// Authorization URL + hashed state/PKCE material for a new gate flow, produced
-/// by [`OAuthGateProvider::prepare_flow`] and consumed by the shared driver.
-#[derive(Debug)]
-pub(crate) struct PreparedOAuthGateFlow {
-    pub(crate) authorization_url: ironclaw_auth::OAuthAuthorizationUrl,
-    pub(crate) opaque_state_hash: ironclaw_auth::OpaqueStateHash,
-    pub(crate) pkce_verifier_hash: ironclaw_auth::PkceVerifierHash,
-    pub(crate) pkce_verifier: SecretString,
 }
 
 pub(crate) fn auth_scope_for_blocked_turn(
@@ -514,168 +340,93 @@ pub(crate) fn challenge_view_from_flow(
 mod tests {
     use super::*;
     use ironclaw_auth::{
-        AuthFlowStatus, GOOGLE_CALENDAR_READONLY_SCOPE, InMemoryAuthProductServices,
-        OAuthAuthorizationUrl,
+        AuthEngineDeps, AuthFlowStatus, EngineCallbackBase, InMemoryAuthProductServices,
+        OAuthAuthorizationUrl, ResolvedVendorAuthRecipe, StaticAuthRecipeResolver,
     };
     use ironclaw_host_api::{
-        AgentId, ExtensionId, RuntimeCredentialAccountProviderId, TenantId, ThreadId, UserId,
+        AgentId, ExtensionId, TenantId, ThreadId, UserId, VendorAuthRecipe, VendorId,
     };
     use ironclaw_secrets::InMemorySecretStore;
 
-    #[tokio::test]
-    async fn google_oauth_gate_replaces_expired_turn_gate_flow() {
-        let fixture = GateFixture::new(None);
-        let expired_flow_id = AuthFlowId::new();
-        let expired_scope = fixture.auth_scope();
-        fixture
-            .flow_manager
-            .create_flow(NewAuthFlow {
-                id: Some(expired_flow_id),
-                scope: expired_scope.clone(),
-                kind: AuthFlowKind::IntegrationCredential,
-                provider: AuthProviderId::new(ironclaw_auth::GOOGLE_PROVIDER_ID).unwrap(),
-                challenge: AuthChallenge::OAuthUrl {
-                    authorization_url: OAuthAuthorizationUrl::new(
-                        "https://accounts.google.com/o/oauth2/v2/auth?state=expired".to_string(),
-                    )
-                    .unwrap(),
-                    expires_at: Utc::now() - ChronoDuration::seconds(1),
-                },
-                continuation: AuthContinuationRef::TurnGateResume {
-                    turn_run_ref: TurnRunRef::new(fixture.run_id.to_string()).unwrap(),
-                    gate_ref: fixture.gate_ref.clone(),
-                },
-                update_binding: None,
-                opaque_state_hash: None,
-                pkce_verifier_hash: None,
-                expires_at: Utc::now() - ChronoDuration::seconds(1),
+    fn acme_vendor_recipe() -> ResolvedVendorAuthRecipe {
+        let recipe: VendorAuthRecipe = serde_json::from_value(serde_json::json!({
+            "method": "oauth2_code",
+            "display_name": "Acme account",
+            "authorization_endpoint": "https://auth.acme.example/authorize",
+            "token_endpoint": "https://auth.acme.example/token",
+            "scopes": ["msg:read"],
+            "client_credentials": { "client_id_handle": "acme_oauth_client_id" },
+            "token_response": { "access_token": "/access_token" },
+        }))
+        .expect("recipe parses");
+        ResolvedVendorAuthRecipe {
+            vendor: "acmevendor".to_string(),
+            recipe,
+            token_exchange_resource: None,
+        }
+    }
+
+    #[derive(Debug)]
+    struct StaticCredentials;
+
+    #[async_trait::async_trait]
+    impl ironclaw_auth::EngineClientCredentialsSource for StaticCredentials {
+        async fn resolve(
+            &self,
+            _vendor: &str,
+            _credentials: &ironclaw_host_api::RecipeClientCredentials,
+        ) -> Result<ironclaw_auth::EngineOAuthClientMaterial, AuthProductError> {
+            Ok(ironclaw_auth::EngineOAuthClientMaterial {
+                client_id: ironclaw_auth::OAuthClientId::new("gate-client-id")?,
+                client_secret: None,
             })
-            .await
-            .unwrap();
-
-        let challenge = fixture.challenge().await;
-
-        assert_ne!(
-            challenge.authorization_url.unwrap().as_str(),
-            "https://accounts.google.com/o/oauth2/v2/auth?state=expired"
-        );
-        let expired = fixture
-            .shared
-            .get_flow(&expired_scope, expired_flow_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(expired.status, AuthFlowStatus::Canceled);
-        assert_eq!(fixture.active_gate_flows().await.len(), 1);
+        }
     }
 
-    #[tokio::test]
-    async fn google_oauth_gate_reuses_one_flow_under_concurrent_challenges() {
-        let fixture = GateFixture::new(None);
+    #[derive(Debug)]
+    struct UnconfiguredCredentials;
 
-        let (left, right) = tokio::join!(fixture.challenge(), fixture.challenge());
-        let left = left.authorization_url.unwrap();
-        let right = right.authorization_url.unwrap();
-
-        assert_eq!(left, right);
-        assert_eq!(fixture.active_gate_flows().await.len(), 1);
+    #[async_trait::async_trait]
+    impl ironclaw_auth::EngineClientCredentialsSource for UnconfiguredCredentials {
+        async fn resolve(
+            &self,
+            _vendor: &str,
+            _credentials: &ironclaw_host_api::RecipeClientCredentials,
+        ) -> Result<ironclaw_auth::EngineOAuthClientMaterial, AuthProductError> {
+            Err(AuthProductError::MalformedConfig)
+        }
     }
 
-    #[tokio::test]
-    async fn google_oauth_gate_authorization_url_keeps_hosted_domain_hint() {
-        let fixture = GateFixture::new(Some("example.com"));
+    #[derive(Debug)]
+    struct PanicEgress;
 
-        let challenge = fixture.challenge().await;
-        let authorization_url = challenge.authorization_url.unwrap();
-        let parsed = url::Url::parse(authorization_url.as_str()).unwrap();
-
-        assert!(
-            parsed
-                .query_pairs()
-                .any(|(name, value)| name == "hd" && value == "example.com")
-        );
+    #[async_trait::async_trait]
+    impl ironclaw_host_api::RuntimeHttpEgress for PanicEgress {
+        async fn execute(
+            &self,
+            _request: ironclaw_host_api::RuntimeHttpEgressRequest,
+        ) -> Result<
+            ironclaw_host_api::RuntimeHttpEgressResponse,
+            ironclaw_host_api::RuntimeHttpEgressError,
+        > {
+            panic!("gate flow preparation must not reach the vendor");
+        }
     }
 
-    #[tokio::test]
-    async fn google_oauth_gate_registry_uses_registered_requirement_when_multiple_present() {
-        let fixture = GateFixture::new(None);
-        let registry = OAuthGateProviderRegistry::new(vec![Arc::new(fixture.driver.clone())]);
-        let unsupported_requirement = RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
-            setup: Default::default(),
-            requester_extension: ExtensionId::new("github").unwrap(),
-            provider_scopes: Vec::new(),
-        };
-        let requirements = vec![unsupported_requirement, fixture.requirement.clone()];
-
-        let challenge = registry
-            .challenge_for_blocked_gate(OAuthGateChallengeRequest {
-                flow_manager: &fixture.flow_manager,
-                flow_source: &fixture.flow_source,
-                requirements: &requirements,
-                scope: &fixture.scope,
-                owner_user_id: &fixture.owner_user_id,
-                run_id: fixture.run_id,
-                gate_ref: &fixture.gate_ref,
-            })
-            .await
-            .unwrap()
-            .expect("google requirement should produce a challenge");
-
-        assert_eq!(challenge.kind, AuthPromptChallengeKind::OAuthUrl);
-        assert_eq!(fixture.active_gate_flows().await.len(), 1);
-    }
-
-    /// A registered-but-unconfigured provider (Slack before the operator saves
-    /// OAuth client credentials) must not swallow the whole gate: pre-fix, a
-    /// requirements list with the Slack provider first errored `challenge_for_gate`
-    /// entirely and the user got no auth prompt at all.
-    #[cfg(feature = "slack-v2-host-beta")]
-    #[tokio::test]
-    async fn gate_registry_falls_through_unavailable_provider_to_next_requirement() {
-        use crate::slack::slack_personal_oauth::SlackPersonalOAuthGateProvider;
-        use crate::slack::slack_setup::SlackPersonalSetupServiceSlot;
-
-        let fixture = GateFixture::new(None);
-        let slack_driver = Arc::new(OAuthGateFlowDriver::new(
-            Arc::new(SlackPersonalOAuthGateProvider::new(
-                SlackPersonalSetupServiceSlot::new(
-                    ironclaw_auth::OAuthRedirectUri::new(
-                        "https://host.example/api/reborn/product-auth/oauth/slack/callback",
-                    )
-                    .unwrap(),
-                ),
-            )),
-            Arc::new(InMemorySecretStore::new()),
-        ));
-        let registry =
-            OAuthGateProviderRegistry::new(vec![slack_driver, Arc::new(fixture.driver.clone())]);
-        let slack_requirement = RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new("slack").unwrap(),
-            setup: Default::default(),
-            requester_extension: ExtensionId::new("slack").unwrap(),
-            provider_scopes: Vec::new(),
-        };
-        let requirements = vec![slack_requirement, fixture.requirement.clone()];
-
-        let challenge = registry
-            .challenge_for_blocked_gate(OAuthGateChallengeRequest {
-                flow_manager: &fixture.flow_manager,
-                flow_source: &fixture.flow_source,
-                requirements: &requirements,
-                scope: &fixture.scope,
-                owner_user_id: &fixture.owner_user_id,
-                run_id: fixture.run_id,
-                gate_ref: &fixture.gate_ref,
-            })
-            .await
-            .unwrap()
-            .expect("the google requirement must still produce a challenge");
-
-        assert_eq!(
-            challenge.provider.as_str(),
-            ironclaw_auth::GOOGLE_PROVIDER_ID
-        );
+    fn engine_with_credentials(
+        credentials: Arc<dyn ironclaw_auth::EngineClientCredentialsSource>,
+    ) -> Arc<AuthEngine> {
+        Arc::new(AuthEngine::new(AuthEngineDeps {
+            recipes: Arc::new(StaticAuthRecipeResolver::new(vec![acme_vendor_recipe()])),
+            client_credentials: credentials,
+            egress: Arc::new(PanicEgress),
+            secret_store: Arc::new(InMemorySecretStore::new()),
+            callback_base: EngineCallbackBase::new(
+                "https://host.example/api/reborn/product-auth/oauth",
+            )
+            .expect("callback base"),
+            dcr_client_name: "IronClaw test".to_string(),
+        }))
     }
 
     struct GateFixture {
@@ -691,25 +442,16 @@ mod tests {
     }
 
     impl GateFixture {
-        fn new(hosted_domain_hint: Option<&str>) -> Self {
+        fn new() -> Self {
             let shared = Arc::new(InMemoryAuthProductServices::new());
             let flow_manager: Arc<dyn AuthFlowManager> = shared.clone();
             let flow_source: Arc<dyn AuthFlowRecordSource> = shared.clone();
-            let mut client = OAuthClientConfig::new(
-                "google-client.apps.googleusercontent.com",
-                "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
-                None,
-            )
-            .unwrap();
-            if let Some(hosted_domain_hint) = hosted_domain_hint {
-                client = client.with_hosted_domain_hint(hosted_domain_hint);
-            }
             Self {
                 shared,
                 flow_manager,
                 flow_source,
                 driver: OAuthGateFlowDriver::new(
-                    Arc::new(GoogleOAuthGateProvider::new(client)),
+                    engine_with_credentials(Arc::new(StaticCredentials)),
                     Arc::new(InMemorySecretStore::new()),
                 ),
                 scope: TurnScope::new(
@@ -720,34 +462,32 @@ mod tests {
                 ),
                 owner_user_id: UserId::new("user-alpha").unwrap(),
                 run_id: TurnRunId::new(),
-                gate_ref: AuthGateRef::new("gate:google-auth").unwrap(),
+                gate_ref: AuthGateRef::new("gate:vendor-auth").unwrap(),
                 requirement: RuntimeCredentialAuthRequirement {
-                    provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+                    provider: VendorId::new("acmevendor").unwrap(),
                     setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
-                        scopes: vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()],
+                        scopes: vec!["msg:read".to_string()],
                     },
-                    requester_extension: ExtensionId::new("google-calendar").unwrap(),
-                    provider_scopes: vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()],
+                    requester_extension: ExtensionId::new("acme-messenger-fixture").unwrap(),
+                    provider_scopes: vec!["msg:read".to_string()],
                 },
             }
         }
 
         async fn challenge(&self) -> AuthChallengeView {
             self.driver
-                .challenge_for_blocked_gate(
-                    OAuthGateChallengeRequest {
-                        flow_manager: &self.flow_manager,
-                        flow_source: &self.flow_source,
-                        requirements: std::slice::from_ref(&self.requirement),
-                        scope: &self.scope,
-                        owner_user_id: &self.owner_user_id,
-                        run_id: self.run_id,
-                        gate_ref: &self.gate_ref,
-                    },
-                    &self.requirement,
-                )
+                .challenge_for_blocked_gate(OAuthGateChallengeRequest {
+                    flow_manager: &self.flow_manager,
+                    flow_source: &self.flow_source,
+                    requirements: std::slice::from_ref(&self.requirement),
+                    scope: &self.scope,
+                    owner_user_id: &self.owner_user_id,
+                    run_id: self.run_id,
+                    gate_ref: &self.gate_ref,
+                })
                 .await
                 .unwrap()
+                .expect("vendor requirement should produce a challenge")
         }
 
         fn auth_scope(&self) -> AuthProductScope {
@@ -772,5 +512,137 @@ mod tests {
                 })
                 .collect()
         }
+    }
+
+    #[tokio::test]
+    async fn gate_challenge_is_recipe_driven_and_host_constructed() {
+        let fixture = GateFixture::new();
+        let challenge = fixture.challenge().await;
+        assert_eq!(challenge.kind, AuthPromptChallengeKind::OAuthUrl);
+        assert_eq!(challenge.provider.as_str(), "acmevendor");
+        let url = challenge.authorization_url.expect("authorization url");
+        assert!(
+            url.as_str()
+                .starts_with("https://auth.acme.example/authorize")
+        );
+        assert!(url.as_str().contains("code_challenge"));
+        assert_eq!(fixture.active_gate_flows().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn gate_replaces_expired_turn_gate_flow() {
+        let fixture = GateFixture::new();
+        let expired_flow_id = AuthFlowId::new();
+        let expired_scope = fixture.auth_scope();
+        fixture
+            .flow_manager
+            .create_flow(NewAuthFlow {
+                id: Some(expired_flow_id),
+                scope: expired_scope.clone(),
+                kind: AuthFlowKind::IntegrationCredential,
+                provider: AuthProviderId::new("acmevendor").unwrap(),
+                challenge: AuthChallenge::OAuthUrl {
+                    authorization_url: OAuthAuthorizationUrl::new(
+                        "https://auth.acme.example/authorize?state=expired".to_string(),
+                    )
+                    .unwrap(),
+                    expires_at: Utc::now() - ChronoDuration::seconds(1),
+                },
+                continuation: AuthContinuationRef::TurnGateResume {
+                    turn_run_ref: TurnRunRef::new(fixture.run_id.to_string()).unwrap(),
+                    gate_ref: fixture.gate_ref.clone(),
+                },
+                update_binding: None,
+                opaque_state_hash: None,
+                pkce_verifier_hash: None,
+                expires_at: Utc::now() - ChronoDuration::seconds(1),
+            })
+            .await
+            .unwrap();
+
+        let challenge = fixture.challenge().await;
+
+        assert_ne!(
+            challenge.authorization_url.unwrap().as_str(),
+            "https://auth.acme.example/authorize?state=expired"
+        );
+        let expired = fixture
+            .shared
+            .get_flow(&expired_scope, expired_flow_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(expired.status, AuthFlowStatus::Canceled);
+        assert_eq!(fixture.active_gate_flows().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn gate_reuses_one_flow_under_concurrent_challenges() {
+        let fixture = GateFixture::new();
+
+        let (left, right) = tokio::join!(fixture.challenge(), fixture.challenge());
+        let left = left.authorization_url.unwrap();
+        let right = right.authorization_url.unwrap();
+
+        assert_eq!(left, right);
+        assert_eq!(fixture.active_gate_flows().await.len(), 1);
+    }
+
+    /// A resolvable-but-unconfigured vendor (operator has not saved OAuth
+    /// client credentials) must not swallow the whole gate: the driver falls
+    /// through to the next requirement.
+    #[tokio::test]
+    async fn gate_falls_through_unconfigured_vendor_to_next_requirement() {
+        let mut fixture = GateFixture::new();
+        // A second engine whose credentials source rejects only the first
+        // vendor would need two vendors; simpler: the first requirement names
+        // a vendor with no recipe at all, the second is serviceable.
+        let unknown_requirement = RuntimeCredentialAuthRequirement {
+            provider: VendorId::new("unknownvendor").unwrap(),
+            setup: Default::default(),
+            requester_extension: ExtensionId::new("acme-messenger-fixture").unwrap(),
+            provider_scopes: Vec::new(),
+        };
+        let serviceable = fixture.requirement.clone();
+        fixture.requirement = unknown_requirement;
+        let requirements = vec![fixture.requirement.clone(), serviceable];
+
+        let challenge = fixture
+            .driver
+            .challenge_for_blocked_gate(OAuthGateChallengeRequest {
+                flow_manager: &fixture.flow_manager,
+                flow_source: &fixture.flow_source,
+                requirements: &requirements,
+                scope: &fixture.scope,
+                owner_user_id: &fixture.owner_user_id,
+                run_id: fixture.run_id,
+                gate_ref: &fixture.gate_ref,
+            })
+            .await
+            .unwrap()
+            .expect("the serviceable requirement must still produce a challenge");
+        assert_eq!(challenge.provider.as_str(), "acmevendor");
+
+        // And an unconfigured (credentials missing) vendor also falls through.
+        let unconfigured_driver = OAuthGateFlowDriver::new(
+            engine_with_credentials(Arc::new(UnconfiguredCredentials)),
+            Arc::new(InMemorySecretStore::new()),
+        );
+        let result = unconfigured_driver
+            .challenge_for_blocked_gate(OAuthGateChallengeRequest {
+                flow_manager: &fixture.flow_manager,
+                flow_source: &fixture.flow_source,
+                requirements: std::slice::from_ref(&requirements[1]),
+                scope: &fixture.scope,
+                owner_user_id: &fixture.owner_user_id,
+                run_id: TurnRunId::new(),
+                gate_ref: &fixture.gate_ref,
+            })
+            .await
+            .unwrap();
+        assert!(
+            result.is_none(),
+            "unconfigured vendor yields no challenge instead of erroring the gate"
+        );
     }
 }

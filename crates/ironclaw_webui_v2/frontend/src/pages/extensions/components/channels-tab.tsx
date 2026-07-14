@@ -1,5 +1,8 @@
 import { useT } from "../../../lib/i18n";
-import { SlackAdminManagedSection } from "../../../components/slack-setup-panel";
+import {
+  channelConnection,
+  isInboundProofCodeConnection,
+} from "../lib/extensions-schema";
 import { ExtensionCard, RegistryCard } from "./extension-card";
 import { PairingSection } from "./pairing-section";
 import { redeemPairingCode } from "../lib/pairing-api";
@@ -8,36 +11,15 @@ function packageId(item) {
   return item?.package_ref?.id || "";
 }
 
-export function isSlackPackage(item) {
-  return packageId(item) === "slack";
-}
-
-// Channel discovery is extension-surface data: an extension's `surfaces`
-// carry a typed `channel` entry with direction (inbound/outbound), the
-// caller's connection state, and the connect affordance. There is no separate
-// connectable-channel registry.
-export function channelSurface(item) {
-  const surfaces = item?.surfaces || [];
-  return surfaces.find((surface) => surface?.kind === "channel") || null;
-}
-
-export function channelConnection(item) {
-  return channelSurface(item)?.connection || null;
-}
-
-export function isInboundProofCodeConnection(connection) {
-  return connection?.strategy === "inbound_proof_code";
-}
-
+// Every channel package renders the same generic sections: the connect
+// section derives from the surface `connection` strategy, and the configure
+// affordance from the setup fields/secrets in the configure modal. OAuth
+// connections (and channels without a connect affordance) render nothing
+// here — OAuth connect lives in the configure modal.
 export function ChannelConnectSections({ item }) {
   const connection = channelConnection(item);
   const sections = [];
-  if (isSlackPackage(item)) {
-    // Operator-only Slack workspace setup + channel routing. The section
-    // self-gates on the operator-scoped setup endpoint, so non-operators see
-    // nothing here; the user OAuth connect lives in the configure modal.
-    sections.push(<SlackAdminManagedSection key="slack-admin" />);
-  } else if (isInboundProofCodeConnection(connection)) {
+  if (isInboundProofCodeConnection(connection)) {
     const pairingChannel = connection.channel || packageId(item);
     sections.push(
       <PairingSection
@@ -93,8 +75,7 @@ export function ChannelsTab({
                       isBusy={isBusy}
                     />
                     <ChannelConnectSections item={ch} />
-                    {!isSlackPackage(ch) &&
-                    !pairingHandledBySurface &&
+                    {!pairingHandledBySurface &&
                     (ch.onboarding_state === "pairing_required" ||
                       ch.onboarding_state === "pairing") &&
                     ( <PairingSection

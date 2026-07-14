@@ -489,7 +489,6 @@ async fn approval_gate_prompt(
 /// so both surface the *same* "what is being approved" data from one source.
 /// Returns `None` when no store is wired, the gate ref is not an approval ref,
 /// the request is missing, or the lookup fails.
-#[cfg(feature = "slack-v2-host-beta")]
 pub(crate) async fn approval_prompt_context_view(
     approval_requests: Option<&dyn ApprovalRequestStore>,
     gate_ref: &GateRef,

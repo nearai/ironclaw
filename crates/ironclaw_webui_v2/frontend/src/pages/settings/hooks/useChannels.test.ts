@@ -46,7 +46,7 @@ function useChannelsForTest({ extensions, registry }) {
 
 const channelSurfaces = [
   { kind: "tool" },
-  { kind: "channel", inbound: true, outbound: true, connected: false },
+  { kind: "channel", inbound: true, outbound: true },
 ];
 const toolSurfaces = [{ kind: "tool" }, { kind: "auth" }];
 

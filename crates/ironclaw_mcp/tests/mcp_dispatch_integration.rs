@@ -88,7 +88,7 @@ async fn mcp_lane_auth_failure_returns_manifest_credential_context_and_releases_
             assert_eq!(credential_requirements.len(), 1);
             assert_eq!(
                 credential_requirements[0].provider,
-                RuntimeCredentialAccountProviderId::new("github").unwrap()
+                VendorId::new("github").unwrap()
             );
             assert_eq!(
                 credential_requirements[0].requester_extension,

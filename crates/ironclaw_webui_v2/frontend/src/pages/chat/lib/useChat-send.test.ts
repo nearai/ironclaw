@@ -3605,7 +3605,7 @@ test("useChat: blank unconnected Slack chat does NOT auto-open a connection pane
             package_ref: { id: "slack", kind: "extension" },
             display_name: "Slack",
             kind: "channel",
-            activation_status: "active",
+            installation_state: "active",
             onboarding_state: "setup_required",
           },
         ],

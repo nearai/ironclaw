@@ -376,7 +376,10 @@ fn apply_credential_injection(
                     reason: "credential injection path placeholder is invalid".to_string(),
                 });
             }
-            if !is_rfc3986_unreserved_segment(value) {
+            // Values are unreserved-plus-`:` material (real vendor tokens
+            // carry `:`), never `%` (no smuggled pre-encoded octets) and
+            // never `/` (no added segments).
+            if !ironclaw_network::is_path_segment_credential_material(value) {
                 return Err(RuntimeHttpEgressError::Credential {
                     reason: "credential injection path value is invalid".to_string(),
                 });
@@ -394,11 +397,21 @@ fn apply_credential_injection(
             };
             let path = url.path().to_string();
             let path = path.strip_prefix('/').unwrap_or(&path);
-            let placeholder_count = path
+            // Two substitution forms: the placeholder as a whole segment
+            // (`/v1/token/run`), or a brace template fused inside one segment
+            // (`/bot{token}/run` — the URL parser percent-encodes the braces,
+            // so the encoded form is matched too). Exactly one site total.
+            let raw_token = format!("{{{placeholder}}}");
+            let encoded_upper = format!("%7B{placeholder}%7D");
+            let encoded_lower = format!("%7b{placeholder}%7d");
+            let segment_count = path
                 .split('/')
                 .filter(|segment| *segment == placeholder)
                 .count();
-            match placeholder_count {
+            let template_count = path.matches(raw_token.as_str()).count()
+                + path.matches(encoded_upper.as_str()).count()
+                + path.matches(encoded_lower.as_str()).count();
+            match segment_count + template_count {
                 0 => {
                     return Err(RuntimeHttpEgressError::Credential {
                         reason: "credential injection path placeholder was not found".to_string(),
@@ -412,17 +425,29 @@ fn apply_credential_injection(
                     });
                 }
             }
-            let mut rewritten_path = String::with_capacity(path.len() + value.len());
-            for (index, segment) in path.split('/').enumerate() {
-                if index > 0 {
-                    rewritten_path.push('/');
+            let rewritten_path = if segment_count == 1 {
+                let mut rewritten = String::with_capacity(path.len() + value.len());
+                for (index, segment) in path.split('/').enumerate() {
+                    if index > 0 {
+                        rewritten.push('/');
+                    }
+                    if segment == placeholder {
+                        rewritten.push_str(value);
+                    } else {
+                        rewritten.push_str(segment);
+                    }
                 }
-                if segment == placeholder {
-                    rewritten_path.push_str(value);
-                } else {
-                    rewritten_path.push_str(segment);
+                rewritten
+            } else {
+                let mut rewritten = path.replacen(raw_token.as_str(), value, 1);
+                if rewritten == path {
+                    rewritten = path.replacen(encoded_upper.as_str(), value, 1);
                 }
-            }
+                if rewritten == path {
+                    rewritten = path.replacen(encoded_lower.as_str(), value, 1);
+                }
+                rewritten
+            };
             url.set_path(&rewritten_path);
         }
     }

@@ -43,11 +43,11 @@ async fn thread_history_cold_get_and_libsql_reopen() {
     // Cold-GET mechanics mirror `assert_reply_persists_after_reopen`'s LibSql
     // branch: a genuinely fresh `libsql::Database` connection to the on-disk
     // file, independent of the live composite `Arc`.
-    let db_path = h
-        ._shared
-        .libsql_db_path
-        .clone()
-        .expect("LibSql storage mode has a db path");
+    let reborn_support::builder::StorageReopen::LibSql { db_path } = &h._shared.storage_reopen
+    else {
+        panic!("LibSql storage mode has a db path");
+    };
+    let db_path = db_path.clone();
     let db = Arc::new(
         libsql::Builder::new_local(&db_path)
             .build()

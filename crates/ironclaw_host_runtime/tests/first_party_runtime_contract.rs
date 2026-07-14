@@ -700,10 +700,9 @@ fn first_party_registry_with_effects(effects: Vec<EffectKind>) -> ExtensionRegis
                     "schemas/host/status.input.v1.json",
                 )
                 .unwrap(),
-                output_schema_ref: CapabilityProfileSchemaRef::new(
-                    "schemas/host/status.output.v1.json",
-                )
-                .unwrap(),
+                output_schema_ref: Some(
+                    CapabilityProfileSchemaRef::new("schemas/host/status.output.v1.json").unwrap(),
+                ),
                 prompt_doc_ref: Some(
                     CapabilityProfileSchemaRef::new("prompts/host/status.md").unwrap(),
                 ),

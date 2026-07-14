@@ -41,7 +41,7 @@ fallback_feature_flags() {
 
 case "${package}" in
   ironclaw_reborn_cli)
-    printf '%s\n' "--features webui-v2-beta,slack-v2-host-beta"
+    printf '%s\n' "--features webui-v2-beta"
     ;;
   ironclaw_product_adapters)
     printf '%s\n' "--features test-support,host-auth-mint"
@@ -52,7 +52,7 @@ case "${package}" in
     printf '%s\n' "--features test-support,libsql"
     ;;
   ironclaw_reborn_composition)
-    printf '%s\n' "--features test-support,webui-v2-beta,slack-v2-host-beta,libsql"
+    printf '%s\n' "--features test-support,webui-v2-beta,libsql"
     ;;
   ironclaw_reborn)
     printf '%s\n' "--features root-llm-provider,libsql-secrets,libsql-restart-tests,webui-user-store"
@@ -87,15 +87,19 @@ case "${package}" in
     # former ironclaw_reborn_openai_compat_storage crate (enables `storage`).
     printf '%s\n' "--features libsql"
     ;;
+  ironclaw_extension_host)
+    # The lifecycle contract test (`lifecycle_contract`) uses the crate's
+    # in-crate fixtures/scripted adapters, gated behind `test-support`.
+    printf '%s\n' "--features test-support"
+    ;;
   ironclaw_architecture | \
   ironclaw_product_adapter_registry | \
   ironclaw_product_context | \
   ironclaw_reborn_config | \
   ironclaw_reborn_identity | \
   ironclaw_reborn_traces | \
-  ironclaw_slack_v2_adapter | \
-  ironclaw_telegram_v2_adapter | \
-  ironclaw_wasm_product_adapters)
+  ironclaw_slack_extension | \
+  ironclaw_telegram_extension)
     # Already on the allowlist with no feature flags; keep them flag-free now
     # that the default branch derives fallback features for closure crates.
     ;;

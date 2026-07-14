@@ -41,6 +41,7 @@ mod fakes;
 // `ironclaw_product_workflow_storage` crate). Gated behind `storage` so the
 // facade surface stays free of the `ironclaw_filesystem` dependency unless a
 // consumer opts into a durable backend.
+mod delivery_coordinator;
 #[cfg(feature = "storage")]
 mod filesystem_ledger;
 mod gate_state;
@@ -51,6 +52,7 @@ mod lifecycle;
 mod outbound_delivery;
 mod policy;
 mod reborn_services;
+mod run_delivery;
 mod webui_inbound;
 mod workflow;
 
@@ -134,14 +136,24 @@ pub use lifecycle::{
 };
 // Product hosts use this outbound orchestration seam to wire outbound policy
 // decisions to adapter rendering without reaching into module internals.
-pub use outbound_delivery::{
-    ProductOutboundDeliveryError, ProductOutboundDeliveryOutcome, ProductOutboundDeliveryRequest,
-    ProductOutboundStatusUpdateFailure, ProductOutboundTargetResolver,
-    VerifiedProductOutboundTargetMetadata, prepare_and_render_product_outbound,
+pub use delivery_coordinator::{
+    ChannelDeliveryResolver, CoordinatedDeliveryError, CoordinatedDeliveryOutcome,
+    CoordinatedDeliveryRequest, DeliveryCoordinator, DeliveryIntent, DeliveryReplyContextSource,
+    DeliveryRetryPolicy, NoReplyContext, NoticeDeliveryRequest, ResolvedChannelDelivery,
 };
+pub use outbound_delivery::{ProductOutboundTargetResolver, VerifiedProductOutboundTargetMetadata};
+// The generic run-delivery components (§5.4): channel hosts wire these over
+// the coordinator; vendor residue enters only through the ports.
 pub use policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
     NoopBeforeInboundPolicy,
+};
+pub use run_delivery::{
+    ApprovalPromptContextSource, BlockedAuthFlowCancel, BlockedAuthPromptRequest,
+    BlockedAuthPromptSource, DeliveredChannelMessage, PreferenceTargetCodec,
+    PreferenceTargetEncodeRequest, RunDeliveryError, RunDeliveryObserver, RunDeliveryServices,
+    RunDeliverySettings, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
+    triggered_run_delivery_settings,
 };
 // Projection/event types that route handlers need to thread through SSE
 // (parse the resume cursor, render browser-safe event payloads). Re-exported
@@ -159,7 +171,7 @@ pub use reborn_services::{
     AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE,
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
     AdminUserSecretMeta, AdminUserService, AdminUserStatus, AutomationListRequest,
-    AutomationProductFacade, ChannelConnectionFacade, CodexLoginStart,
+    AutomationProductFacade, ChannelConfigFacade, ChannelConnectionFacade, CodexLoginStart,
     ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
     ExtensionCredentialSubmitRequest, FilesystemBrowseReader, FsMount, InboundAttachmentLander,
     InboundAttachmentReader, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,
@@ -168,16 +180,17 @@ pub use reborn_services::{
     NearAiWalletLoginResult, OperatorLogsService, OperatorServiceLifecycleService,
     OperatorStatusService, OutboundPreferencesProductFacade, ProductAgentBoundCaller,
     ProjectCaller, ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError,
-    ProjectFsFile, ProjectFsStat, ProjectService, ProjectServiceError,
+    ProjectFsFile, ProjectFsStat, ProjectService, ProjectServiceError, RebornAccountBindingSource,
     RebornAccountLoginLinkResponse, RebornAccountTrace, RebornAccountTracesResponse,
     RebornAddMemberRequest, RebornAdminCreateUserRequest, RebornAdminPutSecretRequest,
     RebornAdminSecretDeletedResponse, RebornAdminSecretResponse, RebornAdminSetRoleRequest,
     RebornAdminSetStatusRequest, RebornAdminUpdateUserRequest, RebornAdminUserCreatedResponse,
     RebornAdminUserDeletedResponse, RebornAdminUserListQuery, RebornAdminUserListResponse,
     RebornAdminUserResponse, RebornAdminUserSecretsListResponse, RebornAttachmentBytes,
-    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
-    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornAutomationState, RebornCancelRunResponse,
+    RebornAttachmentRequest, RebornAuthAccount, RebornAutomationInfo,
+    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornCancelRunResponse, RebornChannelConfigField,
     RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateProjectRequest,
     RebornCreateThreadResponse, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
     RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionCredentialSetup,
@@ -218,12 +231,12 @@ pub use reborn_services::{
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornStreamEventsSubscription, RebornSubmitTurnResponse, RebornTimelineRequest,
     RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse,
-    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, SetActiveLlmRequest,
-    SettingsToolPermissionState, SkillsProductFacade, StaticOperatorStatusService,
-    TriggerRunThreadScope, UnsupportedAutomationProductFacade, UnsupportedOperatorLogsService,
-    UnsupportedOperatorServiceLifecycleService, UnsupportedOperatorStatusService,
-    UnsupportedOutboundPreferencesProductFacade, UpsertLlmProviderRequest,
-    normalize_operator_log_context_value,
+    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornVendorAuthAccounts,
+    SetActiveLlmRequest, SettingsToolPermissionState, SkillsProductFacade,
+    StaticOperatorStatusService, TriggerRunThreadScope, UnsupportedAutomationProductFacade,
+    UnsupportedOperatorLogsService, UnsupportedOperatorServiceLifecycleService,
+    UnsupportedOperatorStatusService, UnsupportedOutboundPreferencesProductFacade,
+    UpsertLlmProviderRequest, normalize_operator_log_context_value,
 };
 
 pub use webui_inbound::{

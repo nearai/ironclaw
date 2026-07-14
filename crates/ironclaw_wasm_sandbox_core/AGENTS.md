@@ -6,7 +6,6 @@
 - Read `Cargo.toml` and `src/lib.rs` for exported primitives.
 - Neighboring runtime crates:
   - `crates/ironclaw_wasm/AGENTS.md`
-  - `crates/ironclaw_wasm_product_adapters/AGENTS.md`
 
 ## What This Crate Owns
 
@@ -24,7 +23,7 @@
 
 - Fast local check: `cargo test -p ironclaw_wasm_sandbox_core`
 - Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture`
-- Run downstream runtime tests when changing exported sandbox primitives: `cargo test -p ironclaw_wasm` and `cargo test -p ironclaw_wasm_product_adapters`.
+- Run downstream runtime tests when changing exported sandbox primitives: `cargo test -p ironclaw_wasm`.
 
 ## Agent Notes
 

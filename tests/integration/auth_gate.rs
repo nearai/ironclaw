@@ -144,8 +144,7 @@ async fn runtime_401_after_injection_populates_provider_credential_requirement()
     let requirement = &state.credential_requirements[0];
     assert_eq!(
         requirement.provider,
-        ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github")
-            .expect("valid provider id"),
+        ironclaw_host_api::VendorId::new("github").expect("valid provider id"),
         "provider must be populated so AuthPromptView.provider is non-null"
     );
     assert_eq!(

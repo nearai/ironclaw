@@ -292,7 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_omits_connect_action_while_extensions_render_slack_setup_ui() {
+    fn chat_omits_connect_action_while_extensions_render_generic_connect_ui() {
         let chat = source_text("pages/chat/chat.tsx");
         assert!(!chat.contains("ChannelConnectCard"));
         assert!(!chat.contains("channelConnectAction"));
@@ -302,19 +302,30 @@ mod tests {
         assert!(!use_chat.contains("resolveConnectAction"));
         assert!(!use_chat.contains("channel_connect_action"));
 
-        let picker = source_text("components/slack-channel-picker.tsx");
-        assert!(picker.contains("listSlackAllowedChannels"));
-        assert!(picker.contains("saveSlackAllowedChannels(channels)"));
+        // The Slack-specific frontend surface is deleted (extension-runtime
+        // P6): no admin setup panel, no allowed-channel picker, no bespoke
+        // setup/channel APIs.
+        for deleted in [
+            "components/slack-setup-panel.tsx",
+            "components/slack-channel-picker.tsx",
+            "lib/slack-setup-api.ts",
+            "lib/slack-channels-api.ts",
+        ] {
+            let full = format!("{}/frontend/src/{deleted}", env!("CARGO_MANIFEST_DIR"));
+            assert!(
+                !std::path::Path::new(&full).exists(),
+                "{deleted} is a deleted Slack-specific surface and must not return"
+            );
+        }
 
-        let setup_panel = source_text("components/slack-setup-panel.tsx");
-        assert!(setup_panel.contains("SlackChannelPicker"));
+        // Every channel package renders the same generic sections: no
+        // concrete package-id condition remains in the channels tab or the
+        // configure modal (extension-runtime overview §6.4 — affordances
+        // derive from the state enums plus config completeness on the wire).
+        let schema = source_text("pages/extensions/lib/extensions-schema.ts");
         assert!(
-            setup_panel.contains("<SlackChannelPicker />"),
-            "the picker takes no connect-action prop; copy comes from i18n"
-        );
-        assert!(
-            setup_panel.contains("if (setupQuery.isError)"),
-            "the admin section self-gates on the operator-scoped setup query"
+            schema.contains("inbound_proof_code"),
+            "the shared surface taxonomy owns the connect-strategy vocabulary"
         );
 
         let channels_tab = source_text("pages/extensions/components/channels-tab.tsx");
@@ -322,12 +333,23 @@ mod tests {
             channels_tab.contains("channelConnection"),
             "connect affordances come from the extension's channel surface"
         );
-        assert!(channels_tab.contains("inbound_proof_code"));
-        assert!(channels_tab.contains("SlackAdminManagedSection"));
+        assert!(channels_tab.contains("isInboundProofCodeConnection"));
         assert!(
             channels_tab.contains("copy={connection}"),
             "pairing copy is the surface connection requirement"
         );
+        assert!(!channels_tab.to_ascii_lowercase().contains("slack"));
+
+        let configure_modal = source_text("pages/extensions/components/configure-modal.tsx");
+        assert!(
+            configure_modal.contains("connectsViaOauth(extension, secrets)"),
+            "pairing-vs-OAuth routing derives from the wire connect strategy / secrets"
+        );
+        assert!(
+            configure_modal.contains("!extensionIsActive(extension)"),
+            "post-OAuth auto-activate is generic: any not-yet-active extension"
+        );
+        assert!(!configure_modal.to_ascii_lowercase().contains("slack"));
 
         let regression = source_text("pages/chat/lib/useChat-send.test.ts");
         assert!(regression.contains("connect-like prompts submit to the model"));
@@ -759,7 +781,7 @@ mod tests {
         );
 
         let extension_card = source_text("pages/extensions/components/extension-card.tsx");
-        assert!(extension_card.contains("activationStatus: ext.activation_status"));
+        assert!(extension_card.contains("installationState: ext.installation_state"));
         assert!(extension_card.contains("onboardingState: ext.onboarding_state"));
 
         let configure_modal = source_text("pages/extensions/components/configure-modal.tsx");

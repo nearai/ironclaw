@@ -1,15 +1,10 @@
-#[cfg(feature = "slack-v2-host-beta")]
-use ironclaw_auth::SLACK_PROVIDER_ID;
 use ironclaw_extensions::{
     CapabilityDeclV2, CapabilityVisibility, ExtensionAssetPath, ExtensionManifestRecord,
     ExtensionPackage, ExtensionRuntime, ManifestSource,
 };
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_first_party_extensions::is_gsuite_extension_id;
-use ironclaw_host_api::{
-    CapabilityId, CapabilitySurfaceKind, ExtensionId, RuntimeCredentialAccountProviderId,
-    VirtualPath, sha256_digest_token,
-};
+use ironclaw_host_api::{CapabilityId, CapabilitySurfaceKind, ExtensionId, VendorId, VirtualPath};
 use ironclaw_product_adapters::{ProductCapabilityFlag, ProductSurfaceKind};
 use ironclaw_product_workflow::{
     ChannelConnectionRequirement, LifecycleChannelDirections,
@@ -28,79 +23,9 @@ use crate::llm_admin::nearai_mcp::{
     nearai_mcp_endpoint_from_base, nearai_mcp_endpoint_from_env,
 };
 
-const GITHUB_MANIFEST: &str =
-    include_str!("../../../ironclaw_first_party_extensions/assets/github/manifest.toml");
-const GITHUB_WASM_MODULE: &[u8] =
-    include_bytes!("../../../ironclaw_first_party_extensions/assets/github/wasm/github_tool.wasm");
-const GOOGLE_CALENDAR_MANIFEST: &str =
-    include_str!("../../../ironclaw_first_party_extensions/assets/google-calendar/manifest.toml");
-const GOOGLE_DOCS_MANIFEST: &str =
-    include_str!("../../../ironclaw_first_party_extensions/assets/google-docs/manifest.toml");
-const GOOGLE_DOCS_WASM_MODULE: &[u8] = include_bytes!(
-    "../../../ironclaw_first_party_extensions/assets/google-docs/wasm/google_docs_tool.wasm"
-);
-const GOOGLE_DRIVE_MANIFEST: &str =
-    include_str!("../../../ironclaw_first_party_extensions/assets/google-drive/manifest.toml");
-const GOOGLE_DRIVE_WASM_MODULE: &[u8] = include_bytes!(
-    "../../../ironclaw_first_party_extensions/assets/google-drive/wasm/google_drive_tool.wasm"
-);
-const GOOGLE_SHEETS_MANIFEST: &str =
-    include_str!("../../../ironclaw_first_party_extensions/assets/google-sheets/manifest.toml");
-const GOOGLE_SHEETS_WASM_MODULE: &[u8] = include_bytes!(
-    "../../../ironclaw_first_party_extensions/assets/google-sheets/wasm/google_sheets_tool.wasm"
-);
-#[cfg(feature = "slack-v2-host-beta")]
-const SLACK_MANIFEST: &str =
-    include_str!("../../../ironclaw_first_party_extensions/assets/slack/manifest.toml");
-#[cfg(feature = "slack-v2-host-beta")]
-const SLACK_WASM_MODULE: &[u8] = include_bytes!(
-    "../../../ironclaw_first_party_extensions/assets/slack/wasm/slack_user_tool.wasm"
-);
-const GOOGLE_SLIDES_MANIFEST: &str =
-    include_str!("../../../ironclaw_first_party_extensions/assets/google-slides/manifest.toml");
-const GOOGLE_SLIDES_WASM_MODULE: &[u8] = include_bytes!(
-    "../../../ironclaw_first_party_extensions/assets/google-slides/wasm/google_slides_tool.wasm"
-);
-const GMAIL_MANIFEST: &str =
-    include_str!("../../../ironclaw_first_party_extensions/assets/gmail/manifest.toml");
-const NOTION_MCP_MANIFEST: &str =
-    include_str!("../../../ironclaw_first_party_extensions/assets/notion-mcp/manifest.toml");
-const WEB_ACCESS_MANIFEST: &str =
-    include_str!("../../../ironclaw_first_party_extensions/assets/web-access/manifest.toml");
 const NEARAI_MCP_MANIFEST: &str =
     include_str!("../../../ironclaw_first_party_extensions/assets/nearai-mcp/manifest.toml");
 const NEARAI_EXTENSION_ID: &str = HostManagedCredentialExtension::NearAi.id();
-#[cfg(feature = "slack-v2-host-beta")]
-pub(crate) const SLACK_EXTENSION_ID: &str = "slack";
-#[cfg(feature = "slack-v2-host-beta")]
-const SLACK_PERSONAL_OAUTH_REQUIREMENT_NAME: &str = "slack_personal_oauth";
-// The slack_personal OAuth setup scopes are the union of the Slack tools'
-// per-capability scopes: the read-only tools request only read scopes, and
-// write tools request chat:write. Because the account is shared and send_message
-// is currently a default tool, a read-only user still grants chat:write;
-// reducing the grant (a write-opt-in / scope-upgrade re-consent flow) is tracked
-// in nearai/ironclaw#5669. `slack_read_only_tools_do_not_request_chat_write`
-// enforces that this list equals the union of the manifest capabilities' scopes
-// and that only write-effect capabilities declare chat:write.
-#[cfg(feature = "slack-v2-host-beta")]
-const SLACK_OAUTH_SETUP_SCOPES: &[&str] = &[
-    "search:read",
-    "channels:history",
-    "groups:history",
-    "im:history",
-    "mpim:history",
-    "channels:read",
-    "groups:read",
-    "im:read",
-    "mpim:read",
-    "users:read",
-    "chat:write",
-];
-
-#[cfg(feature = "slack-v2-host-beta")]
-pub(crate) fn slack_personal_oauth_setup_scopes() -> &'static [&'static str] {
-    SLACK_OAUTH_SETUP_SCOPES
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HostManagedCredentialExtension {
@@ -161,7 +86,23 @@ pub(crate) struct AvailableExtensionPackage {
     /// [`CapabilitySurfaceKind::Channel`]. Cached at construction like
     /// `surface_kinds`.
     pub(crate) channel_directions: Option<LifecycleChannelDirections>,
+    /// The channel surface's declared `[channel.presentation]` (markdown +
+    /// message cap), cached at construction like `channel_directions`. Fed into
+    /// prompt construction via the lifecycle summary (OUT-11).
+    pub(crate) channel_presentation: Option<ironclaw_host_api::ChannelPresentation>,
     pub(crate) assets: Vec<AvailableExtensionAsset>,
+    /// Bespoke onboarding copy carried down from a migrated inventory bundle
+    /// (`ironclaw_first_party_extensions::packages`). `None` for packages whose
+    /// onboarding copy still lives in composition's per-id `onboarding()` match;
+    /// as each package migrates, its copy moves here and its match arm is
+    /// deleted. See overview §3 (package self-containment).
+    pub(crate) onboarding_override: Option<LifecycleExtensionOnboarding>,
+    /// Bespoke OAuth-setup credential requirement carried down from a migrated
+    /// inventory bundle, replacing the manifest-derived requirement. `None` for
+    /// packages whose derived requirement is correct. Used by a package whose
+    /// connect flow authorizes a shared account with setup scopes distinct from
+    /// its per-tool runtime scopes.
+    pub(crate) oauth_setup_override: Option<LifecycleExtensionCredentialRequirement>,
 }
 
 impl AvailableExtensionPackage {
@@ -182,10 +123,11 @@ impl AvailableExtensionPackage {
             surface_kinds: self.surface_kinds.clone(),
             channel_directions: self.channel_directions,
             channel_connection: channel_connection_for_package(&self.package_ref, self),
+            channel_presentation: self.channel_presentation.clone(),
             visible_capability_ids,
             visible_read_only_capability_ids,
             credential_requirements: credential_requirements(self),
-            onboarding: onboarding(&self.package_ref),
+            onboarding: onboarding(self),
         }
     }
 }
@@ -202,14 +144,24 @@ fn channel_connection_for_package(
     if !directions.inbound {
         return None;
     }
+    let strategy = super::extension_lifecycle::channel_connect_strategy(&package.package);
     Some(super::extension_lifecycle::channel_connection_requirement(
         package_ref.id.as_str(),
         &package.package.manifest.name,
+        strategy,
     ))
 }
 
-fn onboarding(package_ref: &LifecyclePackageRef) -> Option<LifecycleExtensionOnboarding> {
-    if is_host_managed_credential_extension(package_ref) {
+fn onboarding(package: &AvailableExtensionPackage) -> Option<LifecycleExtensionOnboarding> {
+    // Packages migrated to the self-contained inventory carry their onboarding
+    // copy as data (see `package_from_bundle`); composition never names them.
+    if let Some(onboarding) = &package.onboarding_override {
+        return Some(onboarding.clone());
+    }
+
+    // The only remaining non-inventory onboarding is the host-managed NEAR AI
+    // MCP credential (config-assembled at runtime; bucket 1 of the DEL-8 debt).
+    if is_host_managed_credential_extension(&package.package_ref) {
         return Some(onboarding_message(
             "NEAR AI MCP uses the NEAR AI credentials configured for the assistant. If NEAR AI is not configured yet, add a NEAR AI API key in assistant inference settings before activating this extension.",
             Some(
@@ -220,48 +172,7 @@ fn onboarding(package_ref: &LifecyclePackageRef) -> Option<LifecycleExtensionOnb
         ));
     }
 
-    match package_ref.id.as_str() {
-        "github" => Some(onboarding_message(
-            "GitHub needs a personal access token before its repository and pull request tools can run.",
-            Some(
-                "Create a GitHub personal access token with the repository permissions you want IronClaw to use, then paste it here.",
-            ),
-            Some("https://github.com/settings/personal-access-tokens/new"),
-            "After saving the token, activate GitHub to publish its tools.",
-        )),
-        "gmail" => Some(onboarding_message(
-            "Gmail needs Google OAuth authorization before mail tools can run.",
-            Some("Authorize the Google account that IronClaw should use for Gmail."),
-            None,
-            "After authorization completes, activate Gmail to publish its tools.",
-        )),
-        #[cfg(feature = "slack-v2-host-beta")]
-        "slack" => Some(onboarding_message(
-            "Slack needs OAuth authorization before the Slack channel can recognize your DMs and before the user-scoped Slack tools can run.",
-            Some("Authorize the Slack account you will use to DM IronClaw."),
-            None,
-            "After authorization completes, DM the Slack bot directly or use the Slack tools from any chat.",
-        )),
-        "google-calendar" => Some(onboarding_message(
-            "Google Calendar needs Google OAuth authorization before calendar tools can run.",
-            Some("Authorize the Google account that IronClaw should use for Google Calendar."),
-            None,
-            "After authorization completes, activate Google Calendar to publish its tools.",
-        )),
-        "notion" => Some(onboarding_message(
-            "Notion needs OAuth authorization before MCP tools can run.",
-            Some("Authorize the Notion workspace that IronClaw should access."),
-            None,
-            "After authorization completes, activate Notion to publish its MCP tools.",
-        )),
-        "web-access" => Some(onboarding_message(
-            "Web Access does not need credentials. Activate it to make web search and page-content retrieval tools available.",
-            Some("No credentials are required for Web Access."),
-            None,
-            "Activate Web Access to publish its tools.",
-        )),
-        _ => None,
-    }
+    None
 }
 
 fn onboarding_message(
@@ -298,13 +209,14 @@ fn credential_requirements(
     if is_host_managed_credential_extension(&package.package_ref) {
         return Vec::new();
     }
-    // Model B: the user-installable Slack tools extension (`slack`) surfaces the
-    // slack_personal OAuth connect requirement; the bot channel is operator infra.
-    #[cfg(feature = "slack-v2-host-beta")]
+    // A migrated package may carry a bespoke OAuth-setup connect requirement
+    // (a personal-OAuth connect whose setup scopes differ from the per-tool
+    // runtime scopes) that replaces the manifest-derived one. Composition never
+    // names the package — the override rides down from its inventory bundle.
     if package.package_ref.kind == LifecyclePackageKind::Extension
-        && package.package_ref.id.as_str() == SLACK_EXTENSION_ID
+        && let Some(oauth_setup) = &package.oauth_setup_override
     {
-        return slack_personal_oauth_credential_requirements();
+        return vec![oauth_setup.clone()];
     }
 
     let mut groups: Vec<CredentialRequirementGroup> = Vec::new();
@@ -353,24 +265,9 @@ fn credential_requirements(
         .collect()
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
-fn slack_personal_oauth_credential_requirements() -> Vec<LifecycleExtensionCredentialRequirement> {
-    vec![LifecycleExtensionCredentialRequirement {
-        name: SLACK_PERSONAL_OAUTH_REQUIREMENT_NAME.to_string(),
-        provider: SLACK_PROVIDER_ID.to_string(),
-        required: true,
-        setup: LifecycleExtensionCredentialSetup::OAuth {
-            scopes: SLACK_OAUTH_SETUP_SCOPES
-                .iter()
-                .map(|scope| (*scope).to_string())
-                .collect(),
-        },
-    }]
-}
-
 struct CredentialRequirementGroup {
     handle: String,
-    provider: RuntimeCredentialAccountProviderId,
+    provider: VendorId,
     required: bool,
     setup: LifecycleExtensionCredentialSetup,
 }
@@ -404,22 +301,58 @@ impl AvailableExtensionCatalog {
     pub(crate) fn from_first_party_assets_with_nearai_mcp_config(
         nearai_mcp_config: Option<&NearAiMcpBootstrapConfig>,
     ) -> Result<Self, ProductWorkflowError> {
-        #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(unused_mut))]
-        let mut packages = vec![
-            github_package()?,
-            notion_mcp_package()?,
-            web_access_package()?,
-            nearai_mcp_package(nearai_mcp_config)?,
-            google_calendar_package()?,
-            google_docs_package()?,
-            google_drive_package()?,
-            google_sheets_package()?,
-            google_slides_package()?,
-            gmail_package()?,
-        ];
-        #[cfg(feature = "slack-v2-host-beta")]
-        packages.push(slack_package()?);
+        let mut packages = vec![nearai_mcp_package(nearai_mcp_config)?];
+        // Packages migrated to the self-contained inventory
+        // (`ironclaw_first_party_extensions::packages`) are consumed here as
+        // opaque bundles — composition never names them (overview §3).
+        for bundle in ironclaw_first_party_extensions::packages::bundled_packages() {
+            packages.push(package_from_bundle(bundle)?);
+        }
         Ok(Self::from_packages(packages))
+    }
+
+    /// Unified vendor auth recipes across every bundled first-party manifest —
+    /// the recipe catalog behind the auth engine (fallback for extensions not
+    /// yet active). Shared vendors unify per overview §3.2 (union scope
+    /// ceiling; incompatible recipes are a startup error).
+    pub(crate) fn bundled_vendor_recipes()
+    -> Result<Vec<ironclaw_auth::ResolvedVendorAuthRecipe>, ProductWorkflowError> {
+        let catalog = Self::from_first_party_assets_with_nearai_mcp_config(None)?;
+        let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("host port catalog unavailable for recipe resolution: {error}"),
+            }
+        })?;
+        let contracts =
+            ironclaw_host_runtime::default_host_api_contract_registry().map_err(|error| {
+                ProductWorkflowError::InvalidBindingRequest {
+                    reason: format!(
+                        "host API contracts unavailable for recipe resolution: {error}"
+                    ),
+                }
+            })?;
+        let mut resolved = Vec::new();
+        for package in &catalog.packages {
+            let record = ExtensionManifestRecord::from_toml(
+                &package.manifest_toml,
+                ManifestSource::HostBundled,
+                &host_ports,
+                None,
+                &contracts,
+            )
+            .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "bundled extension manifest failed recipe resolution ({}): {error}",
+                    package.package_ref.id
+                ),
+            })?;
+            resolved.push(record.resolved().clone());
+        }
+        ironclaw_extension_host::unified_vendor_recipes(resolved.iter()).map_err(|conflict| {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("bundled vendor recipes conflict: {conflict}"),
+            }
+        })
     }
 
     pub(crate) fn extend(&mut self, other: Self) {
@@ -515,28 +448,6 @@ fn push_search_term(terms: &mut Vec<String>, term: impl AsRef<str>) {
     }
 }
 
-fn github_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package("github", "GitHub", GITHUB_MANIFEST, github_assets())
-}
-
-fn notion_mcp_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package(
-        "notion",
-        "Notion MCP",
-        NOTION_MCP_MANIFEST,
-        notion_mcp_assets(),
-    )
-}
-
-fn web_access_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package(
-        "web-access",
-        "Web Access",
-        WEB_ACCESS_MANIFEST,
-        web_access_assets(),
-    )
-}
-
 fn nearai_mcp_package(
     config: Option<&NearAiMcpBootstrapConfig>,
 ) -> Result<AvailableExtensionPackage, ProductWorkflowError> {
@@ -547,106 +458,6 @@ fn nearai_mcp_package(
         &manifest,
         nearai_mcp_assets(&manifest),
     )
-}
-
-fn google_calendar_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package(
-        "google-calendar",
-        "Google Calendar",
-        GOOGLE_CALENDAR_MANIFEST,
-        google_calendar_assets(),
-    )
-}
-
-fn google_docs_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package(
-        "google-docs",
-        "Google Docs",
-        GOOGLE_DOCS_MANIFEST,
-        google_docs_assets(),
-    )
-}
-
-fn google_drive_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package(
-        "google-drive",
-        "Google Drive",
-        GOOGLE_DRIVE_MANIFEST,
-        google_drive_assets(),
-    )
-}
-
-fn google_sheets_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package(
-        "google-sheets",
-        "Google Sheets",
-        GOOGLE_SHEETS_MANIFEST,
-        google_sheets_assets(),
-    )
-}
-
-fn google_slides_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package(
-        "google-slides",
-        "Google Slides",
-        GOOGLE_SLIDES_MANIFEST,
-        google_slides_assets(),
-    )
-}
-
-fn gmail_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package("gmail", "Gmail", GMAIL_MANIFEST, gmail_assets())
-}
-
-#[cfg(feature = "slack-v2-host-beta")]
-fn slack_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package(SLACK_EXTENSION_ID, "Slack", SLACK_MANIFEST, slack_assets())
-}
-
-pub(crate) fn google_calendar_manifest_digest() -> String {
-    sha256_digest_token(GOOGLE_CALENDAR_MANIFEST.as_bytes())
-}
-
-pub(crate) fn google_docs_manifest_digest() -> String {
-    sha256_digest_token(GOOGLE_DOCS_MANIFEST.as_bytes())
-}
-
-pub(crate) fn google_drive_manifest_digest() -> String {
-    sha256_digest_token(GOOGLE_DRIVE_MANIFEST.as_bytes())
-}
-
-pub(crate) fn google_sheets_manifest_digest() -> String {
-    sha256_digest_token(GOOGLE_SHEETS_MANIFEST.as_bytes())
-}
-
-#[cfg(feature = "slack-v2-host-beta")]
-pub(crate) fn slack_manifest_digest() -> String {
-    sha256_digest_token(SLACK_MANIFEST.as_bytes())
-}
-
-pub(crate) fn google_slides_manifest_digest() -> String {
-    sha256_digest_token(GOOGLE_SLIDES_MANIFEST.as_bytes())
-}
-
-pub(crate) fn gmail_manifest_digest() -> String {
-    sha256_digest_token(GMAIL_MANIFEST.as_bytes())
-}
-
-pub(crate) fn notion_mcp_manifest_digest() -> String {
-    sha256_digest_token(NOTION_MCP_MANIFEST.as_bytes())
-}
-
-pub(crate) fn web_access_manifest_digest() -> String {
-    sha256_digest_token(WEB_ACCESS_MANIFEST.as_bytes())
-}
-
-/// The Slack **bot** channel manifest — the model-B product adapter that owns
-/// the Slack Events host-ingress route. `slack_serve` projects the route
-/// descriptor from here; the tools package manifest (`SLACK_MANIFEST`)
-/// carries only WASM tool capabilities, not channel ingress.
-#[cfg(feature = "slack-v2-host-beta")]
-pub(crate) fn slack_manifest_toml() -> &'static str {
-    SLACK_MANIFEST
 }
 
 pub(crate) fn nearai_mcp_manifest_toml_for_config(
@@ -669,57 +480,78 @@ fn nearai_mcp_manifest_toml_for_endpoint(
     let mut manifest = toml::from_str::<Value>(NEARAI_MCP_MANIFEST).map_err(|error| {
         map_binding_error(format!("bundled NEAR AI manifest TOML is invalid: {error}"))
     })?;
-    let runtime = manifest
-        .get_mut("runtime")
+    // The v3 manifest declares the proxied server once ([mcp].server); the
+    // connection credential's audience derives from the server host, so the
+    // endpoint override patches exactly one field.
+    let mcp = manifest
+        .get_mut("mcp")
         .and_then(Value::as_table_mut)
-        .ok_or_else(|| map_binding_error("bundled NEAR AI manifest lacks runtime table"))?;
-    runtime.insert("url".to_string(), Value::String(endpoint.url.clone()));
-
-    let capabilities = manifest
-        .get_mut("capability_provider")
-        .and_then(Value::as_table_mut)
-        .and_then(|section| section.get_mut("tools"))
-        .and_then(Value::as_table_mut)
-        .and_then(|tools| tools.get_mut("capabilities"))
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| {
-            map_binding_error(
-                "bundled NEAR AI manifest lacks capability_provider.tools capabilities array",
-            )
-        })?;
-    let search = capabilities
-        .first_mut()
-        .and_then(Value::as_table_mut)
-        .ok_or_else(|| map_binding_error("bundled NEAR AI manifest lacks search capability"))?;
-    let runtime_credentials = search
-        .get_mut("runtime_credentials")
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| map_binding_error("bundled NEAR AI manifest lacks runtime credentials"))?;
-    let credential = runtime_credentials
-        .first_mut()
-        .and_then(Value::as_table_mut)
-        .ok_or_else(|| map_binding_error("bundled NEAR AI manifest lacks runtime credential"))?;
-    let audience = credential
-        .get_mut("audience")
-        .and_then(Value::as_table_mut)
-        .ok_or_else(|| {
-            map_binding_error("bundled NEAR AI manifest lacks runtime credential audience")
-        })?;
-    audience.insert(
-        "host_pattern".to_string(),
-        Value::String(endpoint.host_pattern.clone()),
-    );
-    if let Some(port) = endpoint.port {
-        audience.insert("port".to_string(), Value::Integer(i64::from(port)));
-    } else {
-        audience.remove("port");
-    }
+        .ok_or_else(|| map_binding_error("bundled NEAR AI manifest lacks [mcp] declaration"))?;
+    mcp.insert("server".to_string(), Value::String(endpoint.url.clone()));
 
     toml::to_string(&manifest).map_err(|error| {
         map_binding_error(format!(
             "bundled NEAR AI manifest TOML render failed: {error}"
         ))
     })
+}
+
+/// Build an [`AvailableExtensionPackage`] from an opaque first-party
+/// [`ironclaw_first_party_extensions::packages::PackageBundle`]. The bundle
+/// carries only data (id, display copy, manifest, assets); all manifest
+/// resolution / surface projection stays here (it needs product_workflow +
+/// host_runtime types the inventory crate sits below).
+fn package_from_bundle(
+    bundle: ironclaw_first_party_extensions::packages::PackageBundle,
+) -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    use ironclaw_first_party_extensions::packages::PackageAssetContent;
+    let assets = bundle
+        .assets
+        .into_iter()
+        .map(|asset| AvailableExtensionAsset {
+            path: asset.path,
+            content: match asset.content {
+                PackageAssetContent::Bytes(bytes) => AvailableExtensionAssetContent::Bytes(bytes),
+                PackageAssetContent::Filesystem(path) => {
+                    AvailableExtensionAssetContent::Filesystem(path)
+                }
+            },
+        })
+        .collect();
+    // The bundle carries its onboarding copy as plain data; map it to the host
+    // lifecycle type here (the inventory crate sits below product_workflow and
+    // cannot name `LifecycleExtensionOnboarding`).
+    let onboarding_override = bundle.onboarding.map(|copy| {
+        onboarding_message(
+            &copy.instructions,
+            copy.credential_instructions.as_deref(),
+            copy.setup_url.as_deref(),
+            &copy.credential_next_step,
+        )
+    });
+    // A bespoke OAuth-setup credential requirement (a personal-OAuth connect)
+    // replaces the manifest-derived one; map the plain bundle data to the host
+    // lifecycle type here.
+    let oauth_setup_override =
+        bundle
+            .oauth_setup
+            .map(|setup| LifecycleExtensionCredentialRequirement {
+                name: setup.requirement_name,
+                provider: setup.provider,
+                required: true,
+                setup: LifecycleExtensionCredentialSetup::OAuth {
+                    scopes: setup.scopes,
+                },
+            });
+    let mut package = bundled_extension_package(
+        bundle.id,
+        bundle.display_name,
+        &bundle.manifest_toml,
+        assets,
+    )?;
+    package.onboarding_override = onboarding_override;
+    package.oauth_setup_override = oauth_setup_override;
+    Ok(package)
 }
 
 fn bundled_extension_package(
@@ -753,6 +585,7 @@ fn bundled_extension_package(
     })?;
     let surface_kinds = surface_kinds_from_manifest_record(&record, label)?;
     let channel_directions = channel_directions_from_manifest_record(&record, label)?;
+    let channel_presentation = channel_presentation_from_manifest_record(&record);
     let manifest = record.manifest().clone().try_into().map_err(|error| {
         ProductWorkflowError::InvalidBindingRequest {
             reason: format!("bundled {label} extension manifest is invalid: {error}"),
@@ -769,7 +602,10 @@ fn bundled_extension_package(
         package,
         surface_kinds,
         channel_directions,
+        channel_presentation,
         assets,
+        onboarding_override: None,
+        oauth_setup_override: None,
     })
 }
 
@@ -798,6 +634,14 @@ fn channel_directions_from_manifest_record(
     record: &ExtensionManifestRecord,
     label: &str,
 ) -> Result<Option<LifecycleChannelDirections>, ProductWorkflowError> {
+    // Manifest v3: the resolved channel descriptor declares its directions.
+    if let Some(channel) = &record.resolved().channel {
+        return Ok(Some(LifecycleChannelDirections {
+            inbound: channel.inbound,
+            outbound: channel.outbound,
+        }));
+    }
+    // Manifest v2: derive from the product-adapter section capability flags.
     let sections =
         ironclaw_product_adapter_registry::product_adapter_sections(record).map_err(|error| {
             ProductWorkflowError::InvalidBindingRequest {
@@ -820,259 +664,18 @@ fn channel_directions_from_manifest_record(
     Ok(directions)
 }
 
-fn github_assets() -> Vec<AvailableExtensionAsset> {
-    macro_rules! github_schema_asset {
-        ($path:literal) => {
-            bytes_asset(
-                concat!("schemas/github/", $path),
-                include_bytes!(concat!(
-                    "../../../ironclaw_first_party_extensions/assets/github/schemas/github/",
-                    $path
-                )),
-            )
-        };
-    }
-    macro_rules! github_prompt_asset {
-        ($path:literal) => {
-            bytes_asset(
-                concat!("prompts/github/", $path),
-                include_bytes!(concat!(
-                    "../../../ironclaw_first_party_extensions/assets/github/prompts/github/",
-                    $path
-                )),
-            )
-        };
-    }
-
-    vec![
-        bytes_asset("manifest.toml", GITHUB_MANIFEST.as_bytes()),
-        github_schema_asset!("add_issue_assignees.input.v1.json"),
-        github_schema_asset!("add_issue_labels.input.v1.json"),
-        github_schema_asset!("comment_issue.input.v1.json"),
-        github_schema_asset!("comment_issue.output.v1.json"),
-        github_schema_asset!("create_branch.input.v1.json"),
-        github_schema_asset!("create_issue.input.v1.json"),
-        github_schema_asset!("create_issue_comment.input.v1.json"),
-        github_schema_asset!("create_or_update_file.input.v1.json"),
-        github_schema_asset!("create_pr_review.input.v1.json"),
-        github_schema_asset!("create_pull_request.input.v1.json"),
-        github_schema_asset!("create_release.input.v1.json"),
-        github_schema_asset!("create_repo.input.v1.json"),
-        github_schema_asset!("delete_file.input.v1.json"),
-        github_schema_asset!("fork_repo.input.v1.json"),
-        github_schema_asset!("get_combined_status.input.v1.json"),
-        github_schema_asset!("get_file_content.input.v1.json"),
-        github_schema_asset!("get_issue.input.v1.json"),
-        github_schema_asset!("get_issue.output.v1.json"),
-        github_schema_asset!("get_pull_request.input.v1.json"),
-        github_schema_asset!("get_pull_request_files.input.v1.json"),
-        github_schema_asset!("get_pull_request_reviews.input.v1.json"),
-        github_schema_asset!("get_repo.input.v1.json"),
-        github_schema_asset!("get_authenticated_user.input.v1.json"),
-        github_schema_asset!("get_workflow_run_artifacts.input.v1.json"),
-        github_schema_asset!("get_workflow_run_jobs.input.v1.json"),
-        github_schema_asset!("get_workflow_runs.input.v1.json"),
-        github_schema_asset!("handle_webhook.input.v1.json"),
-        github_schema_asset!("list_branches.input.v1.json"),
-        github_schema_asset!("list_issue_comments.input.v1.json"),
-        github_schema_asset!("list_issues.input.v1.json"),
-        github_schema_asset!("list_pull_request_comments.input.v1.json"),
-        github_schema_asset!("list_pull_request_review_threads.input.v1.json"),
-        github_schema_asset!("list_pull_requests.input.v1.json"),
-        github_schema_asset!("list_releases.input.v1.json"),
-        github_schema_asset!("list_repos.input.v1.json"),
-        github_schema_asset!("merge_pull_request.input.v1.json"),
-        github_schema_asset!("raw_output.v1.json"),
-        github_schema_asset!("remove_issue_assignees.input.v1.json"),
-        github_schema_asset!("remove_issue_label.input.v1.json"),
-        github_schema_asset!("reply_pull_request_comment.input.v1.json"),
-        github_schema_asset!("rerun_failed_workflow_run_jobs.input.v1.json"),
-        github_schema_asset!("rerun_workflow_job.input.v1.json"),
-        github_schema_asset!("resolve_review_thread.input.v1.json"),
-        github_schema_asset!("search_code.input.v1.json"),
-        github_schema_asset!("search_issues.input.v1.json"),
-        github_schema_asset!("search_issues.output.v1.json"),
-        github_schema_asset!("search_issues_pull_requests.input.v1.json"),
-        github_schema_asset!("search_repositories.input.v1.json"),
-        github_schema_asset!("trigger_workflow.input.v1.json"),
-        github_schema_asset!("unresolve_review_thread.input.v1.json"),
-        github_schema_asset!("update_issue.input.v1.json"),
-        github_schema_asset!("update_pull_request.input.v1.json"),
-        github_prompt_asset!("add_issue_assignees.md"),
-        github_prompt_asset!("add_issue_labels.md"),
-        github_prompt_asset!("comment_issue.md"),
-        github_prompt_asset!("create_branch.md"),
-        github_prompt_asset!("create_issue.md"),
-        github_prompt_asset!("create_issue_comment.md"),
-        github_prompt_asset!("create_or_update_file.md"),
-        github_prompt_asset!("create_pr_review.md"),
-        github_prompt_asset!("create_pull_request.md"),
-        github_prompt_asset!("create_release.md"),
-        github_prompt_asset!("create_repo.md"),
-        github_prompt_asset!("delete_file.md"),
-        github_prompt_asset!("fork_repo.md"),
-        github_prompt_asset!("get_combined_status.md"),
-        github_prompt_asset!("get_file_content.md"),
-        github_prompt_asset!("get_issue.md"),
-        github_prompt_asset!("get_pull_request.md"),
-        github_prompt_asset!("get_pull_request_files.md"),
-        github_prompt_asset!("get_pull_request_reviews.md"),
-        github_prompt_asset!("get_repo.md"),
-        github_prompt_asset!("get_authenticated_user.md"),
-        github_prompt_asset!("get_workflow_run_artifacts.md"),
-        github_prompt_asset!("get_workflow_run_jobs.md"),
-        github_prompt_asset!("get_workflow_runs.md"),
-        github_prompt_asset!("handle_webhook.md"),
-        github_prompt_asset!("list_branches.md"),
-        github_prompt_asset!("list_issue_comments.md"),
-        github_prompt_asset!("list_issues.md"),
-        github_prompt_asset!("list_pull_request_comments.md"),
-        github_prompt_asset!("list_pull_request_review_threads.md"),
-        github_prompt_asset!("list_pull_requests.md"),
-        github_prompt_asset!("list_releases.md"),
-        github_prompt_asset!("list_repos.md"),
-        github_prompt_asset!("merge_pull_request.md"),
-        github_prompt_asset!("remove_issue_assignees.md"),
-        github_prompt_asset!("remove_issue_label.md"),
-        github_prompt_asset!("reply_pull_request_comment.md"),
-        github_prompt_asset!("rerun_failed_workflow_run_jobs.md"),
-        github_prompt_asset!("rerun_workflow_job.md"),
-        github_prompt_asset!("resolve_review_thread.md"),
-        github_prompt_asset!("search_code.md"),
-        github_prompt_asset!("search_issues.md"),
-        github_prompt_asset!("search_issues_pull_requests.md"),
-        github_prompt_asset!("search_repositories.md"),
-        github_prompt_asset!("trigger_workflow.md"),
-        github_prompt_asset!("unresolve_review_thread.md"),
-        github_prompt_asset!("update_issue.md"),
-        github_prompt_asset!("update_pull_request.md"),
-        bytes_asset("wasm/github_tool.wasm", GITHUB_WASM_MODULE),
-    ]
-}
-
-fn notion_mcp_assets() -> Vec<AvailableExtensionAsset> {
-    macro_rules! notion_schema_asset {
-        ($path:literal) => {
-            bytes_asset(
-                concat!("schemas/notion/", $path),
-                include_bytes!(concat!(
-                    "../../../ironclaw_first_party_extensions/assets/notion-mcp/schemas/notion/",
-                    $path
-                )),
-            )
-        };
-    }
-    macro_rules! notion_prompt_asset {
-        ($path:literal) => {
-            bytes_asset(
-                concat!("prompts/notion/", $path),
-                include_bytes!(concat!(
-                    "../../../ironclaw_first_party_extensions/assets/notion-mcp/prompts/notion/",
-                    $path
-                )),
-            )
-        };
-    }
-
-    vec![
-        bytes_asset("manifest.toml", NOTION_MCP_MANIFEST.as_bytes()),
-        notion_schema_asset!("notion-search.input.v1.json"),
-        notion_schema_asset!("notion-search.output.v1.json"),
-        notion_schema_asset!("notion-fetch.input.v1.json"),
-        notion_schema_asset!("notion-fetch.output.v1.json"),
-        notion_schema_asset!("notion-create-pages.input.v1.json"),
-        notion_schema_asset!("notion-create-pages.output.v1.json"),
-        notion_schema_asset!("notion-update-page.input.v1.json"),
-        notion_schema_asset!("notion-update-page.output.v1.json"),
-        notion_schema_asset!("notion-move-pages.input.v1.json"),
-        notion_schema_asset!("notion-move-pages.output.v1.json"),
-        notion_schema_asset!("notion-duplicate-page.input.v1.json"),
-        notion_schema_asset!("notion-duplicate-page.output.v1.json"),
-        notion_schema_asset!("notion-create-database.input.v1.json"),
-        notion_schema_asset!("notion-create-database.output.v1.json"),
-        notion_schema_asset!("notion-update-data-source.input.v1.json"),
-        notion_schema_asset!("notion-update-data-source.output.v1.json"),
-        notion_schema_asset!("notion-create-view.input.v1.json"),
-        notion_schema_asset!("notion-create-view.output.v1.json"),
-        notion_schema_asset!("notion-update-view.input.v1.json"),
-        notion_schema_asset!("notion-update-view.output.v1.json"),
-        notion_schema_asset!("notion-query-data-sources.input.v1.json"),
-        notion_schema_asset!("notion-query-data-sources.output.v1.json"),
-        notion_schema_asset!("notion-query-database-view.input.v1.json"),
-        notion_schema_asset!("notion-query-database-view.output.v1.json"),
-        notion_schema_asset!("notion-create-comment.input.v1.json"),
-        notion_schema_asset!("notion-create-comment.output.v1.json"),
-        notion_schema_asset!("notion-get-comments.input.v1.json"),
-        notion_schema_asset!("notion-get-comments.output.v1.json"),
-        notion_schema_asset!("notion-get-teams.input.v1.json"),
-        notion_schema_asset!("notion-get-teams.output.v1.json"),
-        notion_schema_asset!("notion-get-users.input.v1.json"),
-        notion_schema_asset!("notion-get-users.output.v1.json"),
-        notion_schema_asset!("notion-get-user.input.v1.json"),
-        notion_schema_asset!("notion-get-user.output.v1.json"),
-        notion_schema_asset!("notion-get-self.input.v1.json"),
-        notion_schema_asset!("notion-get-self.output.v1.json"),
-        notion_prompt_asset!("notion-search.md"),
-        notion_prompt_asset!("notion-fetch.md"),
-        notion_prompt_asset!("notion-create-pages.md"),
-        notion_prompt_asset!("notion-update-page.md"),
-        notion_prompt_asset!("notion-move-pages.md"),
-        notion_prompt_asset!("notion-duplicate-page.md"),
-        notion_prompt_asset!("notion-create-database.md"),
-        notion_prompt_asset!("notion-update-data-source.md"),
-        notion_prompt_asset!("notion-create-view.md"),
-        notion_prompt_asset!("notion-update-view.md"),
-        notion_prompt_asset!("notion-query-data-sources.md"),
-        notion_prompt_asset!("notion-query-database-view.md"),
-        notion_prompt_asset!("notion-create-comment.md"),
-        notion_prompt_asset!("notion-get-comments.md"),
-        notion_prompt_asset!("notion-get-teams.md"),
-        notion_prompt_asset!("notion-get-users.md"),
-        notion_prompt_asset!("notion-get-user.md"),
-        notion_prompt_asset!("notion-get-self.md"),
-    ]
-}
-
-fn web_access_assets() -> Vec<AvailableExtensionAsset> {
-    vec![
-        bytes_asset("manifest.toml", WEB_ACCESS_MANIFEST.as_bytes()),
-        bytes_asset(
-            "schemas/web-access/search.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/web-access/schemas/web-access/search.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/web-access/search.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/web-access/schemas/web-access/search.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/web-access/get_content.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/web-access/schemas/web-access/get_content.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/web-access/get_content.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/web-access/schemas/web-access/get_content.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "prompts/web-access/search.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/web-access/prompts/web-access/search.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/web-access/get_content.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/web-access/prompts/web-access/get_content.md"
-            ),
-        ),
-    ]
+/// The channel surface's declared `[channel.presentation]` (markdown support +
+/// message length cap). Only manifest v3 declares presentation via the resolved
+/// channel descriptor; v2 channels have none. Cached at construction like
+/// `channel_directions` and fed into prompt construction (OUT-11).
+fn channel_presentation_from_manifest_record(
+    record: &ExtensionManifestRecord,
+) -> Option<ironclaw_host_api::ChannelPresentation> {
+    record
+        .resolved()
+        .channel
+        .as_ref()
+        .map(|channel| channel.presentation.clone())
 }
 
 fn nearai_mcp_assets(manifest: &str) -> Vec<AvailableExtensionAsset> {
@@ -1094,473 +697,6 @@ fn nearai_mcp_assets(manifest: &str) -> Vec<AvailableExtensionAsset> {
             "prompts/nearai/web_search.md",
             include_bytes!(
                 "../../../ironclaw_first_party_extensions/assets/nearai-mcp/prompts/nearai/web_search.md"
-            ),
-        ),
-    ]
-}
-
-fn google_calendar_assets() -> Vec<AvailableExtensionAsset> {
-    vec![
-        bytes_asset("manifest.toml", GOOGLE_CALENDAR_MANIFEST.as_bytes()),
-        bytes_asset(
-            "schemas/google-calendar/list_calendars.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/list_calendars.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/list_calendars.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/list_calendars.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/list_events.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/list_events.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/list_events.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/list_events.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/get_event.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/get_event.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/get_event.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/get_event.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/find_free_slots.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/find_free_slots.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/find_free_slots.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/find_free_slots.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/create_event.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/create_event.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/create_event.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/create_event.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/update_event.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/update_event.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/update_event.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/update_event.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/delete_event.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/delete_event.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/delete_event.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/delete_event.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/add_attendees.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/add_attendees.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/add_attendees.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/add_attendees.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/set_reminder.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/set_reminder.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/google-calendar/set_reminder.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/set_reminder.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "prompts/google-calendar/list_calendars.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/list_calendars.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/google-calendar/list_events.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/list_events.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/google-calendar/get_event.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/get_event.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/google-calendar/find_free_slots.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/find_free_slots.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/google-calendar/create_event.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/create_event.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/google-calendar/update_event.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/update_event.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/google-calendar/delete_event.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/delete_event.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/google-calendar/add_attendees.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/add_attendees.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/google-calendar/set_reminder.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/set_reminder.md"
-            ),
-        ),
-    ]
-}
-
-macro_rules! google_wasm_assets {
-    ($id:literal, $manifest:expr, $wasm_file:literal, $wasm_module:expr, [$($operation:literal),+ $(,)?]) => {{
-        vec![
-            bytes_asset("manifest.toml", $manifest.as_bytes()),
-            bytes_asset(
-                concat!("schemas/", $id, "/raw_output.v1.json"),
-                include_bytes!(concat!(
-                    "../../../ironclaw_first_party_extensions/assets/",
-                    $id,
-                    "/schemas/",
-                    $id,
-                    "/raw_output.v1.json"
-                )),
-            ),
-            $(
-                bytes_asset(
-                    concat!("schemas/", $id, "/", $operation, ".input.v1.json"),
-                    include_bytes!(concat!(
-                        "../../../ironclaw_first_party_extensions/assets/",
-                        $id,
-                        "/schemas/",
-                        $id,
-                        "/",
-                        $operation,
-                        ".input.v1.json"
-                    )),
-                ),
-                bytes_asset(
-                    concat!("prompts/", $id, "/", $operation, ".md"),
-                    include_bytes!(concat!(
-                        "../../../ironclaw_first_party_extensions/assets/",
-                        $id,
-                        "/prompts/",
-                        $id,
-                        "/",
-                        $operation,
-                        ".md"
-                    )),
-                ),
-            )+
-            bytes_asset(concat!("wasm/", $wasm_file), $wasm_module),
-        ]
-    }};
-}
-
-fn google_docs_assets() -> Vec<AvailableExtensionAsset> {
-    google_wasm_assets!(
-        "google-docs",
-        GOOGLE_DOCS_MANIFEST,
-        "google_docs_tool.wasm",
-        GOOGLE_DOCS_WASM_MODULE,
-        [
-            "create_document",
-            "get_document",
-            "read_content",
-            "insert_text",
-            "delete_content",
-            "replace_text",
-            "format_text",
-            "format_paragraph",
-            "insert_table",
-            "create_list",
-            "batch_update"
-        ]
-    )
-}
-
-fn google_drive_assets() -> Vec<AvailableExtensionAsset> {
-    google_wasm_assets!(
-        "google-drive",
-        GOOGLE_DRIVE_MANIFEST,
-        "google_drive_tool.wasm",
-        GOOGLE_DRIVE_WASM_MODULE,
-        [
-            "list_files",
-            "get_file",
-            "download_file",
-            "upload_file",
-            "update_file",
-            "create_folder",
-            "delete_file",
-            "trash_file",
-            "share_file",
-            "list_permissions",
-            "remove_permission",
-            "list_shared_drives"
-        ]
-    )
-}
-
-fn google_sheets_assets() -> Vec<AvailableExtensionAsset> {
-    google_wasm_assets!(
-        "google-sheets",
-        GOOGLE_SHEETS_MANIFEST,
-        "google_sheets_tool.wasm",
-        GOOGLE_SHEETS_WASM_MODULE,
-        [
-            "create_spreadsheet",
-            "get_spreadsheet",
-            "read_values",
-            "batch_read_values",
-            "write_values",
-            "append_values",
-            "clear_values",
-            "add_sheet",
-            "delete_sheet",
-            "rename_sheet",
-            "format_cells"
-        ]
-    )
-}
-
-#[cfg(feature = "slack-v2-host-beta")]
-fn slack_assets() -> Vec<AvailableExtensionAsset> {
-    // The schema/prompt asset dirs now match the extension id (`slack`), but the
-    // WASM binary keeps its legacy `slack_user_tool.wasm` filename (and the tool
-    // uses the `slack_user_token` credential handle). `google_wasm_assets!` ties
-    // the wasm filename to the extension id, so it can't be used here — spell the
-    // assets out.
-    macro_rules! slack_schema_asset {
-        ($path:literal) => {
-            bytes_asset(
-                concat!("schemas/slack/", $path),
-                include_bytes!(concat!(
-                    "../../../ironclaw_first_party_extensions/assets/slack/schemas/slack/",
-                    $path
-                )),
-            )
-        };
-    }
-    macro_rules! slack_prompt_asset {
-        ($operation:literal) => {
-            bytes_asset(
-                concat!("prompts/slack/", $operation, ".md"),
-                include_bytes!(concat!(
-                    "../../../ironclaw_first_party_extensions/assets/slack/prompts/slack/",
-                    $operation,
-                    ".md"
-                )),
-            )
-        };
-    }
-
-    vec![
-        bytes_asset("manifest.toml", SLACK_MANIFEST.as_bytes()),
-        slack_schema_asset!("raw_output.v1.json"),
-        slack_schema_asset!("search_messages.input.v1.json"),
-        slack_prompt_asset!("search_messages"),
-        slack_schema_asset!("list_conversations.input.v1.json"),
-        slack_prompt_asset!("list_conversations"),
-        slack_schema_asset!("get_conversation_history.input.v1.json"),
-        slack_prompt_asset!("get_conversation_history"),
-        slack_schema_asset!("get_user_info.input.v1.json"),
-        slack_prompt_asset!("get_user_info"),
-        slack_schema_asset!("send_message.input.v1.json"),
-        slack_prompt_asset!("send_message"),
-        bytes_asset("wasm/slack_user_tool.wasm", SLACK_WASM_MODULE),
-    ]
-}
-
-fn google_slides_assets() -> Vec<AvailableExtensionAsset> {
-    google_wasm_assets!(
-        "google-slides",
-        GOOGLE_SLIDES_MANIFEST,
-        "google_slides_tool.wasm",
-        GOOGLE_SLIDES_WASM_MODULE,
-        [
-            "create_presentation",
-            "get_presentation",
-            "get_thumbnail",
-            "create_slide",
-            "delete_object",
-            "insert_text",
-            "delete_text",
-            "replace_all_text",
-            "create_shape",
-            "insert_image",
-            "format_text",
-            "format_paragraph",
-            "replace_shapes_with_image",
-            "batch_update"
-        ]
-    )
-}
-
-fn gmail_assets() -> Vec<AvailableExtensionAsset> {
-    vec![
-        bytes_asset("manifest.toml", GMAIL_MANIFEST.as_bytes()),
-        bytes_asset(
-            "schemas/gmail/list_messages.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/list_messages.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/gmail/list_messages.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/list_messages.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/gmail/get_message.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/get_message.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/gmail/get_message.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/get_message.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/gmail/send_message.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/send_message.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/gmail/send_message.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/send_message.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/gmail/create_draft.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/create_draft.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/gmail/create_draft.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/create_draft.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/gmail/reply_to_message.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/reply_to_message.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/gmail/reply_to_message.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/reply_to_message.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/gmail/trash_message.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/trash_message.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/gmail/trash_message.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/trash_message.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "prompts/gmail/list_messages.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/prompts/gmail/list_messages.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/gmail/get_message.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/prompts/gmail/get_message.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/gmail/send_message.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/prompts/gmail/send_message.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/gmail/create_draft.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/prompts/gmail/create_draft.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/gmail/reply_to_message.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/prompts/gmail/reply_to_message.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/gmail/trash_message.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/prompts/gmail/trash_message.md"
             ),
         ),
     ]
@@ -1707,6 +843,7 @@ where
         let surface_kinds = surface_kinds_from_manifest_record(&record, entry.name.as_str())?;
         let channel_directions =
             channel_directions_from_manifest_record(&record, entry.name.as_str())?;
+        let channel_presentation = channel_presentation_from_manifest_record(&record);
         let manifest = record
             .manifest()
             .clone()
@@ -1736,17 +873,26 @@ where
             package,
             surface_kinds,
             channel_directions,
+            channel_presentation,
             assets,
+            // Filesystem-loaded extensions are not bundled inventory packages;
+            // their onboarding (if any) still resolves via `onboarding()`.
+            onboarding_override: None,
+            oauth_setup_override: None,
         });
     }
     Ok(packages)
 }
 
 fn reserved_host_bundled_extension_id(extension_id: &ExtensionId) -> bool {
-    matches!(
-        extension_id.as_str(),
-        "github" | "notion" | "web-access" | "slack" | NEARAI_EXTENSION_ID
-    ) || is_gsuite_extension_id(extension_id)
+    // Packages migrated to the self-contained inventory are reserved by their
+    // ids (cheap — no embed materialization); the rest stay listed here until
+    // they migrate. A filesystem extension must never shadow a bundled one.
+    ironclaw_first_party_extensions::packages::bundled_package_ids()
+        .iter()
+        .any(|id| *id == extension_id.as_str())
+        || extension_id.as_str() == NEARAI_EXTENSION_ID
+        || is_gsuite_extension_id(extension_id)
 }
 
 fn extension_asset_path(
@@ -1878,22 +1024,33 @@ mod tests {
                 .map(|asset| asset.path.as_str())
                 .collect::<HashSet<_>>();
 
+            // Synthetic inline-dynamic refs ("schemas/{id}/dynamic/…", e.g. the
+            // hosted-MCP connection template's input schema) ship NO package
+            // asset on purpose: discovered/dynamic schemas are inlined at
+            // discovery time, not packaged files.
+            let is_dynamic_ref = |schema_ref: &str| schema_ref.contains("/dynamic/");
+
             for capability in &package.package.manifest.capabilities {
                 assert!(
-                    assets.contains(capability.input_schema_ref.as_str()),
+                    is_dynamic_ref(capability.input_schema_ref.as_str())
+                        || assets.contains(capability.input_schema_ref.as_str()),
                     "{extension_id} capability {} missing input schema asset {}",
                     capability.id,
                     capability.input_schema_ref.as_str()
                 );
-                assert!(
-                    assets.contains(capability.output_schema_ref.as_str()),
-                    "{extension_id} capability {} missing output schema asset {}",
-                    capability.id,
-                    capability.output_schema_ref.as_str()
-                );
+                if let Some(output_schema_ref) = &capability.output_schema_ref {
+                    assert!(
+                        is_dynamic_ref(output_schema_ref.as_str())
+                            || assets.contains(output_schema_ref.as_str()),
+                        "{extension_id} capability {} missing output schema asset {}",
+                        capability.id,
+                        output_schema_ref.as_str()
+                    );
+                }
                 if let Some(prompt_doc_ref) = &capability.prompt_doc_ref {
                     assert!(
-                        assets.contains(prompt_doc_ref.as_str()),
+                        is_dynamic_ref(prompt_doc_ref.as_str())
+                            || assets.contains(prompt_doc_ref.as_str()),
                         "{extension_id} capability {} missing prompt doc asset {}",
                         capability.id,
                         prompt_doc_ref.as_str()
@@ -1957,13 +1114,25 @@ mod tests {
         let github = catalog.resolve(&package_ref).unwrap();
         let mut allowed_read_only = BTreeSet::new();
         let mut ask_required = BTreeSet::new();
-        let sensitive_token_backed_reads = BTreeSet::from(["github.search_code"]);
+        // Manifest v3 effects uniformly carry the normalizer-added
+        // dispatch_capability marker (every capability is dispatchable; it is
+        // not a write and not an approval signal), so it can no longer mark a
+        // capability as effectful. The non-write capabilities that still
+        // require approval are pinned by id instead: search_code (broad
+        // token-backed read) and handle_webhook (synthesizes system event
+        // intents).
+        let sensitive_non_write_asks =
+            BTreeSet::from(["github.search_code", "github.handle_webhook"]);
 
         for capability in &github.package.manifest.capabilities {
-            let requires_explicit_approval = capability.effects.iter().any(|effect| {
-                effect.is_write() || matches!(effect, EffectKind::DispatchCapability)
-            }) || sensitive_token_backed_reads
-                .contains(capability.id.as_str());
+            assert!(
+                capability.effects.contains(&EffectKind::DispatchCapability),
+                "{} should carry the normalizer-added dispatch_capability effect",
+                capability.id
+            );
+            let requires_explicit_approval =
+                capability.effects.iter().any(|effect| effect.is_write())
+                    || sensitive_non_write_asks.contains(capability.id.as_str());
             if requires_explicit_approval {
                 assert_eq!(
                     capability.default_permission,
@@ -2037,7 +1206,6 @@ mod tests {
                 "google-calendar",
                 "Google Calendar needs Google OAuth authorization",
             ),
-            #[cfg(feature = "slack-v2-host-beta")]
             ("slack", "Slack needs OAuth authorization"),
             ("notion", "Notion needs OAuth authorization"),
             #[cfg(feature = "root-llm-provider")]
@@ -2204,16 +1372,25 @@ mod tests {
              when the root NEAR AI provider owns the credential"
         );
 
-        let search = package
+        // Manifest v3: hosted-MCP nearai declares one [mcp] block instead of
+        // placeholder static tools. Before live tools/list discovery the only
+        // capability is the host-internal connection template — never
+        // model-visible — so the browser summary carries zero visible tools.
+        assert!(
+            summary.visible_capability_ids.is_empty(),
+            "hosted-MCP nearai has no model-visible tools before discovery"
+        );
+        let template = package
             .package
             .manifest
             .capabilities
             .iter()
-            .find(|capability| capability.id.as_str() == "nearai.web_search")
-            .expect("nearai web search capability");
-        assert_eq!(search.runtime_credentials.len(), 1);
+            .find(|capability| capability.id.as_str() == "nearai.mcp_server")
+            .expect("nearai hosted-MCP connection template");
+        assert_eq!(template.visibility, CapabilityVisibility::HostInternal);
+        assert_eq!(template.runtime_credentials.len(), 1);
         assert_eq!(
-            search.runtime_credentials[0].handle,
+            template.runtime_credentials[0].handle,
             ironclaw_host_api::SecretHandle::new("llm_nearai_api_key").unwrap()
         );
     }
@@ -2234,7 +1411,6 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn bundled_slack_search_exposes_one_public_slack_extension() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
@@ -2250,7 +1426,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn bundled_slack_tools_extension_projects_personal_oauth_setup() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
@@ -2310,8 +1485,13 @@ mod tests {
                 .filter(|requirement| requirement.provider == "google")
                 .collect::<Vec<_>>();
 
+            // Manifest v3: per-tool least privilege lives in provider_scopes;
+            // the OAuth account setup scopes come from the [auth.google]
+            // recipe CEILING, uniform across every credential of the vendor
+            // and equal to the package's provider-scope union.
             let mut credential_count = 0;
-            let mut expected_setup_scopes = BTreeSet::new();
+            let mut provider_scope_union = BTreeSet::new();
+            let mut setup_scope_sets = Vec::new();
             for capability in &package.package.manifest.capabilities {
                 for credential in &capability.runtime_credentials {
                     let RuntimeCredentialRequirementSource::ProductAuthAccount { provider, setup } =
@@ -2330,15 +1510,33 @@ mod tests {
                             capability.id
                         );
                     };
-                    assert_eq!(
-                        scopes, &credential.provider_scopes,
-                        "{extension_id} capability {} OAuth setup scopes should match requested provider scopes",
+                    let setup_scopes = scopes.iter().cloned().collect::<BTreeSet<_>>();
+                    assert!(
+                        credential
+                            .provider_scopes
+                            .iter()
+                            .all(|scope| setup_scopes.contains(scope)),
+                        "{extension_id} capability {} provider scopes must fit inside the recipe ceiling",
                         capability.id
                     );
-                    expected_setup_scopes.extend(scopes.iter().cloned());
+                    provider_scope_union.extend(credential.provider_scopes.iter().cloned());
+                    setup_scope_sets.push(setup_scopes);
                     credential_count += 1;
                 }
             }
+
+            assert!(
+                credential_count > 0,
+                "{extension_id} should declare runtime credentials"
+            );
+            assert!(
+                setup_scope_sets.windows(2).all(|pair| pair[0] == pair[1]),
+                "{extension_id} OAuth setup scopes (the vendor ceiling) must be uniform across credentials"
+            );
+            assert_eq!(
+                setup_scope_sets[0], provider_scope_union,
+                "{extension_id} recipe ceiling should equal the union of the tools' provider scopes"
+            );
 
             assert_eq!(
                 google_requirements.len(),
@@ -2351,17 +1549,12 @@ mod tests {
             };
             assert_eq!(
                 scopes.iter().cloned().collect::<BTreeSet<_>>(),
-                expected_setup_scopes,
+                provider_scope_union,
                 "{extension_id} lifecycle setup should include every capability OAuth scope"
-            );
-            assert!(
-                credential_count > 0,
-                "{extension_id} should declare runtime credentials"
             );
         }
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn slack_read_only_tools_do_not_request_chat_write() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
@@ -2369,7 +1562,28 @@ mod tests {
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").unwrap();
         let package = catalog.resolve(&package_ref).unwrap();
 
-        let mut union_scopes = BTreeSet::new();
+        // The setup-scope ceiling now lives on slack's inventory bundle
+        // (`oauth_setup.scopes`); this pin still enforces that it equals the
+        // union of the manifest capabilities' provider scopes and that only
+        // write-effect tools request chat:write.
+        let slack_bundle = ironclaw_first_party_extensions::packages::bundled_packages()
+            .into_iter()
+            .find(|bundle| bundle.id == "slack")
+            .expect("slack is in the bundled inventory");
+        let ceiling = slack_bundle
+            .oauth_setup
+            .expect("slack declares an OAuth setup requirement")
+            .scopes
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+
+        // Manifest v3: per-tool least privilege lives in provider_scopes
+        // (read-only tools exclude chat:write; send_message includes it). The
+        // OAuth account setup scopes are the [auth.slack] recipe CEILING —
+        // identical for every slack credential and chat:write-bearing — which
+        // is the same surface-level union users saw at connect time under v2.
+        let mut provider_scope_union = BTreeSet::new();
         for capability in &package.package.manifest.capabilities {
             let is_write_tool = capability.effects.iter().any(|effect| effect.is_write());
             for credential in &capability.runtime_credentials {
@@ -2388,24 +1602,28 @@ mod tests {
                         capability.id
                     );
                 };
-                assert_eq!(scopes, &credential.provider_scopes);
-                let requests_write = scopes.iter().any(|scope| scope.as_str() == "chat:write");
                 assert_eq!(
-                    requests_write, is_write_tool,
-                    "only write-effect capabilities may request chat:write; capability {} requests_write={requests_write}",
+                    scopes.iter().cloned().collect::<BTreeSet<_>>(),
+                    ceiling,
+                    "slack capability {} setup scopes must be the uniform recipe ceiling",
                     capability.id
                 );
-                union_scopes.extend(scopes.iter().cloned());
+                let requests_write = credential
+                    .provider_scopes
+                    .iter()
+                    .any(|scope| scope.as_str() == "chat:write");
+                assert_eq!(
+                    requests_write, is_write_tool,
+                    "only write-effect capabilities may request chat:write in provider_scopes; capability {} requests_write={requests_write}",
+                    capability.id
+                );
+                provider_scope_union.extend(credential.provider_scopes.iter().cloned());
             }
         }
 
         assert_eq!(
-            union_scopes,
-            slack_personal_oauth_setup_scopes()
-                .iter()
-                .map(|scope| scope.to_string())
-                .collect::<BTreeSet<_>>(),
-            "SLACK_OAUTH_SETUP_SCOPES must equal the union of the manifest capabilities' scopes"
+            provider_scope_union, ceiling,
+            "SLACK_OAUTH_SETUP_SCOPES must equal the union of the manifest capabilities' provider scopes"
         );
     }
 
@@ -2455,7 +1673,6 @@ mod tests {
         assert!(upload_file.effects.contains(&EffectKind::ExternalWrite));
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn bundled_slack_package_declares_product_adapter_channel_surface() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
@@ -2472,10 +1689,26 @@ mod tests {
             !package.package.manifest.capabilities.is_empty(),
             "unified slack declares the user-scoped tool capabilities"
         );
-        assert!(package.package.manifest.host_apis.iter().any(|host_api| {
-            host_api.id.as_str() == "ironclaw.product_adapter/v1"
-                && host_api.section.as_str() == "product_adapter.inbound"
-        }));
+        // Manifest v3 declares the channel surface directly ([channel]); the
+        // [[host_api]] product-adapter contract indirection is gone, so
+        // host_apis is empty and the channel arrives as a projected
+        // CapabilitySurfaceDeclV2::Channel surface.
+        assert!(
+            package.package.manifest.host_apis.is_empty(),
+            "v3 manifests carry no host_api contract refs"
+        );
+        assert!(
+            package
+                .package
+                .manifest
+                .host_api_surfaces
+                .iter()
+                .any(|surface| matches!(
+                    surface,
+                    ironclaw_extensions::CapabilitySurfaceDeclV2::Channel { .. }
+                )),
+            "unified slack declares a channel surface"
+        );
 
         let summary = package.summary();
         assert_eq!(
@@ -2488,6 +1721,21 @@ mod tests {
                 CapabilitySurfaceKind::Auth,
             ],
             "unified slack projects tool + auth + channel surfaces"
+        );
+        // OUT-11: the channel's declared [channel.presentation] projects onto
+        // the lifecycle summary, which feeds prompt construction.
+        let presentation = summary
+            .channel_presentation
+            .as_ref()
+            .expect("slack declares [channel.presentation]");
+        assert!(
+            presentation.supports_markdown,
+            "slack declares supports_markdown = true"
+        );
+        assert_eq!(
+            presentation.max_message_chars,
+            Some(40_000),
+            "slack declares max_message_chars = 40000"
         );
         let directions = summary
             .channel_directions
@@ -2590,15 +1838,9 @@ handle = "web_token"
 
     #[test]
     fn bundled_manifest_digests_are_sha256_tokens() {
-        assert!(notion_mcp_manifest_digest().starts_with("sha256:"));
-        assert!(google_calendar_manifest_digest().starts_with("sha256:"));
-        assert!(google_docs_manifest_digest().starts_with("sha256:"));
-        assert!(google_drive_manifest_digest().starts_with("sha256:"));
-        assert!(google_sheets_manifest_digest().starts_with("sha256:"));
-        assert!(google_slides_manifest_digest().starts_with("sha256:"));
-        assert!(gmail_manifest_digest().starts_with("sha256:"));
-        #[cfg(feature = "slack-v2-host-beta")]
-        assert!(slack_manifest_digest().starts_with("sha256:"));
+        // gmail migrated to the inventory; its digest (still sha256-token) is
+        // asserted through the trust policy in
+        // `factory::tests::builtin_first_party_trust_policy_grants_migrated_gmail_via_inventory`.
     }
 
     #[test]
@@ -2611,14 +1853,31 @@ handle = "web_token"
         let manifest: Value = toml::from_str(&manifest_toml).unwrap();
 
         assert_eq!(manifest["trust"].as_str(), Some("first_party_requested"));
+        // Manifest v3: the endpoint override patches exactly one field —
+        // [mcp].server. The URL-encoded injection attempt stays inert data in
+        // that one string; trust is untouched.
         assert_eq!(
-            manifest["runtime"]["url"].as_str(),
+            manifest["mcp"]["server"].as_str(),
             Some("https://10.0.0.12:8443/%22%0Atrust=%22system/mcp")
         );
-        let audience = &manifest["capability_provider"]["tools"]["capabilities"][0]["runtime_credentials"]
-            [0]["audience"];
-        assert_eq!(audience["host_pattern"].as_str(), Some("10.0.0.12"));
-        assert_eq!(audience["port"].as_integer(), Some(8443));
+
+        // The connection credential's audience is not rendered into the TOML;
+        // it derives from the [mcp].server host automatically when the
+        // manifest is parsed.
+        let package =
+            bundled_extension_package(NEARAI_EXTENSION_ID, "NEAR AI", &manifest_toml, Vec::new())
+                .expect("patched NEAR AI manifest parses");
+        let template = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "nearai.mcp_server")
+            .expect("nearai hosted-MCP connection template");
+        assert_eq!(
+            template.runtime_credentials[0].audience.host_pattern,
+            "10.0.0.12"
+        );
     }
 
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
@@ -3038,6 +2297,7 @@ output_schema_ref = "schemas/write.output.json"
             package,
             surface_kinds: Vec::new(),
             channel_directions: None,
+            channel_presentation: None,
             assets: vec![
                 AvailableExtensionAsset {
                     path: "manifest.toml".to_string(),
@@ -3048,6 +2308,8 @@ output_schema_ref = "schemas/write.output.json"
                     content: AvailableExtensionAssetContent::Bytes(wasm_bytes.to_vec()),
                 },
             ],
+            onboarding_override: None,
+            oauth_setup_override: None,
         }
     }
 }

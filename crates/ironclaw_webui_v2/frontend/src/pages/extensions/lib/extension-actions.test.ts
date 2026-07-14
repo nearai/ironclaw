@@ -31,7 +31,7 @@ test("primaryExtensionAction activates configured inactive MCP extensions", () =
       package_ref: notionRef,
       runtime: "mcp",
       surfaces: toolSurfaces,
-      activation_status: "installed",
+      installation_state: "installed",
     }),
     "activate",
   );
@@ -45,7 +45,7 @@ test("primaryExtensionAction suppresses activation for channel-surface extension
       package_ref: { kind: "extension", id: "slack" },
       runtime: "first_party",
       surfaces: channelSurfaces,
-      activation_status: "installed",
+      installation_state: "installed",
     }),
     null,
   );
@@ -54,7 +54,7 @@ test("primaryExtensionAction suppresses activation for channel-surface extension
       package_ref: { kind: "extension", id: "telegram" },
       runtime: "wasm",
       surfaces: channelSurfaces,
-      activation_status: "installed",
+      installation_state: "installed",
     }),
     null,
   );
@@ -86,7 +86,7 @@ test("primaryExtensionAction suppresses Activate for channel surfaces in pairing
       package_ref: { kind: "extension", id: "slack" },
       runtime: "first_party",
       surfaces: channelSurfaces,
-      activation_status: "installed",
+      installation_state: "installed",
     }),
     null,
     "channel surface + installed should hand off to channel configure/setup UI",
@@ -114,7 +114,7 @@ test("extensionLifecycleState does not call active unauthenticated setup active"
       authenticated: false,
       needs_setup: true,
       has_auth: true,
-      activation_status: "active",
+      installation_state: "active",
     }),
     "auth_required",
   );
@@ -122,7 +122,7 @@ test("extensionLifecycleState does not call active unauthenticated setup active"
 
 test("extensionIsActive accepts card payload lifecycle fields", () => {
   assert.equal(extensionIsActive({ active: true }), true);
-  assert.equal(extensionIsActive({ activationStatus: "ready" }), true);
+  assert.equal(extensionIsActive({ installationState: "ready" }), true);
   assert.equal(extensionIsActive({ onboardingState: "auth_required" }), false);
 });
 

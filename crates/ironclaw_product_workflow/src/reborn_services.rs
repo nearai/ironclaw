@@ -126,8 +126,8 @@ pub use projects::{
     RebornRemoveMemberRequest, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
 };
 pub use types::{
-    RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
-    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAccountBindingSource, RebornAttachmentBytes, RebornAttachmentRequest, RebornAuthAccount,
+    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
     RebornChannelConnectStrategy, RebornCreateThreadResponse, RebornDeleteThreadRequest,
@@ -159,7 +159,7 @@ pub use types::{
     RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornStreamEventsSubscription, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse,
+    RebornTimelineResponse, RebornVendorAuthAccounts,
 };
 
 type SkillActivationRecorder =
@@ -243,6 +243,44 @@ impl ChannelConnectionFacade for StaticChannelConnectionFacade {
     ) -> Result<std::collections::HashMap<String, bool>, RebornServicesError> {
         Ok(std::collections::HashMap::new())
     }
+}
+
+/// Presence-only projection of one manifest-declared channel-config field.
+/// Secret fields report `provided` only; stored values are never echoed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebornChannelConfigField {
+    /// The manifest-declared field handle (the submit key).
+    pub name: String,
+    /// Operator-facing label from the manifest.
+    pub label: String,
+    pub secret: bool,
+    pub provided: bool,
+}
+
+/// The generic channel-config configure port: per-extension operator config
+/// declared by the extension manifest's channel-config fields. Host
+/// composition implements it over the durable installation store and the
+/// scoped secret store; the setup facade routes submitted values through it
+/// and derives config completeness from the field status.
+#[async_trait]
+pub trait ChannelConfigFacade: Send + Sync {
+    /// Per-field presence for the extension's declared channel config.
+    /// Empty when the extension declares none (or is not installed yet).
+    async fn field_status(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<Vec<RebornChannelConfigField>, RebornServicesError>;
+
+    /// Validate submitted `(handle, value)` pairs against the installed
+    /// manifest's declared fields and persist them (non-secret values
+    /// durably per installation, secret values into the scoped secret
+    /// store). Saving while the extension is active re-runs its activation
+    /// with the new values.
+    async fn save_values(
+        &self,
+        extension_id: &ExtensionId,
+        values: Vec<(String, String)>,
+    ) -> Result<(), RebornServicesError>;
 }
 
 #[async_trait]
@@ -2632,6 +2670,7 @@ pub struct RebornServices {
     automation_facade: Arc<dyn AutomationProductFacade>,
     skills_facade: Arc<dyn SkillsProductFacade>,
     channel_connection_facade: Arc<dyn ChannelConnectionFacade>,
+    channel_config_facade: Option<Arc<dyn ChannelConfigFacade>>,
     outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade>,
     operator_status: Arc<dyn OperatorStatusService>,
     operator_logs: Arc<dyn OperatorLogsService>,
@@ -2667,6 +2706,7 @@ impl RebornServices {
             automation_facade: Arc::new(UnsupportedAutomationProductFacade::new_static()),
             skills_facade: Arc::new(UnsupportedSkillsProductFacade::new_static()),
             channel_connection_facade: Arc::new(StaticChannelConnectionFacade),
+            channel_config_facade: None,
             outbound_preferences_facade: Arc::new(
                 UnsupportedOutboundPreferencesProductFacade::new_static(),
             ),
@@ -2801,6 +2841,17 @@ impl RebornServices {
         outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade>,
     ) -> Self {
         self.outbound_preferences_facade = outbound_preferences_facade;
+        self
+    }
+
+    /// Wire the generic channel-config configure port. Without it, the
+    /// setup facade renders no channel-config fields and rejects
+    /// channel-config submissions as unavailable.
+    pub fn with_channel_config_facade(
+        mut self,
+        channel_config_facade: Arc<dyn ChannelConfigFacade>,
+    ) -> Self {
+        self.channel_config_facade = Some(channel_config_facade);
         self
     }
 
@@ -4714,6 +4765,7 @@ impl RebornServicesApi for RebornServices {
         lifecycle_setup::setup_extension(
             self.lifecycle_facade.as_ref(),
             self.extension_credentials.as_deref(),
+            self.channel_config_facade.as_deref(),
             caller,
             package_ref,
             request,

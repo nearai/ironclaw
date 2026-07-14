@@ -3,7 +3,7 @@ use ironclaw_extensions::{
     ExtensionActivationState, ExtensionHealthSnapshot, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
     ExtensionManifestRecord, ExtensionManifestRef, InMemoryExtensionInstallationStore,
-    ManifestHash, ManifestSource,
+    ManifestHash, ManifestSource, ResolvedExtensionManifest,
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{ExtensionId, VirtualPath};
@@ -30,11 +30,22 @@ impl FilesystemExtensionInstallationStore {
                 let mut state: WireState =
                     serde_json::from_slice(&bytes).map_err(invalid_installation_error)?;
                 let migrated = migrate_retired_slack_bot_identity(&mut state);
-                state.load_into(&inner).await?;
-                if migrated {
-                    tracing::debug!(
-                        "migrated retired slack_bot installation state to the unified slack extension"
-                    );
+                let backfilled = state.load_into(&inner).await?;
+                if migrated || backfilled {
+                    if migrated {
+                        tracing::debug!(
+                            "migrated retired slack_bot installation state to the unified slack extension"
+                        );
+                    }
+                    if backfilled {
+                        // One-time idempotent backfill (extension-runtime
+                        // REC-3): legacy raw-TOML records were compiled once
+                        // through the manifest reader; persist the resolved
+                        // contracts so later loads never reparse.
+                        tracing::debug!(
+                            "backfilled resolved extension contracts for legacy manifest records"
+                        );
+                    }
                     let store = Self {
                         filesystem,
                         state_path,
@@ -190,6 +201,23 @@ impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
         self.inner.update_health(installation_id, health).await?;
         self.save_snapshot().await
     }
+
+    async fn channel_config(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<Vec<(String, String)>, ExtensionInstallationError> {
+        self.inner.channel_config(extension_id).await
+    }
+
+    async fn set_channel_config(
+        &self,
+        extension_id: &ExtensionId,
+        values: Vec<(String, String)>,
+    ) -> Result<(), ExtensionInstallationError> {
+        let _guard = self.save_lock.lock().await;
+        self.inner.set_channel_config(extension_id, values).await?;
+        self.save_snapshot().await
+    }
 }
 
 /// One-time forward migration (NEA-25 unified Slack extension): the Slack
@@ -243,20 +271,13 @@ fn migrate_retired_slack_bot_identity(state: &mut WireState) -> bool {
         .iter()
         .any(|record| record.raw_toml.contains("\nid = \"slack\""));
     if !has_unified_record {
-        #[cfg(feature = "slack-v2-host-beta")]
-        {
-            state.manifests.push(WireManifestRecord {
-                raw_toml: super::available_extensions::slack_manifest_toml().to_string(),
-                source: WireManifestSource::HostBundled,
-                manifest_hash: None,
-            });
-        }
-        #[cfg(not(feature = "slack-v2-host-beta"))]
-        {
-            // Without the Slack feature the unified manifest is not bundled;
-            // drop the orphaned installation instead of failing the load.
-            return changed;
-        }
+        state.manifests.push(WireManifestRecord {
+            raw_toml: ironclaw_first_party_extensions::packages::slack_manifest_toml().to_string(),
+            source: WireManifestSource::HostBundled,
+            manifest_hash: None,
+            // Compiled by the backfill path on this same load.
+            resolved: None,
+        });
     }
     if let Some(existing) = state
         .installations
@@ -303,6 +324,18 @@ fn migrate_retired_slack_bot_identity(state: &mut WireState) -> bool {
 struct WireState {
     manifests: Vec<WireManifestRecord>,
     installations: Vec<ExtensionInstallation>,
+    /// Per-installation non-secret `[channel.config]` values keyed by field
+    /// handle. Serde-defaulted (and omitted when empty) so state files
+    /// written before the configure surface existed load unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    channel_configs: Vec<WireChannelConfig>,
+}
+
+/// One installation's stored non-secret channel-config values.
+#[derive(Debug, Serialize, Deserialize)]
+struct WireChannelConfig {
+    extension_id: String,
+    values: Vec<(String, String)>,
 }
 
 impl WireState {
@@ -316,17 +349,32 @@ impl WireState {
             .map(WireManifestRecord::from)
             .collect();
         let installations = store.list_installations().await?;
+        let channel_configs = store
+            .channel_configs()
+            .await
+            .into_iter()
+            .map(|(extension_id, values)| WireChannelConfig {
+                extension_id: extension_id.as_str().to_string(),
+                values,
+            })
+            .collect();
         Ok(Self {
             manifests,
             installations,
+            channel_configs,
         })
     }
 
+    /// Load the wire state; returns whether any manifest record lacked a
+    /// persisted resolved contract and was backfilled by compiling its raw
+    /// source once (extension-runtime REC-3).
     async fn load_into(
         self,
         store: &InMemoryExtensionInstallationStore,
-    ) -> Result<(), ExtensionInstallationError> {
+    ) -> Result<bool, ExtensionInstallationError> {
+        let mut backfilled = false;
         for manifest in self.manifests {
+            backfilled |= manifest.resolved.is_none();
             store
                 .upsert_manifest(manifest.into_manifest_record()?)
                 .await?;
@@ -334,7 +382,14 @@ impl WireState {
         for installation in self.installations {
             store.upsert_installation(installation).await?;
         }
-        Ok(())
+        for config in self.channel_configs {
+            let extension_id =
+                ExtensionId::new(&config.extension_id).map_err(invalid_installation_error)?;
+            store
+                .set_channel_config(&extension_id, config.values)
+                .await?;
+        }
+        Ok(backfilled)
     }
 }
 
@@ -344,10 +399,23 @@ struct WireManifestRecord {
     source: WireManifestSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     manifest_hash: Option<ManifestHash>,
+    /// The compiled contract (extension-runtime REC-1/REC-2). Loads rebuild
+    /// from it without reparsing `raw_toml`; absent only on legacy records,
+    /// which backfill by compiling once at load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resolved: Option<ResolvedExtensionManifest>,
 }
 
 impl WireManifestRecord {
     fn into_manifest_record(self) -> Result<ExtensionManifestRecord, ExtensionInstallationError> {
+        if let Some(resolved) = self.resolved {
+            return ExtensionManifestRecord::from_resolved(
+                self.raw_toml,
+                self.source.into_manifest_source(),
+                resolved,
+                self.manifest_hash,
+            );
+        }
         let host_ports = ironclaw_host_runtime::default_host_port_catalog()
             .map_err(invalid_installation_error)?;
         let contracts = ironclaw_host_runtime::default_host_api_contract_registry()
@@ -368,6 +436,7 @@ impl From<ExtensionManifestRecord> for WireManifestRecord {
             raw_toml: record.raw_toml().to_string(),
             source: WireManifestSource::from_manifest_source(record.manifest().source),
             manifest_hash: record.manifest_hash().cloned(),
+            resolved: Some(record.resolved().clone()),
         }
     }
 }
@@ -470,6 +539,7 @@ mod tests {
                 raw_toml: "schema_version = \"reborn.extension_manifest.v2\"\nid = \"slack_bot\"\n(historical split-identity record; dropped without parsing)".to_string(),
                 source: WireManifestSource::HostBundled,
                 manifest_hash: None,
+                resolved: None,
             }],
             installations: vec![
                 ExtensionInstallation::new(
@@ -492,6 +562,7 @@ mod tests {
                 )
                 .expect("tools installation"),
             ],
+            channel_configs: Vec::new(),
         };
         filesystem
             .write_file(
@@ -691,5 +762,327 @@ prompt_doc_ref = "prompts/gmail/echo.md"
         async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
             self.inner.delete(path).await
         }
+    }
+
+    const RESOLVED_RECORD_V3_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "zephyrite"
+name = "Zephyrite"
+version = "0.1.0"
+description = "resolved-record store fixture"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/zephyrite_tool.wasm"
+
+[[tools]]
+id = "zephyrite.echo"
+description = "Echoes input"
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
+
+[[tools.credentials]]
+handle = "zephyrite_token"
+vendor = "zephyrite"
+scopes = ["echo:read"]
+audience = { scheme = "https", host = "api.zephyrite.example" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[auth.zephyrite]
+method = "oauth2_code"
+display_name = "Zephyrite account"
+authorization_endpoint = "https://auth.zephyrite.example/authorize"
+token_endpoint = "https://auth.zephyrite.example/token"
+scopes = ["echo:read"]
+client_credentials = { client_id_handle = "zephyrite_client_id" }
+
+[auth.zephyrite.token_response]
+access_token = "/access_token"
+"#;
+
+    /// A minimal v2 manifest that validates against the runtime default
+    /// host-port catalog and contract registry (the legacy-backfill parse
+    /// context).
+    const LEGACY_V2_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "oldtimer"
+name = "Oldtimer"
+version = "0.1.0"
+description = "legacy raw-TOML record fixture"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/oldtimer.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "oldtimer.echo"
+description = "Echoes input"
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/oldtimer/echo.input.v1.json"
+output_schema_ref = "schemas/oldtimer/echo.output.v1.json"
+"#;
+
+    fn state_path() -> VirtualPath {
+        VirtualPath::new("/system/extensions/.installations/state.json").expect("state path")
+    }
+
+    /// REC-2 (store tier): a persisted record rehydrates from its resolved
+    /// contract without reparsing the raw source — proven by corrupting the
+    /// stored `raw_toml` to garbage and loading successfully.
+    async fn assert_rehydrates_without_reparse(filesystem: Arc<dyn RootFilesystem>) {
+        let store =
+            FilesystemExtensionInstallationStore::load_at(Arc::clone(&filesystem), state_path())
+                .await
+                .expect("empty store loads");
+        let record = ExtensionManifestRecord::from_toml(
+            RESOLVED_RECORD_V3_MANIFEST,
+            ManifestSource::InstalledLocal,
+            &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
+            None,
+            &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+        )
+        .expect("v3 manifest parses");
+        let expected_manifest = record.manifest().clone();
+        let expected_resolved = record.resolved().clone();
+        store.upsert_manifest(record).await.expect("persist record");
+        drop(store);
+
+        // Corrupt the raw source in the persisted state: the resolved
+        // contract must be the load-bearing copy.
+        let bytes = filesystem
+            .read_file(&state_path())
+            .await
+            .expect("state file exists");
+        let mut state: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("state file is JSON");
+        state["manifests"][0]["raw_toml"] =
+            serde_json::Value::String("# raw manifest source unavailable".to_string());
+        filesystem
+            .write_file(
+                &state_path(),
+                &serde_json::to_vec_pretty(&state).expect("serialize"),
+            )
+            .await
+            .expect("rewrite state");
+
+        let store =
+            FilesystemExtensionInstallationStore::load_at(Arc::clone(&filesystem), state_path())
+                .await
+                .expect("store loads from resolved contracts");
+        let reloaded = store
+            .get_manifest(&ExtensionId::new("zephyrite").expect("id"))
+            .await
+            .expect("get manifest")
+            .expect("record present");
+        assert_eq!(reloaded.manifest(), &expected_manifest);
+        assert_eq!(reloaded.resolved(), &expected_resolved);
+        assert_eq!(reloaded.raw_toml(), "# raw manifest source unavailable");
+    }
+
+    /// REC-3 (store tier): legacy wire records without a resolved contract
+    /// backfill by compiling once at load, persist the compiled contract,
+    /// and a second load is a byte-identical no-op.
+    async fn assert_legacy_records_backfill_idempotently(filesystem: Arc<dyn RootFilesystem>) {
+        let legacy_state = serde_json::json!({
+            "manifests": [{
+                "raw_toml": LEGACY_V2_MANIFEST,
+                "source": "installed_local",
+            }],
+            "installations": [],
+        });
+        filesystem
+            .write_file(
+                &state_path(),
+                &serde_json::to_vec_pretty(&legacy_state).expect("serialize"),
+            )
+            .await
+            .expect("seed legacy state");
+
+        let store =
+            FilesystemExtensionInstallationStore::load_at(Arc::clone(&filesystem), state_path())
+                .await
+                .expect("legacy state loads");
+        let record = store
+            .get_manifest(&ExtensionId::new("oldtimer").expect("id"))
+            .await
+            .expect("get manifest")
+            .expect("record present");
+        assert_eq!(record.resolved().id.as_str(), "oldtimer");
+        drop(store);
+
+        let backfilled_bytes = filesystem
+            .read_file(&state_path())
+            .await
+            .expect("state file exists");
+        let backfilled: serde_json::Value =
+            serde_json::from_slice(&backfilled_bytes).expect("state is JSON");
+        assert!(
+            backfilled["manifests"][0]["resolved"].is_object(),
+            "backfill must persist the compiled resolved contract"
+        );
+
+        // Second load: nothing left to backfill; the snapshot is untouched.
+        let _store =
+            FilesystemExtensionInstallationStore::load_at(Arc::clone(&filesystem), state_path())
+                .await
+                .expect("backfilled state loads");
+        let second_bytes = filesystem
+            .read_file(&state_path())
+            .await
+            .expect("state file exists");
+        assert_eq!(
+            backfilled_bytes, second_bytes,
+            "second load must be a no-op (idempotent backfill)"
+        );
+    }
+
+    /// Channel-config persistence (extension-runtime §6.4): values round-trip
+    /// through the durable snapshot, state files written BEFORE the configure
+    /// surface existed load unchanged (serde default), and a snapshot with no
+    /// config keeps the old wire shape (no `channel_configs` key).
+    #[tokio::test]
+    async fn channel_config_round_trips_and_old_state_files_load() {
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+        let store =
+            FilesystemExtensionInstallationStore::load_at(Arc::clone(&filesystem), state_path())
+                .await
+                .expect("empty store loads");
+        let record = ExtensionManifestRecord::from_toml(
+            RESOLVED_RECORD_V3_MANIFEST,
+            ManifestSource::InstalledLocal,
+            &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
+            None,
+            &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+        )
+        .expect("v3 manifest parses");
+        let extension_id = ExtensionId::new("zephyrite").expect("id");
+        let installation_id =
+            ExtensionInstallationId::new("zephyrite".to_string()).expect("installation id");
+        store
+            .upsert_manifest_and_installation(
+                record,
+                ExtensionInstallation::new(
+                    installation_id.clone(),
+                    extension_id.clone(),
+                    ExtensionActivationState::Installed,
+                    ExtensionManifestRef::new(extension_id.clone(), None),
+                    Vec::new(),
+                    Utc::now(),
+                )
+                .expect("installation"),
+            )
+            .await
+            .expect("persist install");
+
+        // No config saved yet: the snapshot keeps the pre-configure wire
+        // shape, so this snapshot IS an "old state file" for the reload below.
+        let bytes = filesystem
+            .read_file(&state_path())
+            .await
+            .expect("state file exists");
+        let state: serde_json::Value = serde_json::from_slice(&bytes).expect("state is JSON");
+        assert!(
+            state.get("channel_configs").is_none(),
+            "an empty channel-config set must not change the wire shape"
+        );
+        drop(store);
+        let store =
+            FilesystemExtensionInstallationStore::load_at(Arc::clone(&filesystem), state_path())
+                .await
+                .expect("old-shape state loads");
+        assert!(
+            store
+                .channel_config(&extension_id)
+                .await
+                .expect("read config")
+                .is_empty()
+        );
+
+        // Save, reload from disk, and read back: the values are durable.
+        let values = vec![(
+            "public_endpoint_url".to_string(),
+            "https://hooks.example.test/updates".to_string(),
+        )];
+        store
+            .set_channel_config(&extension_id, values.clone())
+            .await
+            .expect("save config");
+        drop(store);
+        let store =
+            FilesystemExtensionInstallationStore::load_at(Arc::clone(&filesystem), state_path())
+                .await
+                .expect("state with config loads");
+        assert_eq!(
+            store
+                .channel_config(&extension_id)
+                .await
+                .expect("read config"),
+            values
+        );
+
+        // Deleting the installation deletes its config from the snapshot too.
+        store
+            .delete_installation(&installation_id)
+            .await
+            .expect("delete installation");
+        drop(store);
+        let store = FilesystemExtensionInstallationStore::load_at(filesystem, state_path())
+            .await
+            .expect("state reloads after delete");
+        assert!(
+            store
+                .channel_config(&extension_id)
+                .await
+                .expect("read config after delete")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn records_rehydrate_from_resolved_in_memory() {
+        assert_rehydrates_without_reparse(Arc::new(InMemoryBackend::new())).await;
+    }
+
+    #[tokio::test]
+    async fn legacy_records_backfill_idempotently_in_memory() {
+        assert_legacy_records_backfill_idempotently(Arc::new(InMemoryBackend::new())).await;
+    }
+
+    #[cfg(feature = "libsql")]
+    async fn libsql_filesystem(dir: &std::path::Path) -> Arc<dyn RootFilesystem> {
+        let db = std::sync::Arc::new(
+            libsql::Builder::new_local(dir.join("store.db"))
+                .build()
+                .await
+                .expect("open libsql database"),
+        );
+        let filesystem = ironclaw_filesystem::LibSqlRootFilesystem::new(db);
+        filesystem.run_migrations().await.expect("migrations");
+        Arc::new(filesystem)
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn records_rehydrate_from_resolved_on_libsql() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_rehydrates_without_reparse(libsql_filesystem(dir.path()).await).await;
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn legacy_records_backfill_idempotently_on_libsql() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_legacy_records_backfill_idempotently(libsql_filesystem(dir.path()).await).await;
     }
 }

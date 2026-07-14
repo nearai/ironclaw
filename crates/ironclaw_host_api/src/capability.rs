@@ -11,9 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     CapabilityGrantId, CapabilityId, ExtensionId, MountView, NetworkPolicy, NetworkTargetPattern,
-    Principal, ResourceCeiling, ResourceProfile, RuntimeCredentialAccountProviderId,
-    RuntimeCredentialAuthRequirement, RuntimeCredentialTarget, RuntimeKind, SecretHandle,
-    Timestamp, TrustClass,
+    Principal, ResourceCeiling, ResourceProfile, RuntimeCredentialAuthRequirement,
+    RuntimeCredentialTarget, RuntimeKind, SecretHandle, Timestamp, TrustClass, VendorId,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -112,7 +111,7 @@ pub enum RuntimeCredentialRequirementSource {
     #[default]
     SecretHandle,
     ProductAuthAccount {
-        provider: RuntimeCredentialAccountProviderId,
+        provider: VendorId,
         #[serde(default)]
         setup: RuntimeCredentialAccountSetup,
     },

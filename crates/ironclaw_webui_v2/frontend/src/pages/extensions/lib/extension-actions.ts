@@ -30,7 +30,9 @@ export function extensionLifecycleState(ext) {
   if (ext?.needs_setup === true && ext?.authenticated === false) {
     return ext?.has_auth ? "auth_required" : "setup_required";
   }
-  return ext?.activation_status || ext?.activationStatus || (ext?.active ? "active" : "installed");
+  return (
+    ext?.installation_state || ext?.installationState || (ext?.active ? "active" : "installed")
+  );
 }
 
 export function extensionIsActive(ext) {

@@ -391,8 +391,8 @@ impl From<TraceScopeArg> for ConsentScope {
 pub enum TraceChannelArg {
     Web,
     Cli,
-    Telegram,
-    Slack,
+    /// An extension-served channel (the retired per-vendor values map here).
+    Extension,
     Routine,
     Other,
 }
@@ -402,8 +402,7 @@ impl std::fmt::Display for TraceChannelArg {
         let value = match self {
             Self::Web => "web",
             Self::Cli => "cli",
-            Self::Telegram => "telegram",
-            Self::Slack => "slack",
+            Self::Extension => "extension",
             Self::Routine => "routine",
             Self::Other => "other",
         };
@@ -416,8 +415,7 @@ impl From<TraceChannelArg> for TraceChannel {
         match value {
             TraceChannelArg::Web => TraceChannel::Web,
             TraceChannelArg::Cli => TraceChannel::Cli,
-            TraceChannelArg::Telegram => TraceChannel::Telegram,
-            TraceChannelArg::Slack => TraceChannel::Slack,
+            TraceChannelArg::Extension => TraceChannel::Extension,
             TraceChannelArg::Routine => TraceChannel::Routine,
             TraceChannelArg::Other => TraceChannel::Other,
         }
@@ -1101,6 +1099,7 @@ async fn preview_recorded_trace(options: PreviewOptions) -> anyhow::Result<()> {
                 include_tool_payloads: options.include_tool_payloads,
                 consent_scopes: vec![options.scope.into()],
                 channel: options.channel.into(),
+                channel_origin: None,
                 engine_version: options.engine_version,
                 feature_flags: BTreeMap::new(),
                 pseudonymous_contributor_id: options.contributor_id,

@@ -4,16 +4,18 @@ use std::{
 };
 
 use futures::{StreamExt, TryStreamExt, stream};
-use ironclaw_host_api::{CapabilitySurfaceKind, ExtensionId};
+use ironclaw_auth::AuthAccountState;
+use ironclaw_host_api::{CapabilitySurfaceKind, ExtensionId, InstallationState};
 
 use crate::{
     ChannelConnectionFacade, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
     LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductAction,
     LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
-    LifecycleProductResponse, LifecycleProductSurfaceContext, RebornExtensionActionResponse,
-    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionOnboardingState,
-    RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornExtensionSurface,
-    RebornServicesError, WebUiAuthenticatedCaller,
+    LifecycleProductResponse, LifecycleProductSurfaceContext, RebornAccountBindingSource,
+    RebornAuthAccount, RebornExtensionActionResponse, RebornExtensionInfo,
+    RebornExtensionListResponse, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
+    RebornExtensionRegistryResponse, RebornExtensionSurface, RebornServicesError,
+    RebornVendorAuthAccounts, WebUiAuthenticatedCaller,
 };
 
 use super::{
@@ -26,8 +28,6 @@ use super::{
 };
 
 const EXTENSION_READINESS_CONCURRENCY: usize = 8;
-const SLACK_EXTENSION_ID: &str = "slack";
-const SLACK_CHANNEL_ID: &str = "slack";
 
 pub(super) async fn list_extensions(
     facade: Arc<dyn LifecycleProductFacade>,
@@ -346,8 +346,8 @@ fn extension_info(
     let runtime = summary.runtime_kind.runtime_wire_name().to_string();
     let channel_unconnected = has_external_channel_surface
         && connections.get(summary.package_ref.id.as_str()) == Some(&false);
-    // A channel extension the calling user has not personally connected (for
-    // example, Slack OAuth) surfaces as `setup_required` so the WebUI shows the same
+    // A channel extension the calling user has not personally connected (via
+    // the vendor's OAuth) surfaces as `setup_required` so the WebUI shows the same
     // Configure affordance as a credential-gated extension. The per-user
     // connections map only contains channels with that concept; a connected
     // channel (value `true`) keeps its normal onboarding state, and this is
@@ -362,7 +362,12 @@ fn extension_info(
     } else {
         None
     };
-    let surfaces = wire_surfaces(&summary, connected);
+    let auth_accounts = vendor_auth_accounts(&summary, connected);
+    let resolved_account_id = auth_accounts
+        .first()
+        .and_then(|vendor| vendor.accounts.first())
+        .map(|account| account.account_id.clone());
+    let surfaces = wire_surfaces(&summary, resolved_account_id);
     RebornExtensionInfo {
         package_ref: summary.package_ref,
         display_name: summary.name,
@@ -378,11 +383,12 @@ fn extension_info(
                 LifecyclePhase::Installed | LifecyclePhase::Configured | LifecyclePhase::Failed
             ),
         has_auth,
-        activation_status: Some(phase_status(phase).to_string()),
+        installation_state: installation_state_from_phase(phase),
         activation_error: None,
         version: Some(summary.version),
         onboarding_state,
         onboarding: onboarding.onboarding,
+        auth_accounts,
         surfaces,
     }
 }
@@ -392,7 +398,7 @@ fn extension_info(
 /// (when a connections map applies), and the connect affordance.
 fn wire_surfaces(
     summary: &LifecycleExtensionSummary,
-    connected: Option<bool>,
+    resolved_account_id: Option<String>,
 ) -> Vec<RebornExtensionSurface> {
     summary
         .surface_kinds
@@ -409,7 +415,12 @@ fn wire_surfaces(
                     .channel_directions
                     .map(|directions| directions.outbound)
                     .unwrap_or(false),
-                connected,
+                // Length ≤ 1 today: the surface resolves to its vendor's single
+                // account through the default binding (ADR 0001, shape only).
+                binding_source: resolved_account_id
+                    .as_ref()
+                    .map(|_| RebornAccountBindingSource::Default),
+                resolved_account_id: resolved_account_id.clone(),
                 connection: summary.channel_connection.clone(),
             }),
             // Reserved kinds have no manifest section yet, so no wire form.
@@ -432,35 +443,91 @@ fn removable_channel_cleanup_for_summary(
             summary.package_ref.id.as_str().to_string(),
         ));
     }
+    // An extension without a channel surface can still hold the caller's
+    // per-channel connection when it authenticates against a vendor (for
+    // example, a tools package whose OAuth account is the channel's
+    // personal connection). Whether such a connection concept exists is
+    // the connection facade's call: it is consulted first and disconnect
+    // runs only when it reports this channel. The channel key is the
+    // package id — the same key the facade's connections map uses.
     if summary.package_ref.kind == LifecyclePackageKind::Extension
-        && summary.package_ref.id.as_str() == SLACK_EXTENSION_ID
-        && summary
-            .credential_requirements
-            .iter()
-            .any(|requirement| requirement.provider == ironclaw_auth::SLACK_PROVIDER_ID)
+        && !summary.credential_requirements.is_empty()
     {
         return Some(RemovableChannelCleanup::IfConnectionFacadeSupportsChannel(
-            SLACK_CHANNEL_ID.to_string(),
+            summary.package_ref.id.as_str().to_string(),
         ));
     }
     None
 }
 
-fn phase_status(phase: LifecyclePhase) -> &'static str {
+/// Project the facade's richer lifecycle phase onto the shared §6.1
+/// installation-state enum the wire exposes. The mapping is total: the facade
+/// phases that are not distinct installation-lifecycle states (configured /
+/// disabled / failed / upgrade-required / installing / discovered / unsupported)
+/// collapse to `Installed`, and the UI re-derives those distinctions from
+/// `needs_setup` + config completeness + `activation_error` + version (UI-4).
+/// `Deactivating`/`RemovalPending` are host-transient and never surface as a
+/// facade phase.
+fn installation_state_from_phase(phase: LifecyclePhase) -> InstallationState {
     match phase {
-        LifecyclePhase::Active => "active",
-        LifecyclePhase::Disabled => "disabled",
-        LifecyclePhase::Removed => "removed",
-        LifecyclePhase::Failed => "failed",
-        LifecyclePhase::Unsupported => "unsupported",
-        LifecyclePhase::Discovered => "available",
-        LifecyclePhase::Installing => "installing",
-        LifecyclePhase::Installed => "installed",
-        LifecyclePhase::Configured => "configured",
-        LifecyclePhase::Activating => "activating",
-        LifecyclePhase::UpgradeRequired => "upgrade_required",
-        LifecyclePhase::Removing => "removing",
+        LifecyclePhase::Active => InstallationState::Active,
+        LifecyclePhase::Activating => InstallationState::Activating,
+        LifecyclePhase::Removing => InstallationState::Removing,
+        LifecyclePhase::Removed => InstallationState::Removed,
+        LifecyclePhase::Discovered
+        | LifecyclePhase::Installing
+        | LifecyclePhase::Installed
+        | LifecyclePhase::Configured
+        | LifecyclePhase::Disabled
+        | LifecyclePhase::UpgradeRequired
+        | LifecyclePhase::Failed
+        | LifecyclePhase::Unsupported => InstallationState::Installed,
     }
+}
+
+/// The credential-authority vendor a channel/auth surface binds. Prefers the
+/// declared auth recipe vendor; falls back to the package id (today the two
+/// real channel package ids equal their vendor ids).
+fn channel_auth_vendor(summary: &LifecycleExtensionSummary) -> String {
+    summary
+        .credential_requirements
+        .first()
+        .map(|requirement| requirement.provider.clone())
+        .unwrap_or_else(|| summary.package_ref.id.as_str().to_string())
+}
+
+/// Per-vendor accounts list for the extensions wire (overview §6.4, ADR 0001).
+/// Shape only: one vendor, at most one account, derived from the caller's
+/// connection signal — a live grant backfills to `Connected` (MIG-1). Richer
+/// per-account state and multiple accounts arrive with the post-P7
+/// multi-account follow-up; the list shape is frozen so that lands without a
+/// wire break. `None` connection signal (no per-caller connection concept)
+/// yields no vendor entry.
+fn vendor_auth_accounts(
+    summary: &LifecycleExtensionSummary,
+    connected: Option<bool>,
+) -> Vec<RebornVendorAuthAccounts> {
+    let Some(is_connected) = connected else {
+        return Vec::new();
+    };
+    let vendor = channel_auth_vendor(summary);
+    let state = if is_connected {
+        AuthAccountState::Connected
+    } else {
+        AuthAccountState::Disconnected
+    };
+    vec![RebornVendorAuthAccounts {
+        vendor: vendor.clone(),
+        // One account per vendor today; its id is the vendor id until the
+        // multi-account follow-up wires real per-account identity.
+        accounts: vec![RebornAuthAccount {
+            account_id: vendor,
+            label: summary.name.clone(),
+            state,
+            last_error: None,
+            is_default: true,
+        }],
+    }]
 }
 
 fn action_response(
@@ -668,10 +735,7 @@ mod tests {
     async fn remove_action_disconnects_slack_when_removing_visible_slack_extension() {
         let facade = RemoveFacade::slack_tools_extension();
         let caller = caller();
-        let connections = Arc::new(TestConnections::with_connections(&[(
-            SLACK_CHANNEL_ID,
-            false,
-        )]));
+        let connections = Arc::new(TestConnections::with_connections(&[("slack", false)]));
         let channel_connections: Arc<dyn ChannelConnectionFacade> = connections.clone();
 
         let response = remove_extension(
@@ -713,6 +777,30 @@ mod tests {
             calls[1].1,
             LifecycleProductAction::ExtensionRemove { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn remove_action_disconnects_facade_reported_connection_for_credentialed_extension() {
+        // The companion-package rule is vendor-blind: ANY credential-bearing
+        // extension consults the connection facade on removal, and the
+        // caller's channel connection is cleared exactly when the facade
+        // reports that channel key (the package id).
+        let facade = RemoveFacade::non_channel();
+        let caller = caller();
+        let connections = Arc::new(TestConnections::with_connections(&[("fixture", true)]));
+        let channel_connections: Arc<dyn ChannelConnectionFacade> = connections.clone();
+
+        let response =
+            remove_extension(&facade, channel_connections, caller.clone(), package_ref())
+                .await
+                .expect("remove response");
+
+        assert!(response.success);
+        assert_eq!(
+            connections.disconnects(),
+            vec![(caller.user_id.clone(), "fixture".to_string())],
+            "a credentialed extension the facade reports as a channel gets the caller disconnect"
+        );
     }
 
     #[tokio::test]
@@ -1574,6 +1662,7 @@ mod tests {
             surface_kinds: Vec::new(),
             channel_directions: None,
             channel_connection: None,
+            channel_presentation: None,
             visible_capability_ids: Vec::new(),
             visible_read_only_capability_ids: Vec::new(),
             credential_requirements: vec![LifecycleExtensionCredentialRequirement {
@@ -1605,6 +1694,7 @@ mod tests {
             surface_kinds: Vec::new(),
             channel_directions: None,
             channel_connection: None,
+            channel_presentation: None,
             visible_capability_ids: vec!["nearai.web_search".to_string()],
             visible_read_only_capability_ids: vec!["nearai.web_search".to_string()],
             credential_requirements: Vec::new(),

@@ -4,8 +4,8 @@ use crate::local_dev_mounts::scoped_skill_management_mount_view;
 use async_trait::async_trait;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::{
-    CredentialStageError, HostApiError, HostPath, InvocationId, MountView, ResourceScope,
-    RuntimeHttpEgress, UserId, VirtualPath,
+    CredentialStageError, ExtensionId, HostApiError, HostPath, InvocationId, MountView,
+    ResourceScope, RuntimeHttpEgress, UserId, VirtualPath,
 };
 use ironclaw_product_workflow::{
     LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
@@ -217,6 +217,7 @@ fn invalid_skill_context(error: impl std::fmt::Display) -> RebornLocalSkillManag
 pub(crate) struct RebornLocalLifecycleFacade {
     skill_management: Arc<RebornLocalSkillManagementPort>,
     extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
+    channel_config: Option<Arc<crate::extension_host::channel_config::ChannelConfigService>>,
     runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     credential_accounts: Option<Arc<dyn RuntimeCredentialAccountSelectionService>>,
 }
@@ -226,6 +227,7 @@ impl RebornLocalLifecycleFacade {
         Self {
             skill_management,
             extension_management: None,
+            channel_config: None,
             runtime_http_egress: None,
             credential_accounts: None,
         }
@@ -236,6 +238,14 @@ impl RebornLocalLifecycleFacade {
         extension_management: Arc<RebornLocalExtensionManagementPort>,
     ) -> Self {
         self.extension_management = Some(extension_management);
+        self
+    }
+
+    pub(crate) fn with_channel_config(
+        mut self,
+        channel_config: Arc<crate::extension_host::channel_config::ChannelConfigService>,
+    ) -> Self {
+        self.channel_config = Some(channel_config);
         self
     }
 
@@ -422,9 +432,35 @@ impl RebornLocalLifecycleFacade {
                 let scope = lifecycle_resource_scope(&context)?;
                 extension_management.remove(package_ref, &scope).await
             }
-            LifecycleProductAction::ExtensionAuth { package_ref }
-            | LifecycleProductAction::ExtensionConfigure { package_ref, .. } => {
+            LifecycleProductAction::ExtensionAuth { package_ref } => {
                 unsupported_extension_auth_configure_projection(Some(package_ref))
+            }
+            LifecycleProductAction::ExtensionConfigure {
+                package_ref,
+                payload,
+            } => {
+                // The configure half of the setup surface: validate + persist
+                // manifest-declared channel-config values (extension-runtime
+                // §6.4; a save against an active extension re-runs activation
+                // per §6.5). Auth keeps the unsupported projection above.
+                let (Some(extension_management), Some(channel_config)) =
+                    (&self.extension_management, &self.channel_config)
+                else {
+                    return unsupported_extension_auth_configure_projection(Some(package_ref));
+                };
+                let extension_id = ExtensionId::new(package_ref.id.as_str()).map_err(|error| {
+                    ProductWorkflowError::InvalidBindingRequest {
+                        reason: format!("invalid extension id: {error}"),
+                    }
+                })?;
+                let values = parse_channel_config_payload(payload.as_ref())?;
+                channel_config
+                    .save(&extension_id, values)
+                    .await
+                    .map_err(map_channel_config_error)?;
+                let mut response = extension_management.project(package_ref).await?;
+                response.message = Some("channel configuration saved".to_string());
+                Ok(response)
             }
         }
     }
@@ -581,6 +617,46 @@ fn unsupported_extension_auth_configure_projection(
             "extension_auth_and_configure_not_yet_wired".to_string(),
         ))?],
     ))
+}
+
+/// Decode a configure payload: optional `fields` and `secrets` string maps,
+/// unioned into `(handle, value)` pairs (the service classifies each handle
+/// by its manifest descriptor, so which map a value rode in is advisory).
+fn parse_channel_config_payload(
+    payload: Option<&serde_json::Value>,
+) -> Result<Vec<(String, String)>, ProductWorkflowError> {
+    #[derive(Default, serde::Deserialize)]
+    struct ConfigurePayload {
+        #[serde(default)]
+        fields: std::collections::BTreeMap<String, String>,
+        #[serde(default)]
+        secrets: std::collections::BTreeMap<String, String>,
+    }
+    let decoded = match payload {
+        Some(payload) => {
+            serde_json::from_value::<ConfigurePayload>(payload.clone()).map_err(|error| {
+                ProductWorkflowError::InvalidBindingRequest {
+                    reason: format!("invalid extension configure payload: {error}"),
+                }
+            })?
+        }
+        None => ConfigurePayload::default(),
+    };
+    Ok(decoded.fields.into_iter().chain(decoded.secrets).collect())
+}
+
+fn map_channel_config_error(
+    error: crate::extension_host::channel_config::ChannelConfigError,
+) -> ProductWorkflowError {
+    use crate::extension_host::channel_config::ChannelConfigError;
+    match error {
+        ChannelConfigError::Storage { reason } => ProductWorkflowError::Transient { reason },
+        ChannelConfigError::NotInstalled { .. }
+        | ChannelConfigError::UnknownField { .. }
+        | ChannelConfigError::Reactivation { .. } => ProductWorkflowError::InvalidBindingRequest {
+            reason: error.to_string(),
+        },
+    }
 }
 
 fn map_skill_error(error: SkillManagementError) -> ProductWorkflowError {

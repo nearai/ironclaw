@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- *(reborn-extensions)* every first-party integration (GitHub, Gmail, Google Calendar/Docs/Drive/Sheets/Slides, Notion, Slack, Telegram, Web Access) now ships as a self-contained module under `ironclaw_first_party_extensions::packages`, carrying its manifest/WASM embeds, onboarding copy, OAuth-setup credential, and host trust effects as opaque bundle data. Composition builds them via `bundled_packages()` and the built-in trust policy iterates the inventory generically — generic host code no longer names a concrete extension for package machinery (P7b, DEL-8 lane A).
 - *(reborn-cli)* document the standalone `config init` atomic-write dependency on `tempfile` and call out the default runner cadence change to 5s heartbeats / 200ms polling (down from 10s / 2s).
 - *(reborn)* expose runtime poll settings and document the standalone turn-runner cadence change for callers using `TurnRunnerSettings::default()`.
 - *(channels)* v1 Slack DM policy now defaults to `allowlist` (previously `pairing`); existing installs still configured with `dm_policy=pairing` fall through to `allowlist` as Slack relay pairing is retired ([#5604](https://github.com/nearai/ironclaw/pull/5604)).
@@ -16,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- *(reborn)* retire the `ProductAdapter` trait and its `ironclaw_wasm_product_adapters` host-runtime crate as a consolidation; the live external-protocol contract is `ChannelAdapter`, onto which ProductAdapter's conformance and outbound-delivery suites were ported unweakened (P7b, DEL-5). The `*_v2` adapter crates were renamed to `*_extension` (DEL-2).
 - *(channels)* remove the v1 `pairing_approve` builtin tool and the generic `channel_connection_resume` machinery as part of retiring Slack relay pairing; existing Slack pairing users reconnect via OAuth (Telegram/WASM self-service pairing via the pairing endpoints is unaffected) ([#5604](https://github.com/nearai/ironclaw/pull/5604)).
 
 ## [0.29.1](https://github.com/nearai/ironclaw/compare/ironclaw-v0.29.0...ironclaw-v0.29.1) - 2026-06-04
