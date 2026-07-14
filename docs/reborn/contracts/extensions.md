@@ -92,6 +92,13 @@ Legacy top-level `[[capabilities]]` declarations are accepted only for
 `ManifestSource::HostBundled` packages such as host-owned built-ins and explicit
 compatibility fixtures.
 
+The WebUI/API-facing lifecycle payload
+(`ironclaw_product_workflow::lifecycle::LifecycleExtensionSource`, wire values
+`host_bundled` / `user_registered`) mirrors this manifest-source trust split
+one-to-one. `user_registered` denotes a descriptor from the owner-scoped MCP
+registration store (never first-party; see FEATURE_PARITY.md's "Per-user/private
+MCP registration" row).
+
 Legacy host-bundled WASM manifest:
 
 ```toml
