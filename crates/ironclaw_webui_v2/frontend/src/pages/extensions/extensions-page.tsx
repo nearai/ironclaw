@@ -19,7 +19,8 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     mcpRegistry,
     catalogEntries,
     connectableChannels,
-    isLoading,
+    isExtensionsLoading,
+    isRegistryLoading,
     isBusy,
     actionResult,
     clearResult,
@@ -30,6 +31,12 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     isImporting,
     invalidate,
   } = useExtensions();
+
+  // The registry response already contains every catalog entry plus its
+  // installed flag. Render that snapshot as soon as it arrives; the slower
+  // installed-extension request can progressively replace installed registry
+  // cards with their full management controls when enrichment finishes.
+  const isLoading = isRegistryLoading || (tab !== "registry" && isExtensionsLoading);
 
   const handleConfigure = React.useCallback((extension) => setConfiguring(extension), []);
   const handleInstall = React.useCallback(

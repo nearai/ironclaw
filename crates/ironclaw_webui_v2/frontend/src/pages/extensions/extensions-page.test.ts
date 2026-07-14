@@ -14,7 +14,7 @@ function extensionsPageSourceForTest() {
   return `${lines.join("\n")}\nglobalThis.__testExports = { ExtensionsPage };`;
 }
 
-function renderExtensionsPage(tab) {
+function renderExtensionsPage(tab, extensionState = {}) {
   const context = {
     ActionToast() {},
     ChannelsTab() {},
@@ -38,7 +38,8 @@ function renderExtensionsPage(tab) {
       mcpRegistry: [],
       catalogEntries: [],
       connectableChannels: [],
-      isLoading: false,
+      isExtensionsLoading: false,
+      isRegistryLoading: false,
       isBusy: false,
       actionResult: null,
       clearResult: () => {},
@@ -46,6 +47,7 @@ function renderExtensionsPage(tab) {
       activate: () => {},
       remove: () => {},
       invalidate: () => {},
+      ...extensionState,
     }),
     useParams: () => ({ tab }),
   };
@@ -55,6 +57,21 @@ function renderExtensionsPage(tab) {
     rendered: context.globalThis.__testExports.ExtensionsPage(),
   };
 }
+
+test("ExtensionsPage renders registry data while installed extensions are still loading", () => {
+  const { rendered } = renderExtensionsPage("registry", {
+    isExtensionsLoading: true,
+    isRegistryLoading: false,
+  });
+
+  const renderedJson = JSON.stringify(rendered);
+  assert.doesNotMatch(
+    renderedJson,
+    /v2-skeleton/,
+    "the registry must not remain behind the installed-extension skeleton",
+  );
+  assert.match(renderedJson, /catalogEntries/);
+});
 
 for (const tab of ["installed", "unknown"]) {
   test(`ExtensionsPage redirects ${tab} tab to registry`, () => {

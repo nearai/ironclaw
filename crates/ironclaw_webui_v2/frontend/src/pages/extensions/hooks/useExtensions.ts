@@ -316,7 +316,6 @@ export function useExtensions() {
     },
   });
 
-  const isLoading = extensionsQuery.isLoading || registryQuery.isLoading;
   const isBusy = installMutation.isPending || activateMutation.isPending || removeMutation.isPending || importMutation.isPending;
   const remove = React.useCallback(
     (extension) => {
@@ -339,7 +338,8 @@ export function useExtensions() {
     registry,
     catalogEntries,
     connectableChannels,
-    isLoading,
+    isExtensionsLoading: extensionsQuery.isLoading,
+    isRegistryLoading: registryQuery.isLoading,
     isBusy,
     actionResult,
     clearResult,
