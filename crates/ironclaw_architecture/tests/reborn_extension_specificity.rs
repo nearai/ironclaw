@@ -225,6 +225,221 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "github",
         "credential-prefix redaction (github_pat_)",
     ),
+    (
+        "crates/ironclaw_auth/src/lib.rs",
+        "gmail",
+        "auth-engine OAuth provider-id vocabulary (persisted provider ids), not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_auth/src/lib.rs",
+        "google",
+        "auth-engine OAuth provider-id vocabulary (persisted provider ids), not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_auth/src/lib.rs",
+        "google_calendar",
+        "auth-engine OAuth provider-id vocabulary (persisted provider ids), not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_auth/src/lib.rs",
+        "slack",
+        "auth-engine OAuth provider-id vocabulary (persisted provider ids), not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_auth/src/oauth.rs",
+        "gmail",
+        "auth-engine OAuth provider-id vocabulary (persisted provider ids), not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_auth/src/oauth.rs",
+        "google",
+        "auth-engine OAuth provider-id vocabulary (persisted provider ids), not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_auth/src/oauth.rs",
+        "google_calendar",
+        "auth-engine OAuth provider-id vocabulary (persisted provider ids), not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_auth/src/oauth.rs",
+        "slack",
+        "auth-engine OAuth provider-id vocabulary (persisted provider ids), not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_auth/src/oauth.rs",
+        "www.googleapis.com",
+        "auth-engine OAuth provider-id vocabulary (persisted provider ids), not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_auth/src/scope.rs",
+        "google",
+        "auth-engine OAuth provider-id vocabulary (persisted provider ids), not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_common/src/identity.rs",
+        "github",
+        "persisted credential-name / channel-id vocabulary in the shared identity crate (compat law: stored ids stay readable)",
+    ),
+    (
+        "crates/ironclaw_common/src/identity.rs",
+        "gmail",
+        "persisted credential-name / channel-id vocabulary in the shared identity crate (compat law: stored ids stay readable)",
+    ),
+    (
+        "crates/ironclaw_common/src/identity.rs",
+        "google",
+        "persisted credential-name / channel-id vocabulary in the shared identity crate (compat law: stored ids stay readable)",
+    ),
+    (
+        "crates/ironclaw_common/src/identity.rs",
+        "google-calendar",
+        "persisted credential-name / channel-id vocabulary in the shared identity crate (compat law: stored ids stay readable)",
+    ),
+    (
+        "crates/ironclaw_common/src/identity.rs",
+        "google_calendar",
+        "persisted credential-name / channel-id vocabulary in the shared identity crate (compat law: stored ids stay readable)",
+    ),
+    (
+        "crates/ironclaw_common/src/identity.rs",
+        "notion",
+        "persisted credential-name / channel-id vocabulary in the shared identity crate (compat law: stored ids stay readable)",
+    ),
+    (
+        "crates/ironclaw_common/src/identity.rs",
+        "slack",
+        "persisted credential-name / channel-id vocabulary in the shared identity crate (compat law: stored ids stay readable)",
+    ),
+    (
+        "crates/ironclaw_llm/src/gemini_oauth.rs",
+        "www.googleapis.com",
+        "Gemini OAuth scope host in the multi-provider LLM crate",
+    ),
+    (
+        "crates/ironclaw_reborn_identity/src/filesystem_store.rs",
+        "slack",
+        "credential-authority ProviderKind vocabulary (persisted identity keys), not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_reborn_identity/src/key.rs",
+        "github",
+        "credential-authority ProviderKind vocabulary (persisted identity keys), not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_reborn_identity/src/key.rs",
+        "google",
+        "credential-authority ProviderKind vocabulary (persisted identity keys), not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_reborn_identity/src/key.rs",
+        "slack",
+        "credential-authority ProviderKind vocabulary (persisted identity keys), not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_reborn_identity/src/lib.rs",
+        "github",
+        "credential-authority ProviderKind vocabulary (persisted identity keys), not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_reborn_identity/src/lib.rs",
+        "google",
+        "credential-authority ProviderKind vocabulary (persisted identity keys), not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_reborn_identity/src/lib.rs",
+        "slack",
+        "credential-authority ProviderKind vocabulary (persisted identity keys), not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_common/src/attachment.rs",
+        "telegram",
+        "persisted credential-name / channel-id vocabulary in the shared identity crate (compat law: stored ids stay readable)",
+    ),
+    (
+        "crates/ironclaw_common/src/identity.rs",
+        "telegram",
+        "persisted credential-name / channel-id vocabulary in the shared identity crate (compat law: stored ids stay readable)",
+    ),
+    (
+        "crates/ironclaw_common/src/platform.rs",
+        "telegram",
+        "persisted credential-name / channel-id vocabulary in the shared identity crate (compat law: stored ids stay readable)",
+    ),
+    (
+        "crates/ironclaw_reborn_identity/src/key.rs",
+        "telegram",
+        "credential-authority ProviderKind vocabulary (persisted identity keys), not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_reborn_identity/src/lib.rs",
+        "telegram",
+        "credential-authority ProviderKind vocabulary (persisted identity keys), not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_safety/src/leak_detector.rs",
+        "telegram",
+        "vendor token-format leak detection (telegram_bot_token pattern)",
+    ),
+    (
+        "crates/ironclaw_webui_v2/frontend/src/pages/chat/lib/gates.ts",
+        "github",
+        "WebUI browser-login SSO provider button/route, not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_webui_v2/frontend/src/pages/login/components/oauth-provider-buttons.tsx",
+        "github",
+        "WebUI browser-login SSO provider button/route, not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_webui_v2/frontend/src/pages/login/components/oauth-provider-buttons.tsx",
+        "google",
+        "WebUI browser-login SSO provider button/route, not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_webui_v2/frontend/src/pages/login/hooks/useOAuthProviders.ts",
+        "github",
+        "WebUI browser-login SSO provider button/route, not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_webui_v2/frontend/src/pages/login/hooks/useOAuthProviders.ts",
+        "google",
+        "WebUI browser-login SSO provider button/route, not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_webui_v2/frontend/src/pages/onboarding/onboarding-page.tsx",
+        "github",
+        "WebUI browser-login SSO provider button/route, not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_webui_v2/frontend/src/pages/onboarding/onboarding-page.tsx",
+        "google",
+        "WebUI browser-login SSO provider button/route, not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_webui_v2/frontend/src/pages/settings/components/provider-card.tsx",
+        "github",
+        "WebUI browser-login SSO provider button/route, not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_webui_v2/frontend/src/pages/settings/components/provider-card.tsx",
+        "google",
+        "WebUI browser-login SSO provider button/route, not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_webui_v2/frontend/src/pages/settings/hooks/useProviderLogin.ts",
+        "github",
+        "WebUI browser-login SSO provider button/route, not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_webui_v2/frontend/src/pages/settings/hooks/useProviderLogin.ts",
+        "google",
+        "WebUI browser-login SSO provider button/route, not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_webui_v2/frontend/src/pages/settings/hooks/useProviderLogin.ts",
+        "private.near.ai",
+        "WebUI browser-login SSO provider button/route, not the extensions vendor",
+    ),
 ];
 
 /// Path fragments allowed to reference concrete extension identities for a
@@ -389,10 +604,8 @@ const REBORN_LAYERS: &[&str] = &[
 /// Crates that are the concrete product code (present or planned). A missing
 /// directory is tolerated so the planned extension crates are covered from
 /// the day they appear.
-const CONCRETE_EXTENSION_CRATES: &[&str] = &[
-    "ironclaw_slack_extension",
-    "ironclaw_telegram_extension",
-];
+const CONCRETE_EXTENSION_CRATES: &[&str] =
+    &["ironclaw_slack_extension", "ironclaw_telegram_extension"];
 
 /// Generic-side crates excluded from the scan for a documented structural
 /// reason (see the module header).
@@ -702,23 +915,6 @@ fn apply_path_term_collisions(
 /// debt scheduled for deletion by the extension-runtime phases (P1–P7). Do
 /// not add entries for new code — fix the code instead.
 const ALLOWLIST: &[(&str, &str)] = &[
-    ("crates/ironclaw_auth/src/lib.rs", "gmail"),
-    ("crates/ironclaw_auth/src/lib.rs", "google"),
-    ("crates/ironclaw_auth/src/lib.rs", "google_calendar"),
-    ("crates/ironclaw_auth/src/lib.rs", "slack"),
-    ("crates/ironclaw_auth/src/oauth.rs", "gmail"),
-    ("crates/ironclaw_auth/src/oauth.rs", "google"),
-    ("crates/ironclaw_auth/src/oauth.rs", "google_calendar"),
-    ("crates/ironclaw_auth/src/oauth.rs", "slack"),
-    ("crates/ironclaw_auth/src/oauth.rs", "www.googleapis.com"),
-    ("crates/ironclaw_auth/src/scope.rs", "google"),
-    ("crates/ironclaw_common/src/identity.rs", "github"),
-    ("crates/ironclaw_common/src/identity.rs", "gmail"),
-    ("crates/ironclaw_common/src/identity.rs", "google"),
-    ("crates/ironclaw_common/src/identity.rs", "google-calendar"),
-    ("crates/ironclaw_common/src/identity.rs", "google_calendar"),
-    ("crates/ironclaw_common/src/identity.rs", "notion"),
-    ("crates/ironclaw_common/src/identity.rs", "slack"),
     ("crates/ironclaw_filesystem/src/index.rs", "acme"),
     ("crates/ironclaw_host_api/src/capability.rs", "slack"),
     ("crates/ironclaw_host_api/src/http.rs", "slack"),
@@ -735,10 +931,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     (
         "crates/ironclaw_host_runtime/src/first_party_tools/http.rs",
         "github",
-    ),
-    (
-        "crates/ironclaw_llm/src/gemini_oauth.rs",
-        "www.googleapis.com",
     ),
     (
         "crates/ironclaw_llm/src/tool_schema/placeholder_stripping.rs",
@@ -1095,23 +1287,10 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "webaccess",
     ),
     (
-        "crates/ironclaw_reborn_identity/src/filesystem_store.rs",
-        "slack",
-    ),
-    ("crates/ironclaw_reborn_identity/src/key.rs", "github"),
-    ("crates/ironclaw_reborn_identity/src/key.rs", "google"),
-    ("crates/ironclaw_reborn_identity/src/key.rs", "slack"),
-    ("crates/ironclaw_reborn_identity/src/lib.rs", "github"),
-    ("crates/ironclaw_reborn_identity/src/lib.rs", "google"),
-    ("crates/ironclaw_reborn_identity/src/lib.rs", "slack"),
-    (
         "crates/ironclaw_reborn_traces/src/contribution.rs",
         "github",
     ),
     ("crates/ironclaw_reborn_traces/src/contribution.rs", "gmail"),
-    ("crates/ironclaw_common/src/attachment.rs", "telegram"),
-    ("crates/ironclaw_common/src/identity.rs", "telegram"),
-    ("crates/ironclaw_common/src/platform.rs", "telegram"),
     (
         "crates/ironclaw_product_adapter_registry/src/lib.rs",
         "telegram",
@@ -1130,13 +1309,10 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
         "telegram",
     ),
-    ("crates/ironclaw_reborn_identity/src/key.rs", "telegram"),
-    ("crates/ironclaw_reborn_identity/src/lib.rs", "telegram"),
     (
         "crates/ironclaw_reborn_traces/src/contribution.rs",
         "telegram",
     ),
-    ("crates/ironclaw_safety/src/leak_detector.rs", "telegram"),
     (
         "crates/ironclaw_webui_v2/frontend/src/pages/chat/hooks/useChannelOnboarding.ts",
         "telegram",
@@ -1183,54 +1359,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     (
         "crates/ironclaw_webui_v2/frontend/src/i18n/zh-CN.ts",
         "google",
-    ),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/pages/chat/lib/gates.ts",
-        "github",
-    ),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/pages/login/components/oauth-provider-buttons.tsx",
-        "github",
-    ),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/pages/login/components/oauth-provider-buttons.tsx",
-        "google",
-    ),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/pages/login/hooks/useOAuthProviders.ts",
-        "github",
-    ),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/pages/login/hooks/useOAuthProviders.ts",
-        "google",
-    ),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/pages/onboarding/onboarding-page.tsx",
-        "github",
-    ),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/pages/onboarding/onboarding-page.tsx",
-        "google",
-    ),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/pages/settings/components/provider-card.tsx",
-        "github",
-    ),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/pages/settings/components/provider-card.tsx",
-        "google",
-    ),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/pages/settings/hooks/useProviderLogin.ts",
-        "github",
-    ),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/pages/settings/hooks/useProviderLogin.ts",
-        "google",
-    ),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/pages/settings/hooks/useProviderLogin.ts",
-        "private.near.ai",
     ),
 ];
 
@@ -1546,10 +1674,16 @@ fn term_collision_carve_outs_stay_documented_and_narrow() {
             "google",
             "github",
             "slack",
+            "gmail",
+            "google_calendar",
+            "google-calendar",
+            "notion",
+            "telegram",
             "api.github.com",
             "private.near.ai",
             "accounts.google.com",
             "oauth2.googleapis.com",
+            "www.googleapis.com",
         ]),
         "path-scoped carve-outs are reserved for the four documented collision domains \
          (LLM providers, SSO login, GitHub-as-skill-source, credential-format detection); \
