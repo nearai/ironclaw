@@ -554,7 +554,7 @@ async def test_reborn_legacy_extensions_catalog_failure_shows_retry(
         nonlocal registry_requests
         path = urlparse(route.request.url).path
         if path == "/api/webchat/v2/extensions" and route.request.method == "GET":
-            await fulfill_json(route, {"extensions": []})
+            await fulfill_json(route, {"extensions": [CHANNEL_READY]})
             return
         if path == "/api/webchat/v2/extensions/registry" and route.request.method == "GET":
             registry_requests += 1
@@ -584,16 +584,28 @@ async def test_reborn_legacy_extensions_catalog_failure_shows_retry(
             "Extension catalog unavailable", timeout=15000
         )
         await expect(page.get_by_text("Registry is empty")).to_have_count(0)
-        failed_request_count = registry_requests
-        assert failed_request_count >= 1
+        assert registry_requests >= 1
 
+        await page.goto(
+            f"{reborn_v2_server}/v2/extensions/channels?token={REBORN_V2_AUTH_TOKEN}"
+        )
+        await expect(page.get_by_text("Telegram Channel", exact=True)).to_be_visible(
+            timeout=5000
+        )
+        await expect(error_banner).to_contain_text("Extension catalog unavailable")
+
+        failed_request_count = registry_requests
         registry_available = True
         await error_banner.get_by_role("button", name="Retry").click()
 
+        await expect(error_banner).to_have_count(0)
+        await expect(page.get_by_text("Telegram Channel", exact=True)).to_be_visible()
+        await page.goto(
+            f"{reborn_v2_server}/v2/extensions/registry?token={REBORN_V2_AUTH_TOKEN}"
+        )
         await expect(page.get_by_text("Registry Tool", exact=True)).to_be_visible(
             timeout=5000
         )
-        await expect(error_banner).to_have_count(0)
         assert registry_requests > failed_request_count
     finally:
         await context.close()

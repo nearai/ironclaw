@@ -8,8 +8,28 @@ import { RegistryTab } from "./components/registry-tab";
 import { useExtensions } from "./hooks/useExtensions";
 import { useT } from "../../lib/i18n";
 
-export function ExtensionsPage({ isAdmin = false } = {}) {
+function CatalogErrorBanner({ isRefetching, onRetry }) {
   const t = useT();
+  return (
+    <div
+      className="rounded-lg border border-[color-mix(in_srgb,var(--v2-danger-text)_30%,transparent)] bg-[var(--v2-danger-soft)] px-4 py-4 text-[var(--v2-danger-text)]"
+      role="alert"
+    >
+      <p className="text-sm font-semibold">{t("ext.catalog.loadErrorTitle")}</p>
+      <p className="mt-1 text-sm">{t("ext.catalog.loadErrorDesc")}</p>
+      <button
+        type="button"
+        className="mt-4 rounded-md border border-current px-3 py-1.5 text-sm font-medium transition-opacity hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-50"
+        onClick={onRetry}
+        disabled={isRefetching}
+      >
+        {isRefetching ? t("ext.catalog.retrying") : t("ext.catalog.retry")}
+      </button>
+    </div>
+  );
+}
+
+export function ExtensionsPage({ isAdmin = false } = {}) {
   const { tab = "registry" } = useParams();
   const [configuring, setConfiguring] = React.useState(null);
 
@@ -22,7 +42,8 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     catalogEntries,
     connectableChannels,
     isLoading,
-    error,
+    extensionsError,
+    registryError,
     refetch,
     isRefetching,
     isBusy,
@@ -82,25 +103,11 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     return (<Navigate to="/extensions/registry" replace />);
   }
 
-  if (error) {
+  if (extensionsError || (registryError && tab === "registry")) {
     return (
       <div className="flex h-full flex-col overflow-y-auto">
         <div className="v2-page-entrance flex-1 p-4 sm:p-6">
-          <div
-            className="rounded-lg border border-[color-mix(in_srgb,var(--v2-danger-text)_30%,transparent)] bg-[var(--v2-danger-soft)] px-4 py-4 text-[var(--v2-danger-text)]"
-            role="alert"
-          >
-            <p className="text-sm font-semibold">{t("ext.catalog.loadErrorTitle")}</p>
-            <p className="mt-1 text-sm">{t("ext.catalog.loadErrorDesc")}</p>
-            <button
-              type="button"
-              className="mt-4 rounded-md border border-current px-3 py-1.5 text-sm font-medium transition-opacity hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-50"
-              onClick={() => refetch()}
-              disabled={isRefetching}
-            >
-              {isRefetching ? t("ext.catalog.retrying") : t("ext.catalog.retry")}
-            </button>
-          </div>
+          <CatalogErrorBanner isRefetching={isRefetching} onRetry={refetch} />
         </div>
       </div>
     );
@@ -149,6 +156,8 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
       <div className="v2-page-entrance flex-1 p-4 sm:p-6">
         <div className="space-y-5">
           <ActionToast result={actionResult} onDismiss={clearResult} />
+          {registryError &&
+          (<CatalogErrorBanner isRefetching={isRefetching} onRetry={refetch} />)}
           {tabContent[tab]}
         </div>
       </div>

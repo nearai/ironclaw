@@ -186,6 +186,8 @@ test("useExtensions exposes catalog errors and refetches both catalog queries", 
   vm.runInNewContext(useExtensionsSourceForTest(), context);
   const result = context.globalThis.__testExports.useExtensions();
 
+  assert.equal(result.extensionsError, null);
+  assert.equal(result.registryError, catalogError);
   assert.equal(result.error, catalogError);
   await result.refetch();
   assert.deepEqual(refetched, ["extensions", "extension-registry"]);

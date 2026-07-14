@@ -345,6 +345,8 @@ export function useExtensions() {
     catalogEntries,
     connectableChannels,
     isLoading,
+    extensionsError: extensionsQuery.error || null,
+    registryError: registryQuery.error || null,
     error: extensionsQuery.error || registryQuery.error || null,
     refetch,
     isRefetching: extensionsQuery.isRefetching || registryQuery.isRefetching,
