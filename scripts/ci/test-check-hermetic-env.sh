@@ -83,6 +83,14 @@ assert allows "pre-existing unguarded set_var, unrelated new fn" "src/lib.rs" \
     'fn t() {\n    unsafe { std::env::set_var("FOO", "1"); }\n}\n' \
     'fn t() {\n    unsafe { std::env::set_var("FOO", "1"); }\n}\nfn unrelated() { let _ = 2; }\n'
 
+# ── A guard token in a COMMENT must not exempt a raw mutation → blocked ─────
+# The guard tokens (EnvGuard/lock_env/…) only serialize when they name real
+# lock/RAII construction. A bare `// EnvGuard` comment beside raw set_var is
+# not serialization and must NOT clear the hunk.
+assert blocks "comment 'EnvGuard' does not exempt raw set_var" "src/lib.rs" \
+    "fn a() {}\n" \
+    'fn a() {}\n#[test]\nfn t() {\n    // EnvGuard would go here\n    unsafe { std::env::set_var("FOO", "1"); }\n}\n'
+
 echo ""
 echo "Passed: $PASS, Failed: $FAIL"
 [ "$FAIL" -eq 0 ]

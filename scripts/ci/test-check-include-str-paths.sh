@@ -110,6 +110,55 @@ mk "$T7" "prompts/session_summary.md" "hello\n"
 mk "$T7" "Dockerfile" 'FROM rust AS builder\nCOPY . .\nRUN cargo build --bin ironclaw\n'
 assert_allows "COPY . . copies the whole context" "$T7"
 
+# ── Case 8: braceless #[cfg(test)] item must not swallow following code ─────
+# A single-line `#[cfg(test)] use ...;` has no braces; the span scan must stop
+# at the `;`, not run forward to the next unrelated `{` and mark a real
+# (non-test) include_str! below it as test-only. Here the include_str! is
+# compiled by cargo build and its target is NOT COPYd, so it must be blocked.
+T8="$TMP/case8"
+mk "$T8" "src/hooks/summary.rs" '#[cfg(test)]\nuse std::fmt;\n\nfn real() {\n    let _ = include_str!("../../prompts/needed.md");\n}\n'
+mk "$T8" "prompts/needed.md" "hi\n"
+mk "$T8" "Dockerfile" 'FROM rust AS builder\nCOPY src/ src/\nRUN cargo build --bin ironclaw\n'
+assert_blocks "braceless cfg(test) does not hide a real include_str!" "$T8" "never COPYs \`prompts\`"
+
+# ── Case 9: narrowed COPY of one crate must not cover a sibling crate ───────
+# `COPY crates/foo/` copies only crates/foo; a prompt referenced from
+# crates/bar is NOT in the build context and must be flagged (top-segment
+# matching would wrongly treat all of `crates/` as covered).
+T9="$TMP/case9"
+mk "$T9" "crates/bar/src/lib.rs" 'const Q: &str = include_str!("../assets/x.md");\n'
+mk "$T9" "crates/bar/assets/x.md" "y\n"
+mk "$T9" "crates/foo/src/lib.rs" 'fn f() {}\n'
+mk "$T9" "Dockerfile" 'FROM rust AS builder\nCOPY crates/foo/ crates/foo/\nRUN cargo build --bin ironclaw\n'
+assert_allows "narrowed COPY crates/foo/ does not compile crates/bar (not blamed)" "$T9"
+
+# ── Case 10: narrowed COPY covers its own crate's nested prompt ────────────
+T10="$TMP/case10"
+mk "$T10" "crates/foo/src/lib.rs" 'const Q: &str = include_str!("../prompts/p.md");\n'
+mk "$T10" "crates/foo/prompts/p.md" "y\n"
+mk "$T10" "Dockerfile" 'FROM rust AS builder\nCOPY crates/foo/ crates/foo/\nRUN cargo build --bin ironclaw\n'
+assert_allows "narrowed COPY crates/foo/ covers crates/foo's own nested prompt" "$T10"
+
+# ── Case 11: root build.rs include_str! target must be covered ─────────────
+# `cargo build` compiles the repo-root build.rs; a prompt it reads that is not
+# COPYd fails the Docker build exactly like a src/ reference.
+T11="$TMP/case11"
+mk "$T11" "build.rs" 'fn main() { let _ = include_str!("prompts/gen.md"); }\n'
+mk "$T11" "prompts/gen.md" "hi\n"
+mk "$T11" "Dockerfile" 'FROM rust AS builder\nCOPY build.rs build.rs\nRUN cargo build --bin ironclaw\n'
+assert_blocks "root build.rs include_str! missing from COPY is flagged" "$T11" "never COPYs \`prompts\`"
+
+# ── Case 12: include_str! target resolving outside the repo is flagged ─────
+# The target exists on the host but lives outside the repo root, so no Docker
+# COPY can include it — the image build would fail. `outside_ext.md` is a
+# sibling of the repo tree; `../../../outside_ext.md` from src/hooks/ climbs
+# above the repo root to reach it.
+T12="$TMP/case12"
+mk "$T12" "src/hooks/summary.rs" 'const P: &str = include_str!("../../../outside_ext.md");\n'
+mk "$T12" "Dockerfile" 'FROM rust AS builder\nCOPY src/ src/\nRUN cargo build --bin ironclaw\n'
+printf 'x\n' > "$TMP/outside_ext.md"
+assert_blocks "include_str! target outside the repo is flagged" "$T12" "outside the build context"
+
 echo ""
 echo "Passed: $PASS, Failed: $FAIL"
 [ "$FAIL" -eq 0 ]

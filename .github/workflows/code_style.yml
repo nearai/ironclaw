@@ -54,7 +54,7 @@ jobs:
         run: |
           CHANGED_FILES="$(git diff --name-only "$BASE_SHA"..."$HEAD_SHA")"
 
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(src/|crates/|channels-src/|tools-src/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile$|build\.rs$|\.gitignore$|scripts/check_no_panics\.py$|scripts/check_gateway_boundaries\.py$|\.github/workflows/code_style\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(src/|crates/|channels-src/|tools-src/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile|build\.rs$|\.gitignore$|scripts/ci/|\.githooks/|scripts/check_no_panics\.py$|scripts/check_gateway_boundaries\.py$|\.github/workflows/code_style\.yml$)'; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_code=false" >> "$GITHUB_OUTPUT"
@@ -209,6 +209,19 @@ jobs:
       # no compile — safe on a shallow checkout.
       - name: include_str! paths + Docker COPY coverage
         run: scripts/ci/check-include-str-paths.sh
+      # Guards the #6015 coverage-flake class on the actual PR diff (not just
+      # the synthetic self-tests below): a newly-added unguarded env mutation
+      # fails here. The checker diffs the working tree against the PR base, so
+      # fetch that base tip first (a shallow checkout lacks origin/<base>).
+      - name: Hermetic env mutation guard (PR diff)
+        env:
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            git fetch --no-tags --depth=1 origin \
+              "+refs/heads/${GITHUB_BASE_REF}:refs/remotes/origin/${GITHUB_BASE_REF}"
+          fi
+          scripts/ci/check-hermetic-env.sh
       # Lock in the checkers' own behaviour (they build hermetic temp repos).
       - name: Static-check self-tests
         run: |

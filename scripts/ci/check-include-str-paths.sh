@@ -41,6 +41,20 @@ def top_segment(rel: str) -> str:
     return parts[0] if parts else ""
 
 
+def is_covered(rel, roots):
+    """True if `rel` (a repo-relative path) is at or under any COPY root. A
+    root is the normalized copied path (e.g. `crates/foo` from
+    `COPY crates/foo/ crates/foo/`), so a narrowed crate copy covers that
+    crate but not its siblings."""
+    p = Path(rel)
+    while True:
+        if str(p) in roots:
+            return True
+        if p.parent == p:
+            return False
+        p = p.parent
+
+
 def cfg_test_spans(lines):
     """Return a list of (start, end) 0-based line index ranges guarded by
     `#[cfg(test)]`. `cargo build` does not compile these, so include_str!
@@ -52,10 +66,22 @@ def cfg_test_spans(lines):
     n = len(lines)
     while i < n:
         if CFG_TEST_RE.search(lines[i]):
-            # Find the opening brace of the guarded item.
+            # Find the opening brace of the guarded item. A braceless item
+            # (e.g. `#[cfg(test)] use foo;`) terminates at the first `;` — do
+            # NOT run forward to the next unrelated `{`, which would swallow
+            # real (non-test) code below and hide its include_str! calls.
             j = i
+            braceless = False
             while j < n and "{" not in lines[j]:
+                if ";" in lines[j]:
+                    braceless = True
+                    break
                 j += 1
+            if braceless:
+                # Single-line guarded item with no block; span is just it.
+                spans.append((i, j))
+                i = j + 1
+                continue
             if j >= n:
                 break
             depth = 0
@@ -85,8 +111,14 @@ for base in ("src", "crates"):
     d = repo / base
     if d.is_dir():
         rs_files.extend(sorted(d.rglob("*.rs")))
+# The repo-root build.rs is compiled by `cargo build` too (and COPYd into the
+# builder stage), so an include_str! it reads is equally a Docker-context risk.
+root_build = repo / "build.rs"
+if root_build.is_file():
+    rs_files.append(root_build)
 
 missing = []          # (referencing_file, raw_path)
+outside = []          # (referencing_file, raw_path) — resolves outside the repo
 refs = []             # (referencing_relpath, target_relpath)
 for f in rs_files:
     try:
@@ -112,8 +144,9 @@ for f in rs_files:
         try:
             target_rel = target.relative_to(repo)
         except ValueError:
-            # Resolves outside the repo — unusual, but not a Docker-context
-            # concern. Skip (existence already confirmed above).
+            # Resolves outside the repo: it exists on the host but can never be
+            # inside a Docker build context, so the image build would fail.
+            outside.append((f_rel, raw))
             continue
         refs.append((f_rel, target_rel))
 
@@ -139,7 +172,10 @@ def parse_dockerfile(text):
             if s in (".", "./"):
                 full_copy = True
                 continue
-            roots.add(top_segment(s))
+            # Store the full normalized copied path (not just its top segment)
+            # so a narrowed copy like `COPY crates/foo/` covers crates/foo but
+            # not sibling crates.
+            roots.add(str(Path(s)))
     return roots, full_copy, builds
 
 
@@ -157,16 +193,14 @@ for df in dockerfiles:
         continue
     df_rel = df.relative_to(repo)
     for ref_file, target in refs:
-        ref_top = top_segment(str(ref_file))
         # Only enforce for referencing files this Dockerfile actually copies
         # (i.e. actually compiles). A Dockerfile that never copies `src/`
         # (e.g. Dockerfile.reborn) does not compile `src/hooks/*.rs`, so a
         # repo-root `prompts/` reference from there is irrelevant to it.
-        if ref_top not in roots:
+        if not is_covered(ref_file, roots):
             continue
-        target_top = top_segment(str(target))
-        if target_top not in roots:
-            coverage_errors.append((df_rel, ref_file, target, target_top))
+        if not is_covered(target, roots):
+            coverage_errors.append((df_rel, ref_file, target, top_segment(str(target))))
 
 
 # ── Report ────────────────────────────────────────────────────────────────
@@ -177,6 +211,14 @@ if missing:
     print("✗ include_str!() targets that do not exist on disk:")
     for ref_file, raw in missing:
         print(f"    {ref_file}: include_str!(\"{raw}\") — file not found")
+    print()
+
+if outside:
+    failed = True
+    print("✗ include_str!() targets that resolve outside the build context "
+          "(exist on host, but no Docker COPY can ever include them):")
+    for ref_file, raw in outside:
+        print(f"    {ref_file}: include_str!(\"{raw}\") — resolves outside the repo")
     print()
 
 if coverage_errors:

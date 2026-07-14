@@ -35,7 +35,14 @@ SUPPRESS_RE='// env-hermetic:'
 # Diff source: staged changes if any, else the working tree vs the upstream base.
 if git diff --cached --quiet 2>/dev/null; then
     BASE_REF=""
-    for ref in "@{upstream}" "origin/HEAD" "origin/main" "origin/master" "main" "master"; do
+    # In CI (GitHub Actions) the PR base is exposed via GITHUB_BASE_REF; a
+    # shallow checkout may lack `origin/main`, so try the PR base first.
+    CANDIDATES=()
+    if [ -n "${GITHUB_BASE_REF:-}" ]; then
+        CANDIDATES+=("origin/$GITHUB_BASE_REF" "$GITHUB_BASE_REF")
+    fi
+    CANDIDATES+=("@{upstream}" "origin/HEAD" "origin/main" "origin/master" "main" "master")
+    for ref in "${CANDIDATES[@]}"; do
         if git rev-parse --verify --quiet "$ref" >/dev/null 2>&1; then
             BASE_REF="$ref"
             break
@@ -46,9 +53,12 @@ if git diff --cached --quiet 2>/dev/null; then
         echo "hermetic-env: no base ref to diff against; skipping"
         exit 0
     fi
-    DIFF=$(git diff -W "$BASE_REF" -- '*.rs' 2>/dev/null || true)
+    # No `|| true`: a git-diff failure must abort (set -e), not silently yield
+    # an empty diff that would bypass the guard. `git diff` returns 0 on a
+    # clean run regardless of content, so this only surfaces real errors.
+    DIFF=$(git diff -W "$BASE_REF" -- '*.rs')
 else
-    DIFF=$(git diff --cached -W -- '*.rs' 2>/dev/null || true)
+    DIFF=$(git diff --cached -W -- '*.rs')
 fi
 
 [ -n "$DIFF" ] || { echo "hermetic-env: no Rust changes; OK"; exit 0; }
@@ -66,8 +76,13 @@ HITS=$(printf '%s\n' "$DIFF" | awk -v guard="$GUARD_RE" -v mut="$MUT_RE" -v supp
     /^@@ / { flush(); next }
     {
         # A guard token anywhere in the function hunk (added or context)
-        # clears the whole hunk.
-        if ($0 ~ guard) has_guard = 1
+        # clears the whole hunk — but only when it names real lock/RAII
+        # construction, not when it merely appears in a `//` comment. Strip
+        # the line comment before testing so `// EnvGuard` does not exempt an
+        # adjacent raw mutation.
+        code = $0
+        sub(/\/\/.*/, "", code)
+        if (code ~ guard) has_guard = 1
         # Only ADDED lines that mutate env and are not suppressed accumulate.
         if ($0 ~ /^\+/ && $0 ~ mut && $0 !~ suppress) {
             line = $0
