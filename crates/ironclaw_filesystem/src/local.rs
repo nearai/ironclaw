@@ -472,13 +472,37 @@ fn unique_temp_path(
     Ok(parent.join(format!(".{name}.tmp.{counter}")))
 }
 
+/// Flush the parent directory entry so a create/rename is durable.
+///
+/// This is a POSIX durability step: on Linux and macOS, the rename is only
+/// guaranteed to survive a crash once the *directory* has been fsync'd.
+///
+/// Windows has no equivalent, and cannot express one. `File::open(dir)` yields a
+/// handle without write access, and `sync_all()` on it becomes `FlushFileBuffers`,
+/// which fails with `ERROR_ACCESS_DENIED` (`io::ErrorKind::PermissionDenied`) for
+/// exactly that reason. Because this runs at the end of `atomic_write_file`, the
+/// error propagates and **every write through `LocalFilesystem` fails on
+/// Windows** — including the bundled-skill install that `local-dev` performs at
+/// boot, so `ironclaw-reborn run`/`serve` cannot start at all.
+///
+/// NTFS orders and persists directory-entry changes for create/rename without an
+/// explicit directory flush, so the step is a no-op there. POSIX durability
+/// semantics are preserved everywhere they exist.
 async fn sync_parent_dir(virtual_path: &VirtualPath, parent: &Path) -> Result<(), FilesystemError> {
-    let dir = tokio::fs::File::open(parent)
-        .await
-        .map_err(|error| io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error))?;
-    dir.sync_all()
-        .await
-        .map_err(|error| io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error))
+    #[cfg(windows)]
+    {
+        let _ = (virtual_path, parent);
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let dir = tokio::fs::File::open(parent).await.map_err(|error| {
+            io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error)
+        })?;
+        dir.sync_all()
+            .await
+            .map_err(|error| io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error))
+    }
 }
 
 async fn ensure_existing_ancestor_contained(
