@@ -2731,7 +2731,7 @@ credential_handle = "{id}_bot_token"
     }
 
     #[test]
-    fn channel_connection_strategy_comes_from_typed_channel_and_auth_surfaces() {
+    fn channel_connection_strategy_requires_composition_owned_channel_and_auth_surfaces() {
         let renamed_oauth = bundled_extension_package(
             "renamed-chat",
             "Renamed Chat",
@@ -2745,13 +2745,25 @@ credential_handle = "{id}_bot_token"
         )
         .expect("valid OAuth channel");
         let renamed_summary = renamed_oauth.summary();
+        assert!(
+            renamed_summary.channel_connection.is_none(),
+            "an extension-wide Slack OAuth surface must not claim ownership of a renamed channel"
+        );
+
+        let slack_oauth = bundled_extension_package(
+            "slack",
+            "Slack",
+            &channel_manifest("slack", "Slack", r#"["inbound_messages"]"#, Some("slack")),
+            Vec::new(),
+        )
+        .expect("valid composition-owned OAuth channel");
         assert_eq!(
-            renamed_summary
+            slack_oauth
+                .summary()
                 .channel_connection
                 .as_ref()
                 .map(|connection| connection.strategy),
-            Some(ironclaw_product_workflow::RebornChannelConnectStrategy::OAuth),
-            "OAuth must not depend on the package being literally named slack"
+            Some(ironclaw_product_workflow::RebornChannelConnectStrategy::OAuth)
         );
 
         let slack_without_oauth = bundled_extension_package(
@@ -2760,15 +2772,11 @@ credential_handle = "{id}_bot_token"
             &channel_manifest("slack", "Slack", r#"["inbound_messages"]"#, None),
             Vec::new(),
         )
-        .expect("valid proof-code channel");
+        .expect("valid but unsupported inbound channel package");
         let slack_summary = slack_without_oauth.summary();
-        assert_eq!(
-            slack_summary
-                .channel_connection
-                .as_ref()
-                .map(|connection| connection.strategy),
-            Some(ironclaw_product_workflow::RebornChannelConnectStrategy::InboundProofCode),
-            "a package name must not spoof OAuth behavior"
+        assert!(
+            slack_summary.channel_connection.is_none(),
+            "a package name must not spoof OAuth or expose an unimplemented proof-code route"
         );
 
         let outbound_oauth = bundled_extension_package(

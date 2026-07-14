@@ -128,11 +128,18 @@ fn is_sanctioned(path: &str) -> bool {
 
 fn is_reborn_python_scenario(relative: &str, contents: &str) -> bool {
     let file_name = relative.rsplit('/').next().unwrap_or_default();
+    let imports_reborn_webui_harness = contents.lines().any(|line| {
+        line.trim_start()
+            .starts_with("from reborn_webui_harness import")
+    });
+    let uses_reborn_binary_fixture = contents
+        .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        .any(|token| token.starts_with("ironclaw_reborn_") && token.ends_with("_binary"));
     relative.starts_with("tests/e2e/scenarios/")
         && file_name.ends_with(".py")
         && (file_name.starts_with("test_reborn_webui_v2_")
-            || contents.contains("reborn_webui_harness")
-            || contents.contains("ironclaw_reborn_"))
+            || imports_reborn_webui_harness
+            || uses_reborn_binary_fixture)
 }
 
 fn record_hits(relative: &str, contents: &str, hits: &mut Vec<String>) {
@@ -260,6 +267,11 @@ fn python_scan_follows_reborn_webui_and_harness_boundaries() {
         )
         .expect("write legacy gateway Python fixture");
     }
+    std::fs::write(
+        scenarios.join("test_v2_notion_mcp_oauth_flow.py"),
+        "# docs: ironclaw_reborn_composition\nfixture = {\"kind\": \"wasm_channel\"}\n",
+    )
+    .expect("write legacy gateway fixture with a Reborn documentation reference");
 
     let mut hits = Vec::new();
     scan_dir(&root, &scenarios, &mut hits);

@@ -3,8 +3,8 @@ use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_auth::{
-    AuthProductScope, AuthProviderId, AuthSurface, SecretCleanupAction, SecretCleanupReport,
-    SecretCleanupRequest,
+    AuthProductScope, AuthProviderId, AuthSurface, SLACK_PROVIDER_ID, SecretCleanupAction,
+    SecretCleanupReport, SecretCleanupRequest,
 };
 use ironclaw_extensions::{
     CapabilitySurfaceDeclV2, CapabilityVisibility, ExtensionActivationState, ExtensionError,
@@ -71,8 +71,8 @@ mod hosted_mcp_test_support;
 mod install_policy;
 
 use crate::extension_host::available_extensions::{
-    AvailableExtensionCatalog, AvailableExtensionPackage, imported_extension_package,
-    materialize_available_extension, visible_capability_ids,
+    AvailableExtensionCatalog, AvailableExtensionPackage, SLACK_EXTENSION_ID,
+    imported_extension_package, materialize_available_extension, visible_capability_ids,
 };
 use crate::extension_host::extension_activation_credentials::{
     ChannelSetupActivationCredentialGate, ExtensionActivationCredentialGate,
@@ -97,8 +97,6 @@ use install_policy::{
     RemoveDecision, decide_install_on_existing, decide_remove, derive_owner,
     ensure_caller_may_operate, install_scope_for_owner,
 };
-
-const RETIRED_SLACK_USER_EXTENSION_ID: &str = "slack_user";
 
 // This port is deliberately scoped to LocalSingleUser composition. The
 // lifecycle service models the installed extension set, while active_registry
@@ -206,20 +204,10 @@ pub(crate) async fn restore_extension_lifecycle_state(
         .await
         .map_err(map_extension_installation_error)?
     {
-        if remove_retired_internal_installation(installation_store, &installation).await? {
-            continue;
-        }
         let package_ref = LifecyclePackageRef::new(
             LifecyclePackageKind::Extension,
             installation.extension_id().as_str(),
         )?;
-        // A row whose extension id the catalog does not (yet) materialize a
-        // package for — e.g. a placeholder row written by the standalone
-        // v1->Reborn migration tool ahead of catalog package materialization
-        // — must not abort restore for every other installation (#5499
-        // review). `resolve`'s only realistic failure here is "not found";
-        // skip and keep the row (never delete/rewrite persisted state) so it
-        // restores once the catalog gains the package.
         // A row whose extension id the catalog does not (yet) materialize a
         // package for — e.g. a placeholder row written by the standalone
         // v1->Reborn migration tool ahead of catalog package materialization
@@ -239,6 +227,7 @@ pub(crate) async fn restore_extension_lifecycle_state(
                 continue;
             }
         };
+        ensure_supported_channel_connection(&available)?;
         if let Err(hash_error) = validate_restored_manifest_hash(&installation, &available) {
             migrate_host_bundled_manifest_hash(
                 installation_store,
@@ -275,33 +264,6 @@ pub(crate) async fn restore_extension_lifecycle_state(
         }
     }
     Ok(())
-}
-
-async fn remove_retired_internal_installation(
-    installation_store: &Arc<dyn ExtensionInstallationStore>,
-    installation: &ExtensionInstallation,
-) -> Result<bool, ProductWorkflowError> {
-    if installation.extension_id().as_str() != RETIRED_SLACK_USER_EXTENSION_ID {
-        return Ok(false);
-    }
-
-    tracing::info!(
-        extension_id = installation.extension_id().as_str(),
-        installation_id = installation.installation_id().as_str(),
-        "removing retired internal extension installation during lifecycle restore"
-    );
-    installation_store
-        .delete_installation(installation.installation_id())
-        .await
-        .map_err(map_extension_installation_error)?;
-    match installation_store
-        .delete_manifest(installation.extension_id())
-        .await
-    {
-        Ok(()) | Err(ExtensionInstallationError::ManifestNotFound { .. }) => {}
-        Err(error) => return Err(map_extension_installation_error(error)),
-    }
-    Ok(true)
 }
 
 impl RebornLocalExtensionManagementPort {
@@ -720,6 +682,7 @@ impl RebornLocalExtensionManagementPort {
             let catalog = self.catalog.read().await;
             catalog.resolve(&package_ref)?
         };
+        ensure_supported_channel_connection(&available)?;
         let _operation_guard = self.operation_lock.lock().await;
         let installation_id =
             ExtensionInstallationId::new(available.package.id.as_str().to_string())
@@ -910,6 +873,7 @@ impl RebornLocalExtensionManagementPort {
                 "activate",
             )?;
             let package = self.lifecycle_package(&extension_id).await?;
+            ensure_supported_channel_package(&package)?;
             if let ExtensionActivationCredentialReadiness::Missing(missing) =
                 credential_gate.credential_readiness(&package).await?
             {
@@ -2205,39 +2169,87 @@ fn append_exact_capability_guidance(message: &mut String, visible_capability_ids
     message.push('.');
 }
 
-// Build the structured connect requirement for an inbound channel. OAuth is
-// selected only when the same typed manifest projection also declares an OAuth
-// auth surface; package ids, runtime kinds, and section names are irrelevant.
-// An inbound channel without OAuth gets a generic proof-code prompt. NOTE: no such
-// channel ships today (Slack is the only inbound product adapter), and no
-// backend mounts the generic proof-code redeem route — the first non-Slack
-// inbound channel must mount one alongside this requirement or its submit
-// will 404 (see PAIRING_REDEEM_PATH in the webui pairing-api.js).
+/// Reject channel packages whose connection lifecycle has no authenticated
+/// owner in Train A. This check runs before the install operation lock and
+/// before any manifest, filesystem, registry, or credential side effect.
+fn ensure_supported_channel_connection(
+    available: &AvailableExtensionPackage,
+) -> Result<(), ProductWorkflowError> {
+    let surfaces = available.package.manifest.capability_surfaces();
+    if has_inbound_channel(&surfaces)
+        && (available.source != ManifestSource::HostBundled
+            || !composition_owns_inbound_oauth_connection(available.package.id.as_str(), &surfaces))
+    {
+        return Err(ProductWorkflowError::InvalidBindingRequest {
+            reason: format!(
+                "inbound channel extension {} has no authenticated connection owner in Train A",
+                available.package.id.as_str()
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn ensure_supported_channel_package(
+    package: &ExtensionPackage,
+) -> Result<(), ProductWorkflowError> {
+    let surfaces = package.manifest.capability_surfaces();
+    if has_inbound_channel(&surfaces)
+        && !composition_owns_inbound_oauth_connection(package.id.as_str(), &surfaces)
+    {
+        return Err(ProductWorkflowError::InvalidBindingRequest {
+            reason: format!(
+                "inbound channel extension {} has no authenticated connection owner in Train A",
+                package.id.as_str()
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn has_inbound_channel(surfaces: &[CapabilitySurfaceDeclV2]) -> bool {
+    surfaces.iter().any(|surface| {
+        matches!(
+            surface,
+            CapabilitySurfaceDeclV2::Channel { inbound: true, .. }
+        )
+    })
+}
+
+/// Train A has one composition-owned inbound connection authority: the
+/// unified host-bundled Slack package is bound by the Slack product-auth
+/// provider. Extension-wide auth surfaces do not encode which channel they
+/// own, so every other combination fails closed until Train B introduces a
+/// typed channel-to-connection-owner association.
+fn composition_owns_inbound_oauth_connection(
+    package_id: &str,
+    surfaces: &[CapabilitySurfaceDeclV2],
+) -> bool {
+    package_id == SLACK_EXTENSION_ID
+        && has_inbound_channel(surfaces)
+        && surfaces.iter().any(|surface| {
+            matches!(
+                surface,
+                CapabilitySurfaceDeclV2::Auth {
+                    provider,
+                    setup: RuntimeCredentialAccountSetup::OAuth { .. },
+                } if provider.as_str() == SLACK_PROVIDER_ID
+            )
+        })
+}
+
+// Build the structured connection requirement for Train A's explicit
+// composition allowlist: the unified `slack` package plus its `slack` OAuth
+// provider surface. Runtime kind and section names remain irrelevant; every
+// other inbound combination is rejected before installation and projects no
+// connection requirement.
 pub(crate) fn channel_connection_requirement(
     channel_id: &str,
     display_name: &str,
     surfaces: &[CapabilitySurfaceDeclV2],
 ) -> Option<ChannelConnectionRequirement> {
-    let inbound = surfaces.iter().any(|surface| {
-        matches!(
-            surface,
-            CapabilitySurfaceDeclV2::Channel { inbound: true, .. }
-        )
-    });
-    if !inbound {
-        return None;
-    }
-    let oauth = surfaces.iter().any(|surface| {
-        matches!(
-            surface,
-            CapabilitySurfaceDeclV2::Auth {
-                setup: RuntimeCredentialAccountSetup::OAuth { .. },
-                ..
-            }
-        )
-    });
-    if oauth {
-        Some(ChannelConnectionRequirement {
+    composition_owns_inbound_oauth_connection(channel_id, surfaces).then(|| {
+        ChannelConnectionRequirement {
             channel: channel_id.to_string(),
             strategy: RebornChannelConnectStrategy::OAuth,
             instructions: format!(
@@ -2248,20 +2260,8 @@ pub(crate) fn channel_connection_requirement(
             error_message: format!(
                 "{display_name} OAuth connection failed. Try configuring {display_name} again."
             ),
-        })
-    } else {
-        Some(ChannelConnectionRequirement {
-            channel: channel_id.to_string(),
-            strategy: RebornChannelConnectStrategy::InboundProofCode,
-            instructions: format!(
-                "Open {}'s app or bot, get the pairing code, and paste it here.",
-                display_name
-            ),
-            input_placeholder: "Enter pairing code".to_string(),
-            submit_label: "Connect".to_string(),
-            error_message: "Pairing failed. Check the code and try again.".to_string(),
-        })
-    }
+        }
+    })
 }
 fn extension_ids_from_package_ref(
     package_ref: &LifecyclePackageRef,
@@ -2358,6 +2358,7 @@ fn extension_search_has_installed_external_channel_result(
             .summary
             .surface_kinds
             .contains(&CapabilitySurfaceKind::Channel)
+            && extension.summary.channel_connection.is_some()
     })
 }
 
@@ -2585,8 +2586,8 @@ mod tests {
     }
 
     #[test]
-    fn installed_external_channel_search_result_gets_activation_guidance() {
-        let payload = LifecycleProductPayload::ExtensionSearch {
+    fn installed_connectable_channel_search_result_gets_activation_guidance() {
+        let mut payload = LifecycleProductPayload::ExtensionSearch {
             extensions: vec![LifecycleSearchExtensionSummary {
                 summary: LifecycleExtensionSummary {
                     package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
@@ -2602,7 +2603,14 @@ mod tests {
                     credential_requirements: Vec::new(),
                     onboarding: None,
                     channel_directions: None,
-                    channel_connection: None,
+                    channel_connection: Some(ChannelConnectionRequirement {
+                        channel: "slack".to_string(),
+                        strategy: RebornChannelConnectStrategy::OAuth,
+                        instructions: "Connect Slack".to_string(),
+                        input_placeholder: String::new(),
+                        submit_label: "Connect Slack".to_string(),
+                        error_message: "Slack connection failed".to_string(),
+                    }),
                 },
                 installation_phase: Some(LifecyclePhase::Installed),
             }],
@@ -2613,6 +2621,15 @@ mod tests {
             Some(&payload)
         ));
         assert!(!extension_search_has_ready_result(Some(&payload)));
+
+        let LifecycleProductPayload::ExtensionSearch { extensions, .. } = &mut payload else {
+            unreachable!("fixture is an extension search payload");
+        };
+        extensions[0].summary.channel_connection = None;
+        assert!(
+            !extension_search_has_installed_external_channel_result(Some(&payload)),
+            "an outbound-only channel must not advertise an unsupported explicit connect flow"
+        );
     }
 
     #[test]
@@ -2654,12 +2671,12 @@ mod tests {
 
     #[test]
     fn oauth_channel_activation_names_only_real_model_visible_capabilities() {
-        // Provider id, display name, and model-visible capability namespace
-        // are independent. Connection guidance may describe Slack, but tool
-        // guidance must come only from the exact ids the publisher returned.
-        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "renamed-chat")
+        // The composition-owned channel identity and model-visible capability
+        // namespace are independent. Connection guidance may describe Slack,
+        // but tool guidance comes only from the exact ids the publisher returned.
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
             .expect("valid package ref");
-        let package = fixture_oauth_external_channel_package("renamed-chat", "Slack").package;
+        let package = fixture_oauth_external_channel_package("slack", "Slack").package;
         let visible_capability_ids = vec!["workspace.lookup".to_string()];
 
         let message = activation_success_message(&package_ref, &package, &visible_capability_ids);
@@ -3023,12 +3040,12 @@ output_schema_ref = "schemas/run.output.json"
         let (_dir, _storage_root, port, _active_registry, _installation_store) =
             extension_management_port_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_packages(vec![
-                    fixture_oauth_external_channel_package("renamed-chat", "Slack"),
+                    fixture_oauth_external_channel_package("slack", "Slack"),
                 ]),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
-        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "renamed-chat")
-            .expect("valid ref");
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("valid ref");
         port.install(package_ref.clone(), &lifecycle_owner())
             .await
             .expect("install slack channel");
@@ -3075,7 +3092,7 @@ output_schema_ref = "schemas/run.output.json"
         let requirement = connection_required
             .as_ref()
             .expect("slack channel activation must carry a structured connection requirement");
-        assert_eq!(requirement.channel, "renamed-chat");
+        assert_eq!(requirement.channel, "slack");
         assert_eq!(requirement.strategy, RebornChannelConnectStrategy::OAuth);
         assert_eq!(requirement.input_placeholder, "");
         assert_eq!(requirement.submit_label, "Connect Slack");
@@ -3090,8 +3107,8 @@ output_schema_ref = "schemas/run.output.json"
     }
 
     #[tokio::test]
-    async fn extension_activate_returns_generic_pairing_guidance_for_external_channel_package() {
-        let (_dir, _storage_root, facade, _active_registry, _installation_store) =
+    async fn extension_install_rejects_inbound_channel_without_supported_connection_owner() {
+        let (_dir, storage_root, facade, _active_registry, installation_store) =
             extension_lifecycle_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_packages(vec![fixture_external_channel_package(
                     "telegram", "Telegram",
@@ -3100,61 +3117,120 @@ output_schema_ref = "schemas/run.output.json"
             );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
             .expect("valid ref");
-        facade
+        let error = facade
             .execute(
                 lifecycle_surface_context(),
-                LifecycleProductAction::ExtensionInstall {
-                    package_ref: package_ref.clone(),
-                },
+                LifecycleProductAction::ExtensionInstall { package_ref },
             )
             .await
-            .expect("install external channel");
+            .expect_err("Train A has no authenticated generic proof-code owner");
 
-        let activate = facade
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { reason }
+                if reason.contains("authenticated connection owner")
+        ));
+        assert!(
+            !storage_root.join("system/extensions/telegram").exists(),
+            "unsupported connection policy must run before package materialization"
+        );
+        assert!(
+            installation_store
+                .list_installations()
+                .await
+                .expect("list installations after rejected install")
+                .is_empty(),
+            "unsupported connection policy must run before installation persistence"
+        );
+        assert!(
+            installation_store
+                .get_manifest(&ExtensionId::new("telegram").expect("valid extension id"))
+                .await
+                .expect("read manifest after rejected install")
+                .is_none(),
+            "unsupported connection policy must run before manifest persistence"
+        );
+    }
+
+    #[tokio::test]
+    async fn extension_install_rejects_inbound_channel_with_unrelated_oauth_surface() {
+        let (_dir, storage_root, facade, _active_registry, installation_store) =
+            extension_lifecycle_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(vec![
+                    fixture_oauth_external_channel_package("teams", "Teams"),
+                ]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "teams").expect("valid ref");
+
+        let error = facade
             .execute(
                 lifecycle_surface_context(),
-                LifecycleProductAction::ExtensionActivate { package_ref },
+                LifecycleProductAction::ExtensionInstall { package_ref },
             )
             .await
-            .expect("activate external channel");
+            .expect_err("Slack tool OAuth cannot own a Teams inbound channel");
 
-        assert_eq!(activate.phase, LifecyclePhase::Active);
-        let message = activate.message.as_deref().expect("activation message");
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { reason }
+                if reason.contains("authenticated connection owner")
+        ));
+        assert!(!storage_root.join("system/extensions/teams").exists());
         assert!(
-            message.contains("Telegram is installed as an external channel")
-                && message.contains("app or bot")
-                && message.contains("pairing code")
-                && message.contains("WebChat connection panel")
-                && message.contains("rather than normal chat")
-                && message.contains("continue the user's original request")
-                && message.contains("already connected")
-                && message.contains("until connection is confirmed"),
-            "external channel activation should guide the model into generic pairing UI, got: {message}"
+            installation_store
+                .list_installations()
+                .await
+                .expect("list installations after rejected install")
+                .is_empty()
         );
-        let Some(LifecycleProductPayload::ExtensionActivate {
-            connection_required,
-            ..
-        }) = activate.payload.as_ref()
-        else {
-            panic!("expected extension activate payload");
-        };
-        let requirement = connection_required
-            .as_ref()
-            .expect("external channel activation must carry a structured connection requirement");
-        assert_eq!(requirement.channel, "telegram");
-        assert_eq!(
-            requirement.strategy,
-            RebornChannelConnectStrategy::InboundProofCode
+    }
+
+    #[tokio::test]
+    async fn extension_install_rejects_non_host_bundled_slack_oauth_channel() {
+        let mut slack = fixture_oauth_external_channel_package("slack", "Slack");
+        slack.source = ManifestSource::RegistryInstalled;
+        let (_dir, storage_root, facade, _active_registry, installation_store) =
+            extension_lifecycle_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(vec![slack]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("valid ref");
+
+        let error = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionInstall { package_ref },
+            )
+            .await
+            .expect_err("only the host-bundled Slack package owns the connection");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { reason }
+                if reason.contains("authenticated connection owner")
+        ));
+        assert!(!storage_root.join("system/extensions/slack").exists());
+        assert!(
+            installation_store
+                .list_installations()
+                .await
+                .expect("list installations after rejected install")
+                .is_empty()
         );
         assert!(
-            requirement.instructions.contains("Telegram"),
-            "generic channel copy should name the channel: {}",
-            requirement.instructions
+            installation_store
+                .get_manifest(&ExtensionId::new("slack").expect("valid extension id"))
+                .await
+                .expect("read manifest after rejected install")
+                .is_none()
         );
     }
 
     #[test]
-    fn channel_connection_reducer_uses_typed_surfaces_not_package_identity() {
+    fn channel_connection_reducer_requires_composition_owned_provider_identity() {
         let channel = |inbound, outbound| CapabilitySurfaceDeclV2::Channel {
             host_api: ironclaw_extensions::HostApiId::new("ironclaw.product_adapter/v1")
                 .expect("host API id"),
@@ -3164,27 +3240,34 @@ output_schema_ref = "schemas/run.output.json"
             outbound,
         };
         let oauth = CapabilitySurfaceDeclV2::Auth {
-            provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("chat-auth")
+            provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("slack")
                 .expect("provider id"),
             setup: RuntimeCredentialAccountSetup::OAuth {
                 scopes: vec!["identity:read".to_string()],
             },
         };
 
-        let renamed_oauth = channel_connection_requirement(
-            "renamed-chat",
-            "Renamed Chat",
-            &[channel(true, false), oauth],
+        let slack_oauth = channel_connection_requirement(
+            "slack",
+            "Slack",
+            &[channel(true, false), oauth.clone()],
         )
-        .expect("inbound OAuth channel connects");
-        assert_eq!(renamed_oauth.strategy, RebornChannelConnectStrategy::OAuth);
+        .expect("the composition-owned Slack OAuth channel connects");
+        assert_eq!(slack_oauth.strategy, RebornChannelConnectStrategy::OAuth);
 
-        let slack_named_without_oauth =
-            channel_connection_requirement("slack", "Slack", &[channel(true, false)])
-                .expect("inbound proof-code channel connects");
-        assert_eq!(
-            slack_named_without_oauth.strategy,
-            RebornChannelConnectStrategy::InboundProofCode
+        assert!(
+            channel_connection_requirement(
+                "teams",
+                "Teams",
+                &[channel(true, true), oauth.clone()],
+            )
+            .is_none(),
+            "an extension-wide Slack OAuth tool surface must not own an unrelated Teams channel"
+        );
+
+        assert!(
+            channel_connection_requirement("slack", "Slack", &[channel(true, false)]).is_none(),
+            "an inbound channel without OAuth must not expose a guaranteed-404 proof-code flow"
         );
 
         assert!(
@@ -3195,7 +3278,7 @@ output_schema_ref = "schemas/run.output.json"
                     channel(false, true),
                     CapabilitySurfaceDeclV2::Auth {
                         provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new(
-                            "chat-auth",
+                            "slack"
                         )
                         .expect("provider id"),
                         setup: RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
@@ -3211,7 +3294,7 @@ output_schema_ref = "schemas/run.output.json"
     async fn generic_external_channel_remove_succeeds_without_cleanup_facade() {
         let (_dir, storage_root, facade, _active_registry, installation_store) =
             extension_lifecycle_fixture_with_catalog_and_service(
-                AvailableExtensionCatalog::from_packages(vec![fixture_external_channel_package(
+                AvailableExtensionCatalog::from_packages(vec![fixture_outbound_channel_package(
                     "telegram", "Telegram",
                 )]),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
@@ -3266,7 +3349,7 @@ output_schema_ref = "schemas/run.output.json"
     async fn extension_remove_without_cleanup_or_credentials_does_not_require_actor() {
         let (_dir, storage_root, port, _active_registry, installation_store) =
             extension_management_port_fixture_with_catalog_and_service(
-                AvailableExtensionCatalog::from_packages(vec![fixture_external_channel_package(
+                AvailableExtensionCatalog::from_packages(vec![fixture_outbound_channel_package(
                     "telegram", "Telegram",
                 )]),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
@@ -3925,48 +4008,32 @@ output_schema_ref = "schemas/run.output.json"
 
     #[tokio::test]
     async fn extension_search_distinguishes_external_channel_connect_from_delivery() {
-        // Generic external-channel search guidance. Uses a neutral `example_bot`
-        // fixture rather than the real Slack bot: under model B `slack_bot` is
-        // hidden from search, so a Slack-named fixture would be filtered out and
-        // this generic guidance would go untested.
-        let (_dir, _storage_root, facade, _active_registry, _installation_store) =
-            extension_lifecycle_fixture_with_catalog_and_service(
-                AvailableExtensionCatalog::from_packages(vec![fixture_external_channel_package(
-                    "example_bot",
-                    "Example",
-                )]),
+        // The unified Slack package is the only Train A channel whose OAuth
+        // ownership is composition-proven; unrelated channel/auth surface
+        // combinations fail closed.
+        let (_dir, _storage_root, port, _active_registry, _installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(vec![
+                    fixture_oauth_external_channel_package("slack", "Slack"),
+                ]),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
-        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "example_bot")
-            .expect("valid ref");
-        facade
-            .execute(
-                lifecycle_surface_context(),
-                LifecycleProductAction::ExtensionInstall {
-                    package_ref: package_ref.clone(),
-                },
-            )
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("valid ref");
+        port.install(package_ref.clone(), &lifecycle_owner())
             .await
-            .expect("install example channel");
-        facade
-            .execute(
-                lifecycle_surface_context(),
-                LifecycleProductAction::ExtensionActivate {
-                    package_ref: package_ref.clone(),
-                },
-            )
-            .await
-            .expect("activate example channel");
+            .expect("install Slack channel");
+        port.activate_with_prechecked_credentials_for_test(
+            package_ref.clone(),
+            ExtensionActivationMode::Static,
+        )
+        .await
+        .expect("activate Slack channel");
 
-        let search = facade
-            .execute(
-                lifecycle_surface_context(),
-                LifecycleProductAction::ExtensionSearch {
-                    query: "example".to_string(),
-                },
-            )
+        let search = port
+            .search("slack", None, &lifecycle_owner())
             .await
-            .expect("search active example channel");
+            .expect("search active Slack channel");
 
         let message = search.message.as_deref().expect("search guidance");
         assert!(
@@ -3986,11 +4053,11 @@ output_schema_ref = "schemas/run.output.json"
         else {
             panic!("expected extension search payload");
         };
-        let example = extensions
+        let slack = extensions
             .iter()
-            .find(|extension| extension.summary.package_ref.id.as_str() == "example_bot")
-            .expect("example search result");
-        assert_eq!(example.installation_phase, Some(LifecyclePhase::Active));
+            .find(|extension| extension.summary.package_ref.id.as_str() == "slack")
+            .expect("Slack search result");
+        assert_eq!(slack.installation_phase, Some(LifecyclePhase::Active));
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
@@ -4849,86 +4916,6 @@ output_schema_ref = "schemas/run.output.json"
     }
 
     #[tokio::test]
-    async fn restore_removes_retired_slack_user_installation_without_catalog_entry() {
-        let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
-        let extension_id =
-            ExtensionId::new(RETIRED_SLACK_USER_EXTENSION_ID).expect("valid extension id");
-        let installation_id =
-            ExtensionInstallationId::new(RETIRED_SLACK_USER_EXTENSION_ID).expect("valid install");
-        let manifest_hash = "sha256:retired-slack-user".to_string();
-        installation_store
-            .upsert_manifest(fixture_manifest_record_with_source(
-                retired_slack_user_manifest(),
-                ManifestSource::HostBundled,
-                Some(manifest_hash.clone()),
-            ))
-            .await
-            .expect("upsert retired slack_user manifest");
-        installation_store
-            .upsert_installation(
-                ExtensionInstallation::new(
-                    installation_id.clone(),
-                    extension_id.clone(),
-                    ExtensionActivationState::Enabled,
-                    ExtensionManifestRef::new(
-                        extension_id.clone(),
-                        Some(ManifestHash::new(manifest_hash).expect("valid hash")),
-                    ),
-                    Vec::new(),
-                    chrono::Utc::now(),
-                    InstallationOwner::Tenant,
-                )
-                .expect("retired slack_user installation"),
-            )
-            .await
-            .expect("upsert retired slack_user installation");
-        let restored_lifecycle = Arc::new(Mutex::new(ExtensionLifecycleService::new(
-            ExtensionRegistry::new(),
-        )));
-        let restored_active_registry =
-            Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
-        let restored_trust_policy = test_extension_trust_policy();
-        let restored_active_extensions = test_active_extension_publisher(
-            Arc::clone(&restored_active_registry),
-            Arc::clone(&restored_trust_policy),
-        );
-        let installation_store_trait: Arc<dyn ExtensionInstallationStore> =
-            installation_store.clone();
-        let filesystem: Arc<dyn RootFilesystem> = Arc::new(LocalFilesystem::new());
-
-        restore_extension_lifecycle_state(
-            &AvailableExtensionCatalog::from_packages(Vec::new()),
-            &filesystem,
-            &installation_store_trait,
-            &restored_lifecycle,
-            &restored_active_extensions,
-        )
-        .await
-        .expect("retired slack_user install is cleaned up during restore");
-
-        assert!(
-            installation_store
-                .get_installation(&installation_id)
-                .await
-                .expect("read retired installation")
-                .is_none()
-        );
-        assert!(
-            installation_store
-                .get_manifest(&extension_id)
-                .await
-                .expect("read retired manifest")
-                .is_none()
-        );
-        assert!(
-            restored_active_registry
-                .snapshot()
-                .get_extension(&extension_id)
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
     async fn restore_skips_installation_absent_from_catalog_and_restores_valid_installation() {
         // Regression for PR #5499 review finding: a persisted installation
         // row whose extension id the catalog does not (yet) materialize a
@@ -5023,6 +5010,132 @@ output_schema_ref = "schemas/run.output.json"
             restored_active_registry
                 .snapshot()
                 .get_extension(&orphan_extension_id)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_rejects_persisted_enabled_inbound_channel_without_connection_owner() {
+        let available = fixture_external_channel_package("telegram", "Telegram");
+        let manifest_toml = available.manifest_toml.clone();
+        let manifest_hash = available_manifest_hash(&available).expect("manifest hash");
+        let extension_id = available.package.id.clone();
+        let installation_id =
+            ExtensionInstallationId::new(extension_id.as_str()).expect("valid installation id");
+        let (_dir, storage_root, port, active_registry, installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(vec![available]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        installation_store
+            .upsert_manifest(fixture_manifest_record_with_source(
+                &manifest_toml,
+                ManifestSource::HostBundled,
+                Some(manifest_hash.as_str().to_string()),
+            ))
+            .await
+            .expect("seed unsupported manifest");
+        installation_store
+            .upsert_installation(
+                ExtensionInstallation::new(
+                    installation_id,
+                    extension_id.clone(),
+                    ExtensionActivationState::Enabled,
+                    ExtensionManifestRef::new(extension_id.clone(), Some(manifest_hash)),
+                    Vec::new(),
+                    chrono::Utc::now(),
+                    InstallationOwner::Tenant,
+                )
+                .expect("seed unsupported installation"),
+            )
+            .await
+            .expect("persist unsupported installation");
+
+        let catalog = port.catalog.read().await;
+        let installation_store_trait: Arc<dyn ExtensionInstallationStore> = installation_store;
+        let error = restore_extension_lifecycle_state(
+            &catalog,
+            &port.filesystem,
+            &installation_store_trait,
+            &port.lifecycle_service,
+            &port.active_extensions,
+        )
+        .await
+        .expect_err("restart must not publish a persisted unsupported inbound channel");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { reason }
+                if reason.contains("authenticated connection owner")
+        ));
+        assert!(!storage_root.join("system/extensions/telegram").exists());
+        assert!(
+            active_registry
+                .snapshot()
+                .get_extension(&extension_id)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn activation_rejects_persisted_installed_inbound_channel_without_connection_owner() {
+        let available = fixture_external_channel_package("telegram", "Telegram");
+        let manifest_toml = available.manifest_toml.clone();
+        let manifest_hash = available_manifest_hash(&available).expect("manifest hash");
+        let extension_id = available.package.id.clone();
+        let package_ref = available.package_ref.clone();
+        let mut lifecycle = ExtensionLifecycleService::new(ExtensionRegistry::new());
+        lifecycle
+            .install(available.package.clone())
+            .await
+            .expect("seed pre-restart lifecycle package");
+        let (_dir, _storage_root, port, active_registry, installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(vec![available]),
+                lifecycle,
+            );
+        installation_store
+            .upsert_manifest(fixture_manifest_record_with_source(
+                &manifest_toml,
+                ManifestSource::HostBundled,
+                Some(manifest_hash.as_str().to_string()),
+            ))
+            .await
+            .expect("seed unsupported manifest");
+        installation_store
+            .upsert_installation(
+                ExtensionInstallation::new(
+                    ExtensionInstallationId::new(extension_id.as_str())
+                        .expect("valid installation id"),
+                    extension_id.clone(),
+                    ExtensionActivationState::Installed,
+                    ExtensionManifestRef::new(extension_id.clone(), Some(manifest_hash)),
+                    Vec::new(),
+                    chrono::Utc::now(),
+                    InstallationOwner::Tenant,
+                )
+                .expect("seed unsupported installation"),
+            )
+            .await
+            .expect("persist unsupported installation");
+
+        let error = port
+            .activate_with_prechecked_credentials_for_test(
+                package_ref,
+                ExtensionActivationMode::Static,
+            )
+            .await
+            .expect_err("activation must revalidate persisted connection ownership");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { reason }
+                if reason.contains("authenticated connection owner")
+        ));
+        assert!(
+            active_registry
+                .snapshot()
+                .get_extension(&extension_id)
                 .is_none()
         );
     }
@@ -8119,18 +8232,28 @@ output_schema_ref = "schemas/run.output.json"
     }
 
     fn fixture_external_channel_package(id: &str, name: &str) -> AvailableExtensionPackage {
-        fixture_external_channel_package_with_oauth(id, name, false)
+        fixture_external_channel_package_with_direction_and_oauth(id, name, true, false)
+    }
+
+    fn fixture_outbound_channel_package(id: &str, name: &str) -> AvailableExtensionPackage {
+        fixture_external_channel_package_with_direction_and_oauth(id, name, false, false)
     }
 
     fn fixture_oauth_external_channel_package(id: &str, name: &str) -> AvailableExtensionPackage {
-        fixture_external_channel_package_with_oauth(id, name, true)
+        fixture_external_channel_package_with_direction_and_oauth(id, name, true, true)
     }
 
-    fn fixture_external_channel_package_with_oauth(
+    fn fixture_external_channel_package_with_direction_and_oauth(
         id: &str,
         name: &str,
+        inbound: bool,
         oauth: bool,
     ) -> AvailableExtensionPackage {
+        let capability_flags = if inbound {
+            "inbound_messages"
+        } else {
+            "external_final_reply_push"
+        };
         let oauth_section = if oauth {
             format!(
                 r#"
@@ -8183,7 +8306,7 @@ header_name = "X-Channel-Signature"
 timestamp_header_name = "X-Channel-Timestamp"
 
 [product_adapter.inbound.capabilities]
-flags = ["inbound_messages"]
+flags = ["{capability_flags}"]
 
 [[product_adapter.inbound.required_credentials]]
 handle = "{id}_bot_token"
@@ -8203,7 +8326,7 @@ credential_handle = "{id}_bot_token"
         name: &str,
         requirement: ExtensionRemovalCleanupRequirement,
     ) -> AvailableExtensionPackage {
-        let mut package = fixture_external_channel_package(id, name);
+        let mut package = fixture_outbound_channel_package(id, name);
         package.cleanup_requirements = vec![requirement];
         package
     }
@@ -8358,36 +8481,6 @@ input_schema_ref = "schemas/search.input.json"
 output_schema_ref = "schemas/search.output.json"
 "#
         .to_string()
-    }
-
-    fn retired_slack_user_manifest() -> &'static str {
-        r#"
-schema_version = "reborn.extension_manifest.v2"
-id = "slack_user"
-name = "Retired Slack User Extension"
-version = "0.1.0"
-description = "Retired internal Slack user tools companion"
-trust = "first_party_requested"
-
-[runtime]
-kind = "wasm"
-module = "wasm/slack_user_tool.wasm"
-
-[[host_api]]
-id = "ironclaw.capability_provider/v1"
-section = "capability_provider.tools"
-
-[capability_provider.tools]
-
-[[capability_provider.tools.capabilities]]
-id = "slack_user.search"
-description = "Search Slack messages"
-effects = ["network"]
-default_permission = "ask"
-visibility = "model"
-input_schema_ref = "schemas/search.input.json"
-output_schema_ref = "schemas/search.output.json"
-"#
     }
 
     fn fixture_extension_package_from_manifest(manifest_toml: &str) -> AvailableExtensionPackage {

@@ -875,13 +875,13 @@ mod tests {
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
-    async fn webui_and_tool_extension_remove_generic_filesystem_channel_without_slack_cleanup() {
+    async fn webui_and_tool_extension_remove_generic_outbound_channel_without_slack_cleanup() {
         const GENERIC_CHANNEL_MANIFEST: &str = r#"
 schema_version = "reborn.extension_manifest.v2"
 id = "channel-ext"
 name = "Channel Ext"
 version = "0.1.0"
-description = "A filesystem-discovered external channel extension."
+description = "A filesystem-discovered outbound channel extension."
 trust = "third_party"
 
 [runtime]
@@ -901,7 +901,7 @@ header_name = "X-Channel-Signature"
 timestamp_header_name = "X-Channel-Timestamp"
 
 [product_adapter.inbound.capabilities]
-flags = ["inbound_messages"]
+flags = ["external_final_reply_push"]
 
 [[product_adapter.inbound.required_credentials]]
 handle = "channel_ext_token"

@@ -310,11 +310,11 @@ async fn production_libsql_malformed_product_auth_record_fails_typed_migration()
 
 #[cfg(feature = "postgres")]
 #[tokio::test]
-#[ignore = "live prerequisite: requires Docker and a reachable Postgres testcontainer"]
+#[ignore = "live prerequisite: requires IRONCLAW_TEST_POSTGRES_URL or Docker/testcontainers"]
 async fn production_postgres_migrates_slack_personal_before_publishing_services() {
     let (_container, pool, database_url) = postgres_pool_or_skip()
         .await
-        .expect("live Postgres migration lane requires Docker and a reachable testcontainer");
+        .expect("live Postgres migration lane requires IRONCLAW_TEST_POSTGRES_URL or Docker");
     let scope = auth_scope("postgres-slack-migration");
     let (first_notifier, first_handle) = live_wake_notifier();
     let first_services = build_reborn_services(

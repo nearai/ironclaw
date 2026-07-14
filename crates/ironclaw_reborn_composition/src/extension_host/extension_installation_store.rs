@@ -306,9 +306,106 @@ fn normalize_wire_state(mut state: WireState) -> Result<WireState, ExtensionInst
     for manifest in &mut state.manifests {
         normalize_persisted_legacy_manifest(manifest)?;
     }
+    remove_retired_slack_user_state(&mut state)?;
     normalize_retired_slack_identity(&mut state)?;
     state.installations = canonicalize_installation_rows(state.installations)?;
     Ok(state)
+}
+
+/// Remove the retired internal-only Slack user-tools package in the same
+/// normalized snapshot as every other persisted-state migration, but only in
+/// a Slack-enabled build and after strict manifest/ref authority validation.
+/// The former restore-time cleanup issued separate installation and manifest
+/// deletes, which could leave a torn state after interruption.
+fn remove_retired_slack_user_state(
+    state: &mut WireState,
+) -> Result<(), ExtensionInstallationError> {
+    const RETIRED_SLACK_USER_ID: &str = "slack_user";
+
+    let manifest_ids = state
+        .manifests
+        .iter()
+        .map(|record| persisted_manifest_id(&record.raw_toml))
+        .collect::<Result<Vec<_>, _>>()?;
+    let retired_manifest_indices = manifest_ids
+        .iter()
+        .enumerate()
+        .filter_map(|(index, id)| (id == RETIRED_SLACK_USER_ID).then_some(index))
+        .collect::<Vec<_>>();
+    if retired_manifest_indices.iter().any(|index| {
+        !matches!(
+            state.manifests[*index].source,
+            WireManifestSource::HostBundled
+        )
+    }) {
+        return Err(invalid_installation_error(
+            "retired internal Slack user-tools manifests must be host-bundled records",
+        ));
+    }
+    let retired_installations = state
+        .installations
+        .iter()
+        .filter(|installation| installation.extension_id().as_str() == RETIRED_SLACK_USER_ID)
+        .collect::<Vec<_>>();
+    if retired_manifest_indices.is_empty() && retired_installations.is_empty() {
+        return Ok(());
+    }
+    let retired_manifest_index = match retired_manifest_indices.as_slice() {
+        [index] => *index,
+        [] => {
+            return Err(invalid_installation_error(
+                "retired internal Slack user-tools installations require a matching host-bundled manifest",
+            ));
+        }
+        _ => {
+            return Err(invalid_installation_error(
+                "persisted extension state contains multiple retired Slack user-tools manifests",
+            ));
+        }
+    };
+    let retired_manifest = state.manifests[retired_manifest_index]
+        .clone()
+        .into_manifest_record()?;
+    for installation in retired_installations {
+        if retired_manifest.extension_id() != installation.manifest_ref().extension_id() {
+            return Err(ExtensionInstallationError::ManifestExtensionMismatch {
+                extension_id: installation.extension_id().clone(),
+                manifest_extension_id: installation.manifest_ref().extension_id().clone(),
+            });
+        }
+        match (
+            retired_manifest.manifest_hash(),
+            installation.manifest_ref().manifest_hash(),
+        ) {
+            (Some(registered), Some(referenced)) if registered == referenced => {}
+            (None, None) => {}
+            _ => {
+                return Err(ExtensionInstallationError::ManifestHashMismatch {
+                    extension_id: installation.extension_id().clone(),
+                });
+            }
+        }
+    }
+
+    #[cfg(not(feature = "slack-v2-host-beta"))]
+    return Err(invalid_installation_error(
+        "retired Slack user-tools migration is unavailable in this build",
+    ));
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    {
+        let mut retained_manifests = Vec::with_capacity(state.manifests.len());
+        for (record, id) in state.manifests.drain(..).zip(manifest_ids) {
+            if id != RETIRED_SLACK_USER_ID {
+                retained_manifests.push(record);
+            }
+        }
+        state.manifests = retained_manifests;
+        state
+            .installations
+            .retain(|installation| installation.extension_id().as_str() != RETIRED_SLACK_USER_ID);
+        Ok(())
+    }
 }
 
 fn normalize_persisted_legacy_manifest(

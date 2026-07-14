@@ -474,6 +474,264 @@ async fn load_at_slack_fold_preserves_canonical_fields_and_uses_enabled_wins() {
     assert_eq!(after_second.entry.body, after_first.entry.body);
 }
 
+#[cfg(feature = "slack-v2-host-beta")]
+#[tokio::test]
+async fn load_at_atomically_removes_retired_slack_user_state() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let state_path = test_state_path();
+    let state = WireState {
+        manifests: vec![WireManifestRecord {
+            raw_toml: legacy_manifest_toml("slack_user"),
+            source: WireManifestSource::HostBundled,
+            manifest_hash: Some(ManifestHash::new("sha256:retired-slack-user").unwrap()),
+            removal_cleanup_requirements: Vec::new(),
+        }],
+        installations: vec![named_installation(
+            "slack_user",
+            "slack_user",
+            ExtensionActivationState::Enabled,
+            InstallationOwner::Tenant,
+            Some("sha256:retired-slack-user"),
+            Vec::new(),
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+            ExtensionHealthStatus::Healthy,
+        )],
+    };
+    let before = seed_wire_state(&backend, &state_path, &state).await;
+    let filesystem: Arc<dyn RootFilesystem> = backend.clone();
+
+    let store = FilesystemExtensionInstallationStore::load_at(filesystem, state_path.clone())
+        .await
+        .expect("retired internal user-tools state is removed in the normalized snapshot");
+
+    assert!(store.list_installations().await.unwrap().is_empty());
+    assert!(
+        store
+            .get_manifest(&ExtensionId::new("slack_user").unwrap())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let after_first = backend.get(&state_path).await.unwrap().unwrap();
+    assert_ne!(after_first.version, before.version);
+
+    let second_filesystem: Arc<dyn RootFilesystem> = backend.clone();
+    FilesystemExtensionInstallationStore::load_at(second_filesystem, state_path.clone())
+        .await
+        .expect("retired user-tools cleanup is rerunnable");
+    let after_second = backend.get(&state_path).await.unwrap().unwrap();
+    assert_eq!(after_second.version, after_first.version);
+    assert_eq!(after_second.entry.body, after_first.entry.body);
+}
+
+#[cfg(not(feature = "slack-v2-host-beta"))]
+#[tokio::test]
+async fn load_at_without_slack_feature_preserves_retired_slack_user_state() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let state_path = test_state_path();
+    let state = WireState {
+        manifests: vec![WireManifestRecord {
+            raw_toml: legacy_manifest_toml("slack_user"),
+            source: WireManifestSource::HostBundled,
+            manifest_hash: Some(ManifestHash::new("sha256:retired-slack-user").unwrap()),
+            removal_cleanup_requirements: Vec::new(),
+        }],
+        installations: vec![named_installation(
+            "slack_user",
+            "slack_user",
+            ExtensionActivationState::Enabled,
+            InstallationOwner::Tenant,
+            Some("sha256:retired-slack-user"),
+            Vec::new(),
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+            ExtensionHealthStatus::Healthy,
+        )],
+    };
+    let seeded = seed_wire_state(&backend, &state_path, &state).await;
+    let filesystem: Arc<dyn RootFilesystem> = backend.clone();
+
+    let error =
+        match FilesystemExtensionInstallationStore::load_at(filesystem, state_path.clone()).await {
+            Ok(_) => panic!("feature-disabled build cannot delete retired Slack user state"),
+            Err(error) => error,
+        };
+
+    assert!(matches!(
+        error,
+        ExtensionInstallationError::InvalidInstallation { ref reason }
+            if reason.contains("Slack user-tools migration is unavailable")
+    ));
+    let after = backend.get(&state_path).await.unwrap().unwrap();
+    assert_eq!(after.version, seeded.version);
+    assert_eq!(after.entry.body, seeded.entry.body);
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+#[tokio::test]
+async fn load_at_never_deletes_retired_slack_user_with_mismatched_manifest_hash() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let state_path = test_state_path();
+    let state = WireState {
+        manifests: vec![WireManifestRecord {
+            raw_toml: legacy_manifest_toml("slack_user"),
+            source: WireManifestSource::HostBundled,
+            manifest_hash: Some(ManifestHash::new("sha256:retired-slack-user").unwrap()),
+            removal_cleanup_requirements: Vec::new(),
+        }],
+        installations: vec![named_installation(
+            "slack_user",
+            "slack_user",
+            ExtensionActivationState::Enabled,
+            InstallationOwner::Tenant,
+            Some("sha256:different-retired-slack-user"),
+            Vec::new(),
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+            ExtensionHealthStatus::Healthy,
+        )],
+    };
+    let seeded = seed_wire_state(&backend, &state_path, &state).await;
+    let filesystem: Arc<dyn RootFilesystem> = backend.clone();
+
+    let error =
+        match FilesystemExtensionInstallationStore::load_at(filesystem, state_path.clone()).await {
+            Ok(_) => panic!("mismatched retired manifest authority must fail closed"),
+            Err(error) => error,
+        };
+
+    assert!(matches!(
+        error,
+        ExtensionInstallationError::ManifestHashMismatch { .. }
+    ));
+    let after = backend.get(&state_path).await.unwrap().unwrap();
+    assert_eq!(after.version, seeded.version);
+    assert_eq!(after.entry.body, seeded.entry.body);
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+#[tokio::test]
+async fn load_at_never_deletes_retired_slack_user_with_invalid_strict_manifest() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let state_path = test_state_path();
+    let malformed_manifest = current_manifest_toml("slack_user").replace(
+        "trust = \"third_party\"\n",
+        "trust = \"third_party\"\nunknown_retired_field = true\n",
+    );
+    let state = WireState {
+        manifests: vec![WireManifestRecord {
+            raw_toml: malformed_manifest,
+            source: WireManifestSource::HostBundled,
+            manifest_hash: Some(ManifestHash::new("sha256:retired-slack-user").unwrap()),
+            removal_cleanup_requirements: Vec::new(),
+        }],
+        installations: vec![named_installation(
+            "slack_user",
+            "slack_user",
+            ExtensionActivationState::Enabled,
+            InstallationOwner::Tenant,
+            Some("sha256:retired-slack-user"),
+            Vec::new(),
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+            ExtensionHealthStatus::Healthy,
+        )],
+    };
+    let seeded = seed_wire_state(&backend, &state_path, &state).await;
+    let filesystem: Arc<dyn RootFilesystem> = backend.clone();
+
+    let error =
+        match FilesystemExtensionInstallationStore::load_at(filesystem, state_path.clone()).await {
+            Ok(_) => panic!("strict-invalid retired manifest must fail closed"),
+            Err(error) => error,
+        };
+
+    assert!(matches!(error, ExtensionInstallationError::Manifest(_)));
+    let after = backend.get(&state_path).await.unwrap().unwrap();
+    assert_eq!(after.version, seeded.version);
+    assert_eq!(after.entry.body, seeded.entry.body);
+}
+
+#[tokio::test]
+async fn load_at_never_deletes_non_bundled_slack_user_state() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let state_path = test_state_path();
+    let state = WireState {
+        manifests: vec![WireManifestRecord {
+            raw_toml: current_manifest_toml("slack_user"),
+            source: WireManifestSource::RegistryInstalled,
+            manifest_hash: Some(ManifestHash::new("sha256:user-owned-slack-user").unwrap()),
+            removal_cleanup_requirements: Vec::new(),
+        }],
+        installations: vec![named_installation(
+            "slack_user",
+            "slack_user",
+            ExtensionActivationState::Enabled,
+            InstallationOwner::Tenant,
+            Some("sha256:user-owned-slack-user"),
+            Vec::new(),
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+            ExtensionHealthStatus::Healthy,
+        )],
+    };
+    let seeded = seed_wire_state(&backend, &state_path, &state).await;
+    let filesystem: Arc<dyn RootFilesystem> = backend.clone();
+
+    let error =
+        match FilesystemExtensionInstallationStore::load_at(filesystem, state_path.clone()).await {
+            Ok(_) => panic!("an untrusted package using a retired internal id must fail closed"),
+            Err(error) => error,
+        };
+
+    assert!(matches!(
+        error,
+        ExtensionInstallationError::InvalidInstallation { ref reason }
+            if reason.contains("must be host-bundled")
+    ));
+    let after = backend.get(&state_path).await.unwrap().unwrap();
+    assert_eq!(after.version, seeded.version);
+    assert_eq!(after.entry.body, seeded.entry.body);
+}
+
+#[tokio::test]
+async fn load_at_never_deletes_orphan_slack_user_installation_without_provenance() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let state_path = test_state_path();
+    let state = WireState {
+        manifests: Vec::new(),
+        installations: vec![named_installation(
+            "slack_user",
+            "slack_user",
+            ExtensionActivationState::Enabled,
+            InstallationOwner::Tenant,
+            Some("sha256:orphan-slack-user"),
+            Vec::new(),
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+            ExtensionHealthStatus::Healthy,
+        )],
+    };
+    let seeded = seed_wire_state(&backend, &state_path, &state).await;
+    let filesystem: Arc<dyn RootFilesystem> = backend.clone();
+
+    let error =
+        match FilesystemExtensionInstallationStore::load_at(filesystem, state_path.clone()).await {
+            Ok(_) => panic!("an orphan retired-id installation must fail closed"),
+            Err(error) => error,
+        };
+
+    assert!(matches!(
+        error,
+        ExtensionInstallationError::InvalidInstallation { ref reason }
+            if reason.contains("matching host-bundled manifest")
+    ));
+    let after = backend.get(&state_path).await.unwrap().unwrap();
+    assert_eq!(after.version, seeded.version);
+    assert_eq!(after.entry.body, seeded.entry.body);
+}
+
 #[tokio::test]
 async fn load_at_slack_fold_uses_tenant_dominance_and_canonical_mixed_policy_without_enabled() {
     let backend = Arc::new(InMemoryBackend::new());

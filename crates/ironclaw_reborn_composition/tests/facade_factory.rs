@@ -622,13 +622,21 @@ async fn libsql_trigger_record_count(db: &libsql::Database) -> i64 {
 
 #[cfg(feature = "postgres")]
 async fn postgres_pool_or_skip() -> Option<(
-    testcontainers_modules::testcontainers::ContainerAsync<
-        testcontainers_modules::postgres::Postgres,
+    Option<
+        testcontainers_modules::testcontainers::ContainerAsync<
+            testcontainers_modules::postgres::Postgres,
+        >,
     >,
     deadpool_postgres::Pool,
     String,
 )> {
-    let (container, database_url) = start_postgres_container().await?;
+    let (container, database_url) = match std::env::var("IRONCLAW_TEST_POSTGRES_URL") {
+        Ok(database_url) => (None, database_url),
+        Err(_) => {
+            let (container, database_url) = start_postgres_container().await?;
+            (Some(container), database_url)
+        }
+    };
     assert_postgres_accepts_connections(&database_url).await;
     let config: tokio_postgres::Config = database_url
         .parse()
