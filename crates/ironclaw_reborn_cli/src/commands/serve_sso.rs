@@ -28,9 +28,6 @@ use secrecy::SecretString;
 
 const WEBUI_BASE_URL_ENV: &str = "IRONCLAW_REBORN_WEBUI_BASE_URL";
 
-#[cfg(test)]
-pub(crate) static WEBUI_BASE_URL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 /// Resolved SSO startup config: the providers to mount plus the public
 /// base URL their callback URLs are built from. Constructed by
 /// [`sso_startup_config_from_env`]; consumed by `serve.rs`, which adds
@@ -446,7 +443,7 @@ mod tests {
 
     fn clear_sso_env() {
         for var in SSO_ENV_VARS {
-            // SAFETY: tests are serialized by `WEBUI_BASE_URL_ENV_LOCK`; no other thread
+            // SAFETY: tests are serialized by `the shared crate process-env lock`; no other thread
             // reads or writes these vars while the guard is held.
             unsafe { std::env::remove_var(var) };
         }
@@ -460,9 +457,9 @@ mod tests {
     /// same caller succeeds once the allowlist is supplied.
     #[test]
     fn startup_fails_closed_when_providers_set_but_allowlist_missing() {
-        let _guard = WEBUI_BASE_URL_ENV_LOCK.lock().expect("env lock");
+        let _guard = crate::runtime::test_env::lock_runtime_env();
         clear_sso_env();
-        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleaned up before the guard drops.
+        // SAFETY: serialized by the shared crate process-env lock; cleaned up before the guard drops.
         unsafe {
             std::env::set_var("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID", "client-id");
             std::env::set_var(
@@ -479,7 +476,7 @@ mod tests {
         );
 
         // Blank allowlist → same fail-closed result.
-        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK.
+        // SAFETY: serialized by the shared crate process-env lock.
         unsafe {
             std::env::set_var("IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS", "  , ,");
         }
@@ -489,7 +486,7 @@ mod tests {
         );
 
         // Supplying the allowlist makes the same caller succeed.
-        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK.
+        // SAFETY: serialized by the shared crate process-env lock.
         unsafe {
             std::env::set_var("IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS", "example.com");
         }
@@ -510,14 +507,14 @@ mod tests {
     /// caller `sso_startup_config_from_env`, since the helper is private.
     #[test]
     fn client_id_without_secret_fails_startup() {
-        let _guard = WEBUI_BASE_URL_ENV_LOCK.lock().expect("env lock");
+        let _guard = crate::runtime::test_env::lock_runtime_env();
 
         for id_var in [
             "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID",
             "IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_ID",
         ] {
             clear_sso_env();
-            // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleared before/after.
+            // SAFETY: serialized by the shared crate process-env lock; cleared before/after.
             unsafe { std::env::set_var(id_var, "client-id") };
             assert!(
                 sso_startup_config_from_env(addr("127.0.0.1:3000")).is_err(),
@@ -533,7 +530,7 @@ mod tests {
     /// since the allowlist gate only fires once a provider is configured.)
     #[test]
     fn no_provider_configured_returns_none() {
-        let _guard = WEBUI_BASE_URL_ENV_LOCK.lock().expect("env lock");
+        let _guard = crate::runtime::test_env::lock_runtime_env();
         clear_sso_env();
         let resolved = sso_startup_config_from_env(addr("127.0.0.1:3000"))
             .expect("no provider configured is not an error");
@@ -542,9 +539,9 @@ mod tests {
 
     #[test]
     fn webui_oauth_base_url_prefers_explicit_reborn_env() {
-        let _guard = WEBUI_BASE_URL_ENV_LOCK.lock().expect("env lock");
+        let _guard = crate::runtime::test_env::lock_runtime_env();
         clear_sso_env();
-        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleaned up before the guard drops.
+        // SAFETY: serialized by the shared crate process-env lock; cleaned up before the guard drops.
         unsafe {
             std::env::set_var(WEBUI_BASE_URL_ENV, " https://configured.example/ ");
         }
@@ -559,9 +556,9 @@ mod tests {
 
     #[test]
     fn webui_public_base_url_from_env_rejects_blank_normalized_values() {
-        let _guard = WEBUI_BASE_URL_ENV_LOCK.lock().expect("env lock");
+        let _guard = crate::runtime::test_env::lock_runtime_env();
         clear_sso_env();
-        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleaned up before the guard drops.
+        // SAFETY: serialized by the shared crate process-env lock; cleaned up before the guard drops.
         unsafe {
             std::env::set_var(WEBUI_BASE_URL_ENV, "/");
         }
@@ -572,7 +569,7 @@ mod tests {
             "error should name env var, got: {error}"
         );
 
-        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleaned up before the guard drops.
+        // SAFETY: serialized by the shared crate process-env lock; cleaned up before the guard drops.
         unsafe {
             std::env::set_var(WEBUI_BASE_URL_ENV, " / ");
         }
@@ -586,9 +583,9 @@ mod tests {
 
     #[test]
     fn sso_startup_config_uses_explicit_webui_base_url() {
-        let _guard = WEBUI_BASE_URL_ENV_LOCK.lock().expect("env lock");
+        let _guard = crate::runtime::test_env::lock_runtime_env();
         clear_sso_env();
-        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleaned up before the guard drops.
+        // SAFETY: serialized by the shared crate process-env lock; cleaned up before the guard drops.
         unsafe {
             std::env::set_var("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID", "client-id");
             std::env::set_var(
@@ -613,7 +610,7 @@ mod tests {
 
     #[test]
     fn webui_oauth_base_url_falls_back_to_listener() {
-        let _guard = WEBUI_BASE_URL_ENV_LOCK.lock().expect("env lock");
+        let _guard = crate::runtime::test_env::lock_runtime_env();
         clear_sso_env();
 
         assert_eq!(
@@ -633,9 +630,9 @@ mod tests {
     /// sent at exchange matches what Google stored.
     #[test]
     fn non_empty_env_trims_surrounding_whitespace() {
-        let _guard = WEBUI_BASE_URL_ENV_LOCK.lock().expect("env lock");
+        let _guard = crate::runtime::test_env::lock_runtime_env();
         clear_sso_env();
-        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleared before/after.
+        // SAFETY: serialized by the shared crate process-env lock; cleared before/after.
         unsafe {
             std::env::set_var(
                 "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET",
@@ -649,7 +646,7 @@ mod tests {
         );
 
         // Whitespace-only stays None — it is not a configured value.
-        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK.
+        // SAFETY: serialized by the shared crate process-env lock.
         unsafe {
             std::env::set_var("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET", "   \n\t");
         }
@@ -669,9 +666,9 @@ mod tests {
     /// rejected or forwarded.
     #[test]
     fn whitespace_padded_oauth_credentials_still_configure_provider() {
-        let _guard = WEBUI_BASE_URL_ENV_LOCK.lock().expect("env lock");
+        let _guard = crate::runtime::test_env::lock_runtime_env();
         clear_sso_env();
-        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleared before/after.
+        // SAFETY: serialized by the shared crate process-env lock; cleared before/after.
         unsafe {
             std::env::set_var("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID", "  client-id\n");
             std::env::set_var(

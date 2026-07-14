@@ -242,6 +242,7 @@ pub(crate) fn imported_extension_package(
         manifest_toml: record.raw_toml().to_string(),
         source: ManifestSource::InstalledLocal,
         package,
+        cleanup_requirements: Vec::new(),
         surface_kinds,
         assets,
     })

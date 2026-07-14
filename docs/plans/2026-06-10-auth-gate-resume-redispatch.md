@@ -25,7 +25,7 @@
 | `PromptStep::ResumeApproval` routing | `crates/ironclaw_agent_loop/src/executor/canonical.rs` (grep `ResumeApproval`) |
 | Test scaffolding | `crates/ironclaw_agent_loop/src/test_support/mod.rs:449,1063` (`ScriptedCapabilityOutcome::AuthRequired`) |
 
-**Scope guard:** No changes to `ironclaw_runner`, `ironclaw_product_workflow`, `ironclaw_loop_support`, or host-runtime crates. The candidate already carries everything needed for re-dispatch — this is purely executor/state work in `ironclaw_agent_loop` (plus, only if Task 1 proves it necessary, a serialization shim in `state/slots.rs`).
+**Scope guard:** No changes to `ironclaw_runner`, `ironclaw_product_workflow`, `ironclaw_loop_host`, or host-runtime crates. The candidate already carries everything needed for re-dispatch — this is purely executor/state work in `ironclaw_agent_loop` (plus, only if Task 1 proves it necessary, a serialization shim in `state/slots.rs`).
 
 ---
 

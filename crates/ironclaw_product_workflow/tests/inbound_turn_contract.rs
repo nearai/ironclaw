@@ -11,7 +11,7 @@ use ironclaw_host_api::{
     AgentId, MountAlias, MountGrant, MountPermissions, MountView, TenantId, ThreadId, UserId,
     VirtualPath,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
     CapabilitySurfaceProfileResolver, CapabilityWriteResult, EmptyLoopCapabilityPort,
     EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
@@ -436,8 +436,8 @@ fn test_await_edge_trio(
     capability_result_writer: Arc<dyn LoopCapabilityResultWriter>,
     thread_service: Arc<InMemorySessionThreadService>,
 ) -> (
-    Arc<dyn ironclaw_loop_support::AwaitEdgeWriter>,
-    Arc<dyn ironclaw_loop_support::AwaitEdgeSettler>,
+    Arc<dyn ironclaw_loop_host::AwaitEdgeWriter>,
+    Arc<dyn ironclaw_loop_host::AwaitEdgeSettler>,
     Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
     Arc<dyn RuntimeSubagentGoalStore>,
 ) {
@@ -454,7 +454,7 @@ fn test_await_edge_trio(
         Arc::new(ironclaw_runner::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
     let resolver = Arc::new(AwaitEdgeResolver::new_unbound(
         Arc::clone(&store),
-        goal_store.clone() as Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore>,
+        goal_store.clone() as Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
         Arc::clone(turn_store) as Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore>,
         capability_result_writer,
         thread_service,
@@ -464,8 +464,8 @@ fn test_await_edge_trio(
         Arc::clone(&store),
     ));
     (
-        driver as Arc<dyn ironclaw_loop_support::AwaitEdgeWriter>,
-        resolver as Arc<dyn ironclaw_loop_support::AwaitEdgeSettler>,
+        driver as Arc<dyn ironclaw_loop_host::AwaitEdgeWriter>,
+        resolver as Arc<dyn ironclaw_loop_host::AwaitEdgeSettler>,
         store as Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
         goal_store as Arc<dyn RuntimeSubagentGoalStore>,
     )
@@ -755,7 +755,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(Arc::new(
             ProductLiveCapabilityIo::default(),
         ))),
-        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+        subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
         loop_exit_evidence: Arc::new(
             ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
                 Arc::new(thread_service.clone()),
@@ -935,7 +935,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(Arc::new(
             ProductLiveCapabilityIo::default(),
         ))),
-        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+        subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
         // Product-live composition must bind the applier evidence to the
         // runtime cancellation source even if the supplied evidence is not.
         loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
@@ -1128,7 +1128,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(Arc::new(
             ProductLiveCapabilityIo::default(),
         ))),
-        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+        subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
         loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
             Arc::new(InMemorySessionThreadService::default()),
             Arc::new(InMemoryTurnStateStore::default()) as Arc<dyn TurnStateStore>,

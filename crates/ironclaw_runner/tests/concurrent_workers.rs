@@ -14,7 +14,7 @@ use std::sync::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
     HostIdentityContextSource, HostManagedModelError, HostManagedModelErrorKind,
     HostManagedModelGateway, HostManagedModelRequest, HostManagedModelResponse,
@@ -756,7 +756,7 @@ async fn scheduler_executor_applies_loop_exit_end_to_end() {
             Ok(LoopExit::Failed(LoopFailed {
                 reason_kind: LoopFailureKind::DriverBug,
                 checkpoint_id: None,
-                usage_summary_ref: None,
+                model_usage: None,
                 diagnostic_ref: None,
                 explanation_message_refs: Vec::new(),
                 safe_summary: None,

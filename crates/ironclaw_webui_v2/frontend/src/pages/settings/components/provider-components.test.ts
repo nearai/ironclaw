@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "vitest";
 
 import { groupProvidersByStatus } from "../lib/llm-providers";
-import { runVmModuleForTest } from "../../../test-support/vm-module-harness.ts";
+import { runVmModuleForTest } from "../../../test-support/vm-module-harness";
 
 const PROVIDER_GROUP_LABELS = [
   "llm.groupActive",

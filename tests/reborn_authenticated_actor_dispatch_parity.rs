@@ -19,7 +19,7 @@ use ironclaw_host_runtime::{
     HostRuntimeServices, SurfaceKind, VisibleCapabilityRequest as HostVisibleCapabilityRequest,
     builtin_first_party_package,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     CapabilityResultWrite, CapabilityWriteResult, HostRuntimeLoopCapabilityPortFactory,
     LoopCapabilityInputResolver, LoopCapabilityResultWriter, loop_driver_execution_extension_id,
 };

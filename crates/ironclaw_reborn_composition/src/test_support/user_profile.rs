@@ -12,11 +12,11 @@
 #[cfg(feature = "test-support")]
 pub fn build_user_profile_source_for_test(
     filesystem: Option<std::sync::Arc<dyn ironclaw_filesystem::RootFilesystem>>,
-) -> std::sync::Arc<dyn ironclaw_loop_support::HostUserProfileSource> {
+) -> std::sync::Arc<dyn ironclaw_loop_host::HostUserProfileSource> {
     match filesystem {
         Some(fs) => std::sync::Arc::new(crate::runtime::MemoryBackedUserProfileSourceAdapter(
             ironclaw_host_runtime::MemoryBackedUserProfileSource::new(fs),
         )),
-        None => std::sync::Arc::new(ironclaw_loop_support::EmptyUserProfileSource),
+        None => std::sync::Arc::new(ironclaw_loop_host::EmptyUserProfileSource),
     }
 }

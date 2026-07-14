@@ -36,8 +36,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::context::RebornCliContext;
 
+// Crate-wide process-env lock lives here (see test_env.rs). `pub(crate)` so
+// non-runtime env-mutating tests (e.g. commands::serve_sso) serialize against
+// the same mutex — all unit tests link into one binary, so a second, separate
+// env lock would not serialize and races the shared process environment
+// (#6015).
 #[cfg(test)]
-mod test_env;
+pub(crate) mod test_env;
 mod trigger_poller;
 
 use trigger_poller::trigger_poller_settings;

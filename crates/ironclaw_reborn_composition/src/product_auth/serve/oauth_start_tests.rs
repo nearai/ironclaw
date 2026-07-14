@@ -148,7 +148,8 @@ mod tests {
             TenantId::new("tenant-alpha").expect("tenant"),
             None,
             None,
-        );
+        )
+        .with_test_installed_extension_lookup();
         let app = product_auth_route_mount(state)
             .protected
             .layer(axum::Extension(test_caller()));
@@ -249,7 +250,8 @@ mod tests {
             TenantId::new("tenant-alpha").expect("tenant"),
             None,
             None,
-        );
+        )
+        .with_test_installed_extension_lookup();
         let app = product_auth_route_mount(state)
             .protected
             .layer(axum::Extension(test_caller()));
@@ -334,6 +336,7 @@ mod tests {
             None,
             None,
         )
+        .with_test_installed_extension_lookup()
         .with_google_oauth(
             GoogleOAuthRouteConfig::new(
                 "google-client.apps.googleusercontent.com",

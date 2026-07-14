@@ -1,6 +1,256 @@
 use crate::common::*;
 
 #[tokio::test]
+async fn oauth_completion_compensation_preserves_a_newer_account_generation() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let existing = services
+        .create_account(NewCredentialAccount {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("work github"),
+            status: CredentialAccountStatus::PendingSetup,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("github-old-access").unwrap()),
+            refresh_secret: None,
+            scopes: provider_scopes(&["read:user"]),
+        })
+        .await
+        .expect("existing account");
+    let first_flow = oauth_update_flow(&services, owner.clone(), &existing).await;
+    let first = services
+        .complete_oauth_callback(
+            &owner,
+            OAuthCallbackInput {
+                flow_id: first_flow.id,
+                opaque_state_hash: state_hash("state-hash"),
+                outcome: ProviderCallbackOutcome::Authorized {
+                    exchange: Box::new(OAuthProviderExchange {
+                        provider: provider(),
+                        account_label: label("first generation"),
+                        authorization_code_hash: code_hash("first-code"),
+                        pkce_verifier_hash: pkce_hash("pkce-hash"),
+                        access_secret: SecretHandle::new("github-first-access").unwrap(),
+                        refresh_secret: None,
+                        scopes: provider_scopes(&["repo"]),
+                        account_id: Some(existing.id),
+                        provider_identity: None,
+                    }),
+                },
+            },
+        )
+        .await
+        .expect("first callback");
+    let first_fingerprint = first
+        .credential_secret_fingerprint
+        .clone()
+        .expect("first secret fingerprint");
+    let claimed = services
+        .claim_continuation_dispatch(
+            &owner,
+            ironclaw_auth::AuthContinuationDispatchClaimInput {
+                flow_id: first.id,
+                claimed_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("first continuation claim");
+    services
+        .settle_continuation_dispatch(
+            &owner,
+            ironclaw_auth::AuthContinuationDispatchSettlementInput {
+                flow_id: first.id,
+                expected_claimed_at: claimed.updated_at,
+                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
+                    error: AuthErrorCode::BackendUnavailable,
+                },
+            },
+        )
+        .await
+        .expect("first continuation failure");
+    let first_account = services
+        .get_account(CredentialAccountLookupRequest::new(
+            owner.clone(),
+            existing.id,
+        ))
+        .await
+        .expect("first lookup")
+        .expect("first account");
+    let second_flow = oauth_update_flow(&services, owner.clone(), &first_account).await;
+    services
+        .complete_oauth_callback(
+            &owner,
+            OAuthCallbackInput {
+                flow_id: second_flow.id,
+                opaque_state_hash: state_hash("state-hash"),
+                outcome: ProviderCallbackOutcome::Authorized {
+                    exchange: Box::new(OAuthProviderExchange {
+                        provider: provider(),
+                        account_label: label("second generation"),
+                        authorization_code_hash: code_hash("second-code"),
+                        pkce_verifier_hash: pkce_hash("pkce-hash"),
+                        access_secret: SecretHandle::new("github-second-access").unwrap(),
+                        refresh_secret: None,
+                        scopes: provider_scopes(&["repo"]),
+                        account_id: Some(existing.id),
+                        provider_identity: None,
+                    }),
+                },
+            },
+        )
+        .await
+        .expect("second callback");
+
+    let outcome = services
+        .compensate_oauth_completion(ironclaw_auth::OAuthCompletionCompensationRequest {
+            scope: owner.clone(),
+            flow_id: first.id,
+            provider: first.provider,
+            credential_account_id: existing.id,
+            expected_secret_fingerprint: first_fingerprint,
+        })
+        .await
+        .expect("stale compensation is safe");
+
+    assert_eq!(
+        outcome,
+        ironclaw_auth::OAuthCompletionCompensationOutcome::Superseded
+    );
+    let current = services
+        .get_account(CredentialAccountLookupRequest::new(owner, existing.id))
+        .await
+        .expect("current lookup")
+        .expect("current account");
+    assert_eq!(current.status, CredentialAccountStatus::Configured);
+    assert_eq!(
+        current.access_secret,
+        Some(SecretHandle::new("github-second-access").unwrap())
+    );
+}
+
+#[tokio::test]
+async fn oauth_completion_compensation_ignores_metadata_only_account_updates() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let existing = services
+        .create_account(NewCredentialAccount {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("work github"),
+            status: CredentialAccountStatus::PendingSetup,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("github-old-access").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let flow = oauth_update_flow(&services, owner.clone(), &existing).await;
+    let completed = services
+        .complete_oauth_callback(
+            &owner,
+            OAuthCallbackInput {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash("state-hash"),
+                outcome: ProviderCallbackOutcome::Authorized {
+                    exchange: Box::new(OAuthProviderExchange {
+                        provider: provider(),
+                        account_label: label("oauth account"),
+                        authorization_code_hash: code_hash("code-hash"),
+                        pkce_verifier_hash: pkce_hash("pkce-hash"),
+                        access_secret: SecretHandle::new("github-oauth-access").unwrap(),
+                        refresh_secret: None,
+                        scopes: provider_scopes(&["repo"]),
+                        account_id: Some(existing.id),
+                        provider_identity: None,
+                    }),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    let fingerprint = completed
+        .credential_secret_fingerprint
+        .clone()
+        .expect("OAuth fingerprint");
+    let claim = services
+        .claim_continuation_dispatch(
+            &owner,
+            ironclaw_auth::AuthContinuationDispatchClaimInput {
+                flow_id: completed.id,
+                claimed_at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+    services
+        .settle_continuation_dispatch(
+            &owner,
+            ironclaw_auth::AuthContinuationDispatchSettlementInput {
+                flow_id: completed.id,
+                expected_claimed_at: claim.updated_at,
+                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
+                    error: AuthErrorCode::BackendUnavailable,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    let current = services
+        .get_account(CredentialAccountLookupRequest::new(
+            owner.clone(),
+            existing.id,
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    services
+        .create_or_update_account(CredentialAccountMutation::Update(CredentialAccountUpdate {
+            account_id: current.id,
+            account: NewCredentialAccount {
+                scope: current.scope.clone(),
+                provider: current.provider.clone(),
+                label: label("renamed metadata"),
+                status: current.status,
+                ownership: current.ownership,
+                owner_extension: current.owner_extension.clone(),
+                granted_extensions: current.granted_extensions.clone(),
+                access_secret: current.access_secret.clone(),
+                refresh_secret: current.refresh_secret.clone(),
+                scopes: current.scopes.clone(),
+            },
+        }))
+        .await
+        .unwrap();
+
+    let outcome = services
+        .compensate_oauth_completion(ironclaw_auth::OAuthCompletionCompensationRequest {
+            scope: owner.clone(),
+            flow_id: completed.id,
+            provider: provider(),
+            credential_account_id: existing.id,
+            expected_secret_fingerprint: fingerprint,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        ironclaw_auth::OAuthCompletionCompensationOutcome::Compensated
+    );
+    let revoked = services
+        .get_account(CredentialAccountLookupRequest::new(owner, existing.id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(revoked.status, CredentialAccountStatus::Revoked);
+    assert!(revoked.access_secret.is_none());
+}
+
+#[tokio::test]
 async fn extension_owned_accounts_require_owner_and_cleanup_is_action_specific() {
     let services = InMemoryAuthProductServices::new();
     let owner = scope("alice");

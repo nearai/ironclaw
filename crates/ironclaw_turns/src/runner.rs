@@ -110,6 +110,11 @@ pub struct ApplyValidatedLoopExitRequest {
     pub runner_id: TurnRunnerId,
     pub lease_token: TurnLeaseToken,
     pub mapping: LoopExitMapping,
+    /// Cumulative provider-reported token usage the loop accumulated for this
+    /// run, carried from the `LoopExit` so a terminal transition can persist it
+    /// on the run record. `None` when the exit reported no usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_usage: Option<crate::run_profile::LoopModelUsage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

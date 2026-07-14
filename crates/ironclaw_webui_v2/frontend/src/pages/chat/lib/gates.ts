@@ -59,7 +59,7 @@ export function gateFromEvent(eventType, prompt) {
       gateKind: "auth",
       // Legacy auth_required prompts predate challenge_kind and are paste-a-secret
       // prompts. Explicit unknown/other challenge kinds still route to the neutral
-      // auth card in chat.js.
+      // auth card in chat.tsx.
       challengeKind:
         prompt.challenge_kind ||
         (prompt.provider ||

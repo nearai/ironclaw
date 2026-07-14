@@ -8,7 +8,6 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID};
 use ironclaw_network::NetworkHttpEgress;
-use ironclaw_reborn_composition::ProductLiveCapabilityIo;
 
 use super::super::super::github as github_support;
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
@@ -146,12 +145,16 @@ fn github_issue_tools_with_credential_result(
         credential_account_result,
     )?;
     let mounts = workspace_mounts(MountPermissions::read_write_list_delete())?;
+    let (io, result_writer_io) = super::super::default_capability_io_pair();
     Ok(HostRuntimeCapabilityHarness {
         runtime,
         approval_parts: None,
         auto_approve_settings: None,
         pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
-        io: Arc::new(ProductLiveCapabilityIo::default()),
+        io: Mutex::new(io),
+        result_writer_io: Mutex::new(result_writer_io),
+        durable_capability_io_thread_service: Mutex::new(None),
+        durable_capability_io_requested: false,
         root,
         workspace_root,
         mounts,

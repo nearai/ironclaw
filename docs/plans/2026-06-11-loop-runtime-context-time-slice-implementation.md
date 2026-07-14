@@ -336,7 +336,7 @@ git commit -m "feat(reborn): stamp loop-start runtime context into prompt bundle
 
 - [ ] **Step 1:** `cargo fmt`
 - [ ] **Step 2:** `cargo clippy --all --benches --tests --examples --all-features` — zero warnings
-- [ ] **Step 3:** `cargo test -p ironclaw_turns -p ironclaw_runner -p ironclaw_loop_support -p ironclaw_agent_loop`
+- [ ] **Step 3:** `cargo test -p ironclaw_turns -p ironclaw_runner -p ironclaw_loop_host -p ironclaw_agent_loop`
 - [ ] **Step 4:** Commit any fmt/clippy fixups:
 
 ```bash

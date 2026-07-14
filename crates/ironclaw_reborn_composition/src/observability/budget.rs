@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use ironclaw_loop_support::{BudgetSeedingPolicy, GovernorBackedAccountant, ModelCostTable};
+use ironclaw_loop_host::{BudgetSeedingPolicy, GovernorBackedAccountant, ModelCostTable};
 use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::{
     BudgetEventSink, BudgetGateStore, BudgetPeriod, BudgetThresholds, ResourceGovernor,
@@ -86,7 +86,7 @@ pub fn build_default_budget_accountant(
 mod tests {
     use super::*;
     use ironclaw_host_api::{InvocationId, ResourceEstimate, ResourceScope, TenantId, UserId};
-    use ironclaw_loop_support::ZeroCostTable;
+    use ironclaw_loop_host::ZeroCostTable;
     use ironclaw_resources::{
         InMemoryBudgetEventSink, InMemoryBudgetGateStore, InMemoryResourceGovernor, ResourceAccount,
     };

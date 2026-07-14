@@ -149,9 +149,16 @@ function mergeToolActivity(current, incoming) {
       ? current.toolName
       : incoming.toolName || current.toolName,
     toolStatus: keepCurrentTerminal ? current.toolStatus : incoming.toolStatus,
+    toolDetail: populatedValue(incoming.toolDetail, current.toolDetail),
+    toolParameters: populatedValue(incoming.toolParameters, current.toolParameters),
+    toolResultPreview: populatedValue(incoming.toolResultPreview, current.toolResultPreview),
     toolError: mergedToolError(current, incoming),
     toolErrorKind: incoming.toolErrorKind || current.toolErrorKind || null,
     toolErrorIsBareKind: mergedToolErrorIsBareKind(current, incoming),
+    resultRef: populatedValue(incoming.resultRef, current.resultRef),
+    truncated: Boolean(incoming.truncated || current.truncated),
+    outputBytes: incoming.outputBytes ?? current.outputBytes ?? null,
+    outputKind: populatedValue(incoming.outputKind, current.outputKind),
     updatedAt: keepCurrentTerminal
       ? current.updatedAt || incoming.updatedAt
       : incoming.updatedAt || current.updatedAt,
@@ -203,6 +210,12 @@ function mergedActivityOrder(current, incoming) {
   return Number.isFinite(incoming.activityOrder)
     ? incoming.activityOrder
     : current.activityOrder;
+}
+
+function populatedValue(incoming, current) {
+  if (incoming !== null && incoming !== undefined && incoming !== "") return incoming;
+  if (current !== null && current !== undefined && current !== "") return current;
+  return null;
 }
 
 function applyRememberedTerminal(card, stateRef) {

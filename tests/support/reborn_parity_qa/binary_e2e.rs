@@ -22,7 +22,7 @@ use ironclaw_host_api::{
     CapabilityId, NetworkPolicy, ProviderToolName, ResourceScope, RuntimeHttpEgressRequest,
     ThreadId,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     EmptyUserProfileSource, HostIdentityContextSource, HostManagedModelRequest,
     JsonSpawnSubagentInputCodec,
 };
@@ -163,7 +163,7 @@ impl RebornBinaryE2EHarness {
         Self::with_model_gateway(
             conversation_id,
             RebornTraceReplayModelGateway::with_responses([
-                ironclaw_loop_support::HostManagedModelResponse::assistant_reply(reply),
+                ironclaw_loop_host::HostManagedModelResponse::assistant_reply(reply),
             ]),
             RecordingTestCapabilityPort::echo(),
         )
@@ -314,8 +314,20 @@ impl RebornBinaryE2EHarness {
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
     ) -> HarnessResult<Self> {
+        // The production capability port resolves the dispatch scope
+        // owner-first from the turn's real binding subject (this harness
+        // submits as the fixed `"alice"` actor, not the profile's default
+        // `"reborn-e2e-builtin-user"`), so the disabled global auto-approve
+        // setting must be seeded under that SAME resolved subject or the
+        // gate never raises -- mirrors
+        // `with_host_runtime_extension_lifecycle_capabilities`.
+        let subject_user = Self::resolve_default_binding_subject_user(conversation_id).await?;
         let host_runtime = Arc::new(
-            crate::reborn_support::harness::profiles::file::file_tools_requiring_approval().await?,
+            crate::reborn_support::harness::profiles::file::file_tools_requiring_approval_profile_for_user(
+                subject_user.as_str(),
+            )?
+            .build()
+            .await?,
         );
         Self::with_model_gateway_capability_mode(
             conversation_id,
@@ -759,7 +771,10 @@ impl RebornBinaryE2EHarness {
             capability_input_resolver,
             capability_result_writer,
             capability_recorder,
-        ) = capability_mode.into_parts(milestone_sink.clone())?;
+        ) = capability_mode.into_parts(
+            milestone_sink.clone(),
+            thread_harness.service.clone() as Arc<dyn SessionThreadService>,
+        )?;
         // Same shared `ScopedFilesystem` handle the turn store uses (`/turns`
         // mount) — the await-edge tree lives at
         // `/turns/subagent-await-edges/...`, a sibling prefix, per §4.5a's
@@ -769,7 +784,7 @@ impl RebornBinaryE2EHarness {
         let await_edge_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
         let await_edge_resolver = Arc::new(AwaitEdgeResolver::new_unbound(
             Arc::clone(&await_edge_store),
-            await_edge_goal_store.clone() as Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore>,
+            await_edge_goal_store.clone() as Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
             turn_store.clone() as Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore>,
             capability_result_writer.clone(),
             thread_harness.service.clone(),
@@ -827,16 +842,16 @@ impl RebornBinaryE2EHarness {
             capability_result_writer,
             subagent_goal_store: await_edge_goal_store,
             subagent_await_edge_writer: await_edge_driver
-                as Arc<dyn ironclaw_loop_support::AwaitEdgeWriter>,
+                as Arc<dyn ironclaw_loop_host::AwaitEdgeWriter>,
             subagent_await_edge_settler: await_edge_resolver
-                as Arc<dyn ironclaw_loop_support::AwaitEdgeSettler>,
+                as Arc<dyn ironclaw_loop_host::AwaitEdgeSettler>,
             subagent_await_edge_evidence: await_edge_store
                 as Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
             subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
             subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
                 capability_input_resolver,
             )),
-            subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+            subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
             loop_exit_evidence: evidence,
             config: runtime_config,
             model_route_resolver: None,
@@ -1509,8 +1524,8 @@ fn route_kind_for_trigger(trigger: ProductTriggerReason) -> ProductConversationR
     }
 }
 
-pub fn trace_tool_call_response() -> ironclaw_loop_support::HostManagedModelResponse {
-    ironclaw_loop_support::HostManagedModelResponse {
+pub fn trace_tool_call_response() -> ironclaw_loop_host::HostManagedModelResponse {
+    ironclaw_loop_host::HostManagedModelResponse {
         safe_text_deltas: Vec::new(),
         safe_reasoning_deltas: Vec::new(),
         usage: None,
