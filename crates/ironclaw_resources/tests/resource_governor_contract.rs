@@ -40,6 +40,7 @@ impl ResourceGovernorStore for AlwaysFailingStore {
 struct RejectAppendFilesystem<F> {
     inner: F,
     append_calls: std::sync::atomic::AtomicUsize,
+    reject_appends: std::sync::atomic::AtomicBool,
 }
 
 impl<F> RejectAppendFilesystem<F> {
@@ -47,11 +48,17 @@ impl<F> RejectAppendFilesystem<F> {
         Self {
             inner,
             append_calls: std::sync::atomic::AtomicUsize::new(0),
+            reject_appends: std::sync::atomic::AtomicBool::new(true),
         }
     }
 
     fn append_calls(&self) -> usize {
         self.append_calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn allow_appends(&self) {
+        self.reject_appends
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -102,10 +109,16 @@ where
     async fn append(
         &self,
         path: &VirtualPath,
-        _payload: Vec<u8>,
+        payload: Vec<u8>,
     ) -> Result<ironclaw_filesystem::SeqNo, ironclaw_filesystem::FilesystemError> {
         self.append_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if !self
+            .reject_appends
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return self.inner.append(path, payload).await;
+        }
         Err(ironclaw_filesystem::FilesystemError::Unsupported {
             path: path.clone(),
             operation: ironclaw_filesystem::FilesystemOperation::Append,
@@ -115,10 +128,16 @@ where
     async fn append_batch(
         &self,
         path: &VirtualPath,
-        _payloads: Vec<Vec<u8>>,
+        payloads: Vec<Vec<u8>>,
     ) -> Result<Vec<ironclaw_filesystem::SeqNo>, ironclaw_filesystem::FilesystemError> {
         self.append_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if !self
+            .reject_appends
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return self.inner.append_batch(path, payloads).await;
+        }
         Err(ironclaw_filesystem::FilesystemError::Unsupported {
             path: path.clone(),
             operation: ironclaw_filesystem::FilesystemOperation::Append,
@@ -1605,7 +1624,7 @@ async fn filesystem_resource_governor_releases_account_gate_before_delta_ack() {
 }
 
 #[tokio::test]
-async fn filesystem_resource_governor_fails_closed_and_poisoned_after_delta_append_error() {
+async fn filesystem_resource_governor_fails_closed_then_recovers_after_delta_append_error() {
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 
@@ -1640,10 +1659,32 @@ async fn filesystem_resource_governor_fails_closed_and_poisoned_after_delta_appe
     );
     assert_eq!(backend.append_calls(), 1);
 
-    let poisoned = governor.account_snapshot(&account).unwrap_err();
+    backend.allow_appends();
+
+    let recovered = governor
+        .account_snapshot(&account)
+        .expect("governor should reload after storage recovers");
     assert!(
-        matches!(poisoned, ResourceError::Storage { .. }),
-        "authority must fail closed after a durable journal error: {poisoned:?}"
+        recovered.is_none(),
+        "the failed optimistic limit mutation must not survive authority reload"
+    );
+
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_usd: Some(dec!(2.00)),
+                ..ResourceLimits::default()
+            },
+        )
+        .expect("same governor instance should accept writes after recovery");
+    let recovered = governor
+        .account_snapshot(&account)
+        .expect("recovered account snapshot")
+        .expect("limit account exists after successful retry");
+    assert_eq!(
+        recovered.limits.expect("limits are present").max_usd,
+        Some(dec!(2.00))
     );
 }
 
