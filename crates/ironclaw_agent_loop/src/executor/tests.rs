@@ -383,6 +383,235 @@ async fn prompt_stage_compacts_candidate_prompt_then_rebuilds_final_bundle() {
 }
 
 #[tokio::test]
+async fn prompt_stage_circuit_breaker_disables_compaction_after_repeated_ineffective_runs() {
+    use ironclaw_turns::run_profile::PromptContextTokenBudget;
+
+    use crate::state::CompactionStrategyState;
+
+    // Threshold is 90 tokens (100 - 10). Each compaction retains a 60-token
+    // assistant tail — BELOW the threshold, so measuring right after
+    // retain_after_sequence (BUG B2) records every attempt as effective and
+    // the breaker never opens. Only the rebuilt bundle shows the injected
+    // 40-token summary pushing the prompt back over the threshold
+    // (100 >= 90): three REAL ineffective compactions driven through the
+    // prompt stage must open the breaker, and the fourth threshold overflow
+    // must be suppressed.
+    let compacting_run = |summary_seq: u64, user_seq: u64| {
+        vec![
+            // Candidate bundle: over threshold with an eligible user boundary.
+            vec![
+                compaction_metadata(summary_seq, LoopContextCompactionKind::Summary, 40),
+                compaction_metadata(summary_seq + 1, LoopContextCompactionKind::Assistant, 60),
+                compaction_metadata(user_seq, LoopContextCompactionKind::User, 20),
+                compaction_metadata(user_seq + 1, LoopContextCompactionKind::Assistant, 60),
+            ],
+            // Rebuild after compacting through user_seq: the 60-token tail is
+            // under the threshold, but summary + tail is over (100 >= 90) —
+            // ineffective.
+            vec![
+                compaction_metadata(user_seq, LoopContextCompactionKind::Summary, 40),
+                compaction_metadata(user_seq + 1, LoopContextCompactionKind::Assistant, 60),
+            ],
+        ]
+    };
+    let mut prompt_indexes = vec![
+        // First run's candidate bundle (no prior summary yet).
+        vec![
+            compaction_metadata(1, LoopContextCompactionKind::User, 20),
+            compaction_metadata(2, LoopContextCompactionKind::Assistant, 60),
+            compaction_metadata(3, LoopContextCompactionKind::User, 20),
+            compaction_metadata(4, LoopContextCompactionKind::Assistant, 60),
+        ],
+        // First rebuild: injected summary keeps the prompt over threshold.
+        vec![
+            compaction_metadata(3, LoopContextCompactionKind::Summary, 40),
+            compaction_metadata(4, LoopContextCompactionKind::Assistant, 60),
+        ],
+    ];
+    prompt_indexes.extend(compacting_run(3, 5));
+    prompt_indexes.extend(compacting_run(5, 7));
+    // Fourth run's candidate bundle: over threshold with an eligible user
+    // boundary, so only the open circuit can explain a skip.
+    prompt_indexes.push(vec![
+        compaction_metadata(7, LoopContextCompactionKind::Summary, 40),
+        compaction_metadata(8, LoopContextCompactionKind::Assistant, 60),
+        compaction_metadata(9, LoopContextCompactionKind::User, 20),
+        compaction_metadata(10, LoopContextCompactionKind::Assistant, 60),
+    ]);
+    let host = MockHost::new(Vec::new())
+        .with_prompt_compaction_indexes(prompt_indexes)
+        .with_compaction_result(Ok(LoopCompactionResponse {
+            summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
+            compression_ratio_ppm: 250_000,
+        }));
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy {
+        prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
+        preserve_tail_tokens: 60,
+        deadline_ms: 1,
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+
+    for completed_compactions in 1..=CompactionStrategyState::INEFFECTIVE_COMPACTION_TRIP_LIMIT {
+        let step = PromptStage
+            .process(
+                ctx,
+                PromptInput {
+                    state,
+                    pending_input_ack: PendingInputAck::default(),
+                },
+            )
+            .await
+            .expect("prompt stage");
+        let output = match step {
+            PromptStep::Prepared(output) => output,
+            _ => panic!("expected prepared prompt"),
+        };
+        state = output.state;
+        assert_eq!(
+            state.compaction_state.consecutive_ineffective_compactions, completed_compactions,
+            "each rebuilt prompt stays over threshold, so every completed \
+             compaction must count as ineffective"
+        );
+        assert_eq!(
+            state.compaction_state.compaction_circuit_open,
+            completed_compactions == CompactionStrategyState::INEFFECTIVE_COMPACTION_TRIP_LIMIT,
+            "the circuit must open exactly on the third real ineffective compaction"
+        );
+        assert_eq!(
+            host.progress_event_names()
+                .iter()
+                .filter(|&&name| name == "compaction_started")
+                .count(),
+            completed_compactions as usize
+        );
+    }
+
+    // Drive the prompt stage again with the breaker open and the prompt still
+    // over threshold: threshold-triggered compaction must NOT run again.
+    let step = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("prompt stage after breaker opened");
+    let output = match step {
+        PromptStep::Prepared(output) => output,
+        _ => panic!("expected prepared prompt"),
+    };
+    assert!(output.state.compaction_state.compaction_circuit_open);
+    assert_eq!(
+        host.progress_event_names()
+            .iter()
+            .filter(|&&name| name == "compaction_started")
+            .count(),
+        CompactionStrategyState::INEFFECTIVE_COMPACTION_TRIP_LIMIT as usize,
+        "an open circuit breaker must stop threshold-triggered compactions for the run"
+    );
+}
+
+#[tokio::test]
+async fn prompt_stage_forced_compaction_bypasses_open_circuit_breaker() {
+    use ironclaw_turns::run_profile::PromptContextTokenBudget;
+
+    // BUG B1 regression: force_compact_on_next_iteration (context-overflow
+    // recovery via RetryAlteration::ShrinkContext, byte-cap overflow) must
+    // run its compaction even with the breaker open — otherwise the same
+    // oversized prompt is rebuilt until the retry budget aborts.
+    // BUG B3 regression: the forced compaction is judged against the prompt
+    // it started from (260 tokens), not the 90-token transcript threshold —
+    // shrinking to 140 tokens is effective and resets the counter, even
+    // though 140 is still over the threshold.
+    let host = MockHost::new(Vec::new())
+        .with_prompt_compaction_indexes(vec![
+            // Candidate bundle: 260 tokens with an eligible user boundary.
+            vec![
+                compaction_metadata(1, LoopContextCompactionKind::Summary, 40),
+                compaction_metadata(2, LoopContextCompactionKind::Assistant, 100),
+                compaction_metadata(3, LoopContextCompactionKind::User, 20),
+                compaction_metadata(4, LoopContextCompactionKind::Assistant, 100),
+            ],
+            // Rebuild after compacting through seq 3: shrank to 140 tokens.
+            vec![
+                compaction_metadata(3, LoopContextCompactionKind::Summary, 40),
+                compaction_metadata(4, LoopContextCompactionKind::Assistant, 100),
+            ],
+        ])
+        .with_compaction_result(Ok(LoopCompactionResponse {
+            summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
+            compression_ratio_ppm: 250_000,
+        }));
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy {
+        prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
+        preserve_tail_tokens: 60,
+        deadline_ms: 1,
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.compaction_state.compaction_circuit_open = true;
+    state.compaction_state.consecutive_ineffective_compactions =
+        crate::state::CompactionStrategyState::INEFFECTIVE_COMPACTION_TRIP_LIMIT;
+    state.compaction_state.force_compact_on_next_iteration = true;
+
+    let step = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("prompt stage");
+    let output = match step {
+        PromptStep::Prepared(output) => output,
+        _ => panic!("expected prepared prompt"),
+    };
+    assert_eq!(
+        host.progress_event_names()
+            .iter()
+            .filter(|&&name| name == "compaction_started")
+            .count(),
+        1,
+        "a forced compaction must bypass the open circuit breaker"
+    );
+    assert_eq!(
+        output.state.compaction_state.last_compacted_through_seq,
+        Some(3)
+    );
+    assert!(
+        !output
+            .state
+            .compaction_state
+            .force_compact_on_next_iteration
+    );
+    assert_eq!(
+        output
+            .state
+            .compaction_state
+            .consecutive_ineffective_compactions,
+        0,
+        "a forced compaction that shrank the prompt (260 -> 140) is effective \
+         against its pre-compaction baseline even though 140 is still over \
+         the 90-token transcript threshold"
+    );
+    assert!(
+        output.state.compaction_state.compaction_circuit_open,
+        "the breaker is one-way; an effective forced compaction does not close it"
+    );
+}
+
+#[tokio::test]
 async fn prompt_stage_deferred_compaction_returns_to_normal_prompt_path() {
     let host = MockHost::new(Vec::new())
         .with_prompt_compaction_index(vec![compaction_metadata(

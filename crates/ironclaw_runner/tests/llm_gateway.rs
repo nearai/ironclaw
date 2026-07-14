@@ -45,6 +45,7 @@ use ironclaw_turns::{
 };
 use rust_decimal::Decimal;
 use tokio::sync::Barrier;
+use tracing_test::traced_test;
 
 const STATIC_PROVIDER_ID: &str = "static-test-provider";
 
@@ -98,6 +99,121 @@ async fn gateway_calls_llm_provider_for_allowed_model_profile() {
     assert_eq!(requests[0].messages.len(), 2);
     assert_eq!(requests[0].messages[0].content, "system instructions");
     assert_eq!(requests[0].messages[1].content, "hello model");
+}
+
+#[traced_test]
+#[tokio::test]
+async fn gateway_records_prompt_cache_break_within_a_run() {
+    // Per-call cache_read series: healthy continuity (200K -> 190K is exactly
+    // at both detection floors, so NOT a break), then a collapse to 50K.
+    // Cache-break telemetry is internal diagnostics, so both the per-call
+    // series and the break record are emitted at debug level.
+    let provider = Arc::new(CacheUsageSequenceProvider::new(vec![
+        200_000, 190_000, 50_000,
+    ]));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+
+    let request = model_request(interactive_model());
+    let run_id = request.run_id;
+    gateway.stream_model(request).await.unwrap();
+    assert!(
+        logs_contain("reborn model gateway prompt cache usage"),
+        "every completed call must emit the per-call cache series"
+    );
+    assert!(!logs_contain("prompt cache break detected"));
+
+    let mut request = model_request(interactive_model());
+    request.run_id = run_id;
+    gateway.stream_model(request).await.unwrap();
+    assert!(
+        !logs_contain("prompt cache break detected"),
+        "a drop at the detection floors must stay quiet"
+    );
+
+    let mut request = model_request(interactive_model());
+    request.run_id = run_id;
+    gateway.stream_model(request).await.unwrap();
+    assert!(
+        logs_contain("prompt cache break detected"),
+        "a 190K -> 50K cache_read collapse in the same run must record a break"
+    );
+    logs_assert(|lines: &[&str]| {
+        // Break telemetry must stay off the REPL-visible warn level: it is
+        // internal diagnostics and warn!/info! corrupt the interactive TUI.
+        match lines
+            .iter()
+            .find(|line| line.contains("prompt cache break detected"))
+        {
+            Some(line) if line.contains("WARN") || line.contains("ERROR") => Err(format!(
+                "cache-break record must be debug-level diagnostics, got: {line}"
+            )),
+            Some(_) => Ok(()),
+            None => Err("expected a recorded cache break".to_string()),
+        }
+    });
+}
+
+#[traced_test]
+#[tokio::test]
+async fn gateway_records_prompt_cache_break_on_tool_capable_path_when_tool_surface_changes() {
+    // Mirrors gateway_records_prompt_cache_break_within_a_run but through
+    // stream_model_with_capabilities: two same-run tool-capable calls where
+    // the cached read collapses (200K -> 50K) after the advertised tool
+    // surface changed between calls. Pins ModelCallCacheUsage::
+    // from_tool_response recording on the tool-capable path and the
+    // tool-surface attribution of the resulting break.
+    let provider = Arc::new(ToolAwareProvider::tool_response_sequence(vec![
+        tool_stop_reply_with_cache_read("ok one", 200_000),
+        tool_stop_reply_with_cache_read("ok two", 50_000),
+    ]));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+
+    let request = model_request(interactive_model());
+    let run_id = request.run_id;
+    gateway
+        .stream_model_with_capabilities(
+            request,
+            Arc::new(GatewayCapabilityPort::with_tool_surface()),
+        )
+        .await
+        .unwrap();
+    assert!(
+        logs_contain("reborn model gateway prompt cache usage"),
+        "tool-capable calls must record the per-call cache series"
+    );
+    assert!(!logs_contain("prompt cache break detected"));
+
+    let mut request = model_request(interactive_model());
+    request.run_id = run_id;
+    gateway
+        .stream_model_with_capabilities(
+            request,
+            Arc::new(GatewayCapabilityPort::with_extended_tool_surface()),
+        )
+        .await
+        .unwrap();
+    assert!(
+        logs_contain("prompt cache break detected"),
+        "a same-run cached-read collapse on the tool-capable path must record a break"
+    );
+    assert!(
+        logs_contain("tool_definitions_changed=true"),
+        "the break must be attributed to the changed tool surface"
+    );
+    assert!(
+        logs_contain("system_prompt_changed=false"),
+        "the unchanged system prompt must not be blamed for the break"
+    );
 }
 
 #[tokio::test]
@@ -869,6 +985,23 @@ fn repair_tool_result<'a>(
         .expect("repair request includes rejected tool result")
 }
 
+fn tool_stop_reply_with_cache_read(
+    content: &str,
+    cache_read_input_tokens: u32,
+) -> ToolCompletionResponse {
+    ToolCompletionResponse {
+        content: Some(content.to_string()),
+        tool_calls: Vec::new(),
+        input_tokens: 1,
+        output_tokens: 1,
+        finish_reason: FinishReason::Stop,
+        cache_read_input_tokens,
+        cache_creation_input_tokens: 0,
+        reasoning: None,
+        reasoning_details: None,
+    }
+}
+
 fn malformed_args_repair_provider(
     parse_error: &str,
     final_content: &str,
@@ -906,6 +1039,7 @@ fn malformed_args_repair_provider(
     ]))
 }
 
+#[traced_test]
 #[tokio::test]
 async fn gateway_repairs_oversized_provider_tool_arguments_before_registration() {
     // Must exceed the host provider-argument limit so the gateway exercises its
@@ -936,7 +1070,9 @@ async fn gateway_repairs_oversized_provider_tool_arguments_before_registration()
             input_tokens: 1,
             output_tokens: 1,
             finish_reason: FinishReason::ToolUse,
-            cache_read_input_tokens: 0,
+            // Cache series across the repair retry: the rejected first call
+            // read 200K cached tokens, the repair retry collapses to 50K.
+            cache_read_input_tokens: 200_000,
             cache_creation_input_tokens: 0,
             reasoning: Some("response reasoning".to_string()),
             reasoning_details: None,
@@ -947,7 +1083,7 @@ async fn gateway_repairs_oversized_provider_tool_arguments_before_registration()
             input_tokens: 2,
             output_tokens: 2,
             finish_reason: FinishReason::Stop,
-            cache_read_input_tokens: 0,
+            cache_read_input_tokens: 50_000,
             cache_creation_input_tokens: 0,
             reasoning: None,
             reasoning_details: None,
@@ -1006,6 +1142,36 @@ async fn gateway_repairs_oversized_provider_tool_arguments_before_registration()
         ironclaw_safety::PROVIDER_ARGUMENTS_MAX_BYTES
     )));
     assert!(!repair_tool_result.content.contains("xxxxx"));
+
+    // The repair retry is a second same-run model call: both calls must land
+    // in the prompt-cache activity log, and the scripted 200K -> 50K
+    // cached-read collapse between them must be recorded as a break with the
+    // request shape (tool surface, system prompt) correctly unchanged.
+    logs_assert(|lines: &[&str]| {
+        let recorded = lines
+            .iter()
+            .filter(|line| line.contains("reborn model gateway prompt cache usage"))
+            .count();
+        if recorded == 2 {
+            Ok(())
+        } else {
+            Err(format!(
+                "expected both the rejected call and the repair retry to record cache usage, got {recorded} records"
+            ))
+        }
+    });
+    assert!(
+        logs_contain("prompt cache break detected"),
+        "the cached-read collapse across the repair retry must record a break"
+    );
+    assert!(
+        logs_contain("tool_definitions_changed=false"),
+        "the repair retry reuses the same tool surface"
+    );
+    assert!(
+        logs_contain("system_prompt_changed=false"),
+        "the repair retry reuses the same system prompt"
+    );
 }
 
 #[tokio::test]
@@ -3446,6 +3612,59 @@ impl LlmProvider for StreamingRecordingLlmProvider {
     }
 }
 
+/// Provider that scripts the `cache_read_input_tokens` of successive calls so
+/// tests can drive the gateway's prompt-cache-break detector.
+struct CacheUsageSequenceProvider {
+    cache_reads: Mutex<VecDeque<u32>>,
+}
+
+impl CacheUsageSequenceProvider {
+    fn new(cache_reads: Vec<u32>) -> Self {
+        Self {
+            cache_reads: Mutex::new(cache_reads.into()),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for CacheUsageSequenceProvider {
+    fn model_name(&self) -> &str {
+        "cache-usage-model"
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        let cache_read_input_tokens = self
+            .cache_reads
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("scripted cache usage for every call");
+        Ok(CompletionResponse {
+            content: "ok".to_string(),
+            input_tokens: 120_000,
+            output_tokens: 10,
+            finish_reason: FinishReason::Stop,
+            reasoning: None,
+            cache_read_input_tokens,
+            cache_creation_input_tokens: 0,
+        })
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        Err(LlmError::RequestFailed {
+            provider: "cache-usage".to_string(),
+            reason: "tool completion is not used by this test".to_string(),
+        })
+    }
+}
+
 struct RecordingLlmProvider {
     model_name: String,
     requests: Mutex<Vec<CompletionRequest>>,
@@ -3714,6 +3933,26 @@ impl GatewayCapabilityPort {
             registered: Mutex::new(Vec::new()),
             validation_error: None,
         }
+    }
+
+    /// Same surface as [`Self::with_tool_surface`] plus one extra advertised
+    /// tool, so a follow-up call changes the gateway's tool-definitions cache
+    /// signature.
+    fn with_extended_tool_surface() -> Self {
+        let mut port = Self::with_tool_surface();
+        port.definitions.push(ProviderToolDefinition {
+            capability_id: CapabilityId::new("demo.extra").unwrap(),
+            name: provider_name("demo__extra"),
+            description: "Extra input".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "message": { "type": "string" }
+                }
+            }),
+        });
+        port.resolvable_definitions = port.definitions.clone();
+        port
     }
 
     fn with_hidden_resolvable_tool_surface() -> Self {

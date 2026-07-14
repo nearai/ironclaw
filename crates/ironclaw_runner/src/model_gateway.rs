@@ -50,6 +50,13 @@ use ironclaw_turns::{
 };
 use tracing::debug;
 
+mod prompt_cache_activity;
+
+use prompt_cache_activity::{
+    ModelCallCacheUsage, PromptCacheActivityLog, PromptCacheCallScope,
+    system_prompt_cache_signature, tool_definitions_cache_signature,
+};
+
 use crate::{
     failure_categories::MODEL_CREDITS_EXHAUSTED_REASON_KIND,
     model_routes::{
@@ -345,6 +352,7 @@ where
     provider: Arc<P>,
     policy: LlmModelProfilePolicy,
     provider_turn_sequence: Arc<AtomicU64>,
+    prompt_cache_activity: Arc<PromptCacheActivityLog>,
 }
 
 impl<P> LlmProviderModelGateway<P>
@@ -366,7 +374,12 @@ where
             provider,
             policy,
             provider_turn_sequence: Arc::new(AtomicU64::new(1)),
+            prompt_cache_activity: Arc::new(PromptCacheActivityLog::default()),
         }
+    }
+
+    fn prompt_cache_scope(&self, run_id: TurnRunId) -> PromptCacheCallScope {
+        PromptCacheCallScope::new(Arc::clone(&self.prompt_cache_activity), run_id)
     }
 }
 
@@ -412,6 +425,7 @@ where
             None,
             None,
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -454,6 +468,7 @@ where
             None,
             Some(sink),
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -500,6 +515,7 @@ where
             Some(provider_turn_scope),
             None,
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -547,6 +563,7 @@ where
             Some(provider_turn_scope),
             Some(sink),
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -660,6 +677,7 @@ where
     provider_pool: Arc<P>,
     route_resolver: Arc<dyn ModelRouteResolver>,
     provider_turn_sequence: Arc<AtomicU64>,
+    prompt_cache_activity: Arc<PromptCacheActivityLog>,
 }
 
 impl<P> RoutedLlmProviderModelGateway<P>
@@ -671,7 +689,12 @@ where
             provider_pool,
             route_resolver,
             provider_turn_sequence: Arc::new(AtomicU64::new(1)),
+            prompt_cache_activity: Arc::new(PromptCacheActivityLog::default()),
         }
+    }
+
+    fn prompt_cache_scope(&self, run_id: TurnRunId) -> PromptCacheCallScope {
+        PromptCacheCallScope::new(Arc::clone(&self.prompt_cache_activity), run_id)
     }
 }
 
@@ -713,6 +736,7 @@ where
             None,
             None,
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -751,6 +775,7 @@ where
             None,
             Some(sink),
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -793,6 +818,7 @@ where
             Some(provider_turn_scope),
             None,
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -836,6 +862,7 @@ where
             Some(provider_turn_scope),
             Some(sink),
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -1114,7 +1141,7 @@ impl CompletionStreamSink for ProviderStreamSink {
 
 #[tracing::instrument(
     level = "debug",
-    skip(provider, completion, capabilities, stream_sink, replay_identity),
+    skip(provider, completion, capabilities, stream_sink, replay_identity, cache_scope),
     fields(
         provider_id = %replay_identity.provider_id,
         provider_model_id = %replay_identity.provider_model_id,
@@ -1128,10 +1155,12 @@ async fn complete_model_request<P>(
     provider_turn_scope: Option<String>,
     stream_sink: Option<Arc<dyn HostManagedModelStreamSink>>,
     replay_identity: ProviderReplayIdentity,
+    cache_scope: Option<PromptCacheCallScope>,
 ) -> Result<HostManagedModelResponse, HostManagedModelError>
 where
     P: LlmProvider + ?Sized,
 {
+    let system_prompt_hash = system_prompt_cache_signature(&completion.messages);
     if let Some(capabilities) = capabilities {
         let tool_definitions = capabilities
             .tool_definitions()
@@ -1168,6 +1197,7 @@ where
                     provider_tool_definition_to_llm(definition)
                 })
                 .collect::<Vec<_>>();
+            let tool_definitions_hash = tool_definitions_cache_signature(&recovery_tool_names);
             let tool_request =
                 ToolCompletionRequest::from_completion_request(completion, llm_tool_definitions);
             debug!("reborn model gateway dispatching tool-capable provider request");
@@ -1202,6 +1232,13 @@ where
                     return Err(map_provider_error(error));
                 }
             };
+            if let Some(scope) = cache_scope.as_ref() {
+                scope.record(
+                    ModelCallCacheUsage::from_tool_response(&response),
+                    tool_definitions_hash,
+                    system_prompt_hash,
+                );
+            }
             let response =
                 recover_textual_tool_calls_from_tool_response(response, &recovery_tool_names)?;
             let host_response_started_at = live_latency_started_at();
@@ -1267,6 +1304,13 @@ where
                             return Err(map_provider_error(error));
                         }
                     };
+                    if let Some(scope) = cache_scope.as_ref() {
+                        scope.record(
+                            ModelCallCacheUsage::from_tool_response(&response),
+                            tool_definitions_hash,
+                            system_prompt_hash,
+                        );
+                    }
                     let mut response = recover_textual_tool_calls_from_tool_response(
                         response,
                         &recovery_tool_names,
@@ -1352,6 +1396,13 @@ where
             return Err(map_provider_error(error));
         }
     };
+    if let Some(scope) = cache_scope.as_ref() {
+        scope.record(
+            ModelCallCacheUsage::from_completion_response(&response),
+            tool_definitions_cache_signature(&[]),
+            system_prompt_hash,
+        );
+    }
     debug!(
         finish_reason = ?response.finish_reason,
         content_bytes = response.content.len(),

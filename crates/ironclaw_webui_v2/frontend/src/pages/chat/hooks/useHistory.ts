@@ -61,6 +61,8 @@ export function useHistory(threadId, options = {}) {
     // thread-change effect below swaps it in.
     messagesThreadId: threadId || null,
     nextCursor: cached?.nextCursor || null,
+    sequenceWindow:
+      cached?.sequenceWindow || timelineSequenceWindow(cached?.messages || []),
     isLoading: false,
     // Non-null when an initial or cursor-load failed. Reset to null on a
     // successful load or when the threadId changes. The chat page renders
@@ -76,16 +78,18 @@ export function useHistory(threadId, options = {}) {
       messages: entry?.messages || [],
       messagesThreadId: threadId || null,
       nextCursor: entry?.nextCursor || null,
+      sequenceWindow:
+        entry?.sequenceWindow || timelineSequenceWindow(entry?.messages || []),
       isLoading: Boolean(threadId) && !entry,
       loadError: null,
     });
   }
-  // Synchronous reentrancy guard, tracked PER THREAD — `isLoading` in state is
-  // async so it can't gate overlapping calls (scroll-to-load + onRunSettled
-  // refetch can fire in the same tick). It must be per-thread, not a single
-  // boolean: a boolean held by an in-flight load of thread A would block a
-  // switch to an uncached thread B, leaving B stuck loading. Each entry is
-  // added before the first await and removed in `finally`.
+  // Synchronous reentrancy guard, tracked PER THREAD AND PAGE — `isLoading` in
+  // state is async so it can't gate overlapping calls (scroll-to-load +
+  // onRunSettled refetch can fire in the same tick). It must be per-page, not
+  // just per-thread: a background latest-page refresh must not cause an
+  // explicit "load older" cursor request for the same thread to be dropped.
+  // Each entry is added before the first await and removed in `finally`.
   const loadingRef = React.useRef(new Set());
   // Tracks the currently-active thread so a fetch that resolves after
   // the user has switched threads doesn't clobber the live view (its
@@ -109,13 +113,15 @@ export function useHistory(threadId, options = {}) {
           messages: [],
           messagesThreadId: null,
           nextCursor: null,
+          sequenceWindow: null,
           isLoading: false,
           loadError: null,
         });
         return;
       }
-      if (loadingRef.current.has(threadId)) return;
-      loadingRef.current.add(threadId);
+      const loadKey = historyLoadKey(threadId, cursor);
+      if (loadingRef.current.has(loadKey)) return;
+      loadingRef.current.add(loadKey);
       // Capture the issuing identity + cache key BEFORE the await. If the
       // user signs out / in (or swaps tokens) while this request is in
       // flight, the response belongs to the previous user: we must neither
@@ -134,7 +140,13 @@ export function useHistory(threadId, options = {}) {
         if (authScope() !== issuingScope) return;
 
         const pendingMessages = cursor ? [] : getPendingMessages?.() || [];
-        const renderable = messagesFromTimeline(data.messages || [], pendingMessages, threadId);
+        const timelineRecords = data.messages || [];
+        const fetchedSequenceWindow = timelineSequenceWindow(timelineRecords);
+        const renderable = messagesFromTimeline(
+          timelineRecords,
+          pendingMessages,
+          threadId,
+        );
         const nextCursor = data.next_cursor || null;
 
         // RebornTimelineResponse.next_cursor === null means we reached
@@ -148,12 +160,34 @@ export function useHistory(threadId, options = {}) {
         // The active thread cache is refreshed again below after merging
         // client-only messages from the live state.
         if (!cursor) {
-          const cachedMessages = historyCache.get(key)?.messages || [];
+          const cachedEntry = historyCache.get(key);
+          const cachedMessages = cachedEntry?.messages || [];
+          const cachedSequenceWindow =
+            cachedEntry?.sequenceWindow ||
+            timelineSequenceWindow(cachedMessages);
           const cacheMerged = mergeFullRefresh(renderable, cachedMessages, {
             preserveClientOnly,
             finalReplyTimestampByRun,
+            freshSequenceWindow: fetchedSequenceWindow,
+            currentSequenceWindow: cachedSequenceWindow,
           });
-          putCache(key, { messages: cacheMerged, nextCursor });
+          putCache(key, {
+            messages: cacheMerged,
+            nextCursor: nextCursorAfterFullRefresh(
+              renderable,
+              cachedMessages,
+              nextCursor,
+              cachedEntry?.nextCursor || null,
+              {
+                freshSequenceWindow: fetchedSequenceWindow,
+                currentSequenceWindow: cachedSequenceWindow,
+              },
+            ),
+            sequenceWindow: sequenceWindowAfterFullRefresh(
+              fetchedSequenceWindow,
+              cachedSequenceWindow,
+            ),
+          });
         }
 
         setState((prev) => {
@@ -161,20 +195,75 @@ export function useHistory(threadId, options = {}) {
           // live view alone (the cache above already captured the result).
           if (threadIdRef.current !== threadId) return prev;
           let merged;
+          let mergedSequenceWindow;
+          const prevSequenceWindow =
+            prev.sequenceWindow || timelineSequenceWindow(prev.messages);
           if (cursor) {
+            if (
+              !cursorPageCanMerge(
+                cursor,
+                renderable,
+                prev.messages,
+                prev.nextCursor || null,
+                {
+                  pageSequenceWindow: fetchedSequenceWindow,
+                  currentSequenceWindow: prevSequenceWindow,
+                },
+              )
+            ) {
+              return {
+                ...prev,
+                isLoading: hasOtherActiveLoadsForThread(
+                  loadingRef.current,
+                  threadId,
+                  loadKey,
+                ),
+              };
+            }
             merged = mergePage(renderable, prev.messages);
+            mergedSequenceWindow = mergeSequenceWindows(
+              fetchedSequenceWindow,
+              prevSequenceWindow,
+            );
           } else {
             merged = mergeFullRefresh(renderable, prev.messages, {
               preserveClientOnly,
               finalReplyTimestampByRun,
+              freshSequenceWindow: fetchedSequenceWindow,
+              currentSequenceWindow: prevSequenceWindow,
             });
+            mergedSequenceWindow = sequenceWindowAfterFullRefresh(
+              fetchedSequenceWindow,
+              prevSequenceWindow,
+            );
           }
-          putCache(key, { messages: merged, nextCursor });
+          const mergedNextCursor = cursor
+            ? nextCursor
+            : nextCursorAfterFullRefresh(
+                renderable,
+                prev.messages,
+                nextCursor,
+                prev.nextCursor || null,
+                {
+                  freshSequenceWindow: fetchedSequenceWindow,
+                  currentSequenceWindow: prevSequenceWindow,
+                },
+              );
+          putCache(key, {
+            messages: merged,
+            nextCursor: mergedNextCursor,
+            sequenceWindow: mergedSequenceWindow,
+          });
           return {
             messages: merged,
             messagesThreadId: threadId,
-            nextCursor,
-            isLoading: false,
+            nextCursor: mergedNextCursor,
+            sequenceWindow: mergedSequenceWindow,
+            isLoading: hasOtherActiveLoadsForThread(
+              loadingRef.current,
+              threadId,
+              loadKey,
+            ),
             loadError: null,
           };
         });
@@ -189,13 +278,17 @@ export function useHistory(threadId, options = {}) {
           threadIdRef.current === threadId
             ? {
                 ...s,
-                isLoading: false,
+                isLoading: hasOtherActiveLoadsForThread(
+                  loadingRef.current,
+                  threadId,
+                  loadKey,
+                ),
                 loadError: "chat.history.loadFailed",
               }
             : s,
         );
       } finally {
-        loadingRef.current.delete(threadId);
+        loadingRef.current.delete(loadKey);
       }
     },
     [threadId, getPendingMessages, setPendingMessages],
@@ -207,6 +300,8 @@ export function useHistory(threadId, options = {}) {
       messages: entry?.messages || [],
       messagesThreadId: threadId || null,
       nextCursor: entry?.nextCursor || null,
+      sequenceWindow:
+        entry?.sequenceWindow || timelineSequenceWindow(entry?.messages || []),
       // Only show the loading state when nothing is cached to show;
       // otherwise render the cached thread immediately and refresh in
       // the background so the content area doesn't flash empty.
@@ -225,15 +320,35 @@ export function useHistory(threadId, options = {}) {
     if (threadIdRef.current === targetThreadId) {
       setState((s) => {
         const messages = apply(s.messages || []);
-        putCache(key, { messages, nextCursor: s.nextCursor || null });
-        return { ...s, messages, messagesThreadId: targetThreadId };
+        const sequenceWindow = mergeSequenceWindows(
+          s.sequenceWindow || null,
+          timelineSequenceWindow(messages),
+        );
+        putCache(key, {
+          messages,
+          nextCursor: s.nextCursor || null,
+          sequenceWindow,
+        });
+        return {
+          ...s,
+          messages,
+          sequenceWindow,
+          messagesThreadId: targetThreadId,
+        };
       });
       return;
     }
 
     const entry = historyCache.get(key) || { messages: [], nextCursor: null };
     const messages = apply(entry.messages || []);
-    putCache(key, { messages, nextCursor: entry.nextCursor || null });
+    putCache(key, {
+      messages,
+      nextCursor: entry.nextCursor || null,
+      sequenceWindow: mergeSequenceWindows(
+        entry.sequenceWindow || null,
+        timelineSequenceWindow(messages),
+      ),
+    });
   }, []);
 
   return {
@@ -249,14 +364,23 @@ export function useHistory(threadId, options = {}) {
       setState((s) => {
         const messages =
           typeof updater === "function" ? updater(s.messages) : updater;
+        const sequenceWindow = mergeSequenceWindows(
+          s.sequenceWindow || null,
+          timelineSequenceWindow(messages),
+        );
         // Keep the cache in step with optimistic sends and SSE-driven
         // updates so returning to the thread shows the latest messages.
         if (threadId) {
-          putCache(cacheKey(threadId), { messages, nextCursor: s.nextCursor });
+          putCache(cacheKey(threadId), {
+            messages,
+            nextCursor: s.nextCursor,
+            sequenceWindow,
+          });
         }
         return {
           ...s,
           messages,
+          sequenceWindow,
           messagesThreadId: threadId || s.messagesThreadId,
         };
       }),
@@ -268,8 +392,76 @@ function mergePage(older, current) {
   return [...older.filter((m) => !ids.has(m?.id)), ...current];
 }
 
+function cursorPageCanMerge(
+  requestedCursor,
+  pageMessages,
+  currentMessages,
+  currentNextCursor,
+  options = {},
+) {
+  return (
+    requestedCursor === currentNextCursor ||
+    cursorPageConnectsToCurrentOldest(pageMessages, currentMessages, options)
+  );
+}
+
+function cursorPageConnectsToCurrentOldest(
+  pageMessages,
+  currentMessages,
+  options = {},
+) {
+  const pageWindow =
+    options.pageSequenceWindow || timelineSequenceWindow(pageMessages);
+  const currentWindow =
+    options.currentSequenceWindow || timelineSequenceWindow(currentMessages);
+  if (!pageWindow || !currentWindow) return false;
+  return (
+    pageWindow.oldest <= currentWindow.oldest &&
+    pageWindow.newest + 1 >= currentWindow.oldest
+  );
+}
+
+function historyLoadKey(threadId, cursor) {
+  return `${threadId}\u0000${cursor || ""}`;
+}
+
+function hasOtherActiveLoadsForThread(activeLoadKeys, threadId, currentLoadKey) {
+  const prefix = `${threadId}\u0000`;
+  for (const key of activeLoadKeys) {
+    if (key !== currentLoadKey && key.startsWith(prefix)) return true;
+  }
+  return false;
+}
+
+function nextCursorAfterFullRefresh(
+  fresh,
+  current,
+  freshNextCursor,
+  currentNextCursor,
+  options = {},
+) {
+  if (!freshNextCursor) return null;
+  const freshSequenceWindow =
+    options.freshSequenceWindow || timelineSequenceWindow(fresh);
+  if (!freshSequenceWindow) return freshNextCursor;
+  const currentSequenceWindow =
+    options.currentSequenceWindow || timelineSequenceWindow(current);
+  return hasConnectedLoadedOlderTimelineRecords(
+    current,
+    freshSequenceWindow,
+    currentSequenceWindow,
+  )
+    ? currentNextCursor || null
+    : freshNextCursor;
+}
+
 function mergeFullRefresh(fresh, current, options = {}) {
-  const { preserveClientOnly = false, finalReplyTimestampByRun = null } = options;
+  const {
+    preserveClientOnly = false,
+    finalReplyTimestampByRun = null,
+    freshSequenceWindow: rawFreshSequenceWindow = null,
+    currentSequenceWindow: rawCurrentSequenceWindow = null,
+  } = options;
   const hydratedFresh = carryFinalAssistantOrderFlags(
     hydrateFreshMessages(fresh, current, {
       finalReplyTimestampByRun,
@@ -277,11 +469,24 @@ function mergeFullRefresh(fresh, current, options = {}) {
     current,
   );
   const ids = new Set(hydratedFresh.map((m) => m?.id).filter(Boolean));
+  const freshSequenceWindow =
+    rawFreshSequenceWindow || timelineSequenceWindow(hydratedFresh);
+  const currentSequenceWindow =
+    rawCurrentSequenceWindow || timelineSequenceWindow(current);
+  const preserveLoadedOlderTimelineMessages =
+    freshSequenceWindow &&
+    currentTimelineWindowConnectsToFresh(
+      current,
+      freshSequenceWindow,
+      currentSequenceWindow,
+    );
   const preserved = current.filter((message) => {
     if (!message || typeof message.id !== "string" || ids.has(message.id)) {
       return false;
     }
-    if (isRunActivityMessage(message)) return true;
+    if (isRunActivityMessage(message) && timelineSequence(message) === null) {
+      return true;
+    }
     if (
       typeof message.timelineMessageId === "string" &&
       ids.has(`msg-${message.timelineMessageId}`)
@@ -289,6 +494,12 @@ function mergeFullRefresh(fresh, current, options = {}) {
       return false;
     }
     if (isSeededOptimisticMessage(message)) return true;
+    if (
+      preserveLoadedOlderTimelineMessages &&
+      isLoadedOlderTimelineMessage(message, freshSequenceWindow.oldest)
+    ) {
+      return true;
+    }
     return preserveClientOnly && message.id.startsWith("err-");
   });
   return preserved.length > 0
@@ -303,6 +514,113 @@ function isSeededOptimisticMessage(message) {
     message.id.startsWith("pending-") &&
     (message.role === "user" || message.role === "assistant")
   );
+}
+
+function isLoadedOlderTimelineMessage(message, oldestFreshSequence) {
+  if (oldestFreshSequence === null) return false;
+  const sequence = timelineSequence(message);
+  return sequence !== null && sequence < oldestFreshSequence;
+}
+
+function hasConnectedLoadedOlderTimelineRecords(
+  messages,
+  freshSequenceWindow,
+  currentSequenceWindow,
+) {
+  if (
+    !currentTimelineWindowConnectsToFresh(
+      messages,
+      freshSequenceWindow,
+      currentSequenceWindow,
+    )
+  ) {
+    return false;
+  }
+  if (
+    currentSequenceWindow &&
+    currentSequenceWindow.oldest < freshSequenceWindow.oldest
+  ) {
+    return true;
+  }
+  return (messages || []).some((message) =>
+    isLoadedOlderTimelineMessage(message, freshSequenceWindow.oldest),
+  );
+}
+
+function currentTimelineWindowConnectsToFresh(
+  messages,
+  freshSequenceWindow,
+  currentSequenceWindow = null,
+) {
+  if (
+    currentSequenceWindow &&
+    sequenceWindowsOverlapOrTouch(currentSequenceWindow, freshSequenceWindow)
+  ) {
+    return true;
+  }
+  let newestBeforeFresh = null;
+  for (const message of messages || []) {
+    const sequence = timelineSequence(message);
+    if (sequence === null) continue;
+    if (
+      sequence >= freshSequenceWindow.oldest &&
+      sequence <= freshSequenceWindow.newest
+    ) {
+      return true;
+    }
+    if (sequence < freshSequenceWindow.oldest) {
+      newestBeforeFresh =
+        newestBeforeFresh === null
+          ? sequence
+          : Math.max(newestBeforeFresh, sequence);
+    }
+  }
+  return (
+    newestBeforeFresh !== null &&
+    newestBeforeFresh + 1 === freshSequenceWindow.oldest
+  );
+}
+
+function sequenceWindowAfterFullRefresh(freshSequenceWindow, currentSequenceWindow) {
+  if (!freshSequenceWindow) return freshSequenceWindow;
+  if (
+    currentSequenceWindow &&
+    sequenceWindowsOverlapOrTouch(currentSequenceWindow, freshSequenceWindow)
+  ) {
+    return mergeSequenceWindows(freshSequenceWindow, currentSequenceWindow);
+  }
+  return freshSequenceWindow;
+}
+
+function mergeSequenceWindows(left, right) {
+  if (!left) return right || null;
+  if (!right) return left || null;
+  return {
+    oldest: Math.min(left.oldest, right.oldest),
+    newest: Math.max(left.newest, right.newest),
+  };
+}
+
+function sequenceWindowsOverlapOrTouch(left, right) {
+  if (!left || !right) return false;
+  return left.oldest <= right.newest + 1 && right.oldest <= left.newest + 1;
+}
+
+function timelineSequenceWindow(messages) {
+  let oldest = null;
+  let newest = null;
+  for (const message of messages || []) {
+    const sequence = timelineSequence(message);
+    if (sequence === null) continue;
+    oldest = oldest === null ? sequence : Math.min(oldest, sequence);
+    newest = newest === null ? sequence : Math.max(newest, sequence);
+  }
+  return oldest === null ? null : { oldest, newest };
+}
+
+function timelineSequence(message) {
+  const sequence = Number(message?.sequence);
+  return Number.isFinite(sequence) ? sequence : null;
 }
 
 function hydrateFreshMessages(fresh, current, options = {}) {
@@ -351,8 +669,15 @@ function hydrateFreshMessages(fresh, current, options = {}) {
 }
 
 function insertPreservedAtOriginalPositions(fresh, preserved, current) {
+  const base = mergeTimelineMessagesBySequence(
+    fresh,
+    preserved.filter((message) => timelineSequence(message) !== null),
+  );
+  const anchoredPreserved = preserved.filter(
+    (message) => timelineSequence(message) === null,
+  );
   const freshIndexById = new Map();
-  for (const [index, message] of fresh.entries()) {
+  for (const [index, message] of base.entries()) {
     if (typeof message?.id === "string") freshIndexById.set(message.id, index);
   }
   const currentAnchors = current.map((message) =>
@@ -361,7 +686,7 @@ function insertPreservedAtOriginalPositions(fresh, preserved, current) {
   const after = new Map();
   const append = [];
 
-  for (const message of preserved) {
+  for (const message of anchoredPreserved) {
     if (!isRunActivityMessage(message)) {
       append.push(message);
       continue;
@@ -384,13 +709,25 @@ function insertPreservedAtOriginalPositions(fresh, preserved, current) {
   }
 
   const merged = [];
-  for (const [index, message] of fresh.entries()) {
+  for (const [index, message] of base.entries()) {
     merged.push(message);
     const group = after.get(index);
     if (group) merged.push(...group);
   }
   merged.push(...append);
   return merged;
+}
+
+function mergeTimelineMessagesBySequence(fresh, preserved) {
+  if (preserved.length === 0) return fresh;
+  return [...fresh, ...preserved].sort((left, right) => {
+    const leftSequence = timelineSequence(left);
+    const rightSequence = timelineSequence(right);
+    if (leftSequence === null && rightSequence === null) return 0;
+    if (leftSequence === null) return 1;
+    if (rightSequence === null) return -1;
+    return leftSequence - rightSequence;
+  });
 }
 
 function freshIndexForCurrentMessage(message, freshIndexById) {
