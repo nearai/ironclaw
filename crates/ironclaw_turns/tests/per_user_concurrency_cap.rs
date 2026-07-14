@@ -57,6 +57,7 @@ fn actor_for(user: &UserId) -> TurnActor {
 fn submit_request_for(scope: TurnScope, key: &str) -> SubmitTurnRequest {
     let actor = actor_for(scope.explicit_owner_user_id().unwrap());
     SubmitTurnRequest {
+        requested_model: None,
         actor,
         accepted_message_ref: AcceptedMessageRef::new(format!("message-{key}")).unwrap(),
         source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
@@ -583,6 +584,7 @@ async fn ownerless_runs_are_not_counted_against_cap() {
     );
 
     let make_req = |scope: TurnScope, key: &'static str| SubmitTurnRequest {
+        requested_model: None,
         scope,
         actor: actor.clone(),
         accepted_message_ref: AcceptedMessageRef::new(format!("msg-{key}")).unwrap(),
@@ -683,6 +685,7 @@ async fn actor_fallback_runs_are_capped_under_actor_user_id() {
     );
 
     let make_req = |scope: TurnScope, actor: TurnActor, key: &'static str| SubmitTurnRequest {
+        requested_model: None,
         scope,
         actor,
         accepted_message_ref: AcceptedMessageRef::new(format!("msg-{key}")).unwrap(),

@@ -6709,6 +6709,7 @@ mod tests {
             Some(owner.clone()),
         );
         let submit = ironclaw_turns::SubmitTurnRequest {
+            requested_model: None,
             scope,
             actor: ironclaw_turns::TurnActor::new(owner),
             accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("configured-message-ref")
@@ -6832,6 +6833,7 @@ mod tests {
             Some(owner.clone()),
         );
         let submit = ironclaw_turns::SubmitTurnRequest {
+            requested_model: None,
             scope,
             actor: ironclaw_turns::TurnActor::new(owner),
             accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("default-message-ref")

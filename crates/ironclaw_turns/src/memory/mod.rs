@@ -1184,7 +1184,10 @@ impl TurnStateStore for InMemoryTurnStateStore {
             run_id,
             status: RunStatusCell::new(TurnStatus::Queued),
             profile: profile.clone(),
-            resolved_model_route: None,
+            resolved_model_route: request
+                .requested_model
+                .as_deref()
+                .and_then(crate::run_profile::LoopModelRouteSnapshot::advisory),
             model_usage: None,
             accepted_message_ref: request.accepted_message_ref.clone(),
             source_binding_ref: request.source_binding_ref.clone(),
@@ -1386,6 +1389,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
                 return response;
             }
             SubmitTurnRequest {
+                requested_model: None,
                 scope: request.child_scope.clone(),
                 actor: request.actor.clone(),
                 accepted_message_ref: request.accepted_message_ref.clone(),
@@ -4114,6 +4118,7 @@ mod tests {
             let response = store
                 .submit_turn(
                     SubmitTurnRequest {
+                        requested_model: None,
                         scope: scope.clone(),
                         actor: TurnActor::new(UserId::new(format!("user-{index}")).unwrap()),
                         accepted_message_ref: AcceptedMessageRef::new(format!("accepted-{index}"))
@@ -4192,6 +4197,7 @@ mod tests {
         let response = store
             .submit_turn(
                 SubmitTurnRequest {
+                    requested_model: None,
                     scope: scope.clone(),
                     actor: TurnActor::new(UserId::new("user-lease-overlay").unwrap()),
                     accepted_message_ref: AcceptedMessageRef::new("accepted-lease-overlay")

@@ -68,6 +68,11 @@ pub struct SubmitTurnRequest {
     pub source_binding_ref: SourceBindingRef,
     pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub requested_run_profile: Option<RunProfileRequest>,
+    /// Caller-requested model for this turn. A hint the coordinator resolves to a
+    /// concrete per-run model route when the operator has it configured; when it
+    /// can't be resolved the run falls back to the deployment's active model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
     pub idempotency_key: IdempotencyKey,
     pub received_at: TurnTimestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]

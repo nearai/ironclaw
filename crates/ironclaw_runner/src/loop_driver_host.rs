@@ -1968,6 +1968,18 @@ where
                 .validate()
                 .map_err(|reason| RebornLoopDriverHostError::InvalidRequest { reason })?;
             let Some(resolver) = &self.model_route_resolver else {
+                // No route resolver is wired (the default product runtime). An
+                // *advisory* snapshot is a caller-requested model hint, not an
+                // operator-approved route: pass it through unvalidated so the
+                // non-routed gateway can honor the model id when its provider
+                // supports per-request overrides and otherwise fall back to the
+                // active model. A non-advisory (operator) route persisted on a
+                // resolver-less host is a misconfiguration we cannot validate,
+                // so fail closed. Routed hosts (resolver present) validate every
+                // route below.
+                if snapshot.is_advisory() {
+                    return Ok(run_context);
+                }
                 return Err(RebornLoopDriverHostError::InvalidRequest {
                     reason: "model route resolver is required for this host".to_string(),
                 });

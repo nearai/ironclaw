@@ -795,6 +795,7 @@ mod tests {
         let actor = TurnActor::new(UserId::new("alice").unwrap());
         let submit = coordinator
             .submit_turn(SubmitTurnRequest {
+                requested_model: None,
                 scope: scope.clone(),
                 actor: actor.clone(),
                 accepted_message_ref: AcceptedMessageRef::new("message-auth-real").unwrap(),
