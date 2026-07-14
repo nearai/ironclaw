@@ -58,8 +58,23 @@ function renderExtensionsPage(tab, extensionState = {}) {
   };
 }
 
+function findComponent(node, component) {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const match = findComponent(child, component);
+      if (match) return match;
+    }
+    return null;
+  }
+  if (!node || typeof node !== "object") return null;
+  if (node.type === component) return node;
+  return findComponent(node.children, component);
+}
+
 test("ExtensionsPage renders registry data while installed extensions are still loading", () => {
-  const { rendered } = renderExtensionsPage("registry", {
+  const catalogEntries = [{ id: "registry-tool" }];
+  const { RegistryTab, rendered } = renderExtensionsPage("registry", {
+    catalogEntries,
     isExtensionsLoading: true,
     isRegistryLoading: false,
   });
@@ -70,7 +85,9 @@ test("ExtensionsPage renders registry data while installed extensions are still 
     /v2-skeleton/,
     "the registry must not remain behind the installed-extension skeleton",
   );
-  assert.match(renderedJson, /catalogEntries/);
+  const registryTab = findComponent(rendered, RegistryTab);
+  assert.ok(registryTab, "the registry tab content must be rendered");
+  assert.equal(registryTab.props.catalogEntries, catalogEntries);
 });
 
 for (const tab of ["installed", "unknown"]) {
