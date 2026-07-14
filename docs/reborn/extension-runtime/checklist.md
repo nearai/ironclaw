@@ -834,7 +834,7 @@ Rules — kept short on purpose:
   only (the sanctioned test linkage); the CLI supplies the Slack channel
   adapter + extras through `RebornBuildInput::with_channel_extension_bindings`.
 - [ ] DEL-8 The concrete-name scanner allowlist is empty. — In progress: the
-  shrink-only `ALLOWLIST` (`reborn_extension_specificity.rs`) is down to 113
+  shrink-only `ALLOWLIST` (`reborn_extension_specificity.rs`) is down to 102
   `(path, term)` entries (from ~145 at the start of P7b). **Lane A is
   complete**: every userland first-party package — github, gmail,
   google-calendar/docs/drive/sheets/slides, notion, slack, telegram,
@@ -860,12 +860,14 @@ Rules — kept short on purpose:
      `product_adapters`, `product_workflow`, `reborn`, `reborn_traces`, and
      `skills`. Deep Lane C — each site needs per-site degenericization or an
      explicit sign-off; not package-shaped.
-  3. **i18n frontend copy** — vendor names (github/google) in localized UI
-     strings across 11 locales: NEAR AI SSO provider names, GitHub-as-skill-host
-     copy, and a capability-routing hint. Borderline between the existing
-     SSO / code-host carve-out classes and debt; degenericizing the routing
-     hint across every translation is impractical, so left as debt pending a
-     classification decision.
+  3. **i18n frontend copy** — vendor names in localized UI strings across 11
+     locales. `google` (SSO login-provider name only) is now carved as SSO
+     copy. `github` remains debt: it is SSO + GitHub-as-skill-host (both carve
+     classes) **plus** a capability-routing hint
+     (`tools.description.builtin.http`: "Prefer GitHub extension capabilities")
+     that is closer to debt than collision; degenericizing that hint across
+     every translation is impractical, so it is left pending a classification
+     decision (mirrors the backend `first_party_tools/http.rs` hint).
   Target stays empty; buckets 2–3 need the Lane C degenericization/sign-off
   pass and bucket 1 the config-layer decision.
 - [x] DEL-9 `check-generic-without-concrete.sh` passes in CI: every generic
