@@ -1306,10 +1306,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/ironclaw_product_workflow/Cargo.toml", "telegram"),
     ("crates/ironclaw_product_workflow/src/lib.rs", "telegram"),
     (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
-        "telegram",
-    ),
-    (
         "crates/ironclaw_reborn_traces/src/contribution.rs",
         "telegram",
     ),

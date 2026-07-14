@@ -49,8 +49,6 @@ const GOOGLE_SHEETS_WASM_MODULE: &[u8] = include_bytes!(
 );
 const SLACK_MANIFEST: &str =
     include_str!("../../../ironclaw_first_party_extensions/assets/slack/manifest.toml");
-const TELEGRAM_MANIFEST: &str =
-    include_str!("../../../ironclaw_first_party_extensions/assets/telegram/manifest.toml");
 const SLACK_WASM_MODULE: &[u8] = include_bytes!(
     "../../../ironclaw_first_party_extensions/assets/slack/wasm/slack_user_tool.wasm"
 );
@@ -411,7 +409,12 @@ impl AvailableExtensionCatalog {
             gmail_package()?,
         ];
         packages.push(slack_package()?);
-        packages.push(telegram_package()?);
+        // Packages migrated to the self-contained inventory
+        // (`ironclaw_first_party_extensions::packages`) are consumed here as
+        // opaque bundles — composition never names them (overview §3).
+        for bundle in ironclaw_first_party_extensions::packages::bundled_packages() {
+            packages.push(package_from_bundle(bundle)?);
+        }
         Ok(Self::from_packages(packages))
     }
 
@@ -639,17 +642,6 @@ pub(crate) fn slack_package() -> Result<AvailableExtensionPackage, ProductWorkfl
     bundled_extension_package(SLACK_EXTENSION_ID, "Slack", SLACK_MANIFEST, slack_assets())
 }
 
-/// The Telegram channel package: a pure channel extension — one manifest,
-/// zero package assets beyond it (DEL-10's addition test).
-pub(crate) fn telegram_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package(
-        "telegram",
-        "Telegram",
-        TELEGRAM_MANIFEST,
-        vec![bytes_asset("manifest.toml", TELEGRAM_MANIFEST.as_bytes())],
-    )
-}
-
 pub(crate) fn google_calendar_manifest_digest() -> String {
     sha256_digest_token(GOOGLE_CALENDAR_MANIFEST.as_bytes())
 }
@@ -727,6 +719,36 @@ fn nearai_mcp_manifest_toml_for_endpoint(
             "bundled NEAR AI manifest TOML render failed: {error}"
         ))
     })
+}
+
+/// Build an [`AvailableExtensionPackage`] from an opaque first-party
+/// [`ironclaw_first_party_extensions::packages::PackageBundle`]. The bundle
+/// carries only data (id, display copy, manifest, assets); all manifest
+/// resolution / surface projection stays here (it needs product_workflow +
+/// host_runtime types the inventory crate sits below).
+fn package_from_bundle(
+    bundle: ironclaw_first_party_extensions::packages::PackageBundle,
+) -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    use ironclaw_first_party_extensions::packages::PackageAssetContent;
+    let assets = bundle
+        .assets
+        .into_iter()
+        .map(|asset| AvailableExtensionAsset {
+            path: asset.path,
+            content: match asset.content {
+                PackageAssetContent::Bytes(bytes) => AvailableExtensionAssetContent::Bytes(bytes),
+                PackageAssetContent::Filesystem(path) => {
+                    AvailableExtensionAssetContent::Filesystem(path)
+                }
+            },
+        })
+        .collect();
+    bundled_extension_package(
+        bundle.id,
+        bundle.display_name,
+        &bundle.manifest_toml,
+        assets,
+    )
 }
 
 fn bundled_extension_package(
