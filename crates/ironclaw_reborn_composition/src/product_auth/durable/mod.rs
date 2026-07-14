@@ -12,8 +12,8 @@ use futures::{StreamExt as _, TryStreamExt as _, stream};
 
 use chrono::Utc;
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FileType, FilesystemError, RecordVersion, RootFilesystem,
-    ScopedFilesystem,
+    CasApply, CasExpectation, CasUpdateError, ContentType, Entry, FileType, FilesystemError,
+    RecordVersion, RootFilesystem, ScopedFilesystem, cas_update,
 };
 use ironclaw_host_api::{
     AgentId, ProjectId, ResourceScope, ScopedPath, SecretHandle, TenantId, UserId,
@@ -46,6 +46,24 @@ mod tests;
 
 const MAX_OWNER_SESSION_ROOTS_PER_SURFACE: usize = 1024;
 const MAX_OWNER_RECORDS_PER_ROOT: usize = 1024;
+const MAX_ACCOUNT_DISCOVERY_ENTRIES_PER_ROOT: usize = 1024;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AccountEnumerationMode {
+    BestEffortKeepalive,
+    StrictMigration,
+}
+
+struct LocatedCredentialAccount {
+    located_scope: ironclaw_auth::AuthProductScope,
+    path: ScopedPath,
+    account: CredentialAccount,
+    #[allow(
+        dead_code,
+        reason = "strict discovery records the observed version for auditability"
+    )]
+    version: RecordVersion,
+}
 
 fn flow_requires_lifecycle_cleanup(flow: &AuthFlowRecord) -> bool {
     !ironclaw_auth::is_terminal_status(flow.status)
@@ -54,6 +72,16 @@ fn flow_requires_lifecycle_cleanup(flow: &AuthFlowRecord) -> bool {
                 flow.continuation,
                 AuthContinuationRef::TurnGateResume { .. }
             ))
+}
+
+fn migration_cas_error(error: CasUpdateError<AuthProductError>) -> AuthProductError {
+    match error {
+        CasUpdateError::Apply(error) => error,
+        CasUpdateError::RetriesExhausted => AuthProductError::BackendConflict,
+        CasUpdateError::Timeout | CasUpdateError::CasUnsupported | CasUpdateError::Backend(_) => {
+            AuthProductError::BackendUnavailable
+        }
+    }
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -483,6 +511,15 @@ where
         &self,
         owner: &CredentialAccountOwnerScope,
     ) -> Result<Vec<ironclaw_auth::AuthProductScope>, AuthProductError> {
+        self.account_scopes_for_owner_with_mode(owner, AccountEnumerationMode::BestEffortKeepalive)
+            .await
+    }
+
+    async fn account_scopes_for_owner_with_mode(
+        &self,
+        owner: &CredentialAccountOwnerScope,
+        mode: AccountEnumerationMode,
+    ) -> Result<Vec<ironclaw_auth::AuthProductScope>, AuthProductError> {
         let resource = ResourceScope {
             tenant_id: owner.tenant_id.clone(),
             user_id: owner.user_id.clone(),
@@ -527,8 +564,10 @@ where
                 if entry.file_type != FileType::Directory {
                     continue;
                 }
-                let Ok(session_id) = AuthSessionId::new(entry.name) else {
-                    continue;
+                let session_id = match AuthSessionId::new(entry.name) {
+                    Ok(session_id) => session_id,
+                    Err(_) if mode == AccountEnumerationMode::BestEffortKeepalive => continue,
+                    Err(_) => return Err(AuthProductError::BackendUnavailable),
                 };
                 scopes.push(
                     ironclaw_auth::AuthProductScope::new(resource.clone(), surface)
@@ -543,6 +582,18 @@ where
         &self,
         owner: &CredentialAccountOwnerScope,
     ) -> Result<Vec<CredentialAccount>, AuthProductError> {
+        self.account_records_for_owner_filtered(owner, |_| true)
+            .await
+    }
+
+    async fn account_records_for_owner_filtered<P>(
+        &self,
+        owner: &CredentialAccountOwnerScope,
+        predicate: P,
+    ) -> Result<Vec<CredentialAccount>, AuthProductError>
+    where
+        P: Fn(&CredentialAccount) -> bool,
+    {
         let mut accounts = Vec::new();
         for scope in self.account_scopes_for_owner(owner).await? {
             accounts.extend(
@@ -552,7 +603,7 @@ where
                 )
                 .await?
                 .into_iter()
-                .filter(|account| owner.matches(account)),
+                .filter(|account| owner.matches(account) && predicate(account)),
             );
         }
         accounts.sort_by_key(|account| account.id);
@@ -598,105 +649,102 @@ where
         }
     }
 
-    /// Enumerate all Google OAuth accounts eligible for proactive keepalive
-    /// refresh across all tenants, users, agents, and projects.
-    ///
-    /// Filters in-memory to provider == `GOOGLE_PROVIDER_ID`, status ==
-    /// `Configured`, and `refresh_secret.is_some()`. Idle-threshold filtering
-    /// (by `updated_at`) is left to the caller (the credential-refresh worker).
-    /// Returns an empty vec when the root filesystem was not wired (local-dev /
-    /// test path). The returned `CredentialAccount` records carry the
-    /// `access_secret`/`refresh_secret` *handles* (opaque references, never the
-    /// raw token material) because the worker needs them to drive the refresh.
-    /// Callers MUST NOT log or serialize these records; only the handle is ever
-    /// present, and it must stay internal to the refresh path.
-    ///
-    /// # Owner-scope enumeration
-    ///
-    /// The method mirrors every path shape that `product_auth_base_root` in
-    /// `paths.rs` can produce, ensuring no subtree is missed:
-    ///
-    /// - plain:           `/secrets/product-auth`
-    /// - agent-only:      `/secrets/agents/<a>/product-auth`
-    /// - agent+project:   `/secrets/agents/<a>/projects/<p>/product-auth`
-    /// - project-only:    `/secrets/projects/<p>/product-auth`
-    ///
-    /// For each discovered owner scope, the canonical `account_records_for_owner`
-    /// reader is reused (it already enumerates surfaces + sessions, applies the
-    /// per-root record cap, and deduplicates). This function then filters to
-    /// Google + Configured + has refresh secret and deduplicates the combined set.
-    ///
-    /// Per-directory and per-owner errors are silently skipped (annotated below)
-    /// so one bad subtree never aborts the sweep.
-    pub(crate) async fn sweep_all_accounts(&self) -> Vec<CredentialAccount> {
+    async fn discovery_entries(
+        &self,
+        path: &VirtualPath,
+        mode: AccountEnumerationMode,
+    ) -> Result<Vec<ironclaw_filesystem::DirEntry>, AuthProductError> {
         let Some(root) = &self.root else {
-            // Local-dev / test path: no root wired, nothing to enumerate.
-            return Vec::new();
+            return match mode {
+                AccountEnumerationMode::BestEffortKeepalive => Ok(Vec::new()),
+                AccountEnumerationMode::StrictMigration => {
+                    Err(AuthProductError::BackendUnavailable)
+                }
+            };
         };
-
-        // Walk /tenants → /tenants/<t>/users to discover (tenant, user) pairs.
-        let tenants_path = match VirtualPath::new("/tenants") {
-            Ok(p) => p,
-            Err(error) => {
-                tracing::debug!(%error, "account sweep: /tenants is not a valid virtual path");
-                return Vec::new();
-            }
-        };
-        let tenant_entries = match root.list_dir(&tenants_path).await {
+        let mut entries = match root
+            .list_dir_bounded(
+                path,
+                MAX_ACCOUNT_DISCOVERY_ENTRIES_PER_ROOT.saturating_add(1),
+            )
+            .await
+        {
             Ok(entries) => entries,
-            Err(FilesystemError::NotFound { .. } | FilesystemError::Unsupported { .. }) => {
-                return Vec::new();
-            }
+            Err(FilesystemError::NotFound { .. }) => return Ok(Vec::new()),
             Err(error) => {
-                tracing::debug!(%error, "account sweep: failed to list /tenants");
-                return Vec::new();
+                if mode == AccountEnumerationMode::StrictMigration {
+                    return Err(fs_error(error));
+                }
+                tracing::debug!(%error, path = %path, "account keepalive: discovery subtree skipped");
+                return Ok(Vec::new());
             }
         };
+        if entries.len() > MAX_ACCOUNT_DISCOVERY_ENTRIES_PER_ROOT {
+            return match mode {
+                AccountEnumerationMode::BestEffortKeepalive => Ok(Vec::new()),
+                AccountEnumerationMode::StrictMigration => {
+                    Err(AuthProductError::BackendUnavailable)
+                }
+            };
+        }
+        entries.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(entries)
+    }
 
-        let mut candidates = Vec::new();
+    fn discovery_path(
+        raw: &str,
+        mode: AccountEnumerationMode,
+    ) -> Result<Option<VirtualPath>, AuthProductError> {
+        match VirtualPath::new(raw) {
+            Ok(path) => Ok(Some(path)),
+            Err(_) if mode == AccountEnumerationMode::BestEffortKeepalive => Ok(None),
+            Err(_) => Err(AuthProductError::BackendUnavailable),
+        }
+    }
+
+    fn parse_discovery_id<T>(
+        result: Result<T, ironclaw_host_api::HostApiError>,
+        mode: AccountEnumerationMode,
+    ) -> Result<Option<T>, AuthProductError> {
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(_) if mode == AccountEnumerationMode::BestEffortKeepalive => Ok(None),
+            Err(_) => Err(AuthProductError::BackendUnavailable),
+        }
+    }
+
+    async fn discover_account_owners(
+        &self,
+        mode: AccountEnumerationMode,
+    ) -> Result<Vec<CredentialAccountOwnerScope>, AuthProductError> {
+        let Some(tenants_path) = Self::discovery_path("/tenants", mode)? else {
+            return Ok(Vec::new());
+        };
+        let tenant_entries = self.discovery_entries(&tenants_path, mode).await?;
+        let mut owners = Vec::new();
         for tenant_entry in tenant_entries {
             if tenant_entry.file_type != FileType::Directory {
                 continue;
             }
-            let Ok(tenant_id) = TenantId::new(&tenant_entry.name) else {
-                continue; // silent-ok: unparseable tenant directory name; skip
+            let Some(tenant_id) =
+                Self::parse_discovery_id(TenantId::new(&tenant_entry.name), mode)?
+            else {
+                continue;
             };
-            let users_path_str = format!("/tenants/{}/users", tenant_entry.name);
-            let users_path = match VirtualPath::new(&users_path_str) {
-                Ok(p) => p,
-                Err(_) => continue,
+            let Some(users_path) =
+                Self::discovery_path(&format!("/tenants/{}/users", tenant_entry.name), mode)?
+            else {
+                continue;
             };
-            let user_entries = match root.list_dir(&users_path).await {
-                Ok(entries) => entries,
-                Err(FilesystemError::NotFound { .. } | FilesystemError::Unsupported { .. }) => {
-                    continue;
-                }
-                Err(error) => {
-                    tracing::debug!(
-                        tenant = %tenant_entry.name,
-                        %error,
-                        "account sweep: failed to list users for tenant"
-                    );
-                    continue;
-                }
-            };
-            for user_entry in user_entries {
+            for user_entry in self.discovery_entries(&users_path, mode).await? {
                 if user_entry.file_type != FileType::Directory {
                     continue;
                 }
-                let Ok(user_id) = UserId::new(&user_entry.name) else {
-                    continue; // silent-ok: unparseable user directory name; skip
+                let Some(user_id) = Self::parse_discovery_id(UserId::new(&user_entry.name), mode)?
+                else {
+                    continue;
                 };
-
-                // Collect every owner scope for this (tenant, user):
-                //   1. plain (no agent, no project)
-                //   2. for each agent dir: agent-only
-                //   3. for each agent+project dir: agent+project
-                //   4. for each project dir (top-level): project-only
-                let mut owner_scopes: Vec<CredentialAccountOwnerScope> = Vec::new();
-
-                // 1. Plain user scope.
-                owner_scopes.push(CredentialAccountOwnerScope {
+                owners.push(CredentialAccountOwnerScope {
                     tenant_id: tenant_id.clone(),
                     user_id: user_id.clone(),
                     agent_id: None,
@@ -706,172 +754,210 @@ where
                     session_id: None,
                 });
 
-                // 2 + 3. Enumerate /tenants/<t>/users/<u>/secrets/agents/
-                let agents_dir = format!(
+                let agents_raw = format!(
                     "/tenants/{}/users/{}/secrets/agents",
                     tenant_entry.name, user_entry.name
                 );
-                if let Ok(agents_path) = VirtualPath::new(&agents_dir) {
-                    match root.list_dir(&agents_path).await {
-                        Ok(agent_entries) => {
-                            for agent_entry in agent_entries {
-                                if agent_entry.file_type != FileType::Directory {
-                                    continue;
-                                }
-                                let Ok(agent_id) = AgentId::new(&agent_entry.name) else {
-                                    continue; // silent-ok: unparseable agent dir; skip
-                                };
-                                // 2. Agent-only scope.
-                                owner_scopes.push(CredentialAccountOwnerScope {
-                                    tenant_id: tenant_id.clone(),
-                                    user_id: user_id.clone(),
-                                    agent_id: Some(agent_id.clone()),
-                                    project_id: None,
-                                    mission_id: None,
-                                    thread_id: None,
-                                    session_id: None,
-                                });
-                                // 3. Agent+project scopes.
-                                let agent_projects_dir =
-                                    format!("{}/{}/projects", agents_dir, agent_entry.name);
-                                if let Ok(ap_path) = VirtualPath::new(&agent_projects_dir) {
-                                    match root.list_dir(&ap_path).await {
-                                        Ok(proj_entries) => {
-                                            for proj_entry in proj_entries {
-                                                if proj_entry.file_type != FileType::Directory {
-                                                    continue;
-                                                }
-                                                let Ok(project_id) =
-                                                    ProjectId::new(&proj_entry.name)
-                                                else {
-                                                    continue; // silent-ok: unparseable project dir; skip
-                                                };
-                                                owner_scopes.push(CredentialAccountOwnerScope {
-                                                    tenant_id: tenant_id.clone(),
-                                                    user_id: user_id.clone(),
-                                                    agent_id: Some(agent_id.clone()),
-                                                    project_id: Some(project_id),
-                                                    mission_id: None,
-                                                    thread_id: None,
-                                                    session_id: None,
-                                                });
-                                            }
-                                        }
-                                        Err(
-                                            FilesystemError::NotFound { .. }
-                                            | FilesystemError::Unsupported { .. },
-                                        ) => {}
-                                        Err(error) => {
-                                            tracing::debug!(
-                                                tenant = %tenant_entry.name,
-                                                user = %user_entry.name,
-                                                agent = %agent_entry.name,
-                                                %error,
-                                                "account sweep: failed to list agent/projects dir; skipping"
-                                                // silent-ok: one bad agent subtree must not abort the sweep
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Err(
-                            FilesystemError::NotFound { .. } | FilesystemError::Unsupported { .. },
-                        ) => {}
-                        Err(error) => {
-                            tracing::debug!(
-                                tenant = %tenant_entry.name,
-                                user = %user_entry.name,
-                                %error,
-                                "account sweep: failed to list agents dir; skipping"
-                                // silent-ok: one bad user subtree must not abort the sweep
-                            );
-                        }
+                let Some(agents_path) = Self::discovery_path(&agents_raw, mode)? else {
+                    continue;
+                };
+                for agent_entry in self.discovery_entries(&agents_path, mode).await? {
+                    if agent_entry.file_type != FileType::Directory {
+                        continue;
                     }
-                }
-
-                // 4. Top-level project-only scopes.
-                // /tenants/<t>/users/<u>/secrets/projects/
-                let projects_dir = format!(
-                    "/tenants/{}/users/{}/secrets/projects",
-                    tenant_entry.name, user_entry.name
-                );
-                if let Ok(projects_path) = VirtualPath::new(&projects_dir) {
-                    match root.list_dir(&projects_path).await {
-                        Ok(proj_entries) => {
-                            for proj_entry in proj_entries {
-                                if proj_entry.file_type != FileType::Directory {
-                                    continue;
-                                }
-                                let Ok(project_id) = ProjectId::new(&proj_entry.name) else {
-                                    continue; // silent-ok: unparseable project dir; skip
-                                };
-                                owner_scopes.push(CredentialAccountOwnerScope {
-                                    tenant_id: tenant_id.clone(),
-                                    user_id: user_id.clone(),
-                                    agent_id: None,
-                                    project_id: Some(project_id),
-                                    mission_id: None,
-                                    thread_id: None,
-                                    session_id: None,
-                                });
-                            }
-                        }
-                        Err(
-                            FilesystemError::NotFound { .. } | FilesystemError::Unsupported { .. },
-                        ) => {}
-                        Err(error) => {
-                            tracing::debug!(
-                                tenant = %tenant_entry.name,
-                                user = %user_entry.name,
-                                %error,
-                                "account sweep: failed to list projects dir; skipping"
-                                // silent-ok: one bad user subtree must not abort the sweep
-                            );
-                        }
-                    }
-                }
-
-                // For each discovered owner scope, use the canonical reader to
-                // enumerate all surfaces + sessions, then filter to keepalive
-                // candidates (Google + Configured + has refresh secret).
-                for owner in owner_scopes {
-                    let records = match self.account_records_for_owner(&owner).await {
-                        Ok(r) => r,
-                        Err(error) => {
-                            tracing::debug!(
-                                tenant = %tenant_entry.name,
-                                user = %user_entry.name,
-                                %error,
-                                "account sweep: account_records_for_owner failed; skipping owner"
-                                // silent-ok: one bad owner subtree must not abort the sweep
-                            );
+                    let Some(agent_id) =
+                        Self::parse_discovery_id(AgentId::new(&agent_entry.name), mode)?
+                    else {
+                        continue;
+                    };
+                    owners.push(CredentialAccountOwnerScope {
+                        tenant_id: tenant_id.clone(),
+                        user_id: user_id.clone(),
+                        agent_id: Some(agent_id.clone()),
+                        project_id: None,
+                        mission_id: None,
+                        thread_id: None,
+                        session_id: None,
+                    });
+                    let Some(projects_path) = Self::discovery_path(
+                        &format!("{}/{}/projects", agents_raw, agent_entry.name),
+                        mode,
+                    )?
+                    else {
+                        continue;
+                    };
+                    for project_entry in self.discovery_entries(&projects_path, mode).await? {
+                        if project_entry.file_type != FileType::Directory {
                             continue;
                         }
+                        let Some(project_id) =
+                            Self::parse_discovery_id(ProjectId::new(&project_entry.name), mode)?
+                        else {
+                            continue;
+                        };
+                        owners.push(CredentialAccountOwnerScope {
+                            tenant_id: tenant_id.clone(),
+                            user_id: user_id.clone(),
+                            agent_id: Some(agent_id.clone()),
+                            project_id: Some(project_id),
+                            mission_id: None,
+                            thread_id: None,
+                            session_id: None,
+                        });
+                    }
+                }
+
+                let Some(projects_path) = Self::discovery_path(
+                    &format!(
+                        "/tenants/{}/users/{}/secrets/projects",
+                        tenant_entry.name, user_entry.name
+                    ),
+                    mode,
+                )?
+                else {
+                    continue;
+                };
+                for project_entry in self.discovery_entries(&projects_path, mode).await? {
+                    if project_entry.file_type != FileType::Directory {
+                        continue;
+                    }
+                    let Some(project_id) =
+                        Self::parse_discovery_id(ProjectId::new(&project_entry.name), mode)?
+                    else {
+                        continue;
                     };
-                    candidates.extend(records);
+                    owners.push(CredentialAccountOwnerScope {
+                        tenant_id: tenant_id.clone(),
+                        user_id: user_id.clone(),
+                        agent_id: None,
+                        project_id: Some(project_id),
+                        mission_id: None,
+                        thread_id: None,
+                        session_id: None,
+                    });
                 }
             }
         }
-        // Stable ordering by account id; dedup in case the same account appeared
-        // under multiple enumerated owner scopes (e.g. plain + agent-scoped read).
-        candidates.sort_by_key(|a| a.id);
-        candidates.dedup_by_key(|a| a.id);
-        candidates
+        Ok(owners)
     }
 
-    /// Google keepalive candidates: Configured accounts with a refresh
-    /// secret handle, filtered from the full durable-account sweep.
+    fn validate_located_account(
+        located_scope: &ironclaw_auth::AuthProductScope,
+        path: &ScopedPath,
+        located_id: CredentialAccountId,
+        account: &CredentialAccount,
+    ) -> Result<(), AuthProductError> {
+        let located_resource = &located_scope.resource;
+        let embedded_resource = &account.scope.resource;
+        if account.id != located_id
+            || embedded_resource.tenant_id != located_resource.tenant_id
+            || embedded_resource.user_id != located_resource.user_id
+            || embedded_resource.agent_id != located_resource.agent_id
+            || embedded_resource.project_id != located_resource.project_id
+            || account.scope.surface != located_scope.surface
+            || account.scope.session_id != located_scope.session_id
+            || account_path(located_scope, located_id)? != *path
+        {
+            return Err(AuthProductError::BackendUnavailable);
+        }
+        Ok(())
+    }
+
+    async fn strict_migration_accounts_for_owner(
+        &self,
+        owner: &CredentialAccountOwnerScope,
+    ) -> Result<Vec<LocatedCredentialAccount>, AuthProductError> {
+        let mut located = Vec::new();
+        for scope in self
+            .account_scopes_for_owner_with_mode(owner, AccountEnumerationMode::StrictMigration)
+            .await?
+        {
+            let root = account_root(&scope)?;
+            let mut entries = match self
+                .filesystem
+                .list_dir_bounded(
+                    &scope.resource,
+                    &root,
+                    MAX_OWNER_RECORDS_PER_ROOT.saturating_add(1),
+                )
+                .await
+            {
+                Ok(entries) => entries,
+                Err(FilesystemError::NotFound { .. }) => continue,
+                Err(error) => return Err(fs_error(error)),
+            };
+            if entries.len() > MAX_OWNER_RECORDS_PER_ROOT {
+                return Err(AuthProductError::BackendUnavailable);
+            }
+            entries.sort_by(|left, right| left.name.cmp(&right.name));
+            for entry in entries {
+                let Some(raw_id) = entry.name.strip_suffix(".json") else {
+                    continue;
+                };
+                if entry.file_type != FileType::File {
+                    return Err(AuthProductError::BackendUnavailable);
+                }
+                let located_id = uuid::Uuid::parse_str(raw_id)
+                    .map(CredentialAccountId::from_uuid)
+                    .map_err(|_| AuthProductError::BackendUnavailable)?;
+                let path = join_scoped(&root, &entry.name)?;
+                let Some((account, version)) = self
+                    .read_record::<CredentialAccount>(&scope.resource, &path)
+                    .await?
+                else {
+                    return Err(AuthProductError::BackendUnavailable);
+                };
+                Self::validate_located_account(&scope, &path, located_id, &account)?;
+                if account.provider.as_str() == "slack_personal" {
+                    located.push(LocatedCredentialAccount {
+                        located_scope: scope.clone(),
+                        path,
+                        account,
+                        version,
+                    });
+                }
+            }
+        }
+        Ok(located)
+    }
+
+    /// Enumerate configured Google OAuth accounts with refresh-secret handles.
+    ///
+    /// This operational sweep is deliberately best-effort: a malformed or
+    /// unavailable subtree is skipped so another owner can still be refreshed.
+    /// Filtering happens within each owner traversal before records are added to
+    /// the global candidate set. The returned records contain opaque secret
+    /// handles only; callers must not log or serialize them.
     pub(crate) async fn list_refresh_candidates(&self) -> Vec<CredentialAccount> {
-        self.sweep_all_accounts()
+        let owners = match self
+            .discover_account_owners(AccountEnumerationMode::BestEffortKeepalive)
             .await
-            .into_iter()
-            .filter(|account| {
-                account.provider.as_str() == ironclaw_auth::GOOGLE_PROVIDER_ID
-                    && account.status == CredentialAccountStatus::Configured
-                    && account.refresh_secret.is_some()
-            })
-            .collect()
+        {
+            Ok(owners) => owners,
+            Err(error) => {
+                tracing::debug!(%error, "account keepalive: owner discovery failed");
+                return Vec::new();
+            }
+        };
+        let mut candidates = Vec::new();
+        for owner in owners {
+            match self
+                .account_records_for_owner_filtered(&owner, |account| {
+                    account.provider.as_str() == ironclaw_auth::GOOGLE_PROVIDER_ID
+                        && account.status == CredentialAccountStatus::Configured
+                        && account.refresh_secret.is_some()
+                })
+                .await
+            {
+                Ok(records) => candidates.extend(records),
+                Err(error) => {
+                    tracing::debug!(%error, "account keepalive: owner subtree skipped");
+                }
+            }
+        }
+        candidates.sort_by_key(|account| account.id);
+        candidates.dedup_by_key(|account| account.id);
+        candidates
     }
 
     /// One-time forward migration (NEA-25 unified Slack extension): the Slack
@@ -882,34 +968,69 @@ where
     /// matches, so subsequent boots rewrite nothing. This is a data
     /// migration executed at composition build, not a runtime alias — no code
     /// path resolves the retired provider id.
-    pub(crate) async fn migrate_retired_slack_personal_provider(&self) -> usize {
-        let retired: Vec<CredentialAccount> = self
-            .sweep_all_accounts()
-            .await
-            .into_iter()
-            .filter(|account| account.provider.as_str() == "slack_personal")
-            .collect();
-        let mut migrated = 0usize;
-        for mut account in retired {
-            match ironclaw_auth::AuthProviderId::new("slack") {
-                Ok(provider) => account.provider = provider,
-                Err(error) => {
-                    tracing::warn!(%error, "slack provider migration: unified provider id invalid");
-                    return migrated;
-                }
-            }
-            match self.write_account(&account, CasExpectation::Any).await {
-                Ok(_) => migrated += 1,
-                Err(error) => {
-                    tracing::warn!(
-                        account_id = %account.id,
-                        %error,
-                        "slack provider migration: failed to rewrite account record"
-                    );
-                }
-            }
+    pub(crate) async fn migrate_retired_slack_personal_provider(
+        &self,
+    ) -> Result<usize, AuthProductError> {
+        let mut retired = Vec::new();
+        for owner in self
+            .discover_account_owners(AccountEnumerationMode::StrictMigration)
+            .await?
+        {
+            retired.extend(self.strict_migration_accounts_for_owner(&owner).await?);
         }
-        migrated
+        let unified_provider = ironclaw_auth::AuthProviderId::new("slack")
+            .map_err(|_| AuthProductError::BackendUnavailable)?;
+        let mut migrated = 0usize;
+        for located in retired {
+            let resource = located.located_scope.resource.clone();
+            let located_scope = located.located_scope;
+            let path = located.path;
+            let located_id = located.account.id;
+            let absent_snapshot = located.account;
+            let provider = unified_provider.clone();
+            let validation_path = path.clone();
+            migrated += cas_update(
+                &self.filesystem,
+                &resource,
+                &path,
+                |body| {
+                    serde_json::from_slice::<CredentialAccount>(body)
+                        .map_err(|_| AuthProductError::BackendUnavailable)
+                },
+                |next| {
+                    let body = serde_json::to_vec(next)
+                        .map_err(|_| AuthProductError::BackendUnavailable)?;
+                    Ok(Entry::bytes(body).with_content_type(ContentType::json()))
+                },
+                move |current| {
+                    let mut snapshot = match current {
+                        Some(snapshot) => snapshot,
+                        None => {
+                            return std::future::ready(Ok(CasApply::no_op(
+                                absent_snapshot.clone(),
+                                0,
+                            )));
+                        }
+                    };
+                    if let Err(error) = Self::validate_located_account(
+                        &located_scope,
+                        &validation_path,
+                        located_id,
+                        &snapshot,
+                    ) {
+                        return std::future::ready(Err(error));
+                    }
+                    if snapshot.provider.as_str() != "slack_personal" {
+                        return std::future::ready(Ok(CasApply::no_op(snapshot, 0)));
+                    }
+                    snapshot.provider = provider.clone();
+                    std::future::ready(Ok(CasApply::new(snapshot, 1)))
+                },
+            )
+            .await
+            .map_err(migration_cas_error)?;
+        }
+        Ok(migrated)
     }
 
     async fn create_account_with_id(

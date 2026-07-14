@@ -30,6 +30,8 @@ pub enum RebornBuildError {
     Secret(#[from] ironclaw_secrets::SecretError),
     #[error("reborn filesystem build failed")]
     Filesystem(#[from] ironclaw_filesystem::FilesystemError),
+    #[error("reborn product-auth migration failed: {0}")]
+    ProductAuthMigration(#[source] ironclaw_auth::AuthProductError),
     #[error("reborn resource governor build failed")]
     Resource(#[from] ironclaw_resources::ResourceError),
     #[error("reborn run state build failed")]
@@ -88,6 +90,24 @@ impl From<crate::RebornCompositionError> for RebornBuildError {
 #[cfg(test)]
 mod tests {
     use super::RebornBuildError;
+
+    #[test]
+    fn product_auth_migration_failure_stays_typed_and_sanitized() {
+        let error = RebornBuildError::ProductAuthMigration(
+            ironclaw_auth::AuthProductError::BackendUnavailable,
+        );
+
+        assert!(matches!(
+            error,
+            RebornBuildError::ProductAuthMigration(
+                ironclaw_auth::AuthProductError::BackendUnavailable
+            )
+        ));
+        assert_eq!(
+            error.to_string(),
+            "reborn product-auth migration failed: backend unavailable"
+        );
+    }
 
     #[test]
     fn composition_missing_secret_master_key_stays_typed_for_facade_errors() {

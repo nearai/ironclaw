@@ -1722,10 +1722,15 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         None => {
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             {
-                let durable_services = Arc::new(FilesystemAuthProductServices::new(
+                let durable_services = Arc::new(FilesystemAuthProductServices::new_with_root(
                     local_dev_product_auth_filesystem,
+                    Arc::clone(&filesystem),
                     Arc::clone(&secret_store),
                 ));
+                durable_services
+                    .migrate_retired_slack_personal_provider()
+                    .await
+                    .map_err(RebornBuildError::ProductAuthMigration)?;
                 let provider_client: Arc<dyn AuthProviderClient> = provider_composition
                     .client
                     .clone()
@@ -5032,6 +5037,10 @@ where
                 Arc::clone(&stores.filesystem),
                 Arc::clone(&secret_store),
             ));
+            durable
+                .migrate_retired_slack_personal_provider()
+                .await
+                .map_err(RebornBuildError::ProductAuthMigration)?;
             credential_refresh_candidate_source = Some(Arc::clone(&durable)
                 as Arc<dyn crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshCandidateSource>);
             RebornProductAuthServicePorts::from_shared_with_provider(

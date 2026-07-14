@@ -80,6 +80,14 @@ struct PausedAccountPutBackend {
     resume_flow_list: Notify,
     fail_next_flow_get: AtomicBool,
     fail_account_put_path_fragment: std::sync::Mutex<Option<(String, usize)>>,
+    fail_next_list_path_fragment: std::sync::Mutex<Option<(String, InjectedListFailure)>>,
+    advertise_cas_unsupported: AtomicBool,
+}
+
+#[derive(Clone, Copy)]
+enum InjectedListFailure {
+    Unsupported,
+    Backend,
 }
 
 impl PausedAccountPutBackend {
@@ -97,6 +105,8 @@ impl PausedAccountPutBackend {
             resume_flow_list: Notify::new(),
             fail_next_flow_get: AtomicBool::new(false),
             fail_account_put_path_fragment: std::sync::Mutex::new(None),
+            fail_next_list_path_fragment: std::sync::Mutex::new(None),
+            advertise_cas_unsupported: AtomicBool::new(false),
         }
     }
 
@@ -148,12 +158,25 @@ impl PausedAccountPutBackend {
         *self.fail_account_put_path_fragment.lock().unwrap() =
             Some((account_id.to_string(), successful_matches_before_failure));
     }
+
+    fn fail_next_list(&self, path_fragment: &str, failure: InjectedListFailure) {
+        *self.fail_next_list_path_fragment.lock().unwrap() =
+            Some((path_fragment.to_string(), failure));
+    }
+
+    fn advertise_cas_unsupported(&self) {
+        self.advertise_cas_unsupported.store(true, Ordering::SeqCst);
+    }
 }
 
 #[async_trait::async_trait]
 impl RootFilesystem for PausedAccountPutBackend {
     fn capabilities(&self) -> BackendCapabilities {
-        self.inner.capabilities()
+        if self.advertise_cas_unsupported.load(Ordering::SeqCst) {
+            BackendCapabilities::bytes_only()
+        } else {
+            self.inner.capabilities()
+        }
     }
 
     async fn put(
@@ -217,6 +240,30 @@ impl RootFilesystem for PausedAccountPutBackend {
     }
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        let failure = {
+            let mut configured = self.fail_next_list_path_fragment.lock().unwrap();
+            if configured
+                .as_ref()
+                .is_some_and(|(fragment, _)| path.as_str().contains(fragment))
+            {
+                configured.take().map(|(_, failure)| failure)
+            } else {
+                None
+            }
+        };
+        if let Some(failure) = failure {
+            return Err(match failure {
+                InjectedListFailure::Unsupported => FilesystemError::Unsupported {
+                    path: path.clone(),
+                    operation: ironclaw_filesystem::FilesystemOperation::ListDir,
+                },
+                InjectedListFailure::Backend => FilesystemError::Backend {
+                    path: path.clone(),
+                    operation: ironclaw_filesystem::FilesystemOperation::ListDir,
+                    reason: "injected list failure".to_string(),
+                },
+            });
+        }
         if path.as_str().contains("/flows")
             && self.pause_next_flow_list.swap(false, Ordering::SeqCst)
         {
@@ -459,21 +506,452 @@ async fn migrate_retired_slack_personal_provider_rewrites_accounts_forward() {
         .await
         .unwrap();
 
-    let migrated = service.migrate_retired_slack_personal_provider().await;
-    assert_eq!(migrated, 1, "one retired account rewritten");
-    let second_pass = service.migrate_retired_slack_personal_provider().await;
-    assert_eq!(second_pass, 0, "migration is idempotent");
+    let (_, version_before) = service
+        .read_account(&scope, created.id)
+        .await
+        .unwrap()
+        .expect("seeded account has a version");
 
-    let account = service
-        .get_account(CredentialAccountLookupRequest {
-            scope: scope.clone(),
-            account_id: created.id,
-            requester_extension: None,
-        })
+    let migrated = service
+        .migrate_retired_slack_personal_provider()
+        .await
+        .unwrap();
+    assert_eq!(migrated, 1, "one retired account rewritten");
+    let (account, version_after_first) = service
+        .read_account(&scope, created.id)
         .await
         .unwrap()
         .expect("migrated account still resolvable");
+    let mut expected = created.clone();
+    expected.provider = AuthProviderId::new("slack").unwrap();
+    assert_eq!(account, expected, "migration changes only the provider id");
     assert_eq!(account.provider.as_str(), "slack");
+    assert_ne!(version_after_first, version_before);
+
+    let second_pass = service
+        .migrate_retired_slack_personal_provider()
+        .await
+        .unwrap();
+    assert_eq!(second_pass, 0, "migration is idempotent");
+    let (_, version_after_second) = service
+        .read_account(&scope, created.id)
+        .await
+        .unwrap()
+        .expect("migrated account remains present");
+    assert_eq!(
+        version_after_second, version_after_first,
+        "idempotent pass must not rewrite the record"
+    );
+}
+
+#[tokio::test]
+async fn migrate_retired_slack_personal_provider_requires_strict_root_enumeration() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let service = FilesystemAuthProductServices::new(filesystem, secret_store);
+
+    assert_eq!(
+        service.migrate_retired_slack_personal_provider().await,
+        Err(AuthProductError::BackendUnavailable),
+        "migration must fail closed when composition omitted the root enumeration seam"
+    );
+}
+
+#[tokio::test]
+async fn migrate_retired_slack_personal_provider_returns_unsupported_root_error() {
+    let backend = Arc::new(PausedAccountPutBackend::new());
+    let scoped = Arc::new(ScopedFilesystem::new(
+        Arc::clone(&backend),
+        crate::invocation_mount_view,
+    ));
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let service =
+        FilesystemAuthProductServices::new_with_root(scoped, Arc::clone(&backend), secret_store);
+    backend.fail_next_list("/tenants", InjectedListFailure::Unsupported);
+
+    assert_eq!(
+        service.migrate_retired_slack_personal_provider().await,
+        Err(AuthProductError::BackendUnavailable),
+        "unsupported traversal cannot be mistaken for an empty migration"
+    );
+}
+
+#[tokio::test]
+async fn migrate_retired_slack_personal_provider_returns_backend_traversal_error() {
+    let backend = Arc::new(PausedAccountPutBackend::new());
+    let scoped = Arc::new(ScopedFilesystem::new(
+        Arc::clone(&backend),
+        crate::invocation_mount_view,
+    ));
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let service =
+        FilesystemAuthProductServices::new_with_root(scoped, Arc::clone(&backend), secret_store);
+    backend.fail_next_list("/tenants", InjectedListFailure::Backend);
+
+    assert_eq!(
+        service.migrate_retired_slack_personal_provider().await,
+        Err(AuthProductError::BackendUnavailable)
+    );
+}
+
+#[tokio::test]
+async fn migrate_retired_slack_personal_provider_returns_cas_unsupported_error() {
+    let backend = Arc::new(PausedAccountPutBackend::new());
+    let scoped = Arc::new(ScopedFilesystem::new(
+        Arc::clone(&backend),
+        crate::invocation_mount_view,
+    ));
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let service =
+        FilesystemAuthProductServices::new_with_root(scoped, Arc::clone(&backend), secret_store);
+    let scope = test_scope();
+    service
+        .create_account(NewCredentialAccount {
+            scope,
+            provider: AuthProviderId::new("slack_personal").unwrap(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("unsupported-cas-secret").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .unwrap();
+    backend.advertise_cas_unsupported();
+
+    assert_eq!(
+        service.migrate_retired_slack_personal_provider().await,
+        Err(AuthProductError::BackendUnavailable)
+    );
+}
+
+#[tokio::test]
+async fn migrate_retired_slack_personal_provider_retries_cas_and_preserves_concurrent_update() {
+    let backend = Arc::new(PausedAccountPutBackend::new());
+    let scoped = Arc::new(ScopedFilesystem::new(
+        Arc::clone(&backend),
+        crate::invocation_mount_view,
+    ));
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let service = Arc::new(FilesystemAuthProductServices::new_with_root(
+        scoped,
+        Arc::clone(&backend),
+        secret_store,
+    ));
+    let scope = test_scope();
+    let created = service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: AuthProviderId::new("slack_personal").unwrap(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("slack-access-old").unwrap()),
+            refresh_secret: Some(SecretHandle::new("slack-refresh-old").unwrap()),
+            scopes: vec![ProviderScope::new("search:read").unwrap()],
+        })
+        .await
+        .unwrap();
+
+    backend.pause_next_account_put();
+    let migration_service = Arc::clone(&service);
+    let migration = tokio::spawn(async move {
+        migration_service
+            .migrate_retired_slack_personal_provider()
+            .await
+    });
+    backend.wait_for_account_put().await;
+
+    let mut concurrent = created.clone();
+    concurrent.status = CredentialAccountStatus::Revoked;
+    concurrent.access_secret = None;
+    concurrent.refresh_secret = Some(SecretHandle::new("slack-refresh-new").unwrap());
+    concurrent.scopes = vec![ProviderScope::new("channels:history").unwrap()];
+    concurrent.provider_identity = Some(
+        ironclaw_auth::OAuthProviderIdentity::new(
+            "slack-user-new",
+            Some("team-new".to_string()),
+            Some("enterprise-new".to_string()),
+            Some("app-new".to_string()),
+        )
+        .unwrap(),
+    );
+    concurrent.updated_at = Utc::now() + Duration::seconds(5);
+    service
+        .write_account(&concurrent, CasExpectation::Any)
+        .await
+        .unwrap();
+    backend.resume_account_put();
+
+    assert_eq!(migration.await.unwrap().unwrap(), 1);
+    let (migrated, _) = service
+        .read_account(&scope, created.id)
+        .await
+        .unwrap()
+        .expect("account remains after migration");
+    concurrent.provider = AuthProviderId::new("slack").unwrap();
+    assert_eq!(
+        migrated, concurrent,
+        "CAS retry must apply only the provider rewrite to the latest record"
+    );
+}
+
+#[tokio::test]
+async fn migrate_retired_slack_personal_provider_rejects_embedded_scope_path_mismatch() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = Arc::new(ScopedFilesystem::new(
+        Arc::clone(&backend),
+        crate::invocation_mount_view,
+    ));
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let service =
+        FilesystemAuthProductServices::new_with_root(scoped, Arc::clone(&backend), secret_store);
+    let scope = test_scope();
+    let created = service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: AuthProviderId::new("slack_personal").unwrap(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("slack-access").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    let mut malformed = created.clone();
+    malformed.scope.surface = AuthSurface::Chat;
+    service
+        .write_record(
+            &scope.resource,
+            &account_path(&scope, created.id).unwrap(),
+            &malformed,
+            CasExpectation::Any,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        service.migrate_retired_slack_personal_provider().await,
+        Err(AuthProductError::BackendUnavailable),
+        "strict migration must reject an account whose embedded scope disagrees with its located path"
+    );
+    let (still_malformed, _) = service
+        .read_account(&scope, created.id)
+        .await
+        .unwrap()
+        .expect("malformed source record remains for operator repair");
+    assert_eq!(still_malformed, malformed);
+    let chat_scope = AuthProductScope::new(scope.resource.clone(), AuthSurface::Chat);
+    assert!(
+        service
+            .read_account(&chat_scope, created.id)
+            .await
+            .unwrap()
+            .is_none(),
+        "migration must not create a duplicate at the embedded path"
+    );
+}
+
+#[tokio::test]
+async fn migrate_retired_slack_personal_provider_restart_converges_after_partial_failure() {
+    let backend = Arc::new(PausedAccountPutBackend::new());
+    let scoped = Arc::new(ScopedFilesystem::new(
+        Arc::clone(&backend),
+        crate::invocation_mount_view,
+    ));
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let service =
+        FilesystemAuthProductServices::new_with_root(scoped, Arc::clone(&backend), secret_store);
+    let scope = test_scope();
+    let first_id = CredentialAccountId::from_uuid(
+        uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+    );
+    let second_id = CredentialAccountId::from_uuid(
+        uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
+    );
+    for account_id in [first_id, second_id] {
+        service
+            .create_account_with_id(
+                account_id,
+                NewCredentialAccount {
+                    scope: scope.clone(),
+                    provider: AuthProviderId::new("slack_personal").unwrap(),
+                    label: account_label(),
+                    status: CredentialAccountStatus::Configured,
+                    ownership: CredentialOwnership::UserReusable,
+                    owner_extension: None,
+                    granted_extensions: Vec::new(),
+                    access_secret: Some(
+                        SecretHandle::new(format!("slack-access-{account_id}")).unwrap(),
+                    ),
+                    refresh_secret: None,
+                    scopes: Vec::new(),
+                },
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+    }
+    backend.fail_account_put_for_after(second_id, 0);
+
+    assert_eq!(
+        service.migrate_retired_slack_personal_provider().await,
+        Err(AuthProductError::BackendUnavailable),
+        "a later write failure must not report partial success"
+    );
+    let (first_after_failure, first_version_after_failure) = service
+        .read_account(&scope, first_id)
+        .await
+        .unwrap()
+        .expect("first account committed before the injected failure");
+    let (second_after_failure, _) = service
+        .read_account(&scope, second_id)
+        .await
+        .unwrap()
+        .expect("second account remains available for restart");
+    assert_eq!(first_after_failure.provider.as_str(), "slack");
+    assert_eq!(second_after_failure.provider.as_str(), "slack_personal");
+
+    assert_eq!(
+        service
+            .migrate_retired_slack_personal_provider()
+            .await
+            .unwrap(),
+        1,
+        "restart migrates only the remaining record"
+    );
+    let (_, first_version_after_restart) = service
+        .read_account(&scope, first_id)
+        .await
+        .unwrap()
+        .expect("first account remains present");
+    let (second_after_restart, _) = service
+        .read_account(&scope, second_id)
+        .await
+        .unwrap()
+        .expect("second account converged");
+    assert_eq!(first_version_after_restart, first_version_after_failure);
+    assert_eq!(second_after_restart.provider.as_str(), "slack");
+}
+
+#[tokio::test]
+async fn migrate_retired_slack_personal_provider_keeps_same_id_records_at_distinct_paths() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = Arc::new(ScopedFilesystem::new(
+        Arc::clone(&backend),
+        crate::invocation_mount_view,
+    ));
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let service =
+        FilesystemAuthProductServices::new_with_root(scoped, Arc::clone(&backend), secret_store);
+    let web_scope = test_scope();
+    let chat_scope = AuthProductScope::new(web_scope.resource.clone(), AuthSurface::Chat);
+    let shared_id = CredentialAccountId::from_uuid(
+        uuid::Uuid::parse_str("00000000-0000-0000-0000-00000000000a").unwrap(),
+    );
+    for scope in [web_scope.clone(), chat_scope.clone()] {
+        service
+            .create_account_with_id(
+                shared_id,
+                NewCredentialAccount {
+                    scope,
+                    provider: AuthProviderId::new("slack_personal").unwrap(),
+                    label: account_label(),
+                    status: CredentialAccountStatus::Configured,
+                    ownership: CredentialOwnership::UserReusable,
+                    owner_extension: None,
+                    granted_extensions: Vec::new(),
+                    access_secret: Some(SecretHandle::new("shared-id-secret").unwrap()),
+                    refresh_secret: None,
+                    scopes: Vec::new(),
+                },
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(
+        service
+            .migrate_retired_slack_personal_provider()
+            .await
+            .unwrap(),
+        2,
+        "canonical path, not globally deduplicated account id, identifies migration records"
+    );
+    for scope in [web_scope, chat_scope] {
+        let (account, _) = service
+            .read_account(&scope, shared_id)
+            .await
+            .unwrap()
+            .expect("both located records survive");
+        assert_eq!(account.provider.as_str(), "slack");
+    }
+}
+
+#[tokio::test]
+async fn migrate_retired_slack_personal_provider_does_not_resurrect_concurrent_delete() {
+    let backend = Arc::new(PausedAccountPutBackend::new());
+    let scoped = Arc::new(ScopedFilesystem::new(
+        Arc::clone(&backend),
+        crate::invocation_mount_view,
+    ));
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let service = Arc::new(FilesystemAuthProductServices::new_with_root(
+        scoped,
+        Arc::clone(&backend),
+        secret_store,
+    ));
+    let scope = test_scope();
+    let created = service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: AuthProviderId::new("slack_personal").unwrap(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("delete-race-secret").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    backend.pause_next_account_put();
+    let migration_service = Arc::clone(&service);
+    let migration = tokio::spawn(async move {
+        migration_service
+            .migrate_retired_slack_personal_provider()
+            .await
+    });
+    backend.wait_for_account_put().await;
+    service
+        .filesystem
+        .delete(&scope.resource, &account_path(&scope, created.id).unwrap())
+        .await
+        .unwrap();
+    backend.resume_account_put();
+
+    assert_eq!(migration.await.unwrap().unwrap(), 0);
+    assert!(
+        service
+            .read_account(&scope, created.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
