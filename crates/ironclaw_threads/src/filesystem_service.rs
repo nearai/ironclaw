@@ -190,6 +190,33 @@ where
     thread_index_cache_epochs: Mutex<HashMap<String, u64>>,
     thread_index_manual_clear_epochs: Mutex<HashMap<String, u64>>,
     thread_index_load_locks: Mutex<HashMap<String, Weak<AsyncMutex<()>>>>,
+    // Issue #6047: on a backend without multi-key transaction support
+    // (`begin()` unimplemented — the production libSQL shape),
+    // `accept_inbound_message` falls back to a non-transactional
+    // reserve-sequence-then-write-message pair. Nothing else serializes
+    // concurrent callers against the same thread, so a message that
+    // reserves a *later* sequence number can still finish writing before
+    // an *earlier* one, making it durably visible out of order. This lock
+    // is acquired only around that reserve+write pair (not the best-effort
+    // index/cache work after it) and restores ordering without touching
+    // the already-safe transactional CAS-retry path.
+    //
+    // Process-local, deliberately: `.claude/rules/database.md` flags a
+    // process-local mutex held across backend I/O because it "cannot
+    // coordinate multiple processes." This crate's filesystem-backed
+    // services already run under a single mounted, single-owner view per
+    // instance (see the `with_fixed_view` boot-owner model used elsewhere
+    // in Reborn's runtime/thread-state services) — the deployment shape
+    // this lock needs to cover is one process per store, matching the
+    // pre-existing `thread_index_load_lock` singleflight lock in this same
+    // file, which has held its own cache-fill read under this exact
+    // mechanism since before this fix. A durable, cross-process ordering
+    // guarantee would need the write itself to become one atomic
+    // domain-level operation (e.g. gap-aware reads with a bounded recovery
+    // contract, or extending the transactional path to a backend that
+    // lacks multi-key transactions) — a materially larger change than this
+    // bug warrants; tracked as a follow-up rather than folded into this fix.
+    inbound_message_write_locks: Mutex<HashMap<String, Weak<AsyncMutex<()>>>>,
     known_thread_index_rows: Mutex<HashSet<String>>,
     known_thread_source_rows: Mutex<HashMap<String, HashSet<ThreadId>>>,
     complete_thread_source_scopes: Mutex<HashSet<String>>,
@@ -210,6 +237,7 @@ where
             thread_index_cache_epochs: Mutex::new(HashMap::new()),
             thread_index_manual_clear_epochs: Mutex::new(HashMap::new()),
             thread_index_load_locks: Mutex::new(HashMap::new()),
+            inbound_message_write_locks: Mutex::new(HashMap::new()),
             known_thread_index_rows: Mutex::new(HashSet::new()),
             known_thread_source_rows: Mutex::new(HashMap::new()),
             complete_thread_source_scopes: Mutex::new(HashSet::new()),
@@ -235,7 +263,7 @@ where
             messages: context_messages_with_summary_replacements(&messages, &[]),
         };
         if let Ok(mut cache) = self.one_shot_context_windows.lock() {
-            let key = one_shot_context_window_cache_key(scope, thread_id);
+            let key = thread_scope_key(scope, thread_id);
             cache.insert(key.clone(), context);
             evict_hash_map_entry_over_limit(
                 &mut cache,
@@ -251,7 +279,7 @@ where
         thread_id: &ThreadId,
         max_messages: usize,
     ) -> Option<ContextWindow> {
-        let key = one_shot_context_window_cache_key(scope, thread_id);
+        let key = thread_scope_key(scope, thread_id);
         let mut context = self.one_shot_context_windows.lock().ok()?.remove(&key)?;
         if max_messages < context.messages.len() {
             let start = context.messages.len() - max_messages;
@@ -262,8 +290,13 @@ where
 
     fn invalidate_one_shot_context_window(&self, scope: &ThreadScope, thread_id: &ThreadId) {
         if let Ok(mut cache) = self.one_shot_context_windows.lock() {
-            cache.remove(&one_shot_context_window_cache_key(scope, thread_id));
+            cache.remove(&thread_scope_key(scope, thread_id));
         }
+    }
+
+    /// See `inbound_message_write_locks` for why this exists.
+    fn inbound_message_write_lock(&self, key: &str) -> Arc<AsyncMutex<()>> {
+        weak_keyed_lock(&self.inbound_message_write_locks, key.to_string())
     }
 
     fn thread_entry(record: &StoredThreadRecord) -> Result<Entry, SessionThreadError> {
@@ -402,7 +435,14 @@ where
         }
     }
 
-    async fn write_new_message(
+    /// CAS-put just the message record itself (`CasExpectation::Absent`) —
+    /// the single step that determines when a message becomes visible to a
+    /// reader (`list_thread_messages` reads these records directly). This is
+    /// split out of `write_new_message` so the issue #6047 fallback-path
+    /// write lock in `accept_inbound_message` can cover only this
+    /// ordering-sensitive step, not the best-effort index/cache work that
+    /// follows it and doesn't affect visibility.
+    async fn put_new_message_record(
         &self,
         scope: &ThreadScope,
         thread_id: &ThreadId,
@@ -421,25 +461,44 @@ where
         )
         .await
         {
-            Ok(()) => {
-                self.write_message_sequence_index(scope, thread_id, message)
-                    .await?;
-                self.write_message_lookup_indexes_best_effort(
-                    scope,
-                    thread_id,
-                    message,
-                    "new message",
-                )
-                .await;
-                self.invalidate_one_shot_context_window(scope, thread_id);
-                Ok(())
-            }
+            Ok(()) => Ok(()),
             Err(PutError::VersionMismatch) => Err(SessionThreadError::Backend(format!(
                 "filesystem CAS Absent rejected new {description} at {}",
                 path.as_str()
             ))),
             Err(PutError::Other(error)) => Err(error),
         }
+    }
+
+    async fn write_new_message(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message: &ThreadMessageRecord,
+        description: &'static str,
+    ) -> Result<(), SessionThreadError> {
+        self.put_new_message_record(scope, thread_id, message, description)
+            .await?;
+        self.finish_new_message_indexes(scope, thread_id, message)
+            .await
+    }
+
+    /// The best-effort index/cache work that follows a new message record's
+    /// CAS put — not ordering-sensitive, so callers that need the put itself
+    /// under a narrower critical section (the issue #6047 write lock in
+    /// `accept_inbound_message`) run this afterward, unlocked.
+    async fn finish_new_message_indexes(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message: &ThreadMessageRecord,
+    ) -> Result<(), SessionThreadError> {
+        self.write_message_sequence_index(scope, thread_id, message)
+            .await?;
+        self.write_message_lookup_indexes_best_effort(scope, thread_id, message, "new message")
+            .await;
+        self.invalidate_one_shot_context_window(scope, thread_id);
+        Ok(())
     }
 
     async fn append_message_event(
@@ -1679,9 +1738,23 @@ where
                 return Ok(accepted);
             }
             TransactionalMessageWrite::Unsupported => {
-                let sequence = self.reserve_sequence(&scope, &thread_id).await?;
-                message.sequence = sequence;
-                self.write_new_message(&scope, &thread_id, &message, "message")
+                // Serialize only the ordering-sensitive step (reserve the
+                // sequence, then durably write the message record — the
+                // step that determines when a reader sees this message)
+                // against other concurrent callers for the same thread. See
+                // `inbound_message_write_locks` for why. Held across exactly
+                // two calls, not the best-effort index/cache work below,
+                // which doesn't affect visibility and doesn't need to wait.
+                {
+                    let write_lock =
+                        self.inbound_message_write_lock(&thread_scope_key(&scope, &thread_id));
+                    let _write_guard = write_lock.lock().await;
+                    let sequence = self.reserve_sequence(&scope, &thread_id).await?;
+                    message.sequence = sequence;
+                    self.put_new_message_record(&scope, &thread_id, &message, "message")
+                        .await?;
+                }
+                self.finish_new_message_indexes(&scope, &thread_id, &message)
                     .await?;
 
                 // Non-transactional backends keep the legacy best-effort
@@ -1697,7 +1770,7 @@ where
                         )
                         .await?;
                 }
-                sequence
+                message.sequence
             }
         };
 
@@ -3001,12 +3074,41 @@ fn thread_root_string(scope: &ThreadScope, thread_id: &ThreadId) -> String {
     base
 }
 
-fn one_shot_context_window_cache_key(scope: &ThreadScope, thread_id: &ThreadId) -> String {
+/// Stable per-thread identity string, shared by every cache/lock in this
+/// file keyed on "this one thread" (the one-shot context window cache, the
+/// inbound message write lock). Distinct from, and not interchangeable
+/// with, `thread_index.rs`'s `thread_index_record_cache_key` — that one
+/// keys the thread-index bookkeeping sets/maps and deliberately uses a
+/// different string shape (`thread_index_cache_key(scope) + thread_id`) for
+/// that subsystem.
+fn thread_scope_key(scope: &ThreadScope, thread_id: &ThreadId) -> String {
     format!(
         "{}:{}",
         scope.tenant_id.as_str(),
         thread_root_string(scope, thread_id)
     )
+}
+
+/// Get-or-create a weak-referenced per-key async lock. Callers hold the
+/// returned `Arc` for the duration of their critical section; once the last
+/// holder drops it, `retain` below reclaims the now-dead entry on the next
+/// lookup instead of leaking one lock per key forever.
+fn weak_keyed_lock(
+    locks: &Mutex<HashMap<String, Weak<AsyncMutex<()>>>>,
+    key: String,
+) -> Arc<AsyncMutex<()>> {
+    locks
+        .lock()
+        .map(|mut locks| {
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            if let Some(lock) = locks.get(&key).and_then(|lock| lock.upgrade()) {
+                return lock;
+            }
+            let lock = Arc::new(AsyncMutex::new(()));
+            locks.insert(key, Arc::downgrade(&lock));
+            lock
+        })
+        .unwrap_or_else(|_| Arc::new(AsyncMutex::new(())))
 }
 
 fn evict_hash_map_entry_over_limit<T>(
@@ -3472,7 +3574,13 @@ impl From<FilesystemError> for SessionThreadError {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::HashMap,
+        sync::{Mutex, Weak},
+    };
+
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+    use tokio::sync::Mutex as AsyncMutex;
 
     use super::message_sequence_index::{sequence_from_index_filename, sequence_index_filename};
     use super::{InboundIdempotencyKey, idempotency_record_key};
@@ -3495,6 +3603,32 @@ mod tests {
             vec![1, 2, 10]
         );
         assert_eq!(sequence_from_index_filename("not-a-sequence.json"), None);
+    }
+
+    /// `weak_keyed_lock` backs both `thread_index_load_locks` and (issue
+    /// #6047) `inbound_message_write_locks`. Its `retain` reclaims a key's
+    /// entry once every `Arc` holder has dropped the guard — without this,
+    /// a long-running instance would accumulate one dead entry per distinct
+    /// thread/key ever seen, unboundedly.
+    #[tokio::test]
+    async fn weak_keyed_lock_reclaims_entry_after_guard_dropped() {
+        let locks: Mutex<HashMap<String, Weak<AsyncMutex<()>>>> = Mutex::new(HashMap::new());
+
+        let first = super::weak_keyed_lock(&locks, "a".to_string());
+        drop(first);
+        assert_eq!(
+            locks.lock().unwrap().len(),
+            1,
+            "not yet reclaimed — no lookup happened"
+        );
+
+        let _second = super::weak_keyed_lock(&locks, "b".to_string());
+        assert_eq!(
+            locks.lock().unwrap().len(),
+            1,
+            "the dead \"a\" entry must be reclaimed on the next lookup, leaving only \"b\""
+        );
+        assert!(locks.lock().unwrap().contains_key("b"));
     }
 
     #[test]
