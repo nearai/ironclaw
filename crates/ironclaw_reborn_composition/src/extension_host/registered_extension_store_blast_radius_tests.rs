@@ -276,6 +276,168 @@ fn restore_collision_ids_are_distinct_by_construction() {
     assert_ne!(owner_a, owner_b);
 }
 
+const CROSS_OWNER_RESTORE_OWNER_A_EXTENSION_ID: &str = "owner-a-registered-mcp";
+const CROSS_OWNER_RESTORE_OWNER_B_EXTENSION_ID: &str = "owner-b-registered-mcp";
+
+const CROSS_OWNER_RESTORE_OWNER_A_MANIFEST_TOML: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "owner-a-registered-mcp"
+name = "Owner A's Registered MCP"
+version = "0.1.0"
+description = "Owner A's own registration (cross-owner restore-correctness fixture)"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "http://owner-a-restore.example/mcp"
+"#;
+
+const CROSS_OWNER_RESTORE_OWNER_B_MANIFEST_TOML: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "owner-b-registered-mcp"
+name = "Owner B's Registered MCP"
+version = "0.1.0"
+description = "Owner B's own registration (cross-owner restore-correctness fixture)"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "http://owner-b-restore.example/mcp"
+"#;
+
+/// Restore-tier counterpart of `restore_collision_ids_are_distinct_by_construction`,
+/// reconstructed against the CURRENT row-owner-keyed resolution mechanism
+/// (`resolve_registered_installation_for_restore` -> `list_for_owner`, which
+/// reads directly from `/system/extensions/registered/<tenant>/<owner>` —
+/// never a cross-owner directory scan, per `list_for_owner`'s doc comment).
+/// The commit that minted owner-scoped ids (7792e9b10) deleted the only test
+/// that drove `restore_extension_lifecycle_state` with 2+ DISTINCT owners and
+/// asserted per-owner manifest-content correctness
+/// (`restore_uses_row_owners_registered_descriptor_not_a_differently_ordered_owner`,
+/// which forced a specific `list_dir` ordering on a shared tenant-root scan —
+/// a mechanism that no longer exists) and replaced it with a synchronous,
+/// non-restore test that only asserts two minted ids differ. That left the
+/// row-keyed resolution mechanism itself with no live coverage proving owner
+/// A's row restores owner A's own descriptor and owner B's row restores
+/// owner B's own descriptor, never the other's. This test closes that gap
+/// directly against today's architecture: two distinct owners each register
+/// their own descriptor (distinct manifest name/URL), and restore must
+/// publish each row's OWN owner's content.
+#[tokio::test]
+async fn restore_resolves_each_distinct_owners_row_to_its_own_registered_descriptor() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage_root = dir.path().join("local-dev");
+    std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
+
+    let owner_a_dir = storage_root
+        .join("system/extensions/registered")
+        .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
+        .join(OWNER_A_USER_ID)
+        .join(CROSS_OWNER_RESTORE_OWNER_A_EXTENSION_ID);
+    std::fs::create_dir_all(&owner_a_dir).expect("owner A registered manifest dir");
+    std::fs::write(
+        owner_a_dir.join("manifest.toml"),
+        CROSS_OWNER_RESTORE_OWNER_A_MANIFEST_TOML,
+    )
+    .expect("write owner A's descriptor");
+
+    let owner_b_dir = storage_root
+        .join("system/extensions/registered")
+        .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
+        .join(OWNER_B_USER_ID)
+        .join(CROSS_OWNER_RESTORE_OWNER_B_EXTENSION_ID);
+    std::fs::create_dir_all(&owner_b_dir).expect("owner B registered manifest dir");
+    std::fs::write(
+        owner_b_dir.join("manifest.toml"),
+        CROSS_OWNER_RESTORE_OWNER_B_MANIFEST_TOML,
+    )
+    .expect("write owner B's descriptor");
+
+    let filesystem: Arc<dyn RootFilesystem> = Arc::new(mounted_local_filesystem(&storage_root));
+
+    let default_tenant =
+        TenantId::from_trusted(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string());
+    let installation_store: Arc<dyn ExtensionInstallationStore> =
+        Arc::new(InMemoryExtensionInstallationStore::default());
+    let (owner_a_extension_id, _) = seed_registered_installation(
+        &installation_store,
+        CROSS_OWNER_RESTORE_OWNER_A_MANIFEST_TOML,
+        &default_tenant,
+        &UserId::new(OWNER_A_USER_ID).expect("valid owner id"),
+        CROSS_OWNER_RESTORE_OWNER_A_EXTENSION_ID,
+        None,
+    )
+    .await;
+    let (owner_b_extension_id, _) = seed_registered_installation(
+        &installation_store,
+        CROSS_OWNER_RESTORE_OWNER_B_MANIFEST_TOML,
+        &default_tenant,
+        &UserId::new(OWNER_B_USER_ID).expect("valid owner id"),
+        CROSS_OWNER_RESTORE_OWNER_B_EXTENSION_ID,
+        None,
+    )
+    .await;
+    assert_ne!(
+        owner_a_extension_id, owner_b_extension_id,
+        "sanity: distinct owners registering distinct URLs must mint distinct ids"
+    );
+
+    let empty_catalog = AvailableExtensionCatalog::from_packages(Vec::new());
+    let boot = fresh_boot_fixture();
+
+    restore_extension_lifecycle_state(
+        &empty_catalog,
+        &filesystem,
+        &installation_store,
+        &boot.lifecycle_service,
+        &boot.active_extensions,
+    )
+    .await
+    .expect("restore of two distinct owners' registered installations must succeed");
+
+    let snapshot = boot.active_registry.snapshot();
+
+    let published_a = snapshot
+        .get_extension(&owner_a_extension_id)
+        .expect("owner A's row must restore and publish");
+    let ironclaw_extensions::ExtensionRuntime::Mcp { url: url_a, .. } =
+        &published_a.manifest.runtime
+    else {
+        panic!("expected an MCP runtime declaration for owner A");
+    };
+    assert_eq!(
+        url_a.as_deref(),
+        Some("http://owner-a-restore.example/mcp"),
+        "owner A's row must restore and publish owner A's OWN registered descriptor, never \
+         owner B's"
+    );
+    assert_eq!(
+        published_a.manifest.name, "Owner A's Registered MCP",
+        "owner A's restored manifest name must be owner A's own, never owner B's"
+    );
+
+    let published_b = snapshot
+        .get_extension(&owner_b_extension_id)
+        .expect("owner B's row must restore and publish");
+    let ironclaw_extensions::ExtensionRuntime::Mcp { url: url_b, .. } =
+        &published_b.manifest.runtime
+    else {
+        panic!("expected an MCP runtime declaration for owner B");
+    };
+    assert_eq!(
+        url_b.as_deref(),
+        Some("http://owner-b-restore.example/mcp"),
+        "owner B's row must restore and publish owner B's OWN registered descriptor, never \
+         owner A's"
+    );
+    assert_eq!(
+        published_b.manifest.name, "Owner B's Registered MCP",
+        "owner B's restored manifest name must be owner B's own, never owner A's"
+    );
+}
+
 const CATALOG_MANIFEST_TOML: &str = r#"
 schema_version = "reborn.extension_manifest.v2"
 id = "catalog-mcp"
