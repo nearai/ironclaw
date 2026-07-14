@@ -1835,23 +1835,24 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         })?,
     );
     let extension_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
-    let loaded_extension_installation_store = if matches!(
-        profile,
-        RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo
-    ) {
-        FilesystemExtensionInstallationStore::load_at_with_policy(
-            extension_filesystem.clone(),
-            extension_installation_state_path,
-            NonCasLoadPolicy::AllowReadOnlyLocalDev,
-        )
-        .await
-    } else {
-        FilesystemExtensionInstallationStore::load_at(
-            extension_filesystem.clone(),
-            extension_installation_state_path,
-        )
-        .await
-    };
+    let loaded_extension_installation_store =
+        match extension_installation_non_cas_load_policy(profile) {
+            NonCasLoadPolicy::AllowReadOnlyLocalDev => {
+                FilesystemExtensionInstallationStore::load_at_with_policy(
+                    extension_filesystem.clone(),
+                    extension_installation_state_path,
+                    NonCasLoadPolicy::AllowReadOnlyLocalDev,
+                )
+                .await
+            }
+            NonCasLoadPolicy::RequireCas => {
+                FilesystemExtensionInstallationStore::load_at(
+                    extension_filesystem.clone(),
+                    extension_installation_state_path,
+                )
+                .await
+            }
+        };
     let extension_installation_store: Arc<dyn ExtensionInstallationStore> =
         Arc::new(loaded_extension_installation_store.map_err(|error| {
             RebornBuildError::InvalidConfig {
@@ -2311,6 +2312,21 @@ fn local_dev_extension_installation_state_path(
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("hosted extension installation state path is invalid: {error}"),
     })
+}
+
+fn extension_installation_non_cas_load_policy(
+    profile: RebornCompositionProfile,
+) -> NonCasLoadPolicy {
+    match profile {
+        RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo => {
+            NonCasLoadPolicy::AllowReadOnlyLocalDev
+        }
+        RebornCompositionProfile::Disabled
+        | RebornCompositionProfile::HostedSingleTenant
+        | RebornCompositionProfile::HostedSingleTenantVolume
+        | RebornCompositionProfile::Production
+        | RebornCompositionProfile::MigrationDryRun => NonCasLoadPolicy::RequireCas,
+    }
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -5377,6 +5393,125 @@ mod tests {
             path.as_str(),
             "/system/extensions/.installations/state.json"
         );
+    }
+
+    #[test]
+    fn extension_installation_non_cas_policy_is_local_only() {
+        for (profile, expected) in [
+            (
+                RebornCompositionProfile::Disabled,
+                NonCasLoadPolicy::RequireCas,
+            ),
+            (
+                RebornCompositionProfile::LocalDev,
+                NonCasLoadPolicy::AllowReadOnlyLocalDev,
+            ),
+            (
+                RebornCompositionProfile::LocalDevYolo,
+                NonCasLoadPolicy::AllowReadOnlyLocalDev,
+            ),
+            (
+                RebornCompositionProfile::HostedSingleTenant,
+                NonCasLoadPolicy::RequireCas,
+            ),
+            (
+                RebornCompositionProfile::HostedSingleTenantVolume,
+                NonCasLoadPolicy::RequireCas,
+            ),
+            (
+                RebornCompositionProfile::Production,
+                NonCasLoadPolicy::RequireCas,
+            ),
+            (
+                RebornCompositionProfile::MigrationDryRun,
+                NonCasLoadPolicy::RequireCas,
+            ),
+        ] {
+            assert_eq!(
+                extension_installation_non_cas_load_policy(profile),
+                expected,
+                "unexpected non-CAS load policy for {profile}"
+            );
+        }
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn local_profile_build_normalizes_legacy_manifest_without_rewriting_local_mount() {
+        for profile in [
+            RebornCompositionProfile::LocalDev,
+            RebornCompositionProfile::LocalDevYolo,
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let storage_root = dir.path().join(profile.as_str());
+            let state_path = storage_root.join("system/extensions/.installations/state.json");
+            std::fs::create_dir_all(state_path.parent().expect("state path parent"))
+                .expect("extension installation state directory");
+            let raw_toml = format!(
+                r#"id = 'legacy-tools'
+schema_version = '{}'
+name = 'Legacy Tools'
+version = '0.1.0'
+description = 'persisted legacy caller-level test manifest'
+trust = 'third_party'
+
+[runtime]
+kind = 'wasm'
+module = 'wasm/legacy-tools.wasm'
+
+[[capabilities]]
+id = 'legacy-tools.echo'
+description = 'Echo'
+default_permission = 'allow'
+visibility = 'model'
+input_schema_ref = 'schemas/echo.input.json'
+output_schema_ref = 'schemas/echo.output.json'
+"#,
+                ironclaw_extensions::MANIFEST_SCHEMA_VERSION
+            );
+            let seeded_bytes = serde_json::to_vec_pretty(&serde_json::json!({
+                "manifests": [{
+                    "raw_toml": raw_toml,
+                    "source": "host_bundled"
+                }],
+                "installations": []
+            }))
+            .expect("serialize legacy extension installation state");
+            std::fs::write(&state_path, &seeded_bytes)
+                .expect("seed legacy extension installation state");
+
+            let services = build_reborn_services(RebornBuildInput::local_dev_with_profile(
+                profile,
+                format!("{}-legacy-state-owner", profile.as_str()),
+                storage_root,
+            ))
+            .await
+            .expect("local profile accepts the legacy state through compatibility loading");
+            let store = services
+                .extension_installation_store_for_test()
+                .expect("local profile wires extension installation store");
+            let manifest = store
+                .get_manifest(&ExtensionId::new("legacy-tools").expect("extension id"))
+                .await
+                .expect("read normalized in-memory manifest")
+                .expect("legacy manifest remains present in memory");
+
+            assert!(
+                manifest
+                    .raw_toml()
+                    .contains("[[capability_provider.tools.capabilities]]"),
+                "{profile} must expose the normalized manifest in memory"
+            );
+            assert!(
+                !manifest.raw_toml().contains("[[capabilities]]"),
+                "{profile} must not expose the retired capability shape"
+            );
+            assert_eq!(
+                std::fs::read(&state_path).expect("re-read persisted extension state"),
+                seeded_bytes,
+                "{profile} compatibility loading must not rewrite non-CAS storage"
+            );
+        }
     }
 
     #[test]
