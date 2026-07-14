@@ -291,6 +291,8 @@ where
                 // positive.
                 continue;
             };
+            Self::validate_identity_record_for_path(&record, provider, &primary)
+                .map_err(|error| RebornUserIdentityLookupError::Backend(error.to_string()))?;
             if identity_record_matches_user_binding(
                 &record,
                 provider,
@@ -611,6 +613,22 @@ where
             path_segment(provider),
             path_segment(provider_user_id)
         ))
+    }
+
+    fn validate_identity_record_for_path(
+        record: &StoredSlackUserIdentity,
+        provider: &str,
+        path: &ScopedPath,
+    ) -> Result<(), RebornUserIdentityBindingError> {
+        record.validate_for_provider(provider)?;
+        let expected = Self::identity_path(provider, &record.provider_user_id)
+            .map_err(map_binding_fs_error)?;
+        if expected.as_str() != path.as_str() {
+            return Err(RebornUserIdentityBindingError::Backend(
+                "stored Slack user identity path does not match its record".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     fn connection_path(owner: &SlackConnectionOwner) -> Result<ScopedPath, FilesystemError> {
@@ -1592,6 +1610,8 @@ where
             else {
                 continue;
             };
+            Self::validate_identity_record_for_path(&record, provider, &path)
+                .map_err(|error| RebornUserIdentityLookupError::Backend(error.to_string()))?;
             if let Some(prefix) = provider_user_id_prefix {
                 if !installation_scoped_provider_user_id_matches_prefix(
                     &record.provider_user_id,
@@ -1599,9 +1619,6 @@ where
                 ) {
                     continue;
                 }
-                record
-                    .validate_for_provider(provider)
-                    .map_err(|error| RebornUserIdentityLookupError::Backend(error.to_string()))?;
                 let Some((generation, installation_id, actor_id)) =
                     parse_any_installation_scoped_provider_user_id(&record.provider_user_id)
                 else {
@@ -1666,26 +1683,26 @@ impl<F> FilesystemSlackHostState<F>
 where
     F: RootFilesystem + 'static,
 {
-    async fn ensure_no_active_legacy_alias_conflict(
+    async fn canonical_predecessor_from_legacy_alias(
         &self,
         binding: &RebornUserIdentityBinding,
-    ) -> Result<(), RebornUserIdentityBindingError> {
+    ) -> Result<Option<StoredSlackUserIdentity>, RebornUserIdentityBindingError> {
         if binding.provider.as_str()
             != crate::slack::slack_channel_connection::SLACK_IDENTITY_PROVIDER
         {
-            return Ok(());
+            return Ok(None);
         }
         let Some((installation_id, actor_id)) =
             parse_installation_scoped_provider_user_id(binding.provider_user_id.as_str())
         else {
             // Test and migration callers may seed an already-legacy row. The
             // production binding service always supplies a canonical key.
-            return Ok(());
+            return Ok(None);
         };
         let Some(legacy_provider_user_id) =
             legacy_installation_scoped_provider_user_id(&installation_id, &actor_id)
         else {
-            return Ok(());
+            return Ok(None);
         };
         let legacy_path = Self::identity_path(binding.provider.as_str(), &legacy_provider_user_id)
             .map_err(map_binding_fs_error)?;
@@ -1694,16 +1711,21 @@ where
             .await
             .map_err(map_binding_fs_error)?
         else {
-            return Ok(());
+            return Ok(None);
         };
         legacy_record.validate_for_key(binding.provider.as_str(), &legacy_provider_user_id)?;
-        if legacy_record.state == StoredSlackIdentityState::Active
-            && legacy_record.user_id != binding.user_id.as_str()
-        {
+        if legacy_record.state != StoredSlackIdentityState::Active {
+            return Ok(None);
+        }
+        if legacy_record.user_id != binding.user_id.as_str() {
             log_duplicate_identity_binding(&legacy_record, binding);
             return Err(RebornUserIdentityBindingError::ProviderIdentityAlreadyBound);
         }
-        Ok(())
+        Ok(Some(StoredSlackUserIdentity::from_binding(
+            binding,
+            legacy_record.epoch,
+            legacy_record.created_at,
+        )))
     }
 
     async fn rollback_epoch_identity_binding(
@@ -1889,7 +1911,8 @@ where
                 }
                 None => None,
             };
-        self.ensure_no_active_legacy_alias_conflict(&binding)
+        let legacy_predecessor = self
+            .canonical_predecessor_from_legacy_alias(&binding)
             .await?;
         let path =
             Self::identity_path(binding.provider.as_str(), binding.provider_user_id.as_str())
@@ -1932,7 +1955,10 @@ where
                 None => (
                     StoredSlackUserIdentity::from_binding(&binding, epoch, Utc::now()),
                     CasExpectation::Absent,
-                    None,
+                    // Only a physically absent canonical row may inherit the
+                    // same-user legacy predecessor. A canonical tombstone or
+                    // stale row remains authoritative and is handled above.
+                    legacy_predecessor.clone(),
                 ),
             };
             match self.write_record(&path, &record, cas).await {
@@ -2140,7 +2166,7 @@ where
             else {
                 continue;
             };
-            candidate.validate_for_provider(provider)?;
+            Self::validate_identity_record_for_path(&candidate, provider, &path)?;
             if !identity_record_matches_user_binding(
                 &candidate,
                 provider,
@@ -2203,7 +2229,7 @@ where
             else {
                 continue;
             };
-            candidate.validate_for_provider(provider)?;
+            Self::validate_identity_record_for_path(&candidate, provider, &path)?;
             let matches = match scan {
                 IdentityBindingScan::AllOwned => {
                     identity_record_is_owned(&candidate, provider, user_id, provider_user_id_prefix)
@@ -2245,7 +2271,7 @@ where
             else {
                 return Ok(None);
             };
-            current.validate_for_provider(provider)?;
+            Self::validate_identity_record_for_path(&current, provider, path)?;
             if current.state != StoredSlackIdentityState::Active
                 || current.user_id != user_id.as_str()
                 || expected_epoch.is_some_and(|epoch| current.epoch != Some(epoch))
@@ -3422,7 +3448,10 @@ mod tests {
         BackendCapabilities, DirEntry, FileStat, Filter, InMemoryBackend, Page, VersionedEntry,
     };
     use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    use ironclaw_product_adapters::{ExternalActorRef, ProductAdapterId};
+    use ironclaw_product_workflow::{ProductActorUserResolutionRequest, ProductActorUserResolver};
 
+    use crate::provider_identity::ProviderIdentityActorResolver;
     use crate::slack::slack_personal_binding::{
         RebornIdentityProviderId, RebornIdentityProviderUserId,
         RebornUserIdentityBindingDeleteStore, SlackConnectionEpoch, SlackConnectionOwner,
@@ -3694,6 +3723,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filesystem_slack_host_state_failed_reconfigure_promotes_legacy_predecessor() {
+        let state = state();
+        let owner = SlackConnectionOwner::new(
+            TenantId::new("tenant-alpha").unwrap(),
+            user("user:alice"),
+            installation(),
+        );
+        let active_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
+        let replacement_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
+        seed_legacy_active_identity(&state, &owner, active_epoch).await;
+
+        state
+            .begin_connection(&owner, replacement_epoch, connection_expiry())
+            .await
+            .expect("replacement begins");
+        let rollback = state
+            .bind_user_identity_for_epoch(
+                RebornUserIdentityBinding {
+                    provider: RebornIdentityProviderId::new("slack").unwrap(),
+                    provider_user_id: canonical_provider_user_id_value(),
+                    user_id: user("user:alice"),
+                },
+                replacement_epoch,
+            )
+            .await
+            .expect("replacement identity stages");
+
+        rollback.into_future().await;
+
+        assert_eq!(
+            state
+                .connection_state(&owner)
+                .await
+                .expect("restored connection state"),
+            Some((active_epoch, SlackConnectionState::Active))
+        );
+        let resolved = state
+            .resolve_user_identity_with_binding_epoch("slack", &canonical_provider_user_id())
+            .await
+            .expect("canonical identity lookup")
+            .expect("legacy predecessor is promoted into canonical authority");
+        assert_eq!(resolved.0, user("user:alice"));
+        assert_eq!(
+            resolved.1.as_ref().map(ToString::to_string),
+            Some(active_epoch.to_string())
+        );
+    }
+
+    #[tokio::test]
     async fn failed_connection_cleanup_fences_active_epoch_before_identity_deletion() {
         let state = state();
         let owner = SlackConnectionOwner::new(
@@ -3840,6 +3918,61 @@ mod tests {
             .await
             .expect("identity lookup")
             .expect("previous identity survives activation failure");
+        assert_eq!(
+            resolved.1.as_ref().map(ToString::to_string),
+            Some(active_epoch.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_activation_failure_promotes_legacy_predecessor() {
+        let root = Arc::new(RouteLockTestBackend::normal());
+        let state = state_with_backend(Arc::clone(&root));
+        let owner = SlackConnectionOwner::new(
+            TenantId::new("tenant-alpha").unwrap(),
+            user("user:alice"),
+            installation(),
+        );
+        let active_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
+        let replacement_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
+        seed_legacy_active_identity(&state, &owner, active_epoch).await;
+
+        state
+            .begin_connection(&owner, replacement_epoch, connection_expiry())
+            .await
+            .expect("replacement begins");
+        root.fail_next_connection_write();
+
+        state
+            .bind_user_identity_for_epoch(
+                RebornUserIdentityBinding {
+                    provider: RebornIdentityProviderId::new("slack").unwrap(),
+                    provider_user_id: canonical_provider_user_id_value(),
+                    user_id: user("user:alice"),
+                },
+                replacement_epoch,
+            )
+            .await
+            .err()
+            .expect("activation write failure surfaces");
+        state
+            .abandon_connection(&owner, replacement_epoch)
+            .await
+            .expect("callback failure abandons pending replacement");
+
+        assert_eq!(
+            state
+                .connection_state(&owner)
+                .await
+                .expect("restored lifecycle"),
+            Some((active_epoch, SlackConnectionState::Active))
+        );
+        let resolved = state
+            .resolve_user_identity_with_binding_epoch("slack", &canonical_provider_user_id())
+            .await
+            .expect("canonical identity lookup")
+            .expect("legacy predecessor survives as canonical authority");
+        assert_eq!(resolved.0, user("user:alice"));
         assert_eq!(
             resolved.1.as_ref().map(ToString::to_string),
             Some(active_epoch.to_string())
@@ -4984,6 +5117,160 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filesystem_slack_host_state_scoped_status_rejects_corrupt_identity_path() {
+        let state = state();
+        seed_legacy_with_corrupt_canonical_path(&state).await;
+        let canonical_prefix =
+            crate::provider_identity::installation_scoped_provider_user_id_prefix(&installation());
+
+        state
+            .user_has_provider_binding_with_provider_user_id_prefix(
+                "slack",
+                &user("user:alice"),
+                Some(&canonical_prefix),
+            )
+            .await
+            .expect_err("a corrupt canonical physical row must fail closed over legacy status");
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_scoped_list_rejects_corrupt_identity_path() {
+        let state = state();
+        seed_legacy_with_corrupt_canonical_path(&state).await;
+        let canonical_prefix =
+            crate::provider_identity::installation_scoped_provider_user_id_prefix(&installation());
+
+        state
+            .user_identity_bindings_for_user_at_epoch(
+                "slack",
+                &user("user:alice"),
+                Some(&canonical_prefix),
+                None,
+            )
+            .await
+            .expect_err("a corrupt canonical physical row must fail closed during scoped list");
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_scoped_delete_rejects_corrupt_identity_path() {
+        let state = state();
+        seed_legacy_with_corrupt_canonical_path(&state).await;
+        let canonical_prefix =
+            crate::provider_identity::installation_scoped_provider_user_id_prefix(&installation());
+
+        state
+            .delete_user_identity_bindings_for_user_at_epoch(
+                "slack",
+                &user("user:alice"),
+                Some(&canonical_prefix),
+                None,
+            )
+            .await
+            .expect_err("a corrupt canonical physical row must fail closed during scoped delete");
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_tombstone_reread_rejects_corrupt_identity_path() {
+        let state = state();
+        seed_legacy_with_corrupt_canonical_path(&state).await;
+        let canonical_path = FilesystemSlackHostState::<InMemoryBackend>::identity_path(
+            "slack",
+            &canonical_provider_user_id(),
+        )
+        .expect("canonical identity path");
+
+        state
+            .tombstone_identity_path_if_owned(&canonical_path, "slack", &user("user:alice"), None)
+            .await
+            .expect_err("the CAS reread must revalidate the physical identity path");
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_stale_canonical_authority_shadows_legacy_caller() {
+        let state = state();
+        let owner = SlackConnectionOwner::new(
+            TenantId::new("tenant-alpha").unwrap(),
+            user("user:alice"),
+            installation(),
+        );
+        let active_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
+        let stale_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
+        seed_legacy_active_identity(&state, &owner, active_epoch).await;
+        let canonical_binding = RebornUserIdentityBinding {
+            provider: RebornIdentityProviderId::new("slack").unwrap(),
+            provider_user_id: canonical_provider_user_id_value(),
+            user_id: user("user:alice"),
+        };
+        let canonical_path = FilesystemSlackHostState::<InMemoryBackend>::identity_path(
+            canonical_binding.provider.as_str(),
+            canonical_binding.provider_user_id.as_str(),
+        )
+        .expect("canonical identity path");
+        state
+            .write_record(
+                &canonical_path,
+                &StoredSlackUserIdentity::from_binding(
+                    &canonical_binding,
+                    Some(stale_epoch),
+                    Utc::now(),
+                ),
+                CasExpectation::Absent,
+            )
+            .await
+            .expect("stale canonical identity seeds");
+        let resolver =
+            ProviderIdentityActorResolver::new("slack", "slack_v2", "slack_user", Arc::new(state));
+
+        assert_eq!(
+            resolver
+                .resolve_product_actor_user(actor_resolution_request())
+                .await
+                .expect("actor resolution"),
+            None,
+            "physical canonical presence must prevent legacy authority resurrection"
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_conflicting_canonical_authority_shadows_legacy_caller() {
+        let state = state();
+        state
+            .bind_user_identity(binding("user:alice"))
+            .await
+            .expect("legacy identity seeds");
+        let canonical_binding = RebornUserIdentityBinding {
+            provider: RebornIdentityProviderId::new("slack").unwrap(),
+            provider_user_id: canonical_provider_user_id_value(),
+            user_id: user("user:bob"),
+        };
+        let canonical_path = FilesystemSlackHostState::<InMemoryBackend>::identity_path(
+            canonical_binding.provider.as_str(),
+            canonical_binding.provider_user_id.as_str(),
+        )
+        .expect("canonical identity path");
+        state
+            .write_record(
+                &canonical_path,
+                &StoredSlackUserIdentity::from_binding(&canonical_binding, None, Utc::now()),
+                CasExpectation::Absent,
+            )
+            .await
+            .expect("conflicting canonical identity seeds");
+        let resolver =
+            ProviderIdentityActorResolver::new("slack", "slack_v2", "slack_user", Arc::new(state));
+
+        assert_eq!(
+            resolver
+                .resolve_product_actor_user(actor_resolution_request())
+                .await
+                .expect("actor resolution")
+                .map(|resolved| resolved.user_id),
+            Some(user("user:bob")),
+            "canonical authority must win an inconsistent cross-generation conflict"
+        );
+    }
+
+    #[tokio::test]
     async fn filesystem_slack_host_state_cleans_both_identity_generations_at_epoch() {
         let state = state();
         let owner = SlackConnectionOwner::new(
@@ -5751,6 +6038,75 @@ mod tests {
             user("user:host"),
             AgentId::new("agent:host").unwrap(),
             Some(ProjectId::new("project:host").unwrap()),
+        )
+    }
+
+    async fn seed_legacy_active_identity<F>(
+        state: &FilesystemSlackHostState<F>,
+        owner: &SlackConnectionOwner,
+        epoch: SlackConnectionEpoch,
+    ) where
+        F: RootFilesystem + 'static,
+    {
+        state
+            .begin_connection(owner, epoch, connection_expiry())
+            .await
+            .expect("legacy connection begins");
+        state
+            .activate_connection(owner, epoch)
+            .await
+            .expect("legacy connection activates");
+        let legacy_binding = binding(owner.user_id().as_str());
+        let legacy_path = FilesystemSlackHostState::<F>::identity_path(
+            legacy_binding.provider.as_str(),
+            legacy_binding.provider_user_id.as_str(),
+        )
+        .expect("legacy identity path");
+        state
+            .write_record(
+                &legacy_path,
+                &StoredSlackUserIdentity::from_binding(&legacy_binding, Some(epoch), Utc::now()),
+                CasExpectation::Absent,
+            )
+            .await
+            .expect("legacy active identity seeds");
+    }
+
+    async fn seed_legacy_with_corrupt_canonical_path(
+        state: &FilesystemSlackHostState<InMemoryBackend>,
+    ) {
+        state
+            .bind_user_identity(binding("user:alice"))
+            .await
+            .expect("legacy identity seeds");
+        let canonical_path = FilesystemSlackHostState::<InMemoryBackend>::identity_path(
+            "slack",
+            &canonical_provider_user_id(),
+        )
+        .expect("canonical identity path");
+        let mismatched_binding = RebornUserIdentityBinding {
+            provider: RebornIdentityProviderId::new("slack").unwrap(),
+            provider_user_id: RebornIdentityProviderUserId::new(canonical_provider_user_id_for(
+                "U999",
+            ))
+            .unwrap(),
+            user_id: user("user:alice"),
+        };
+        state
+            .write_record(
+                &canonical_path,
+                &StoredSlackUserIdentity::from_binding(&mismatched_binding, None, Utc::now()),
+                CasExpectation::Absent,
+            )
+            .await
+            .expect("corrupt canonical physical row seeds");
+    }
+
+    fn actor_resolution_request() -> ProductActorUserResolutionRequest {
+        ProductActorUserResolutionRequest::new(
+            ProductAdapterId::new("slack_v2").unwrap(),
+            installation(),
+            ExternalActorRef::new("slack_user", "U123", None::<String>).unwrap(),
         )
     }
 
