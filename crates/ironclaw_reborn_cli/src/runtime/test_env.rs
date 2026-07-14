@@ -13,22 +13,25 @@
 //! the `runtime::tests::build_runtime_input_production_*` env assertions
 //! (#6015). Hence `pub(crate)` and the scope-neutral name.
 //!
+//! To make "exactly one lock" hold beyond this crate too, [`lock_runtime_env`]
+//! does not own a crate-local mutex — it delegates to the canonical
+//! workspace-wide [`ironclaw_common::env_helpers::lock_env`], the same
+//! `ENV_MUTEX` that `ironclaw_reborn_composition` (which these tests build
+//! services against), `ironclaw_llm`, `ironclaw_auth`, and the `src/` crate
+//! already serialize on. So a future env-mutating test anywhere in this binary
+//! that reaches for the canonical lock still serializes against these — it
+//! cannot form the second, non-serializing lock domain that flaked #6015.
+//!
 //! Not exposed outside `#[cfg(test)]`.
 
-use std::sync::{LazyLock, Mutex, MutexGuard};
-
-/// Serializes every test that touches process env vars so they cannot race
-/// each other. cargo test runs tests in parallel by default; without this
-/// each env-mutating test would observe sibling tests' mutations. Held for
-/// the whole body of every env-touching test.
-static RUNTIME_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+use std::sync::MutexGuard;
 
 /// Acquire the single crate-wide process-env lock. `pub(crate)` so
 /// env-mutating tests outside `runtime` (e.g. `commands::serve_sso`) share it.
+/// Delegates to [`ironclaw_common::env_helpers::lock_env`] so the whole
+/// workspace serializes on one mutex rather than a per-crate copy.
 pub(crate) fn lock_runtime_env() -> MutexGuard<'static, ()> {
-    RUNTIME_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    ironclaw_common::env_helpers::lock_env()
 }
 
 /// RAII guard that snapshots an env var on construction and restores it
@@ -75,19 +78,22 @@ mod tests {
 
     /// Regression for #6015. The crate must expose exactly ONE process-env
     /// lock: `commands::serve_sso` previously defined its own
-    /// `WEBUI_BASE_URL_ENV_LOCK`, which did not serialize against
-    /// `RUNTIME_ENV_LOCK`, so the two lock domains raced `std::env` mutation
-    /// (UB on Rust 1.82+) and flaked the `build_runtime_input_production_*`
-    /// assertions. This pins that the shared accessor hands out a genuinely
-    /// exclusive mutex — a second acquisition while one is held is contended —
-    /// so re-introducing a parallel lock (which would break serialization)
-    /// stands out against this single canonical one.
+    /// `WEBUI_BASE_URL_ENV_LOCK`, which did not serialize against the runtime
+    /// lock, so the two lock domains raced `std::env` mutation (UB on Rust
+    /// 1.82+) and flaked the `build_runtime_input_production_*` assertions.
+    /// This pins two things: (1) `lock_runtime_env` hands out a genuinely
+    /// exclusive mutex, and (2) that mutex *is* the canonical workspace lock
+    /// `ironclaw_common::env_helpers::ENV_MUTEX` — so while the accessor's
+    /// guard is held, the canonical mutex is contended. Re-introducing a
+    /// parallel crate-local lock (which would break serialization against the
+    /// rest of the workspace) stands out against this single canonical one.
     #[test]
-    fn process_env_lock_is_a_single_exclusive_mutex() {
+    fn process_env_lock_is_the_single_canonical_mutex() {
         let _held = lock_runtime_env();
         assert!(
-            RUNTIME_ENV_LOCK.try_lock().is_err(),
-            "the crate-wide process-env lock must be one shared, exclusive mutex"
+            ironclaw_common::env_helpers::ENV_MUTEX.try_lock().is_err(),
+            "lock_runtime_env must hand out the canonical workspace env mutex, \
+             not a second crate-local one"
         );
     }
 }
