@@ -1,8 +1,4 @@
-use std::{
-    collections::HashMap,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -12,10 +8,10 @@ use ironclaw_host_api::{
     PermissionMode, ResourceScope, ResourceUsage, RuntimeDispatchErrorKind,
 };
 use ironclaw_triggers::{
-    ActiveHoldProjection, ActiveHoldReason, MissingTriggerActiveRunLookup, TriggerActiveRunLookup,
-    TriggerError, TriggerId, TriggerRecord, TriggerRecordValidationKind, TriggerRepository,
-    TriggerRunRecord, TriggerSchedule, TriggerScheduleValidationKind, TriggerSourceKind,
-    TriggerState, active_holds_for_records,
+    ACTIVE_HOLD_LOOKUP_TIMEOUT, ActiveHoldProjection, ActiveHoldReason,
+    MissingTriggerActiveRunLookup, TriggerActiveRunLookup, TriggerError, TriggerId, TriggerRecord,
+    TriggerRecordValidationKind, TriggerRepository, TriggerRunRecord, TriggerSchedule,
+    TriggerScheduleValidationKind, TriggerSourceKind, TriggerState, active_holds_for_records,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -33,10 +29,6 @@ use super::{
 const TRIGGER_LIST_MAX_LIMIT: usize = 100;
 const TRIGGER_RUN_HISTORY_DEFAULT_LIMIT: usize = 25;
 const TRIGGER_RUN_HISTORY_MAX_LIMIT: usize = 100;
-/// Timeout for the active-run-state lookup behind `active_hold`; matches the
-/// automations facade's backend budget so a slow snapshot source cannot hang
-/// `trigger_list` (#5886).
-const TRIGGER_ACTIVE_HOLD_LOOKUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub const TRIGGER_CREATE_CAPABILITY_ID: &str = "builtin.trigger_create";
 pub const TRIGGER_LIST_CAPABILITY_ID: &str = "builtin.trigger_list";
@@ -459,16 +451,12 @@ async fn list_triggers(
     // Reason/elapsed-occurrence derivation and lookup batching live in
     // `ironclaw_triggers::active_holds_for_records`, shared with the
     // automations facade so both read surfaces stay in lockstep (#5886).
-    let mut holds: HashMap<TriggerId, Value> = active_holds_for_records(
-        active_run_lookup,
-        &records,
-        now,
-        TRIGGER_ACTIVE_HOLD_LOOKUP_TIMEOUT,
-    )
-    .await
-    .into_iter()
-    .map(|(trigger_id, hold)| (trigger_id, active_hold_json(hold)))
-    .collect();
+    let mut holds: HashMap<TriggerId, Value> =
+        active_holds_for_records(active_run_lookup, &records, now, ACTIVE_HOLD_LOOKUP_TIMEOUT)
+            .await
+            .into_iter()
+            .map(|(trigger_id, hold)| (trigger_id, active_hold_json(hold)))
+            .collect();
     let output = records
         .into_iter()
         .map(|record| {

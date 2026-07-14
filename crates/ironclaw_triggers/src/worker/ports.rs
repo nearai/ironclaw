@@ -210,6 +210,11 @@ impl TriggerActiveRunLookup for MissingTriggerActiveRunLookup {
 /// surface so they all render "99+" identically instead of drifting (#5886).
 pub const ACTIVE_HOLD_ELAPSED_OCCURRENCES_CAP: u32 = 99;
 
+/// Default timeout for a standalone `active_holds_for_records` caller (one
+/// not already deriving a remaining-budget duration from an outer deadline),
+/// so a slow snapshot source cannot hang that caller (#5886).
+pub const ACTIVE_HOLD_LOOKUP_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// User-facing reason a trigger's active fire is holding the poller back, at
 /// the granularity read surfaces need ("waiting for your approval" vs
 /// "reconnect an account") (#5886).
