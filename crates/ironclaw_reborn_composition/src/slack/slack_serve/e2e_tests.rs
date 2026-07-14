@@ -387,7 +387,7 @@ fn user_identity_actor_user_resolver() -> Arc<dyn ProductActorUserResolver> {
         crate::slack::slack_host_beta::runtime_setup::slack_provider_identity_actor_resolver(
             Arc::new(RecordingUserIdentityLookup::new([(
                 installation_scoped_provider_user_id(
-                    &AdapterInstallationId::new(INSTALLATION).expect("installation"),
+                    &AdapterInstallationId::new(INSTALLATION).expect("installation"), // safety: static test installation id is valid.
                     SLACK_USER,
                 ),
                 UserId::new(USER).expect("user"), // safety: static test user id is valid.
