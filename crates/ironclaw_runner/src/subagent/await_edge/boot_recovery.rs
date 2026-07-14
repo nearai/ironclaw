@@ -731,6 +731,7 @@ mod tests {
             ..
         } = coordinator
             .submit_turn(SubmitTurnRequest {
+                requested_model: None,
                 scope: parent_scope.clone(),
                 actor: actor.clone(),
                 accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new(

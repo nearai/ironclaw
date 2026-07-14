@@ -193,6 +193,7 @@ async fn local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator() {
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let submit = turn_coordinator
         .submit_turn(SubmitTurnRequest {
+            requested_model: None,
             scope: scope.clone(),
             actor: actor.clone(),
             accepted_message_ref: AcceptedMessageRef::new("message-auth-callback").unwrap(),
@@ -956,6 +957,7 @@ async fn submit_and_block_provider_auth_run(
 ) -> TurnRunId {
     let submit = turn_coordinator
         .submit_turn(SubmitTurnRequest {
+            requested_model: None,
             scope: scope.clone(),
             actor,
             accepted_message_ref: AcceptedMessageRef::new(format!("message-fanout-{suffix}"))
@@ -1075,6 +1077,7 @@ async fn submit_and_block_auth_run(
 ) -> ironclaw_turns::TurnRunId {
     let submit = turn_coordinator
         .submit_turn(SubmitTurnRequest {
+            requested_model: None,
             scope: scope.clone(),
             actor,
             accepted_message_ref: AcceptedMessageRef::new("message-auth-callback-2").unwrap(),
