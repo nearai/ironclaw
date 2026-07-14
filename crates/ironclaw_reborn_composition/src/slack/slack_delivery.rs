@@ -509,7 +509,7 @@ impl SlackFinalReplyDeliveryObserver {
                     if let Err(error) = post_slack_message(
                         self.services.egress.as_ref(),
                         envelope.external_conversation_ref(),
-                        SLACK_AUTH_UNAVAILABLE_MESSAGE,
+                        &slack_auth_unavailable_notice(view.provider.as_deref()),
                     )
                     .await
                     {
@@ -1172,6 +1172,22 @@ fn slack_auth_setup_link_is_private(envelope: &ProductInboundEnvelope) -> bool {
         ProductInboundPayload::UserMessage(payload)
             if payload.trigger == ironclaw_product_adapters::ProductTriggerReason::DirectChat
     )
+}
+
+/// Names the blocked provider when known instead of a blanket "this needs a
+/// credential" notice — a stored-but-rejected (e.g. externally revoked)
+/// credential looks identical to a never-configured one without it (#5884).
+/// Deliberately does not claim the provider was previously connected: the
+/// same gate shape covers both a revoked credential and one that was never
+/// set up, and only the provider identity — not which case this is — is
+/// known here.
+fn slack_auth_unavailable_notice(provider: Option<&str>) -> String {
+    match provider {
+        Some(provider) => {
+            format!("This needs your {provider} credential. {SLACK_AUTH_UNAVAILABLE_MESSAGE}")
+        }
+        None => SLACK_AUTH_UNAVAILABLE_MESSAGE.to_string(),
+    }
 }
 
 fn slack_approval_gate_prompt_view(
@@ -2706,7 +2722,8 @@ async fn triggered_notification_for_state(
                     payload: ProductOutboundPayload::FinalReply(FinalReplyView {
                         turn_run_id: run_id,
                         text: format!(
-                            "{SLACK_AUTH_UNAVAILABLE_MESSAGE}{}",
+                            "{}{}",
+                            slack_auth_unavailable_notice(view.provider.as_deref()),
                             triggered_update_footer(trigger_label)
                         ),
                         generated_at: Utc::now(),
@@ -3098,6 +3115,26 @@ mod tests {
     };
     use ironclaw_turns::AcceptedMessageRef;
 
+    #[test]
+    fn slack_auth_unavailable_notice_without_provider_is_the_blanket_message() {
+        assert_eq!(
+            slack_auth_unavailable_notice(None),
+            SLACK_AUTH_UNAVAILABLE_MESSAGE
+        );
+    }
+
+    #[test]
+    fn slack_auth_unavailable_notice_with_provider_names_it_without_claiming_reconnect() {
+        let notice = slack_auth_unavailable_notice(Some("github"));
+        assert!(notice.contains("github"));
+        assert!(notice.contains(SLACK_AUTH_UNAVAILABLE_MESSAGE));
+        assert!(
+            !notice.to_ascii_lowercase().contains("reconnect"),
+            "must not claim a prior connection existed — the same gate shape \
+             also covers a never-configured extension, got: {notice}"
+        );
+    }
+
     fn accepted_ack() -> ProductInboundAck {
         ProductInboundAck::Accepted {
             accepted_message_ref: AcceptedMessageRef::new("slack:test-message")
@@ -3234,6 +3271,7 @@ mod tests {
     struct ScriptedRunState {
         status: TurnStatus,
         gate_ref: Option<GateRef>,
+        credential_requirements: Vec<ironclaw_host_api::RuntimeCredentialAuthRequirement>,
     }
 
     struct ScriptedTurnCoordinator {
@@ -3281,6 +3319,7 @@ mod tests {
             Self::with_states(vec![ScriptedRunState {
                 status,
                 gate_ref: None,
+                credential_requirements: Vec::new(),
             }])
         }
 
@@ -3387,7 +3426,7 @@ mod tests {
                 checkpoint_id: None,
                 gate_ref: scripted.gate_ref,
                 blocked_activity_id: None,
-                credential_requirements: Vec::new(),
+                credential_requirements: scripted.credential_requirements.clone(),
                 failure: None,
                 event_cursor: EventCursor(1),
                 product_context: None,
@@ -3427,6 +3466,29 @@ mod tests {
         ScriptedRunState {
             status,
             gate_ref: gate_ref.map(|s| GateRef::new(s).expect("gate ref")),
+            credential_requirements: Vec::new(),
+        }
+    }
+
+    /// Like [`scripted_state`] but carries a single manual-token (PAT)
+    /// credential requirement, as `extension_activate`'s auth gate produces
+    /// for a provider like GitHub. Used to assert the auth-unavailable
+    /// notice names the blocked provider instead of a blanket message (#5884).
+    fn scripted_state_with_manual_token_requirement(
+        status: TurnStatus,
+        gate_ref: Option<&str>,
+        provider: &str,
+    ) -> ScriptedRunState {
+        ScriptedRunState {
+            credential_requirements: vec![ironclaw_host_api::RuntimeCredentialAuthRequirement {
+                provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new(provider)
+                    .expect("valid provider id"),
+                setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+                requester_extension: ironclaw_host_api::ExtensionId::new(provider)
+                    .expect("valid extension id"),
+                provider_scopes: Vec::new(),
+            }],
+            ..scripted_state(status, gate_ref)
         }
     }
 
@@ -5166,10 +5228,13 @@ mod tests {
         );
 
         let outbound = Arc::new(InMemoryOutboundStateStore::default());
-        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
-            TurnStatus::BlockedAuth,
-            Some("gate:auth-cancel-test"),
-        )]));
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![
+            scripted_state_with_manual_token_requirement(
+                TurnStatus::BlockedAuth,
+                Some("gate:auth-cancel-test"),
+                "github",
+            ),
+        ]));
         let observer = make_observer(
             Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
             egress.clone(),
@@ -5205,6 +5270,12 @@ mod tests {
         assert!(
             body.contains(SLACK_AUTH_UNAVAILABLE_MESSAGE),
             "body must contain SLACK_AUTH_UNAVAILABLE_MESSAGE text, got: {body}"
+        );
+        // #5884: the notice must name the blocked provider instead of reading
+        // identically to a never-configured extension.
+        assert!(
+            body.contains("github"),
+            "body must name the github provider, got: {body}"
         );
         assert!(
             !body.contains("Authentication required"),
@@ -6774,9 +6845,16 @@ mod tests {
         let binding_ref =
             test_slack_binding_ref(install, scope.agent_id.as_ref().expect("agent").as_str());
 
-        // First poll → BlockedAuth with gate_ref; second poll → Completed.
+        // First poll → BlockedAuth with gate_ref; second poll → Completed. The
+        // BlockedAuth state carries a single manual-token (PAT) credential
+        // requirement for "github", matching what a revoked-but-present GitHub
+        // token's runtime 401 (or a never-configured extension) produces.
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![
-            scripted_state(TurnStatus::BlockedAuth, Some(gate_ref_str)),
+            scripted_state_with_manual_token_requirement(
+                TurnStatus::BlockedAuth,
+                Some(gate_ref_str),
+                "github",
+            ),
             scripted_state(TurnStatus::Completed, None),
         ]));
         let thread_service = Arc::new(InMemorySessionThreadService::default());
@@ -6872,6 +6950,12 @@ mod tests {
                 .iter()
                 .any(|b| b.contains(SLACK_AUTH_UNAVAILABLE_MESSAGE)),
             "expected the auth-unavailable notice to be posted; got: {posted:?}"
+        );
+        // #5884: the notice must name the blocked provider instead of reading
+        // identically to a never-configured extension.
+        assert!(
+            posted.iter().any(|b| b.contains("github")),
+            "expected the auth-unavailable notice to name the github provider; got: {posted:?}"
         );
     }
 

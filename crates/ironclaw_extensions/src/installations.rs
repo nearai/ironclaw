@@ -1313,6 +1313,8 @@ pub enum ExtensionInstallationError {
     ManifestNotFound { extension_id: ExtensionId },
     #[error("invalid installation: {reason}")]
     InvalidInstallation { reason: String },
+    #[error("extension installation backend error: {reason}")]
+    Backend { reason: String },
     #[error("duplicate credential binding {handle}")]
     DuplicateCredentialBinding { handle: ExtensionCredentialHandle },
     #[error("conflicting manifest references for extension {extension_id}")]

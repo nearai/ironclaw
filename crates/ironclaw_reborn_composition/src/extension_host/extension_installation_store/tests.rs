@@ -63,10 +63,14 @@ async fn load_at_sanitizes_filesystem_read_errors() {
         .expect("valid state path");
 
     let error = match FilesystemExtensionInstallationStore::load_at(filesystem, state_path).await {
-        Ok(_) => panic!("backend read failure should surface as invalid installation"),
+        Ok(_) => panic!("backend read failure should surface as a transient backend error"),
         Err(error) => error,
     };
 
+    // Must be `Backend`, not `InvalidInstallation` — a transient I/O fault is
+    // not malformed content, and `map_extension_installation_error` only
+    // routes `Backend` to a retryable classification (#5878).
+    assert!(matches!(error, ExtensionInstallationError::Backend { .. }));
     let rendered = error.to_string();
     assert!(rendered.contains("failed to load extension installation state"));
     assert!(!rendered.contains("/tenants/acme"));
@@ -379,7 +383,7 @@ async fn load_at_returns_rewrite_failure_without_exposing_normalized_store() {
         };
     assert_eq!(
         error,
-        ExtensionInstallationError::InvalidInstallation {
+        ExtensionInstallationError::Backend {
             reason: "failed to load extension installation state".to_string(),
         }
     );

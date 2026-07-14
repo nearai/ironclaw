@@ -2368,10 +2368,13 @@ fn map_extension_error(error: ExtensionError) -> ProductWorkflowError {
 }
 
 fn map_extension_installation_error(error: ExtensionInstallationError) -> ProductWorkflowError {
-    // TODO(#4091): split durable-store transient failures from malformed
-    // lifecycle requests when ExtensionInstallationStore grows a DB backend.
-    ProductWorkflowError::InvalidBindingRequest {
-        reason: error.to_string(),
+    match error {
+        ExtensionInstallationError::Backend { .. } => ProductWorkflowError::Transient {
+            reason: error.to_string(),
+        },
+        _ => ProductWorkflowError::InvalidBindingRequest {
+            reason: error.to_string(),
+        },
     }
 }
 
@@ -2492,6 +2495,30 @@ mod tests {
     use ironclaw_trust::{HostTrustPolicy, InvalidationBus, TrustPolicy};
 
     mod private_install_tests;
+
+    #[test]
+    fn map_extension_installation_error_treats_backend_faults_as_transient() {
+        // A transient installation-store I/O fault (e.g. concurrent-write
+        // contention) must not surface to the model as an invalid-request /
+        // encoding failure — that previously produced the misleading "the
+        // tool input could not be encoded" message reported in #5878.
+        let error = ExtensionInstallationError::Backend {
+            reason: "failed to load extension installation state".to_string(),
+        };
+        assert!(matches!(
+            map_extension_installation_error(error),
+            ProductWorkflowError::Transient { .. }
+        ));
+    }
+
+    #[test]
+    fn map_extension_installation_error_treats_other_faults_as_invalid_binding_request() {
+        let error = ExtensionInstallationError::EmptyOwnerMembers;
+        assert!(matches!(
+            map_extension_installation_error(error),
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+    }
 
     #[tokio::test]
     async fn lifecycle_owner_projections_reject_duplicate_extension_ids() {

@@ -58,7 +58,7 @@ impl FilesystemExtensionInstallationStore {
                     state_path = %state_path.as_str(),
                     "extension installation state load failed"
                 );
-                return Err(invalid_installation_error(INSTALLATION_STATE_IO_ERROR));
+                return Err(backend_installation_error(INSTALLATION_STATE_IO_ERROR));
             }
         }
         Ok(Self {
@@ -94,7 +94,7 @@ async fn write_snapshot(
                 state_path = %state_path.as_str(),
                 "extension installation state write failed"
             );
-            invalid_installation_error(INSTALLATION_STATE_IO_ERROR)
+            backend_installation_error(INSTALLATION_STATE_IO_ERROR)
         })
 }
 
@@ -316,6 +316,12 @@ impl WireManifestSource {
 
 fn invalid_installation_error(error: impl std::fmt::Display) -> ExtensionInstallationError {
     ExtensionInstallationError::InvalidInstallation {
+        reason: error.to_string(),
+    }
+}
+
+fn backend_installation_error(error: impl std::fmt::Display) -> ExtensionInstallationError {
+    ExtensionInstallationError::Backend {
         reason: error.to_string(),
     }
 }
