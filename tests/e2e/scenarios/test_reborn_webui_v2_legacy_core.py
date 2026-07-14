@@ -255,6 +255,11 @@ async def test_reborn_legacy_core_multiple_messages(reborn_v2_page):
     await expect(reborn_v2_page.locator(SEL_V2["msg_assistant"])).to_have_count(
         1, timeout=30000
     )
+    await expect(composer).to_have_attribute(
+        "data-send-disabled",
+        "false",
+        timeout=30000,
+    )
 
     await composer.fill("What is 2+2?")
     await composer.press("Enter")

@@ -71,7 +71,7 @@ use ironclaw_host_api::{
     AgentId, CapabilityId, InvocationId, ProjectId, ResourceScope, RuntimeKind, TenantId, ThreadId,
     UserId,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse, LoopCapabilityInputResolver,
 };
@@ -230,6 +230,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             terminate_hint: false,
             byte_len: 0,
             output_digest: None,
+            model_observation: None,
         }))
     }
 
@@ -304,6 +305,7 @@ impl LoopCapabilityPort for ProviderAwareCapabilityPort {
             terminate_hint: false,
             byte_len: 0,
             output_digest: None,
+            model_observation: None,
         }))
     }
 

@@ -38,7 +38,7 @@ use ironclaw_host_runtime::{
     RuntimeProcessHandle, RuntimeResourceGate, RuntimeStatusRequest, SurfaceKind,
     VisibleCapability, VisibleCapabilityAccess,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     AwaitEdgeSettler, CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
     CapabilitySurfaceProfileResolver, CapabilityWriteResult, EmptyLoopCapabilityPort,
     EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
@@ -54,7 +54,7 @@ use ironclaw_loop_support::{
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_runner::app_loop_family::build_loop_family_registry;
+use ironclaw_runner::app_loop_family::build_loop_family_registry_with_overrides;
 use ironclaw_runner::driver_registry::{
     DriverKind, DriverRegistry, DriverRequirements, LoopDriverRegistryKey, RequirementLevel,
 };
@@ -3562,7 +3562,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
         subagent_await_edge_evidence: await_edge_store as Arc<dyn AwaitDependentRunEvidenceStore>,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
-        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+        subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
         loop_exit_evidence: evidence,
         config: DefaultPlannedRuntimeConfig {
             heartbeat_interval: std::time::Duration::from_millis(20),
@@ -3727,7 +3727,7 @@ async fn pre_minted_scheduler_wake_wiring_drives_scheduler_on_coordinator_submit
         subagent_await_edge_evidence: await_edge_store as Arc<dyn AwaitDependentRunEvidenceStore>,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
-        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+        subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
         loop_exit_evidence: evidence,
         config: DefaultPlannedRuntimeConfig {
             heartbeat_interval: std::time::Duration::from_millis(20),
@@ -3900,7 +3900,7 @@ async fn build_runtime_host_with_optional_hooks(
         subagent_await_edge_evidence: await_edge_store as Arc<dyn AwaitDependentRunEvidenceStore>,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
-        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+        subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
         loop_exit_evidence: evidence,
         config: DefaultPlannedRuntimeConfig::default(),
         model_route_resolver: None,
@@ -4258,7 +4258,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
             as Arc<dyn AwaitDependentRunEvidenceStore>,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
-        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+        subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
         loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
             fixture.thread_service.clone(),
             turn_state_store_dyn(&turn_store),
@@ -4386,7 +4386,7 @@ async fn product_live_parts_for_gate_test(
             as Arc<dyn AwaitDependentRunEvidenceStore>,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
-        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+        subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
         loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
             fixture.thread_service.clone(),
             turn_state_store_dyn(&turn_store),
@@ -8615,7 +8615,14 @@ fn loop_exit_applier_for_fixture(
 }
 
 fn planned_driver_for_full_reborn_test() -> Arc<PlannedDriver> {
-    let registry = build_loop_family_registry().expect("loop family registry should build");
+    // Scripted-outage tests pin retry-then-fail behavior; keep >= 2
+    // availability retries but far below the production budget so a
+    // deliberately offline provider reaches Failed in seconds.
+    let registry = build_loop_family_registry_with_overrides(
+        None,
+        Some(std::num::NonZeroU32::new(2).expect("nonzero")),
+    )
+    .expect("loop family registry should build");
     Arc::new(PlannedDriver::default_from_registry(&registry).expect("planned driver should build"))
 }
 

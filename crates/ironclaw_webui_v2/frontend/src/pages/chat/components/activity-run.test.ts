@@ -22,7 +22,7 @@ function activityRunSourceForTest() {
   return `${lines.join("\n")}\nglobalThis.__testExports = { ActivityRun };`;
 }
 
-test("ActivityRun auto-expands running tool activity", () => {
+test("ActivityRun keeps running tool activity collapsed by default", () => {
   const context = {
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
@@ -53,8 +53,8 @@ test("ActivityRun auto-expands running tool activity", () => {
     ],
   });
 
-  assert.ok(containsScalar(tree, "true"));
-  assert.ok(hasComponentNamed(tree, "ActivityItem"));
+  assert.ok(containsScalar(tree, "false"));
+  assert.equal(hasComponentNamed(tree, "ActivityItem"), false);
 });
 
 test("ActivityRun auto-expands declined tool activity", () => {

@@ -1012,6 +1012,42 @@ async def hosted_github_emulate_server(
 
 
 @pytest.fixture(scope="session")
+async def hosted_provider_emulate_server(
+    ironclaw_binary,
+    mock_llm_server,
+    emulate_google_server,
+    emulate_github_server,
+    emulate_slack_server,
+    wasm_tools_dir,
+):
+    """Start hosted mode with Google, GitHub, and Slack routed to Emulate."""
+    rewrite_map = {
+        "gmail.googleapis.com": emulate_google_server["url"],
+        "www.googleapis.com": emulate_google_server["url"],
+        "api.github.com": emulate_github_server["url"],
+        "slack.com": emulate_slack_server["url"],
+    }
+    async for server in _run_hosted_oauth_refresh_server(
+        ironclaw_binary,
+        mock_llm_server,
+        wasm_tools_dir,
+        extra_env={
+            "IRONCLAW_TEST_HTTP_REWRITE_MAP": json.dumps(rewrite_map),
+            "GITHUB_OAUTH_CLIENT_ID": "hosted-github-client-id",
+            "GITHUB_OAUTH_CLIENT_SECRET": "hosted-github-client-secret",
+            "SLACK_OAUTH_CLIENT_ID": "hosted-slack-client-id",
+            "SLACK_OAUTH_CLIENT_SECRET": "hosted-slack-client-secret",
+        },
+        extra_result={
+            "emulate_google_url": emulate_google_server["url"],
+            "emulate_github_url": emulate_github_server["url"],
+            "emulate_slack_url": emulate_slack_server["url"],
+        },
+    ):
+        yield server
+
+
+@pytest.fixture(scope="session")
 async def hosted_google_oauth_refresh_server(hosted_google_emulate_server):
     """Compatibility fixture for hosted Gmail OAuth refresh regression tests."""
     yield hosted_google_emulate_server

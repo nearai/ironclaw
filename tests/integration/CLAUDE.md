@@ -118,7 +118,7 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
   harness (`RecordingTestCapabilityPort`, `RecordingHostRuntime`,
   `RecordingRuntimeHttpEgress`, `RecordingNetworkHttpEgress`,
   `RecordingApprovalRequestStore`, `RecordingCapabilityResultWriter`,
-  `RecordingSecurityAuditSink`,
+  `RecordingSecurityAuditSink`, `UnavailableProjectService`,
   `GithubHarnessAuthorizer`, `StaticSecretStore`,
   `StaticCapabilitySurfaceProfileResolver`,
   `FixedRuntimeCredentialAccountResolver`, `EmptyIdentityContextSource`,

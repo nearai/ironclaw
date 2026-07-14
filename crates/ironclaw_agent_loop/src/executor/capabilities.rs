@@ -9,7 +9,8 @@ use ironclaw_turns::{
         AuthResumeApprovalIdentity, CapabilityActivityId, CapabilityApprovalResume,
         CapabilityAuthResume, CapabilityAuthResumeReplay, CapabilityBatchInvocation,
         CapabilityCallCandidate, CapabilityFailureKind, CapabilityOutcome, CapabilityProgress,
-        CapabilityResultMessage, LoopDriverNoteKind, LoopProgressEvent, VisibleCapabilitySurface,
+        CapabilityResultMessage, LoopDriverNoteKind, LoopProgressEvent,
+        ModelVisibleToolObservation, VisibleCapabilitySurface,
     },
 };
 
@@ -399,6 +400,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         result_ref,
                         safe_summary,
                         byte_len,
+                        model_observation,
                         ..
                     } => {
                         push_call_signature_once(&mut state, &mut signatures, &call)?;
@@ -409,9 +411,12 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                             ctx.host,
                             &mut state,
                             &call,
-                            result_ref,
-                            safe_summary,
-                            byte_len,
+                            ChildResultAppendInput {
+                                result_ref,
+                                safe_summary,
+                                byte_len,
+                                model_observation,
+                            },
                             &mut capability_batch,
                         )
                         .await?;
@@ -421,6 +426,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         result_ref,
                         safe_summary,
                         byte_len,
+                        model_observation,
                     } if coalesced_gate_step
                         .as_ref()
                         .is_some_and(|(gate, _)| gate == &gate_ref) =>
@@ -436,6 +442,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                             terminate_hint: false,
                             byte_len,
                             output_digest: None,
+                            model_observation,
                         };
                         append_completed_capability_result(
                             ctx.host,
@@ -614,6 +621,7 @@ impl CapabilityStage {
                 result_ref,
                 safe_summary,
                 byte_len,
+                model_observation,
                 ..
             } => {
                 clear_matching_pending_approval_resume(&mut state, &call);
@@ -623,9 +631,12 @@ impl CapabilityStage {
                     ctx.host,
                     &mut state,
                     &call,
-                    result_ref,
-                    safe_summary,
-                    byte_len,
+                    ChildResultAppendInput {
+                        result_ref,
+                        safe_summary,
+                        byte_len,
+                        model_observation,
+                    },
                     capability_batch,
                 )
                 .await?;
@@ -728,6 +739,7 @@ impl CapabilityStage {
                 result_ref,
                 safe_summary,
                 byte_len,
+                model_observation,
             } => {
                 let resolved_result = CapabilityResultMessage {
                     result_ref,
@@ -736,6 +748,7 @@ impl CapabilityStage {
                     terminate_hint: false,
                     byte_len,
                     output_digest: None,
+                    model_observation,
                 };
                 AwaitDependentRunGateStage
                     .process(
@@ -1266,23 +1279,29 @@ fn auth_resume_for_gate(
     }
 }
 
+struct ChildResultAppendInput {
+    result_ref: LoopResultRef,
+    safe_summary: String,
+    byte_len: u64,
+    model_observation: Option<ModelVisibleToolObservation>,
+}
+
 async fn append_spawned_child_result(
     host: &(dyn ironclaw_turns::run_profile::AgentLoopDriverHost + Send + Sync),
     state: &mut LoopExecutionState,
     call: &CapabilityCallCandidate,
-    result_ref: LoopResultRef,
-    safe_summary: String,
-    byte_len: u64,
+    input: ChildResultAppendInput,
     capability_batch: &mut CapabilityBatchTurnSummary,
 ) -> Result<(), AgentLoopExecutorError> {
-    let safe_summary = sanitized_strategy_summary(safe_summary)?.into_inner();
+    let safe_summary = sanitized_strategy_summary(input.safe_summary)?.into_inner();
     let result = CapabilityResultMessage {
-        result_ref,
+        result_ref: input.result_ref,
         safe_summary,
         progress: CapabilityProgress::MadeProgress,
         terminate_hint: false,
-        byte_len,
+        byte_len: input.byte_len,
         output_digest: None,
+        model_observation: input.model_observation,
     };
     append_completed_capability_result(host, state, call, result, capability_batch).await
 }
@@ -1411,6 +1430,7 @@ mod tests {
             result_ref: LoopResultRef::new(format!("result:{result}")).unwrap(),
             safe_summary: "summary".to_string(),
             byte_len: 0,
+            model_observation: None,
         }
     }
 
@@ -1422,6 +1442,7 @@ mod tests {
             terminate_hint: false,
             byte_len: 0,
             output_digest: None,
+            model_observation: None,
         })
     }
 

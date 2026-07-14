@@ -59,7 +59,7 @@ use ironclaw_filesystem::CompositeRootFilesystem;
 use ironclaw_host_api::{ResourceScope, UserId};
 use ironclaw_llm::testing::provider_chain_over;
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilitySurfaceProfileResolver, HostManagedModelGateway,
     HostUserProfileSource, JsonSpawnSubagentInputCodec, ModelCostTable, SubagentSpawnLimits,
     ZeroCostTable,
@@ -679,7 +679,10 @@ impl RebornIntegrationGroupBuilder {
             capability_input_resolver,
             capability_result_writer,
             capability_recorder,
-        ) = capability.mode().into_parts(milestone_sink.clone())?;
+        ) = capability.mode().into_parts(
+            milestone_sink.clone(),
+            group_thread_harness.service.clone() as Arc<dyn SessionThreadService>,
+        )?;
 
         // Enabler (b): production resolves `CapabilityAllowSet::All` for a
         // top-level user turn, making `CapabilitySurfaceProfileFilter` a no-op
@@ -712,7 +715,7 @@ impl RebornIntegrationGroupBuilder {
         let await_edge_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
         let await_edge_resolver = Arc::new(AwaitEdgeResolver::new_unbound(
             Arc::clone(&await_edge_store),
-            await_edge_goal_store.clone() as Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore>,
+            await_edge_goal_store.clone() as Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
             turn_store.clone() as Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore>,
             capability_result_writer.clone(),
             group_thread_harness.service.clone(),
@@ -837,9 +840,9 @@ impl RebornIntegrationGroupBuilder {
             capability_result_writer,
             subagent_goal_store: await_edge_goal_store,
             subagent_await_edge_writer: await_edge_driver
-                as Arc<dyn ironclaw_loop_support::AwaitEdgeWriter>,
+                as Arc<dyn ironclaw_loop_host::AwaitEdgeWriter>,
             subagent_await_edge_settler: await_edge_resolver
-                as Arc<dyn ironclaw_loop_support::AwaitEdgeSettler>,
+                as Arc<dyn ironclaw_loop_host::AwaitEdgeSettler>,
             subagent_await_edge_evidence: await_edge_store
                 as Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
             subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
@@ -860,6 +863,15 @@ impl RebornIntegrationGroupBuilder {
                 tool_disclosure: self
                     .tool_disclosure
                     .unwrap_or_else(ToolDisclosureMode::from_env),
+                // Loop-level counterpart of hermetic `LLM_MAX_RETRIES=0`:
+                // production rides out provider outages for minutes (deep
+                // availability retries with long backoff), which would stall
+                // scenarios that deliberately script a model failure (e.g.
+                // `failure_category_demasked`). One attempt keeps deliberate
+                // failure paths fast while still exercising retry-then-abort.
+                planned_model_availability_retry_attempts: Some(
+                    std::num::NonZeroU32::new(1).expect("nonzero"),
+                ),
                 ..DefaultPlannedRuntimeConfig::default()
             },
             model_route_resolver: None,
