@@ -357,6 +357,13 @@ fn strip_unsafe_result_reference_preview(observation: &mut serde_json::Value) ->
         .is_some()
 }
 
+/// Whether an issue-text field needs repair: either the content scan rejects
+/// it, or it's too long for the retry's own length check to accept even once
+/// content-clean.
+fn observation_text_needs_repair(text: &str) -> bool {
+    text.len() > MODEL_OBSERVATION_TEXT_MAX_BYTES || validate_model_observation_text(text).is_err()
+}
+
 /// Scrubs untrusted echoed text out of `invalid_input` issues: an unsafe
 /// `received` is dropped (it is optional), an unsafe `path` is replaced with
 /// a fixed placeholder (it is required), so the structured repair guidance
@@ -373,19 +380,19 @@ fn strip_unsafe_invalid_input_issue_text(observation: &mut serde_json::Value) ->
         let Some(issue) = issue.as_object_mut() else {
             continue;
         };
-        let received_is_unsafe = issue
+        let received_needs_repair = issue
             .get("received")
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|text| validate_model_observation_text(text).is_err());
-        if received_is_unsafe {
+            .is_some_and(observation_text_needs_repair);
+        if received_needs_repair {
             issue.remove("received");
             changed = true;
         }
-        let path_is_unsafe = issue
+        let path_needs_repair = issue
             .get("path")
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|text| validate_model_observation_text(text).is_err());
-        if path_is_unsafe {
+            .is_some_and(observation_text_needs_repair);
+        if path_needs_repair {
             issue.insert(
                 "path".to_string(),
                 serde_json::Value::String("unexpected_field".to_string()),
@@ -1372,6 +1379,37 @@ mod tests {
         assert!(
             issue.get("received").is_none(),
             "unsafe received is dropped"
+        );
+        assert_eq!(issue["path"], "result_ref");
+        assert_eq!(issue["code"], "invalid_value");
+        assert_eq!(issue["expected"], "valid result reference format");
+    }
+
+    /// An oversized-but-content-clean `received` passes the content scan but
+    /// still fails the retry's length check, so it must also count as
+    /// needing repair — otherwise the whole observation still drops.
+    #[test]
+    fn best_effort_observation_repairs_oversized_issue_received() {
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            "result:oversized-received",
+            ToolResultSafeSummary::new("tool failed").expect("summary"),
+            Some(invalid_input_observation_with_issue(serde_json::json!({
+                "path": "result_ref",
+                "code": "invalid_value",
+                "expected": "valid result reference format",
+                "received": "a".repeat(600),
+                "schema_path": "properties/result_ref"
+            }))),
+        )
+        .expect("envelope construction is fail-open");
+
+        let observation = envelope
+            .model_observation
+            .expect("repaired observation is retained, not dropped whole");
+        let issue = &observation["detail"]["issues"][0];
+        assert!(
+            issue.get("received").is_none(),
+            "oversized received is dropped"
         );
         assert_eq!(issue["path"], "result_ref");
         assert_eq!(issue["code"], "invalid_value");
