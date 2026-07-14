@@ -419,6 +419,88 @@ test("tool activity state keeps preview failure detail when a bare-kind activity
   assert.equal(messages[0].toolErrorKind, "invalid_input");
 });
 
+test("tool activity state preserves running input details across metadata-only updates", () => {
+  const stateRef = { current: createToolActivityState() };
+  let messages = [];
+  const setMessages = (updater) => {
+    messages = typeof updater === "function" ? updater(messages) : updater;
+  };
+
+  upsertToolActivityMessage(
+    setMessages,
+    toolCardFromActivity({
+      invocation_id: "invocation-search",
+      capability_id: "nearai.web_search",
+      status: "started",
+      subtitle: "deploy status",
+      input_summary: "query: deploy status",
+      output_bytes: 0,
+    }),
+    stateRef,
+  );
+
+  upsertToolActivityMessage(
+    setMessages,
+    toolCardFromActivity({
+      invocation_id: "invocation-search",
+      capability_id: "nearai.web_search",
+      status: "running",
+      output_bytes: 128,
+    }),
+    stateRef,
+  );
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].toolStatus, "running");
+  assert.equal(messages[0].toolDetail, "deploy status");
+  assert.equal(messages[0].toolParameters, "query: deploy status");
+  assert.equal(messages[0].outputBytes, 128);
+});
+
+test("tool activity state preserves completed output when a late activity frame has no preview", () => {
+  const stateRef = { current: createToolActivityState() };
+  let messages = [];
+  const setMessages = (updater) => {
+    messages = typeof updater === "function" ? updater(messages) : updater;
+  };
+
+  upsertToolActivityMessage(
+    setMessages,
+    toolCardFromPreview({
+      invocation_id: "invocation-search",
+      capability_id: "nearai.web_search",
+      title: "nearai.web_search",
+      status: "completed",
+      input_summary: "query: deploy status",
+      output_preview: "No deployment incidents found.",
+      result_ref: "result:run.search",
+      output_kind: "text",
+      output_bytes: 30,
+      truncated: true,
+    }),
+    stateRef,
+  );
+
+  upsertToolActivityMessage(
+    setMessages,
+    toolCardFromActivity({
+      invocation_id: "invocation-search",
+      capability_id: "nearai.web_search",
+      status: "completed",
+    }),
+    stateRef,
+  );
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].toolStatus, "success");
+  assert.equal(messages[0].toolParameters, "query: deploy status");
+  assert.equal(messages[0].toolResultPreview, "No deployment incidents found.");
+  assert.equal(messages[0].resultRef, "result:run.search");
+  assert.equal(messages[0].outputKind, "text");
+  assert.equal(messages[0].outputBytes, 30);
+  assert.equal(messages[0].truncated, true);
+});
+
 test("tool activity state uses bare-kind flag instead of string equality", () => {
   const stateRef = { current: createToolActivityState() };
   let messages = [];

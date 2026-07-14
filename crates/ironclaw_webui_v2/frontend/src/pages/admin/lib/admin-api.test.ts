@@ -28,9 +28,9 @@ import {
   putUserSecret,
   deleteUserSecret,
   createUserToken,
-} from "./admin-api.ts";
+} from "./admin-api";
 
-// `api.js` reads a bearer via `sessionStorage.getItem`, which does not
+// `api.ts` reads a bearer via `sessionStorage.getItem`, which does not
 // exist in Node. A minimal in-memory stub keeps `apiFetch` running; an
 // empty token simply omits the Authorization header.
 globalThis.sessionStorage = {
@@ -77,7 +77,7 @@ afterEach(() => {
 });
 
 // The client must JSON-encode request bodies. `apiFetch` forwards `options.body`
-// to `fetch` unchanged (it does NOT serialize — see `lib/api.js`), so a raw
+// to `fetch` unchanged (it does NOT serialize — see `lib/api.ts`), so a raw
 // object body would reach the wire as the string "[object Object]" and the
 // backend would reject it. Asserting the body is a serialized string that
 // parses back to the expected object locks that in.

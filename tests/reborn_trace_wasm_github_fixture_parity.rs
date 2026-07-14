@@ -9,7 +9,7 @@ mod support;
 use std::time::Duration;
 
 use ironclaw_host_api::{CapabilityId, NetworkMethod};
-use ironclaw_loop_support::{HostManagedModelMessageRole, HostManagedModelResponse};
+use ironclaw_loop_host::{HostManagedModelMessageRole, HostManagedModelResponse};
 use ironclaw_network::NetworkHttpRequest;
 use ironclaw_turns::TurnStatus;
 use parity_qa_support::{

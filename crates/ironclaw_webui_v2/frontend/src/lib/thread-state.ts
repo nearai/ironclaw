@@ -12,7 +12,7 @@
  * thread per browser session — the one you're looking at. The deferred
  * follow-up — a user-scoped SSE channel — will fan out backend state
  * transitions across all of a user's threads and become the canonical
- * writer (at which point the chat.js seam goes away).
+ * writer (at which point the chat.tsx seam goes away).
  *
  * The shape was chosen for that future:
  *   - A Map keyed by thread id, not a Set. The values are a typed enum

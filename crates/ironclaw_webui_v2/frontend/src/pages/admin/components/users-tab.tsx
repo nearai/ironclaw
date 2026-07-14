@@ -4,6 +4,7 @@ import { useT } from "../../../lib/i18n";
 import { Panel, StatusPill, EmptyPanel } from "../../../design-system/primitives";
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
+import { SelectMenu } from "../../../design-system/select-menu";
 import { useAdminUsers } from "../hooks/useAdminUsers";
 import {
   formatRelativeTime,
@@ -14,6 +15,7 @@ import {
   formatUserRole,
   formatUserStatus,
   filterUsers,
+  buildRoleOptions,
 } from "../lib/admin-presenters";
 
 function buildFilters(t) {
@@ -66,6 +68,7 @@ function CreateUserForm({ onCreate, isCreating, error }) {
   const [email, setEmail] = React.useState("");
   const [role, setRole] = React.useState("member");
   const [isOpen, setIsOpen] = React.useState(false);
+  const roleOptions = React.useMemo(() => buildRoleOptions(t), [t]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -113,14 +116,14 @@ function CreateUserForm({ onCreate, isCreating, error }) {
           </div>
           <div>
             <label className="mb-1 block text-xs text-iron-300">{t("admin.users.role")}</label>
-            <select
+            <SelectMenu
               value={role}
-              onChange={(e) => setRole(e.currentTarget.value)}
-              className="v2-select h-9 w-full rounded-md border border-iron-700 bg-iron-800/70 px-3 text-sm text-iron-100 outline-none focus:border-signal/45"
-            >
-              <option value="member">{t("admin.users.member")}</option>
-              <option value="admin">{t("admin.users.admin")}</option>
-            </select>
+              options={roleOptions}
+              onChange={setRole}
+              ariaLabel={t("admin.users.role")}
+              className="w-full"
+              buttonClassName="h-9 rounded-md border-iron-700 bg-iron-800/70 px-3 font-sans text-sm text-iron-100"
+            />
           </div>
         </div>
         {error && (<p className="text-sm text-[var(--v2-danger-text)]">{error.message}</p>)}

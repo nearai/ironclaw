@@ -2,7 +2,7 @@
 //!
 //! Boundary note: `ironclaw_turns` is otherwise a contracts-only crate, but the
 //! `ContentDigest` newtype AND its `normalize_for_hash`/JCS/BLAKE3 implementation
-//! live here together on purpose — both the host adapter (`ironclaw_loop_support`,
+//! live here together on purpose — both the host adapter (`ironclaw_loop_host`,
 //! which computes the digest from raw output) and the loop mechanics
 //! (`ironclaw_agent_loop`, whose `CapabilityCallSignature` reuses the same
 //! normalizer) must agree byte-for-byte, and `ironclaw_turns` is the only crate

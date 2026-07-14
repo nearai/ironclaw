@@ -3937,7 +3937,7 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_host_runtime",
  "ironclaw_llm",
- "ironclaw_loop_support",
+ "ironclaw_loop_host",
  "ironclaw_mcp",
  "ironclaw_memory",
  "ironclaw_network",
@@ -4037,7 +4037,6 @@ dependencies = [
  "ironclaw_agent_loop",
  "ironclaw_common",
  "ironclaw_host_api",
- "ironclaw_observability",
  "ironclaw_turns",
  "serde",
  "serde_jcs",
@@ -4334,7 +4333,7 @@ dependencies = [
  "futures",
  "ironclaw_filesystem",
  "ironclaw_host_api",
- "ironclaw_loop_support",
+ "ironclaw_loop_host",
  "ironclaw_skills",
  "ironclaw_turns",
  "thiserror 2.0.18",
@@ -4359,6 +4358,7 @@ dependencies = [
  "ironclaw_observability",
  "ironclaw_safety",
  "ironclaw_skills",
+ "ironclaw_turns",
  "regex",
  "serde",
  "serde_json",
@@ -4541,7 +4541,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_loop_support"
+name = "ironclaw_loop_host"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -4767,7 +4767,7 @@ dependencies = [
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
- "ironclaw_loop_support",
+ "ironclaw_loop_host",
  "ironclaw_outbound",
  "ironclaw_product_adapters",
  "ironclaw_product_context",
@@ -4830,6 +4830,7 @@ dependencies = [
  "clap_complete",
  "dotenvy",
  "hex",
+ "ironclaw_common",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
  "ironclaw_reborn_traces",
@@ -4880,7 +4881,7 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_host_runtime",
  "ironclaw_llm",
- "ironclaw_loop_support",
+ "ironclaw_loop_host",
  "ironclaw_mcp",
  "ironclaw_network",
  "ironclaw_observability",
@@ -5026,7 +5027,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "tokio-postgres",
  "tracing",
  "tracing-subscriber",
  "ulid",
@@ -5190,7 +5190,7 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_host_runtime",
  "ironclaw_llm",
- "ironclaw_loop_support",
+ "ironclaw_loop_host",
  "ironclaw_observability",
  "ironclaw_processes",
  "ironclaw_reborn_event_store",
@@ -8647,9 +8647,9 @@ dependencies = [
 
 [[package]]
 name = "spin"
-version = "0.9.8"
+version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
+checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 
 [[package]]
 name = "spki"

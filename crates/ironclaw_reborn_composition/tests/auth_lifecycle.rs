@@ -198,6 +198,7 @@ impl TurnCoordinator for LifecycleTurnCoordinator {
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             resolved_model_route: None,
+            model_usage: None,
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: Some(self.gate_ref.clone()),

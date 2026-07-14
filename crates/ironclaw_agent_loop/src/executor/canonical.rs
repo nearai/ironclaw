@@ -194,6 +194,12 @@ impl DefaultExecutorPipeline {
                     // turns in a row. `None` is "unknown" and must NOT count as
                     // a zero-output turn against the detector.
                     let response_usage = model_response.usage;
+                    // Accumulate the run's cumulative usage for EVERY model
+                    // response, before branching on its output. A capability
+                    // batch also carries `response_usage`; recording it only on
+                    // the assistant-reply branch would drop the token/cost for
+                    // every tool-using turn.
+                    state.accumulate_model_usage(response_usage);
                     let turn_iteration = state.iteration;
                     let completed = match model_response.output {
                         ParentLoopOutput::AssistantReply(reply) => {

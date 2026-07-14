@@ -329,6 +329,62 @@ impl RebornIntegrationHarness {
         Ok(())
     }
 
+    /// Harness-port-seam Change 4: assert the LATEST captured `tools` argument
+    /// carries a definition named `name` whose `description` contains
+    /// `needle` — pins `wrap_local_dev_surface_disclosure`'s scoped-roots note
+    /// mutation (`LocalDevSurfaceDisclosure::apply_to_surface_fields`), which
+    /// mutates `ProviderToolDefinition::description`/`parameters`, not tool
+    /// presence/absence.
+    pub async fn assert_model_tool_description_contains(
+        &self,
+        name: &str,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        let definitions = self.scripted_llm.captured_tool_definitions();
+        let Some(latest) = definitions.last() else {
+            return Err("no tool definitions captured for any request".into());
+        };
+        let Some(definition) = latest.iter().find(|definition| definition.name == name) else {
+            let seen: Vec<&str> = latest.iter().map(|d| d.name.as_str()).collect();
+            return Err(format!("no captured tool definition named {name:?}; saw {seen:?}").into());
+        };
+        if !definition.description.contains(needle) {
+            return Err(format!(
+                "tool {name:?} description did not contain {needle:?}: {:?}",
+                definition.description
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    /// Inverse of [`assert_model_tool_description_contains`]: the definition
+    /// exists but its description does NOT contain `needle` — the negative
+    /// control proving the note is conditional on a confirmed host mount,
+    /// not always appended.
+    pub async fn assert_model_tool_description_excludes(
+        &self,
+        name: &str,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        let definitions = self.scripted_llm.captured_tool_definitions();
+        let Some(latest) = definitions.last() else {
+            return Err("no tool definitions captured for any request".into());
+        };
+        let Some(definition) = latest.iter().find(|definition| definition.name == name) else {
+            let seen: Vec<&str> = latest.iter().map(|d| d.name.as_str()).collect();
+            return Err(format!("no captured tool definition named {name:?}; saw {seen:?}").into());
+        };
+        if definition.description.contains(needle) {
+            return Err(format!(
+                "tool {name:?} description unexpectedly contained {needle:?}: {:?}",
+                definition.description
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     /// Collects the persisted `safe_summary` field of every `ToolResultReference`
     /// message on this thread's FULL history (not baseline-sliced — safe only
     /// for single-turn harnesses today). Shared collector for
@@ -746,6 +802,57 @@ impl RebornIntegrationHarness {
     /// multi-turn harness.
     pub async fn history_len(&self) -> HarnessResult<usize> {
         Ok(self.persisted_history().await?.len())
+    }
+
+    /// The MOST RECENT persisted `ToolResultReference` message (highest
+    /// `sequence`), for durable tool-result projection scenarios (issue
+    /// #5838) that need to script a dependent `result_read` call with a
+    /// server-minted value (`result_ref`, `next_offset`) `push_script`
+    /// couldn't know ahead of time. Errors when no such message exists.
+    async fn latest_tool_result_reference_message(
+        &self,
+    ) -> HarnessResult<ironclaw_threads::ThreadMessageRecord> {
+        let history = self.persisted_history().await?;
+        history
+            .into_iter()
+            .filter(|message| message.kind == ironclaw_threads::MessageKind::ToolResultReference)
+            .max_by_key(|message| message.sequence)
+            .ok_or_else(|| "no persisted ToolResultReference message".into())
+    }
+
+    /// The `result_ref` of the most recent persisted `ToolResultReference`
+    /// message. See [`latest_tool_result_reference_message`].
+    ///
+    /// [`latest_tool_result_reference_message`]: Self::latest_tool_result_reference_message
+    pub async fn latest_tool_result_ref(&self) -> HarnessResult<String> {
+        self.latest_tool_result_reference_message()
+            .await?
+            .tool_result_ref
+            .ok_or_else(|| "latest ToolResultReference message has no result_ref".into())
+    }
+
+    /// The `model_observation.detail.next_offset` of the most recent
+    /// persisted `ToolResultReference` message's `ResultReference`
+    /// observation — the server-computed continuation offset a `result_read`
+    /// script must use, since the preview's char-boundary floor can move it
+    /// off a fixed byte constant when the payload contains multi-byte UTF-8.
+    /// Errors when the message has no observation or no `next_offset` (i.e.
+    /// the preview already covered the whole payload).
+    pub async fn latest_tool_result_next_offset(&self) -> HarnessResult<u64> {
+        let message = self.latest_tool_result_reference_message().await?;
+        let content = message
+            .content
+            .ok_or("latest ToolResultReference message has no content")?;
+        let envelope: serde_json::Value = serde_json::from_str(&content).map_err(|error| {
+            format!("latest ToolResultReference content is not valid JSON: {error}")
+        })?;
+        envelope["model_observation"]["detail"]["next_offset"]
+            .as_u64()
+            .ok_or_else(|| {
+                "latest ToolResultReference observation has no next_offset (preview may cover \
+                 the whole payload)"
+                    .into()
+            })
     }
 
     /// Slice `history[baseline..]`, failing loud on an out-of-range `baseline` —

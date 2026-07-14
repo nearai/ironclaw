@@ -37,6 +37,107 @@ impl<'de> Deserialize<'de> for ManifestHash {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ExtensionRemovalCleanupAdapterId(String);
+
+impl ExtensionRemovalCleanupAdapterId {
+    pub fn new(value: impl Into<String>) -> Result<Self, ExtensionInstallationError> {
+        validate_cleanup_id(value.into(), "cleanup adapter").map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl AsRef<str> for ExtensionRemovalCleanupAdapterId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ExtensionRemovalCleanupAdapterId {
+    type Error = ExtensionInstallationError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<ExtensionRemovalCleanupAdapterId> for String {
+    fn from(value: ExtensionRemovalCleanupAdapterId) -> Self {
+        value.into_inner()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ExtensionRemovalChannelId(String);
+
+impl ExtensionRemovalChannelId {
+    pub fn new(value: impl Into<String>) -> Result<Self, ExtensionInstallationError> {
+        validate_cleanup_id(value.into(), "cleanup channel").map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl AsRef<str> for ExtensionRemovalChannelId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ExtensionRemovalChannelId {
+    type Error = ExtensionInstallationError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<ExtensionRemovalChannelId> for String {
+    fn from(value: ExtensionRemovalChannelId) -> Self {
+        value.into_inner()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+pub enum ExtensionRemovalCleanupBinding {
+    ChannelConnection { channel: ExtensionRemovalChannelId },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionRemovalCleanupRequirement {
+    pub adapter_id: ExtensionRemovalCleanupAdapterId,
+    pub binding: ExtensionRemovalCleanupBinding,
+}
+
+impl ExtensionRemovalCleanupRequirement {
+    pub fn channel_connection(
+        adapter_id: ExtensionRemovalCleanupAdapterId,
+        channel: ExtensionRemovalChannelId,
+    ) -> Self {
+        Self {
+            adapter_id,
+            binding: ExtensionRemovalCleanupBinding::ChannelConnection { channel },
+        }
+    }
+}
+
 /// Product-agnostic extension manifest record.
 ///
 /// Domain crates can project their own host-api sections from `raw_toml` and
@@ -46,6 +147,7 @@ pub struct ExtensionManifestRecord {
     raw_toml: String,
     manifest: ExtensionManifestV2,
     manifest_hash: Option<ManifestHash>,
+    removal_cleanup_requirements: Vec<ExtensionRemovalCleanupRequirement>,
 }
 
 impl ExtensionManifestRecord {
@@ -83,7 +185,19 @@ impl ExtensionManifestRecord {
             raw_toml,
             manifest,
             manifest_hash,
+            removal_cleanup_requirements: Vec::new(),
         })
+    }
+
+    /// Attach host-trusted declarative cleanup metadata to the persisted
+    /// manifest record. These requirements are never parsed from extension
+    /// supplied TOML; catalog construction is the only production writer.
+    pub fn with_removal_cleanup_requirements(
+        mut self,
+        requirements: Vec<ExtensionRemovalCleanupRequirement>,
+    ) -> Self {
+        self.removal_cleanup_requirements = requirements;
+        self
     }
 
     pub fn manifest(&self) -> &ExtensionManifestV2 {
@@ -100,6 +214,10 @@ impl ExtensionManifestRecord {
 
     pub fn manifest_hash(&self) -> Option<&ManifestHash> {
         self.manifest_hash.as_ref()
+    }
+
+    pub fn removal_cleanup_requirements(&self) -> &[ExtensionRemovalCleanupRequirement] {
+        &self.removal_cleanup_requirements
     }
 }
 
@@ -974,6 +1092,48 @@ mod tests {
     use super::*;
     use crate::ManifestSource;
 
+    #[test]
+    fn removal_cleanup_ids_validate_and_round_trip_their_canonical_wire_values() {
+        let adapter = ExtensionRemovalCleanupAdapterId::new("slack.personal")
+            .expect("canonical cleanup adapter");
+        assert_eq!(adapter.as_str(), "slack.personal");
+        assert_eq!(adapter.as_ref(), "slack.personal");
+        assert_eq!(adapter.clone().into_inner(), "slack.personal");
+        assert_eq!(String::from(adapter.clone()), "slack.personal");
+        assert_eq!(
+            serde_json::from_str::<ExtensionRemovalCleanupAdapterId>(
+                &serde_json::to_string(&adapter).expect("serialize adapter")
+            )
+            .expect("deserialize adapter"),
+            adapter
+        );
+
+        let channel = ExtensionRemovalChannelId::new("slack").expect("canonical cleanup channel");
+        assert_eq!(channel.as_str(), "slack");
+        assert_eq!(channel.as_ref(), "slack");
+        assert_eq!(channel.clone().into_inner(), "slack");
+        assert_eq!(String::from(channel.clone()), "slack");
+        assert_eq!(
+            serde_json::from_str::<ExtensionRemovalChannelId>(
+                &serde_json::to_string(&channel).expect("serialize channel")
+            )
+            .expect("deserialize channel"),
+            channel
+        );
+
+        for invalid in ["", "Slack", "slack/connection", "-slack", "slack-"] {
+            let wire = serde_json::to_string(invalid).expect("serialize invalid cleanup id");
+            assert!(
+                serde_json::from_str::<ExtensionRemovalCleanupAdapterId>(&wire).is_err(),
+                "invalid cleanup adapter must be rejected: {invalid}"
+            );
+            assert!(
+                serde_json::from_str::<ExtensionRemovalChannelId>(&wire).is_err(),
+                "invalid cleanup channel must be rejected: {invalid}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn delete_manifest_rejects_active_installations() {
         let store = InMemoryExtensionInstallationStore::default();
@@ -1236,4 +1396,31 @@ fn validate_nonempty_noncontrol(
         });
     }
     Ok(())
+}
+
+fn validate_cleanup_id(
+    value: String,
+    label: &'static str,
+) -> Result<String, ExtensionInstallationError> {
+    let valid = !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
+        })
+        && value
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && value
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_alphanumeric);
+    if valid {
+        Ok(value)
+    } else {
+        Err(ExtensionInstallationError::InvalidValue {
+            field: label,
+            reason: "must be a bounded lowercase identifier".to_string(),
+        })
+    }
 }

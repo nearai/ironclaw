@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use ironclaw_filesystem::{CasExpectation, RecordVersion, RootFilesystem};
 use ironclaw_host_api::ResourceScope;
 
@@ -13,8 +13,10 @@ use super::{
     scope_matches,
 };
 use ironclaw_auth::{
-    AuthChallenge, AuthErrorCode, AuthFlowId, AuthFlowManager, AuthFlowRecord,
-    AuthFlowRecordSource, AuthFlowStatus, AuthProductError, CredentialAccount, CredentialAccountId,
+    AUTH_CONTINUATION_DISPATCH_LEASE_SECONDS, AuthChallenge, AuthContinuationDispatchClaimInput,
+    AuthContinuationDispatchOutcome, AuthContinuationDispatchSettlementInput, AuthContinuationRef,
+    AuthErrorCode, AuthFlowId, AuthFlowManager, AuthFlowRecord, AuthFlowRecordSource,
+    AuthFlowStatus, AuthProductError, CredentialAccount, CredentialAccountId,
     CredentialAccountStatus, CredentialOwnership, CredentialSelectionInput,
     ManualTokenCompletionInput, NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest,
     OAuthCallbackFailureInput, OAuthCallbackInput, OAuthProviderExchange, ProviderCallbackOutcome,
@@ -62,6 +64,7 @@ where
             challenge: Some(request.challenge),
             continuation: request.continuation,
             credential_account_id: None,
+            credential_secret_fingerprint: None,
             update_binding: request.update_binding,
             opaque_state_hash: request.opaque_state_hash,
             pkce_verifier_hash: request.pkce_verifier_hash,
@@ -112,7 +115,10 @@ where
             }
             Err(error) => return Err(error),
         }
-        if record.status == AuthFlowStatus::Completed {
+        if matches!(
+            record.status,
+            AuthFlowStatus::Completed | AuthFlowStatus::Completing | AuthFlowStatus::Failed
+        ) {
             return Ok(record);
         }
         record.status = AuthFlowStatus::CallbackReceived;
@@ -171,11 +177,13 @@ where
             .resolve_callback_account(input.flow_id, callback, &exchange)
             .await?;
         let account_id = account_write.account.id;
+        let account_fingerprint = account_write.account.secret_fingerprint();
         record.status = AuthFlowStatus::Completed;
         record.error = None;
         record.authorization_code_hash = Some(exchange.authorization_code_hash);
         record.pkce_verifier_hash = Some(exchange.pkce_verifier_hash);
         record.credential_account_id = Some(account_id);
+        record.credential_secret_fingerprint = Some(account_fingerprint);
         record.updated_at = now;
         match self
             .write_flow(scope, &record, CasExpectation::Version(version))
@@ -428,7 +436,10 @@ where
         if !scope_matches(scope, &record.scope) {
             return Err(AuthProductError::CrossScopeDenied);
         }
-        if !ironclaw_auth::is_terminal_status(record.status) {
+        if !matches!(
+            record.status,
+            AuthFlowStatus::Completed | AuthFlowStatus::Canceled | AuthFlowStatus::Failed
+        ) {
             return Err(AuthProductError::FlowAlreadyTerminal);
         }
         // Idempotent: if the continuation was already marked by a concurrent
@@ -438,6 +449,95 @@ where
         }
         record.continuation_emitted_at = Some(emitted_at);
         record.updated_at = emitted_at;
+        self.write_flow(scope, &record, CasExpectation::Version(version))
+            .await?;
+        Ok(record)
+    }
+
+    async fn claim_continuation_dispatch(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+        input: AuthContinuationDispatchClaimInput,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        let lock = self.lock_for(format!("flow:{}", input.flow_id));
+        let _guard = lock.lock().await;
+        let (mut record, version) = self
+            .read_flow(scope, input.flow_id)
+            .await?
+            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        if !scope_matches(scope, &record.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if record.continuation_emitted_at.is_some() {
+            return Ok(record);
+        }
+        if !matches!(
+            record.continuation,
+            AuthContinuationRef::LifecycleActivation { .. }
+        ) {
+            return Err(AuthProductError::FlowAlreadyTerminal);
+        }
+        match record.status {
+            AuthFlowStatus::Completed => {}
+            AuthFlowStatus::Completing
+                if input.claimed_at.signed_duration_since(record.updated_at)
+                    >= Duration::seconds(AUTH_CONTINUATION_DISPATCH_LEASE_SECONDS) => {}
+            AuthFlowStatus::Completing => return Err(AuthProductError::BackendUnavailable),
+            _ => return Err(AuthProductError::FlowAlreadyTerminal),
+        }
+        record.status = AuthFlowStatus::Completing;
+        record.updated_at = input.claimed_at;
+        self.write_flow(scope, &record, CasExpectation::Version(version))
+            .await?;
+        Ok(record)
+    }
+
+    async fn settle_continuation_dispatch(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+        input: AuthContinuationDispatchSettlementInput,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        let lock = self.lock_for(format!("flow:{}", input.flow_id));
+        let _guard = lock.lock().await;
+        let (mut record, version) = self
+            .read_flow(scope, input.flow_id)
+            .await?
+            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        if !scope_matches(scope, &record.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if record.status != AuthFlowStatus::Completing
+            || record.updated_at != input.expected_claimed_at
+            || record.continuation_emitted_at.is_some()
+        {
+            return Err(AuthProductError::FlowAlreadyTerminal);
+        }
+        match input.outcome {
+            AuthContinuationDispatchOutcome::Dispatched { emitted_at } => {
+                record.status = AuthFlowStatus::Completed;
+                record.error = None;
+                record.continuation_emitted_at = Some(emitted_at);
+                record.updated_at = emitted_at;
+            }
+            AuthContinuationDispatchOutcome::RetryableFailure => {
+                record.status = AuthFlowStatus::Completed;
+                record.error = None;
+                record.updated_at = Utc::now();
+            }
+            AuthContinuationDispatchOutcome::TerminalFailure { error } => {
+                if !matches!(
+                    record.continuation,
+                    AuthContinuationRef::LifecycleActivation { .. }
+                ) || record.credential_account_id.is_none()
+                    || record.credential_secret_fingerprint.is_none()
+                {
+                    return Err(AuthProductError::FlowAlreadyTerminal);
+                }
+                record.status = AuthFlowStatus::Failed;
+                record.error = Some(error);
+                record.updated_at = Utc::now();
+            }
+        }
         self.write_flow(scope, &record, CasExpectation::Version(version))
             .await?;
         Ok(record)
@@ -790,7 +890,7 @@ where
         }
     }
 
-    async fn purge_revoked_callback_account(
+    pub(super) async fn purge_revoked_callback_account(
         &self,
         mut account: CredentialAccount,
         mut version: RecordVersion,

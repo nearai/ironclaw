@@ -1,5 +1,5 @@
 // Pure decision logic for the first-run onboarding gate in
-// `layout/gateway-layout.js`. Extracted as a dependency-free function so
+// `layout/gateway-layout.tsx`. Extracted as a dependency-free function so
 // the routing decision can be unit-tested without a React renderer or
 // react-query (see `onboarding-gate.test.ts`).
 

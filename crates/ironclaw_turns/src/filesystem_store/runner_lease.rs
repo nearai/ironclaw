@@ -663,6 +663,7 @@ mod tests {
             status,
             profile,
             resolved_model_route: None,
+            model_usage: None,
             checkpoint_id: None,
             gate_ref: None,
             blocked_activity_id: None,
