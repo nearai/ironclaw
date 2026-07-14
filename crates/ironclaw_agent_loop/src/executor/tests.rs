@@ -71,6 +71,7 @@ fn continuation_observation(
             preview: Some("first bounded chunk".to_string()),
             total_bytes: Some(byte_len * 2),
             next_offset: Some(byte_len),
+            item_count: None,
         },
         artifacts: Vec::new(),
         recovery: None,
@@ -1461,6 +1462,76 @@ async fn reply_admission_rejects_candidate_before_finalizing_and_continues() {
             .is_none()
     );
     assert_eq!(final_state.stop_state.turns_completed, 3);
+}
+
+/// A tool-using run must count the usage from EVERY model response, including
+/// the capability-call turn — not just the final assistant reply. Regression
+/// for usage/cost being dropped on the `CapabilityCalls` branch: the executor
+/// now accumulates before branching on the model output.
+#[tokio::test]
+async fn cumulative_usage_counts_capability_call_and_reply_turns() {
+    use ironclaw_turns::run_profile::{LoopModelResponse, LoopModelUsage};
+
+    let result_ref = LoopResultRef::new("result:done").expect("valid");
+    // Turn 1 is a capability call carrying its own usage; turn 2 is the reply.
+    let calls_usage = LoopModelUsage {
+        input_tokens: 100,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+    };
+    let reply_usage = LoopModelUsage {
+        input_tokens: 40,
+        output_tokens: 20,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+    };
+    let calls = LoopModelResponse {
+        usage: Some(calls_usage),
+        ..calls_response()
+    };
+    let reply = LoopModelResponse {
+        usage: Some(reply_usage),
+        ..reply_response()
+    };
+    let host = MockHost::new(vec![calls, reply]).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+                result_ref,
+                safe_summary: "done".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                terminate_hint: false,
+                byte_len: 0,
+                output_digest: None,
+                model_observation: None,
+            })],
+            stopped_on_suspension: false,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    match exit {
+        LoopExit::Completed(completed) => {
+            // Both turns' usage is summed: had the capability turn been dropped,
+            // this would be only the reply's 40/20.
+            assert_eq!(
+                completed.model_usage,
+                Some(LoopModelUsage {
+                    input_tokens: 140,
+                    output_tokens: 20,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            );
+        }
+        other => panic!("expected completed, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -3075,20 +3146,19 @@ async fn explanation_model_error_degrades_to_original_failed_exit() {
     assert!(host.finalized_assistant_messages().is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn model_error_abort_skips_explanation_and_carries_partial_refs() {
+    // Availability-class model errors retry on the deep availability budget
+    // before aborting; paused time fast-forwards the backoff sleeps.
+    let abort_call_count = crate::strategies::DefaultRecoveryStrategy::default()
+        .max_model_availability_attempts as usize
+        + 1;
     let script = ScenarioScript {
-        model_responses: VecDeque::from([
-            ScriptedModelResponse::Error {
+        model_responses: (0..abort_call_count)
+            .map(|_| ScriptedModelResponse::Error {
                 kind: AgentLoopHostErrorKind::Internal,
-            },
-            ScriptedModelResponse::Error {
-                kind: AgentLoopHostErrorKind::Internal,
-            },
-            ScriptedModelResponse::Error {
-                kind: AgentLoopHostErrorKind::Internal,
-            },
-        ]),
+            })
+            .collect(),
         capability_outcomes: VecDeque::new(),
         single_call_retry_outcomes: VecDeque::new(),
         pending_inputs: VecDeque::new(),
@@ -3116,9 +3186,68 @@ async fn model_error_abort_skips_explanation_and_carries_partial_refs() {
             .iter()
             .filter(|call| matches!(call, MockHostCall::StreamModel))
             .count(),
-        3
+        abort_call_count
     );
     assert!(host.finalized_assistant_messages().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn availability_budget_above_old_executor_guard_reaches_strategy_abort() {
+    // Regression pin: the model stage's retry guard is derived from the
+    // composed recovery strategy, not a hard-coded executor constant. A
+    // configured availability budget larger than the old `MAX_MODEL_RETRIES`
+    // (16) must still reach the strategy's own Abort — with its failure
+    // category and diagnostics — instead of falling through the loop to a
+    // diagnostic-free generic ModelError exit.
+    let attempts = 20u32;
+    let family = crate::families::default_with_overrides(
+        crate::families::FamilyOverrides::default().set_model_availability_attempts(attempts),
+    );
+    let diagnostic_ref = LoopDiagnosticRef::new("diag:model-outage").expect("valid");
+    // Exactly attempts+1 scripted failures: the final one is the call where
+    // the strategy's budget is exhausted and it aborts. Any extra call would
+    // hit the mock's script-exhausted Internal fallback and change the
+    // observed failure category.
+    let host = MockHost::new(Vec::new()).with_model_errors(
+        (0..=attempts)
+            .map(|_| {
+                AgentLoopHostError::new(AgentLoopHostErrorKind::Unavailable, "model unavailable")
+                    .with_diagnostic_ref(diagnostic_ref.clone())
+            })
+            .collect(),
+    );
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&family, &host, state)
+        .await
+        .expect("execute");
+
+    match exit {
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::ModelError);
+            assert_eq!(
+                failed
+                    .safe_summary
+                    .as_ref()
+                    .map(|summary| summary.category()),
+                Some("model_unavailable"),
+                "abort must carry the strategy's failure category"
+            );
+            assert_eq!(
+                failed.diagnostic_ref,
+                Some(diagnostic_ref),
+                "abort must carry the model error's diagnostic ref"
+            );
+        }
+        other => panic!("expected failed exit, got {other:?}"),
+    }
+    assert_eq!(
+        host.model_requests().len(),
+        (attempts + 1) as usize,
+        "the loop must allow exactly the configured availability budget"
+    );
 }
 
 #[tokio::test]

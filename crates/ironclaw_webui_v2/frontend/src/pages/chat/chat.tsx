@@ -40,7 +40,7 @@ import { useInterfacePreferences } from "../../lib/interface-preferences";
 const THREAD_STATE_CLEAR_GRACE_MS = 1500;
 
 function pendingOnboardingLabel(onboarding) {
-  // Single source of channel display names (lib/channel-connection-events.js) so
+  // Single source of channel display names (lib/channel-connection-events.ts) so
   // the composer notice and the pairing-card title can't drift in casing.
   return channelConnectionDisplayName(onboarding?.extensionName);
 }

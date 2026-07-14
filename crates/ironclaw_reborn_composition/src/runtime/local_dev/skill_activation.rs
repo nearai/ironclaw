@@ -22,32 +22,6 @@ const SKILL_ACTIVATE_DESCRIPTION: &str =
     "Activate one or more listed Reborn skills for the current loop run";
 const MAX_SKILL_ACTIVATE_NAMES: usize = 16;
 
-/// Test-only bridge (E-SKILL seam): wrap `inner` with just the `skill_activate`
-/// local-dev synthetic capability, so the Reborn integration-test harness can
-/// inject it onto its host-runtime capability port the same way production does
-/// (`RefreshingLocalDevCapabilityPort::build_inner`). Reuses the real
-/// `skill_activation_capability` + `wrap_local_dev_synthetic_capabilities`, so the
-/// test path never hand-mirrors the production wrap. Mirrors
-/// `wrap_project_create_capability_for_test`. Tests only.
-#[cfg(feature = "test-support")]
-pub(crate) fn wrap_skill_activation_capability_for_test(
-    inner: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    skill_activation_source: Arc<LocalDevSelectableSkillContextSource>,
-    run_context: ironclaw_turns::run_profile::LoopRunContext,
-    input_resolver: Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
-    result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
-) -> Result<Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>, AgentLoopHostError> {
-    super::synthetic_capability::wrap_local_dev_synthetic_capabilities(
-        inner,
-        vec![skill_activation_capability(skill_activation_source)?],
-        run_context,
-        input_resolver,
-        result_writer,
-        // trajectory_observer: None — not wired in the integration-test harness.
-        None,
-    )
-}
-
 pub(super) fn skill_activation_capability(
     skill_activation_source: Arc<LocalDevSelectableSkillContextSource>,
 ) -> Result<LocalDevSyntheticCapability, AgentLoopHostError> {

@@ -6,7 +6,7 @@ use crate::family::{ComponentDigest, ComponentIdentity, LoopFamily, LoopFamilyId
 use crate::planner::AgentLoopPlanner;
 use crate::strategies::DefaultBudgetStrategy;
 
-const SUBAGENT_ITERATION_LIMIT: u32 = 16;
+const SUBAGENT_ITERATION_LIMIT: u32 = 256;
 const SUBAGENT_WALL_CLOCK_LIMIT: Option<Duration> = None;
 
 #[cfg(test)]
@@ -22,17 +22,17 @@ const SUBAGENT_FAMILY_FINGERPRINT: &[u8] = concat!(
     "model:DefaultModelStrategy(primary_or_fallback_index),",
     "batch:DefaultBatchPolicyStrategy(parallel_unless_exclusive),",
     "gate:DefaultGateHandlingStrategy(block),",
-    "recovery:DefaultRecoveryStrategy(max_attempts_per_class=2),",
+    "recovery:DefaultRecoveryStrategy(max_attempts_per_class=2,model_availability_attempts=12),",
     "reply_admission:DefaultReplyAdmissionStrategy(reject_empty_and_provider_transcript_artifacts),",
     "stop:DefaultStopConditionStrategy(window=5,repeat=3,failure_run=3,rejected_reply=invalid_model_output),",
     "drain:DefaultInputDrainStrategy(steering=true,followup=true),",
-    "budget:DefaultBudgetStrategy(iteration_limit=16,wall_clock_limit=none)"
+    "budget:DefaultBudgetStrategy(iteration_limit=256,wall_clock_limit=none)"
 )
 .as_bytes();
 
 pub const SUBAGENT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
-    0xd2, 0xea, 0x8a, 0xd9, 0x15, 0x09, 0x46, 0xe3, 0x8c, 0xe7, 0x63, 0xa5, 0xea, 0xd7, 0xc0, 0xc5,
-    0x28, 0x5c, 0x99, 0x66, 0x7d, 0x8e, 0x83, 0x1c, 0x18, 0xcd, 0xb6, 0x09, 0x47, 0x34, 0x10, 0x3a,
+    0x93, 0xdb, 0xf4, 0x5e, 0xb2, 0x72, 0x50, 0x67, 0xa1, 0xfb, 0xe4, 0x49, 0x70, 0xd8, 0x2d, 0xb9,
+    0x7e, 0x2f, 0xec, 0x17, 0x6e, 0x4b, 0x63, 0x0f, 0x28, 0x00, 0xb4, 0x48, 0x2d, 0x63, 0x28, 0xfc,
 ]);
 
 pub fn subagent() -> LoopFamily {

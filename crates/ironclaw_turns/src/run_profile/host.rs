@@ -1278,6 +1278,40 @@ pub struct LoopModelResponse {
 pub struct LoopModelUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// Tokens read from the provider's server-side prompt cache (e.g. Anthropic
+    /// cache reads). A subset of `input_tokens`, billed at a discount. Zero when
+    /// caching is unsupported or on a cache miss.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub cache_read_input_tokens: u32,
+    /// Tokens written to the provider's server-side prompt cache. Zero when
+    /// caching is unsupported or no new prefix was cached.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub cache_creation_input_tokens: u32,
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
+impl LoopModelUsage {
+    /// Accumulate another call's usage into this running per-run total.
+    pub fn add_assign(&mut self, other: &LoopModelUsage) {
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+        self.cache_read_input_tokens = self
+            .cache_read_input_tokens
+            .saturating_add(other.cache_read_input_tokens);
+        self.cache_creation_input_tokens = self
+            .cache_creation_input_tokens
+            .saturating_add(other.cache_creation_input_tokens);
+    }
+
+    /// Total billable tokens (input + output). Cache tokens are already counted
+    /// within `input_tokens` by every provider that reports them, so they are
+    /// not added again here.
+    pub fn total_tokens(&self) -> u32 {
+        self.input_tokens.saturating_add(self.output_tokens)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

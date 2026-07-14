@@ -486,8 +486,11 @@ where
                 model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
             })
             .await
-            .map_err(|_| CompactionError::PersistenceFailed {
-                safe_summary: safe("summary persistence failed"),
+            .map_err(|error| {
+                tracing::debug!(%error, "summary artifact persistence failed");
+                CompactionError::PersistenceFailed {
+                    safe_summary: safe("summary persistence failed"),
+                }
             })?;
         Ok(LoopCompactionResponse {
             summary_artifact_id: LoopSummaryArtifactId::new(artifact.summary_id.to_string())

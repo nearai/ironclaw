@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     sync::{Arc, Mutex as StdMutex},
 };
 
@@ -79,18 +79,12 @@ pub(crate) use result_read::RESULT_READ_CAPABILITY_ID_FOR_TEST;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use skill_activation::SKILL_ACTIVATE_CAPABILITY_ID;
 
-/// Test-only bridges (E-PROJ / E-SKILL / result_read seams), co-located with
-/// the capability each wraps and re-exported here for the `runtime` caller.
-#[cfg(feature = "test-support")]
-pub(super) use outbound_delivery::wrap_outbound_delivery_capabilities_for_test;
-#[cfg(feature = "test-support")]
-pub(super) use project_create::wrap_project_create_capability_for_test;
+/// Test-only bridge (result_read seam, issue #5838), co-located with the
+/// capability it wraps and re-exported here for the `runtime` caller.
 #[cfg(feature = "test-support")]
 pub(super) use refreshing_capability_port::create_refreshing_local_dev_capability_port_for_test;
 #[cfg(feature = "test-support")]
 pub(super) use result_read::wrap_result_read_capability_for_test;
-#[cfg(feature = "test-support")]
-pub(super) use skill_activation::wrap_skill_activation_capability_for_test;
 
 pub(super) struct LocalDevCapabilityWiring {
     pub(super) capability_factory: Arc<dyn LoopCapabilityPortFactory>,
@@ -259,7 +253,8 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             // `RefreshingLocalDevCapabilityPortConfig`): always empty here.
             capability_execution_mount_overrides: HashMap::new(),
             additional_provider_trust: BTreeMap::new(),
-            capability_id_filter: HashSet::new(),
+            capability_id_filter: None,
+            additional_capability_grants: Vec::new(),
         })
         .await
     }
@@ -750,6 +745,7 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
                     )
                 })?;
         let output_content = serialized_result_output(&output)?;
+        let item_count = output.as_array().map(|items| items.len() as u64);
         let serialized_bytes = output_content.len();
         let output_bytes = serialized_bytes.try_into().unwrap_or(u64::MAX);
         // Snapshot the first-look preview from the same bytes the durable
@@ -806,6 +802,7 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             &write_result.result_ref,
             write_result.byte_len,
             preview,
+            item_count,
         ));
         Ok(write_result)
     }
@@ -937,23 +934,36 @@ fn floor_char_boundary(value: &str, index: usize) -> usize {
     index
 }
 
+/// Truncated-preview summary text; names the full array's element count when
+/// known so the model doesn't misread a truncated array preview as the whole
+/// result (issue: byte-slice lands mid-JSON-array).
+fn truncated_preview_summary(next_offset: u64, item_count: Option<u64>) -> String {
+    let base = format!(
+        "Tool completed; preview truncated, use result_read with the result \
+         reference and offset {next_offset} for more output."
+    );
+    match item_count {
+        Some(count) => format!("{base} Full result is a JSON array of {count} items."),
+        None => base,
+    }
+}
+
 fn local_dev_result_reference_observation(
     result_ref: &LoopResultRef,
     byte_len: u64,
     preview: Option<FirstLookResultPreview>,
+    item_count: Option<u64>,
 ) -> ModelVisibleToolObservation {
-    let (summary, preview_text, total_bytes, next_offset) = match preview {
+    let (summary, preview_text, total_bytes, next_offset, item_count) = match preview {
         Some(FirstLookResultPreview {
             text,
             next_offset: Some(next_offset),
         }) => (
-            format!(
-                "Tool completed; preview truncated, use result_read with the result reference \
-                 and offset {next_offset} for more output."
-            ),
+            truncated_preview_summary(next_offset, item_count),
             Some(text),
             Some(byte_len),
             Some(next_offset),
+            item_count,
         ),
         Some(FirstLookResultPreview {
             text,
@@ -963,10 +973,12 @@ fn local_dev_result_reference_observation(
             Some(text),
             Some(byte_len),
             None,
+            None,
         ),
         None => (
             "Tool completed; use result_read with the result reference for more output."
                 .to_string(),
+            None,
             None,
             None,
             None,
@@ -982,6 +994,7 @@ fn local_dev_result_reference_observation(
             preview: preview_text,
             total_bytes,
             next_offset,
+            item_count,
         },
         artifacts: vec![ModelVisibleArtifact {
             artifact_ref: result_ref.as_str().to_string(),

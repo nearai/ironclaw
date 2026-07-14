@@ -9,7 +9,7 @@ import {
   deleteAdminUser,
   suspendAdminUser,
   activateAdminUser,
-} from "../lib/admin-api.js";
+} from "../lib/admin-api";
 
 export function useAdminUsers() {
   const queryClient = useQueryClient();
@@ -23,7 +23,7 @@ export function useAdminUsers() {
   const rawUsers = query.data;
   const users = Array.isArray(rawUsers) ? rawUsers : rawUsers?.users || [];
   // Detect the forbidden state from the structured `ApiError` (see
-  // `lib/api.js`), not the humanized message: a non-admin caller gets HTTP 403
+  // `lib/api.ts`), not the humanized message: a non-admin caller gets HTTP 403
   // whose body kind is humanized to "Participant denied", so a string match on
   // "403"/"Forbidden" would miss it and never render the admin-required panel.
   // Prefer the numeric status; fall back to the parsed error/kind code.
@@ -68,7 +68,7 @@ export function useAdminUsers() {
     // The one-time API bearer is issued ONLY at user creation, so the create
     // result (which carries `.token`) feeds the one-time token banner. There is
     // no re-issue endpoint for existing users, so no `createToken` action is
-    // exposed here — see `lib/admin-api.js::createUserToken`.
+    // exposed here — see `lib/admin-api.ts::createUserToken`.
     newToken: createMut.data?.token ? createMut.data : null,
     clearToken: () => {
       createMut.reset();

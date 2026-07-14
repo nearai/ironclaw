@@ -17,8 +17,8 @@ use axum::{
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
-    AuthErrorCode, AuthFlowId, AuthFlowRecord, AuthFlowRecordSource, AuthFlowStatus,
-    AuthProductError, AuthProductScope, AuthProviderId, CredentialAccountLabel,
+    AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowRecord, AuthFlowRecordSource,
+    AuthFlowStatus, AuthProductError, AuthProductScope, AuthProviderId, CredentialAccountLabel,
     OAuthAuthorizationEndpoint, OAuthAuthorizeUrlRequest, OAuthCallbackState,
     OAuthCallbackStateKind, OAuthProviderIdentity, OAuthScopeParam, PkceVerifierSecret,
     ProviderScope, SLACK_PERSONAL_AUTHORIZATION_ENDPOINT, SLACK_PERSONAL_PROVIDER_ID,
@@ -34,7 +34,7 @@ use crate::extension_host::available_extensions::{
 };
 use crate::product_auth::api::auth::{
     OAuthProviderIdentityBindingRollback, OAuthProviderIdentityCheck,
-    OAuthProviderIdentityCheckFuture, RebornOAuthStartFlowRequest,
+    OAuthProviderIdentityCheckFuture, RebornOAuthCallbackFailureStage, RebornOAuthStartFlowRequest,
 };
 use crate::product_auth::oauth::oauth_gate::{OAuthGateProvider, PreparedOAuthGateFlow};
 use crate::product_auth::oauth::oauth_provider_client::{
@@ -208,18 +208,26 @@ pub(crate) async fn start_extension_oauth_flow(
     );
     let connection_epoch = SlackConnectionEpoch::new(flow_id);
 
-    let flow = match run_with_backend_timeout(state.product_auth_services().start_setup_oauth_flow(
-        RebornOAuthStartFlowRequest {
-            flow_id: Some(flow_id),
-            scope: scope.clone(),
-            provider: provider.clone(),
-            authorization_url: authorization_url.clone(),
-            opaque_state_hash: opaque_state_hash.clone(),
-            pkce_verifier_hash,
-            update_binding,
-            expires_at: request.expires_at,
-        },
-    ))
+    let flow = match run_with_backend_timeout(
+        state
+            .product_auth_services()
+            .start_setup_oauth_flow(RebornOAuthStartFlowRequest {
+                flow_id: Some(flow_id),
+                scope: scope.clone(),
+                provider: provider.clone(),
+                authorization_url: authorization_url.clone(),
+                opaque_state_hash: opaque_state_hash.clone(),
+                pkce_verifier_hash,
+                continuation: AuthContinuationRef::LifecycleActivation {
+                    package_ref: ironclaw_auth::LifecyclePackageRef::new(
+                        requester_extension.as_str(),
+                    )
+                    .map_err(|_| internal_invariant("lifecycle_package_ref"))?,
+                },
+                update_binding,
+                expires_at: request.expires_at,
+            }),
+    )
     .await
     {
         Ok(flow) => flow,
@@ -301,13 +309,18 @@ fn slack_personal_oauth_abandon_hook(
     state: ProductAuthRouteState,
     callback_scope: AuthProductScope,
     flow_id: AuthFlowId,
+    failure_stage: RebornOAuthCallbackFailureStage,
 ) -> OAuthCallbackTerminalHookFuture {
     Box::pin(async move {
         let Some(config) = state.slack_personal_oauth_binding_config() else {
-            return;
+            tracing::warn!(
+                %flow_id,
+                "Slack terminal cleanup authority is unavailable; keeping flow retryable"
+            );
+            return Err(ProductAuthRouteFailure::backend_unavailable());
         };
         let connection_epoch = SlackConnectionEpoch::new(flow_id);
-        let Ok(Some(connection_owner)) = config
+        let connection_owner = match config
             .lifecycle_store
             .connection_owner_for_epoch(
                 &callback_scope.resource.tenant_id,
@@ -315,10 +328,67 @@ fn slack_personal_oauth_abandon_hook(
                 connection_epoch,
             )
             .await
-        else {
-            return;
+        {
+            Ok(Some(connection_owner)) => connection_owner,
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    flow_id = %flow_id,
+                    "failed to inspect terminal Slack OAuth connection epoch"
+                );
+                return Err(ProductAuthRouteFailure::backend_unavailable());
+            }
         };
         let provider_user_id_prefix = format!("{}:", connection_owner.installation_id().as_str());
+        if matches!(
+            failure_stage,
+            RebornOAuthCallbackFailureStage::ContinuationSideEffect
+                | RebornOAuthCallbackFailureStage::ContinuationCompensation
+        ) {
+            if let Err(error) = config
+                .lifecycle_store
+                .begin_failed_connection_cleanup(&connection_owner, connection_epoch)
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    flow_id = %flow_id,
+                    "failed to fence terminal Slack OAuth epoch before identity cleanup"
+                );
+                return Err(ProductAuthRouteFailure::backend_unavailable());
+            }
+            if let Err(error) = config
+                .binding_rollback_store
+                .delete_user_identity_bindings_for_user_at_epoch(
+                    crate::slack::slack_actor_identity::SLACK_IDENTITY_PROVIDER,
+                    &callback_scope.resource.user_id,
+                    Some(provider_user_id_prefix.as_str()),
+                    Some(connection_epoch),
+                )
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    flow_id = %flow_id,
+                    "retaining Slack OAuth lifecycle owner because failed activation identity cleanup did not complete"
+                );
+                return Err(ProductAuthRouteFailure::backend_unavailable());
+            }
+            if let Err(error) = config
+                .lifecycle_store
+                .complete_failed_connection_cleanup(&connection_owner, connection_epoch)
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    flow_id = %flow_id,
+                    "failed to settle terminal Slack OAuth epoch after identity cleanup"
+                );
+                return Err(ProductAuthRouteFailure::backend_unavailable());
+            }
+            return Ok(());
+        }
         match config
             .binding_rollback_store
             .user_identity_bindings_for_user_at_epoch(
@@ -334,7 +404,7 @@ fn slack_personal_oauth_abandon_hook(
                     flow_id = %flow_id,
                     "retaining Slack OAuth lifecycle owner because identity cleanup is still pending"
                 );
-                return;
+                return Err(ProductAuthRouteFailure::backend_unavailable());
             }
             Err(error) => {
                 tracing::debug!(
@@ -342,12 +412,12 @@ fn slack_personal_oauth_abandon_hook(
                     flow_id = %flow_id,
                     "retaining Slack OAuth lifecycle owner because identity cleanup could not be verified"
                 );
-                return;
+                return Err(ProductAuthRouteFailure::backend_unavailable());
             }
             Ok(_) => {}
         }
         abandon_slack_connection_epoch(config.lifecycle_store.as_ref(), &callback_scope, flow_id)
-            .await;
+            .await
     })
 }
 
@@ -355,24 +425,31 @@ async fn abandon_slack_connection_epoch(
     lifecycle_store: &dyn crate::slack::slack_personal_binding::SlackUserBindingLifecycleStore,
     scope: &AuthProductScope,
     flow_id: AuthFlowId,
-) {
+) -> Result<(), ProductAuthRouteFailure> {
     let connection_epoch = SlackConnectionEpoch::new(flow_id);
-    let Ok(Some(connection_owner)) = lifecycle_store
+    let connection_owner = match lifecycle_store
         .connection_owner_for_epoch(
             &scope.resource.tenant_id,
             &scope.resource.user_id,
             connection_epoch,
         )
         .await
-    else {
-        return;
+    {
+        Ok(Some(connection_owner)) => connection_owner,
+        Ok(None) => return Ok(()),
+        Err(error) => {
+            tracing::warn!(%error, %flow_id, "failed to inspect terminal Slack OAuth epoch");
+            return Err(ProductAuthRouteFailure::backend_unavailable());
+        }
     };
     if let Err(error) = lifecycle_store
         .abandon_connection(&connection_owner, connection_epoch)
         .await
     {
-        tracing::debug!(%error, "failed to abandon terminal Slack OAuth connection epoch");
+        tracing::warn!(%error, "failed to abandon terminal Slack OAuth connection epoch");
+        return Err(ProductAuthRouteFailure::backend_unavailable());
     }
+    Ok(())
 }
 
 fn slack_personal_identity_hook(
@@ -687,7 +764,15 @@ impl OAuthGateProvider for SlackPersonalOAuthGateProvider {
         let Some(lifecycle) = self.slot.gate_lifecycle() else {
             return;
         };
-        abandon_slack_connection_epoch(lifecycle.lifecycle_store.as_ref(), scope, flow_id).await;
+        if let Err(error) =
+            abandon_slack_connection_epoch(lifecycle.lifecycle_store.as_ref(), scope, flow_id).await
+        {
+            tracing::warn!(
+                %flow_id,
+                ?error,
+                "Slack OAuth flow abandonment remains pending"
+            );
+        }
     }
 }
 

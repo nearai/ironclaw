@@ -77,7 +77,6 @@ use crate::{
 };
 
 const MAX_CAPABILITY_RETRIES: usize = 8;
-const MAX_MODEL_RETRIES: usize = 8;
 const MAX_INPUT_DRAIN: usize = 32;
 
 /// Drives the canonical loop tick by consulting a resolved [`LoopFamily`].

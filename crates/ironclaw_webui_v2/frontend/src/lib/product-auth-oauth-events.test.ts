@@ -1,7 +1,8 @@
+// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import vm from "node:vm";
-import { productAuthOAuthEventsSource } from "./product-auth-oauth-events.vm-inline.mjs";
+import { productAuthOAuthEventsSource } from "./product-auth-oauth-events.vm-inline";
 
 function libForTest(windowObject) {
   const context = {

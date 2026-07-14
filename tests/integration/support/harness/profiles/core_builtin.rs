@@ -18,7 +18,8 @@ use super::super::{
     local_dev_host_runtime_with_real_egress_pipeline, memory_mounts, workspace_mounts,
 };
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, ExtensionId, MountPermissions, NetworkPolicy, RuntimeKind, UserId,
+    CapabilityId, EffectKind, ExtensionId, MountAlias, MountGrant, MountPermissions, MountView,
+    NetworkPolicy, RuntimeKind, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, HTTP_CAPABILITY_ID,
@@ -185,6 +186,27 @@ pub(crate) async fn core_builtin_tools(
 /// `CoreBuiltinOptions`.
 pub(crate) async fn core_builtin_tools_default() -> HarnessResult<HostRuntimeCapabilityHarness> {
     core_builtin_tools(CoreBuiltinOptions::default()).await
+}
+
+/// Harness-port-seam Change 4: the SAME `core_builtin_tools_default` backend,
+/// with an additional confirmed `/host` mount grant layered onto the
+/// workspace mount view — mirrors `local_dev_mounts::ambient_workspace_mount_view`
+/// appending a `/host` alias when `host_home_aliases` is non-empty. This is
+/// the ONLY integration-tier construction with a confirmed host-home mount,
+/// so it is the sole way to observe `wrap_local_dev_surface_disclosure`'s
+/// scoped-roots note (the layer is a no-op — disabled — without a `/host`
+/// alias present, see `LocalDevSurfaceDisclosure::enabled`).
+pub(crate) async fn core_builtin_tools_with_confirmed_host_mount()
+-> HarnessResult<HostRuntimeCapabilityHarness> {
+    let mut harness = core_builtin_tools(CoreBuiltinOptions::default()).await?;
+    let mut mounts = harness.mounts.mounts.clone();
+    mounts.push(MountGrant::new(
+        MountAlias::new("/host")?,
+        VirtualPath::new("/projects/host")?,
+        MountPermissions::read_write_list_delete(),
+    ));
+    harness.mounts = MountView::new(mounts)?;
+    Ok(harness)
 }
 
 /// Real capability ids `core_builtin_tools_from_runtime` registers on the

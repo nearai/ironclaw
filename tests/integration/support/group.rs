@@ -854,6 +854,15 @@ impl RebornIntegrationGroupBuilder {
                 tool_disclosure: self
                     .tool_disclosure
                     .unwrap_or_else(ToolDisclosureMode::from_env),
+                // Loop-level counterpart of hermetic `LLM_MAX_RETRIES=0`:
+                // production rides out provider outages for minutes (deep
+                // availability retries with long backoff), which would stall
+                // scenarios that deliberately script a model failure (e.g.
+                // `failure_category_demasked`). One attempt keeps deliberate
+                // failure paths fast while still exercising retry-then-abort.
+                planned_model_availability_retry_attempts: Some(
+                    std::num::NonZeroU32::new(1).expect("nonzero"),
+                ),
                 ..DefaultPlannedRuntimeConfig::default()
             },
             model_route_resolver: None,

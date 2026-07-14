@@ -4077,3 +4077,126 @@ async fn filesystem_summary_spanning_interior_draft_is_not_applied() {
     assert_eq!(context.messages[0].content, "first");
     assert_eq!(context.messages[1].content, "third");
 }
+
+// Backend that fails only the summary-artifact write, so all prior reads in
+// `create_summary_artifact` succeed and only the final CAS `put` errors —
+// the shape `persist_summary` (ironclaw_loop_support::compaction_task) hits
+// in production (#5838).
+struct SummaryWriteFailureBackend {
+    inner: InMemoryBackend,
+}
+
+impl SummaryWriteFailureBackend {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryBackend::new(),
+        }
+    }
+
+    fn is_summary_path(path: &VirtualPath) -> bool {
+        path.as_str().contains("/summaries/")
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for SummaryWriteFailureBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        if Self::is_summary_path(path) {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::WriteFile,
+                reason: "synthetic summary artifact write failure (contract test)".to_string(),
+            });
+        }
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+}
+
+#[tokio::test]
+async fn create_summary_artifact_surfaces_backend_error_on_storage_write_failure() {
+    // Regression for #5838: the backend cause must survive to the caller
+    // instead of being collapsed away before it reaches `persist_summary`.
+    let backend = Arc::new(SummaryWriteFailureBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-summary-write-fail", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("fs-summary-write-fail");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-summary-write-fail").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("large tool-heavy turn content"),
+        })
+        .await
+        .unwrap();
+
+    let err = service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 1,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("compacted summary body"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await
+        .expect_err("summary artifact write must surface the backend failure, not succeed");
+
+    match &err {
+        SessionThreadError::Backend(reason) => {
+            assert!(
+                reason.contains("synthetic summary artifact write failure"),
+                "expected the real backend cause to survive to the caller, got: {reason}"
+            );
+        }
+        other => panic!("expected SessionThreadError::Backend, got: {other:?}"),
+    }
+}

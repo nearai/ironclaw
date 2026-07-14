@@ -148,6 +148,7 @@ pub(super) fn running_run_state(
         resolved_run_profile_id: ironclaw_turns::RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
         resolved_model_route: None,
+        model_usage: None,
         received_at: chrono::Utc::now(),
         checkpoint_id: None,
         gate_ref: None,
@@ -283,7 +284,7 @@ pub(super) fn completed_exit(
         reply_message_refs,
         result_refs: vec![],
         final_checkpoint_id,
-        usage_summary_ref: None,
+        model_usage: None,
         exit_id: test_exit_id(),
     })
 }
@@ -390,6 +391,7 @@ pub(super) fn claimed_run() -> ClaimedTurnRun {
             resolved_run_profile_id: ironclaw_turns::RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             resolved_model_route: None,
+            model_usage: None,
             received_at: chrono::Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
@@ -672,6 +674,7 @@ fn state_for_mapping(
         resolved_run_profile_id: ironclaw_turns::RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
         resolved_model_route: None,
+        model_usage: None,
         received_at: chrono::Utc::now(),
         checkpoint_id: None,
         gate_ref,

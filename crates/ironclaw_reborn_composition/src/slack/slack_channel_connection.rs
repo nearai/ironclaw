@@ -1916,6 +1916,24 @@ mod tests {
             Ok(())
         }
 
+        async fn begin_failed_connection_cleanup(
+            &self,
+            _owner: &SlackConnectionOwner,
+            _epoch: SlackConnectionEpoch,
+        ) -> Result<(), crate::slack::slack_personal_binding::SlackUserBindingLifecycleError>
+        {
+            Ok(())
+        }
+
+        async fn complete_failed_connection_cleanup(
+            &self,
+            _owner: &SlackConnectionOwner,
+            _epoch: SlackConnectionEpoch,
+        ) -> Result<(), crate::slack::slack_personal_binding::SlackUserBindingLifecycleError>
+        {
+            Ok(())
+        }
+
         async fn abandon_connection(
             &self,
             _owner: &SlackConnectionOwner,

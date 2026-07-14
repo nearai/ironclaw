@@ -4,8 +4,8 @@ import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
 
-import { rememberChannelConnectionWaiter } from "../../../lib/channel-connection-events.js";
-import { redeemPairingCode as realRedeemPairingCode } from "../lib/pairing-api.js";
+import { rememberChannelConnectionWaiter } from "../../../lib/channel-connection-events";
+import { redeemPairingCode as realRedeemPairingCode } from "../lib/pairing-api";
 
 function configureModalSourceForTest() {
   const source = readFileSync(new URL("./configure-modal.tsx", import.meta.url), "utf8");
@@ -288,7 +288,7 @@ test("ConfigureModal does not show a generic activate action beside Slack OAuth"
   assert.doesNotMatch(body, /extensions\.activate/);
 });
 
-test("ConfigureModal activates the Slack extension after OAuth setup completes", async () => {
+test("ConfigureModal broadcasts public wasm-tool Slack OAuth completion without duplicate activation", async () => {
   const slackOauthSecret = {
     name: "slack_personal_oauth",
     provider: "slack_personal",
@@ -303,7 +303,7 @@ test("ConfigureModal activates the Slack extension after OAuth setup completes",
   };
   let closed = false;
   const { calls, invalidations, notifications, oauthSetupArgs } = renderModal({
-    kind: "channel",
+    kind: "wasm_tool",
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
@@ -329,9 +329,7 @@ test("ConfigureModal activates the Slack extension after OAuth setup completes",
 
   await oauthSetupArgs[0][1].onConfigured();
 
-  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
-    ["activate", { id: "slack" }],
-  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), []);
   assert.deepEqual(JSON.parse(JSON.stringify(invalidations)), [
     ["extensions"],
     ["extension-registry"],
