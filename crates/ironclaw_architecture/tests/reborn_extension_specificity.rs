@@ -31,9 +31,13 @@
 //! Exactly four such domains exist: LLM providers (`nearai`/`api.near.ai` is
 //! the assistant's LLM+embeddings backend; Google is Gemini; GitHub is
 //! Copilot), WebUI browser-login SSO providers (Google/GitHub OIDC), GitHub
-//! as a skill/code host (skill installation from repositories), and vendor
-//! credential-format detection (leak/secret scanners must know Slack/GitHub
-//! token shapes). Bare `nearai` terms are carved out globally with the
+//! as a skill/code host (skill installation from repositories), and
+//! vendor-specific safety detection — leak/secret scanners must know
+//! Slack/GitHub token shapes, and the trace payload-redaction/side-effect
+//! classifier must know which tool-name keywords carry messaging/email/
+//! issue-tracker payloads (a safety denylist that is a *superset* of the
+//! inventory, so it cannot be sourced from the inventory without weakening
+//! redaction). Bare `nearai` terms are carved out globally with the
 //! compound extension forms (`nearai_mcp`, `private.near.ai`, …) still
 //! scanned; the rest are path-scoped. Each carve-out names its collision and
 //! fails when stale; adding one for any other reason is a violation of this
@@ -92,7 +96,9 @@ const TERM_COLLISIONS: &[(&str, &str)] = &[
 /// Path-scoped permanent carve-outs for identifiers that belong to a
 /// **different product domain** which legitimately owns the vocabulary.
 /// Four classes only — LLM providers, WebUI browser-login SSO providers,
-/// GitHub as a skill/code host, and vendor credential-format detection.
+/// GitHub as a skill/code host, and vendor-specific safety detection
+/// (credential-format leak/secret scanners plus the trace payload-redaction
+/// classifier).
 /// Every entry must keep matching (staleness fails) and the exact list is
 /// pinned by a self-test; broadening it is a gate regression, not a fix.
 const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
@@ -379,6 +385,41 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "crates/ironclaw_safety/src/leak_detector.rs",
         "telegram",
         "vendor token-format leak detection (telegram_bot_token pattern)",
+    ),
+    // Trace payload-redaction / side-effect safety classifier
+    // (`ironclaw_reborn_traces`): `tool_payload_profile` selects the
+    // payload-redaction profile and `classify_tool_side_effect` the
+    // external-write side-effect off tool-name keywords. The vendor keywords
+    // are a safety DENYLIST — a superset of the bundled inventory that must
+    // also cover non-package messaging/issue-tracker tools (signal, discord,
+    // gitlab) — so sourcing the set from the inventory would drop those and
+    // weaken redaction. Not extension routing (the classifier has only the
+    // tool-name string at trace-analysis time). Pinned by
+    // `tool_payload_redaction_profile_is_a_safety_denylist_not_inventory_routing`.
+    (
+        "crates/ironclaw_reborn_traces/src/contribution.rs",
+        "slack",
+        "trace payload-redaction/side-effect safety classifier keyed off tool-name \
+         keywords (messaging profile + external-write detection); a safety denylist, \
+         not extension routing",
+    ),
+    (
+        "crates/ironclaw_reborn_traces/src/contribution.rs",
+        "telegram",
+        "trace payload-redaction safety classifier keyed off tool-name keywords \
+         (messaging profile); a safety denylist, not extension routing",
+    ),
+    (
+        "crates/ironclaw_reborn_traces/src/contribution.rs",
+        "gmail",
+        "trace payload-redaction safety classifier keyed off tool-name keywords \
+         (email profile); a safety denylist, not extension routing",
+    ),
+    (
+        "crates/ironclaw_reborn_traces/src/contribution.rs",
+        "github",
+        "trace payload-redaction safety classifier keyed off tool-name keywords \
+         (issue-tracker profile); a safety denylist, not extension routing",
     ),
     (
         "crates/ironclaw_webui_v2/frontend/src/i18n/",
@@ -1181,11 +1222,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "webaccess",
     ),
     (
-        "crates/ironclaw_reborn_traces/src/contribution.rs",
-        "github",
-    ),
-    ("crates/ironclaw_reborn_traces/src/contribution.rs", "gmail"),
-    (
         "crates/ironclaw_product_adapter_registry/src/lib.rs",
         "telegram",
     ),
@@ -1199,11 +1235,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     ("crates/ironclaw_product_workflow/Cargo.toml", "telegram"),
     ("crates/ironclaw_product_workflow/src/lib.rs", "telegram"),
-    (
-        "crates/ironclaw_reborn_traces/src/contribution.rs",
-        "telegram",
-    ),
-    ("crates/ironclaw_reborn_traces/src/contribution.rs", "slack"),
     ("crates/ironclaw_skills/src/selector.rs", "github"),
     ("crates/ironclaw_skills/src/types.rs", "github"),
     ("crates/ironclaw_skills/src/types.rs", "google"),
@@ -1534,7 +1565,8 @@ fn term_collision_carve_outs_stay_documented_and_narrow() {
             "www.googleapis.com",
         ]),
         "path-scoped carve-outs are reserved for the four documented collision domains \
-         (LLM providers, SSO login, GitHub-as-skill-source, credential-format detection); \
+         (LLM providers, SSO login, GitHub-as-skill-source, vendor-safety detection — \
+         credential-format scanners plus the trace payload-redaction classifier); \
          new terms here are a gate regression"
     );
     let carved_paths: BTreeSet<&str> = PATH_TERM_COLLISIONS

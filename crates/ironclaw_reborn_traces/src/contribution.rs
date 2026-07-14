@@ -10103,6 +10103,84 @@ mod tests {
         );
     }
 
+    /// Lane-2 safety pin (extension-runtime DEL-8). The trace redaction
+    /// classifier keys the payload-redaction profile (and the external-write
+    /// side-effect level) off tool-name keywords; the vendor keywords are a
+    /// genuine safety DENYLIST, not extension routing. It is deliberately a
+    /// SUPERSET of the bundled package inventory — it must also cover
+    /// non-package messaging/issue-tracker tools such as signal, discord, and
+    /// gitlab — so it cannot be sourced from the inventory without weakening
+    /// redaction. This locks the mapping so a future "de-hardcode the vendor
+    /// names" cleanup cannot silently drop a keyword and stop redacting a
+    /// tool's sensitive payload. The `contribution.rs` PATH_TERM_COLLISIONS
+    /// carve-out in
+    /// `crates/ironclaw_architecture/tests/reborn_extension_specificity.rs`
+    /// documents why the names stay here.
+    #[test]
+    fn tool_payload_redaction_profile_is_a_safety_denylist_not_inventory_routing() {
+        // Package-vendor keywords select the profile whose rules redact that
+        // payload shape.
+        assert!(matches!(
+            tool_payload_profile("slack.send_message"),
+            Some(ToolPayloadProfile::Messaging)
+        ));
+        assert!(matches!(
+            tool_payload_profile("gmail.send_email"),
+            Some(ToolPayloadProfile::Email)
+        ));
+        assert!(matches!(
+            tool_payload_profile("github.create_issue"),
+            Some(ToolPayloadProfile::IssueTracker)
+        ));
+        // Non-inventory keywords must ALSO classify — dropping them (as
+        // sourcing the set from the package inventory would) silently stops
+        // redacting those tools' payloads.
+        assert!(matches!(
+            tool_payload_profile("signal.send"),
+            Some(ToolPayloadProfile::Messaging)
+        ));
+        assert!(matches!(
+            tool_payload_profile("discord.post_message"),
+            Some(ToolPayloadProfile::Messaging)
+        ));
+        assert!(matches!(
+            tool_payload_profile("gitlab.open_merge_request"),
+            Some(ToolPayloadProfile::IssueTracker)
+        ));
+
+        // A `slack`-named send is an external write (the safety signal),
+        // distinct from a local write.
+        assert!(matches!(
+            classify_tool_side_effect("slack.send_message"),
+            SideEffectLevel::ExternalWrite
+        ));
+        assert!(matches!(
+            classify_tool_side_effect("file.write"),
+            SideEffectLevel::LocalWrite
+        ));
+
+        // Drive the production caller: a messaging tool's content field is
+        // redacted; a tool the classifier does not recognize passes through
+        // untouched (the control proving the keyword gates the redaction).
+        let payload = serde_json::json!({ "message": "meet me at 5", "channel": "C42" });
+        let mut report = RedactionReport::default();
+        let redacted =
+            redact_tool_specific_payload(Some("slack.send_message"), &payload, &mut report);
+        assert_ne!(
+            redacted.get("message"),
+            payload.get("message"),
+            "a messaging tool's message content must be redacted"
+        );
+
+        let mut report = RedactionReport::default();
+        let untouched =
+            redact_tool_specific_payload(Some("weather.forecast"), &payload, &mut report);
+        assert_eq!(
+            untouched, payload,
+            "a tool with no payload profile must pass through unredacted"
+        );
+    }
+
     struct FakePrivacyFilterAdapter;
 
     #[async_trait]
