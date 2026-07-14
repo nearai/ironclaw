@@ -5,6 +5,7 @@
 
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use serde::{Deserialize, Serialize};
 
 /// Look up known per-token costs for a model by its identifier.
 ///
@@ -94,6 +95,120 @@ pub fn model_cost(model_id: &str) -> Option<(Decimal, Decimal)> {
 pub fn default_cost() -> (Decimal, Decimal) {
     // Conservative estimate: roughly GPT-4o pricing
     (dec!(0.0000025), dec!(0.00001))
+}
+
+/// A per-run USD cost, split by billing category. Priced from cumulative token
+/// usage via [`price_usage`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsageCost {
+    /// Fresh (non-cached) input plus cache-creation tokens at the full input rate.
+    pub input_cost: Decimal,
+    /// Cache-read tokens at the model's discounted rate.
+    pub cached_input_cost: Decimal,
+    /// Output tokens at the output rate.
+    pub output_cost: Decimal,
+    /// Sum of the three components above.
+    pub total_cost: Decimal,
+}
+
+/// Cache-read discount divisor by model family, mirroring the provider defaults
+/// documented on `LlmProvider::cache_read_discount` (Anthropic 10× i.e. 90% off,
+/// OpenAI 2× i.e. 50% off, others no discount).
+pub fn cache_read_discount(model_id: &str) -> Decimal {
+    let lower = model_id.to_ascii_lowercase();
+    if lower.contains("claude") {
+        Decimal::from(10)
+    } else if lower.contains("gpt") || lower.starts_with("o1") || lower.starts_with("o3") {
+        Decimal::from(2)
+    } else {
+        Decimal::ONE
+    }
+}
+
+/// Price a run's cumulative token usage in USD for `model_id`.
+///
+/// `cache_read_input_tokens` is treated as a subset of `input_tokens` billed at
+/// the model's cache-read discount; `cache_creation_input_tokens` is a separate
+/// write-side count billed at the full input rate on top. Unknown models fall
+/// back to [`default_cost`] (≈GPT-4o), so a new paid model never silently prices
+/// at zero. This is the single pricing source shared by every surface that
+/// reports per-run cost (OpenAI-compatible API, WebChat v2).
+pub fn price_usage(
+    model_id: &str,
+    input_tokens: u32,
+    output_tokens: u32,
+    cache_read_input_tokens: u32,
+    cache_creation_input_tokens: u32,
+) -> UsageCost {
+    let (input_rate, output_rate) = model_cost(model_id).unwrap_or_else(default_cost);
+    let discount = cache_read_discount(model_id);
+    let billable_input = Decimal::from(
+        input_tokens
+            .saturating_sub(cache_read_input_tokens)
+            .saturating_add(cache_creation_input_tokens),
+    );
+    let input_cost = billable_input * input_rate;
+    let cached_input_cost = if discount > Decimal::ONE {
+        Decimal::from(cache_read_input_tokens) * input_rate / discount
+    } else {
+        Decimal::from(cache_read_input_tokens) * input_rate
+    };
+    let output_cost = Decimal::from(output_tokens) * output_rate;
+    let total_cost = input_cost + cached_input_cost + output_cost;
+    UsageCost {
+        input_cost,
+        cached_input_cost,
+        output_cost,
+        total_cost,
+    }
+}
+
+/// Format a USD `Decimal` for the wire: trimmed of trailing zeros, never in
+/// scientific notation.
+pub fn format_usd(amount: Decimal) -> String {
+    amount.normalize().to_string()
+}
+
+/// Wire-facing per-run USD cost, split by billing category. Each amount is a
+/// [`format_usd`]-formatted string so serialized cost never drifts into
+/// scientific notation. Shared by every surface that reports run cost.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunCost {
+    pub input_cost_usd: String,
+    pub cached_input_cost_usd: String,
+    pub output_cost_usd: String,
+    pub total_cost_usd: String,
+    pub currency: String,
+}
+
+impl RunCost {
+    /// ISO-4217 currency code for all amounts.
+    pub const USD: &'static str = "USD";
+
+    /// Price a run's cumulative token usage for `model_id` and format it for the
+    /// wire. See [`price_usage`] for the billing rules.
+    pub fn from_usage(
+        model_id: &str,
+        input_tokens: u32,
+        output_tokens: u32,
+        cache_read_input_tokens: u32,
+        cache_creation_input_tokens: u32,
+    ) -> Self {
+        let cost = price_usage(
+            model_id,
+            input_tokens,
+            output_tokens,
+            cache_read_input_tokens,
+            cache_creation_input_tokens,
+        );
+        Self {
+            input_cost_usd: format_usd(cost.input_cost),
+            cached_input_cost_usd: format_usd(cost.cached_input_cost),
+            output_cost_usd: format_usd(cost.output_cost),
+            total_cost_usd: format_usd(cost.total_cost),
+            currency: Self::USD.to_string(),
+        }
+    }
 }
 
 /// Heuristic to detect local/self-hosted models (Ollama, llama.cpp, etc.).
@@ -186,6 +301,37 @@ mod tests {
         let (input, output) = model_cost("free").unwrap();
         assert_eq!(input, Decimal::ZERO);
         assert_eq!(output, Decimal::ZERO);
+    }
+
+    #[test]
+    fn price_usage_bills_input_and_output_at_model_rate() {
+        // gpt-4o: input 0.0000025/tok, output 0.00001/tok.
+        let cost = price_usage("gpt-4o", 1_000, 500, 0, 0);
+        assert_eq!(cost.input_cost, dec!(0.0025));
+        assert_eq!(cost.output_cost, dec!(0.005));
+        assert_eq!(cost.total_cost, dec!(0.0075));
+    }
+
+    #[test]
+    fn price_usage_discounts_cache_reads_and_bills_creation_at_full_rate() {
+        // 3000 input of which 2000 were cache reads (claude 10× discount),
+        // plus 1000 cache-creation tokens billed at the full input rate.
+        // claude-opus input rate 0.000015/tok.
+        let cost = price_usage("claude-opus-4-6", 3_000, 0, 2_000, 1_000);
+        // fresh input = (3000 - 2000) + 1000 = 2000 → 2000 * 0.000015 = 0.03
+        assert_eq!(cost.input_cost, dec!(0.03));
+        // cached = 2000 * 0.000015 / 10 = 0.003
+        assert_eq!(cost.cached_input_cost, dec!(0.003));
+        assert_eq!(cost.total_cost, dec!(0.033));
+    }
+
+    #[test]
+    fn run_cost_from_usage_formats_and_labels_currency() {
+        let cost = RunCost::from_usage("gpt-4o", 1_000, 500, 0, 0);
+        assert_eq!(cost.input_cost_usd, "0.0025");
+        assert_eq!(cost.output_cost_usd, "0.005");
+        assert_eq!(cost.total_cost_usd, "0.0075");
+        assert_eq!(cost.currency, "USD");
     }
 
     #[test]
