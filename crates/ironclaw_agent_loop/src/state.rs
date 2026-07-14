@@ -70,6 +70,14 @@ pub struct LoopExecutionState {
     /// (#3841 follow-up F1).
     pub recent_output_token_counts: BoundedRing<u32, 8>,
 
+    /// Cumulative provider-reported token usage across this run's model calls,
+    /// summed from `LoopModelResponse::usage`. Carried into the terminal
+    /// `LoopExit` so the run record persists per-run usage for the
+    /// OpenAI-compatible surfaces. `None` until the first call that reports
+    /// usage (replay stubs and usage-less providers leave it `None`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cumulative_model_usage: Option<ironclaw_turns::run_profile::LoopModelUsage>,
+
     /// Count of final-answer nudges issued this run (driver-specific nudge,
     /// gated by `SteeringPolicy.allow_driver_specific_nudges`). Capped so the
     /// loop can't issue unbounded extra model calls. `#[serde(default)]` keeps
@@ -243,6 +251,20 @@ impl PendingExternalToolResume {
 }
 
 impl LoopExecutionState {
+    /// Accumulate one model call's reported usage into the run's cumulative
+    /// total. No-op when the call reported no usage (replay stubs, usage-less
+    /// providers), leaving any prior total intact.
+    pub(crate) fn accumulate_model_usage(
+        &mut self,
+        usage: Option<ironclaw_turns::run_profile::LoopModelUsage>,
+    ) {
+        if let Some(usage) = usage {
+            self.cumulative_model_usage
+                .get_or_insert_with(Default::default)
+                .add_assign(&usage);
+        }
+    }
+
     /// Builds the initial state at the start of a fresh run.
     ///
     /// The `input_cursor` field is populated via
@@ -263,6 +285,7 @@ impl LoopExecutionState {
             seen_capability_output_digests: BoundedRing::new(),
             recent_failure_kinds: BoundedRing::new(),
             recent_output_token_counts: BoundedRing::new(),
+            cumulative_model_usage: None,
             final_answer_nudges_used: 0,
             context_state: ContextStrategyState::default(),
             capability_state: CapabilityStrategyState::default(),
@@ -328,6 +351,10 @@ impl LoopExecutionState {
         self.input_cursor = LoopInputCursor::origin_for_run(context);
         self.assistant_refs.clear();
         self.result_refs.clear();
+        // A retry rebases onto a different run id; the failed run's token total
+        // belongs to that run and must not be re-reported under the new one.
+        // (Same-run gate resumes return early above, preserving the total.)
+        self.cumulative_model_usage = None;
         self
     }
 }
@@ -786,6 +813,12 @@ mod tests {
             .result_refs
             .push(ironclaw_turns::LoopResultRef::new("result:source-run").unwrap());
         state.iteration = 4;
+        state.cumulative_model_usage = Some(ironclaw_turns::run_profile::LoopModelUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        });
         // Gate-bound resume state must survive the rebase: this path also
         // resumes a run after an approval/auth gate, where the pending-resume
         // record drives re-dispatch of the gated capability.
@@ -830,6 +863,9 @@ mod tests {
         );
         assert!(rebased.assistant_refs.is_empty());
         assert!(rebased.result_refs.is_empty());
+        // A retry rebases onto a different run id, so the failed run's token
+        // total must be dropped rather than re-reported under the new run.
+        assert!(rebased.cumulative_model_usage.is_none());
         // Gate-bound resume state is preserved so an approval/auth resume can
         // re-dispatch the gated capability.
         assert_eq!(rebased.last_gate, state.last_gate);
@@ -856,6 +892,14 @@ mod tests {
             .result_refs
             .push(ironclaw_turns::LoopResultRef::new("result:same-run").unwrap());
         state.iteration = 3;
+        // A same-run gate resume must preserve the run's accumulated token
+        // total; the full-equality assertion below locks that in.
+        state.cumulative_model_usage = Some(ironclaw_turns::run_profile::LoopModelUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        });
 
         let rebased = state.clone().rebase_for_run(&context);
 

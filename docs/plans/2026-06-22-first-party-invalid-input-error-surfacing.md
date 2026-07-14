@@ -396,7 +396,7 @@ impl RuntimeCapabilityFailure {
 
 `failure_from` copies `detail` only for `CapabilityInvocationError::Dispatch`.
 
-### `ironclaw_loop_support`
+### `ironclaw_loop_host`
 
 Convert the neutral detail once:
 
@@ -481,7 +481,7 @@ fn runtime_failure_detail_to_loop(
   - `From<DispatchError>` preserves first-party detail.
 - `crates/ironclaw_host_runtime/src/production.rs`
   - `failure_from` preserves dispatch detail into `RuntimeCapabilityFailure`.
-- `crates/ironclaw_loop_support/src/capability_port.rs`
+- `crates/ironclaw_loop_host/src/capability_port.rs`
   - runtime invalid-input detail converts to
     `CapabilityFailureDetail::InvalidInput`.
 - `crates/ironclaw_host_runtime/tests/first_party_builtin_tools.rs`
@@ -504,10 +504,10 @@ fn runtime_failure_detail_to_loop(
 - `cargo fmt`
 - `cargo test -p ironclaw_capabilities dispatch_error`
 - `cargo test -p ironclaw_host_runtime trigger_create`
-- `cargo test -p ironclaw_loop_support runtime_failure_to_loop`
+- `cargo test -p ironclaw_loop_host runtime_failure_to_loop`
 - `cargo test -p ironclaw_agent_loop model_visible`
 - Targeted clippy after the code patch:
-  `cargo clippy -p ironclaw_host_api -p ironclaw_capabilities -p ironclaw_triggers -p ironclaw_host_runtime -p ironclaw_loop_support --all-targets -- -D warnings`
+  `cargo clippy -p ironclaw_host_api -p ironclaw_capabilities -p ironclaw_triggers -p ironclaw_host_runtime -p ironclaw_loop_host --all-targets -- -D warnings`
 
 ## Thermo-nuclear review loop
 

@@ -104,6 +104,12 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 # runtime-owned `RebornRuntime::open_reborn_identity_resolver` accessor
 # instead. Feature-unifies with the `[dependencies]` entry above.
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version = "0.1.0", features = ["test-support"] }
+# Canonical workspace-wide process-env test lock. Env-mutating unit tests in
+# this crate serialize on `ironclaw_common::env_helpers::lock_env()` — the same
+# mutex the composition/llm/auth crates and `src/` use — so no crate defines a
+# second, non-serializing lock domain (the #6015 flake). Dev-only: the lock is
+# reached solely from `#[cfg(test)]` code in `runtime::test_env`.
+ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
 
 [[bin]]
 name = "ironclaw-reborn"

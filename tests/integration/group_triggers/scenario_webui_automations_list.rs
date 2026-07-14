@@ -51,12 +51,13 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 
     let services = RebornServices::new(h.thread_harness.service.clone(), h.coordinator.clone())
         .with_automation_product_facade(facade);
-    // `triggers()` group's capability harness uses a fixed constructor user,
-    // not the thread's binding subject — trigger creator_user_id is that
-    // user, so the WebUI caller must match it for list_scoped_triggers's
-    // caller-scoped filter to see the trigger.
-    let mut caller = webui_caller_for(&h.binding);
-    caller.user_id = capability_harness.user_id().clone();
+    // The production capability port resolves the execution user from the
+    // run's binding owner (owner → actor → fallback), so trigger
+    // creator_user_id is the binding subject — the default `webui_caller_for`
+    // caller already matches it for list_scoped_triggers's caller-scoped
+    // filter. (The pre-port harness dispatched under a fixed constructor
+    // user and needed a caller override here.)
+    let caller = webui_caller_for(&h.binding);
     let router = mount_webui_v2_router(Arc::new(services), caller);
 
     let (status, body) = get_json(router, "/api/webchat/v2/automations").await;

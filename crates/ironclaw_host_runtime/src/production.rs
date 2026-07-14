@@ -2293,7 +2293,15 @@ fn rejected_summary_diagnostic(
         // would only duplicate it.
         return None;
     }
-    Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic { text: summary })
+    const MAX_DIAGNOSTIC_CHARS: usize = 512;
+    let text = if summary.chars().count() <= MAX_DIAGNOSTIC_CHARS {
+        summary
+    } else {
+        let mut text: String = summary.chars().take(MAX_DIAGNOSTIC_CHARS - 3).collect();
+        text.push_str("...");
+        text
+    };
+    Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic { text })
 }
 
 /// Returns a stable, redacted summary message for a capability invocation
@@ -2913,6 +2921,24 @@ output_schema_ref = "schemas/test.output.json"
             Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic { text: raw }),
             "the raw reason must ride the diagnostic detail"
         );
+    }
+
+    #[test]
+    fn failure_from_bounds_rejected_summary_diagnostic_on_char_boundaries() {
+        let raw = format!("/{}", "é".repeat(600));
+        let error = CapabilityInvocationError::Dispatch {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Executor),
+            safe_summary: Some(raw),
+            detail: None,
+        };
+
+        let failure = failure_from(error, cap());
+        let Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic { text }) = failure.detail
+        else {
+            panic!("expected bounded diagnostic detail");
+        };
+        assert_eq!(text.chars().count(), 512);
+        assert!(text.ends_with("..."));
     }
 
     #[test]

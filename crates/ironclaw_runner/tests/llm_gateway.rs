@@ -11,7 +11,7 @@ use ironclaw_llm::{
     CompletionRequest, CompletionResponse, CompletionStreamSink, FinishReason, LlmError,
     LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessage,
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelRouteSnapshot,
     HostManagedModelStreamSink, HostManagedToolResultContent, ThreadBackedLoopContextPort,
@@ -214,6 +214,56 @@ async fn gateway_records_prompt_cache_break_on_tool_capable_path_when_tool_surfa
         logs_contain("system_prompt_changed=false"),
         "the unchanged system prompt must not be blamed for the break"
     );
+}
+
+#[tokio::test]
+async fn gateway_honors_caller_requested_model_route_over_profile_default() {
+    let provider = Arc::new(RecordingLlmProvider::reply("assistant response"));
+    // Profile default resolves to "profile-default-model"; the caller's per-run
+    // requested-model route must take precedence.
+    let policy = LlmModelProfilePolicy::new().allow_model_profile(
+        interactive_model(),
+        Some("profile-default-model".to_string()),
+    );
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        policy,
+    );
+
+    let request = model_request_with_route(interactive_model(), "requested", "caller-picked-model");
+    gateway.stream_model(request).await.unwrap();
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].model.as_deref(),
+        Some("caller-picked-model"),
+        "the per-run requested model must override the profile default"
+    );
+}
+
+#[tokio::test]
+async fn gateway_falls_back_to_profile_default_when_no_requested_route() {
+    let provider = Arc::new(RecordingLlmProvider::reply("assistant response"));
+    let policy = LlmModelProfilePolicy::new().allow_model_profile(
+        interactive_model(),
+        Some("profile-default-model".to_string()),
+    );
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        policy,
+    );
+
+    // No resolved_model_route on the request → the profile default is used.
+    gateway
+        .stream_model(model_request(interactive_model()))
+        .await
+        .unwrap();
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests[0].model.as_deref(), Some("profile-default-model"));
 }
 
 #[tokio::test]
@@ -3465,10 +3515,10 @@ impl HostManagedModelGateway for InvalidSummaryModelGateway {
         &self,
         _request: HostManagedModelRequest,
     ) -> Result<
-        ironclaw_loop_support::HostManagedModelResponse,
-        ironclaw_loop_support::HostManagedModelError,
+        ironclaw_loop_host::HostManagedModelResponse,
+        ironclaw_loop_host::HostManagedModelError,
     > {
-        Err(ironclaw_loop_support::HostManagedModelError::safe(
+        Err(ironclaw_loop_host::HostManagedModelError::safe(
             self.kind,
             self.safe_summary.clone(),
         ))

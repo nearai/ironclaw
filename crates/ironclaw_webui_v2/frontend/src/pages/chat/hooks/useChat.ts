@@ -197,7 +197,7 @@ export function useChat(threadId) {
   // the slot the vm test harness seeds/reads — plus its dismissal/flow refs and
   // the derive/OAuth/resume effects. `useChat` keeps the gate + send state and
   // threads the handles they share in; the returned values are re-exposed
-  // verbatim from `useChat` for `chat.js`.
+  // verbatim from `useChat` for `chat.tsx`.
   const channelOnboarding = useChannelOnboarding(threadId, {
     messages,
     messagesThreadId,
@@ -481,7 +481,7 @@ export function useChat(threadId) {
   }, [sseStatus, setMessages, setIsProcessing, setActiveRun, threadId]);
 
   // Accepts the composer call shape `{ attachments, threadId }`. The
-  // `attachments` are staged objects from `lib/attachments.js`
+  // `attachments` are staged objects from `lib/attachments.ts`
   // (`stageFiles`); we split them into the `WebUiInboundAttachment` wire
   // shape for the send and the render shape for the optimistic bubble so
   // cards/thumbnails appear immediately, matching what the timeline
@@ -491,7 +491,7 @@ export function useChat(threadId) {
   // facade refuses to implicitly create a missing thread. When the
   // caller is on the landing screen (no active thread yet), we
   // eagerly POST `/threads` first and use the returned id. The
-  // returned response carries `thread_id` so the chat.js navigation
+  // returned response carries `thread_id` so the chat.tsx navigation
   // hook can route to `/chat/<id>` after the first send.
   const send = React.useCallback(
     async (content, opts = {}) => {
@@ -890,7 +890,7 @@ export function useChat(threadId) {
       if (!runId || !gateRef || !provider) {
         throw new Error("auth gate is missing required credential metadata");
       }
-      // `account_label` is optional on the prompt (gates.js defaults it to
+      // `account_label` is optional on the prompt (gates.ts defaults it to
       // an empty string), so don't gate submission on it — derive a sensible
       // label when the prompt didn't carry one.
       const accountLabel = pendingGate.accountLabel || `${provider} credential`;
@@ -996,7 +996,7 @@ export function useChat(threadId) {
   }, [hasMore, nextCursor, loadHistory]);
 
   // Fork-shape compatibility: `approve(requestId, action, kind)` from
-  // chat.js. `requestId` and `kind` are v1 concepts the v2 stream
+  // chat.tsx. `requestId` and `kind` are v1 concepts the v2 stream
   // doesn't surface; the live `pendingGate` already carries
   // `runId` + `gateRef`, so the args are intentionally ignored and
   // the call is rerouted to v2 resolveGate.

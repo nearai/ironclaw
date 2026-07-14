@@ -4,8 +4,8 @@ use crate::local_dev_mounts::scoped_skill_management_mount_view;
 use async_trait::async_trait;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::{
-    CredentialStageError, HostApiError, HostPath, InvocationId, MountView, ResourceScope,
-    RuntimeHttpEgress, UserId, VirtualPath,
+    HostApiError, HostPath, InvocationId, MountView, ResourceScope, RuntimeHttpEgress, UserId,
+    VirtualPath,
 };
 use ironclaw_product_workflow::{
     LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
@@ -470,30 +470,17 @@ impl RebornLocalLifecycleFacade {
         if requirements.is_empty() {
             return Ok(None);
         }
-        let Some(credential_accounts) = &self.credential_accounts else {
-            return Err(ProductWorkflowError::InvalidBindingRequest {
-                reason: format!(
-                    "extension {} requires product auth credentials before activation",
-                    package_ref.id
-                ),
-            });
+        // Credential readiness is evaluated exactly once inside activation,
+        // where missing requirements become typed lifecycle blockers. When
+        // product auth is not composed, the normal `activate` path uses the
+        // unavailable gate and reports every declared requirement as missing.
+        let Some(credential_accounts) = self.credential_accounts.as_ref() else {
+            return Ok(None);
         };
-        let scope = lifecycle_resource_scope(context)?;
-        let credential_gate =
-            RuntimeExtensionActivationCredentialGate::new(scope, Arc::clone(credential_accounts));
-        let missing_requirements = credential_gate
-            .missing_requirements(requirements)
-            .await
-            .map_err(map_lifecycle_credential_stage_error)?;
-        if missing_requirements.is_empty() {
-            return Ok(Some(credential_gate));
-        }
-        Err(ProductWorkflowError::InvalidBindingRequest {
-            reason: format!(
-                "extension {} requires product auth credentials before activation",
-                package_ref.id
-            ),
-        })
+        Ok(Some(RuntimeExtensionActivationCredentialGate::new(
+            lifecycle_resource_scope(context)?,
+            Arc::clone(credential_accounts),
+        )))
     }
 }
 
@@ -589,17 +576,6 @@ fn lifecycle_caller(context: &LifecycleProductContext) -> Result<UserId, Product
                     "command auth subject is not a valid lifecycle caller identity: {error}"
                 ),
             }),
-    }
-}
-
-fn map_lifecycle_credential_stage_error(error: CredentialStageError) -> ProductWorkflowError {
-    match error {
-        CredentialStageError::AuthRequired => ProductWorkflowError::InvalidBindingRequest {
-            reason: "extension requires product auth credentials before activation".to_string(),
-        },
-        CredentialStageError::Backend => ProductWorkflowError::InvalidBindingRequest {
-            reason: "extension product auth credential state is invalid".to_string(),
-        },
     }
 }
 

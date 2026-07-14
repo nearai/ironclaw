@@ -258,6 +258,8 @@ fn completed_response(id: OpenAiResponseId, model: String) -> OpenAiResponseObje
         error: None,
         incomplete_details: None,
         usage: Some(OpenAiResponseUsage {
+            input_tokens_details: None,
+            cost: None,
             input_tokens: 1,
             output_tokens: 1,
             total_tokens: 2,
