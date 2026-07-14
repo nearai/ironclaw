@@ -204,7 +204,7 @@ impl RebornLocalExtensionManagementPort {
         let effective_tenant =
             installation_effective_owner_scope(&self.installation_store, installation)
                 .await?
-                .map(|owner_scope| owner_scope.matches(scope));
+                .map(|owner_scope| owner_scope.matches_tenant(&scope.tenant_id));
         Ok(effective_tenant == Some(true))
     }
 
@@ -226,7 +226,7 @@ impl RebornLocalExtensionManagementPort {
         }
         let effective_tenant = stored_source
             .and_then(|stored_source| effective_owner_scope(installation, stored_source))
-            .map(|owner_scope| owner_scope.matches(scope));
+            .map(|owner_scope| owner_scope.matches_tenant(&scope.tenant_id));
         effective_tenant == Some(true)
     }
 

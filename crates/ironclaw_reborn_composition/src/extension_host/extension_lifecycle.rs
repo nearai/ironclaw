@@ -992,11 +992,13 @@ impl RebornLocalExtensionManagementPort {
                 // packages).
                 let new_owner = match registration_owner(&available.package.manifest.source) {
                     // No owner-mismatch check here: `HostedMcpExtensionId` mint
-                    // (7792e9b10) hashes tenant+owner+url+label, so
-                    // `available.package.id` reaching this arm is always the
-                    // caller's own minted id. A foreign-owner takeover — the
-                    // deleted `ensure_registered_row_owner_match`'s only job —
-                    // is therefore unconstructible.
+                    // (7792e9b10) hashes tenant+owner+url+label into a
+                    // truncated SHA-256 digest, so `available.package.id`
+                    // reaching this arm is the caller's own minted id under
+                    // cryptographic collision resistance — a foreign-owner
+                    // takeover here would require a digest collision across
+                    // owners, astronomically unlikely rather than
+                    // structurally prevented.
                     Some(owner) => owner,
                     None => decide_install_on_existing(
                         &available.package.id,

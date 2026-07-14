@@ -46,6 +46,10 @@ pub(crate) struct HostedMcpExtensionId(ExtensionId);
 pub(crate) struct NotHostedMcp;
 
 impl HostedMcpExtensionId {
+    /// `account_label` is deliberately folded into the mint digest now even
+    /// though every production call site passes `""` today (single-account
+    /// ids only) — this keeps the id stable when multi-account support lands
+    /// additively later, instead of changing the hash shape retroactively.
     pub(crate) fn mint(
         tenant_id: &TenantId,
         owner: &UserId,

@@ -117,6 +117,10 @@ async fn registered_load_rejects_valid_shaped_id_with_wrong_digest() {
 /// never contains `UserRegistered` packages (T1's fix for the boot-leak
 /// blocker in the plan). Today `restore_extension_lifecycle_state` has no
 /// registered-store fallback on `catalog.resolve()` miss, so this fails.
+/// Also implicitly covers `migrate_unminted_registered_ids`: it seeds the row
+/// under the unminted literal `REGISTERED_EXTENSION_ID` and asserts on the
+/// minted id restore must produce, so re-seeding with an already-minted id
+/// would silently drop that coverage.
 #[tokio::test]
 async fn restore_publishes_owner_registered_extension_without_static_catalog_entry() {
     let dir = tempfile::tempdir().expect("tempdir");
