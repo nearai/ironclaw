@@ -1077,3 +1077,112 @@ async fn migration_continues_after_one_owner_io_failure() {
         "the broken owner's descriptor must not have been migrated"
     );
 }
+
+const SIBLING_MIGRATION_OWNER_USER_ID: &str = "a2222222-7fe5-474c-965a-67cb69df3d14";
+const SIBLING_HEALTHY_EXTENSION_ID: &str = "sibling-healthy-mcp";
+const SIBLING_BROKEN_EXTENSION_ID: &str = "sibling-broken-mcp";
+const SIBLING_HEALTHY_MANIFEST_TOML: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "sibling-healthy-mcp"
+name = "Sibling Healthy MCP"
+version = "0.1.0"
+description = "Healthy sibling legacy descriptor (mint-failure containment fixture)"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "http://127.0.0.1:9/mcp"
+"#;
+// No `[runtime].url` — `minted_manifest_for_legacy` returns `Err` for this
+// descriptor, the exact per-sibling failure Fix 1's skip-and-log contains.
+const SIBLING_BROKEN_MANIFEST_TOML: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "sibling-broken-mcp"
+name = "Sibling Broken MCP"
+version = "0.1.0"
+description = "Legacy descriptor with no hosted MCP URL (mint-failure containment fixture)"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+"#;
+
+/// Pins Fix 1's `migrate_legacy_owner_dir` site: a mint failure on ONE legacy
+/// descriptor must not abort processing of the REST of that owner's sibling
+/// descriptors. The broken sibling's legacy manifest and the owner directory
+/// itself (via `migrated_all = false`) must stay intact, while a healthy
+/// sibling under the SAME owner directory still migrates successfully.
+#[tokio::test]
+async fn legacy_owner_migration_skips_one_minting_failure_and_migrates_healthy_sibling() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage_root = dir.path().join("local-dev");
+    std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
+
+    let healthy_legacy_dir = storage_root
+        .join("system/extensions/registered")
+        .join(SIBLING_MIGRATION_OWNER_USER_ID)
+        .join(SIBLING_HEALTHY_EXTENSION_ID);
+    std::fs::create_dir_all(&healthy_legacy_dir).expect("healthy sibling legacy dir");
+    std::fs::write(
+        healthy_legacy_dir.join("manifest.toml"),
+        SIBLING_HEALTHY_MANIFEST_TOML,
+    )
+    .expect("write healthy sibling legacy manifest");
+
+    let broken_legacy_dir = storage_root
+        .join("system/extensions/registered")
+        .join(SIBLING_MIGRATION_OWNER_USER_ID)
+        .join(SIBLING_BROKEN_EXTENSION_ID);
+    std::fs::create_dir_all(&broken_legacy_dir).expect("broken sibling legacy dir");
+    std::fs::write(
+        broken_legacy_dir.join("manifest.toml"),
+        SIBLING_BROKEN_MANIFEST_TOML,
+    )
+    .expect("write broken sibling legacy manifest");
+
+    let filesystem = mounted_local_filesystem(&storage_root);
+
+    migrate_legacy_owner_layout(&filesystem).await.expect(
+        "one sibling's mint failure must be skip-and-logged, never abort the whole owner's \
+         migration pass",
+    );
+
+    let default_tenant =
+        TenantId::from_trusted(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string());
+    let owner = UserId::new(SIBLING_MIGRATION_OWNER_USER_ID).expect("valid owner id");
+    let healthy_minted_id = minted_extension_id(&default_tenant, &owner, "http://127.0.0.1:9/mcp");
+
+    let migrated_healthy_manifest = storage_root
+        .join("system/extensions/registered")
+        .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
+        .join(SIBLING_MIGRATION_OWNER_USER_ID)
+        .join(healthy_minted_id.as_str())
+        .join("manifest.toml");
+    assert!(
+        migrated_healthy_manifest.is_file(),
+        "the healthy sibling must still migrate to the tenant-scoped path despite the broken \
+         sibling's mint failure"
+    );
+    assert!(
+        !healthy_legacy_dir.exists(),
+        "the healthy sibling's legacy directory must be removed once migrated"
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(broken_legacy_dir.join("manifest.toml"))
+            .expect("read broken sibling's legacy manifest"),
+        SIBLING_BROKEN_MANIFEST_TOML,
+        "the broken sibling's legacy manifest must be left byte-unchanged, not deleted or \
+         corrupted"
+    );
+    assert!(
+        storage_root
+            .join("system/extensions/registered")
+            .join(SIBLING_MIGRATION_OWNER_USER_ID)
+            .exists(),
+        "the legacy owner directory must not be deleted while the broken sibling's descriptor \
+         remains unmigrated inside it"
+    );
+}

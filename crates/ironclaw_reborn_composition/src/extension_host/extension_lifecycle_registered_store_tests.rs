@@ -72,6 +72,20 @@ fn hosted_mcp_id_parse_rejects_foreign_shape() {
     assert!(HostedMcpExtensionId::parse(&foreign).is_err());
 }
 
+#[test]
+fn hosted_mcp_mint_rejects_syntactically_malformed_url() {
+    let tenant = TenantId::from_trusted("tenant-a".to_string());
+    let owner = UserId::new(OWNER_USER_ID).expect("valid owner id");
+    assert!(HostedMcpExtensionId::mint(&tenant, &owner, "not a url at all", "").is_err());
+}
+
+#[test]
+fn hosted_mcp_mint_rejects_hostless_url() {
+    let tenant = TenantId::from_trusted("tenant-a".to_string());
+    let owner = UserId::new(OWNER_USER_ID).expect("valid owner id");
+    assert!(HostedMcpExtensionId::mint(&tenant, &owner, "mailto:foo@bar.com", "").is_err());
+}
+
 #[tokio::test]
 async fn registered_load_rejects_valid_shaped_id_with_wrong_digest() {
     let temp = tempfile::tempdir().expect("tempdir");
