@@ -11,16 +11,12 @@ use ironclaw_product_workflow::{
     TriggerRunThreadScope,
 };
 use ironclaw_triggers::{
-    BlockedActiveRunKind, TriggerActiveRunLookup, TriggerActiveRunState,
-    TriggerActiveRunStateRequest, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
-    TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus, TriggerSchedule,
-    TriggerSourceKind, TriggerState,
+    ActiveHoldProjection, ActiveHoldReason, TriggerActiveRunLookup, TriggerError, TriggerId,
+    TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus,
+    TriggerSchedule, TriggerSourceKind, TriggerState, active_holds_for_records,
 };
 
 const AUTOMATION_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
-/// Display cap for skipped-slot counting; the wire flags truncation so the
-/// panel renders "99+" (#5886).
-const SKIPPED_RUNS_DISPLAY_CAP: u32 = 99;
 
 /// WebUI panel facade for automation (trigger) listing.
 ///
@@ -95,7 +91,9 @@ impl RebornAutomationProductFacade {
     }
 
     /// Batch-resolve active-run states for records holding an active fire and
-    /// derive each record's hold projection (#5886). Lookup failure degrades
+    /// derive each record's hold projection (#5886), shared with
+    /// `ironclaw_host_runtime::first_party_tools::trigger_management` via
+    /// `ironclaw_triggers::active_holds_for_records`. Lookup failure degrades
     /// to "no hold" — this is a display-only projection and must not fail the
     /// panel list.
     async fn active_holds_for_records(
@@ -104,49 +102,12 @@ impl RebornAutomationProductFacade {
         deadline: tokio::time::Instant,
         now: Timestamp,
     ) -> HashMap<TriggerId, RebornAutomationActiveHold> {
-        let mut requests = Vec::new();
-        let mut requested_records = Vec::new();
-        for record in records {
-            let (Some(fire_slot), Some(run_id)) = (record.active_fire_slot, record.active_run_ref)
-            else {
-                continue;
-            };
-            requests.push(TriggerActiveRunStateRequest {
-                tenant_id: record.tenant_id.clone(),
-                trigger_id: record.trigger_id,
-                fire_slot,
-                run_id,
-            });
-            requested_records.push(record);
-        }
-        if requests.is_empty() {
-            return HashMap::new();
-        }
-        let Ok(states) =
-            tokio::time::timeout_at(deadline, self.active_run_lookup.active_run_states(requests))
-                .await
-        else {
-            // silent-ok: display-only automation-hold projection; a slow
-            // snapshot source must not fail or delay the panel list.
-            tracing::debug!("active-run lookup timed out while deriving automation holds");
-            return HashMap::new();
-        };
-        let mut holds = HashMap::new();
-        for (record, state) in requested_records.into_iter().zip(states) {
-            let state = match state {
-                Ok(state) => state,
-                Err(error) => {
-                    // silent-ok: display-only automation-hold projection;
-                    // snapshot lookup failure must not fail the panel list.
-                    tracing::debug!(%error, "active-run lookup failed while deriving a hold");
-                    continue;
-                }
-            };
-            if let Some(hold) = active_hold_from_state(record, state, now) {
-                holds.insert(record.trigger_id, hold);
-            }
-        }
-        holds
+        let timeout = deadline.saturating_duration_since(tokio::time::Instant::now());
+        active_holds_for_records(&*self.active_run_lookup, records, now, timeout)
+            .await
+            .into_iter()
+            .map(|(trigger_id, hold)| (trigger_id, wire_hold_from_projection(hold)))
+            .collect()
     }
 }
 
@@ -448,45 +409,22 @@ fn automation_info_from_record(
     }
 }
 
-/// Derive the user-facing hold projection for a record whose active fire
-/// resolved to `state` (#5886). Terminal runs are omitted (cleanup will
-/// release the fire) and Missing stays conservative (possibly a stale
-/// snapshot) — omission means "show nothing", never an error.
-fn active_hold_from_state(
-    record: &TriggerRecord,
-    state: TriggerActiveRunState,
-    now: Timestamp,
-) -> Option<RebornAutomationActiveHold> {
-    let reason = match state {
-        TriggerActiveRunState::Blocked { kind } => match kind {
-            BlockedActiveRunKind::Approval => RebornAutomationHoldReason::Approval,
-            BlockedActiveRunKind::Auth => RebornAutomationHoldReason::Auth,
-            BlockedActiveRunKind::Other => RebornAutomationHoldReason::Other,
+/// Maps the crate-neutral hold projection (`ironclaw_triggers`) to this
+/// facade's wire DTO. The reason/skip-count derivation itself lives in
+/// `ironclaw_triggers::active_hold_projection` — only the wire-type mapping
+/// belongs here (#5886).
+fn wire_hold_from_projection(hold: ActiveHoldProjection) -> RebornAutomationActiveHold {
+    RebornAutomationActiveHold {
+        reason: match hold.reason {
+            ActiveHoldReason::Approval => RebornAutomationHoldReason::Approval,
+            ActiveHoldReason::Auth => RebornAutomationHoldReason::Auth,
+            ActiveHoldReason::InProgress => RebornAutomationHoldReason::InProgress,
+            ActiveHoldReason::Other => RebornAutomationHoldReason::Other,
         },
-        TriggerActiveRunState::Nonterminal => RebornAutomationHoldReason::InProgress,
-        TriggerActiveRunState::Terminal { .. } | TriggerActiveRunState::Missing => return None,
-    };
-    let since = record.active_fire_slot;
-    let skipped = since.and_then(|slot| {
-        match record
-            .schedule
-            .skipped_slots_between(slot, now, SKIPPED_RUNS_DISPLAY_CAP)
-        {
-            Ok(count) => Some(count),
-            Err(error) => {
-                // silent-ok: display-only skip counter; a malformed stored
-                // schedule must not fail the panel list.
-                tracing::debug!(%error, "skipped-slot derivation failed for automation hold");
-                None
-            }
-        }
-    });
-    Some(RebornAutomationActiveHold {
-        reason,
-        since,
-        skipped_runs: skipped.map(|s| s.count),
-        skipped_runs_capped: skipped.map(|s| s.capped).unwrap_or_default(),
-    })
+        since: hold.since,
+        skipped_runs: hold.skipped_runs,
+        skipped_runs_capped: hold.skipped_runs_capped,
+    }
 }
 
 /// Maps a trigger record's source kind + schedule to the wire DTO source.

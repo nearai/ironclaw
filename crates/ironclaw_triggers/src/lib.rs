@@ -1314,12 +1314,14 @@ pub use libsql::LibSqlTriggerRepository;
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresTriggerRepository;
 pub use worker::{
-    BlockedActiveRunKind, MissingTriggerActiveRunLookup, NoopTriggerFireSettlementObserver,
+    ACTIVE_HOLD_SKIPPED_RUNS_CAP, ActiveHoldProjection, ActiveHoldReason, BlockedActiveRunKind,
+    MissingTriggerActiveRunLookup, NoopTriggerFireSettlementObserver,
     TriggerAcceptedFireSettlement, TriggerActiveRunLookup, TriggerActiveRunState,
     TriggerActiveRunStateRequest, TriggerFireSettlementObserver, TriggerPollerFailureReason,
     TriggerPollerFireOutcome, TriggerPollerFireReport, TriggerPollerTickReport,
     TriggerPollerWorker, TriggerPollerWorkerConfig, TriggerPollerWorkerDeps,
     TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter, TrustedTriggerSubmitRequest,
+    active_hold_projection, active_holds_for_records,
 };
 
 #[derive(Clone, Default)]

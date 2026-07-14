@@ -13,10 +13,12 @@ mod report;
 
 pub use config::{TriggerPollerWorkerConfig, TriggerPollerWorkerDeps};
 pub use ports::{
-    BlockedActiveRunKind, MissingTriggerActiveRunLookup, NoopTriggerFireSettlementObserver,
+    ACTIVE_HOLD_SKIPPED_RUNS_CAP, ActiveHoldProjection, ActiveHoldReason, BlockedActiveRunKind,
+    MissingTriggerActiveRunLookup, NoopTriggerFireSettlementObserver,
     TriggerAcceptedFireSettlement, TriggerActiveRunLookup, TriggerActiveRunState,
     TriggerActiveRunStateRequest, TriggerFireSettlementObserver, TrustedTriggerFireSubmitOutcome,
-    TrustedTriggerFireSubmitter, TrustedTriggerSubmitRequest,
+    TrustedTriggerFireSubmitter, TrustedTriggerSubmitRequest, active_hold_projection,
+    active_holds_for_records,
 };
 pub use report::{
     TriggerPollerFailureReason, TriggerPollerFireOutcome, TriggerPollerFireReport,

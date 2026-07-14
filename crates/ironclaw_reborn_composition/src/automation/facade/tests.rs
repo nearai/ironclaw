@@ -1382,3 +1382,37 @@ async fn automation_facade_non_active_record_never_calls_the_lookup() {
         "a record with no active fire must never surface a hold"
     );
 }
+
+#[tokio::test]
+async fn automation_facade_claimed_but_unaccepted_record_reports_other_without_lookup() {
+    // A record with `active_fire_slot` set but `active_run_ref` still `None`
+    // is mid claim-to-accept (worker::due_fire::process_claimed_fire). There
+    // is no run_id to look up yet, so the hold must resolve to `Other`
+    // directly — the panic-lookup proves the lookup is never called (#5886).
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let c = caller();
+    let id = TriggerId::new();
+    let mut record = make_record(id, &c, TriggerState::Scheduled, "Claimed", "* * * * *");
+    record.active_fire_slot = Some(now() - chrono::Duration::minutes(5));
+    record.active_run_ref = None;
+    repo.upsert_trigger(record).await.expect("upsert");
+
+    let lookup = Arc::new(ScriptedActiveRunLookup {
+        outcome: ScriptedActiveRunOutcome::Panic,
+    });
+    let facade = RebornAutomationProductFacade::new(repo, lookup);
+    let result = facade
+        .list_automations(c, automation_list_request(10, 0))
+        .await
+        .expect("list automations");
+
+    let found = result
+        .iter()
+        .find(|a| a.automation_id == id.to_string())
+        .expect("record present");
+    let hold = found
+        .active_hold
+        .as_ref()
+        .expect("claimed-but-unaccepted fire must surface a hold");
+    assert_eq!(hold.reason, RebornAutomationHoldReason::Other);
+}
