@@ -74,7 +74,8 @@ MOCK_CHANNEL_EXTENSION = {
     "name": "telegram-channel",
     "package_ref": {"kind": "extension", "id": "telegram-channel"},
     "display_name": "Telegram Channel",
-    "kind": "wasm_channel",
+    "runtime": "wasm",
+    "surfaces": [{"kind": "channel", "inbound": True, "outbound": True}],
     "description": "Configured messaging channel.",
     "active": True,
     "authenticated": True,
@@ -85,7 +86,8 @@ MOCK_MCP_EXTENSION = {
     "name": "beta-mcp",
     "package_ref": {"kind": "extension", "id": "beta-mcp"},
     "display_name": "Beta MCP",
-    "kind": "mcp_server",
+    "runtime": "mcp",
+    "surfaces": [{"kind": "tool"}],
     "description": "Installed MCP server.",
     "active": False,
     "authenticated": False,
@@ -452,7 +454,7 @@ async def test_reborn_legacy_settings_channels_search(
         await expect(page.get_by_text("Telegram Channel", exact=True)).to_be_visible(
             timeout=5000
         )
-        await expect(page.get_by_text("Beta MCP", exact=True)).to_be_visible(timeout=5000)
+        await expect(page.get_by_text("Beta MCP", exact=True)).to_have_count(0)
 
         await search.fill("telegram")
         await expect(page.get_by_text("Telegram Channel", exact=True)).to_be_visible()

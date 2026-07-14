@@ -452,9 +452,13 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         class FakePage:
             def __init__(self) -> None:
                 self.gotos: list[tuple[str, str | None]] = []
+                self.reloads: list[str | None] = []
 
             async def goto(self, url: str, wait_until: str | None = None) -> None:
                 self.gotos.append((url, wait_until))
+
+            async def reload(self, wait_until: str | None = None) -> None:
+                self.reloads.append(wait_until)
 
             def locator(self, selector: str) -> str:
                 return selector
@@ -480,18 +484,22 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         ) -> None:
             await action(fake_page)
 
+        slack_installed = False
+
         async def fake_webui_json(
             _page: object,
             method: str,
             path: str,
             payload: dict[str, object] | None = None,
         ) -> dict[str, object]:
+            nonlocal slack_installed
             fetched_paths.append(path)
             if method == "POST" and path == "/api/webchat/v2/extensions/install":
                 self.assertEqual(
                     payload,
                     {"package_ref": {"kind": "extension", "id": "slack"}},
                 )
+                slack_installed = True
                 return {
                     "success": True,
                     "message": "Slack installed",
@@ -527,30 +535,39 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 }
             self.assertEqual(method, "GET")
             if path == "/api/webchat/v2/extensions":
-                return {"extensions": []}
-            self.assertEqual(path, "/api/webchat/v2/channels/connectable")
-            return {
-                "channels": [
-                    {
-                        "channel": "slack",
-                        "display_name": "Slack",
-                        "strategy": "admin_managed_channels",
-                        "action": {"title": "Choose Slack channel"},
-                    },
-                    {
-                        "channel": "slack",
-                        "display_name": "Slack",
-                        "strategy": "oauth",
-                        "action": {
-                            "title": "Slack account connection",
-                            "instructions": (
-                                "Connect Slack with OAuth from the extension "
-                                "configuration, then message the Slack bot directly."
-                            ),
-                        },
-                    },
-                ]
-            }
+                if not slack_installed:
+                    return {"extensions": []}
+                return {
+                    "extensions": [
+                        {
+                            "package_ref": {"kind": "extension", "id": "slack"},
+                            "display_name": "Slack",
+                            "runtime": "wasm",
+                            "surfaces": [
+                                {"kind": "tool"},
+                                {
+                                    "kind": "channel",
+                                    "inbound": True,
+                                    "outbound": True,
+                                    "connected": False,
+                                    "connection": {
+                                        "channel": "slack",
+                                        "strategy": "oauth",
+                                        "instructions": (
+                                            "Connect Slack with OAuth from the extension "
+                                            "configuration, then message the Slack bot directly."
+                                        ),
+                                        "input_placeholder": "",
+                                        "submit_label": "Connect Slack",
+                                        "error_message": "Slack OAuth connection failed.",
+                                    },
+                                },
+                                {"kind": "auth"},
+                            ],
+                        }
+                    ]
+                }
+            self.fail(f"unexpected GET path: {path}")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output_dir = Path(tmpdir)
@@ -639,12 +656,14 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 )
             ],
         )
+        self.assertEqual(fake_page.reloads, ["domcontentloaded"])
         observed_expectations = [text for _selector, text, _timeout in expected_texts]
         self.assertIn("Channels", observed_expectations)
-        self.assertIn("Slack workspace setup", observed_expectations)
-        self.assertNotIn("Slack account connection", observed_expectations)
-        self.assertNotIn("Connect Slack with OAuth", observed_expectations)
-        self.assertNotIn("Connect Slack", observed_expectations)
+        self.assertTrue(
+            any("Connect Slack with OAuth" in text for text in observed_expectations)
+        )
+        self.assertIn("Connect Slack", observed_expectations)
+        self.assertNotIn("Slack workspace setup", observed_expectations)
         self.assertNotIn("pairing code", observed_expectations)
         self.assertFalse(any("/v2/chat" in url for url, _wait in fake_page.gotos))
         self.assertEqual(
@@ -652,15 +671,15 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "/v2/extensions/channels",
         )
         self.assertEqual(
-            result.details["slack_connect_title"],
-            "Slack account connection",
+            result.details["slack_connect_submit_label"],
+            "Connect Slack",
         )
         self.assertEqual(
             fetched_paths,
             [
-                "/api/webchat/v2/channels/connectable",
                 "/api/webchat/v2/extensions",
                 "/api/webchat/v2/extensions/install",
+                "/api/webchat/v2/extensions",
                 "/api/reborn/product-auth/accounts/list",
                 "/api/webchat/v2/extensions/slack/setup/oauth/start",
             ],

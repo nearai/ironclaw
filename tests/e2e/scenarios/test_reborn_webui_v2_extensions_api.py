@@ -49,6 +49,9 @@ async def test_reborn_v2_extension_lifecycle_served(reborn_v2_server):
         )
         assert web_access_entry["package_ref"] == WEB_ACCESS_PACKAGE_REF
         assert web_access_entry["display_name"] == "Web Access"
+        assert web_access_entry["runtime"] == "first_party"
+        assert {"kind": "tool"} in web_access_entry["surfaces"]
+        assert "kind" not in web_access_entry
         assert web_access_entry["installed"] is False
 
         listed = await client.get(
@@ -80,7 +83,9 @@ async def test_reborn_v2_extension_lifecycle_served(reborn_v2_server):
                 if extension["package_ref"]["id"] == "web-access"
             )
             assert installed["display_name"] == "Web Access"
-            assert installed["kind"] == "first_party"
+            assert installed["runtime"] == "first_party"
+            assert {"kind": "tool"} in installed["surfaces"]
+            assert "kind" not in installed
             assert installed["has_auth"] is False
             assert installed["needs_setup"] in {False, True}
             assert installed["activation_status"] in {"installed", "configured", "active"}

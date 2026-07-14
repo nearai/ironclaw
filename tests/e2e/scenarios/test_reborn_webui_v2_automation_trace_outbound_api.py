@@ -18,7 +18,7 @@ pytest_plugins = ["reborn_webui_harness"]
 READ_PATHS = [
     "/api/webchat/v2/automations",
     "/api/webchat/v2/traces/credit",
-    "/api/webchat/v2/channels/connectable",
+    "/api/webchat/v2/extensions",
     "/api/webchat/v2/outbound/preferences",
     "/api/webchat/v2/outbound/targets",
 ]
@@ -136,7 +136,7 @@ async def test_reborn_v2_trace_credits_and_hold_authorize_served(reborn_v2_serve
         assert malformed_submission.status_code == 400
 
 
-async def test_reborn_v2_outbound_preferences_targets_and_channels_served(
+async def test_reborn_v2_outbound_preferences_targets_and_extension_channels_served(
     reborn_v2_server,
 ):
     headers = reborn_bearer_headers()
@@ -176,15 +176,35 @@ async def test_reborn_v2_outbound_preferences_targets_and_channels_served(
         assert isinstance(targets_body["targets"], list)
         assert targets_body.get("next_cursor") in {None, ""}
 
-        channels = await client.get(
-            f"{reborn_v2_server}/api/webchat/v2/channels/connectable",
+        listed_extensions = await client.get(
+            f"{reborn_v2_server}/api/webchat/v2/extensions",
             timeout=15,
         )
-        channels.raise_for_status()
-        channels_body = channels.json()
-        assert isinstance(channels_body["channels"], list)
-        for channel in channels_body["channels"]:
-            assert channel["channel"]
-            assert channel["display_name"]
-            assert channel["strategy"]
-            assert channel["action"]["submit_label"]
+        listed_extensions.raise_for_status()
+        extensions = listed_extensions.json()["extensions"]
+        assert isinstance(extensions, list)
+        channel_extensions = [
+            extension
+            for extension in extensions
+            if any(
+                isinstance(surface, dict) and surface.get("kind") == "channel"
+                for surface in extension.get("surfaces", [])
+            )
+        ]
+        for extension in channel_extensions:
+            assert extension["package_ref"]["kind"] == "extension"
+            assert extension["package_ref"]["id"]
+            assert extension["display_name"]
+            assert extension["runtime"]
+            assert "kind" not in extension
+            for surface in extension["surfaces"]:
+                if surface.get("kind") != "channel":
+                    continue
+                assert isinstance(surface["inbound"], bool)
+                assert isinstance(surface["outbound"], bool)
+                connection = surface.get("connection")
+                if connection is not None:
+                    assert connection["channel"]
+                    assert connection["strategy"] in {"oauth", "inbound_proof_code"}
+                    assert connection["instructions"]
+                    assert connection["submit_label"]

@@ -17,10 +17,30 @@ def _package_ref(package_id: str) -> dict:
     return {"kind": "extension", "id": package_id}
 
 
+def _tool_surfaces(*, auth: bool = False) -> list[dict]:
+    surfaces = [{"kind": "tool"}]
+    if auth:
+        surfaces.append({"kind": "auth"})
+    return surfaces
+
+
+def _channel_surfaces(
+    *, auth: bool = False, connection: dict | None = None
+) -> list[dict]:
+    channel = {"kind": "channel", "inbound": True, "outbound": True}
+    if connection is not None:
+        channel.update({"connected": False, "connection": connection})
+    surfaces = [channel]
+    if auth:
+        surfaces.append({"kind": "auth"})
+    return surfaces
+
+
 REGISTRY_TOOL = {
     "package_ref": _package_ref("registry-tool"),
     "display_name": "Registry Tool",
-    "kind": "wasm_tool",
+    "runtime": "wasm",
+    "surfaces": _tool_surfaces(),
     "description": "A registry WASM tool",
     "keywords": ["search", "utility"],
     "installed": False,
@@ -29,7 +49,8 @@ REGISTRY_TOOL = {
 REGISTRY_MCP = {
     "package_ref": _package_ref("registry-mcp"),
     "display_name": "Registry MCP Server",
-    "kind": "mcp_server",
+    "runtime": "mcp",
+    "surfaces": _tool_surfaces(),
     "description": "An MCP server from the registry",
     "keywords": ["tools"],
     "installed": False,
@@ -38,7 +59,8 @@ REGISTRY_MCP = {
 ACTIVE_TOOL = {
     "package_ref": _package_ref("active-tool"),
     "display_name": "Active Tool",
-    "kind": "wasm_tool",
+    "runtime": "wasm",
+    "surfaces": _tool_surfaces(),
     "description": "An installed WASM tool extension",
     "active": True,
     "authenticated": True,
@@ -51,7 +73,8 @@ ACTIVE_TOOL = {
 INACTIVE_MCP = {
     "package_ref": _package_ref("inactive-mcp"),
     "display_name": "Inactive MCP",
-    "kind": "mcp_server",
+    "runtime": "mcp",
+    "surfaces": _tool_surfaces(),
     "description": "An inactive MCP server",
     "active": False,
     "authenticated": False,
@@ -64,7 +87,8 @@ INACTIVE_MCP = {
 CHANNEL_READY = {
     "package_ref": _package_ref("telegram-channel"),
     "display_name": "Telegram Channel",
-    "kind": "wasm_channel",
+    "runtime": "wasm",
+    "surfaces": _channel_surfaces(auth=True),
     "description": "A configured messaging channel",
     "active": True,
     "authenticated": True,
@@ -78,7 +102,18 @@ CHANNEL_READY = {
 TELEGRAM_CHANNEL_SETUP = {
     "package_ref": _package_ref("telegram"),
     "display_name": "Telegram",
-    "kind": "wasm_channel",
+    "runtime": "wasm",
+    "surfaces": _channel_surfaces(
+        auth=True,
+        connection={
+            "channel": "telegram",
+            "strategy": "inbound_proof_code",
+            "instructions": "Message the Telegram bot, then paste its pairing code.",
+            "input_placeholder": "ABC123",
+            "submit_label": "Connect Telegram",
+            "error_message": "Invalid or expired Telegram pairing code.",
+        },
+    ),
     "description": "Telegram bot channel",
     "active": False,
     "authenticated": False,
@@ -92,7 +127,8 @@ TELEGRAM_CHANNEL_SETUP = {
 AVAILABLE_CHANNEL = {
     "package_ref": _package_ref("slack-channel"),
     "display_name": "Slack Channel",
-    "kind": "wasm_channel",
+    "runtime": "wasm",
+    "surfaces": _channel_surfaces(auth=True),
     "description": "A registry channel",
     "keywords": ["slack"],
     "installed": False,
@@ -101,7 +137,8 @@ AVAILABLE_CHANNEL = {
 LABEL_CHANNEL_BASE = {
     "package_ref": _package_ref("label-channel"),
     "display_name": "Label Channel",
-    "kind": "wasm_channel",
+    "runtime": "wasm",
+    "surfaces": _channel_surfaces(),
     "description": "A WASM channel used to assert card action labels.",
     "active": False,
     "authenticated": False,
@@ -113,7 +150,8 @@ LABEL_CHANNEL_BASE = {
 CONFIG_TOOL = {
     "package_ref": _package_ref("config-tool"),
     "display_name": "Config Tool",
-    "kind": "wasm_tool",
+    "runtime": "wasm",
+    "surfaces": _tool_surfaces(auth=True),
     "description": "A tool that requires manual setup.",
     "active": False,
     "authenticated": False,
@@ -127,7 +165,8 @@ CONFIG_TOOL = {
 OAUTH_TOOL = {
     "package_ref": _package_ref("oauth-tool"),
     "display_name": "OAuth Tool",
-    "kind": "wasm_tool",
+    "runtime": "wasm",
+    "surfaces": _tool_surfaces(auth=True),
     "description": "A tool that requires OAuth setup.",
     "active": False,
     "authenticated": False,
@@ -141,7 +180,8 @@ OAUTH_TOOL = {
 CONFIG_TOOL_REGISTRY = {
     "package_ref": _package_ref("config-tool"),
     "display_name": "Config Tool",
-    "kind": "wasm_tool",
+    "runtime": "wasm",
+    "surfaces": _tool_surfaces(auth=True),
     "description": "A registry tool that requires manual setup.",
     "keywords": ["config"],
     "installed": True,
@@ -253,7 +293,6 @@ async def _open_mocked_extensions_page(
                     package_id,
                     {
                         "name": package_id,
-                        "kind": "wasm_channel",
                         "secrets": [],
                         "fields": [],
                         "onboarding": None,
@@ -385,11 +424,7 @@ async def _open_mocked_extensions_page(
 
         await route.continue_()
 
-    async def handle_connectable_channels(route):
-        await fulfill_json(route, {"channels": []})
-
     await page.route("**/api/webchat/v2/extensions**", handle_extensions)
-    await page.route("**/api/webchat/v2/channels/connectable", handle_connectable_channels)
     await page.goto(f"{reborn_v2_server}/v2/extensions/{tab}?token={REBORN_V2_AUTH_TOKEN}")
     await expect(page.get_by_text("Registry").first).to_be_visible(timeout=15000)
 
@@ -419,7 +454,6 @@ def _label_channel(**overrides):
 def _manual_config_setup_payload() -> dict:
     return {
         "name": "config-tool",
-        "kind": "wasm_tool",
         "secrets": [
             {
                 "name": "API_TOKEN",
@@ -750,7 +784,6 @@ async def test_reborn_legacy_install_setup_required_channel_opens_setup_modal(
         setup_payloads={
             "slack-channel": {
                 "name": "slack-channel",
-                "kind": "wasm_channel",
                 "secrets": [
                     {
                         "name": "SLACK_BOT_TOKEN",
@@ -935,7 +968,8 @@ async def test_reborn_legacy_extensions_remove_clears_installed_state(
     active_tool_registry_entry = {
         "package_ref": _package_ref("active-tool"),
         "display_name": "Active Tool",
-        "kind": "wasm_tool",
+        "runtime": "wasm",
+        "surfaces": _tool_surfaces(),
         "description": "An installed WASM tool extension",
         "keywords": ["search"],
         "installed": True,
@@ -1302,7 +1336,6 @@ async def test_reborn_legacy_channel_reconnect_opens_setup_modal_without_activat
         setup_payloads={
             "label-channel": {
                 "name": "label-channel",
-                "kind": "wasm_channel",
                 "secrets": [
                     {
                         "name": "BOT_TOKEN",
@@ -1502,7 +1535,6 @@ async def test_reborn_legacy_configure_modal_saves_manual_secret_and_fields(
         setup_payloads={
             "config-tool": {
                 "name": "config-tool",
-                "kind": "wasm_tool",
                 "secrets": [
                     {
                         "name": "API_TOKEN",
@@ -1580,7 +1612,6 @@ async def test_reborn_legacy_configure_modal_renders_field_variants(
         setup_payloads={
             "config-tool": {
                 "name": "config-tool",
-                "kind": "wasm_tool",
                 "secrets": [
                     {
                         "name": "API_TOKEN",
@@ -1662,7 +1693,6 @@ async def test_reborn_legacy_configure_modal_setup_url_requires_https(
             setup_payloads={
                 "config-tool": {
                     "name": "config-tool",
-                    "kind": "wasm_tool",
                     "secrets": [
                         {
                             "name": "API_TOKEN",
@@ -1727,7 +1757,6 @@ async def test_reborn_legacy_configure_handles_selector_sensitive_package_ids(
         setup_payloads={
             package_id: {
                 "name": package_id,
-                "kind": "wasm_tool",
                 "secrets": [
                     {
                         "name": "API_TOKEN",
@@ -1789,7 +1818,6 @@ async def test_reborn_legacy_configure_modal_blank_existing_secret_is_not_submit
         setup_payloads={
             "config-tool": {
                 "name": "config-tool",
-                "kind": "wasm_tool",
                 "secrets": [
                     {
                         "name": "API_TOKEN",
@@ -1850,7 +1878,6 @@ async def test_reborn_legacy_configure_modal_save_failure_stays_open(
         setup_payloads={
             "config-tool": {
                 "name": "config-tool",
-                "kind": "wasm_tool",
                 "secrets": [
                     {
                         "name": "API_TOKEN",
@@ -1943,7 +1970,6 @@ async def test_reborn_legacy_configure_modal_auto_resolved_setup_has_no_manual_f
         setup_payloads={
             "auto-resolved-oauth-tool": {
                 "name": "auto-resolved-oauth-tool",
-                "kind": "wasm_tool",
                 "secrets": [],
                 "fields": [],
                 "onboarding": None,
@@ -2068,7 +2094,6 @@ async def test_reborn_legacy_telegram_setup_preserves_token_characters(
         setup_payloads={
             "telegram": {
                 "name": "telegram",
-                "kind": "wasm_channel",
                 "secrets": [
                     {
                         "name": "telegram_bot_token",
@@ -2146,7 +2171,6 @@ async def test_reborn_legacy_configure_oauth_requires_https_authorization_url(
         setup_payloads={
             "oauth-tool": {
                 "name": "oauth-tool",
-                "kind": "wasm_tool",
                 "secrets": [
                     {
                         "name": "GOOGLE_AUTH",
@@ -2227,7 +2251,6 @@ async def test_reborn_legacy_configure_oauth_start_failure_stays_visible(
         setup_payloads={
             "oauth-tool": {
                 "name": "oauth-tool",
-                "kind": "wasm_tool",
                 "secrets": [
                     {
                         "name": "GOOGLE_AUTH",
@@ -2316,7 +2339,6 @@ async def test_reborn_legacy_configure_oauth_accepts_uppercase_https_url(
         setup_payloads={
             "oauth-tool": {
                 "name": "oauth-tool",
-                "kind": "wasm_tool",
                 "secrets": [
                     {
                         "name": "GOOGLE_AUTH",
@@ -2399,7 +2421,7 @@ async def test_reborn_legacy_configure_oauth_accepts_uppercase_https_url(
         await harness["context"].close()
 
 
-async def test_reborn_legacy_extensions_channels_and_mcp_tabs_render(
+async def test_reborn_legacy_extensions_channels_and_tools_tabs_render(
     reborn_v2_server, reborn_v2_browser
 ):
     harness = await _open_mocked_extensions_page(
@@ -2411,13 +2433,17 @@ async def test_reborn_legacy_extensions_channels_and_mcp_tabs_render(
     )
     try:
         page = harness["page"]
-        await expect(page.get_by_text("Web Gateway")).to_be_visible(timeout=5000)
-        await expect(page.get_by_text("HTTP Webhook")).to_be_visible()
-        await expect(page.get_by_text("Telegram Channel")).to_be_visible()
+        await expect(page.get_by_text("Telegram Channel")).to_be_visible(timeout=5000)
         await expect(page.get_by_text("Slack Channel")).to_be_visible()
+        await expect(page.get_by_text("Inactive MCP", exact=True)).to_have_count(0)
+        await expect(page.get_by_text("Registry MCP Server", exact=True)).to_have_count(0)
 
-        await page.goto(f"{reborn_v2_server}/v2/extensions/mcp?token={REBORN_V2_AUTH_TOKEN}")
+        await page.goto(
+            f"{reborn_v2_server}/v2/extensions/tools?token={REBORN_V2_AUTH_TOKEN}"
+        )
         await expect(page.get_by_text("Inactive MCP", exact=True)).to_be_visible(timeout=5000)
         await expect(page.get_by_text("Registry MCP Server", exact=True)).to_be_visible()
+        await expect(page.get_by_text("Telegram Channel", exact=True)).to_have_count(0)
+        await expect(page.get_by_text("Slack Channel", exact=True)).to_have_count(0)
     finally:
         await harness["context"].close()

@@ -3162,52 +3162,77 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
             wait_until="domcontentloaded",
         )  # type: ignore[attr-defined]
         await expect(page.locator("body")).to_contain_text("Channels", timeout=15000)  # type: ignore[attr-defined]
-        body = await _fetch_webui_json(page, "/api/webchat/v2/channels/connectable")
-        channels = body.get("channels")
-        if not isinstance(channels, list):
-            raise AssertionError(f"connectable channels body did not include a list: {body!r}")
-        slack_channels = [
-            channel
-            for channel in channels
-            if isinstance(channel, dict) and channel.get("channel") == "slack"
-        ]
-        observed["connectable_channel_count"] = len(channels)
-        observed["slack_strategy_count"] = len(slack_channels)
-        observed["slack_strategies"] = [
-            channel.get("strategy")
-            for channel in slack_channels
-            if isinstance(channel, dict)
-        ]
-        personal = next(
-            (
-                channel
-                for channel in slack_channels
-                if isinstance(channel, dict)
-                and channel.get("strategy") == "oauth"
-            ),
-            None,
-        )
-        if not isinstance(personal, dict):
-            raise AssertionError(f"Slack oauth connect strategy missing: {channels!r}")
-        action_body = personal.get("action")
-        if not isinstance(action_body, dict):
-            raise AssertionError(f"Slack connect action missing: {personal!r}")
-        title = str(action_body.get("title") or "")
-        if not title:
-            raise AssertionError(f"Slack connect action title missing: {personal!r}")
-        instructions = str(action_body.get("instructions") or "")
-        if not _slack_connect_instructions_look_valid(instructions):
-            raise AssertionError(f"unexpected Slack connect instructions: {instructions!r}")
         # Extension-scoped OAuth deliberately rejects an absent installation.
         # Exercise the same global install transition as the product UI before
-        # probing the OAuth start surface; do not manufacture per-user setup
-        # state inside the canary. Reruns reuse an existing installation.
+        # reading the installed extension's caller-scoped channel surface.
         await _ensure_extension_installed_on_page(
             page,
             observed,
             package_id="slack",
             display_name="Slack",
         )
+        # The install probe uses the API directly, so refresh the product view
+        # before asserting that its channel surface renders the connection copy.
+        await page.reload(wait_until="domcontentloaded")  # type: ignore[attr-defined]
+        await expect(page.locator("body")).to_contain_text("Channels", timeout=15000)  # type: ignore[attr-defined]
+        body = await _fetch_webui_json(page, "/api/webchat/v2/extensions")
+        extensions = body.get("extensions")
+        if not isinstance(extensions, list):
+            raise AssertionError(f"extensions body did not include a list: {body!r}")
+        slack_extension = next(
+            (
+                extension
+                for extension in extensions
+                if isinstance(extension, dict)
+                and isinstance(extension.get("package_ref"), dict)
+                and extension["package_ref"].get("id") == "slack"
+            ),
+            None,
+        )
+        if not isinstance(slack_extension, dict):
+            raise AssertionError(f"installed Slack extension missing: {extensions!r}")
+        surfaces = slack_extension.get("surfaces")
+        if not isinstance(surfaces, list):
+            raise AssertionError(f"Slack extension surfaces missing: {slack_extension!r}")
+        surface_kinds = {
+            surface.get("kind")
+            for surface in surfaces
+            if isinstance(surface, dict)
+            and isinstance(surface.get("kind"), str)
+        }
+        required_surface_kinds = {"tool", "auth", "channel"}
+        if not required_surface_kinds.issubset(surface_kinds):
+            raise AssertionError(
+                "Slack extension did not expose unified tool, auth, and channel "
+                f"surfaces: {slack_extension!r}"
+            )
+        channel_surfaces = [
+            surface
+            for surface in surfaces
+            if isinstance(surface, dict) and surface.get("kind") == "channel"
+        ]
+        connection = next(
+            (
+                surface.get("connection")
+                for surface in channel_surfaces
+                if isinstance(surface.get("connection"), dict)
+                and surface["connection"].get("channel") == "slack"
+                and surface["connection"].get("strategy") == "oauth"
+            ),
+            None,
+        )
+        if not isinstance(connection, dict):
+            raise AssertionError(
+                f"Slack oauth channel connection missing: {slack_extension!r}"
+            )
+        instructions = str(connection.get("instructions") or "")
+        if not _slack_connect_instructions_look_valid(instructions):
+            raise AssertionError(f"unexpected Slack connect instructions: {instructions!r}")
+        submit_label = str(connection.get("submit_label") or "")
+        if not submit_label:
+            raise AssertionError(
+                f"Slack channel connection submit label missing: {connection!r}"
+            )
         account_scope = _slack_personal_auth_ready_account(personal_auth)
         invocation_id = str(account_scope.get("invocation_id") or "").strip()
         thread_id = str(account_scope.get("thread_id") or "").strip()
@@ -3260,13 +3285,15 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
         authorization_url = str(oauth_start.get("authorization_url") or "")
         if not authorization_url.startswith("https://slack.com/oauth/"):
             raise AssertionError(f"Slack OAuth start returned unexpected URL: {oauth_start!r}")
-        if "admin_managed_channels" in observed["slack_strategies"]:
-            await expect(page.locator("body")).to_contain_text("Slack workspace setup", timeout=15000)  # type: ignore[attr-defined]
-        else:
-            await expect(page.locator("body")).to_contain_text(title, timeout=15000)  # type: ignore[attr-defined]
-            await expect(page.locator("body")).to_contain_text("Connect Slack with OAuth", timeout=15000)  # type: ignore[attr-defined]
-        observed["slack_display_name"] = personal.get("display_name")
-        observed["slack_connect_title"] = title
+        await expect(page.locator("body")).to_contain_text(instructions, timeout=15000)  # type: ignore[attr-defined]
+        await expect(page.locator("body")).to_contain_text(submit_label, timeout=15000)  # type: ignore[attr-defined]
+        observed["extension_count"] = len(extensions)
+        observed["slack_display_name"] = slack_extension.get("display_name")
+        observed["slack_runtime"] = slack_extension.get("runtime")
+        observed["slack_surface_kinds"] = sorted(surface_kinds)
+        observed["slack_channel_surface_count"] = len(channel_surfaces)
+        observed["slack_connect_strategy"] = connection.get("strategy")
+        observed["slack_connect_submit_label"] = submit_label
         observed["slack_connect_instructions"] = instructions
         observed["slack_product_auth_account_count"] = len(accounts)
         observed["slack_product_auth_configured_account_count"] = len(configured_accounts)
