@@ -31,6 +31,9 @@ pub(super) fn bundle() -> PackageBundle {
                 publish its tools."
                 .to_string(),
         }),
+        // WASM tool package: trust comes from the extension registry, not an
+        // admin local-manifest effect grant.
+        trust_effects: None,
     }
 }
 

@@ -58,7 +58,7 @@ use ironclaw_host_api::runtime_policy::{
 };
 use ironclaw_host_api::{
     EffectKind, ExtensionId, HostPath, InvocationId, MountPermissions, MountView, PackageId,
-    ResourceScope, RuntimeHttpEgress, UserId, VirtualPath,
+    ResourceScope, RuntimeHttpEgress, UserId, VirtualPath, sha256_digest_token,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{HostApiError, MountAlias, MountGrant};
@@ -140,9 +140,9 @@ use crate::extension_host::lifecycle::{
 use crate::extension_host::mcp::hosted_http_mcp_runtime;
 use crate::extension_host::{
     available_extensions::{
-        AvailableExtensionCatalog, gmail_manifest_digest, google_calendar_manifest_digest,
-        google_docs_manifest_digest, google_drive_manifest_digest, google_sheets_manifest_digest,
-        google_slides_manifest_digest, notion_mcp_manifest_digest, web_access_manifest_digest,
+        AvailableExtensionCatalog, google_calendar_manifest_digest, google_docs_manifest_digest,
+        google_drive_manifest_digest, google_sheets_manifest_digest, google_slides_manifest_digest,
+        notion_mcp_manifest_digest, web_access_manifest_digest,
     },
     extension_installation_store::FilesystemExtensionInstallationStore,
     extension_lifecycle::{
@@ -4093,16 +4093,6 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
             None,
         ),
         AdminEntry::for_local_manifest(
-            PackageId::new("gmail").map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("Gmail first-party package id is invalid: {error}"),
-            })?,
-            "/system/extensions/gmail/manifest.toml".to_string(),
-            Some(gmail_manifest_digest()),
-            HostTrustAssignment::first_party(),
-            gsuite_allowed_effects(),
-            None,
-        ),
-        AdminEntry::for_local_manifest(
             PackageId::new("notion").map_err(|error| RebornBuildError::InvalidConfig {
                 reason: format!("Notion MCP first-party package id is invalid: {error}"),
             })?,
@@ -4123,6 +4113,28 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
         slack_user_allowed_effects(),
         None,
     ));
+    // Packages migrated to the self-contained inventory supply their own trust
+    // grant as data (`PackageBundle::trust_effects`); composition still owns the
+    // decision (`first_party`) and the policy construction. Each entry is
+    // byte-identical to the explicit one it replaced — same id, local-manifest
+    // path, manifest digest, and effect list. Packages with `None` (WASM tools,
+    // channel-only) draw trust from the extension registry instead and are
+    // skipped here.
+    for bundle in ironclaw_first_party_extensions::packages::bundled_packages() {
+        let Some(effects) = bundle.trust_effects else {
+            continue;
+        };
+        entries.push(AdminEntry::for_local_manifest(
+            PackageId::new(bundle.id).map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("first-party package id '{}' is invalid: {error}", bundle.id),
+            })?,
+            format!("/system/extensions/{}/manifest.toml", bundle.id),
+            Some(sha256_digest_token(bundle.manifest_toml.as_bytes())),
+            HostTrustAssignment::first_party(),
+            effects,
+            None,
+        ));
+    }
     HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(entries))]).map_err(|error| {
         RebornBuildError::InvalidConfig {
             reason: format!("built-in first-party trust policy is invalid: {error}"),
@@ -7993,6 +8005,62 @@ mod tests {
             wrong_path.provenance,
             ironclaw_trust::TrustProvenance::Default
         );
+    }
+
+    #[test]
+    fn builtin_first_party_trust_policy_grants_migrated_gmail_via_inventory() {
+        // gmail migrated to the self-contained inventory; its first-party trust
+        // entry is now produced by the generic `bundled_packages()` loop, not a
+        // hardcoded `AdminEntry`. Lock that the migration preserved gmail's
+        // first-party grant AND its manifest-digest binding (a wrong digest must
+        // still fall back to Sandbox — the loop didn't drop the digest).
+        let policy = builtin_first_party_trust_policy().expect("trust policy");
+        let gmail_bundle = ironclaw_first_party_extensions::packages::bundled_packages()
+            .into_iter()
+            .find(|bundle| bundle.id == "gmail")
+            .expect("gmail is in the bundled inventory");
+        let expected_digest =
+            ironclaw_host_api::sha256_digest_token(gmail_bundle.manifest_toml.as_bytes());
+
+        let gmail_identity = |digest: Option<String>| {
+            ironclaw_host_api::PackageIdentity::new(
+                ironclaw_host_api::PackageId::new("gmail").expect("gmail package id"),
+                ironclaw_host_api::PackageSource::LocalManifest {
+                    path: "/system/extensions/gmail/manifest.toml".to_string(),
+                },
+                digest,
+                None,
+            )
+        };
+
+        let matching = ironclaw_trust::TrustPolicy::evaluate(
+            &policy,
+            &ironclaw_trust::TrustPolicyInput {
+                identity: gmail_identity(Some(expected_digest.clone())),
+                requested_trust: ironclaw_host_api::RequestedTrustClass::FirstPartyRequested,
+                requested_authority: Default::default(),
+            },
+        )
+        .expect("matching gmail identity should evaluate");
+        assert_eq!(matching.effective_trust.class(), TrustClass::FirstParty);
+        assert_eq!(
+            matching.provenance,
+            ironclaw_trust::TrustProvenance::AdminConfig
+        );
+
+        let wrong_digest = ironclaw_trust::TrustPolicy::evaluate(
+            &policy,
+            &ironclaw_trust::TrustPolicyInput {
+                identity: gmail_identity(Some(
+                    "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                        .to_string(),
+                )),
+                requested_trust: ironclaw_host_api::RequestedTrustClass::FirstPartyRequested,
+                requested_authority: Default::default(),
+            },
+        )
+        .expect("wrong digest gmail identity should evaluate");
+        assert_eq!(wrong_digest.effective_trust.class(), TrustClass::Sandbox);
     }
 }
 

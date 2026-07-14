@@ -1014,10 +1014,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     (
         "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
-        "gmail",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
         "google",
     ),
     (
@@ -1108,7 +1104,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_reborn_composition/src/extension_host/gsuite.rs",
         "google",
     ),
-    ("crates/ironclaw_reborn_composition/src/factory.rs", "gmail"),
     (
         "crates/ironclaw_reborn_composition/src/factory.rs",
         "google",

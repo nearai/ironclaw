@@ -53,8 +53,6 @@ const GOOGLE_SLIDES_MANIFEST: &str =
 const GOOGLE_SLIDES_WASM_MODULE: &[u8] = include_bytes!(
     "../../../ironclaw_first_party_extensions/assets/google-slides/wasm/google_slides_tool.wasm"
 );
-const GMAIL_MANIFEST: &str =
-    include_str!("../../../ironclaw_first_party_extensions/assets/gmail/manifest.toml");
 const NOTION_MCP_MANIFEST: &str =
     include_str!("../../../ironclaw_first_party_extensions/assets/notion-mcp/manifest.toml");
 const WEB_ACCESS_MANIFEST: &str =
@@ -225,12 +223,6 @@ fn onboarding(package: &AvailableExtensionPackage) -> Option<LifecycleExtensionO
     }
 
     match package_ref.id.as_str() {
-        "gmail" => Some(onboarding_message(
-            "Gmail needs Google OAuth authorization before mail tools can run.",
-            Some("Authorize the Google account that IronClaw should use for Gmail."),
-            None,
-            "After authorization completes, activate Gmail to publish its tools.",
-        )),
         "slack" => Some(onboarding_message(
             "Slack needs OAuth authorization before the Slack channel can recognize your DMs and before the user-scoped Slack tools can run.",
             Some("Authorize the Slack account you will use to DM IronClaw."),
@@ -406,7 +398,6 @@ impl AvailableExtensionCatalog {
             google_drive_package()?,
             google_sheets_package()?,
             google_slides_package()?,
-            gmail_package()?,
         ];
         packages.push(slack_package()?);
         // Packages migrated to the self-contained inventory
@@ -630,10 +621,6 @@ fn google_slides_package() -> Result<AvailableExtensionPackage, ProductWorkflowE
     )
 }
 
-fn gmail_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package("gmail", "Gmail", GMAIL_MANIFEST, gmail_assets())
-}
-
 pub(crate) fn slack_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     bundled_extension_package(SLACK_EXTENSION_ID, "Slack", SLACK_MANIFEST, slack_assets())
 }
@@ -660,10 +647,6 @@ pub(crate) fn slack_manifest_digest() -> String {
 
 pub(crate) fn google_slides_manifest_digest() -> String {
     sha256_digest_token(GOOGLE_SLIDES_MANIFEST.as_bytes())
-}
-
-pub(crate) fn gmail_manifest_digest() -> String {
-    sha256_digest_token(GMAIL_MANIFEST.as_bytes())
 }
 
 pub(crate) fn notion_mcp_manifest_digest() -> String {
@@ -1382,120 +1365,6 @@ fn google_slides_assets() -> Vec<AvailableExtensionAsset> {
             "batch_update"
         ]
     )
-}
-
-fn gmail_assets() -> Vec<AvailableExtensionAsset> {
-    vec![
-        bytes_asset("manifest.toml", GMAIL_MANIFEST.as_bytes()),
-        bytes_asset(
-            "schemas/gmail/list_messages.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/list_messages.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/gmail/list_messages.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/list_messages.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/gmail/get_message.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/get_message.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/gmail/get_message.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/get_message.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/gmail/send_message.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/send_message.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/gmail/send_message.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/send_message.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/gmail/create_draft.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/create_draft.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/gmail/create_draft.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/create_draft.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/gmail/reply_to_message.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/reply_to_message.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/gmail/reply_to_message.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/reply_to_message.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/gmail/trash_message.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/trash_message.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/gmail/trash_message.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/trash_message.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "prompts/gmail/list_messages.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/prompts/gmail/list_messages.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/gmail/get_message.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/prompts/gmail/get_message.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/gmail/send_message.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/prompts/gmail/send_message.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/gmail/create_draft.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/prompts/gmail/create_draft.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/gmail/reply_to_message.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/prompts/gmail/reply_to_message.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/gmail/trash_message.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/gmail/prompts/gmail/trash_message.md"
-            ),
-        ),
-    ]
 }
 
 fn bytes_asset(path: &str, bytes: &[u8]) -> AvailableExtensionAsset {
@@ -2631,8 +2500,10 @@ handle = "web_token"
         assert!(google_drive_manifest_digest().starts_with("sha256:"));
         assert!(google_sheets_manifest_digest().starts_with("sha256:"));
         assert!(google_slides_manifest_digest().starts_with("sha256:"));
-        assert!(gmail_manifest_digest().starts_with("sha256:"));
         assert!(slack_manifest_digest().starts_with("sha256:"));
+        // gmail migrated to the inventory; its digest (still sha256-token) is
+        // asserted through the trust policy in
+        // `factory::tests::builtin_first_party_trust_policy_grants_migrated_gmail_via_inventory`.
     }
 
     #[test]

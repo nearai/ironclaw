@@ -13,9 +13,10 @@
 
 use std::borrow::Cow;
 
-use ironclaw_host_api::VirtualPath;
+use ironclaw_host_api::{EffectKind, VirtualPath};
 
 mod github;
+mod gmail;
 mod telegram;
 
 /// One inventory entry: a package's id paired with its bundle builder.
@@ -28,6 +29,7 @@ type PackageEntry = (&'static str, fn() -> PackageBundle);
 /// other. Each `ID` const lives in its owning module beside `bundle()`.
 const PACKAGES: &[PackageEntry] = &[
     (github::ID, github::bundle),
+    (gmail::ID, gmail::bundle),
     (telegram::ID, telegram::bundle),
 ];
 
@@ -66,6 +68,15 @@ pub struct PackageBundle {
     pub assets: Vec<PackageAsset>,
     /// Bespoke onboarding copy, `None` for packages that need no setup guidance.
     pub onboarding: Option<PackageOnboarding>,
+    /// Host authority effects this first-party package is granted in the
+    /// built-in trust policy, carried as explicit data (not derived from the
+    /// manifest — the trust grant is an independent host assertion, defense in
+    /// depth). `None` for packages whose trust comes from the WASM extension
+    /// registry rather than an admin local-manifest entry (e.g. the pure WASM
+    /// tools and channel-only packages). Composition still owns the trust
+    /// *decision* (`HostTrustAssignment::first_party`); the bundle only supplies
+    /// the effect list.
+    pub trust_effects: Option<Vec<EffectKind>>,
 }
 
 /// A byte-content asset addressed by `path`.
