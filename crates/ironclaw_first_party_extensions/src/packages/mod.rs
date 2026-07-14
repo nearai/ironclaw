@@ -15,6 +15,7 @@ use std::borrow::Cow;
 
 use ironclaw_host_api::VirtualPath;
 
+mod github;
 mod telegram;
 
 /// Byte or filesystem content of one asset shipped inside a package, addressed
@@ -53,5 +54,5 @@ pub(crate) fn bytes_asset(path: &str, bytes: &[u8]) -> PackageAsset {
 /// new `assets/<id>/` directory plus its `packages/<id>.rs` module and a line
 /// here.
 pub fn bundled_packages() -> Vec<PackageBundle> {
-    vec![telegram::bundle()]
+    vec![github::bundle(), telegram::bundle()]
 }
