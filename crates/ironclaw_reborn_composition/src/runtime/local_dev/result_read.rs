@@ -228,6 +228,7 @@ fn result_read_observation(
             next_offset,
             // `content` here is always a paged text chunk, never array-shaped.
             item_count: None,
+            final_reply_presentation: None,
         },
         artifacts: vec![ModelVisibleArtifact {
             artifact_ref: result_ref.to_string(),

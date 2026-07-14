@@ -15,8 +15,8 @@ use crate::{
 
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, FailedExitDetails,
-    StageContext, attach_failure_explanation, completed_exit, failed_exit,
-    model_preference_to_host,
+    StageContext, apply_capability_final_reply_presentation, attach_failure_explanation,
+    completed_exit, failed_exit, model_preference_to_host,
 };
 
 /// Instruction injected by the final-answer nudge — drive the model to produce a
@@ -117,6 +117,7 @@ pub(super) async fn try_final_answer_nudge(
                 .await
             {
                 ReplyAdmissionOutcome::AcceptFinal => {
+                    let reply = apply_capability_final_reply_presentation(state, reply);
                     // Preserve the canonical assistant-reply accounting so the
                     // diminishing-returns window sees the nudge turn's output
                     // tokens (matches `AssistantReplyStage`).
@@ -132,6 +133,7 @@ pub(super) async fn try_final_answer_nudge(
                         Err(error) => return nudge_bail("transcript", error),
                     };
                     state.recent_output_token_counts.push(output_tokens);
+                    state.pending_final_reply_presentations = crate::state::BoundedRing::new();
                     state.accumulate_model_usage(usage);
                     Ok(Some(reply_ref))
                 }

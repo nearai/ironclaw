@@ -82,6 +82,7 @@ pub(super) fn file_diff_preview(
         output_kind: "unified_diff".to_string(),
         subtitle: Some(path.to_string()),
         truncated: truncated || preview_text.truncated,
+        final_reply_presentation: None,
     }
 }
 
@@ -94,6 +95,7 @@ fn large_diff_preview(path: &str, diff_path: &str) -> CapabilityDisplayOutputPre
         output_kind: "unified_diff".to_string(),
         subtitle: Some(path.to_string()),
         truncated: true,
+        final_reply_presentation: None,
     }
 }
 

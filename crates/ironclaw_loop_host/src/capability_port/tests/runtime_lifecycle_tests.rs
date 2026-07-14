@@ -1,4 +1,5 @@
 use super::*;
+// arch-exempt: large_file, extends the existing runtime lifecycle matrix at its owning seam without adding production policy, plan #3988
 use std::{
     collections::VecDeque,
     sync::{
@@ -151,6 +152,10 @@ async fn runtime_completed_display_preview_is_forwarded_to_result_writer() {
                         output_kind: "unified_diff".to_string(),
                         subtitle: Some("/workspace/file".to_string()),
                         truncated: false,
+                        final_reply_presentation:
+                            ironclaw_host_api::CapabilityFinalReplyPresentation::new(
+                                "Edited 1 file",
+                            ),
                     }),
                     usage: ResourceUsage::default(),
                 },
@@ -166,7 +171,21 @@ async fn runtime_completed_display_preview_is_forwarded_to_result_writer() {
         .await
         .expect("runtime outcome maps to loop outcome");
 
-    assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+    let CapabilityOutcome::Completed(completed) = outcome else {
+        panic!("expected completed outcome");
+    };
+    let presentation = match completed
+        .model_observation
+        .as_ref()
+        .map(|observation| &observation.detail)
+    {
+        Some(ironclaw_turns::run_profile::ToolObservationDetail::ResultReference {
+            final_reply_presentation: Some(presentation),
+            ..
+        }) => presentation,
+        detail => panic!("expected final-reply presentation, got {detail:?}"),
+    };
+    assert_eq!(presentation.safe_reply(), "Edited 1 file");
     let previews = result_writer.display_previews();
     let preview = previews
         .into_iter()

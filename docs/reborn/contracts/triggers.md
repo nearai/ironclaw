@@ -445,6 +445,14 @@ The trigger system must expose `trigger_create`, `trigger_list`, `trigger_remove
 - `trigger_remove` is caller-scoped delete.
 - `trigger_pause` and `trigger_resume` are caller-scoped state transitions
   (`Scheduled` <-> `Paused`); the poller does not fire a paused trigger.
+- All five management verbs retain raw ids, schedules, prompts, and host
+  metadata only for model-internal follow-up calls. The first-party capability
+  owner projects a bounded `CapabilityFinalReplyPresentation`; the generic
+  agent loop applies the latest such projection before transcript finalization,
+  so user-facing replies cannot expose raw trigger internals. Composition may
+  render that typed projection but must not reimplement trigger verb, schedule,
+  or handler-field policy. Recorded model fixtures pin tool choice and argument
+  shape only; caller-level integration coverage owns this final-reply boundary.
 - Local-dev builds compiled with `libsql` store trigger records in the
   local-dev libSQL database (`reborn-local-dev.db`) through the same
   `TriggerRepository` contract used by production libSQL. Local-dev builds

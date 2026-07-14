@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+// arch-exempt: large_file, mechanical construction updates for the shared result observation contract while contract-test decomposition is tracked, plan #3988
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -2599,6 +2600,7 @@ async fn transcript_port_degrades_control_char_result_reference_preview_without_
             total_bytes: Some(16),
             next_offset: None,
             item_count: None,
+            final_reply_presentation: None,
         },
         artifacts: Vec::new(),
         recovery: None,
@@ -2671,6 +2673,7 @@ async fn transcript_port_persists_result_reference_item_count() {
             total_bytes: Some(8_192),
             next_offset: Some(2_048),
             item_count: Some(600),
+            final_reply_presentation: None,
         },
         artifacts: Vec::new(),
         recovery: None,

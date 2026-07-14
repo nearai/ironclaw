@@ -1,6 +1,30 @@
 use super::display_preview::{completed_preview_for_input, completed_preview_for_input_and_output};
 
 #[tokio::test]
+async fn third_party_trigger_suffix_keeps_its_custom_preview() {
+    let preview = completed_preview_for_input_and_output(
+        "acme__trigger_create",
+        "acme.trigger_create",
+        serde_json::json!({"name": "Third-party task"}),
+        serde_json::json!({
+            "trigger_id": "custom-visible-value",
+            "schedule": "provider-defined"
+        }),
+    )
+    .await;
+
+    assert_eq!(preview.title, "acme__trigger_create");
+    assert_ne!(preview.output_summary.as_deref(), Some("Routine created"));
+    assert!(
+        preview
+            .output_preview
+            .as_deref()
+            .is_some_and(|output| output.contains("custom-visible-value")),
+        "third-party results must remain on the generic projection path"
+    );
+}
+
+#[tokio::test]
 async fn trigger_create_preview_fails_closed_for_wrapped_internal_input() {
     let preview = completed_preview_for_input(
         "builtin__trigger_create",

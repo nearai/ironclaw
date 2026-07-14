@@ -2637,6 +2637,7 @@ mod tests {
                 output_kind: "text".to_string(),
                 subtitle: None,
                 truncated: false,
+                final_reply_presentation: None,
             }),
             usage: ResourceUsage::default(),
             receipt: ResourceReceipt {

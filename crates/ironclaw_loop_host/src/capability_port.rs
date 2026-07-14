@@ -5,8 +5,8 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityDisplayOutputPreview, CapabilityId, CapabilitySet, CorrelationId,
-    DispatchFailureDetail, DispatchInputIssue, DispatchInputIssueCode, EffectKind,
+    CapabilityDisplayOutputPreview, CapabilityFinalReplyPresentation, CapabilityId, CapabilitySet,
+    CorrelationId, DispatchFailureDetail, DispatchInputIssue, DispatchInputIssueCode, EffectKind,
     ExecutionContext, ExtensionId, InvocationId, MountView, Principal, ProviderToolName,
     ResourceEstimate, RuntimeDispatchErrorKind, RuntimeKind, sha256_digest_token,
 };
@@ -27,10 +27,11 @@ use ironclaw_turns::{
         CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilityResumeToken,
         ConcurrencyHint, ContentDigest, LoopCapabilityPort, LoopHostMilestone,
         LoopHostMilestoneKind, LoopHostMilestoneSink, LoopProcessRef, LoopRunContext,
-        LoopSafeSummary, ModelVisibleToolObservation, ProcessHandleSummary, ProviderToolCall,
+        LoopSafeSummary, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleArtifact,
+        ModelVisibleToolObservation, ObservationTrust, ProcessHandleSummary, ProviderToolCall,
         ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
-        RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
-        sanitize_model_visible_text,
+        RegisterProviderToolCallRequest, ToolObservationDetail, ToolObservationStatus,
+        VisibleCapabilityRequest, VisibleCapabilitySurface, sanitize_model_visible_text,
     },
 };
 use serde_json::Value;
@@ -52,9 +53,7 @@ use self::surface_snapshot::{
     SyntheticSurfaceCapabilitySnapshot,
 };
 
-// arch-exempt: large_file, tracked in #3988; this PR keeps new synthetic surface
-// snapshot logic in `capability_port/surface_snapshot.rs` while preserving the
-// existing adapter boundary.
+// arch-exempt: large_file, capability-port decomposition remains tracked and new domain policy stays in owner modules, plan #3988
 const PROVIDER_TOOL_NAME_DIGEST_BYTES: usize = 32;
 const PROVIDER_TOOL_CALL_INPUT_REF_PREFIX: &str = "input:provider-tool-";
 
@@ -530,6 +529,51 @@ impl CapabilityWriteResult {
             byte_len,
             output_digest,
         }
+    }
+
+    /// Attaches capability-owned final presentation to the in-memory result
+    /// observation carried into the agent loop. The policy is serde-skipped
+    /// from the model-visible envelope and consumed only at finalization.
+    pub fn with_final_reply_presentation(
+        mut self,
+        presentation: Option<CapabilityFinalReplyPresentation>,
+    ) -> Self {
+        let Some(presentation) = presentation else {
+            return self;
+        };
+        if let Some(ModelVisibleToolObservation {
+            detail:
+                ToolObservationDetail::ResultReference {
+                    final_reply_presentation,
+                    ..
+                },
+            ..
+        }) = self.model_observation.as_mut()
+        {
+            *final_reply_presentation = Some(presentation);
+            return self;
+        }
+        self.model_observation = Some(ModelVisibleToolObservation {
+            schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+            status: ToolObservationStatus::Success,
+            summary: "Tool completed; use the result reference for more output.".to_string(),
+            detail: ToolObservationDetail::ResultReference {
+                result_ref: self.result_ref.as_str().to_string(),
+                byte_len: self.byte_len,
+                preview: None,
+                total_bytes: None,
+                next_offset: None,
+                item_count: None,
+                final_reply_presentation: Some(presentation),
+            },
+            artifacts: vec![ModelVisibleArtifact {
+                artifact_ref: self.result_ref.as_str().to_string(),
+                summary: "Stored tool result".to_string(),
+            }],
+            recovery: None,
+            trust: ObservationTrust::UntrustedToolOutput,
+        });
+        self
     }
 }
 
@@ -2624,6 +2668,10 @@ async fn runtime_outcome_to_loop(
     ensure_runtime_outcome_matches(conversion.requested_capability_id, &conversion.outcome)?;
     Ok(match conversion.outcome {
         RuntimeCapabilityOutcome::Completed(completed) => {
+            let final_reply_presentation = completed
+                .display_preview
+                .as_ref()
+                .and_then(|preview| preview.final_reply_presentation.clone());
             let write_result = result_writer
                 .write_capability_result(CapabilityResultWrite {
                     run_context,
@@ -2634,7 +2682,8 @@ async fn runtime_outcome_to_loop(
                     display_preview: completed.display_preview.clone(),
                     durable_persistence: DurablePersistence::Persist,
                 })
-                .await?;
+                .await?
+                .with_final_reply_presentation(final_reply_presentation);
             CapabilityOutcome::Completed(CapabilityResultMessage {
                 result_ref: write_result.result_ref,
                 safe_summary: "capability completed".to_string(),

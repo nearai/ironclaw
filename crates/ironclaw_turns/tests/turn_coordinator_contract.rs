@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical construction update for the shared result observation contract while turn-state test decomposition is tracked, plan #5662
 use std::{
     sync::{
         Arc, Mutex,
@@ -266,6 +267,7 @@ fn subagent_capability_outcomes_round_trip_model_observation() {
             total_bytes: Some(4_096),
             next_offset: Some(2_048),
             item_count: None,
+            final_reply_presentation: None,
         },
         artifacts: Vec::new(),
         recovery: None,

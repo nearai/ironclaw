@@ -1,4 +1,5 @@
 use chrono::Utc;
+// arch-exempt: large_file, mechanical construction update for the shared result observation contract while test decomposition is tracked, plan #3988
 use ironclaw_host_api::{AgentId, ProviderToolName, TenantId, UserId};
 use ironclaw_threads::{
     AcceptedInboundMessage, AcceptedInboundMessageReplay, AppendAssistantDraftRequest,
@@ -3374,6 +3375,7 @@ async fn spawn_subagent_propagates_result_metadata_from_result_writer() {
             total_bytes: Some(fixed_byte_len * 2),
             next_offset: Some(fixed_byte_len),
             item_count: None,
+            final_reply_presentation: None,
         },
         artifacts: Vec::new(),
         recovery: None,

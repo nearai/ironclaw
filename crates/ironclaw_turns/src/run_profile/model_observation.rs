@@ -1,4 +1,4 @@
-use ironclaw_host_api::DispatchInputIssueCode;
+use ironclaw_host_api::{CapabilityFinalReplyPresentation, DispatchInputIssueCode};
 use serde::{Deserialize, Serialize};
 
 use super::host::CapabilityFailureKind;
@@ -114,6 +114,12 @@ pub enum ToolObservationDetail {
         /// a byte-sliced array as the complete result.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         item_count: Option<u64>,
+        /// Host-authored deterministic presentation policy used only inside
+        /// the live loop before transcript finalization. It is intentionally
+        /// omitted from the model-visible tool-result envelope; the loop
+        /// copies it into checkpointed control state when the result lands.
+        #[serde(skip)]
+        final_reply_presentation: Option<CapabilityFinalReplyPresentation>,
     },
 }
 
@@ -142,6 +148,7 @@ impl ToolObservationDetail {
                 preview,
                 next_offset,
                 item_count,
+                final_reply_presentation: _,
                 ..
             } => {
                 // `preview` is intentionally NOT content-checked here: this
@@ -432,6 +439,7 @@ mod tests {
                 total_bytes: None,
                 next_offset: None,
                 item_count: Some(600),
+                final_reply_presentation: None,
             },
             artifacts: Vec::new(),
             recovery: None,

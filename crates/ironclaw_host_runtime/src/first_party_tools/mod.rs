@@ -20,6 +20,7 @@ mod spawn_subagent;
 mod time;
 mod trace_commons;
 mod trigger_management;
+mod trigger_presentation;
 
 use std::{future::Future, panic::AssertUnwindSafe, sync::Arc, time::Instant};
 
@@ -70,6 +71,10 @@ pub use trigger_management::TriggerManagementClock;
 pub use trigger_management::{
     TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
     TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, TriggerCreateHook,
+};
+pub use trigger_presentation::{
+    RoutineInputPresentation, routine_input_presentation, routine_output_presentation,
+    routine_title,
 };
 
 pub const BUILTIN_FIRST_PARTY_PROVIDER: &str = "builtin";

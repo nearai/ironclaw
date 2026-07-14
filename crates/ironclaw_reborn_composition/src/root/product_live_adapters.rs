@@ -1053,6 +1053,7 @@ mod tests {
                 output_kind: "unified_diff".to_string(),
                 subtitle: Some("/workspace/main.rs".to_string()),
                 truncated: false,
+                final_reply_presentation: None,
             }),
             durable_persistence: DurablePersistence::Persist,
         })

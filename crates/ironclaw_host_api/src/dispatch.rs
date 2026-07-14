@@ -44,6 +44,40 @@ pub struct CapabilityDisplayOutputPreview {
     pub output_kind: String,
     pub subtitle: Option<String>,
     pub truncated: bool,
+    /// Optional capability-owned deterministic final reply. When present, the
+    /// loop uses this safe projection instead of model-authored result prose.
+    pub final_reply_presentation: Option<CapabilityFinalReplyPresentation>,
+}
+
+const CAPABILITY_FINAL_REPLY_MAX_BYTES: usize = 4 * 1024;
+
+/// Capability-owned, transport-neutral final-reply presentation policy.
+///
+/// Generic loop code consumes this typed projection without knowing which
+/// capability produced it and replaces model-authored result prose before
+/// transcript finalization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityFinalReplyPresentation {
+    safe_reply: String,
+}
+
+impl CapabilityFinalReplyPresentation {
+    pub fn new(safe_reply: impl Into<String>) -> Option<Self> {
+        let safe_reply = truncate_capability_display_text(
+            safe_reply.into().trim(),
+            CAPABILITY_FINAL_REPLY_MAX_BYTES,
+        )
+        .text;
+        if safe_reply.is_empty() {
+            return None;
+        }
+
+        Some(Self { safe_reply })
+    }
+
+    pub fn safe_reply(&self) -> &str {
+        &self.safe_reply
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

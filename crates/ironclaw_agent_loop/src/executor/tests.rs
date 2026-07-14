@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+// arch-exempt: large_file, mechanical construction update for the shared result observation contract while executor-test decomposition is tracked, plan #3988
 
 use ironclaw_host_api::{
     ApprovalRequestId, CorrelationId, DispatchInputIssueCode, ProviderToolName, ResourceEstimate,
@@ -72,6 +73,7 @@ fn continuation_observation(
             total_bytes: Some(byte_len * 2),
             next_offset: Some(byte_len),
             item_count: None,
+            final_reply_presentation: None,
         },
         artifacts: Vec::new(),
         recovery: None,

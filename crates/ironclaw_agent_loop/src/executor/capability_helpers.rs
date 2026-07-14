@@ -637,6 +637,19 @@ pub(super) fn push_completed_result(
     result: CapabilityResultMessage,
 ) {
     state.recovery_state = state.recovery_state.cleared_attempts();
+    if let Some(ironclaw_turns::run_profile::ModelVisibleToolObservation {
+        detail:
+            ironclaw_turns::run_profile::ToolObservationDetail::ResultReference {
+                final_reply_presentation: Some(presentation),
+                ..
+            },
+        ..
+    }) = result.model_observation.as_ref()
+    {
+        state
+            .pending_final_reply_presentations
+            .push(presentation.clone());
+    }
     if let Some(n) = state
         .post_capability_state
         .pending_capability_bytes
