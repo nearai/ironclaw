@@ -689,7 +689,12 @@ async fn registered_mutations_reject_same_user_in_foreign_tenant_scope() {
 /// even when a same-id shared package sits in the catalog too. Before the
 /// fix, `resolve_available_for_scope` (used by `project`/`install`)
 /// checks the catalog unconditionally and would serve the colliding
-/// catalog descriptor instead of the row's own registered one.
+/// catalog descriptor instead of the row's own registered one. The
+/// collision below is constructed by writing straight into the catalog
+/// under test, bypassing the real ingress gate (`is_hosted_mcp_id_namespace`,
+/// closed at both production chokepoints by 7d6ce6acb) that would reject
+/// it in production — this test pins the resolve-ordering mechanism as a
+/// second line of defense, not a live production gap.
 #[tokio::test]
 async fn project_prefers_registered_row_over_same_id_catalog_package() {
     let owner_scope = resource_scope_for("default", "owner-a");
@@ -1117,8 +1122,7 @@ async fn owner_install_of_registered_package_stamps_manifest_owner_row() {
 /// minted from `(tenant, owner, url)`, two owners writing a descriptor at
 /// the same bare `ExtensionId` could collide on the SAME installation row —
 /// the takeover this test used to construct and reject via
-/// `ensure_registered_row_owner_match`'s mismatch arm (still covered at the
-/// unit tier by `install_policy::ensure_registered_row_owner_match_rejects_takeover_and_allows_same_owner`).
+/// `ensure_registered_row_owner_match`'s mismatch arm.
 /// Minting makes that collision unconstructible for a fresh registration
 /// (owner is hashed into the id), so this now pins the new invariant
 /// directly at the live install path: two owners registering the SAME URL

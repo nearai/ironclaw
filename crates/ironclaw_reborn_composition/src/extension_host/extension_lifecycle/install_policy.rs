@@ -135,34 +135,6 @@ pub(super) fn decide_remove(
     }
 }
 
-/// Row-takeover guard for a registered install (#5459 P1 follow-up, review
-/// item 1; tenant axis added in the T2 cross-tenant follow-up): rows are
-/// keyed by bare `ExtensionId` while registered descriptors are owner- AND
-/// tenant-scoped, so until owner-unique id minting lands, a second
-/// tenant-owner registering a descriptor with the same id must not silently
-/// re-stamp another tenant-owner's existing row — including when the two
-/// share the same `UserId` (a user valid in two tenant scopes). Both
-/// `existing_effective_scope` (the row's `effective_owner_scope`, computed
-/// by the caller from the row + its stored manifest) and `new_scope` must
-/// agree on BOTH tenant and user; anything else — a different user, a
-/// different tenant, a non-registered/non-singleton existing row (`None`) —
-/// is a takeover attempt and is masked identically to
-/// `ensure_caller_may_operate`'s "is not installed" denial so a non-owner
-/// cannot enumerate who holds the id.
-pub(super) fn ensure_registered_row_owner_match(
-    extension_id: &ExtensionId,
-    existing_effective_scope: Option<super::registered_lifecycle::OwnerScope>,
-    new_scope: (TenantId, UserId),
-) -> Result<(), ProductWorkflowError> {
-    if existing_effective_scope
-        .as_ref()
-        .is_some_and(|scope| scope.matches_parts(&new_scope.0, &new_scope.1))
-    {
-        return Ok(());
-    }
-    Err(masked_not_installed(extension_id))
-}
-
 /// Tenant-axis companion to [`ensure_caller_may_operate`] for activate/remove
 /// on a registered row (T2 cross-tenant follow-up): `ensure_caller_may_operate`
 /// only checks the row's `InstallationOwner` user-id membership, which the
@@ -228,50 +200,6 @@ mod tests {
 
     fn tenant(id: &str) -> TenantId {
         TenantId::new(id).expect("valid tenant")
-    }
-
-    #[test]
-    fn ensure_registered_row_owner_match_rejects_takeover_and_allows_same_owner() {
-        let ext_id = ExtensionId::new("acme-mcp-registered").expect("extension id");
-        let tenant_a = tenant("tenant-a");
-        let a_scope = Some(OwnerScope::new(tenant_a.clone(), user("owner-a")));
-
-        ensure_registered_row_owner_match(
-            &ext_id,
-            a_scope.clone(),
-            (tenant_a.clone(), user("owner-a")),
-        )
-        .expect("same tenant-owner re-registering must be allowed");
-
-        let takeover_by_b = ensure_registered_row_owner_match(
-            &ext_id,
-            a_scope.clone(),
-            (tenant_a.clone(), user("owner-b")),
-        )
-        .expect_err("a different owner must not take over the row");
-        let takeover_by_tenant =
-            ensure_registered_row_owner_match(&ext_id, None, (tenant_a.clone(), user("owner-a")))
-                .expect_err("a non-registered/non-singleton row must not be treated as a match");
-        // T2 cross-tenant follow-up: the SAME user id in a DIFFERENT tenant
-        // must not be treated as the same owner — the row is tenant-scoped,
-        // not just user-scoped.
-        let takeover_by_same_user_other_tenant = ensure_registered_row_owner_match(
-            &ext_id,
-            a_scope,
-            (tenant("tenant-b"), user("owner-a")),
-        )
-        .expect_err("the same user id in a different tenant must not take over the row");
-        for error in [
-            takeover_by_b,
-            takeover_by_tenant,
-            takeover_by_same_user_other_tenant,
-        ] {
-            let rendered = error.to_string();
-            assert!(
-                rendered.contains("is not installed") && !rendered.contains("owner-a"),
-                "denial must mask the existing owner: {rendered}"
-            );
-        }
     }
 
     /// T2 cross-tenant follow-up: `ensure_caller_may_operate` alone only

@@ -220,7 +220,12 @@ output_schema_ref = "schemas/search.output.json"
 /// collision must still restore and publish the registered row's OWN
 /// descriptor, never the colliding catalog one, even with a non-empty
 /// catalog (unlike the sibling boot-order test above, which uses an empty
-/// catalog and so never exercises this branch order).
+/// catalog and so never exercises this branch order). The collision is
+/// constructed by writing manifest files directly onto the filesystem
+/// fixture, bypassing the real ingress gate that rejects this namespace
+/// collision at both production chokepoints (7d6ce6acb) — this test pins
+/// the restore-tier resolve-ordering mechanism as a second line of
+/// defense, not a live production gap.
 #[tokio::test]
 async fn restore_prefers_registered_row_over_same_id_catalog_package() {
     let dir = tempfile::tempdir().expect("tempdir");

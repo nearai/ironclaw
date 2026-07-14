@@ -101,8 +101,7 @@ pub(crate) use active_publication::ActiveExtensionPublisher;
 use active_publication::extension_trust_policy_input;
 use install_policy::{
     RemoveDecision, decide_install_on_existing, decide_remove, derive_owner,
-    ensure_caller_may_operate, ensure_registered_row_owner_match,
-    ensure_registered_row_tenant_match, install_scope_for_owner,
+    ensure_caller_may_operate, ensure_registered_row_tenant_match, install_scope_for_owner,
 };
 #[cfg(test)]
 use registered_lifecycle::{OwnerScope, effective_owner_scope};
@@ -992,23 +991,13 @@ impl RebornLocalExtensionManagementPort {
                 // the operator (design point 5: no membership for registered
                 // packages).
                 let new_owner = match registration_owner(&available.package.manifest.source) {
-                    Some(owner) => {
-                        // `available.package.manifest.source` was resolved
-                        // via this caller's own tenant-owner scope (never a
-                        // foreign one — `resolve_available_for_scope`), so
-                        // it always carries `scope`'s tenant and user; the
-                        // existing row's effective scope must match BOTH,
-                        // not just the user id (T2 cross-tenant follow-up).
-                        let existing_effective_scope =
-                            installation_effective_owner_scope(&self.installation_store, &existing)
-                                .await?;
-                        ensure_registered_row_owner_match(
-                            &available.package.id,
-                            existing_effective_scope,
-                            (scope.tenant_id.clone(), scope.user_id.clone()),
-                        )?;
-                        owner
-                    }
+                    // No owner-mismatch check here: `HostedMcpExtensionId` mint
+                    // (7792e9b10) hashes tenant+owner+url+label, so
+                    // `available.package.id` reaching this arm is always the
+                    // caller's own minted id. A foreign-owner takeover — the
+                    // deleted `ensure_registered_row_owner_match`'s only job —
+                    // is therefore unconstructible.
+                    Some(owner) => owner,
                     None => decide_install_on_existing(
                         &available.package.id,
                         existing.owner(),

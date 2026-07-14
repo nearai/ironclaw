@@ -41,10 +41,6 @@ impl OwnerScope {
         self.tenant_id == scope.tenant_id && self.owner == scope.user_id
     }
 
-    pub(super) fn matches_parts(&self, tenant_id: &TenantId, owner: &UserId) -> bool {
-        &self.tenant_id == tenant_id && &self.owner == owner
-    }
-
     pub(super) fn matches_tenant(&self, tenant_id: &TenantId) -> bool {
         &self.tenant_id == tenant_id
     }
