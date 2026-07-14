@@ -49,8 +49,9 @@ async def admin_client(reborn_v2_server):
 @pytest.fixture()
 async def test_user(admin_client):
     """Create a member user, yield its record + one-time token, delete after."""
-    email = f"test-{uuid.uuid4().hex[:8]}@example.com"
-    display_name = "E2E Test User"
+    suffix = uuid.uuid4().hex[:8]
+    email = f"test-{suffix}@example.com"
+    display_name = f"E2E Test User {suffix}"
     r = await admin_client.post(
         f"{ADMIN_BASE}/users",
         json={"display_name": display_name, "email": email, "role": "member"},
