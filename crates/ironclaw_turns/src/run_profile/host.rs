@@ -579,15 +579,6 @@ impl LoopModelRouteSnapshot {
         .ok()
     }
 
-    /// Whether this route is a caller-requested advisory hint (see
-    /// [`LoopModelRouteSnapshot::advisory`]) rather than an operator-resolved
-    /// route.
-    pub fn is_advisory(&self) -> bool {
-        self.provider_id == ADVISORY_MODEL_ROUTE_COMPONENT
-            && self.config_version == ADVISORY_MODEL_ROUTE_COMPONENT
-            && self.auth_version == ADVISORY_MODEL_ROUTE_COMPONENT
-    }
-
     pub fn validate(&self) -> Result<(), String> {
         validate_model_route_component_value("provider_id", &self.provider_id, 128, |character| {
             character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
@@ -2618,10 +2609,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn advisory_model_route_carries_model_and_marks_itself_advisory() {
+    fn advisory_model_route_carries_requested_model_and_validates() {
         let route = LoopModelRouteSnapshot::advisory("gpt-4o").expect("valid model");
         assert_eq!(route.model_id, "gpt-4o");
-        assert!(route.is_advisory());
         assert!(route.validate().is_ok());
     }
 
@@ -2636,12 +2626,6 @@ mod tests {
             LoopModelRouteSnapshot::advisory("  claude-opus-4-6  ").map(|route| route.model_id),
             Some("claude-opus-4-6".to_string())
         );
-    }
-
-    #[test]
-    fn operator_resolved_route_is_not_advisory() {
-        let route = LoopModelRouteSnapshot::new("openai", "gpt-4o", "config:v1", "auth:v1");
-        assert!(!route.is_advisory());
     }
 
     struct DefinitionPort {
