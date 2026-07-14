@@ -56,7 +56,7 @@ impl CompactionStrategy for ActiveTaskPreservingCompactionStrategy {
             self.minimum_tail_messages,
             self.minimum_compacted_messages,
         )
-        .map(|sequence| self.base.trigger_at(sequence))
+        .map(|sequence| self.base.trigger_at(state, sequence))
         .unwrap_or(CompactionDecision::Skip)
     }
 }
@@ -110,7 +110,10 @@ fn is_compaction_prefix_message(entry: &MessageIndexEntry) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{CompactionPromptSnapshot, LoopExecutionState, MessageIndexEntry};
+    use crate::state::{
+        CompactionEffectivenessBaseline, CompactionPromptSnapshot, LoopExecutionState,
+        MessageIndexEntry,
+    };
     use ironclaw_turns::run_profile::PromptContextTokenBudget;
 
     fn active_task_preserving_strategy(
@@ -183,6 +186,8 @@ mod tests {
                 drop_through_seq: 5,
                 preserve_tail_tokens: 1,
                 deadline_ms: 7,
+                effectiveness_baseline:
+                    CompactionEffectivenessBaseline::PreCompactionPromptTokens { tokens: 80 },
             }
         );
     }
@@ -242,6 +247,9 @@ mod tests {
                 drop_through_seq: 5,
                 preserve_tail_tokens: 1,
                 deadline_ms: 7,
+                effectiveness_baseline: CompactionEffectivenessBaseline::TriggerThresholdTokens {
+                    tokens: 90
+                },
             }
         );
     }
@@ -270,6 +278,48 @@ mod tests {
         assert_eq!(
             strategy.should_compact(&state, &context),
             CompactionDecision::Skip
+        );
+    }
+
+    #[test]
+    fn active_task_strategy_skips_when_compaction_circuit_is_open() {
+        let context = crate::test_support::test_run_context("active-task-preserving-circuit-open");
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.compaction_state.compaction_circuit_open = true;
+        state.compaction_prompt =
+            CompactionPromptSnapshot::from_message_index(active_task_message_index());
+        state.compaction_prompt.observed_prompt_tokens = 90;
+        let strategy = active_task_preserving_strategy(1);
+
+        assert_eq!(
+            strategy.should_compact(&state, &context),
+            CompactionDecision::Skip
+        );
+    }
+
+    #[test]
+    fn active_task_strategy_forced_compaction_bypasses_open_circuit() {
+        // BUG B1 regression: forced/recovery compactions must run even after
+        // the ineffective-compaction breaker opened — the breaker only gates
+        // automatic threshold-triggered compaction.
+        let context =
+            crate::test_support::test_run_context("active-task-preserving-circuit-open-forced");
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.compaction_state.compaction_circuit_open = true;
+        state.compaction_state.force_compact_on_next_iteration = true;
+        state.compaction_prompt =
+            CompactionPromptSnapshot::from_message_index(active_task_message_index());
+        let strategy = active_task_preserving_strategy(1);
+
+        assert_eq!(
+            strategy.should_compact(&state, &context),
+            CompactionDecision::Trigger {
+                drop_through_seq: 5,
+                preserve_tail_tokens: 1,
+                deadline_ms: 7,
+                effectiveness_baseline:
+                    CompactionEffectivenessBaseline::PreCompactionPromptTokens { tokens: 80 },
+            }
         );
     }
 

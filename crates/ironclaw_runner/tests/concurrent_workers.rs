@@ -194,6 +194,7 @@ async fn submit_run_on_thread(
     let submit = turn_store
         .submit_turn(
             SubmitTurnRequest {
+                requested_model: None,
                 scope: turn_scope,
                 actor: TurnActor::new(user_id.clone()),
                 accepted_message_ref: AcceptedMessageRef::new(format!(
@@ -311,6 +312,7 @@ async fn submit_owned_run_on_thread(
     let submit = turn_store
         .submit_turn(
             SubmitTurnRequest {
+                requested_model: None,
                 scope: turn_scope,
                 actor: TurnActor::new(user_id.clone()),
                 accepted_message_ref: AcceptedMessageRef::new(format!(
@@ -756,7 +758,7 @@ async fn scheduler_executor_applies_loop_exit_end_to_end() {
             Ok(LoopExit::Failed(LoopFailed {
                 reason_kind: LoopFailureKind::DriverBug,
                 checkpoint_id: None,
-                usage_summary_ref: None,
+                model_usage: None,
                 diagnostic_ref: None,
                 explanation_message_refs: Vec::new(),
                 safe_summary: None,

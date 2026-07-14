@@ -21,27 +21,28 @@ dist = false
 [[bin]]
 name = "ironclaw-reborn-migration"
 path = "src/main.rs"
+required-features = ["full-migration"]
 
 [[bin]]
 name = "ironclaw-reborn-extension-ownership-migration"
 path = "src/extension_ownership_main.rs"
 
 [features]
-default = ["libsql", "postgres"]
-# Each backend feature forwards into the v1 read stack (root `ironclaw` crate)
-# and every Reborn write stack that dispatches on a backend, so a single
-# `--features libsql` build wires the whole read→write path over one backend.
+default = ["full-migration", "libsql", "postgres"]
+full-migration = ["dep:ironclaw"]
+# Backend features wire every Reborn write stack that dispatches on that
+# backend. When `full-migration` is also enabled, `ironclaw?/libsql` forwards
+# the same backend into the optional v1 read stack.
 libsql = [
     "dep:libsql",
-    "ironclaw/libsql",
+    "ironclaw?/libsql",
     "ironclaw_filesystem/libsql",
     "ironclaw_triggers/libsql",
     "ironclaw_reborn_composition/libsql",
 ]
 postgres = [
     "dep:deadpool-postgres",
-    "dep:tokio-postgres",
-    "ironclaw/postgres",
+    "ironclaw?/postgres",
     "ironclaw_filesystem/postgres",
     "ironclaw_triggers/postgres",
     "ironclaw_reborn_composition/postgres",
@@ -49,7 +50,7 @@ postgres = [
 
 [dependencies]
 # ── v1 / engine-v2 read side (the legacy monolith) ──────────────────────────
-ironclaw = { path = "../..", default-features = false }
+ironclaw = { path = "../..", default-features = false, optional = true }
 
 # ── Reborn write side (path deps; versions intentionally unpinned) ───────────
 ironclaw_common = { path = "../ironclaw_common" }
@@ -85,15 +86,14 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 # backend-specific handles (optional, pulled in by feature)
 deadpool-postgres = { version = "0.14", optional = true }
 libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
-tokio-postgres = { version = "0.7", optional = true, features = ["with-serde_json-1"] }
 
 [dev-dependencies]
 tempfile = "3"
 
 # Docker-free acceptance test: seeds a rich v1+engine-v2 libSQL fixture, runs the
-# migration, and asserts the round-trip + the exact gap set. Gated on libsql so a
-# no-libsql build still compiles.
+# migration, and asserts the round-trip + the exact gap set. Gated on the full
+# migration plus libsql so the ownership-only operator build stays legacy-free.
 [[test]]
 name = "migration_roundtrip"
 path = "tests/migration_roundtrip.rs"
-required-features = ["libsql"]
+required-features = ["full-migration", "libsql"]

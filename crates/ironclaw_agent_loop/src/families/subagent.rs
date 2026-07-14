@@ -6,7 +6,7 @@ use crate::family::{ComponentDigest, ComponentIdentity, LoopFamily, LoopFamilyId
 use crate::planner::AgentLoopPlanner;
 use crate::strategies::DefaultBudgetStrategy;
 
-const SUBAGENT_ITERATION_LIMIT: u32 = 16;
+const SUBAGENT_ITERATION_LIMIT: u32 = 256;
 const SUBAGENT_WALL_CLOCK_LIMIT: Option<Duration> = None;
 
 #[cfg(test)]
@@ -17,22 +17,22 @@ const SUBAGENT_FAMILY_FINGERPRINT: &[u8] = concat!(
     "planner=DefaultPlanner;",
     "strategies=",
     "context:DefaultContextStrategy(max_messages=128),",
-    "compaction:ActiveTaskPreservingCompactionStrategy(context_limit=128000,reserve=20000,preserve_tail=8000,min_compacted=3,min_tail=3,deadline_ms=30000),",
+    "compaction:ActiveTaskPreservingCompactionStrategy(context_limit=128000,reserve=20000,preserve_tail=8000,min_compacted=3,min_tail=3,deadline_ms=30000,ineffective_trip_limit=3),",
     "capability:DefaultCapabilityStrategy(all),",
     "model:DefaultModelStrategy(primary_or_fallback_index),",
     "batch:DefaultBatchPolicyStrategy(parallel_unless_exclusive),",
     "gate:DefaultGateHandlingStrategy(block),",
-    "recovery:DefaultRecoveryStrategy(max_attempts_per_class=2),",
+    "recovery:DefaultRecoveryStrategy(max_attempts_per_class=2,model_availability_attempts=12),",
     "reply_admission:DefaultReplyAdmissionStrategy(reject_empty_and_provider_transcript_artifacts),",
     "stop:DefaultStopConditionStrategy(window=5,repeat=3,failure_run=3,rejected_reply=invalid_model_output),",
     "drain:DefaultInputDrainStrategy(steering=true,followup=true),",
-    "budget:DefaultBudgetStrategy(iteration_limit=16,wall_clock_limit=none)"
+    "budget:DefaultBudgetStrategy(iteration_limit=256,wall_clock_limit=none)"
 )
 .as_bytes();
 
 pub const SUBAGENT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
-    0xd2, 0xea, 0x8a, 0xd9, 0x15, 0x09, 0x46, 0xe3, 0x8c, 0xe7, 0x63, 0xa5, 0xea, 0xd7, 0xc0, 0xc5,
-    0x28, 0x5c, 0x99, 0x66, 0x7d, 0x8e, 0x83, 0x1c, 0x18, 0xcd, 0xb6, 0x09, 0x47, 0x34, 0x10, 0x3a,
+    0x70, 0x61, 0x2a, 0x59, 0x13, 0x8a, 0xcd, 0x50, 0xff, 0x4b, 0x1e, 0xe6, 0x21, 0x9d, 0xa7, 0xd2,
+    0xef, 0xca, 0x5f, 0x35, 0x0b, 0x8b, 0x6d, 0x51, 0x63, 0xf6, 0x00, 0xd2, 0x8c, 0xc8, 0x17, 0x03,
 ]);
 
 pub fn subagent() -> LoopFamily {

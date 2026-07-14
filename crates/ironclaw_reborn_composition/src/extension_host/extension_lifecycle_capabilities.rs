@@ -1320,7 +1320,7 @@ credential_handle = "channel_ext_token"
     }
 
     #[tokio::test]
-    async fn local_dev_extension_search_hides_onboarding_after_credentialed_activation() {
+    async fn local_dev_extension_search_distinguishes_configured_from_active() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = build_reborn_services(RebornBuildInput::local_dev(
             "extension-tools-active-search-owner",
@@ -1376,6 +1376,15 @@ credential_handle = "channel_ext_token"
             .find(|extension| extension["package_ref"]["id"] == "github")
             .expect("github search result");
         assert_eq!(installed_github["installation_phase"], "installed");
+        let installed_message = installed_search["message"]
+            .as_str()
+            .expect("installed inactive search should carry activation guidance");
+        assert!(
+            installed_message.contains("installed but not activated")
+                && installed_message.contains("not currently callable tools")
+                && installed_message.contains(EXTENSION_ACTIVATE_CAPABILITY_ID),
+            "installed inactive GitHub search must not imply tools are active, got {installed_search}"
+        );
         assert!(
             installed_github.get("credential_requirements").is_none(),
             "installed inactive GitHub model-visible search results must not expose stale PAT requirements before activation"
@@ -1395,11 +1404,18 @@ credential_handle = "channel_ext_token"
         )
         .await
         .expect("configured search succeeds");
+        let configured_message = configured_search["message"]
+            .as_str()
+            .expect("configured inactive search should carry activation guidance");
         assert!(
-            configured_search["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("already configured or active")),
-            "configured GitHub search should override stale PAT onboarding, got {configured_search}"
+            configured_message.contains("installed but not activated")
+                && configured_message.contains("configured only means")
+                && configured_message.contains("not currently callable tools"),
+            "configured GitHub search must not report activation before activation, got {configured_search}"
+        );
+        assert!(
+            !configured_message.contains("ready"),
+            "configured-but-inactive GitHub search must not be marked ready, got {configured_search}"
         );
         let extensions = configured_search["payload"]["extensions"]
             .as_array()
@@ -1437,7 +1453,7 @@ credential_handle = "channel_ext_token"
         assert!(
             active_search["message"]
                 .as_str()
-                .is_some_and(|message| message.contains("already configured or active")),
+                .is_some_and(|message| message.contains("active installed extension results")),
             "active GitHub search should override stale PAT onboarding, got {active_search}"
         );
         let extensions = active_search["payload"]["extensions"]

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{InvocationId, UserId};
+use ironclaw_host_api::{DispatchInputIssueCode, InvocationId, UserId};
 use ironclaw_loop_host::{CapabilityResultWrite, DurablePersistence};
 use ironclaw_threads::{
     MessageKind, MessageStatus, ReadToolResultRecordRequest, SessionThreadError,
@@ -9,11 +9,11 @@ use ironclaw_threads::{
     ToolResultReferenceEnvelope,
 };
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailure, CapabilityFailureKind,
-    CapabilityOutcome, CapabilityProgress, CapabilityResultMessage, ConcurrencyHint,
-    MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleArtifact,
-    ModelVisibleToolObservation, ObservationTrust, ToolObservationDetail, ToolObservationStatus,
-    sanitize_model_visible_text,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailure, CapabilityFailureDetail,
+    CapabilityFailureKind, CapabilityInputIssue, CapabilityOutcome, CapabilityProgress,
+    CapabilityResultMessage, ConcurrencyHint, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+    ModelVisibleArtifact, ModelVisibleToolObservation, ObservationTrust, ToolObservationDetail,
+    ToolObservationStatus, sanitize_model_visible_text,
 };
 
 use super::{
@@ -105,13 +105,7 @@ impl LocalDevSyntheticCapabilityHandler for ResultReadHandler {
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
         let input = match parse_result_read_input(&invocation.input) {
             Ok(input) => input,
-            Err(error) => {
-                return Ok(CapabilityOutcome::Failed(CapabilityFailure {
-                    error_kind: CapabilityFailureKind::InvalidInput,
-                    safe_summary: error.safe_summary,
-                    detail: None,
-                }));
-            }
+            Err(failure) => return Ok(CapabilityOutcome::Failed(failure)),
         };
         let scope = local_dev_thread_scope_for_run(&invocation.run_context, &self.fallback_user_id)
             .ok_or_else(|| {
@@ -232,6 +226,8 @@ fn result_read_observation(
             preview: Some(content),
             total_bytes: Some(total_bytes),
             next_offset,
+            // `content` here is always a paged text chunk, never array-shaped.
+            item_count: None,
         },
         artifacts: vec![ModelVisibleArtifact {
             artifact_ref: result_ref.to_string(),
@@ -275,60 +271,204 @@ struct ResultReadInput {
     max_bytes: u64,
 }
 
+/// Builds the `InvalidInput` `CapabilityFailure` every
+/// `parse_result_read_input` error arm returns, carrying one structured
+/// repair issue.
+fn invalid_input_failure(safe_summary: &str, issue: CapabilityInputIssue) -> CapabilityFailure {
+    CapabilityFailure {
+        error_kind: CapabilityFailureKind::InvalidInput,
+        safe_summary: safe_summary.to_string(),
+        detail: Some(CapabilityFailureDetail::InvalidInput {
+            issues: vec![issue],
+        }),
+    }
+}
+
+/// JSON type name for a `CapabilityInputIssue::received` value, distinct from
+/// `serde_json::Value`'s numeric `Display` used for out-of-range values.
+fn json_value_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+/// Model-controlled text echoed into a `CapabilityInputIssue` must be
+/// secret-redacted first, or the persistence-side content scan drops the
+/// whole observation for exactly the inputs that need repair guidance most.
+fn sanitized_issue_text(value: impl Into<String>) -> String {
+    sanitize_model_visible_text(value)
+}
+
+/// A model-authored field name may only reach the model-visible issue `path`
+/// when identifier-shaped (1..=64 chars of `[A-Za-z0-9_.-]`); anything else
+/// gets a fixed placeholder so instruction-shaped names cannot be echoed.
+fn safe_issue_path(key: &str) -> String {
+    let identifier_shaped = (1..=64).contains(&key.len())
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
+    if identifier_shaped {
+        sanitized_issue_text(key)
+    } else {
+        "unexpected_field".to_string()
+    }
+}
+
 fn parse_result_read_input(
     value: &serde_json::Value,
-) -> Result<ResultReadInput, AgentLoopHostError> {
+) -> Result<ResultReadInput, CapabilityFailure> {
     let object = value.as_object().ok_or_else(|| {
-        AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
+        invalid_input_failure(
             "result_read arguments must be an object",
+            CapabilityInputIssue {
+                path: "root".to_string(),
+                code: DispatchInputIssueCode::TypeMismatch,
+                expected: Some("object".to_string()),
+                received: Some(json_value_kind(value).to_string()),
+                schema_path: Some("root".to_string()),
+            },
         )
     })?;
-    if object
+    if let Some(unexpected) = object
         .keys()
-        .any(|key| key != "result_ref" && key != "offset" && key != "max_bytes")
+        .find(|key| *key != "result_ref" && *key != "offset" && *key != "max_bytes")
     {
-        return Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
+        return Err(invalid_input_failure(
             "result_read arguments contain an unsupported field",
+            CapabilityInputIssue {
+                path: safe_issue_path(unexpected),
+                code: DispatchInputIssueCode::UnexpectedField,
+                expected: Some("declared field".to_string()),
+                received: Some("unexpected field".to_string()),
+                schema_path: Some("additionalProperties".to_string()),
+            },
         ));
     }
-    let result_ref = object
-        .get("result_ref")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
+    let result_ref_value = object.get("result_ref");
+    let result_ref = match result_ref_value.and_then(serde_json::Value::as_str) {
+        Some(value) => value.to_string(),
+        None => {
+            let (code, expected, received) = match result_ref_value {
+                None => (
+                    DispatchInputIssueCode::MissingRequired,
+                    Some("required field".to_string()),
+                    None,
+                ),
+                Some(other) => (
+                    DispatchInputIssueCode::TypeMismatch,
+                    Some("string".to_string()),
+                    Some(json_value_kind(other).to_string()),
+                ),
+            };
+            return Err(invalid_input_failure(
                 "result_read requires a result_ref string",
-            )
-        })?
-        .to_string();
+                CapabilityInputIssue {
+                    path: "result_ref".to_string(),
+                    code,
+                    expected,
+                    received,
+                    schema_path: Some("properties/result_ref".to_string()),
+                },
+            ));
+        }
+    };
     ToolResultReferenceEnvelope::validate_result_ref(&result_ref).map_err(|error| {
         tracing::debug!(validation_error = %error, "result reader result reference validation failed");
-        AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
+        invalid_input_failure(
             "result_read result_ref is invalid",
+            CapabilityInputIssue {
+                path: "result_ref".to_string(),
+                code: DispatchInputIssueCode::InvalidValue,
+                expected: Some("valid result reference format".to_string()),
+                received: Some(sanitized_issue_text(result_ref.clone())),
+                schema_path: Some("properties/result_ref".to_string()),
+            },
         )
     })?;
-    let offset = object
-        .get("offset")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| {
-            AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
+    let offset_value = object.get("offset");
+    let offset = match offset_value.and_then(serde_json::Value::as_u64) {
+        Some(value) => value,
+        None => {
+            let (code, expected, received) = match offset_value {
+                None => (
+                    DispatchInputIssueCode::MissingRequired,
+                    Some("required field".to_string()),
+                    None,
+                ),
+                // A number that isn't a u64 (negative, float) is an
+                // InvalidValue; any other JSON type is a TypeMismatch echoing
+                // only the type name (mirrors the result_ref arm).
+                Some(other) if other.is_number() => (
+                    DispatchInputIssueCode::InvalidValue,
+                    Some("non-negative integer".to_string()),
+                    Some(sanitized_issue_text(other.to_string())),
+                ),
+                Some(other) => (
+                    DispatchInputIssueCode::TypeMismatch,
+                    Some("integer".to_string()),
+                    Some(json_value_kind(other).to_string()),
+                ),
+            };
+            return Err(invalid_input_failure(
                 "result_read requires a non-negative offset",
-            )
-        })?;
-    let max_bytes = object
-        .get("max_bytes")
-        .and_then(serde_json::Value::as_u64)
+                CapabilityInputIssue {
+                    path: "offset".to_string(),
+                    code,
+                    expected,
+                    received,
+                    schema_path: Some("properties/offset".to_string()),
+                },
+            ));
+        }
+    };
+    let max_bytes_value = object.get("max_bytes");
+    let Some(max_bytes_value) = max_bytes_value else {
+        return Err(invalid_input_failure(
+            "result_read requires a max_bytes integer",
+            CapabilityInputIssue {
+                path: "max_bytes".to_string(),
+                code: DispatchInputIssueCode::MissingRequired,
+                expected: Some("required field".to_string()),
+                received: None,
+                schema_path: Some("properties/max_bytes".to_string()),
+            },
+        ));
+    };
+    if !max_bytes_value.is_number() {
+        return Err(invalid_input_failure(
+            "result_read requires a max_bytes integer",
+            CapabilityInputIssue {
+                path: "max_bytes".to_string(),
+                code: DispatchInputIssueCode::TypeMismatch,
+                expected: Some("integer".to_string()),
+                received: Some(json_value_kind(max_bytes_value).to_string()),
+                schema_path: Some("properties/max_bytes".to_string()),
+            },
+        ));
+    }
+    let max_bytes = match max_bytes_value
+        .as_u64()
         .filter(|value| (RESULT_READ_MIN_BYTES..=RESULT_READ_MAX_BYTES).contains(value))
-        .ok_or_else(|| {
-            AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
+    {
+        Some(value) => value,
+        None => {
+            return Err(invalid_input_failure(
                 "result_read max_bytes is outside the allowed range",
-            )
-        })?;
+                CapabilityInputIssue {
+                    path: "max_bytes".to_string(),
+                    code: DispatchInputIssueCode::InvalidValue,
+                    expected: Some(format!("{RESULT_READ_MIN_BYTES}..={RESULT_READ_MAX_BYTES}")),
+                    received: Some(sanitized_issue_text(max_bytes_value.to_string())),
+                    schema_path: Some("properties/max_bytes".to_string()),
+                },
+            ));
+        }
+    };
     Ok(ResultReadInput {
         result_ref,
         offset,

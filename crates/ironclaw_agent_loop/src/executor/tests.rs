@@ -71,6 +71,7 @@ fn continuation_observation(
             preview: Some("first bounded chunk".to_string()),
             total_bytes: Some(byte_len * 2),
             next_offset: Some(byte_len),
+            item_count: None,
         },
         artifacts: Vec::new(),
         recovery: None,
@@ -378,6 +379,235 @@ async fn prompt_stage_compacts_candidate_prompt_then_rebuilds_final_bundle() {
             "checkpoint_written",
             "prompt_bundle_built",
         ]
+    );
+}
+
+#[tokio::test]
+async fn prompt_stage_circuit_breaker_disables_compaction_after_repeated_ineffective_runs() {
+    use ironclaw_turns::run_profile::PromptContextTokenBudget;
+
+    use crate::state::CompactionStrategyState;
+
+    // Threshold is 90 tokens (100 - 10). Each compaction retains a 60-token
+    // assistant tail — BELOW the threshold, so measuring right after
+    // retain_after_sequence (BUG B2) records every attempt as effective and
+    // the breaker never opens. Only the rebuilt bundle shows the injected
+    // 40-token summary pushing the prompt back over the threshold
+    // (100 >= 90): three REAL ineffective compactions driven through the
+    // prompt stage must open the breaker, and the fourth threshold overflow
+    // must be suppressed.
+    let compacting_run = |summary_seq: u64, user_seq: u64| {
+        vec![
+            // Candidate bundle: over threshold with an eligible user boundary.
+            vec![
+                compaction_metadata(summary_seq, LoopContextCompactionKind::Summary, 40),
+                compaction_metadata(summary_seq + 1, LoopContextCompactionKind::Assistant, 60),
+                compaction_metadata(user_seq, LoopContextCompactionKind::User, 20),
+                compaction_metadata(user_seq + 1, LoopContextCompactionKind::Assistant, 60),
+            ],
+            // Rebuild after compacting through user_seq: the 60-token tail is
+            // under the threshold, but summary + tail is over (100 >= 90) —
+            // ineffective.
+            vec![
+                compaction_metadata(user_seq, LoopContextCompactionKind::Summary, 40),
+                compaction_metadata(user_seq + 1, LoopContextCompactionKind::Assistant, 60),
+            ],
+        ]
+    };
+    let mut prompt_indexes = vec![
+        // First run's candidate bundle (no prior summary yet).
+        vec![
+            compaction_metadata(1, LoopContextCompactionKind::User, 20),
+            compaction_metadata(2, LoopContextCompactionKind::Assistant, 60),
+            compaction_metadata(3, LoopContextCompactionKind::User, 20),
+            compaction_metadata(4, LoopContextCompactionKind::Assistant, 60),
+        ],
+        // First rebuild: injected summary keeps the prompt over threshold.
+        vec![
+            compaction_metadata(3, LoopContextCompactionKind::Summary, 40),
+            compaction_metadata(4, LoopContextCompactionKind::Assistant, 60),
+        ],
+    ];
+    prompt_indexes.extend(compacting_run(3, 5));
+    prompt_indexes.extend(compacting_run(5, 7));
+    // Fourth run's candidate bundle: over threshold with an eligible user
+    // boundary, so only the open circuit can explain a skip.
+    prompt_indexes.push(vec![
+        compaction_metadata(7, LoopContextCompactionKind::Summary, 40),
+        compaction_metadata(8, LoopContextCompactionKind::Assistant, 60),
+        compaction_metadata(9, LoopContextCompactionKind::User, 20),
+        compaction_metadata(10, LoopContextCompactionKind::Assistant, 60),
+    ]);
+    let host = MockHost::new(Vec::new())
+        .with_prompt_compaction_indexes(prompt_indexes)
+        .with_compaction_result(Ok(LoopCompactionResponse {
+            summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
+            compression_ratio_ppm: 250_000,
+        }));
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy {
+        prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
+        preserve_tail_tokens: 60,
+        deadline_ms: 1,
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+
+    for completed_compactions in 1..=CompactionStrategyState::INEFFECTIVE_COMPACTION_TRIP_LIMIT {
+        let step = PromptStage
+            .process(
+                ctx,
+                PromptInput {
+                    state,
+                    pending_input_ack: PendingInputAck::default(),
+                },
+            )
+            .await
+            .expect("prompt stage");
+        let output = match step {
+            PromptStep::Prepared(output) => output,
+            _ => panic!("expected prepared prompt"),
+        };
+        state = output.state;
+        assert_eq!(
+            state.compaction_state.consecutive_ineffective_compactions, completed_compactions,
+            "each rebuilt prompt stays over threshold, so every completed \
+             compaction must count as ineffective"
+        );
+        assert_eq!(
+            state.compaction_state.compaction_circuit_open,
+            completed_compactions == CompactionStrategyState::INEFFECTIVE_COMPACTION_TRIP_LIMIT,
+            "the circuit must open exactly on the third real ineffective compaction"
+        );
+        assert_eq!(
+            host.progress_event_names()
+                .iter()
+                .filter(|&&name| name == "compaction_started")
+                .count(),
+            completed_compactions as usize
+        );
+    }
+
+    // Drive the prompt stage again with the breaker open and the prompt still
+    // over threshold: threshold-triggered compaction must NOT run again.
+    let step = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("prompt stage after breaker opened");
+    let output = match step {
+        PromptStep::Prepared(output) => output,
+        _ => panic!("expected prepared prompt"),
+    };
+    assert!(output.state.compaction_state.compaction_circuit_open);
+    assert_eq!(
+        host.progress_event_names()
+            .iter()
+            .filter(|&&name| name == "compaction_started")
+            .count(),
+        CompactionStrategyState::INEFFECTIVE_COMPACTION_TRIP_LIMIT as usize,
+        "an open circuit breaker must stop threshold-triggered compactions for the run"
+    );
+}
+
+#[tokio::test]
+async fn prompt_stage_forced_compaction_bypasses_open_circuit_breaker() {
+    use ironclaw_turns::run_profile::PromptContextTokenBudget;
+
+    // BUG B1 regression: force_compact_on_next_iteration (context-overflow
+    // recovery via RetryAlteration::ShrinkContext, byte-cap overflow) must
+    // run its compaction even with the breaker open — otherwise the same
+    // oversized prompt is rebuilt until the retry budget aborts.
+    // BUG B3 regression: the forced compaction is judged against the prompt
+    // it started from (260 tokens), not the 90-token transcript threshold —
+    // shrinking to 140 tokens is effective and resets the counter, even
+    // though 140 is still over the threshold.
+    let host = MockHost::new(Vec::new())
+        .with_prompt_compaction_indexes(vec![
+            // Candidate bundle: 260 tokens with an eligible user boundary.
+            vec![
+                compaction_metadata(1, LoopContextCompactionKind::Summary, 40),
+                compaction_metadata(2, LoopContextCompactionKind::Assistant, 100),
+                compaction_metadata(3, LoopContextCompactionKind::User, 20),
+                compaction_metadata(4, LoopContextCompactionKind::Assistant, 100),
+            ],
+            // Rebuild after compacting through seq 3: shrank to 140 tokens.
+            vec![
+                compaction_metadata(3, LoopContextCompactionKind::Summary, 40),
+                compaction_metadata(4, LoopContextCompactionKind::Assistant, 100),
+            ],
+        ])
+        .with_compaction_result(Ok(LoopCompactionResponse {
+            summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
+            compression_ratio_ppm: 250_000,
+        }));
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy {
+        prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
+        preserve_tail_tokens: 60,
+        deadline_ms: 1,
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.compaction_state.compaction_circuit_open = true;
+    state.compaction_state.consecutive_ineffective_compactions =
+        crate::state::CompactionStrategyState::INEFFECTIVE_COMPACTION_TRIP_LIMIT;
+    state.compaction_state.force_compact_on_next_iteration = true;
+
+    let step = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("prompt stage");
+    let output = match step {
+        PromptStep::Prepared(output) => output,
+        _ => panic!("expected prepared prompt"),
+    };
+    assert_eq!(
+        host.progress_event_names()
+            .iter()
+            .filter(|&&name| name == "compaction_started")
+            .count(),
+        1,
+        "a forced compaction must bypass the open circuit breaker"
+    );
+    assert_eq!(
+        output.state.compaction_state.last_compacted_through_seq,
+        Some(3)
+    );
+    assert!(
+        !output
+            .state
+            .compaction_state
+            .force_compact_on_next_iteration
+    );
+    assert_eq!(
+        output
+            .state
+            .compaction_state
+            .consecutive_ineffective_compactions,
+        0,
+        "a forced compaction that shrank the prompt (260 -> 140) is effective \
+         against its pre-compaction baseline even though 140 is still over \
+         the 90-token transcript threshold"
+    );
+    assert!(
+        output.state.compaction_state.compaction_circuit_open,
+        "the breaker is one-way; an effective forced compaction does not close it"
     );
 }
 
@@ -1461,6 +1691,76 @@ async fn reply_admission_rejects_candidate_before_finalizing_and_continues() {
             .is_none()
     );
     assert_eq!(final_state.stop_state.turns_completed, 3);
+}
+
+/// A tool-using run must count the usage from EVERY model response, including
+/// the capability-call turn — not just the final assistant reply. Regression
+/// for usage/cost being dropped on the `CapabilityCalls` branch: the executor
+/// now accumulates before branching on the model output.
+#[tokio::test]
+async fn cumulative_usage_counts_capability_call_and_reply_turns() {
+    use ironclaw_turns::run_profile::{LoopModelResponse, LoopModelUsage};
+
+    let result_ref = LoopResultRef::new("result:done").expect("valid");
+    // Turn 1 is a capability call carrying its own usage; turn 2 is the reply.
+    let calls_usage = LoopModelUsage {
+        input_tokens: 100,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+    };
+    let reply_usage = LoopModelUsage {
+        input_tokens: 40,
+        output_tokens: 20,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+    };
+    let calls = LoopModelResponse {
+        usage: Some(calls_usage),
+        ..calls_response()
+    };
+    let reply = LoopModelResponse {
+        usage: Some(reply_usage),
+        ..reply_response()
+    };
+    let host = MockHost::new(vec![calls, reply]).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+                result_ref,
+                safe_summary: "done".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                terminate_hint: false,
+                byte_len: 0,
+                output_digest: None,
+                model_observation: None,
+            })],
+            stopped_on_suspension: false,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    match exit {
+        LoopExit::Completed(completed) => {
+            // Both turns' usage is summed: had the capability turn been dropped,
+            // this would be only the reply's 40/20.
+            assert_eq!(
+                completed.model_usage,
+                Some(LoopModelUsage {
+                    input_tokens: 140,
+                    output_tokens: 20,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            );
+        }
+        other => panic!("expected completed, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -3075,20 +3375,19 @@ async fn explanation_model_error_degrades_to_original_failed_exit() {
     assert!(host.finalized_assistant_messages().is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn model_error_abort_skips_explanation_and_carries_partial_refs() {
+    // Availability-class model errors retry on the deep availability budget
+    // before aborting; paused time fast-forwards the backoff sleeps.
+    let abort_call_count = crate::strategies::DefaultRecoveryStrategy::default()
+        .max_model_availability_attempts as usize
+        + 1;
     let script = ScenarioScript {
-        model_responses: VecDeque::from([
-            ScriptedModelResponse::Error {
+        model_responses: (0..abort_call_count)
+            .map(|_| ScriptedModelResponse::Error {
                 kind: AgentLoopHostErrorKind::Internal,
-            },
-            ScriptedModelResponse::Error {
-                kind: AgentLoopHostErrorKind::Internal,
-            },
-            ScriptedModelResponse::Error {
-                kind: AgentLoopHostErrorKind::Internal,
-            },
-        ]),
+            })
+            .collect(),
         capability_outcomes: VecDeque::new(),
         single_call_retry_outcomes: VecDeque::new(),
         pending_inputs: VecDeque::new(),
@@ -3116,9 +3415,68 @@ async fn model_error_abort_skips_explanation_and_carries_partial_refs() {
             .iter()
             .filter(|call| matches!(call, MockHostCall::StreamModel))
             .count(),
-        3
+        abort_call_count
     );
     assert!(host.finalized_assistant_messages().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn availability_budget_above_old_executor_guard_reaches_strategy_abort() {
+    // Regression pin: the model stage's retry guard is derived from the
+    // composed recovery strategy, not a hard-coded executor constant. A
+    // configured availability budget larger than the old `MAX_MODEL_RETRIES`
+    // (16) must still reach the strategy's own Abort — with its failure
+    // category and diagnostics — instead of falling through the loop to a
+    // diagnostic-free generic ModelError exit.
+    let attempts = 20u32;
+    let family = crate::families::default_with_overrides(
+        crate::families::FamilyOverrides::default().set_model_availability_attempts(attempts),
+    );
+    let diagnostic_ref = LoopDiagnosticRef::new("diag:model-outage").expect("valid");
+    // Exactly attempts+1 scripted failures: the final one is the call where
+    // the strategy's budget is exhausted and it aborts. Any extra call would
+    // hit the mock's script-exhausted Internal fallback and change the
+    // observed failure category.
+    let host = MockHost::new(Vec::new()).with_model_errors(
+        (0..=attempts)
+            .map(|_| {
+                AgentLoopHostError::new(AgentLoopHostErrorKind::Unavailable, "model unavailable")
+                    .with_diagnostic_ref(diagnostic_ref.clone())
+            })
+            .collect(),
+    );
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&family, &host, state)
+        .await
+        .expect("execute");
+
+    match exit {
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::ModelError);
+            assert_eq!(
+                failed
+                    .safe_summary
+                    .as_ref()
+                    .map(|summary| summary.category()),
+                Some("model_unavailable"),
+                "abort must carry the strategy's failure category"
+            );
+            assert_eq!(
+                failed.diagnostic_ref,
+                Some(diagnostic_ref),
+                "abort must carry the model error's diagnostic ref"
+            );
+        }
+        other => panic!("expected failed exit, got {other:?}"),
+    }
+    assert_eq!(
+        host.model_requests().len(),
+        (attempts + 1) as usize,
+        "the loop must allow exactly the configured availability budget"
+    );
 }
 
 #[tokio::test]

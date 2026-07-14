@@ -12,20 +12,33 @@ use std::sync::Arc;
 
 use ironclaw_extensions::ExtensionInstallationStore;
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_host_api::{AgentId, TenantId, UserId};
+use ironclaw_reborn_identity::{FilesystemRebornIdentityStore, RebornUserDirectory};
+
+#[cfg(feature = "full-migration")]
+use ironclaw_host_api::ProjectId;
+#[cfg(feature = "full-migration")]
 use ironclaw_memory::MemoryService;
+#[cfg(feature = "full-migration")]
 use ironclaw_memory_native::NativeMemoryService;
-use ironclaw_reborn_identity::{
-    FilesystemRebornIdentityStore, RebornIdentityResolver, RebornUserDirectory,
-};
+#[cfg(feature = "full-migration")]
+use ironclaw_reborn_identity::RebornIdentityResolver;
+#[cfg(feature = "full-migration")]
 use ironclaw_secrets::{FilesystemSecretStore, SecretStore, SecretsCrypto};
+#[cfg(feature = "full-migration")]
 use ironclaw_threads::{FilesystemSessionThreadService, SessionThreadService};
+#[cfg(feature = "full-migration")]
 use ironclaw_triggers::TriggerRepository;
+#[cfg(feature = "full-migration")]
 use secrecy::SecretString;
 
 use crate::error::MigrationError;
+use crate::options::TargetStore;
+
+#[cfg(feature = "full-migration")]
 use crate::mounts;
-use crate::options::{MigrationOptions, TargetStore};
+#[cfg(feature = "full-migration")]
+use crate::options::MigrationOptions;
 
 /// The concrete Reborn backend the migration writes into. Both the KV substrate
 /// and the triggers DB share this one handle.
@@ -35,17 +48,20 @@ pub(crate) enum Backend {
         root: Arc<ironclaw_filesystem::LibSqlRootFilesystem>,
         /// Shared handle for the triggers repo, which uses the raw DB (not the
         /// KV substrate). `LibSqlRootFilesystem` does not re-expose it.
+        #[cfg(feature = "full-migration")]
         db: Arc<libsql::Database>,
     },
     #[cfg(feature = "postgres")]
     Postgres {
         root: Arc<ironclaw_filesystem::PostgresRootFilesystem>,
+        #[cfg(feature = "full-migration")]
         pool: deadpool_postgres::Pool,
     },
 }
 
 /// Live Reborn write target: opened backend plus every constructed write
 /// service and the scope migrated records are written under.
+#[cfg(feature = "full-migration")]
 pub(crate) struct RebornTarget {
     /// Held for `identity_store` (the identity row-by-row follow-up); the other
     /// services already retain their own root/db Arcs.
@@ -108,6 +124,7 @@ impl ExtensionOwnershipTarget {
     }
 }
 
+#[cfg(feature = "full-migration")]
 impl RebornTarget {
     pub(crate) async fn open(options: &MigrationOptions) -> Result<Self, MigrationError> {
         let crypto = match &options.secret_master_key {
@@ -171,12 +188,14 @@ impl RebornTarget {
     }
 }
 
+#[cfg(feature = "full-migration")]
 fn build_crypto(key: &SecretString) -> Result<SecretsCrypto, MigrationError> {
     SecretsCrypto::new(key.clone())
         .map_err(|e| MigrationError::OpenTarget(format!("secrets master key: {e}")))
 }
 
 /// The KV-substrate write services built over one backend.
+#[cfg(feature = "full-migration")]
 type KvServices = (
     Arc<dyn SessionThreadService>,
     Arc<dyn MemoryService>,
@@ -185,6 +204,7 @@ type KvServices = (
 
 /// Build the filesystem-backed KV services over one concrete backend, returning
 /// them as trait objects.
+#[cfg(feature = "full-migration")]
 fn build_kv_services<F>(root: Arc<F>, crypto: Option<Arc<SecretsCrypto>>) -> KvServices
 where
     F: RootFilesystem + 'static,
@@ -213,6 +233,7 @@ where
     (thread_service, memory_service, secret_store)
 }
 
+#[cfg(feature = "full-migration")]
 #[allow(dead_code)] // wired for the identity row-by-row follow-up
 fn build_identity_store<F>(
     root: Arc<F>,
@@ -256,6 +277,7 @@ where
     Ok(store)
 }
 
+#[cfg(feature = "full-migration")]
 async fn build_trigger_repo(
     backend: &Backend,
 ) -> Result<Arc<dyn TriggerRepository>, MigrationError> {
@@ -298,7 +320,11 @@ async fn open_backend(target: &TargetStore) -> Result<Backend, MigrationError> {
             root.run_migrations()
                 .await
                 .map_err(|e| MigrationError::OpenTarget(e.to_string()))?;
-            Ok(Backend::LibSql { root, db })
+            Ok(Backend::LibSql {
+                root,
+                #[cfg(feature = "full-migration")]
+                db,
+            })
         }
         #[cfg(not(feature = "libsql"))]
         TargetStore::LibSql { .. } => Err(MigrationError::OpenTarget(
@@ -313,7 +339,11 @@ async fn open_backend(target: &TargetStore) -> Result<Backend, MigrationError> {
             root.run_migrations()
                 .await
                 .map_err(|e| MigrationError::OpenTarget(e.to_string()))?;
-            Ok(Backend::Postgres { root, pool })
+            Ok(Backend::Postgres {
+                root,
+                #[cfg(feature = "full-migration")]
+                pool,
+            })
         }
         #[cfg(not(feature = "postgres"))]
         TargetStore::Postgres { .. } => Err(MigrationError::OpenTarget(
@@ -322,76 +352,13 @@ async fn open_backend(target: &TargetStore) -> Result<Backend, MigrationError> {
     }
 }
 
-/// Build the Reborn target Postgres pool with the repo's remote-TLS rule:
-/// remote hosts must use TLS (mirrors `ironclaw_reborn_event_store` and
-/// `src/db/tls.rs`). A remote `sslmode=disable` is rejected rather than sending
-/// migration traffic — including decrypted secrets — in cleartext; local
-/// connections keep plain TCP. TLS wiring is reused from `ironclaw::db::tls`.
+/// Build the Reborn target Postgres pool through the production composition
+/// helper so migrations inherit the same fail-closed remote-TLS policy without
+/// linking the legacy root crate.
 #[cfg(feature = "postgres")]
 fn open_postgres_pool(
     url: &secrecy::SecretString,
 ) -> Result<deadpool_postgres::Pool, MigrationError> {
-    use secrecy::ExposeSecret;
-
-    let raw = url.expose_secret();
-    let pg_config = raw
-        .parse::<tokio_postgres::Config>()
-        .map_err(|e| MigrationError::OpenTarget(format!("parse Postgres URL: {e}")))?;
-    let remote = !is_local_postgres_config(&pg_config);
-    let ssl_mode = match pg_config.get_ssl_mode() {
-        tokio_postgres::config::SslMode::Disable => {
-            if remote {
-                return Err(MigrationError::OpenTarget(
-                    "remote Postgres target requires TLS; sslmode=disable is rejected for \
-                     migration traffic (it carries decrypted secrets)"
-                        .into(),
-                ));
-            }
-            ironclaw::config::SslMode::Disable
-        }
-        // `Prefer`/`Require`/future variants: force TLS on remote, allow the
-        // parsed intent on local.
-        _ if remote => ironclaw::config::SslMode::Require,
-        _ => ironclaw::config::SslMode::Prefer,
-    };
-
-    let mut dp_config = deadpool_postgres::Config::new();
-    dp_config.url = Some(raw.to_string());
-    ironclaw::db::tls::create_pool(&dp_config, ssl_mode)
-        .map_err(|e| MigrationError::OpenTarget(e.to_string()))
-}
-
-/// True when the parsed Postgres `Config` targets only loopback hosts / Unix
-/// sockets. Anything else is treated as remote and must use TLS. Mirrors the
-/// event-store's `is_local_postgres_config`.
-#[cfg(feature = "postgres")]
-fn is_local_postgres_config(config: &tokio_postgres::Config) -> bool {
-    use tokio_postgres::config::Host;
-
-    let hosts = config.get_hosts();
-    let hostaddrs = config.get_hostaddrs();
-    if hosts.is_empty() && hostaddrs.is_empty() {
-        // Empty host list means libpq's compiled-in default socket directory.
-        return true;
-    }
-    for host in hosts {
-        match host {
-            #[cfg(unix)]
-            Host::Unix(_) => continue,
-            Host::Tcp(name) => {
-                if !matches!(
-                    name.as_str(),
-                    "localhost" | "127.0.0.1" | "::1" | "[::1]" | "0.0.0.0"
-                ) {
-                    return false;
-                }
-            }
-        }
-    }
-    for addr in hostaddrs {
-        if !addr.is_loopback() && !addr.is_unspecified() {
-            return false;
-        }
-    }
-    true
+    ironclaw_reborn_composition::open_reborn_postgres_pool(url.clone())
+        .map_err(|error| MigrationError::OpenTarget(error.to_string()))
 }

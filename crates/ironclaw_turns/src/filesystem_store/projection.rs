@@ -61,6 +61,7 @@ pub(super) fn run_state_from_record(run: TurnRunRecord, actor: TurnActor) -> Tur
         resolved_run_profile_id: run.profile.id,
         resolved_run_profile_version: run.profile.version,
         resolved_model_route: run.resolved_model_route,
+        model_usage: run.model_usage,
         received_at: run.received_at,
         checkpoint_id: run.checkpoint_id,
         gate_ref: run.gate_ref,

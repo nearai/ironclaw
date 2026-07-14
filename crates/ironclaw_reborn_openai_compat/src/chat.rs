@@ -167,9 +167,24 @@ pub enum OpenAiChatFinishReason {
     ContentFilter,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenAiUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    /// Breakdown of the prompt tokens. OpenAI-standard shape; currently carries
+    /// the cached-token subset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens_details: Option<OpenAiPromptTokensDetails>,
+    /// IronClaw extension: computed USD cost for this completion. `None` when the
+    /// run reported no usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<crate::OpenAiCompatCost>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenAiPromptTokensDetails {
+    /// Prompt tokens served from the provider's prompt cache (a subset of
+    /// `prompt_tokens`).
+    pub cached_tokens: u32,
 }

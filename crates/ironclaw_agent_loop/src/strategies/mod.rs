@@ -35,7 +35,7 @@ pub(crate) use active_task_compaction::ActiveTaskPreservingCompactionStrategy;
 pub(crate) use batch::{
     BatchPolicy, BatchPolicyStrategy, CapabilityCallSummary, DefaultBatchPolicyStrategy,
 };
-pub(crate) use budget::{BudgetStrategy, DefaultBudgetStrategy};
+pub(crate) use budget::{BudgetStrategy, DEFAULT_ITERATION_BACKSTOP, DefaultBudgetStrategy};
 pub(crate) use capability::{CapabilityFilter, CapabilityStrategy, DefaultCapabilityStrategy};
 pub(crate) use compaction::{
     ByteCapStrategy, CompactionDecision, CompactionForceStrategy, CompactionStrategy,

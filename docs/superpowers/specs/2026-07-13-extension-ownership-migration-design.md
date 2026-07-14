@@ -76,3 +76,34 @@ On the existing port-8745 hosted-volume stack:
 6. Remove a non-Slack extension as Account A and confirm Account B keeps it.
 7. After connecting Slack for both users, remove it as Account A and confirm A's
    personal Slack state is cleaned while B remains installed and connected.
+
+## Railway QA Packaging
+
+The Reborn Railway runtime image must include the existing
+`ironclaw-reborn-extension-ownership-migration` binary so an operator can run
+the migration against a volume-backed libSQL database. The binary is built with
+only the `libsql` backend enabled and without the optional legacy full-migration
+read stack, then copied into the runtime image beside `ironclaw-reborn`. Default
+migration crate builds still include the full legacy-to-Reborn migrator. The
+normal image entrypoint and application startup behavior remain unchanged;
+merely deploying the image never runs the migration.
+
+The existing CLI Dockerfile smoke suite must verify both sides of this contract:
+
+1. the builder compiles the exact migration binary from
+   `ironclaw_reborn_migration` with `--no-default-features --features libsql`;
+2. the runtime stage copies that exact binary into `/usr/local/bin`.
+
+The alternatives are intentionally rejected for this one-time operation:
+
+- a separate migration image would require moving or reattaching the one-volume
+  Railway service and add avoidable operational risk;
+- remote-libSQL URL/token support would expand the migration's storage contract
+  even though QA already exposes the database as a mounted filesystem;
+- a Railway pre-deploy command cannot be used because Railway does not mount
+  persistent volumes into pre-deploy containers.
+
+The QA run remains an explicit operator sequence: deploy the image, create a
+manual Railway volume backup, run a read-only dry run, stop application writers,
+apply once against the discovered `reborn-local-dev.db`, restart the normal
+entrypoint, and run a final dry run that reports no changed extensions.

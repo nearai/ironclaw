@@ -4080,7 +4080,7 @@ async fn filesystem_summary_spanning_interior_draft_is_not_applied() {
 
 // Backend that fails only the summary-artifact write, so all prior reads in
 // `create_summary_artifact` succeed and only the final CAS `put` errors —
-// the shape `persist_summary` (ironclaw_loop_support::compaction_task) hits
+// the shape `persist_summary` (ironclaw_loop_host::compaction_task) hits
 // in production (#5838).
 struct SummaryWriteFailureBackend {
     inner: InMemoryBackend,

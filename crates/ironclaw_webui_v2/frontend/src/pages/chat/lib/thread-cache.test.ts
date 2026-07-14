@@ -23,6 +23,7 @@ globalThis.__testExports = {
   deriveSidebarTitle,
   displaySidebarTitle,
   normalizeSidebarTitle,
+  removeThreadList,
   touchThreadList,
   upsertThreadList,
 };`;
@@ -134,6 +135,30 @@ test("upsertThreadList preserves cached title when incoming record has raw threa
       next_cursor: null,
     },
   );
+});
+
+test("removeThreadList removes only the matching cached thread", () => {
+  const { removeThreadList } = loadThreadCache();
+  const data = {
+    threads: [
+      { thread_id: "thread-keep", title: "Keep" },
+      { thread_id: "thread-drop", title: "Drop" },
+    ],
+    next_cursor: "cursor-1",
+  };
+
+  assert.deepEqual(normalize(removeThreadList(data, "thread-drop")), {
+    threads: [{ thread_id: "thread-keep", title: "Keep" }],
+    next_cursor: "cursor-1",
+  });
+});
+
+test("removeThreadList preserves cache identity when the thread is absent", () => {
+  const { removeThreadList } = loadThreadCache();
+  const data = { threads: [{ thread_id: "thread-keep" }], next_cursor: null };
+
+  assert.equal(removeThreadList(data, "thread-missing"), data);
+  assert.equal(removeThreadList(undefined, "thread-missing"), undefined);
 });
 
 test("touchThreadList updates activity without overwriting an existing title", () => {
