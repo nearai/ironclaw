@@ -36,13 +36,28 @@ use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 
-/// Distinctive id/name only the seeded fixture carries — a search hit is
-/// unambiguous evidence the registered descriptor was surfaced.
-const REGISTERED_EXTENSION_ID: &str = "acme-mcp-registered";
+/// Search term only the seeded fixture's name carries — a search hit is
+/// unambiguous evidence the registered descriptor was surfaced. Distinct from
+/// the extension id: R1's `registered_package_has_minted_id` gate means the id
+/// itself must be minted per-owner (see `minted_extension_id` below), so the
+/// search/isolation assertions key off this stable name term instead.
+const REGISTERED_EXTENSION_SEARCH_TERM: &str = "acme";
 
-const REGISTERED_MANIFEST_TOML: &str = r#"
+/// Hosted MCP URL the fixture registers against; part of the mint input
+/// alongside (tenant, owner), so it must match between the minted id and the
+/// manifest's `[runtime].url`.
+const REGISTERED_MCP_URL: &str = "http://127.0.0.1:9/mcp";
+
+/// Registered-extension manifest TOML, parameterized by the minted id — R1
+/// gates every registered-store read on recomputing
+/// `HostedMcpExtensionId::mint(tenant, owner, url, "")` and matching it
+/// against the descriptor's id, so a bare literal id here would silently fail
+/// to round-trip on every list/search/install call.
+fn registered_manifest_toml(minted_id: &str) -> String {
+    format!(
+        r#"
 schema_version = "reborn.extension_manifest.v2"
-id = "acme-mcp-registered"
+id = "{minted_id}"
 name = "Acme Support MCP"
 version = "0.1.0"
 description = "User-registered hosted MCP server (T1 fixture)"
@@ -51,8 +66,10 @@ trust = "third_party"
 [runtime]
 kind = "mcp"
 transport = "http"
-url = "http://127.0.0.1:9/mcp"
-"#;
+url = "{REGISTERED_MCP_URL}"
+"#
+    )
+}
 
 pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // ── Actor A (default actor) ──────────────────────────────────────────────
@@ -61,7 +78,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .script([
             RebornScriptedReply::tool_call(
                 "builtin.extension_search",
-                json!({ "query": REGISTERED_EXTENSION_ID }),
+                json!({ "query": REGISTERED_EXTENSION_SEARCH_TERM }),
             ),
             RebornScriptedReply::text("searched"),
         ])
@@ -79,16 +96,30 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .subject_user_id
         .as_ref()
         .ok_or("actor A's resolved binding has no subject_user_id")?;
+    // R1 gates every registered-store read on recomputing this exact mint and
+    // matching it against the descriptor's id (`registered_package_has_minted_id`
+    // in `registered_extension_store.rs`) — a bare literal id would silently
+    // fail to round-trip through search/install/activate/remove.
+    let extension_id =
+        ironclaw_reborn_composition::test_support::mint_registered_mcp_extension_id_for_test(
+            &a.binding.tenant_id,
+            owner_user_id,
+            REGISTERED_MCP_URL,
+        );
+    let extension_id_str = extension_id.as_str();
     let manifest_dir = capability_harness.storage_root_for_test().join(format!(
         "system/extensions/registered/{}/{}/{}",
         a.binding.tenant_id.as_str(),
         owner_user_id.as_str(),
-        REGISTERED_EXTENSION_ID
+        extension_id_str
     ));
     std::fs::create_dir_all(&manifest_dir)
         .map_err(|e| format!("[seed] create registered manifest dir: {e}"))?;
-    std::fs::write(manifest_dir.join("manifest.toml"), REGISTERED_MANIFEST_TOML)
-        .map_err(|e| format!("[seed] write registered manifest: {e}"))?;
+    std::fs::write(
+        manifest_dir.join("manifest.toml"),
+        registered_manifest_toml(extension_id_str),
+    )
+    .map_err(|e| format!("[seed] write registered manifest: {e}"))?;
 
     // ── A searches: the owner's own registered server must be discoverable ──
     a.submit_turn("search for my registered acme MCP server")
@@ -99,12 +130,12 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .map_err(|e| format!("[A search invoked] {e}"))?;
     // Owner A's search must surface its own registered descriptor via the
     // registered-store overlay in `search()`.
-    a.assert_tool_result_contains(REGISTERED_EXTENSION_ID)
+    a.assert_tool_result_contains(extension_id_str)
         .await
         .map_err(|e| {
             format!(
                 "owner A's search did not surface its own registered extension \
-                 {REGISTERED_EXTENSION_ID}: {e}"
+                 {extension_id_str}: {e}"
             )
         })?;
 
@@ -120,14 +151,14 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .script([
             RebornScriptedReply::tool_call(
                 "builtin.extension_install",
-                json!({ "extension_id": REGISTERED_EXTENSION_ID }),
+                json!({ "extension_id": extension_id_str }),
             ),
             RebornScriptedReply::text("installed"),
         ])
         .build()
         .await?;
     a_install
-        .submit_turn(&format!("install {REGISTERED_EXTENSION_ID}"))
+        .submit_turn(&format!("install {extension_id_str}"))
         .await
         .map_err(|e| format!("[A install submit] {e}"))?;
     a_install
@@ -141,11 +172,11 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 
     let shared_extension_root = capability_harness
         .storage_root_for_test()
-        .join(format!("system/extensions/{REGISTERED_EXTENSION_ID}"));
+        .join(format!("system/extensions/{extension_id_str}"));
     if shared_extension_root.exists() {
         return Err(format!(
             "owner-registered install must not materialize under the shared \
-             /system/extensions/{REGISTERED_EXTENSION_ID} root: found {shared_extension_root:?}"
+             /system/extensions/{extension_id_str} root: found {shared_extension_root:?}"
         )
         .into());
     }
@@ -165,7 +196,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .as_array()
         .and_then(|rows| {
             rows.iter()
-                .find(|row| row["extension_id"] == REGISTERED_EXTENSION_ID)
+                .find(|row| row["extension_id"] == extension_id_str)
         })
         .ok_or("[row pin] registered installation row missing from persisted state")?;
     let owner = &row["owner"];
@@ -194,7 +225,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .script([
             RebornScriptedReply::tool_call(
                 "builtin.extension_search",
-                json!({ "query": REGISTERED_EXTENSION_ID }),
+                json!({ "query": REGISTERED_EXTENSION_SEARCH_TERM }),
             ),
             RebornScriptedReply::text("searched"),
         ])
@@ -216,13 +247,13 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .await
         .map_err(|e| format!("[B search invoked] {e}"))?;
     if b_search
-        .assert_tool_result_contains(REGISTERED_EXTENSION_ID)
+        .assert_tool_result_contains(extension_id_str)
         .await
         .is_ok()
     {
         return Err(format!(
             "isolation failure: actor B's extension_search surfaced actor A's \
-             registered extension {REGISTERED_EXTENSION_ID}"
+             registered extension {extension_id_str}"
         )
         .into());
     }
@@ -234,14 +265,14 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .script([
             RebornScriptedReply::tool_call(
                 "builtin.extension_install",
-                json!({ "extension_id": REGISTERED_EXTENSION_ID }),
+                json!({ "extension_id": extension_id_str }),
             ),
             RebornScriptedReply::text("install attempted"),
         ])
         .build()
         .await?;
     b_install
-        .submit_turn(&format!("install {REGISTERED_EXTENSION_ID}"))
+        .submit_turn(&format!("install {extension_id_str}"))
         .await
         .map_err(|e| format!("[B install submit] {e}"))?;
     b_install
@@ -262,14 +293,14 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .script([
             RebornScriptedReply::tool_call(
                 "builtin.extension_activate",
-                json!({ "extension_id": REGISTERED_EXTENSION_ID }),
+                json!({ "extension_id": extension_id_str }),
             ),
             RebornScriptedReply::text("activated"),
         ])
         .build()
         .await?;
     a_activate
-        .submit_turn(&format!("activate {REGISTERED_EXTENSION_ID}"))
+        .submit_turn(&format!("activate {extension_id_str}"))
         .await
         .map_err(|e| format!("[A activate submit] {e}"))?;
     a_activate
@@ -288,14 +319,14 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .script([
             RebornScriptedReply::tool_call(
                 "builtin.extension_activate",
-                json!({ "extension_id": REGISTERED_EXTENSION_ID }),
+                json!({ "extension_id": extension_id_str }),
             ),
             RebornScriptedReply::text("activate attempted"),
         ])
         .build()
         .await?;
     b_activate
-        .submit_turn(&format!("activate {REGISTERED_EXTENSION_ID}"))
+        .submit_turn(&format!("activate {extension_id_str}"))
         .await
         .map_err(|e| format!("[B activate submit] {e}"))?;
     b_activate
@@ -317,14 +348,14 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .script([
             RebornScriptedReply::tool_call(
                 "builtin.extension_remove",
-                json!({ "extension_id": REGISTERED_EXTENSION_ID }),
+                json!({ "extension_id": extension_id_str }),
             ),
             RebornScriptedReply::text("remove attempted"),
         ])
         .build()
         .await?;
     b_remove
-        .submit_turn(&format!("remove {REGISTERED_EXTENSION_ID}"))
+        .submit_turn(&format!("remove {extension_id_str}"))
         .await
         .map_err(|e| format!("[B remove submit] {e}"))?;
     b_remove
@@ -342,14 +373,14 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .script([
             RebornScriptedReply::tool_call(
                 "builtin.extension_remove",
-                json!({ "extension_id": REGISTERED_EXTENSION_ID }),
+                json!({ "extension_id": extension_id_str }),
             ),
             RebornScriptedReply::text("removed"),
         ])
         .build()
         .await?;
     a_remove
-        .submit_turn(&format!("remove {REGISTERED_EXTENSION_ID}"))
+        .submit_turn(&format!("remove {extension_id_str}"))
         .await
         .map_err(|e| format!("[A remove submit] {e}"))?;
     a_remove

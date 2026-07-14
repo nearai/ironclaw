@@ -91,7 +91,10 @@ impl HostedMcpExtensionId {
         Ok(Self(extension_id.clone()))
     }
 
-    #[cfg(test)]
+    // Also needed under `test-support` (not just `cfg(test)`): cross-crate
+    // integration-test fixtures mint via `test_support::mint_registered_mcp_extension_id_for_test`
+    // as a normal dependency of this crate, not as its own `cfg(test)` build.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn into_extension_id(self) -> ExtensionId {
         self.0
     }
