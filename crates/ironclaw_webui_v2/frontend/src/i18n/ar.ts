@@ -1290,7 +1290,9 @@ registerPack("ar", {
   "automations.hold.auth": "بانتظار إعادة ربط حساب",
   "automations.hold.inProgress": "التشغيل السابق لا يزال قيد التنفيذ",
   "automations.hold.meta.inProgress": "بدأ {since} · سيبدأ التشغيل التالي بعد انتهاء هذا",
-  "automations.hold.meta.paused": "متوقف مؤقتًا منذ {since} · تم تخطي {count} من التشغيلات (لم تتم جدولتها)",
+  "automations.hold.meta.paused":
+    "متوقف مؤقتًا منذ {since} · مرّت {count} من الأوقات المجدولة أثناء التوقف",
+  "automations.hold.meta.pausedUnknownCount": "متوقف مؤقتًا منذ {since} · عدد التشغيلات المتخطاة غير متوفر",
   "automations.hold.other": "التشغيل السابق لم ينتهِ بعد",
   "automations.status.needsReview": "بحاجة إلى مراجعة",
   "automations.status.running": "قيد التشغيل",

@@ -297,13 +297,14 @@ test("AutomationDetailPanel renders hold_meta_label when present", () => {
       ...automation(),
       primary_status_label: "Waiting for your approval",
       primary_status_tone: "warning",
-      hold_meta_label: "Paused since Jul 14, 12:51 AM · 3 runs skipped (not queued)",
+      hold_meta_label:
+        "Paused since Jul 14, 12:51 AM · 3 scheduled occurrences elapsed while held",
     },
   });
 
   assert.ok(
     collectScalars(rendered).includes(
-      "Paused since Jul 14, 12:51 AM · 3 runs skipped (not queued)",
+      "Paused since Jul 14, 12:51 AM · 3 scheduled occurrences elapsed while held",
     ),
     "hold_meta_label text should render in the detail panel",
   );
@@ -315,7 +316,7 @@ test("AutomationDetailPanel omits hold meta text when hold_meta_label is absent"
 
   assert.ok(
     !collectScalars(rendered).some((value) =>
-      typeof value === "string" && value.includes("runs skipped"),
+      typeof value === "string" && value.includes("scheduled occurrences elapsed"),
     ),
     "no hold meta text should render when there is no active hold",
   );

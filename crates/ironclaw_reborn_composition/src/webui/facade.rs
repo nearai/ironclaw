@@ -166,6 +166,41 @@ impl std::fmt::Debug for RebornWebuiBundle {
     }
 }
 
+/// A trigger repository paired with the turn-run snapshot source from the
+/// SAME runtime. Local-dev and production graphs both carry these two
+/// separately; mixing runtimes would let active-hold projections read run
+/// state the poller of the *other* runtime writes, silently desyncing the
+/// automations panel (#5886).
+pub(crate) struct AutomationBacking {
+    pub(crate) repository: Arc<dyn TriggerRepository>,
+    pub(crate) snapshot_source: Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>,
+}
+
+/// Resolves the [`AutomationBacking`] pair for whichever runtime is wired:
+/// local-dev first, then (when compiled with a durable backend) production
+/// runtime as a fallback. Returns `None` when neither runtime is present.
+pub(crate) fn automation_backing(services: &crate::RebornServices) -> Option<AutomationBacking> {
+    let from_local = services
+        .local_runtime
+        .as_ref()
+        .map(|local_runtime| AutomationBacking {
+            repository: Arc::clone(&local_runtime.trigger_repository),
+            snapshot_source: Arc::clone(&local_runtime.turn_state)
+                as Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>,
+        });
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    let from_local = from_local.or_else(|| {
+        services
+            .production_runtime
+            .as_ref()
+            .map(|production_runtime| AutomationBacking {
+                repository: production_runtime.trigger_repository(),
+                snapshot_source: production_runtime.turn_run_snapshot_source(),
+            })
+    });
+    from_local
+}
+
 /// Compose the WebUI-facing product facade from an already-built Reborn runtime.
 ///
 /// This function does not create a second turn coordinator, thread service,
@@ -352,42 +387,14 @@ pub(crate) fn build_webui_services_with_connectable_channels(
             Arc::clone(product_auth),
         )));
     }
-    // Local-dev and production graphs both carry a trigger repository plus a
-    // turn-state snapshot source; whichever is wired backs the automations
-    // panel. The pair must come from the SAME runtime so active-hold
-    // projections read the run state the poller actually writes (#5886).
-    type AutomationBacking = (
-        Arc<dyn TriggerRepository>,
-        Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>,
-    );
-    let automation_backing: Option<AutomationBacking> = {
-        let from_local = services.local_runtime.as_ref().map(|local_runtime| {
-            (
-                Arc::clone(&local_runtime.trigger_repository),
-                Arc::clone(&local_runtime.turn_state)
-                    as Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>,
-            )
-        });
-        #[cfg(any(feature = "libsql", feature = "postgres"))]
-        let from_local = from_local.or_else(|| {
-            services
-                .production_runtime
-                .as_ref()
-                .map(|production_runtime| {
-                    (
-                        production_runtime.trigger_repository(),
-                        production_runtime.turn_run_snapshot_source(),
-                    )
-                })
-        });
-        from_local
-    };
-    if let Some((repository, snapshot_source)) = automation_backing {
+    if let Some(backing) = automation_backing(services) {
         let active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup> = Arc::new(
-            crate::automation::trigger_poller::SnapshotActiveRunLookup::new(snapshot_source),
+            crate::automation::trigger_poller::SnapshotActiveRunLookup::new(
+                backing.snapshot_source,
+            ),
         );
         api = api.with_automation_product_facade(Arc::new(
-            RebornAutomationProductFacade::new(repository, active_run_lookup)
+            RebornAutomationProductFacade::new(backing.repository, active_run_lookup)
                 .with_scheduler_enabled(services.readiness.workers.trigger_poller),
         ));
     }

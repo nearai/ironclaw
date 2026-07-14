@@ -1290,7 +1290,9 @@ registerPack("zh-CN", {
   "automations.hold.auth": "等待您重新连接账户",
   "automations.hold.inProgress": "上一次运行仍在进行中",
   "automations.hold.meta.inProgress": "于{since}开始 · 下一次运行将在此次完成后开始",
-  "automations.hold.meta.paused": "自{since}起已暂停 · 已跳过 {count} 次运行(未排队)",
+  "automations.hold.meta.paused":
+    "自{since}起已暂停 · 暂停期间已过去 {count} 次计划执行时刻",
+  "automations.hold.meta.pausedUnknownCount": "自{since}起已暂停 · 跳过次数不可用",
   "automations.hold.other": "上一次运行尚未完成",
   "automations.status.needsReview": "需要审核",
   "automations.status.running": "运行中",

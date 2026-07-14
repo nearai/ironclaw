@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- *(reborn)* automations and `trigger_list` now surface why a scheduled trigger is currently held (approval/auth/in-progress) and how many scheduled runs were skipped while held ([#5886](https://github.com/nearai/ironclaw/issues/5886)).
+- *(reborn)* automations and `trigger_list` now surface why a scheduled trigger is currently held (approval/auth/in-progress) and how many scheduled occurrences elapsed while held ([#5886](https://github.com/nearai/ironclaw/issues/5886)).
 
 ### Fixed
 

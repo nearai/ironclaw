@@ -156,34 +156,27 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
         .map_err(map_trigger_error)?;
 
         // The required run-history fetch runs before the optional hold lookup
-        // in both branches below so a slow hold derivation (#5886) can never
-        // steal deadline budget from data the caller actually needs.
-        if records.is_empty() || request.run_limit == 0 {
-            let mut holds = self
-                .active_holds_for_records(&records, deadline, chrono::Utc::now())
-                .await;
-            return Ok(records
-                .into_iter()
-                .map(|record| {
-                    let hold = holds.remove(&record.trigger_id);
-                    automation_info_from_record(record, &[], hold)
-                })
-                .collect());
-        }
-
-        let trigger_ids: Vec<TriggerId> = records.iter().map(|r| r.trigger_id).collect();
+        // so a slow hold derivation (#5886) can never steal deadline budget
+        // from data the caller actually needs. When there's nothing to fetch
+        // (no records, or run history wasn't requested) skip the batch call
+        // entirely rather than issuing it with an empty id list.
         let mut runs_by_trigger: HashMap<TriggerId, Vec<TriggerRunRecord>> =
-            tokio::time::timeout_at(
-                deadline,
-                self.trigger_repository.list_trigger_run_history_batch(
-                    caller.tenant_id.clone(),
-                    &trigger_ids,
-                    request.run_limit,
-                ),
-            )
-            .await
-            .map_err(|_| backend_timeout_error())?
-            .map_err(map_trigger_error)?;
+            if records.is_empty() || request.run_limit == 0 {
+                HashMap::new()
+            } else {
+                let trigger_ids: Vec<TriggerId> = records.iter().map(|r| r.trigger_id).collect();
+                tokio::time::timeout_at(
+                    deadline,
+                    self.trigger_repository.list_trigger_run_history_batch(
+                        caller.tenant_id.clone(),
+                        &trigger_ids,
+                        request.run_limit,
+                    ),
+                )
+                .await
+                .map_err(|_| backend_timeout_error())?
+                .map_err(map_trigger_error)?
+            };
 
         let mut holds = self
             .active_holds_for_records(&records, deadline, chrono::Utc::now())
@@ -416,9 +409,9 @@ fn automation_info_from_record(
 }
 
 /// Maps the crate-neutral hold projection (`ironclaw_triggers`) to this
-/// facade's wire DTO. The reason/skip-count derivation itself lives in
-/// `ironclaw_triggers::active_hold_projection` — only the wire-type mapping
-/// belongs here (#5886).
+/// facade's wire DTO. The reason/elapsed-occurrence derivation itself lives
+/// in `ironclaw_triggers::active_hold_projection` — only the wire-type
+/// mapping belongs here (#5886).
 fn wire_hold_from_projection(hold: ActiveHoldProjection) -> RebornAutomationActiveHold {
     RebornAutomationActiveHold {
         reason: match hold.reason {
@@ -428,8 +421,8 @@ fn wire_hold_from_projection(hold: ActiveHoldProjection) -> RebornAutomationActi
             ActiveHoldReason::Other => RebornAutomationHoldReason::Other,
         },
         since: hold.since,
-        skipped_runs: hold.skipped_runs,
-        skipped_runs_capped: hold.skipped_runs_capped,
+        elapsed_occurrences: hold.elapsed_occurrences,
+        elapsed_occurrences_capped: hold.elapsed_occurrences_capped,
     }
 }
 

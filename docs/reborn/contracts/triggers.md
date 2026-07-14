@@ -553,11 +553,14 @@ outbound messages directly.
     but `active_run_ref` is not yet populated.
 - `since` is the held fire's claimed slot timestamp (`TriggerRecord.active_fire_slot`);
   may be absent.
-- `skipped_runs` is the count of schedule slots skipped while held, computed
-  from the schedule between `since` and now, capped at
-  `ACTIVE_HOLD_SKIPPED_RUNS_CAP` (99). At the cap, `skipped_runs_capped = true`
-  signals truncation — the value must never be presented as an exact count
-  above the cap.
+- `elapsed_occurrences` is the count of scheduled occurrences that have
+  elapsed since `since`, computed from the schedule between `since` and now,
+  capped at `ACTIVE_HOLD_ELAPSED_OCCURRENCES_CAP` (99). At the cap,
+  `elapsed_occurrences_capped = true` signals truncation — the value must
+  never be presented as an exact count above the cap. This is **not** a count
+  of runs the poller attempted or skipped: it is derived purely from
+  wall-clock cron slots, so it keeps accruing while the trigger is paused or
+  whenever the poller isn't running at all.
 - Omission rule: `active_hold` is absent entirely when the active run resolves
   to `Terminal` or `Missing` (nothing to report), or when the underlying
   active-run lookup or schedule-slot derivation fails or times out. This is a

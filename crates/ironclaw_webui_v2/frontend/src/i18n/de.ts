@@ -1290,7 +1290,9 @@ registerPack("de", {
   "automations.hold.auth": "Wartet darauf, dass Sie ein Konto erneut verbinden",
   "automations.hold.inProgress": "Vorheriger Lauf läuft noch",
   "automations.hold.meta.inProgress": "Gestartet {since} · nächster Lauf startet, sobald dieser abgeschlossen ist",
-  "automations.hold.meta.paused": "Pausiert seit {since} · {count} Läufe übersprungen (nicht eingereiht)",
+  "automations.hold.meta.paused":
+    "Pausiert seit {since} · {count} geplante Vorkommen während der Pause verstrichen",
+  "automations.hold.meta.pausedUnknownCount": "Pausiert seit {since} · Anzahl übersprungener Läufe nicht verfügbar",
   "automations.hold.other": "Vorheriger Lauf ist noch nicht abgeschlossen",
   "automations.status.needsReview": "Prüfung erforderlich",
   "automations.status.running": "Läuft",

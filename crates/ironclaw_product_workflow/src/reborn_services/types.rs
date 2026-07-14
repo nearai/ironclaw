@@ -1125,19 +1125,22 @@ pub struct RebornAutomationInfo {
     pub active_hold: Option<RebornAutomationActiveHold>,
 }
 
-/// Why an automation's schedule is currently held, plus skip accounting.
+/// Why an automation's schedule is currently held, plus elapsed-occurrence
+/// accounting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornAutomationActiveHold {
     pub reason: RebornAutomationHoldReason,
     /// The held fire's claimed slot — when the pause effectively began.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<DateTime<Utc>>,
-    /// Scheduled slots skipped while held; display-only, capped.
+    /// Scheduled occurrences elapsed while held; display-only, capped. Not a
+    /// count of runs the poller attempted — accrues from wall-clock cron
+    /// slots regardless of poller activity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub skipped_runs: Option<u32>,
-    /// True when `skipped_runs` hit the cap — render as "N+".
+    pub elapsed_occurrences: Option<u32>,
+    /// True when `elapsed_occurrences` hit the cap — render as "N+".
     #[serde(default)]
-    pub skipped_runs_capped: bool,
+    pub elapsed_occurrences_capped: bool,
 }
 
 /// Client-visible hold reason. `in_progress` = the previous run is still

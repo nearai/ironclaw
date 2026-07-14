@@ -262,18 +262,27 @@ function holdStatusTone(hold) {
 }
 
 // One-line explanation shown under the status pill: when the hold started and
-// how many due runs were skipped (not queued) while it was in effect. Counts
-// beyond the backend's cap render as "{count}+" per skipped_runs_capped.
+// how many scheduled occurrences elapsed while it was in effect. Counts
+// beyond the backend's cap render as "{count}+" per elapsed_occurrences_capped.
+// The backend sends elapsed_occurrences as null/absent when it couldn't
+// derive a count (e.g. a malformed persisted schedule) — that must read as
+// "unavailable", never as a false "0 occurrences elapsed".
 function holdMetaLabel(hold, t, locale) {
   const tx = tr(t);
   const since = formatAutomationDate(hold?.since, tx("automations.date.unknown"), locale);
   if (hold?.reason === "in_progress") {
     return tx("automations.hold.meta.inProgress", { since });
   }
-  const count = hold?.skipped_runs_capped
-    ? `${hold?.skipped_runs ?? 0}+`
-    : String(hold?.skipped_runs ?? 0);
-  return tx("automations.hold.meta.paused", { since, count });
+  if (hold?.elapsed_occurrences_capped) {
+    return tx("automations.hold.meta.paused", {
+      since,
+      count: `${hold?.elapsed_occurrences ?? 0}+`,
+    });
+  }
+  if (hold?.elapsed_occurrences === null || hold?.elapsed_occurrences === undefined) {
+    return tx("automations.hold.meta.pausedUnknownCount", { since });
+  }
+  return tx("automations.hold.meta.paused", { since, count: String(hold.elapsed_occurrences) });
 }
 
 export function lastStatusLabel(status, t) {
@@ -344,7 +353,8 @@ function normalizeAutomation(automation, t, locale) {
   // #5886: an active_hold means a due trigger is being intentionally skipped
   // (blocked on approval/auth, or a prior run still in flight) rather than
   // queued. When present it overrides the ordinary status pill so the user
-  // sees why nothing is running, plus a meta line with when/how-many-skipped.
+  // sees why nothing is running, plus a meta line with when/how-many
+  // scheduled occurrences have elapsed.
   const activeHold = automation.active_hold || null;
 
   return {

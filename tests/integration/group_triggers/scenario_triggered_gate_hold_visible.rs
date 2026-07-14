@@ -1,8 +1,8 @@
 //! RED regression for #5886: a trigger whose active fire is parked on a
 //! `BlockedApproval` gate must expose a derived `active_hold` projection
-//! (reason/since/skipped_runs) on BOTH read surfaces — the WebUI automations
-//! list and the `builtin.trigger_list` capability output — and drop it once
-//! the run reaches a terminal status.
+//! (reason/since/elapsed_occurrences) on BOTH read surfaces — the WebUI
+//! automations list and the `builtin.trigger_list` capability output — and
+//! drop it once the run reaches a terminal status.
 
 use std::sync::Arc;
 
@@ -20,8 +20,8 @@ use serde_json::{Value, json};
 const TRIGGER_NAME: &str = "c-triggered-gate-hold-visible";
 
 pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
-    // Every-minute cron (not Once) so skipped-slot counting is meaningful for
-    // the hold projection (#5886).
+    // Every-minute cron (not Once) so elapsed-occurrence counting is
+    // meaningful for the hold projection (#5886).
     let creator = g
         .thread("conv-triggered-hold-create")
         .script([
@@ -177,6 +177,36 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         )
         .into());
     }
+
+    // Surface 2 post-completion: `trigger_list` must ALSO drop active_hold
+    // once the run is terminal. A fresh thread (the earlier `lister` already
+    // consumed its scripted replies at `build()`).
+    let lister_after = g
+        .thread("conv-triggered-hold-list-after")
+        .script([
+            RebornScriptedReply::tool_call("builtin.trigger_list", json!({})),
+            RebornScriptedReply::text("listed again"),
+        ])
+        .build()
+        .await?;
+    lister_after.submit_turn("list my automations").await?;
+    let listed_after = lister_after
+        .tool_result_output("builtin.trigger_list")
+        .await?;
+    let listed_entry_after = listed_after["triggers"]
+        .as_array()
+        .ok_or("trigger_list output missing triggers array")?
+        .iter()
+        .find(|t| t["trigger_id"] == json!(trigger_id))
+        .cloned()
+        .ok_or_else(|| format!("created trigger absent from trigger_list: {listed_after}"))?;
+    if listed_entry_after.get("active_hold").is_some() {
+        return Err(format!(
+            "#5886: trigger_list active_hold must be omitted once the active run is terminal: {listed_entry_after}"
+        )
+        .into());
+    }
+
     Ok(())
 }
 
@@ -198,7 +228,7 @@ async fn automation_entry(router: axum::Router, trigger_id: &str) -> HarnessResu
 }
 
 /// The #5886 hold contract on one listed entry: an `active_hold` object with
-/// reason "approval", a `since` timestamp, and a `skipped_runs` count.
+/// reason "approval", a `since` timestamp, and an `elapsed_occurrences` count.
 fn assert_active_hold(entry: &Value, surface: &str) -> HarnessResult<()> {
     let hold = entry.get("active_hold").ok_or_else(|| {
         format!("#5886: {surface} missing \"active_hold\" for a gate-parked fire: {entry}")
@@ -211,10 +241,11 @@ fn assert_active_hold(entry: &Value, surface: &str) -> HarnessResult<()> {
     if hold.get("since").is_none() {
         return Err(format!("#5886: {surface} active_hold missing \"since\": {entry}").into());
     }
-    if hold.get("skipped_runs").is_none() {
-        return Err(
-            format!("#5886: {surface} active_hold missing \"skipped_runs\": {entry}").into(),
-        );
+    if hold.get("elapsed_occurrences").is_none() {
+        return Err(format!(
+            "#5886: {surface} active_hold missing \"elapsed_occurrences\": {entry}"
+        )
+        .into());
     }
     Ok(())
 }

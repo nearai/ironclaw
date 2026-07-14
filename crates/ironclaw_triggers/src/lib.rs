@@ -613,19 +613,20 @@ impl TriggerSchedule {
         }
     }
 
-    /// Count schedule slots in `(after, now]` — the fires an active hold made
-    /// the poller skip (#5886). Display-only derivation; stops at `cap` and
-    /// reports the truncation so UIs can render "99+" instead of a false-exact
-    /// count. `Once` schedules have no repeat slots to skip.
-    pub fn skipped_slots_between(
+    /// Count elapsed schedule slots in `(after, now]` — not runs the poller
+    /// attempted or skipped, just cron occurrences that have passed (#5886).
+    /// Display-only derivation; stops at `cap` and reports the truncation so
+    /// UIs can render "99+" instead of a false-exact count. `Once` schedules
+    /// have no repeat slots to count.
+    pub fn elapsed_occurrences_between(
         &self,
         after: Timestamp,
         now: Timestamp,
         cap: u32,
-    ) -> Result<SkippedSlotCount, TriggerError> {
+    ) -> Result<ElapsedOccurrenceCount, TriggerError> {
         let (expression, timezone) = match self {
             Self::Once { .. } => {
-                return Ok(SkippedSlotCount {
+                return Ok(ElapsedOccurrenceCount {
                     count: 0,
                     capped: false,
                 });
@@ -651,7 +652,7 @@ impl TriggerSchedule {
                     cursor = slot;
                 }
                 _ => {
-                    return Ok(SkippedSlotCount {
+                    return Ok(ElapsedOccurrenceCount {
                         count,
                         capped: false,
                     });
@@ -660,14 +661,15 @@ impl TriggerSchedule {
         }
         let capped =
             matches!(next_cron_slot_after(&schedule, &tz, cursor), Some(slot) if slot <= now);
-        Ok(SkippedSlotCount { count, capped })
+        Ok(ElapsedOccurrenceCount { count, capped })
     }
 }
 
 /// Cron-branch core of [`TriggerSchedule::next_slot_after`], factored to
 /// accept an already-parsed `Schedule`/`Tz` so callers that need repeated
-/// lookups (e.g. [`TriggerSchedule::skipped_slots_between`]'s loop) can parse
-/// once and reuse it instead of re-parsing the schedule string every call.
+/// lookups (e.g. [`TriggerSchedule::elapsed_occurrences_between`]'s loop) can
+/// parse once and reuse it instead of re-parsing the schedule string every
+/// call.
 fn next_cron_slot_after(schedule: &Schedule, tz: &Tz, after: Timestamp) -> Option<Timestamp> {
     if *tz == Tz::UTC {
         schedule.after(&after).next()
@@ -679,10 +681,11 @@ fn next_cron_slot_after(schedule: &Schedule, tz: &Tz, after: Timestamp) -> Optio
     }
 }
 
-/// Result of [`TriggerSchedule::skipped_slots_between`]: `capped` marks a
-/// truncated count (the real number of skipped slots exceeds `count`).
+/// Result of [`TriggerSchedule::elapsed_occurrences_between`]: `capped` marks
+/// a truncated count (the real number of elapsed occurrences exceeds
+/// `count`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SkippedSlotCount {
+pub struct ElapsedOccurrenceCount {
     pub count: u32,
     pub capped: bool,
 }
@@ -1336,8 +1339,8 @@ pub use libsql::LibSqlTriggerRepository;
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresTriggerRepository;
 pub use worker::{
-    ACTIVE_HOLD_SKIPPED_RUNS_CAP, ActiveHoldProjection, ActiveHoldReason, BlockedActiveRunKind,
-    MissingTriggerActiveRunLookup, NoopTriggerFireSettlementObserver,
+    ACTIVE_HOLD_ELAPSED_OCCURRENCES_CAP, ActiveHoldProjection, ActiveHoldReason,
+    BlockedActiveRunKind, MissingTriggerActiveRunLookup, NoopTriggerFireSettlementObserver,
     TriggerAcceptedFireSettlement, TriggerActiveRunLookup, TriggerActiveRunState,
     TriggerActiveRunStateRequest, TriggerFireSettlementObserver, TriggerPollerFailureReason,
     TriggerPollerFireOutcome, TriggerPollerFireReport, TriggerPollerTickReport,
@@ -3194,16 +3197,16 @@ mod tests {
     }
 
     #[test]
-    fn skipped_slots_between_counts_cron_slots_exactly() {
+    fn elapsed_occurrences_between_counts_cron_slots_exactly() {
         let schedule = TriggerSchedule::cron("* * * * *").expect("valid cron");
         let after = Utc.with_ymd_and_hms(2025, 6, 1, 9, 0, 0).unwrap();
         let now = Utc.with_ymd_and_hms(2025, 6, 1, 9, 16, 0).unwrap();
-        let skipped = schedule
-            .skipped_slots_between(after, now, 99)
+        let elapsed = schedule
+            .elapsed_occurrences_between(after, now, 99)
             .expect("count");
         assert_eq!(
-            skipped,
-            SkippedSlotCount {
+            elapsed,
+            ElapsedOccurrenceCount {
                 count: 16,
                 capped: false
             }
@@ -3211,16 +3214,16 @@ mod tests {
     }
 
     #[test]
-    fn skipped_slots_between_reports_cap_truncation() {
+    fn elapsed_occurrences_between_reports_cap_truncation() {
         let schedule = TriggerSchedule::cron("* * * * *").expect("valid cron");
         let after = Utc.with_ymd_and_hms(2025, 6, 1, 9, 0, 0).unwrap();
         let now = Utc.with_ymd_and_hms(2025, 6, 1, 10, 0, 0).unwrap();
-        let skipped = schedule
-            .skipped_slots_between(after, now, 5)
+        let elapsed = schedule
+            .elapsed_occurrences_between(after, now, 5)
             .expect("count");
         assert_eq!(
-            skipped,
-            SkippedSlotCount {
+            elapsed,
+            ElapsedOccurrenceCount {
                 count: 5,
                 capped: true
             }
@@ -3228,16 +3231,16 @@ mod tests {
     }
 
     #[test]
-    fn skipped_slots_between_exact_cap_window_is_not_capped() {
+    fn elapsed_occurrences_between_exact_cap_window_is_not_capped() {
         let schedule = TriggerSchedule::cron("* * * * *").expect("valid cron");
         let after = Utc.with_ymd_and_hms(2025, 6, 1, 9, 0, 0).unwrap();
         let now = Utc.with_ymd_and_hms(2025, 6, 1, 9, 5, 0).unwrap();
-        let skipped = schedule
-            .skipped_slots_between(after, now, 5)
+        let elapsed = schedule
+            .elapsed_occurrences_between(after, now, 5)
             .expect("count");
         assert_eq!(
-            skipped,
-            SkippedSlotCount {
+            elapsed,
+            ElapsedOccurrenceCount {
                 count: 5,
                 capped: false
             }
@@ -3245,13 +3248,15 @@ mod tests {
     }
 
     #[test]
-    fn skipped_slots_between_zero_window_and_once_schedules_skip_nothing() {
+    fn elapsed_occurrences_between_zero_window_and_once_schedules_elapse_nothing() {
         let after = Utc.with_ymd_and_hms(2025, 6, 1, 9, 0, 0).unwrap();
         let cron = TriggerSchedule::cron("* * * * *").expect("valid cron");
-        let none = cron.skipped_slots_between(after, after, 99).expect("count");
+        let none = cron
+            .elapsed_occurrences_between(after, after, 99)
+            .expect("count");
         assert_eq!(
             none,
-            SkippedSlotCount {
+            ElapsedOccurrenceCount {
                 count: 0,
                 capped: false
             }
@@ -3260,10 +3265,12 @@ mod tests {
             TriggerSchedule::once(Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap(), "UTC")
                 .expect("valid once");
         let now = Utc.with_ymd_and_hms(2025, 6, 2, 9, 0, 0).unwrap();
-        let skipped = once.skipped_slots_between(after, now, 99).expect("count");
+        let elapsed = once
+            .elapsed_occurrences_between(after, now, 99)
+            .expect("count");
         assert_eq!(
-            skipped,
-            SkippedSlotCount {
+            elapsed,
+            ElapsedOccurrenceCount {
                 count: 0,
                 capped: false
             }

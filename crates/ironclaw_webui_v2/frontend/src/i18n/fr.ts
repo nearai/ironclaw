@@ -1290,7 +1290,9 @@ registerPack("fr", {
   "automations.hold.auth": "En attente de la reconnexion d'un compte",
   "automations.hold.inProgress": "L'exécution précédente est toujours en cours",
   "automations.hold.meta.inProgress": "Démarré {since} · la prochaine exécution commencera une fois celle-ci terminée",
-  "automations.hold.meta.paused": "En pause depuis {since} · {count} exécutions ignorées (non mises en file)",
+  "automations.hold.meta.paused":
+    "En pause depuis {since} · {count} occurrences planifiées écoulées pendant la pause",
+  "automations.hold.meta.pausedUnknownCount": "En pause depuis {since} · nombre d'exécutions ignorées indisponible",
   "automations.hold.other": "L'exécution précédente n'est pas terminée",
   "automations.status.needsReview": "À vérifier",
   "automations.status.running": "En cours",

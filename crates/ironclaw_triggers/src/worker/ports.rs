@@ -206,9 +206,9 @@ impl TriggerActiveRunLookup for MissingTriggerActiveRunLookup {
     }
 }
 
-/// Display cap for `active_hold.skipped_runs`; shared by every read surface so
-/// they all render "99+" identically instead of drifting (#5886).
-pub const ACTIVE_HOLD_SKIPPED_RUNS_CAP: u32 = 99;
+/// Display cap for `active_hold.elapsed_occurrences`; shared by every read
+/// surface so they all render "99+" identically instead of drifting (#5886).
+pub const ACTIVE_HOLD_ELAPSED_OCCURRENCES_CAP: u32 = 99;
 
 /// User-facing reason a trigger's active fire is holding the poller back, at
 /// the granularity read surfaces need ("waiting for your approval" vs
@@ -222,15 +222,15 @@ pub enum ActiveHoldReason {
 }
 
 /// Display-only projection of why a trigger is held plus how many scheduled
-/// fires it has caused the poller to skip. Owned here because it is derived
-/// entirely from `TriggerRecord` + `TriggerActiveRunState`; callers only map
-/// this to their own wire type (#5886).
+/// occurrences have elapsed since the hold began. Owned here because it is
+/// derived entirely from `TriggerRecord` + `TriggerActiveRunState`; callers
+/// only map this to their own wire type (#5886).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ActiveHoldProjection {
     pub reason: ActiveHoldReason,
     pub since: Option<Timestamp>,
-    pub skipped_runs: Option<u32>,
-    pub skipped_runs_capped: bool,
+    pub elapsed_occurrences: Option<u32>,
+    pub elapsed_occurrences_capped: bool,
 }
 
 /// Derive the hold projection for a record whose active fire resolved to
@@ -243,6 +243,12 @@ pub struct ActiveHoldProjection {
 /// `worker::due_fire::process_claimed_fire`. There is no run to look up yet,
 /// so this resolves directly to `ActiveHoldReason::Other` instead of the
 /// caller silently omitting the hold for that window (#5886).
+///
+/// `elapsed_occurrences` counts elapsed schedule occurrences since `since` —
+/// it is NOT a count of runs the poller attempted or skipped. It keeps
+/// accruing while the trigger is paused, or whenever the poller isn't
+/// running, because it is derived purely from wall-clock cron slots, not
+/// from poller activity.
 ///
 /// Terminal runs are omitted (cleanup will release the fire) and `Missing`
 /// stays conservative (possibly a stale snapshot) — omission always means
@@ -265,16 +271,18 @@ pub fn active_hold_projection(
         }
     };
     let since = record.active_fire_slot;
-    let skipped = since.and_then(|slot| {
-        match record
-            .schedule
-            .skipped_slots_between(slot, now, ACTIVE_HOLD_SKIPPED_RUNS_CAP)
-        {
+    let elapsed = since.and_then(|slot| {
+        match record.schedule.elapsed_occurrences_between(
+            slot,
+            now,
+            ACTIVE_HOLD_ELAPSED_OCCURRENCES_CAP,
+        ) {
             Ok(count) => Some(count),
             Err(error) => {
-                // silent-ok: display-only skip counter; a malformed stored
-                // schedule must not fail a read surface (#5886).
-                tracing::debug!(%error, "skipped-slot derivation failed for active hold");
+                // silent-ok: display-only elapsed-occurrence counter; a
+                // malformed stored schedule must not fail a read surface
+                // (#5886).
+                tracing::debug!(%error, "elapsed-occurrence derivation failed for active hold");
                 None
             }
         }
@@ -282,8 +290,8 @@ pub fn active_hold_projection(
     Some(ActiveHoldProjection {
         reason,
         since,
-        skipped_runs: skipped.map(|s| s.count),
-        skipped_runs_capped: skipped.map(|s| s.capped).unwrap_or_default(),
+        elapsed_occurrences: elapsed.map(|s| s.count),
+        elapsed_occurrences_capped: elapsed.map(|s| s.capped).unwrap_or_default(),
     })
 }
 
@@ -409,7 +417,7 @@ mod tests {
         .expect("blocked approval yields a hold");
         assert_eq!(hold.reason, ActiveHoldReason::Approval);
         assert_eq!(hold.since, record.active_fire_slot);
-        assert!(hold.skipped_runs.is_some());
+        assert!(hold.elapsed_occurrences.is_some());
 
         let hold = active_hold_projection(&record, Some(TriggerActiveRunState::Nonterminal), now)
             .expect("nonterminal yields a hold");
@@ -607,10 +615,11 @@ mod tests {
 
     /// A malformed persisted schedule (shouldn't happen given create-time
     /// validation, but storage can be corrupted) must not panic or fail the
-    /// caller: `skipped_slots_between` errors, and `active_hold_projection`
-    /// silently omits `skipped_runs` while still surfacing the hold (#5886).
+    /// caller: `elapsed_occurrences_between` errors, and
+    /// `active_hold_projection` silently omits `elapsed_occurrences` while
+    /// still surfacing the hold (#5886).
     #[test]
-    fn active_hold_projection_omits_skipped_runs_on_malformed_schedule() {
+    fn active_hold_projection_omits_elapsed_occurrences_on_malformed_schedule() {
         let now = Utc::now();
         let mut record = test_record(
             Some(now - chrono::Duration::days(1)),
@@ -626,8 +635,8 @@ mod tests {
         assert_eq!(hold.reason, ActiveHoldReason::InProgress);
         assert_eq!(hold.since, record.active_fire_slot);
         assert!(
-            hold.skipped_runs.is_none(),
-            "skip-count derivation must degrade silently, not surface a stale count"
+            hold.elapsed_occurrences.is_none(),
+            "elapsed-occurrence derivation must degrade silently, not surface a stale count"
         );
     }
 

@@ -1290,7 +1290,9 @@ registerPack("ko", {
   "automations.hold.auth": "계정 재연결을 기다리는 중입니다",
   "automations.hold.inProgress": "이전 실행이 아직 진행 중입니다",
   "automations.hold.meta.inProgress": "{since}에 시작됨 · 완료 후 다음 실행이 시작됩니다",
-  "automations.hold.meta.paused": "{since}부터 일시 중지됨 · {count}개 실행 건너뜀 (대기열에 없음)",
+  "automations.hold.meta.paused":
+    "{since}부터 일시 중지됨 · 보류 중 예정된 발생 시점 {count}개 경과",
+  "automations.hold.meta.pausedUnknownCount": "{since}부터 일시 중지됨 · 건너뛴 실행 수를 알 수 없음",
   "automations.hold.other": "이전 실행이 아직 끝나지 않았습니다",
   "automations.status.needsReview": "검토 필요",
   "automations.status.running": "실행 중",

@@ -1290,7 +1290,9 @@ registerPack("pt-BR", {
   "automations.hold.auth": "Aguardando você reconectar uma conta",
   "automations.hold.inProgress": "A execução anterior ainda está em andamento",
   "automations.hold.meta.inProgress": "Iniciado {since} · a próxima execução começa após esta terminar",
-  "automations.hold.meta.paused": "Pausado desde {since} · {count} execuções ignoradas (não enfileiradas)",
+  "automations.hold.meta.paused":
+    "Pausado desde {since} · {count} ocorrências programadas transcorreram enquanto pausado",
+  "automations.hold.meta.pausedUnknownCount": "Pausado desde {since} · contagem de execuções ignoradas indisponível",
   "automations.hold.other": "A execução anterior ainda não terminou",
   "automations.status.needsReview": "Precisa de revisão",
   "automations.status.running": "Em execução",

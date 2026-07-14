@@ -90,8 +90,8 @@ pub(super) fn insert_handlers(
     registry: &mut FirstPartyCapabilityRegistry,
     repository: Arc<dyn TriggerRepository>,
 ) -> Result<(), HostApiError> {
-    // Test-only bare wrapper (~30 call sites): defaults a `Missing`-resolving
-    // lookup so those sites never see a fabricated hold, mirroring
+    // Compatibility wrapper: supplies `MissingTriggerActiveRunLookup`, so
+    // callers through this path never project an `active_hold`, mirroring
     // `NoopTriggerCreateHook` below (#5886).
     insert_handlers_with_create_hook(
         registry,
@@ -456,7 +456,7 @@ async fn list_triggers(
         .list_trigger_run_history_batch(scope.tenant_id.clone(), &trigger_ids, run_limit)
         .await
         .map_err(|error| trigger_repository_error("list_trigger_run_history_batch", error))?;
-    // Reason/skip-count derivation and lookup batching live in
+    // Reason/elapsed-occurrence derivation and lookup batching live in
     // `ironclaw_triggers::active_holds_for_records`, shared with the
     // automations facade so both read surfaces stay in lockstep (#5886).
     let mut holds: HashMap<TriggerId, Value> = active_holds_for_records(
@@ -496,8 +496,8 @@ fn active_hold_json(hold: ActiveHoldProjection) -> Value {
     json!({
         "reason": reason,
         "since": hold.since,
-        "skipped_runs": hold.skipped_runs,
-        "skipped_runs_capped": hold.skipped_runs_capped,
+        "elapsed_occurrences": hold.elapsed_occurrences,
+        "elapsed_occurrences_capped": hold.elapsed_occurrences_capped,
     })
 }
 

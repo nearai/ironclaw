@@ -910,7 +910,9 @@ registerPack("en", {
   "automations.hold.auth": "Waiting for you to reconnect an account",
   "automations.hold.inProgress": "Previous run still in progress",
   "automations.hold.other": "Previous run hasn't finished",
-  "automations.hold.meta.paused": "Paused since {since} · {count} runs skipped (not queued)",
+  "automations.hold.meta.paused":
+    "Paused since {since} · {count} scheduled occurrences elapsed while held",
+  "automations.hold.meta.pausedUnknownCount": "Paused since {since} · run count unavailable",
   "automations.hold.meta.inProgress": "Started {since} · next run starts after it finishes",
   "automations.detail.emptyTitle": "Select an automation",
   "automations.detail.emptyDescription":

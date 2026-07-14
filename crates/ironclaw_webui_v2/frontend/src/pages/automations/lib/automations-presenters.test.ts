@@ -49,7 +49,9 @@ const EN_SCHEDULE = {
   "automations.hold.auth": "Waiting for you to reconnect an account",
   "automations.hold.inProgress": "Previous run still in progress",
   "automations.hold.other": "Previous run hasn't finished",
-  "automations.hold.meta.paused": "Paused since {since} · {count} runs skipped (not queued)",
+  "automations.hold.meta.paused":
+    "Paused since {since} · {count} scheduled occurrences elapsed while held",
+  "automations.hold.meta.pausedUnknownCount": "Paused since {since} · run count unavailable",
   "automations.hold.meta.inProgress": "Started {since} · next run starts after it finishes",
   "automations.date.unknown": "Unknown",
   "automations.date.notScheduled": "Not scheduled",
@@ -859,7 +861,8 @@ test("once label reflects source timezone wall-clock, not UTC", () => {
 });
 
 // #5886: an active_hold overrides the normal status pill so the UI explains
-// why a due trigger isn't running, plus a meta line with when/how-many-skipped.
+// why a due trigger isn't running, plus a meta line with when/how-many
+// scheduled occurrences elapsed.
 test("normalizeAutomations overrides status pill and adds hold_meta_label when active_hold is present", () => {
   const automations = normalizeAutomations({
     automations: [
@@ -872,7 +875,7 @@ test("normalizeAutomations overrides status pill and adds hold_meta_label when a
         active_hold: {
           reason: "approval",
           since: "2026-07-14T00:51:00Z",
-          skipped_runs: 3,
+          elapsed_occurrences: 3,
         },
       },
     ],
@@ -881,32 +884,59 @@ test("normalizeAutomations overrides status pill and adds hold_meta_label when a
   assert.equal(automations[0].primary_status_label, "Waiting for your approval");
   assert.equal(automations[0].primary_status_tone, "warning");
   assert.match(automations[0].hold_meta_label, /^Paused since /);
-  assert.match(automations[0].hold_meta_label, /3 runs skipped \(not queued\)$/);
+  assert.match(automations[0].hold_meta_label, /3 scheduled occurrences elapsed while held$/);
 });
 
-test("normalizeAutomations renders skipped_runs_capped as 99+", () => {
+test("normalizeAutomations renders elapsed_occurrences_capped as 99+", () => {
   const automations = normalizeAutomations({
     automations: [
       {
         automation_id: "held-capped",
-        name: "Held with capped skips",
+        name: "Held with capped elapsed occurrences",
         source: { type: "schedule", cron: "0 9 * * *" },
         state: "active",
         active_hold: {
           reason: "auth",
           since: "2026-07-14T00:51:00Z",
-          skipped_runs: 99,
-          skipped_runs_capped: true,
+          elapsed_occurrences: 99,
+          elapsed_occurrences_capped: true,
         },
       },
     ],
   });
 
   assert.equal(automations[0].primary_status_label, "Waiting for you to reconnect an account");
-  assert.match(automations[0].hold_meta_label, /99\+ runs skipped/);
+  assert.match(automations[0].hold_meta_label, /99\+ scheduled occurrences elapsed/);
 });
 
-test("normalizeAutomations uses the in-progress hold variant without a skip count", () => {
+// #5886 follow-up: the backend sends elapsed_occurrences as null when it
+// can't derive a count (e.g. a malformed persisted schedule). The UI must
+// not coerce that to "0 occurrences elapsed" — a false exact count — and
+// instead renders an explicit "unavailable" variant.
+test("normalizeAutomations renders unavailable-count copy when elapsed_occurrences is null", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "held-unknown-count",
+        name: "Held with unknown elapsed count",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "active",
+        active_hold: {
+          reason: "approval",
+          since: "2026-07-14T00:51:00Z",
+          elapsed_occurrences: null,
+        },
+      },
+    ],
+  });
+
+  assert.equal(automations[0].primary_status_label, "Waiting for your approval");
+  assert.match(automations[0].hold_meta_label, /^Paused since /);
+  assert.match(automations[0].hold_meta_label, /run count unavailable$/);
+  assert.doesNotMatch(automations[0].hold_meta_label, /0 scheduled occurrences elapsed/);
+});
+
+test("normalizeAutomations uses the in-progress hold variant without an elapsed-occurrence count", () => {
   const automations = normalizeAutomations({
     automations: [
       {

@@ -213,14 +213,13 @@ fn trigger_create_input_rejects_dst_gap_time() {
 
 // -- active_hold projection (#5886) --------------------------------
 //
-// The reason/skip-count derivation and lookup-batching contract itself is
-// covered in `ironclaw_triggers::worker::ports::tests` (the owning
-// crate); these tests cover only this capability's wire mapping and
+// The reason/elapsed-occurrence derivation and lookup-batching contract
+// itself is covered in `ironclaw_triggers::worker::ports::tests` (the
+// owning crate); these tests cover only this capability's wire mapping and
 // wiring into `active_holds_for_records`.
 
 use ironclaw_triggers::{
-    ActiveHoldReason, BlockedActiveRunKind, TriggerActiveRunState, TriggerActiveRunStateRequest,
-    active_hold_projection,
+    ActiveHoldReason, BlockedActiveRunKind, TriggerActiveRunState, active_hold_projection,
 };
 
 fn test_record(active_fire_slot: Option<DateTime<Utc>>) -> TriggerRecord {
@@ -266,7 +265,7 @@ fn active_hold_json_maps_blocked_approval() {
     let hold = active_hold_json(projection);
     assert_eq!(hold["reason"], "approval");
     assert_eq!(hold["since"], json!(record.active_fire_slot));
-    assert!(hold["skipped_runs"].as_u64().is_some());
+    assert!(hold["elapsed_occurrences"].as_u64().is_some());
 }
 
 #[test]
@@ -278,7 +277,7 @@ fn active_hold_json_maps_nonterminal_to_in_progress() {
     let hold = active_hold_json(projection);
     assert_eq!(hold["reason"], "in_progress");
     assert!(hold["since"].is_null());
-    assert!(hold["skipped_runs"].is_null());
+    assert!(hold["elapsed_occurrences"].is_null());
 }
 
 #[test]
@@ -304,65 +303,14 @@ fn trigger_output_omits_active_hold_key_when_none() {
 #[test]
 fn trigger_output_includes_active_hold_when_present() {
     let record = test_record(Some(Utc::now()));
-    let hold = json!({"reason": "auth", "since": null, "skipped_runs": null, "skipped_runs_capped": false});
+    let hold = json!({"reason": "auth", "since": null, "elapsed_occurrences": null, "elapsed_occurrences_capped": false});
     let output = trigger_output(&record, &[], Some(hold));
     assert_eq!(output["active_hold"]["reason"], "auth");
 }
 
-/// Lookup failure must degrade to "no hold" for the affected record, never
-/// panic or fail the batch (#5886).
-#[tokio::test]
-async fn active_holds_for_records_degrades_on_lookup_error() {
-    struct ErrLookup;
-
-    #[async_trait]
-    impl TriggerActiveRunLookup for ErrLookup {
-        async fn active_run_state(
-            &self,
-            _request: TriggerActiveRunStateRequest,
-        ) -> Result<TriggerActiveRunState, TriggerError> {
-            Err(TriggerError::NotFound)
-        }
-    }
-
-    let record = test_record(Some(Utc::now()));
-    let holds = active_holds_for_records(
-        &ErrLookup,
-        std::slice::from_ref(&record),
-        Utc::now(),
-        TRIGGER_ACTIVE_HOLD_LOOKUP_TIMEOUT,
-    )
-    .await;
-    assert!(holds.is_empty());
-}
-
-/// A record with `active_fire_slot` set but `active_run_ref` still `None`
-/// is mid claim-to-accept; there is no run_id to look up. The
-/// panic-lookup proves `active_holds_for_records` routes it straight to
-/// `active_hold_projection` instead of the lookup (#5886).
-#[tokio::test]
-async fn active_holds_for_records_skips_lookup_for_claimed_but_unaccepted() {
-    struct PanicLookup;
-
-    #[async_trait]
-    impl TriggerActiveRunLookup for PanicLookup {
-        async fn active_run_state(
-            &self,
-            _request: TriggerActiveRunStateRequest,
-        ) -> Result<TriggerActiveRunState, TriggerError> {
-            panic!("lookup must not be called for a claimed-but-unaccepted record");
-        }
-    }
-
-    let mut record = test_record(Some(Utc::now()));
-    record.active_run_ref = None;
-    let holds = active_holds_for_records(
-        &PanicLookup,
-        std::slice::from_ref(&record),
-        Utc::now(),
-        TRIGGER_ACTIVE_HOLD_LOOKUP_TIMEOUT,
-    )
-    .await;
-    let hold = holds.get(&record.trigger_id).expect("hold present");
-    assert_eq!(hold.reason, ActiveHoldReason::Other);
-}
+// `active_holds_for_records`'s lookup-error degrade and
+// claimed-but-unaccepted skip-lookup behavior are pinned directly against
+// the shared function in `ironclaw_triggers::worker::ports::tests`
+// (`active_holds_for_records_degrades_on_lookup_error` and
+// `active_holds_for_records_skips_lookup_for_claimed_but_unaccepted`); no
+// duplicate coverage here (#5886).

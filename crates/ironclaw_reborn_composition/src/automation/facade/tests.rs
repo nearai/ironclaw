@@ -114,8 +114,8 @@ fn make_record(
 
 /// A record with `active_fire_slot`/`active_run_ref` set, so
 /// `active_holds_for_records` includes it in the active-run-lookup batch
-/// (#5886). Uses a per-minute cron so `skipped_slots_between` has plenty of
-/// slots to count between `fire_slot` and "now".
+/// (#5886). Uses a per-minute cron so `elapsed_occurrences_between` has
+/// plenty of slots to count between `fire_slot` and "now".
 fn make_active_fire_record(
     trigger_id: TriggerId,
     caller: &ProductAgentBoundCaller,
@@ -1380,12 +1380,12 @@ async fn automation_facade_stalled_hold_lookup_does_not_starve_run_history() {
 }
 
 #[tokio::test]
-async fn automation_facade_active_hold_propagates_skipped_runs_capped() {
+async fn automation_facade_active_hold_propagates_elapsed_occurrences_capped() {
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let c = caller();
     let id = TriggerId::new();
-    // Fire slot far enough in the past that a per-minute cron has skipped
-    // well over the 99-slot display cap by "now".
+    // Fire slot far enough in the past that a per-minute cron has elapsed
+    // well over the 99-occurrence display cap by "now".
     let fire_slot = now() - chrono::Duration::minutes(200);
     let record = make_active_fire_record(id, &c, fire_slot);
     repo.upsert_trigger(record).await.expect("upsert");
@@ -1405,7 +1405,7 @@ async fn automation_facade_active_hold_propagates_skipped_runs_capped() {
         .expect("record present");
     let hold = found.active_hold.as_ref().expect("hold present");
     assert!(
-        hold.skipped_runs_capped,
+        hold.elapsed_occurrences_capped,
         "a 200-minute gap on a per-minute cron must hit the display cap"
     );
 }
