@@ -124,6 +124,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let facade =
         ironclaw_reborn_composition::test_support::local_dev_automation_product_facade_for_test(
             Arc::clone(&repo),
+            Arc::clone(&g.shared.turn_store),
         );
     let services = RebornServices::new(
         creator.thread_harness.service.clone(),
@@ -191,7 +192,9 @@ async fn automation_entry(router: axum::Router, trigger_id: &str) -> HarnessResu
         .iter()
         .find(|automation| automation["automation_id"] == json!(trigger_id))
         .cloned()
-        .ok_or_else(|| format!("automation {trigger_id:?} absent from LIST response: {body}").into())
+        .ok_or_else(|| {
+            format!("automation {trigger_id:?} absent from LIST response: {body}").into()
+        })
 }
 
 /// The #5886 hold contract on one listed entry: an `active_hold` object with
@@ -201,10 +204,9 @@ fn assert_active_hold(entry: &Value, surface: &str) -> HarnessResult<()> {
         format!("#5886: {surface} missing \"active_hold\" for a gate-parked fire: {entry}")
     })?;
     if hold["reason"] != json!("approval") {
-        return Err(format!(
-            "#5886: {surface} active_hold.reason must be \"approval\": {entry}"
-        )
-        .into());
+        return Err(
+            format!("#5886: {surface} active_hold.reason must be \"approval\": {entry}").into(),
+        );
     }
     if hold.get("since").is_none() {
         return Err(format!("#5886: {surface} active_hold missing \"since\": {entry}").into());

@@ -13,9 +13,10 @@ mod report;
 
 pub use config::{TriggerPollerWorkerConfig, TriggerPollerWorkerDeps};
 pub use ports::{
-    NoopTriggerFireSettlementObserver, TriggerAcceptedFireSettlement, TriggerActiveRunLookup,
-    TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerFireSettlementObserver,
-    TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter, TrustedTriggerSubmitRequest,
+    BlockedActiveRunKind, MissingTriggerActiveRunLookup, NoopTriggerFireSettlementObserver,
+    TriggerAcceptedFireSettlement, TriggerActiveRunLookup, TriggerActiveRunState,
+    TriggerActiveRunStateRequest, TriggerFireSettlementObserver, TrustedTriggerFireSubmitOutcome,
+    TrustedTriggerFireSubmitter, TrustedTriggerSubmitRequest,
 };
 pub use report::{
     TriggerPollerFailureReason, TriggerPollerFireOutcome, TriggerPollerFireReport,

@@ -51,7 +51,12 @@ pub(crate) fn trigger_management_with_gated_write_profile() -> HarnessResult<Too
         Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
             true,
         )?),
-    );
+    )
+    // #5886: this profile's group asserts `trigger_list`'s `active_hold`
+    // against a REAL gate-parked run, which lives in the group's shared
+    // turn-state store, not this harness's own — see
+    // `install_trigger_active_run_lookup_for_test`'s doc.
+    .with_trigger_active_run_lookup_for_test();
     Ok(profile)
 }
 

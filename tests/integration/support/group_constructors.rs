@@ -371,8 +371,7 @@ impl RebornIntegrationGroupBuilder {
     /// [`RebornIntegrationGroup::triggers_with_gated_write`].
     pub async fn triggers_with_gated_write(self) -> HarnessResult<RebornIntegrationGroup> {
         let host_runtime =
-            super::super::harness::profiles::trigger::trigger_management_with_gated_write()
-                .await?;
+            super::super::harness::profiles::trigger::trigger_management_with_gated_write().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await
     }

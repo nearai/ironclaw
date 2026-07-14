@@ -138,11 +138,29 @@ pub enum TriggerActiveRunState {
     /// clearing it earlier would need to atomically terminate the turn as well,
     /// otherwise the run could later resume after failed trigger history was
     /// recorded.
-    Blocked,
+    Blocked {
+        kind: BlockedActiveRunKind,
+    },
     Terminal {
         status: TriggerRunHistoryStatus,
     },
 }
+
+/// Why a blocked active run is parked, at the granularity user-facing read
+/// surfaces need ("waiting for your approval" vs "reconnect an account").
+/// In-memory lookup vocabulary only — never persisted (#5886).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockedActiveRunKind {
+    Approval,
+    Auth,
+    Other,
+}
+
+/// Lookup that resolves every run as [`TriggerActiveRunState::Missing`], for
+/// callers that have no run-state source (mirrors `NoopTriggerCreateHook`).
+/// Consumers treat `Missing` conservatively, so this never fabricates a hold.
+#[derive(Debug, Default)]
+pub struct MissingTriggerActiveRunLookup;
 
 #[async_trait]
 pub trait TriggerActiveRunLookup: Send + Sync {
@@ -172,5 +190,15 @@ pub trait TriggerActiveRunLookup: Send + Sync {
             results.push(self.active_run_state(request).await);
         }
         results
+    }
+}
+
+#[async_trait]
+impl TriggerActiveRunLookup for MissingTriggerActiveRunLookup {
+    async fn active_run_state(
+        &self,
+        _request: TriggerActiveRunStateRequest,
+    ) -> Result<TriggerActiveRunState, TriggerError> {
+        Ok(TriggerActiveRunState::Missing)
     }
 }

@@ -1,19 +1,26 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use ironclaw_host_api::ThreadId;
+use ironclaw_host_api::Timestamp;
 use ironclaw_product_workflow::{
     AutomationListRequest, AutomationName, AutomationProductFacade, ProductAgentBoundCaller,
-    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationActiveHold, RebornAutomationHoldReason, RebornAutomationInfo,
+    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
     TriggerRunThreadScope,
 };
 use ironclaw_triggers::{
-    TriggerError, TriggerId, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus,
-    TriggerRunRecord, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
+    BlockedActiveRunKind, TriggerActiveRunLookup, TriggerActiveRunState,
+    TriggerActiveRunStateRequest, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
+    TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus, TriggerSchedule,
+    TriggerSourceKind, TriggerState,
 };
 
 const AUTOMATION_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
+/// Display cap for skipped-slot counting; the wire flags truncation so the
+/// panel renders "99+" (#5886).
+const SKIPPED_RUNS_DISPLAY_CAP: u32 = 99;
 
 /// WebUI panel facade for automation (trigger) listing.
 ///
@@ -34,6 +41,7 @@ const AUTOMATION_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Clone)]
 pub struct RebornAutomationProductFacade {
     trigger_repository: Arc<dyn TriggerRepository>,
+    active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
     backend_timeout: Duration,
     /// Whether the background trigger poller is running. Surfaced to the WebUI
     /// so the panel can warn that listed automations will not fire while
@@ -47,14 +55,19 @@ impl std::fmt::Debug for RebornAutomationProductFacade {
         formatter
             .debug_struct("RebornAutomationProductFacade")
             .field("trigger_repository", &"Arc<dyn TriggerRepository>")
+            .field("active_run_lookup", &"Arc<dyn TriggerActiveRunLookup>")
             .finish()
     }
 }
 
 impl RebornAutomationProductFacade {
-    pub(crate) fn new(trigger_repository: Arc<dyn TriggerRepository>) -> Self {
+    pub(crate) fn new(
+        trigger_repository: Arc<dyn TriggerRepository>,
+        active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
+    ) -> Self {
         Self {
             trigger_repository,
+            active_run_lookup,
             backend_timeout: AUTOMATION_BACKEND_TIMEOUT,
             scheduler_enabled: true,
         }
@@ -70,13 +83,70 @@ impl RebornAutomationProductFacade {
     #[cfg(test)]
     pub(crate) fn with_backend_timeout(
         trigger_repository: Arc<dyn TriggerRepository>,
+        active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
         backend_timeout: Duration,
     ) -> Self {
         Self {
             trigger_repository,
+            active_run_lookup,
             backend_timeout,
             scheduler_enabled: true,
         }
+    }
+
+    /// Batch-resolve active-run states for records holding an active fire and
+    /// derive each record's hold projection (#5886). Lookup failure degrades
+    /// to "no hold" — this is a display-only projection and must not fail the
+    /// panel list.
+    async fn active_holds_for_records(
+        &self,
+        records: &[TriggerRecord],
+        deadline: tokio::time::Instant,
+        now: Timestamp,
+    ) -> HashMap<TriggerId, RebornAutomationActiveHold> {
+        let mut requests = Vec::new();
+        let mut requested_records = Vec::new();
+        for record in records {
+            let (Some(fire_slot), Some(run_id)) = (record.active_fire_slot, record.active_run_ref)
+            else {
+                continue;
+            };
+            requests.push(TriggerActiveRunStateRequest {
+                tenant_id: record.tenant_id.clone(),
+                trigger_id: record.trigger_id,
+                fire_slot,
+                run_id,
+            });
+            requested_records.push(record);
+        }
+        if requests.is_empty() {
+            return HashMap::new();
+        }
+        let Ok(states) =
+            tokio::time::timeout_at(deadline, self.active_run_lookup.active_run_states(requests))
+                .await
+        else {
+            // silent-ok: display-only automation-hold projection; a slow
+            // snapshot source must not fail or delay the panel list.
+            tracing::debug!("active-run lookup timed out while deriving automation holds");
+            return HashMap::new();
+        };
+        let mut holds = HashMap::new();
+        for (record, state) in requested_records.into_iter().zip(states) {
+            let state = match state {
+                Ok(state) => state,
+                Err(error) => {
+                    // silent-ok: display-only automation-hold projection;
+                    // snapshot lookup failure must not fail the panel list.
+                    tracing::debug!(%error, "active-run lookup failed while deriving a hold");
+                    continue;
+                }
+            };
+            if let Some(hold) = active_hold_from_state(record, state, now) {
+                holds.insert(record.trigger_id, hold);
+            }
+        }
+        holds
     }
 }
 
@@ -124,10 +194,17 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
         .map_err(|_| backend_timeout_error())?
         .map_err(map_trigger_error)?;
 
+        let mut holds = self
+            .active_holds_for_records(&records, deadline, chrono::Utc::now())
+            .await;
+
         if records.is_empty() || request.run_limit == 0 {
             return Ok(records
                 .into_iter()
-                .map(|record| automation_info_from_record(record, &[]))
+                .map(|record| {
+                    let hold = holds.remove(&record.trigger_id);
+                    automation_info_from_record(record, &[], hold)
+                })
                 .collect());
         }
 
@@ -151,7 +228,8 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
                 let runs = runs_by_trigger
                     .remove(&record.trigger_id)
                     .unwrap_or_default();
-                automation_info_from_record(record, &runs)
+                let hold = holds.remove(&record.trigger_id);
+                automation_info_from_record(record, &runs, hold)
             })
             .collect())
     }
@@ -198,7 +276,7 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
 
         Ok(RebornAutomationMutationResponse {
             updated: record.is_some(),
-            automation: record.map(|record| automation_info_from_record(record, &[])),
+            automation: record.map(|record| automation_info_from_record(record, &[], None)),
         })
     }
 
@@ -291,7 +369,7 @@ impl RebornAutomationProductFacade {
 
         Ok(RebornAutomationMutationResponse {
             updated: record.is_some(),
-            automation: record.map(|record| automation_info_from_record(record, &[])),
+            automation: record.map(|record| automation_info_from_record(record, &[], None)),
         })
     }
 }
@@ -344,6 +422,7 @@ fn trigger_is_caller_visible(trigger: &TriggerRecord, caller: &ProductAgentBound
 fn automation_info_from_record(
     record: TriggerRecord,
     runs: &[TriggerRunRecord],
+    active_hold: Option<RebornAutomationActiveHold>,
 ) -> RebornAutomationInfo {
     let source = automation_source_from_record(&record);
     let is_active = record.has_active_fire();
@@ -365,7 +444,49 @@ fn automation_info_from_record(
         recent_runs: runs.iter().filter_map(map_recent_run).collect(),
         is_active,
         created_at: Some(record.created_at),
+        active_hold,
     }
+}
+
+/// Derive the user-facing hold projection for a record whose active fire
+/// resolved to `state` (#5886). Terminal runs are omitted (cleanup will
+/// release the fire) and Missing stays conservative (possibly a stale
+/// snapshot) — omission means "show nothing", never an error.
+fn active_hold_from_state(
+    record: &TriggerRecord,
+    state: TriggerActiveRunState,
+    now: Timestamp,
+) -> Option<RebornAutomationActiveHold> {
+    let reason = match state {
+        TriggerActiveRunState::Blocked { kind } => match kind {
+            BlockedActiveRunKind::Approval => RebornAutomationHoldReason::Approval,
+            BlockedActiveRunKind::Auth => RebornAutomationHoldReason::Auth,
+            BlockedActiveRunKind::Other => RebornAutomationHoldReason::Other,
+        },
+        TriggerActiveRunState::Nonterminal => RebornAutomationHoldReason::InProgress,
+        TriggerActiveRunState::Terminal { .. } | TriggerActiveRunState::Missing => return None,
+    };
+    let since = record.active_fire_slot;
+    let skipped = since.and_then(|slot| {
+        match record
+            .schedule
+            .skipped_slots_between(slot, now, SKIPPED_RUNS_DISPLAY_CAP)
+        {
+            Ok(count) => Some(count),
+            Err(error) => {
+                // silent-ok: display-only skip counter; a malformed stored
+                // schedule must not fail the panel list.
+                tracing::debug!(%error, "skipped-slot derivation failed for automation hold");
+                None
+            }
+        }
+    });
+    Some(RebornAutomationActiveHold {
+        reason,
+        since,
+        skipped_runs: skipped.map(|s| s.count),
+        skipped_runs_capped: skipped.map(|s| s.capped).unwrap_or_default(),
+    })
 }
 
 /// Maps a trigger record's source kind + schedule to the wire DTO source.

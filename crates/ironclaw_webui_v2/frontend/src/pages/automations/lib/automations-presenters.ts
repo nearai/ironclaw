@@ -31,6 +31,17 @@ const RUN_STATUS_PRESENTATION = {
   unknown: { labelKey: "automations.runStatus.unknown", tone: "muted" },
 };
 
+// Display tone + i18n label key for an active hold (#5886): a trigger that is
+// due but not queued because it's blocked on approval/auth/an in-flight run.
+// "in_progress" mirrors the running-run tone (info); the other reasons mirror
+// the paused-state tone (warning) since the automation is effectively stalled.
+const ACTIVE_HOLD_PRESENTATION = {
+  approval: { labelKey: "automations.hold.approval", tone: "warning" },
+  auth: { labelKey: "automations.hold.auth", tone: "warning" },
+  in_progress: { labelKey: "automations.hold.inProgress", tone: "info" },
+  other: { labelKey: "automations.hold.other", tone: "warning" },
+};
+
 // Fallback translator: if a caller forgets to pass `t`, return the raw key
 // rather than crash. Production paths always thread the real translator.
 function tr(t) {
@@ -241,6 +252,30 @@ export function primaryStatusTone(automation) {
   return stateTone(automation?.state);
 }
 
+function holdStatusLabel(hold, t) {
+  const key = ACTIVE_HOLD_PRESENTATION[hold?.reason]?.labelKey || "automations.hold.other";
+  return tr(t)(key);
+}
+
+function holdStatusTone(hold) {
+  return ACTIVE_HOLD_PRESENTATION[hold?.reason]?.tone || "warning";
+}
+
+// One-line explanation shown under the status pill: when the hold started and
+// how many due runs were skipped (not queued) while it was in effect. Counts
+// beyond the backend's cap render as "{count}+" per skipped_runs_capped.
+function holdMetaLabel(hold, t, locale) {
+  const tx = tr(t);
+  const since = formatAutomationDate(hold?.since, tx("automations.date.unknown"), locale);
+  if (hold?.reason === "in_progress") {
+    return tx("automations.hold.meta.inProgress", { since });
+  }
+  const count = hold?.skipped_runs_capped
+    ? `${hold?.skipped_runs ?? 0}+`
+    : String(hold?.skipped_runs ?? 0);
+  return tx("automations.hold.meta.paused", { since, count });
+}
+
 export function lastStatusLabel(status, t) {
   const key = LAST_STATUS_PRESENTATION[status]?.labelKey || "automations.lastStatus.none";
   return tr(t)(key);
@@ -306,6 +341,12 @@ function normalizeAutomation(automation, t, locale) {
     latest_unattached_run_thread_timestamp: latestUnattachedRunThreadTimestamp(recentRuns),
   };
 
+  // #5886: an active_hold means a due trigger is being intentionally skipped
+  // (blocked on approval/auth, or a prior run still in flight) rather than
+  // queued. When present it overrides the ordinary status pill so the user
+  // sees why nothing is running, plus a meta line with when/how-many-skipped.
+  const activeHold = automation.active_hold || null;
+
   return {
     ...normalized,
     display_name: automation.name || tx("automations.untitled"),
@@ -313,8 +354,11 @@ function normalizeAutomation(automation, t, locale) {
     schedule_label: automationScheduleLabel(automation.source, t, locale),
     state_label: stateLabel(automation.state, t),
     state_tone: stateTone(automation.state),
-    primary_status_label: primaryStatusLabel(normalized, t),
-    primary_status_tone: primaryStatusTone(normalized),
+    primary_status_label: activeHold
+      ? holdStatusLabel(activeHold, t)
+      : primaryStatusLabel(normalized, t),
+    primary_status_tone: activeHold ? holdStatusTone(activeHold) : primaryStatusTone(normalized),
+    hold_meta_label: activeHold ? holdMetaLabel(activeHold, t, locale) : null,
     next_run_timestamp: parseTimestamp(automation.next_run_at),
     next_run_label: formatAutomationDate(
       automation.next_run_at,

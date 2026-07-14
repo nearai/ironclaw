@@ -352,25 +352,42 @@ pub(crate) fn build_webui_services_with_connectable_channels(
             Arc::clone(product_auth),
         )));
     }
-    // Local-dev and production graphs both carry a trigger repository; whichever
-    // is wired backs the automations panel.
-    let automation_repository: Option<Arc<dyn TriggerRepository>> = {
-        let from_local = services
-            .local_runtime
-            .as_ref()
-            .map(|local_runtime| Arc::clone(&local_runtime.trigger_repository));
+    // Local-dev and production graphs both carry a trigger repository plus a
+    // turn-state snapshot source; whichever is wired backs the automations
+    // panel. The pair must come from the SAME runtime so active-hold
+    // projections read the run state the poller actually writes (#5886).
+    type AutomationBacking = (
+        Arc<dyn TriggerRepository>,
+        Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>,
+    );
+    let automation_backing: Option<AutomationBacking> = {
+        let from_local = services.local_runtime.as_ref().map(|local_runtime| {
+            (
+                Arc::clone(&local_runtime.trigger_repository),
+                Arc::clone(&local_runtime.turn_state)
+                    as Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>,
+            )
+        });
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         let from_local = from_local.or_else(|| {
             services
                 .production_runtime
                 .as_ref()
-                .map(|production_runtime| production_runtime.trigger_repository())
+                .map(|production_runtime| {
+                    (
+                        production_runtime.trigger_repository(),
+                        production_runtime.turn_run_snapshot_source(),
+                    )
+                })
         });
         from_local
     };
-    if let Some(repository) = automation_repository {
+    if let Some((repository, snapshot_source)) = automation_backing {
+        let active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup> = Arc::new(
+            crate::automation::trigger_poller::SnapshotActiveRunLookup::new(snapshot_source),
+        );
         api = api.with_automation_product_facade(Arc::new(
-            RebornAutomationProductFacade::new(repository)
+            RebornAutomationProductFacade::new(repository, active_run_lookup)
                 .with_scheduler_enabled(services.readiness.workers.trigger_poller),
         ));
     }

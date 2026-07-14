@@ -619,6 +619,50 @@ impl TriggerSchedule {
             Self::Once { at, .. } => Ok(if *at > after { Some(*at) } else { None }),
         }
     }
+
+    /// Count schedule slots in `(after, now]` — the fires an active hold made
+    /// the poller skip (#5886). Display-only derivation; stops at `cap` and
+    /// reports the truncation so UIs can render "99+" instead of a false-exact
+    /// count. `Once` schedules have no repeat slots to skip.
+    pub fn skipped_slots_between(
+        &self,
+        after: Timestamp,
+        now: Timestamp,
+        cap: u32,
+    ) -> Result<SkippedSlotCount, TriggerError> {
+        if matches!(self, Self::Once { .. }) {
+            return Ok(SkippedSlotCount {
+                count: 0,
+                capped: false,
+            });
+        }
+        let mut count = 0u32;
+        let mut cursor = after;
+        while count < cap {
+            match self.next_slot_after(cursor)? {
+                Some(slot) if slot <= now => {
+                    count += 1;
+                    cursor = slot;
+                }
+                _ => {
+                    return Ok(SkippedSlotCount {
+                        count,
+                        capped: false,
+                    });
+                }
+            }
+        }
+        let capped = matches!(self.next_slot_after(cursor)?, Some(slot) if slot <= now);
+        Ok(SkippedSlotCount { count, capped })
+    }
+}
+
+/// Result of [`TriggerSchedule::skipped_slots_between`]: `capped` marks a
+/// truncated count (the real number of skipped slots exceeds `count`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkippedSlotCount {
+    pub count: u32,
+    pub capped: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1270,12 +1314,12 @@ pub use libsql::LibSqlTriggerRepository;
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresTriggerRepository;
 pub use worker::{
-    NoopTriggerFireSettlementObserver, TriggerAcceptedFireSettlement, TriggerActiveRunLookup,
-    TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerFireSettlementObserver,
-    TriggerPollerFailureReason, TriggerPollerFireOutcome, TriggerPollerFireReport,
-    TriggerPollerTickReport, TriggerPollerWorker, TriggerPollerWorkerConfig,
-    TriggerPollerWorkerDeps, TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter,
-    TrustedTriggerSubmitRequest,
+    BlockedActiveRunKind, MissingTriggerActiveRunLookup, NoopTriggerFireSettlementObserver,
+    TriggerAcceptedFireSettlement, TriggerActiveRunLookup, TriggerActiveRunState,
+    TriggerActiveRunStateRequest, TriggerFireSettlementObserver, TriggerPollerFailureReason,
+    TriggerPollerFireOutcome, TriggerPollerFireReport, TriggerPollerTickReport,
+    TriggerPollerWorker, TriggerPollerWorkerConfig, TriggerPollerWorkerDeps,
+    TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter, TrustedTriggerSubmitRequest,
 };
 
 #[derive(Clone, Default)]
@@ -3122,6 +3166,83 @@ mod tests {
         assert!(
             error.to_string().contains("invalid timezone"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn skipped_slots_between_counts_cron_slots_exactly() {
+        let schedule = TriggerSchedule::cron("* * * * *").expect("valid cron");
+        let after = Utc.with_ymd_and_hms(2025, 6, 1, 9, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2025, 6, 1, 9, 16, 0).unwrap();
+        let skipped = schedule
+            .skipped_slots_between(after, now, 99)
+            .expect("count");
+        assert_eq!(
+            skipped,
+            SkippedSlotCount {
+                count: 16,
+                capped: false
+            }
+        );
+    }
+
+    #[test]
+    fn skipped_slots_between_reports_cap_truncation() {
+        let schedule = TriggerSchedule::cron("* * * * *").expect("valid cron");
+        let after = Utc.with_ymd_and_hms(2025, 6, 1, 9, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2025, 6, 1, 10, 0, 0).unwrap();
+        let skipped = schedule
+            .skipped_slots_between(after, now, 5)
+            .expect("count");
+        assert_eq!(
+            skipped,
+            SkippedSlotCount {
+                count: 5,
+                capped: true
+            }
+        );
+    }
+
+    #[test]
+    fn skipped_slots_between_exact_cap_window_is_not_capped() {
+        let schedule = TriggerSchedule::cron("* * * * *").expect("valid cron");
+        let after = Utc.with_ymd_and_hms(2025, 6, 1, 9, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2025, 6, 1, 9, 5, 0).unwrap();
+        let skipped = schedule
+            .skipped_slots_between(after, now, 5)
+            .expect("count");
+        assert_eq!(
+            skipped,
+            SkippedSlotCount {
+                count: 5,
+                capped: false
+            }
+        );
+    }
+
+    #[test]
+    fn skipped_slots_between_zero_window_and_once_schedules_skip_nothing() {
+        let after = Utc.with_ymd_and_hms(2025, 6, 1, 9, 0, 0).unwrap();
+        let cron = TriggerSchedule::cron("* * * * *").expect("valid cron");
+        let none = cron.skipped_slots_between(after, after, 99).expect("count");
+        assert_eq!(
+            none,
+            SkippedSlotCount {
+                count: 0,
+                capped: false
+            }
+        );
+        let once =
+            TriggerSchedule::once(Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap(), "UTC")
+                .expect("valid once");
+        let now = Utc.with_ymd_and_hms(2025, 6, 2, 9, 0, 0).unwrap();
+        let skipped = once.skipped_slots_between(after, now, 99).expect("count");
+        assert_eq!(
+            skipped,
+            SkippedSlotCount {
+                count: 0,
+                capped: false
+            }
         );
     }
 

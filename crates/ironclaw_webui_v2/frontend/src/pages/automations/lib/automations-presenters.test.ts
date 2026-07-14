@@ -45,6 +45,12 @@ const EN_SCHEDULE = {
   "automations.runStatus.unknown": "Unknown",
   "automations.status.running": "Running",
   "automations.status.needsReview": "Needs review",
+  "automations.hold.approval": "Waiting for your approval",
+  "automations.hold.auth": "Waiting for you to reconnect an account",
+  "automations.hold.inProgress": "Previous run still in progress",
+  "automations.hold.other": "Previous run hasn't finished",
+  "automations.hold.meta.paused": "Paused since {since} · {count} runs skipped (not queued)",
+  "automations.hold.meta.inProgress": "Started {since} · next run starts after it finishes",
   "automations.date.unknown": "Unknown",
   "automations.date.notScheduled": "Not scheduled",
   "automations.date.noRuns": "No runs yet",
@@ -76,6 +82,7 @@ const normalizeAutomations = (response, locale = "en") =>
   normalizeAutomationsRaw(response, t, locale).map((automation) => ({
     ...automation,
     schedule_label: norm(automation.schedule_label),
+    hold_meta_label: norm(automation.hold_meta_label),
   }));
 
 test("normalizeAutomations keeps schedule and once rows, drops unknown", () => {
@@ -849,4 +856,92 @@ test("once label reflects source timezone wall-clock, not UTC", () => {
 
   // LA label must carry the LA tz parenthetical
   assert.match(laLabel, /\(America\/Los_Angeles\)/);
+});
+
+// #5886: an active_hold overrides the normal status pill so the UI explains
+// why a due trigger isn't running, plus a meta line with when/how-many-skipped.
+test("normalizeAutomations overrides status pill and adds hold_meta_label when active_hold is present", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "held-approval",
+        name: "Held on approval",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "active",
+        next_run_at: "2026-07-14T09:00:00Z",
+        active_hold: {
+          reason: "approval",
+          since: "2026-07-14T00:51:00Z",
+          skipped_runs: 3,
+        },
+      },
+    ],
+  });
+
+  assert.equal(automations[0].primary_status_label, "Waiting for your approval");
+  assert.equal(automations[0].primary_status_tone, "warning");
+  assert.match(automations[0].hold_meta_label, /^Paused since /);
+  assert.match(automations[0].hold_meta_label, /3 runs skipped \(not queued\)$/);
+});
+
+test("normalizeAutomations renders skipped_runs_capped as 99+", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "held-capped",
+        name: "Held with capped skips",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "active",
+        active_hold: {
+          reason: "auth",
+          since: "2026-07-14T00:51:00Z",
+          skipped_runs: 99,
+          skipped_runs_capped: true,
+        },
+      },
+    ],
+  });
+
+  assert.equal(automations[0].primary_status_label, "Waiting for you to reconnect an account");
+  assert.match(automations[0].hold_meta_label, /99\+ runs skipped/);
+});
+
+test("normalizeAutomations uses the in-progress hold variant without a skip count", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "held-in-progress",
+        name: "Held on in-flight run",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "active",
+        active_hold: {
+          reason: "in_progress",
+          since: "2026-07-14T00:51:00Z",
+        },
+      },
+    ],
+  });
+
+  assert.equal(automations[0].primary_status_label, "Previous run still in progress");
+  assert.equal(automations[0].primary_status_tone, "info");
+  assert.match(automations[0].hold_meta_label, /^Started /);
+  assert.match(automations[0].hold_meta_label, /next run starts after it finishes$/);
+});
+
+test("normalizeAutomations leaves status rendering unchanged when active_hold is absent", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "no-hold",
+        name: "Ordinary active automation",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "active",
+        next_run_at: "2026-07-14T09:00:00Z",
+      },
+    ],
+  });
+
+  assert.equal(automations[0].primary_status_label, "Active");
+  assert.equal(automations[0].primary_status_tone, "signal");
+  assert.equal(automations[0].hold_meta_label, null);
 });

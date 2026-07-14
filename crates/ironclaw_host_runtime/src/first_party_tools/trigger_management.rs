@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Instant};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -8,9 +8,10 @@ use ironclaw_host_api::{
     PermissionMode, ResourceScope, ResourceUsage, RuntimeDispatchErrorKind,
 };
 use ironclaw_triggers::{
-    TriggerError, TriggerId, TriggerRecord, TriggerRecordValidationKind, TriggerRepository,
-    TriggerRunRecord, TriggerSchedule, TriggerScheduleValidationKind, TriggerSourceKind,
-    TriggerState,
+    BlockedActiveRunKind, MissingTriggerActiveRunLookup, TriggerActiveRunLookup,
+    TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerError, TriggerId, TriggerRecord,
+    TriggerRecordValidationKind, TriggerRepository, TriggerRunRecord, TriggerSchedule,
+    TriggerScheduleValidationKind, TriggerSourceKind, TriggerState,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -28,6 +29,9 @@ use super::{
 const TRIGGER_LIST_MAX_LIMIT: usize = 100;
 const TRIGGER_RUN_HISTORY_DEFAULT_LIMIT: usize = 25;
 const TRIGGER_RUN_HISTORY_MAX_LIMIT: usize = 100;
+/// Display cap for `active_hold.skipped_runs`; matches the automations facade
+/// cap so both read surfaces render "99+" identically (#5886).
+const TRIGGER_ACTIVE_HOLD_SKIPPED_RUNS_CAP: u32 = 99;
 
 pub const TRIGGER_CREATE_CAPABILITY_ID: &str = "builtin.trigger_create";
 pub const TRIGGER_LIST_CAPABILITY_ID: &str = "builtin.trigger_list";
@@ -81,13 +85,22 @@ pub(super) fn insert_handlers(
     registry: &mut FirstPartyCapabilityRegistry,
     repository: Arc<dyn TriggerRepository>,
 ) -> Result<(), HostApiError> {
-    insert_handlers_with_create_hook(registry, repository, Arc::new(NoopTriggerCreateHook))
+    // Test-only bare wrapper (~30 call sites): defaults a `Missing`-resolving
+    // lookup so those sites never see a fabricated hold, mirroring
+    // `NoopTriggerCreateHook` below (#5886).
+    insert_handlers_with_create_hook(
+        registry,
+        repository,
+        Arc::new(NoopTriggerCreateHook),
+        Arc::new(MissingTriggerActiveRunLookup),
+    )
 }
 
 pub(super) fn insert_handlers_with_create_hook(
     registry: &mut FirstPartyCapabilityRegistry,
     repository: Arc<dyn TriggerRepository>,
     create_hook: Arc<dyn TriggerCreateHook>,
+    active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
 ) -> Result<(), HostApiError> {
     insert_trigger_handlers(
         registry,
@@ -95,6 +108,7 @@ pub(super) fn insert_handlers_with_create_hook(
             repository,
             create_hook,
             clock: Arc::new(SystemTriggerManagementClock),
+            active_run_lookup,
         }),
     )
 }
@@ -111,6 +125,7 @@ pub(super) fn insert_handlers_with_clock(
             repository,
             create_hook: Arc::new(NoopTriggerCreateHook),
             clock,
+            active_run_lookup: Arc::new(MissingTriggerActiveRunLookup),
         }),
     )
 }
@@ -197,6 +212,7 @@ struct TriggerManagementToolHandler {
     repository: Arc<dyn TriggerRepository>,
     create_hook: Arc<dyn TriggerCreateHook>,
     clock: Arc<dyn TriggerManagementClock>,
+    active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
 }
 
 #[async_trait]
@@ -219,7 +235,14 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
                 .await?
             }
             TRIGGER_LIST_CAPABILITY_ID => {
-                list_triggers(&*self.repository, &request.scope, request.input).await?
+                list_triggers(
+                    &*self.repository,
+                    &*self.active_run_lookup,
+                    &request.scope,
+                    request.input,
+                    self.clock.now(),
+                )
+                .await?
             }
             TRIGGER_REMOVE_CAPABILITY_ID => {
                 remove_trigger(&*self.repository, &request.scope, request.input).await?
@@ -389,14 +412,16 @@ async fn create_trigger(
         return Err(hook_error);
     }
     Ok(json!({
-        "trigger": trigger_output(&record, &[]),
+        "trigger": trigger_output(&record, &[], None),
     }))
 }
 
 async fn list_triggers(
     repository: &dyn TriggerRepository,
+    active_run_lookup: &dyn TriggerActiveRunLookup,
     scope: &ResourceScope,
     input: Value,
+    now: DateTime<Utc>,
 ) -> Result<Value, FirstPartyCapabilityError> {
     let input: TriggerListInput = serde_json::from_value(input).map_err(|_| input_error())?;
     let limit = input
@@ -426,16 +451,106 @@ async fn list_triggers(
         .list_trigger_run_history_batch(scope.tenant_id.clone(), &trigger_ids, run_limit)
         .await
         .map_err(|error| trigger_repository_error("list_trigger_run_history_batch", error))?;
+    let mut holds = active_holds_for_records(active_run_lookup, &records, now).await;
     let output = records
         .into_iter()
         .map(|record| {
             let runs = runs_by_trigger
                 .remove(&record.trigger_id)
                 .unwrap_or_default();
-            trigger_output(&record, &runs)
+            let hold = holds.remove(&record.trigger_id);
+            trigger_output(&record, &runs, hold)
         })
         .collect::<Vec<_>>();
     Ok(json!({ "triggers": output }))
+}
+
+/// Batch-resolves active-run states for records holding an active fire and
+/// derives each record's `active_hold` projection (#5886). Lookup failure
+/// degrades to "no hold" per-record — this is a display-only projection and
+/// must never fail the `trigger_list` capability.
+async fn active_holds_for_records(
+    active_run_lookup: &dyn TriggerActiveRunLookup,
+    records: &[TriggerRecord],
+    now: DateTime<Utc>,
+) -> HashMap<TriggerId, Value> {
+    let mut requests = Vec::new();
+    let mut requested_records = Vec::new();
+    for record in records {
+        let (Some(fire_slot), Some(run_id)) = (record.active_fire_slot, record.active_run_ref)
+        else {
+            continue;
+        };
+        requests.push(TriggerActiveRunStateRequest {
+            tenant_id: record.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot,
+            run_id,
+        });
+        requested_records.push(record);
+    }
+    if requests.is_empty() {
+        return HashMap::new();
+    }
+    let states = active_run_lookup.active_run_states(requests).await;
+    let mut holds = HashMap::new();
+    for (record, state) in requested_records.into_iter().zip(states) {
+        let state = match state {
+            Ok(state) => state,
+            Err(error) => {
+                // silent-ok: display-only automation-hold projection; snapshot
+                // lookup failure must not fail trigger_list (#5886).
+                tracing::debug!(%error, "active-run lookup failed while deriving a trigger hold");
+                continue;
+            }
+        };
+        if let Some(hold) = active_hold_json(record, state, now) {
+            holds.insert(record.trigger_id, hold);
+        }
+    }
+    holds
+}
+
+/// Maps a resolved active-run state to the `active_hold` wire object — same
+/// reason strings and skip-count semantics as the automations facade
+/// (`ironclaw_reborn_composition::automation::facade::active_hold_from_state`),
+/// duplicated because the two crates sit at different layers over the same
+/// `ironclaw_triggers` vocabulary (#5886).
+fn active_hold_json(
+    record: &TriggerRecord,
+    state: TriggerActiveRunState,
+    now: DateTime<Utc>,
+) -> Option<Value> {
+    let reason = match state {
+        TriggerActiveRunState::Blocked { kind } => match kind {
+            BlockedActiveRunKind::Approval => "approval",
+            BlockedActiveRunKind::Auth => "auth",
+            BlockedActiveRunKind::Other => "other",
+        },
+        TriggerActiveRunState::Nonterminal => "in_progress",
+        TriggerActiveRunState::Terminal { .. } | TriggerActiveRunState::Missing => return None,
+    };
+    let since = record.active_fire_slot;
+    let skipped = since.and_then(|slot| {
+        match record
+            .schedule
+            .skipped_slots_between(slot, now, TRIGGER_ACTIVE_HOLD_SKIPPED_RUNS_CAP)
+        {
+            Ok(count) => Some(count),
+            Err(error) => {
+                // silent-ok: display-only skip counter; a malformed stored
+                // schedule must not fail trigger_list (#5886).
+                tracing::debug!(%error, "skipped-slot derivation failed for trigger active_hold");
+                None
+            }
+        }
+    });
+    Some(json!({
+        "reason": reason,
+        "since": since,
+        "skipped_runs": skipped.as_ref().map(|s| s.count),
+        "skipped_runs_capped": skipped.map(|s| s.capped).unwrap_or(false),
+    }))
 }
 
 async fn remove_trigger(
@@ -485,14 +600,18 @@ async fn set_trigger_state(
         .map_err(|error| trigger_repository_error("set_scoped_trigger_state", error))?;
     Ok(json!({
         "updated": updated.is_some(),
-        "trigger": updated.as_ref().map(|record| trigger_output(record, &[])),
+        "trigger": updated.as_ref().map(|record| trigger_output(record, &[], None)),
     }))
 }
 
-fn trigger_output(record: &TriggerRecord, recent_runs: &[TriggerRunRecord]) -> Value {
+fn trigger_output(
+    record: &TriggerRecord,
+    recent_runs: &[TriggerRunRecord],
+    active_hold: Option<Value>,
+) -> Value {
     let is_enabled = record.state == TriggerState::Scheduled;
     let has_active_fire = record.has_active_fire();
-    json!({
+    let mut output = json!({
         "trigger_id": record.trigger_id.to_string(),
         "agent_id": record.agent_id.as_ref().map(|id| id.as_str()),
         "project_id": record.project_id.as_ref().map(|id| id.as_str()),
@@ -511,7 +630,14 @@ fn trigger_output(record: &TriggerRecord, recent_runs: &[TriggerRunRecord]) -> V
         "is_active": is_enabled,
         "has_active_fire": has_active_fire,
         "created_at": record.created_at,
-    })
+    });
+    // `active_hold` is omitted entirely (not null) when there is no live hold
+    // to report — Missing/Terminal active-run states and lookup failures both
+    // resolve to `None` upstream (#5886).
+    if let Some(hold) = active_hold {
+        output["active_hold"] = hold;
+    }
+    output
 }
 
 fn trigger_run_output(run: &TriggerRunRecord) -> Value {
@@ -1033,5 +1159,117 @@ mod tests {
             result.is_err(),
             "DST-gap time must be rejected as input error"
         );
+    }
+
+    // -- active_hold projection (#5886) --------------------------------
+
+    fn test_record(active_fire_slot: Option<DateTime<Utc>>) -> TriggerRecord {
+        use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+        let now = Utc::now();
+        TriggerRecord {
+            trigger_id: TriggerId::new(),
+            tenant_id: TenantId::new("tenant-alpha").expect("valid tenant"),
+            creator_user_id: UserId::new("user-alpha").expect("valid user"),
+            agent_id: Some(AgentId::new("agent-alpha").expect("valid agent")),
+            project_id: Some(ProjectId::new("project-alpha").expect("valid project")),
+            name: "daily".to_string(),
+            source: TriggerSourceKind::Schedule,
+            schedule: TriggerSchedule::Cron {
+                expression: "0 9 * * *".to_string(),
+                timezone: "UTC".to_string(),
+            },
+            prompt: "check mail".to_string(),
+            delivery_target: None,
+            state: TriggerState::Scheduled,
+            next_run_at: now,
+            last_run_at: None,
+            last_fired_slot: None,
+            last_status: None,
+            active_fire_slot,
+            active_run_ref: active_fire_slot.map(|_| ironclaw_turns::TurnRunId::new()),
+            created_at: now,
+        }
+    }
+
+    #[test]
+    fn active_hold_json_maps_blocked_approval() {
+        let now = Utc::now();
+        let record = test_record(Some(now - chrono::Duration::days(3)));
+        let hold = active_hold_json(
+            &record,
+            TriggerActiveRunState::Blocked {
+                kind: BlockedActiveRunKind::Approval,
+            },
+            now,
+        )
+        .expect("blocked state yields a hold");
+        assert_eq!(hold["reason"], "approval");
+        assert_eq!(hold["since"], json!(record.active_fire_slot));
+        assert!(hold["skipped_runs"].as_u64().is_some());
+    }
+
+    #[test]
+    fn active_hold_json_maps_nonterminal_to_in_progress() {
+        let now = Utc::now();
+        let record = test_record(None);
+        let hold = active_hold_json(&record, TriggerActiveRunState::Nonterminal, now)
+            .expect("nonterminal state yields a hold");
+        assert_eq!(hold["reason"], "in_progress");
+        assert!(hold["since"].is_null());
+        assert!(hold["skipped_runs"].is_null());
+    }
+
+    #[test]
+    fn active_hold_json_omits_missing_and_terminal() {
+        let now = Utc::now();
+        let record = test_record(Some(now));
+        assert!(active_hold_json(&record, TriggerActiveRunState::Missing, now).is_none());
+        assert!(
+            active_hold_json(
+                &record,
+                TriggerActiveRunState::Terminal {
+                    status: ironclaw_triggers::TriggerRunHistoryStatus::Ok,
+                },
+                now,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn trigger_output_omits_active_hold_key_when_none() {
+        let record = test_record(None);
+        let output = trigger_output(&record, &[], None);
+        assert!(output.get("active_hold").is_none());
+    }
+
+    #[test]
+    fn trigger_output_includes_active_hold_when_present() {
+        let record = test_record(Some(Utc::now()));
+        let hold = json!({"reason": "auth", "since": null, "skipped_runs": null, "skipped_runs_capped": false});
+        let output = trigger_output(&record, &[], Some(hold));
+        assert_eq!(output["active_hold"]["reason"], "auth");
+    }
+
+    /// Lookup failure must degrade to "no hold" for the affected record, never
+    /// panic or fail the batch (#5886).
+    #[tokio::test]
+    async fn active_holds_for_records_degrades_on_lookup_error() {
+        struct ErrLookup;
+
+        #[async_trait]
+        impl TriggerActiveRunLookup for ErrLookup {
+            async fn active_run_state(
+                &self,
+                _request: TriggerActiveRunStateRequest,
+            ) -> Result<TriggerActiveRunState, TriggerError> {
+                Err(TriggerError::NotFound)
+            }
+        }
+
+        let record = test_record(Some(Utc::now()));
+        let holds =
+            active_holds_for_records(&ErrLookup, std::slice::from_ref(&record), Utc::now()).await;
+        assert!(holds.is_empty());
     }
 }
