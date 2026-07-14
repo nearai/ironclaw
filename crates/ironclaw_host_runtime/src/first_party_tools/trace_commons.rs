@@ -1,3 +1,4 @@
+// arch-exempt: large_file, trace-commons capability family shares one dispatch surface, plan #4539
 //! First-party Trace Commons capabilities: onboard, status, credits, profile token, profile set,
 //! and account login link.
 //!
@@ -1373,6 +1374,7 @@ mod tests {
                 secret_store: None,
                 audit_sink: None,
                 unsafe_raw_diagnostics_allowed: false,
+                post_edit_check: None,
             },
             input,
         }

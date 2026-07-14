@@ -81,7 +81,7 @@ use crate::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime,
     FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, HostRuntimeError,
     HostRuntimeHttpEgressPort, InvocationServicesResolutionRequest, InvocationServicesResolver,
-    LocalHostProcessPort, LocalInvocationServicesResolver, PlannerError,
+    LocalHostProcessPort, LocalInvocationServicesResolver, PlannerError, PostEditCheckConfig,
     ProcessObligationLifecycleStore, RuntimeBackendHealth, RuntimeProcessPort,
     RuntimeSecretMaterialStager, RuntimeSecretStageError, TenantSandboxProcessPort,
     ToolCallHttpEgress, plan_capability,
@@ -167,6 +167,7 @@ where
     run_profile_resolver: Option<Arc<dyn RunProfileResolver>>,
     turn_run_transition_port: Option<Arc<dyn TurnRunTransitionPort>>,
     turn_run_wake_notifier: Option<Arc<dyn TurnRunWakeNotifier>>,
+    post_edit_check: Option<PostEditCheckConfig>,
     component_types: ProductionComponentTypes,
 }
 
@@ -338,6 +339,7 @@ where
             run_profile_resolver: None,
             turn_run_transition_port: None,
             turn_run_wake_notifier: None,
+            post_edit_check: None,
             component_types: ProductionComponentTypes {
                 trust_policy: None,
                 trust_policy_verified: false,
@@ -410,6 +412,10 @@ where
         if let Some(process_port) = &self.tenant_sandbox_process_port {
             invocation_services_resolver = invocation_services_resolver
                 .with_tenant_sandbox_process_port(Arc::clone(process_port));
+        }
+        if let Some(post_edit_check) = &self.post_edit_check {
+            invocation_services_resolver =
+                invocation_services_resolver.with_post_edit_check(post_edit_check.clone());
         }
         let invocation_services: Arc<dyn InvocationServicesResolver> =
             Arc::new(invocation_services_resolver);
