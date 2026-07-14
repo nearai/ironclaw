@@ -2298,12 +2298,17 @@ surface_kind = "timer"
 }
 
 #[test]
-fn contracts_cannot_project_tool_or_auth_section_surfaces() {
-    // Tool and auth surfaces each have a dedicated declaration path
-    // (capability declarations and product-auth credential requirements). A
-    // contract that tries to project them as opaque section surfaces is a
-    // contract-implementation bug and must fail closed.
-    for bad_kind in [CapabilitySurfaceKind::Tool, CapabilitySurfaceKind::Auth] {
+fn contracts_cannot_project_tool_auth_or_directionless_channel_section_surfaces() {
+    // Tool, auth, and channel surfaces each have a dedicated typed declaration
+    // path (capability declarations, product-auth credential requirements, and
+    // directional channel projections). A contract that tries to project any
+    // of them as an opaque section surface is a contract-implementation bug and
+    // must fail closed.
+    for bad_kind in [
+        CapabilitySurfaceKind::Tool,
+        CapabilitySurfaceKind::Auth,
+        CapabilitySurfaceKind::Channel,
+    ] {
         let mut registry = HostApiContractRegistry::new();
         registry
             .register(Arc::new(SurfaceProjectingContract {

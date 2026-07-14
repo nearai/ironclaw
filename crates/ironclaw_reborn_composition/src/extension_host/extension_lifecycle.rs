@@ -2173,16 +2173,19 @@ fn activation_success_message(
         package.manifest.name.as_str(),
         &surfaces,
     ) {
-        if connection.strategy == RebornChannelConnectStrategy::OAuth {
-            return format!(
-                "{name} is installed as an inbound entrypoint. If WebChat shows a {name} account connection panel, tell the user to configure {name} OAuth for this extension rather than pasting anything into normal chat. If the user's {name} account is already connected, continue the user's original request; {name} DMs and WebUI chat can use the same user-scoped {name} tools.",
+        let mut message = if connection.strategy == RebornChannelConnectStrategy::OAuth {
+            format!(
+                "{name} is installed as an inbound entrypoint. If WebChat shows a {name} account connection panel, tell the user to configure {name} OAuth for this extension rather than pasting anything into normal chat. If the user's {name} account is already connected, continue the user's original request. Do not claim the connection is ready until setup is confirmed.",
                 name = package.manifest.name.as_str(),
-            );
-        }
-        return format!(
-            "{} is installed as an external channel. If WebChat shows a channel connection panel, tell the user to open the extension's app or bot, get the pairing code or connection challenge, and paste it into the WebChat connection panel rather than normal chat. If the user's channel account is already connected, continue the user's original request instead of asking them to pair again. Do not claim the channel can receive or send messages for the user until connection is confirmed.",
-            package.manifest.name.as_str()
-        );
+            )
+        } else {
+            format!(
+                "{} is installed as an external channel. If WebChat shows a channel connection panel, tell the user to open the extension's app or bot, get the pairing code or connection challenge, and paste it into the WebChat connection panel rather than normal chat. If the user's channel account is already connected, continue the user's original request instead of asking them to pair again. Do not claim the channel can receive or send messages for the user until connection is confirmed.",
+                package.manifest.name.as_str()
+            )
+        };
+        append_exact_capability_guidance(&mut message, visible_capability_ids);
+        return message;
     }
     if visible_capability_ids.is_empty() {
         return "Extension activation succeeded. No model-visible tools were published by this extension; follow any extension-specific setup or connection UI before claiming new capabilities are available.".to_string();
@@ -2190,12 +2193,19 @@ fn activation_success_message(
     let mut message = String::from(
         "Extension activation succeeded and its tools are now available. No additional authorization or configuration is needed, including for write-capable tools, unless a later tool call reports auth_required. Do not ask the user for a token, OAuth, authorization, or configuration after activated=true.",
     );
+    append_exact_capability_guidance(&mut message, visible_capability_ids);
+    message
+}
+
+fn append_exact_capability_guidance(message: &mut String, visible_capability_ids: &[String]) {
+    if visible_capability_ids.is_empty() {
+        return;
+    }
     message.push_str(
         " These tools are now callable by exact name — invoke one directly with tool_call(name=\"<tool>\", arguments={ ... }), or tool_describe(name=\"<tool>\") first if you need its full schema. Do NOT call tool_search for these; you already have their names: ",
     );
     message.push_str(&visible_capability_ids.join(", "));
     message.push('.');
-    message
 }
 
 // Build the structured connect requirement for an inbound channel. OAuth is
@@ -2645,6 +2655,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn oauth_channel_activation_names_only_real_model_visible_capabilities() {
+        // Provider id, display name, and model-visible capability namespace
+        // are independent. Connection guidance may describe Slack, but tool
+        // guidance must come only from the exact ids the publisher returned.
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "renamed-chat")
+            .expect("valid package ref");
+        let package = fixture_oauth_external_channel_package("renamed-chat", "Slack").package;
+        let visible_capability_ids = vec!["workspace.lookup".to_string()];
+
+        let message = activation_success_message(&package_ref, &package, &visible_capability_ids);
+
+        assert!(message.contains("configure Slack OAuth"), "{message}");
+        assert!(message.contains("workspace.lookup"), "{message}");
+        assert!(message.contains("callable by exact name"), "{message}");
+        assert!(
+            !message.contains("Slack tools"),
+            "display names must not invent a tool namespace: {message}"
+        );
+    }
+
     #[tokio::test]
     async fn extension_lifecycle_installs_activates_and_removes_catalog_package() {
         let (_dir, storage_root, facade, active_registry, _installation_store) =
@@ -2991,7 +3022,7 @@ output_schema_ref = "schemas/run.output.json"
     }
 
     #[tokio::test]
-    async fn extension_activate_returns_oauth_guidance_for_renamed_external_channel_package() {
+    async fn extension_activate_returns_oauth_guidance_without_inventing_channel_tools() {
         let (_dir, _storage_root, port, _active_registry, _installation_store) =
             extension_management_port_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_packages(vec![
@@ -3019,9 +3050,12 @@ output_schema_ref = "schemas/run.output.json"
             message.contains("configure Slack OAuth")
                 && message.contains("WebChat")
                 && message.contains("rather than pasting anything into normal chat")
-                && message.contains("continue the user's original request")
-                && message.contains("user-scoped Slack tools"),
+                && message.contains("continue the user's original request"),
             "Slack activation should guide the model into OAuth setup UI, got: {message}"
+        );
+        assert!(
+            !message.to_ascii_lowercase().contains("tool"),
+            "an inbound OAuth channel with no model-visible capabilities must not claim tools: {message}"
         );
         assert!(
             !message.contains("pairing"),

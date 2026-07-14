@@ -288,20 +288,24 @@ Rules:
   the single source of truth; `ExtensionManifestV2::capability_surfaces()`
   projects them on demand:
   - each capability declaration projects one `tool` surface;
-  - each host API contract section projects the surface kinds its contract
-    declares via `HostApiManifestProjection::surfaces` (the
-    `ironclaw.product_adapter/v1` contract projects `channel` for
+  - each host API contract section projects the typed surfaces its contract
+    declares via `HostApiManifestProjection::surfaces`. The
+    `ironclaw.product_adapter/v1` contract uses the dedicated directional
+    `HostApiSurfaceProjection::Channel { inbound, outbound }` for
     `external_channel` sections; host-native product surface kinds — `web`,
-    `cli`, `synchronous_api` — project nothing), origin-stamped with the
-    owning host API id and section path;
+    `cli`, `synchronous_api` — project nothing. The extensions registry stamps
+    each accepted projection with the owning host API id and section path;
   - `product_auth_account` runtime-credential sources project one `auth`
     surface per distinct provider id. OAuth setups fold to the union of
     declared scopes (sorted, deduplicated) and mask weaker manual-token
     setups; a provider referenced only through retired setups surfaces as
     retired rather than being dropped.
-- Host API contracts must not project `tool` or `auth` section surfaces —
-  those kinds have dedicated declaration paths above. Validation fails
-  closed.
+- Host API contracts must not project coarse `tool`, `auth`, or directionless
+  `channel` section surfaces through `HostApiSurfaceProjection::Kind` — those
+  kinds have dedicated typed declaration paths above. Validation fails closed;
+  channels must use the dedicated directional projection. Coarse projections
+  remain available only for reserved kinds without dedicated typed attributes,
+  such as `trigger` and `file`.
 - `ProviderId` (`RuntimeCredentialAccountProviderId`) is the credential
   authority namespace, not the extension id: several extensions (gmail,
   google-drive, ...) may share one provider (`google`).

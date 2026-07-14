@@ -243,10 +243,11 @@ pub struct HostApiManifestContext<'a> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HostApiManifestProjection {
     pub capabilities: Vec<CapabilityDeclV2>,
-    /// Product-facing surfaces the validated section declares. Channel
-    /// projections carry their typed direction flags; coarse reserved kinds
-    /// remain available for host APIs that do not need further attributes.
-    /// The registry stamps the trusted contract id and section origin.
+    /// Product-facing surfaces the validated section declares. Channels use
+    /// the dedicated directional projection. Coarse projections are reserved
+    /// for kinds without dedicated typed declarations; coarse tool, auth, and
+    /// channel projections are rejected. The registry stamps the trusted
+    /// contract id and section origin.
     pub surfaces: Vec<HostApiSurfaceProjection>,
 }
 
@@ -260,7 +261,8 @@ pub enum HostApiSurfaceProjection {
     /// or runtime kind.
     Channel { inbound: bool, outbound: bool },
     /// Reserved coarse surface kind for contracts whose product shape has no
-    /// additional typed attributes.
+    /// additional typed attributes. Tool, auth, and channel are rejected here
+    /// because each has a dedicated typed declaration path.
     Kind(CapabilitySurfaceKind),
 }
 
