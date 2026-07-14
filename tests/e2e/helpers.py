@@ -240,6 +240,7 @@ SEL_V2 = {
     "attachment_file_input": "input[type=file][multiple]",
     "typing_indicator": "[data-testid='typing-indicator']",
     "connection_status": "[data-testid='connection-status']",
+    "connection_status_toggle": "[data-testid='connection-status-toggle']",
     "connection_status_label": "[data-testid='connection-status-label']",
     "msg_user":       "[data-testid='msg-user']",       # user message bubble
     "msg_assistant":  "[data-testid='msg-assistant']",  # assistant message bubble
