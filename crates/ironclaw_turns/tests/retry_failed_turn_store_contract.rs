@@ -177,6 +177,7 @@ where
 {
     store
         .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            model_usage: None,
             run_id: claimed.state.run_id,
             runner_id: claimed.runner_id,
             lease_token: claimed.lease_token,
@@ -197,6 +198,7 @@ where
 {
     store
         .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            model_usage: None,
             run_id: claimed.state.run_id,
             runner_id: claimed.runner_id,
             lease_token: claimed.lease_token,

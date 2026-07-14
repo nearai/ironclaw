@@ -33,7 +33,7 @@ export function registerPack(lang, translations) {
 }
 
 // Lazy loaders for every non-default locale. `en` is bundled eagerly in
-// main.js as the fallback (see `translate`), so it has no loader. Each
+// main.tsx as the fallback (see `translate`), so it has no loader. Each
 // module calls `registerPack` as an import side effect, populating
 // `packs[lang]`. Literal import paths keep the assets statically
 // discoverable. Loaded packs are cached in `packs`, so each fires once.

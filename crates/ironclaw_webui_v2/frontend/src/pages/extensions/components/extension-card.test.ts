@@ -81,7 +81,7 @@ function makeContext() {
   function Button() {}
   function Icon() {}
 
-  // Inline isChannelExtensionKind from extensions-schema.js (exact copy).
+  // Inline isChannelExtensionKind from extensions-schema.ts (exact copy).
   function isChannelExtensionKind(kind) {
     return kind === "wasm_channel" || kind === "channel";
   }
@@ -118,7 +118,7 @@ function makeContext() {
     installed: "installed",
   };
 
-  // Inline primaryExtensionAction from extension-actions.js (exact copy).
+  // Inline primaryExtensionAction from extension-actions.ts (exact copy).
   function extensionLifecycleState(ext) {
     const onboardingState = ext?.onboarding_state || ext?.onboardingState;
     if (onboardingState) {
@@ -177,7 +177,7 @@ function renderExtensionCard(ext) {
 }
 
 // ---------------------------------------------------------------------------
-// Tree-walking helpers (matching style from channels-tab.test.mts)
+// Tree-walking helpers (matching style from channels-tab.test.ts)
 // ---------------------------------------------------------------------------
 
 /**

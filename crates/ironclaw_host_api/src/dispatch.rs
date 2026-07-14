@@ -136,7 +136,20 @@ impl DispatchInputIssue {
 /// Stable structured dispatch failure details for dispatch validation failures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchFailureDetail {
-    InvalidInput { issues: Vec<DispatchInputIssue> },
+    InvalidInput {
+        issues: Vec<DispatchInputIssue>,
+    },
+    /// Free-text raw failure cause preserved when the host-authored
+    /// `safe_summary` cannot pass the strict loop safe-summary validator
+    /// (e.g. it names a concrete path such as `/testbed/replacer.go`, or
+    /// carries newlines from a shell error). The summary shown to the model
+    /// degrades to the fixed category sentence; this text rides the
+    /// model-visible diagnostic detail channel, where secret VALUES are
+    /// scrubbed and disallowed control characters are normalized at the loop
+    /// boundary before the model observes it.
+    Diagnostic {
+        text: String,
+    },
 }
 
 /// Stable, redacted runtime failure categories surfaced through the dispatch port.

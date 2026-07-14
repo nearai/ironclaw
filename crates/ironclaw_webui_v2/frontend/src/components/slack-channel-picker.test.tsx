@@ -54,18 +54,15 @@ function createReactStub(state) {
   };
 }
 
-function html(strings, ...values) {
-  return { strings: Array.from(strings), values };
-}
-
 function SelectMenu(props) {
-  return html`<SelectMenu
-    value=${props.value}
-    options=${props.options}
-    onChange=${props.onChange}
-    disabled=${props.disabled}
-    ariaLabel=${props.ariaLabel}
-  />`;
+  return (
+    <select
+      aria-label={props.ariaLabel}
+      disabled={props.disabled}
+      onChange={props.onChange}
+      value={props.value}
+    />
+  );
 }
 
 function visit(node, fn) {
@@ -158,7 +155,6 @@ test("SlackChannelPicker edits saved channels and blocks save after load failure
     React: createReactStub(state),
     SelectMenu,
     globalThis: {},
-    html,
     listSlackAllowedChannels: () => query.data,
     normalizeSlackChannelIds: (channelIds = []) =>
       Array.from(
@@ -273,7 +269,6 @@ test("SlackChannelPicker edits saved channels and blocks save after load failure
 test("subjectOptionsForChannel keeps current route subjects row-scoped with friendly labels", () => {
   const context = {
     globalThis: {},
-    html,
   };
   vm.runInNewContext(slackChannelPickerSourceForTest(), context);
 
@@ -334,7 +329,6 @@ test("SlackChannelPicker preserves row subjects when subject catalog fails", () 
     React: createReactStub(state),
     SelectMenu,
     globalThis: {},
-    html,
     listSlackAllowedChannels: () => query.data,
     normalizeSlackChannelIds: (channelIds = []) =>
       Array.from(

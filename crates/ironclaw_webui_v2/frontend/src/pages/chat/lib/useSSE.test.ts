@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
 
-import { CONNECTION_STATUS } from "./connection-status.js";
+import { CONNECTION_STATUS } from "./connection-status";
 
 function useSSESourceForTest() {
   const source = readFileSync(new URL("../hooks/useSSE.ts", import.meta.url), "utf8");

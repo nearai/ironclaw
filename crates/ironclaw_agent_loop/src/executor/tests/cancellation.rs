@@ -478,6 +478,43 @@ async fn model_cancelled_returns_cancelled_without_retry() {
     assert_eq!(host.model_requests().len(), 1);
 }
 
+#[tokio::test(start_paused = true)]
+async fn cancellation_during_availability_backoff_wakes_the_sleep() {
+    // Availability backoffs run up to 60s per attempt; a cancel request must
+    // wake the executor out of the backoff sleep instead of waiting it out.
+    // Under paused time a non-cancellation-aware sleep would auto-advance the
+    // clock by the full first backoff (1s), so the elapsed-time assertion
+    // pins the select-over-cancellation behavior.
+    let host = MockHost::new(Vec::new()).with_model_errors(vec![AgentLoopHostError::new(
+        AgentLoopHostErrorKind::Unavailable,
+        "model unavailable",
+    )]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+    let started = tokio::time::Instant::now();
+
+    let family = crate::families::default();
+    let run = executor.execute_family(&family, &host, state);
+    let cancel = async {
+        // Fires while the executor is inside the 1s availability backoff.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        host.request_cancellation(LoopCancelReasonKind::UserRequested);
+    };
+    let (exit, ()) = tokio::join!(run, cancel);
+
+    assert!(matches!(exit.expect("execute"), LoopExit::Cancelled(_)));
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(1_000),
+        "cancellation must interrupt the backoff sleep, waited {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "no further model call after cancellation during backoff"
+    );
+}
+
 #[tokio::test]
 async fn cancellation_after_retry_prompt_rebuild_skips_second_model_call() {
     let host = MockHost::new(vec![reply_response()])

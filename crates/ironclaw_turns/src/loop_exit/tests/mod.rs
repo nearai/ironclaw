@@ -132,7 +132,7 @@ fn completed_ask_user_exit_maps_to_trusted_completed_outcome_without_final_check
         reply_message_refs: vec![message_ref("msg:assistant-question")],
         result_refs: vec![],
         final_checkpoint_id: None,
-        usage_summary_ref: None,
+        model_usage: None,
         exit_id: exit_id.clone(),
     })
     .validate(LoopExitValidationPolicy {
@@ -157,7 +157,7 @@ fn completed_exit_without_durable_refs_maps_to_protocol_failure_or_recovery() {
         reply_message_refs: vec![],
         result_refs: vec![],
         final_checkpoint_id: None,
-        usage_summary_ref: None,
+        model_usage: None,
         exit_id: exit_id("exit:missing-refs"),
     });
 
@@ -207,7 +207,7 @@ fn completed_exit_requires_host_verified_completion_refs_before_trusted_mapping(
         reply_message_refs: vec![message_ref("msg:assistant-final")],
         result_refs: vec![],
         final_checkpoint_id: None,
-        usage_summary_ref: None,
+        model_usage: None,
         exit_id: exit_id("exit:unverified-completion"),
     });
 
@@ -239,7 +239,7 @@ fn final_checkpoint_policy_rejects_terminal_exit_without_checkpoint() {
             reply_message_refs: vec![message_ref("msg:assistant-final")],
             result_refs: vec![],
             final_checkpoint_id: None,
-            usage_summary_ref: None,
+            model_usage: None,
             exit_id: exit_id("exit:no-final-checkpoint-completed"),
         }),
         LoopExit::Cancelled(LoopCancelled {
@@ -305,7 +305,7 @@ fn validation_policy_requires_final_checkpoint_only_when_configured() {
             reply_message_refs: vec![message_ref("msg:assistant-final")],
             result_refs: vec![],
             final_checkpoint_id: None,
-            usage_summary_ref: None,
+            model_usage: None,
             exit_id: exit_id("exit:checkpoint-policy"),
         })
         .validate(LoopExitValidationPolicy {
@@ -459,7 +459,6 @@ fn loop_failed_legacy_payload_deserializes_and_empty_new_fields_serialize_to_leg
     let legacy = json!({
         "reason_kind": "iteration_limit",
         "checkpoint_id": null,
-        "usage_summary_ref": null,
         "diagnostic_ref": null,
         "exit_id": "exit:legacy-failed"
     });
@@ -480,7 +479,7 @@ fn verified_failed_exit_carries_safe_summary() {
     let decision = LoopExit::Failed(LoopFailed {
         reason_kind: LoopFailureKind::ModelError,
         checkpoint_id: Some(final_checkpoint_id),
-        usage_summary_ref: None,
+        model_usage: None,
         diagnostic_ref: None,
         exit_id: exit_id("exit:verified-failed"),
         explanation_message_refs: vec![explanation_ref.clone()],
@@ -504,7 +503,7 @@ fn verified_failed_exit_does_not_reuse_final_checkpoint_as_resume_checkpoint() {
     let decision = LoopExit::Failed(LoopFailed {
         reason_kind: LoopFailureKind::IterationLimit,
         checkpoint_id: Some(final_checkpoint_id),
-        usage_summary_ref: None,
+        model_usage: None,
         diagnostic_ref: None,
         exit_id: exit_id("exit:final-only-failed"),
         explanation_message_refs: Vec::new(),
@@ -527,7 +526,7 @@ fn unverified_failed_exit_drops_explanation_refs_and_keeps_existing_violation_be
     let decision = LoopExit::Failed(LoopFailed {
         reason_kind: LoopFailureKind::ModelError,
         checkpoint_id: Some(TurnCheckpointId::new()),
-        usage_summary_ref: None,
+        model_usage: None,
         diagnostic_ref: None,
         exit_id: exit_id("exit:unverified-failed"),
         explanation_message_refs: vec![message_ref("msg:unverified-explanation")],
@@ -554,7 +553,7 @@ fn strict_final_checkpoint_policy_trusts_failed_exit_only_after_verification() {
     let exit = LoopExit::Failed(LoopFailed {
         reason_kind: LoopFailureKind::IterationLimit,
         checkpoint_id: Some(checkpoint_id),
-        usage_summary_ref: None,
+        model_usage: None,
         diagnostic_ref: None,
         exit_id: exit_id("exit:strict-failed-checkpoint"),
         explanation_message_refs: Vec::new(),
@@ -621,7 +620,6 @@ fn loop_exit_wire_shape_rejects_raw_payload_fields_and_recovery_required_variant
             "reply_message_refs": ["msg:assistant-final"],
             "result_refs": [],
             "final_checkpoint_id": null,
-            "usage_summary_ref": null,
             "exit_id": "exit:raw",
             "raw_reply_text": "secret prompt-adjacent content"
         }
@@ -653,7 +651,6 @@ fn loop_exit_rejects_oversized_or_duplicate_ref_vectors() {
             "reply_message_refs": oversized_messages,
             "result_refs": [],
             "final_checkpoint_id": null,
-            "usage_summary_ref": null,
             "exit_id": "exit:oversized"
         }
     });
@@ -665,7 +662,6 @@ fn loop_exit_rejects_oversized_or_duplicate_ref_vectors() {
             "reply_message_refs": ["msg:dup", "msg:dup"],
             "result_refs": [],
             "final_checkpoint_id": null,
-            "usage_summary_ref": null,
             "exit_id": "exit:duplicates"
         }
     });
@@ -706,7 +702,7 @@ fn no_reply_with_empty_refs_requires_explicit_policy_permission() {
         reply_message_refs: vec![],
         result_refs: vec![],
         final_checkpoint_id: None,
-        usage_summary_ref: None,
+        model_usage: None,
         exit_id: exit_id("exit:no-reply-empty"),
     });
 
@@ -740,7 +736,7 @@ fn no_reply_with_empty_refs_maps_to_completed_when_policy_allows_it() {
         reply_message_refs: vec![],
         result_refs: vec![],
         final_checkpoint_id: None,
-        usage_summary_ref: None,
+        model_usage: None,
         exit_id: exit_id("exit:no-reply-allowed"),
     })
     .validate(LoopExitValidationPolicy {
@@ -764,7 +760,7 @@ fn delegated_result_with_result_refs_maps_to_trusted_completed() {
         reply_message_refs: vec![],
         result_refs: vec![result_ref("result:delegated-job-1")],
         final_checkpoint_id: None,
-        usage_summary_ref: None,
+        model_usage: None,
         exit_id: exit_id("exit:delegated"),
     })
     .validate(LoopExitValidationPolicy {
@@ -788,7 +784,7 @@ fn result_only_with_result_refs_maps_to_trusted_completed() {
         reply_message_refs: vec![],
         result_refs: vec![result_ref("result:tool-output-1")],
         final_checkpoint_id: None,
-        usage_summary_ref: None,
+        model_usage: None,
         exit_id: exit_id("exit:result-only"),
     })
     .validate(LoopExitValidationPolicy {
@@ -854,7 +850,7 @@ fn completion_kind_must_match_durable_reference_shape() {
             reply_message_refs,
             result_refs,
             final_checkpoint_id: None,
-            usage_summary_ref: None,
+            model_usage: None,
             exit_id: exit_id("exit:mismatched-completion-kind"),
         })
         .validate(policy);

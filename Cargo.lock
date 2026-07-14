@@ -4358,6 +4358,7 @@ dependencies = [
  "ironclaw_observability",
  "ironclaw_safety",
  "ironclaw_skills",
+ "ironclaw_turns",
  "regex",
  "serde",
  "serde_json",
@@ -4829,6 +4830,7 @@ dependencies = [
  "clap_complete",
  "dotenvy",
  "hex",
+ "ironclaw_common",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
  "ironclaw_reborn_traces",
@@ -5025,7 +5027,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "tokio-postgres",
  "tracing",
  "tracing-subscriber",
  "ulid",
@@ -8646,9 +8647,9 @@ dependencies = [
 
 [[package]]
 name = "spin"
-version = "0.9.8"
+version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
+checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 
 [[package]]
 name = "spki"

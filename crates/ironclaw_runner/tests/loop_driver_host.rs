@@ -54,7 +54,7 @@ use ironclaw_loop_host::{
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_runner::app_loop_family::build_loop_family_registry;
+use ironclaw_runner::app_loop_family::build_loop_family_registry_with_overrides;
 use ironclaw_runner::driver_registry::{
     DriverKind, DriverRegistry, DriverRequirements, LoopDriverRegistryKey, RequirementLevel,
 };
@@ -8441,7 +8441,7 @@ impl AgentLoopDriver for ScriptCapabilityFinalReplyDriver {
             reply_message_refs: vec![reply_ref],
             result_refs: vec![],
             final_checkpoint_id: None,
-            usage_summary_ref: None,
+            model_usage: None,
             exit_id: LoopExitId::new("exit:turn-runner-script-capability-e2e").unwrap(),
         }))
     }
@@ -8566,7 +8566,7 @@ impl AgentLoopDriver for TextOnlyFinalReplyDriver {
             reply_message_refs: vec![reply_ref],
             result_refs: vec![],
             final_checkpoint_id: None,
-            usage_summary_ref: None,
+            model_usage: None,
             exit_id: LoopExitId::new("exit:turn-runner-e2e").unwrap(),
         }))
     }
@@ -8615,7 +8615,14 @@ fn loop_exit_applier_for_fixture(
 }
 
 fn planned_driver_for_full_reborn_test() -> Arc<PlannedDriver> {
-    let registry = build_loop_family_registry().expect("loop family registry should build");
+    // Scripted-outage tests pin retry-then-fail behavior; keep >= 2
+    // availability retries but far below the production budget so a
+    // deliberately offline provider reaches Failed in seconds.
+    let registry = build_loop_family_registry_with_overrides(
+        None,
+        Some(std::num::NonZeroU32::new(2).expect("nonzero")),
+    )
+    .expect("loop family registry should build");
     Arc::new(PlannedDriver::default_from_registry(&registry).expect("planned driver should build"))
 }
 
@@ -8829,6 +8836,7 @@ impl HostFixture {
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             resolved_model_route: None,
+            model_usage: None,
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: None,

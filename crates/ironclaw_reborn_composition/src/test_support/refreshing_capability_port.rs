@@ -12,7 +12,14 @@
 /// the `test_support` -> `runtime` -> `runtime::local_dev` forwarding chain
 /// so no layer needs `#[allow(clippy::too_many_arguments)]`. Mirrors
 /// `RefreshingLocalDevCapabilityPortConfig` minus the no-op-by-default parts
-/// (`extension_surface_source`, `external_tool_catalog`, `policy`).
+/// (`external_tool_catalog`, `policy`). `extension_surface_source` itself
+/// stays no-op-by-default too — the harness supplies the raw
+/// `extension_management` port below (Change 3, harness-port-seam P1
+/// follow-up) and `create_refreshing_local_dev_capability_port_for_test`
+/// wraps it in `LocalDevExtensionSurfaceSource::new(..)` internally, the SAME
+/// constructor production's `capability_wiring` calls
+/// (`runtime/local_dev.rs:132-133`) — this crate is the only place that can
+/// name the `pub(in crate::runtime)` wrapper type.
 #[cfg(feature = "test-support")]
 pub struct RefreshingLocalDevCapabilityPortTestParts {
     /// Host runtime the assembled port dispatches builtin capabilities
@@ -45,6 +52,22 @@ pub struct RefreshingLocalDevCapabilityPortTestParts {
     /// reads; production wires the runtime's session thread service
     /// (`local_dev.rs` `create_capability_port`).
     pub thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
+    /// Opaque handle built by
+    /// [`build_local_dev_extension_management_for_test`]. Wraps the
+    /// crate-private (`pub(crate)`) `RebornLocalExtensionManagementPort` so it
+    /// never appears in this (public, `test-support`-gated) struct's field
+    /// types; mirrors `skill_activation_source` above. Active-extension
+    /// registry (installed/activated extensions like `github`, `gmail`, MCP
+    /// servers) whose capabilities and provider trust get folded into the
+    /// visible-capability grants on every refresh — mirrors production
+    /// `capability_wiring`'s
+    /// `LocalDevExtensionSurfaceSource::new(local_runtime.extension_management.clone())`
+    /// (`runtime/local_dev.rs:132-133`). `None` (the default a harness gets by
+    /// simply omitting extension setup) reproduces the no-op surface this
+    /// struct always had before this field existed — extension-lane
+    /// capabilities are only visible when the harness actually installs and
+    /// activates them AND passes the resulting handle here.
+    pub extension_management: Option<ExtensionManagementTestHandle>,
     pub trajectory_observer: Option<std::sync::Arc<dyn crate::RebornTrajectoryObserver>>,
     pub outbound_preferences_facade:
         Option<std::sync::Arc<dyn ironclaw_product_workflow::OutboundPreferencesProductFacade>>,
@@ -66,9 +89,70 @@ pub struct RefreshingLocalDevCapabilityPortTestParts {
     /// `RefreshingLocalDevCapabilityPortConfig::additional_provider_trust`.
     pub additional_provider_trust:
         std::collections::BTreeMap<ironclaw_host_api::ExtensionId, ironclaw_trust::TrustDecision>,
-    /// Test-only config extension (empty = production behavior, i.e. no
+    /// Test-only config extension (`None` = production behavior, i.e. no
     /// filtering). See `RefreshingLocalDevCapabilityPortConfig::capability_id_filter`.
-    pub capability_id_filter: std::collections::HashSet<ironclaw_host_api::CapabilityId>,
+    pub capability_id_filter: Option<std::collections::HashSet<ironclaw_host_api::CapabilityId>>,
+    /// Test-only config extension (empty = production behavior). See
+    /// `RefreshingLocalDevCapabilityPortConfig::additional_capability_grants`
+    /// — hand-minted grants for capability ids an ad-hoc test-only
+    /// `HostRuntime` backend (mock MCP, GitHub/web-access WASM) dispatches
+    /// without a real extension activation.
+    pub additional_capability_grants: Vec<ironclaw_host_api::CapabilityGrant>,
+}
+
+/// Opaque handle (harness-port-seam P1 Change 3) carrying the crate-private
+/// `RebornLocalExtensionManagementPort`. Hides the type from the
+/// integration-test crate, which cannot name it (it is only `pub(crate)`
+/// inside `ironclaw_reborn_composition`); the private type is recovered
+/// internally via [`ExtensionManagementTestHandle::extension_management`]
+/// when forwarding to the production factory. Mirrors `SkillActivationTestSource`.
+#[cfg(feature = "test-support")]
+pub struct ExtensionManagementTestHandle {
+    extension_management: std::sync::Arc<
+        crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort,
+    >,
+}
+
+#[cfg(feature = "test-support")]
+impl ExtensionManagementTestHandle {
+    /// Crate-internal accessor for the wrapped port. Kept `pub(crate)` (never
+    /// `pub`) so the crate-private `RebornLocalExtensionManagementPort` type
+    /// never appears in this crate's public API; only `runtime::local_dev`'s
+    /// test-support constructor (which already names the type) may call this.
+    /// For tests only -- gated behind `test-support`, ships zero bytes in
+    /// production builds.
+    pub(crate) fn extension_management(
+        &self,
+    ) -> std::sync::Arc<
+        crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort,
+    > {
+        self.extension_management.clone()
+    }
+}
+
+/// Reads the same `local_runtime.extension_management` handle production's
+/// `capability_wiring` reads (`runtime/local_dev.rs:132-133`) off a built
+/// `RebornServices`, for wiring
+/// [`RefreshingLocalDevCapabilityPortTestParts::extension_management`].
+/// `None` when the services were built without a local-dev runtime (mirrors
+/// `local_dev_active_extension_authority_for_test`'s `None`-propagation
+/// shape), OR when no extension is currently active (matches production:
+/// `LocalDevExtensionSurfaceSource::new` accepts the port either way and
+/// `snapshot()` just returns an empty surface); tests that never
+/// install/activate an extension can also just omit this call and leave the
+/// field `None` for the same no-op surface.
+#[cfg(feature = "test-support")]
+pub fn build_local_dev_extension_management_for_test(
+    services: &crate::RebornServices,
+) -> Option<ExtensionManagementTestHandle> {
+    let extension_management = services
+        .local_runtime
+        .as_ref()?
+        .extension_management
+        .clone()?;
+    Some(ExtensionManagementTestHandle {
+        extension_management,
+    })
 }
 
 /// Test-support entry point that drives the real

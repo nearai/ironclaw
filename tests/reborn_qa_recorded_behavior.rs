@@ -70,8 +70,8 @@ use ironclaw_triggers::{TriggerRunStatus, TriggerState};
 use parity_qa_support::model_replay::RebornTraceReplayModelGateway;
 use parity_qa_support::qa_trace::{
     build_qa_trace_runtime_with_http_exchanges,
-    build_qa_trace_runtime_with_http_exchanges_and_trigger_poller, load_qa_trace,
-    qa_trace_tenant_id, record_qa_phrase, recorded_tool_calls, send_qa_phrase,
+    build_qa_trace_runtime_with_http_exchanges_and_trigger_poller, canonical_recorded_tool_name,
+    load_qa_trace, qa_trace_tenant_id, record_qa_phrase, recorded_tool_calls, send_qa_phrase,
     strip_expected_tool_results,
 };
 use support::trace_llm::{LlmTrace, TraceExpects, TraceResponse, TraceStep, TraceTurn};
@@ -117,6 +117,11 @@ const CONNECT_GMAIL: QaPhrase = QaPhrase {
     fixture: "connect_gmail",
     phrase: "connect to Gmail",
 };
+
+const SLACK_CHANNEL_MEMBERSHIP_FIXTURE: &str = "slack_channel_membership";
+const SLACK_RECENT_MESSAGE_FIXTURE: &str = "slack_recent_message";
+const SLACK_MENTION_ENCODING_FIXTURE: &str = "slack_mention_encoding";
+const SLACK_ENTITY_HYGIENE_FIXTURE: &str = "slack_entity_hygiene";
 
 // --- Tier 1: recorders (live API, manual) ----------------------------------
 
@@ -166,6 +171,98 @@ fn assert_tool_called_with(trace: &LlmTrace, tool: &str, argument_fragments: &[&
         matched,
         "expected a recorded {tool} call with arguments containing {argument_fragments:?}; \
          recorded calls: {calls:#?}"
+    );
+}
+
+fn assert_tool_sequence(trace: &LlmTrace, expected: &[&str]) {
+    let calls = recorded_tool_calls(trace);
+    let actual = calls
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected, "recorded tool sequence changed");
+}
+
+fn assert_tool_not_called(trace: &LlmTrace, forbidden: &str) {
+    let calls = recorded_tool_calls(trace);
+    assert!(
+        calls.iter().all(|(name, _)| name != forbidden),
+        "recorded fixture must not call {forbidden}; recorded calls: {calls:#?}"
+    );
+}
+
+fn assert_tool_call_groups(trace: &LlmTrace, expected: &[&[&str]]) {
+    let (user_input, model_responses) = trace
+        .steps
+        .split_first()
+        .expect("recorded fixture should contain a user-input step");
+    assert!(
+        matches!(user_input.response, TraceResponse::UserInput { .. }),
+        "recorded fixture should begin with one user-input step"
+    );
+    assert_eq!(
+        model_responses.len(),
+        expected.len() + 1,
+        "recorded fixture should contain the expected tool-call response groups followed by one final text response"
+    );
+
+    for (index, (step, expected_group)) in model_responses
+        .iter()
+        .take(expected.len())
+        .zip(expected.iter())
+        .enumerate()
+    {
+        let TraceResponse::ToolCalls { tool_calls, .. } = &step.response else {
+            panic!("model response {index} should be a tool-call group");
+        };
+        let actual_group = tool_calls
+            .iter()
+            .map(|call| canonical_recorded_tool_name(&call.name))
+            .collect::<Vec<_>>();
+        let expected_group = expected_group
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual_group, expected_group,
+            "recorded tool-call grouping changed at model response {index}"
+        );
+    }
+
+    match &model_responses[expected.len()].response {
+        TraceResponse::Text { content, .. } => assert!(
+            !content.is_empty(),
+            "recorded fixture should end with a non-empty final text response"
+        ),
+        _ => panic!("recorded fixture should end with exactly one final text response"),
+    }
+}
+
+fn assert_tool_argument_string_field_eq(trace: &LlmTrace, tool: &str, field: &str, expected: &str) {
+    let matching_calls = trace
+        .steps
+        .iter()
+        .filter_map(|step| match &step.response {
+            TraceResponse::ToolCalls { tool_calls, .. } => Some(tool_calls.iter()),
+            _ => None,
+        })
+        .flatten()
+        .filter(|call| canonical_recorded_tool_name(&call.name) == tool)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matching_calls.len(),
+        1,
+        "expected exactly one recorded {tool} call before checking its arguments"
+    );
+
+    let arguments = matching_calls[0]
+        .arguments
+        .as_object()
+        .unwrap_or_else(|| panic!("recorded {tool} arguments should be a JSON object"));
+    assert_eq!(
+        arguments.get(field),
+        Some(&serde_json::Value::String(expected.to_string())),
+        "recorded {tool} argument {field:?} changed"
     );
 }
 
@@ -236,6 +333,153 @@ async fn contract_connect_gmail_routes_through_extension_tools() {
     let gmail = load_qa_trace(CONNECT_GMAIL.fixture);
     assert_tool_called_with(&gmail, "builtin.extension_install", &["gmail"]);
     assert_tool_called_with(&gmail, "builtin.extension_activate", &["gmail"]);
+}
+
+#[tokio::test]
+async fn contract_slack_channel_membership_lists_joined_conversations() {
+    let trace = load_qa_trace(SLACK_CHANNEL_MEMBERSHIP_FIXTURE);
+    assert_tool_sequence(
+        &trace,
+        &[
+            "builtin.extension_search",
+            "builtin.extension_install",
+            "builtin.extension_activate",
+            "slack.list_conversations",
+        ],
+    );
+    assert_tool_call_groups(
+        &trace,
+        &[
+            &["builtin.extension_search"][..],
+            &["builtin.extension_install"][..],
+            &["builtin.extension_activate"][..],
+            &["slack.list_conversations"][..],
+        ],
+    );
+}
+
+#[tokio::test]
+async fn contract_slack_recent_message_reads_the_synthetic_conversation() {
+    let trace = load_qa_trace(SLACK_RECENT_MESSAGE_FIXTURE);
+    assert_tool_sequence(
+        &trace,
+        &[
+            "builtin.extension_search",
+            "builtin.extension_install",
+            "builtin.extension_activate",
+            "slack.whoami",
+            "slack.get_conversation_history",
+        ],
+    );
+    assert_tool_call_groups(
+        &trace,
+        &[
+            &["builtin.extension_search"][..],
+            &["builtin.extension_install"][..],
+            &["builtin.extension_activate"][..],
+            &["slack.whoami"][..],
+            &["slack.get_conversation_history"][..],
+        ],
+    );
+    assert_tool_argument_string_field_eq(
+        &trace,
+        "slack.get_conversation_history",
+        "channel",
+        "D0CANARY",
+    );
+    assert_tool_not_called(&trace, "slack.search_messages");
+    assert_tool_not_called(&trace, "builtin.outbound_delivery_targets_list");
+}
+
+#[tokio::test]
+async fn contract_slack_mention_encoding_uses_exact_conversation_lookup() {
+    let trace = load_qa_trace(SLACK_MENTION_ENCODING_FIXTURE);
+    assert_tool_sequence(
+        &trace,
+        &[
+            "builtin.extension_search",
+            "builtin.extension_install",
+            "builtin.extension_activate",
+            "slack.get_conversation_info",
+            "slack.send_message",
+        ],
+    );
+    assert_tool_call_groups(
+        &trace,
+        &[
+            &["builtin.extension_search"][..],
+            &["builtin.extension_install"][..],
+            &["builtin.extension_activate"][..],
+            &["slack.get_conversation_info"][..],
+            &["slack.send_message"][..],
+        ],
+    );
+    assert_tool_argument_string_field_eq(
+        &trace,
+        "slack.get_conversation_info",
+        "channel",
+        "D0CANARY",
+    );
+    assert_tool_argument_string_field_eq(&trace, "slack.send_message", "channel", "D0CANARY");
+    assert_tool_called_with(
+        &trace,
+        "slack.send_message",
+        &["<@U0CANARY>", "MENTION_CANARY"],
+    );
+    assert_tool_not_called(&trace, "slack.list_conversations");
+}
+
+#[tokio::test]
+async fn contract_slack_entity_hygiene_humanizes_the_chained_user_id() {
+    let trace = load_qa_trace(SLACK_ENTITY_HYGIENE_FIXTURE);
+    assert_tool_sequence(
+        &trace,
+        &[
+            "builtin.extension_search",
+            "builtin.extension_install",
+            "builtin.extension_activate",
+            "slack.search_messages",
+            "slack.search_messages",
+            "slack.search_messages",
+            "slack.get_conversation_history",
+            "slack.get_user_info",
+        ],
+    );
+    assert_tool_call_groups(
+        &trace,
+        &[
+            &["builtin.extension_search"][..],
+            &["builtin.extension_install"][..],
+            &["builtin.extension_activate"][..],
+            &["slack.search_messages"][..],
+            &["slack.search_messages"][..],
+            &["slack.search_messages"][..],
+            &["slack.get_conversation_history"][..],
+            &["slack.get_user_info"][..],
+        ],
+    );
+    assert_tool_argument_string_field_eq(
+        &trace,
+        "slack.get_conversation_history",
+        "channel",
+        "D0CANARY",
+    );
+    assert_tool_argument_string_field_eq(&trace, "slack.get_user_info", "user_id", "U0CANARY");
+    assert_tool_not_called(&trace, "builtin.outbound_delivery_targets_list");
+
+    let reply = final_text_reply(&trace).expect("entity-hygiene fixture should end in text");
+    assert!(
+        reply.ends_with("Canary User"),
+        "entity-hygiene reply should end with the synthetic display name; reply: {reply:?}"
+    );
+    assert!(
+        !reply.contains("U0CANARY"),
+        "entity-hygiene reply leaked the synthetic raw user id: {reply:?}"
+    );
+    assert!(
+        !reply.contains("D0CANARY"),
+        "entity-hygiene reply leaked the synthetic raw conversation id: {reply:?}"
+    );
 }
 
 // --- Tier 3: runtime replay (hermetic) ---------------------------------------

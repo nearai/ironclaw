@@ -17,36 +17,6 @@ use crate::runtime::local_dev::synthetic_capability::{
     LocalDevSyntheticCapabilityHandler, LocalDevSyntheticCapabilityInvocation,
 };
 
-/// Test-only bridge (E-PROJ seam): wrap `inner` with just the `project_create`
-/// local-dev synthetic capability, so the Reborn integration-test harness can
-/// inject it onto its host-runtime capability port the same way production does
-/// (`RefreshingLocalDevCapabilityPort::build_inner`). Reuses the real
-/// `project_create_capability` + `wrap_local_dev_synthetic_capabilities`, so the
-/// test path never hand-mirrors the production wrap. Co-located with the
-/// capability it wraps; re-exported from `local_dev` for the caller in `runtime`.
-#[cfg(feature = "test-support")]
-pub(crate) fn wrap_project_create_capability_for_test(
-    inner: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    project_service: Arc<dyn ProjectService>,
-    fallback_user_id: UserId,
-    run_context: LoopRunContext,
-    input_resolver: Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
-    result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
-) -> Result<Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>, AgentLoopHostError> {
-    super::synthetic_capability::wrap_local_dev_synthetic_capabilities(
-        inner,
-        vec![project_create_capability(
-            project_service,
-            fallback_user_id,
-        )?],
-        run_context,
-        input_resolver,
-        result_writer,
-        // trajectory_observer: None — not wired in the integration-test harness.
-        None,
-    )
-}
-
 pub(crate) const PROJECT_CREATE_CAPABILITY_ID: &str = "builtin.project_create";
 const PROJECT_CREATE_PROVIDER_TOOL_NAME: &str = "builtin__project_create";
 const PROJECT_CREATE_DESCRIPTION: &str = "Create a new first-class project owned by the current \

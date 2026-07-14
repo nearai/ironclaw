@@ -5,14 +5,14 @@ export const defaultRoute = "/chat";
 // sidebar navigation. Routes whose page-level API libs are entirely
 // TODO stubs against missing v2 endpoints are hidden here until the
 // matching `/api/webchat/v2/*` contracts land. Remove the flag once
-// the page's `lib/*-api.js` calls real endpoints.
+// the page's `lib/*-api.ts` calls real endpoints.
 export const primaryRoutes = [
   { id: "chat", path: "/chat", labelKey: "nav.chat" },
   { id: "workspace", path: "/workspace", labelKey: "nav.workspace" },
   // Surfaced in the conversations panel (under Search, above Recent) by
   // SidebarThreads rather than the primary nav list, so `hidden: true` keeps the
   // /projects route registered (direct URL + breadcrumb/title resolution) while
-  // suppressing the now-duplicate top-nav entry. Its lib/projects-api.js calls
+  // suppressing the now-duplicate top-nav entry. Its lib/projects-api.ts calls
   // the real v2 `/api/webchat/v2/projects` endpoints (list/create/read/update/
   // delete + membership ACL); per-project missions/threads remain stubbed.
   { id: "projects", path: "/projects", labelKey: "nav.projects", hidden: true },
@@ -23,7 +23,7 @@ export const primaryRoutes = [
   { id: "extensions", path: "/extensions", labelKey: "nav.extensions" },
   { id: "logs", path: "/logs", labelKey: "nav.logs", hidden: true },
   { id: "settings", path: "/settings", labelKey: "nav.settings", hidden: false },
-  // Un-hidden: its lib/admin-api.js now calls the real v2
+  // Un-hidden: its lib/admin-api.ts now calls the real v2
   // `/api/webchat/v2/admin/users*` endpoints (user CRUD + status/role +
   // per-user secret provisioning). Authorization is enforced server-side, so a
   // non-admin caller sees a 403/forbidden state rather than the surface.
@@ -42,7 +42,7 @@ export const routeSectionDefs = [
 ];
 
 export const SETTINGS_SUB_ROUTES = [
-  // Inference is un-hidden: its lib/*-api.js (LLM providers) now calls the real
+  // Inference is un-hidden: its lib/*-api.ts (LLM providers) now calls the real
   // v2 `/api/webchat/v2/llm/*` endpoints, per the unhide rule in the header
   // comment above. The rest stay hidden until their api libs leave stub state.
   { id: "inference", labelKey: "settings.inference", icon: "spark" },
