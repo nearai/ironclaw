@@ -866,6 +866,10 @@ registerPack("es", {
   "ext.registry.importing": "Importando…",
   "ext.registry.importSuccess": "Herramienta importada — instálala desde el registro.",
   "ext.registry.importFailed": "Error al importar",
+  "ext.catalog.loadErrorTitle": "Catálogo de extensiones no disponible",
+  "ext.catalog.loadErrorDesc": "No se pudo cargar el catálogo de extensiones. Comprueba la conexión e inténtalo de nuevo.",
+  "ext.catalog.retry": "Reintentar",
+  "ext.catalog.retrying": "Reintentando…",
 
   // Chat — history
   "chat.history.loading": "Cargando...",

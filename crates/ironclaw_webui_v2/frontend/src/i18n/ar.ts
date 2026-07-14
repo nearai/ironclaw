@@ -866,6 +866,10 @@ registerPack("ar", {
   "ext.registry.importing": "جارٍ الاستيراد…",
   "ext.registry.importSuccess": "تم استيراد الأداة — ثبّتها من السجل.",
   "ext.registry.importFailed": "فشل الاستيراد",
+  "ext.catalog.loadErrorTitle": "دليل الإضافات غير متاح",
+  "ext.catalog.loadErrorDesc": "تعذّر تحميل دليل الإضافات. تحقّق من اتصالك وحاول مرة أخرى.",
+  "ext.catalog.retry": "إعادة المحاولة",
+  "ext.catalog.retrying": "جارٍ إعادة المحاولة…",
 
   // Chat — history
   "chat.history.loading": "جارٍ التحميل...",

@@ -866,6 +866,10 @@ registerPack("de", {
   "ext.registry.importing": "Wird importiert…",
   "ext.registry.importSuccess": "Tool importiert — installiere es aus der Registry.",
   "ext.registry.importFailed": "Import fehlgeschlagen",
+  "ext.catalog.loadErrorTitle": "Erweiterungskatalog nicht verfügbar",
+  "ext.catalog.loadErrorDesc": "Der Erweiterungskatalog konnte nicht geladen werden. Prüfe deine Verbindung und versuche es erneut.",
+  "ext.catalog.retry": "Erneut versuchen",
+  "ext.catalog.retrying": "Erneuter Versuch…",
 
   // Chat — history
   "chat.history.loading": "Laden...",

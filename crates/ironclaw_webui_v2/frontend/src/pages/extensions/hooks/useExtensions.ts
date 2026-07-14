@@ -119,6 +119,11 @@ export function useExtensions() {
     refetchOnMount: "always",
   });
 
+  const refetch = React.useCallback(
+    () => Promise.all([extensionsQuery.refetch(), registryQuery.refetch()]),
+    [extensionsQuery.refetch, registryQuery.refetch]
+  );
+
   const invalidate = React.useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ["extensions"] });
     queryClient.invalidateQueries({ queryKey: ["extension-registry"] });
@@ -340,6 +345,9 @@ export function useExtensions() {
     catalogEntries,
     connectableChannels,
     isLoading,
+    error: extensionsQuery.error || registryQuery.error || null,
+    refetch,
+    isRefetching: extensionsQuery.isRefetching || registryQuery.isRefetching,
     isBusy,
     actionResult,
     clearResult,

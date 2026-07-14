@@ -944,6 +944,11 @@ registerPack("en", {
   "ext.registry.importing": "Importing…",
   "ext.registry.importSuccess": "Tool imported — install it from the registry.",
   "ext.registry.importFailed": "Import failed",
+  "ext.catalog.loadErrorTitle": "Extension catalog unavailable",
+  "ext.catalog.loadErrorDesc":
+    "The extension catalog could not be loaded. Check your connection and try again.",
+  "ext.catalog.retry": "Retry",
+  "ext.catalog.retrying": "Retrying…",
 
   // Chat — history
   "chat.history.loading": "Loading...",
