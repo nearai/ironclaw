@@ -4,9 +4,7 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_first_party_extensions::is_gsuite_extension_id;
-use ironclaw_host_api::{
-    CapabilityId, CapabilitySurfaceKind, ExtensionId, VendorId, VirtualPath, sha256_digest_token,
-};
+use ironclaw_host_api::{CapabilityId, CapabilitySurfaceKind, ExtensionId, VendorId, VirtualPath};
 use ironclaw_product_adapters::{ProductCapabilityFlag, ProductSurfaceKind};
 use ironclaw_product_workflow::{
     ChannelConnectionRequirement, LifecycleChannelDirections,
@@ -161,8 +159,9 @@ fn onboarding(package: &AvailableExtensionPackage) -> Option<LifecycleExtensionO
         return Some(onboarding.clone());
     }
 
-    let package_ref = &package.package_ref;
-    if is_host_managed_credential_extension(package_ref) {
+    // The only remaining non-inventory onboarding is the host-managed NEAR AI
+    // MCP credential (config-assembled at runtime; bucket 1 of the DEL-8 debt).
+    if is_host_managed_credential_extension(&package.package_ref) {
         return Some(onboarding_message(
             "NEAR AI MCP uses the NEAR AI credentials configured for the assistant. If NEAR AI is not configured yet, add a NEAR AI API key in assistant inference settings before activating this extension.",
             Some(
@@ -173,9 +172,7 @@ fn onboarding(package: &AvailableExtensionPackage) -> Option<LifecycleExtensionO
         ));
     }
 
-    match package_ref.id.as_str() {
-        _ => None,
-    }
+    None
 }
 
 fn onboarding_message(
@@ -216,10 +213,10 @@ fn credential_requirements(
     // (a personal-OAuth connect whose setup scopes differ from the per-tool
     // runtime scopes) that replaces the manifest-derived one. Composition never
     // names the package — the override rides down from its inventory bundle.
-    if package.package_ref.kind == LifecyclePackageKind::Extension {
-        if let Some(oauth_setup) = &package.oauth_setup_override {
-            return vec![oauth_setup.clone()];
-        }
+    if package.package_ref.kind == LifecyclePackageKind::Extension
+        && let Some(oauth_setup) = &package.oauth_setup_override
+    {
+        return vec![oauth_setup.clone()];
     }
 
     let mut groups: Vec<CredentialRequirementGroup> = Vec::new();

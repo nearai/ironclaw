@@ -57,9 +57,14 @@ use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, ProcessBackendKind, SecretMode,
 };
 use ironclaw_host_api::{
-    EffectKind, ExtensionId, HostPath, InvocationId, MountPermissions, MountView, PackageId,
-    ResourceScope, RuntimeHttpEgress, UserId, VirtualPath, sha256_digest_token,
+    ExtensionId, HostPath, InvocationId, MountPermissions, MountView, PackageId, ResourceScope,
+    RuntimeHttpEgress, UserId, VirtualPath, sha256_digest_token,
 };
+// `EffectKind` is only referenced by the `#[cfg(test)]` trust-decision helpers
+// now that every production `*_allowed_effects` fn moved to the package
+// inventory as bundle data.
+#[cfg(test)]
+use ironclaw_host_api::EffectKind;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{HostApiError, MountAlias, MountGrant};
 use ironclaw_host_runtime::{
