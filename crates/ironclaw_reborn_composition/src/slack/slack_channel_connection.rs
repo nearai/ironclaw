@@ -3,8 +3,8 @@
 //! Reports whether the calling WebUI user has connected their own Slack account
 //! (so the extensions surface can show a "setup needed" Configure affordance
 //! until they connect) and handles per-caller disconnect (identity + personal DM
-//! target cleanup). Split out of `slack_connectable_channel` so that file stays
-//! the connectable-channel descriptor/wiring layer.
+//! target cleanup). The extension lifecycle owns the typed connection
+//! affordance; this module owns Slack-specific status and cleanup behavior.
 
 // arch-exempt: large_file, Slack disconnect convergence and lifecycle race tests, plan #5905
 
@@ -44,7 +44,7 @@ use crate::{
 };
 
 /// Narrow disconnect-side port over product-auth lifecycle cleanup, so the
-/// per-user Slack disconnect can revoke the caller's `slack_personal`
+/// per-user Slack disconnect can revoke the caller's `slack` provider
 /// credential without depending on the whole product-auth bundle (and so tests
 /// can record the issued cleanup). Production forwards to
 /// [`RebornProductAuthServices::cleanup_credentials_for_lifecycle`], the
@@ -88,7 +88,7 @@ struct SlackChannelConnectionFacade {
     conversation_actor_pairings: Arc<dyn ConversationActorPairingService>,
     personal_dm_target_store: Arc<dyn SlackPersonalDmTargetStore>,
     // Genuinely optional (not an `optional_arc` smell): compositions without
-    // product auth cannot have minted a `slack_personal` credential in the
+    // product auth cannot have minted a `slack` provider credential in the
     // first place, so there is nothing to clean up on disconnect.
     personal_credential_cleanup: Option<Arc<dyn SlackPersonalCredentialCleanup>>,
 }
@@ -373,7 +373,7 @@ impl ChannelConnectionFacade for SlackChannelConnectionFacade {
 
 // OAuth-minted personal credentials carry no extension ownership/grants, so
 // the provider selector is what actually reaches the caller's
-// `slack_personal` account. Shared by the scoped and no-scope disconnect
+// unified `slack` account. Shared by the scoped and no-scope disconnect
 // arms so the revoke request cannot drift between them.
 fn personal_credential_cleanup_request(
     caller: &WebUiAuthenticatedCaller,
@@ -585,7 +585,7 @@ mod tests {
             .await
             .expect("disconnect succeeds");
 
-        // Disconnect must also revoke the caller's `slack_personal` credential
+        // Disconnect must also revoke the caller's `slack` provider credential
         // through the product-auth lifecycle cleanup port, scoped to exactly
         // this tenant + caller and the public Slack extension.
         let cleanup_requests = cleanup.requests();

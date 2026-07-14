@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- *(reborn)* make the unified-extension cutover upgrade-safe: persisted legacy-v2 capability manifests, split Slack installation state (`slack_bot` / internal `slack_user`), and `slack_personal` credential accounts now migrate through strict, aggregate-bounded CAS transitions before services are published on CAS-capable backends. Ordinary CAS-capable installation mutations reread the winning snapshot, publish only after persistence, and commit fresh manifest plus installation atomically; legacy non-CAS local-dev startup normalizes only in memory while explicit lifecycle writes remain serialized and durable. Provider actor keys use a collision-safe versioned encoding while retaining safe legacy reads, and stale Slack rollback no longer erases a newer pending OAuth generation. The one-time credential cutover requires all pre-Train-A writers to be quiesced before startup.
 - *(slack)* resolve known DM conversation IDs through an exact Slack lookup before encoding mentions, avoiding wrong-target posts when conversation lists are long or display names are ambiguous.
 - *(reborn)* add an explicit tenant extension-ownership migration that assigns every installed extension to every existing user, and clean up the departing user's external connection and personal credentials without tearing down the package for remaining users.
 - *(reborn)* make extension-scoped OAuth and explicit extension removal restart-safe and fenced: malformed callbacks now terminalize durable flows, status reads are observational with an explicit reconciliation command, multi-credential activation waits without revoking completed credentials, Slack cleanup fences ingress before fallible identity deletion, and uninstall cleanup obligations survive catalog/package loss.
@@ -16,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- *(reborn)* **Breaking:** extensions are the only installable integration object and the WebUI/API wire now exposes execution `runtime` plus manifest-derived tool/channel/auth `surfaces` instead of the retired extension `kind`; the single host-bundled `slack` extension owns Slack tools, channel, and OAuth surfaces. Because extension-wide auth surfaces do not yet encode channel ownership, Train A fails closed for every other inbound channel/auth combination at install, restore, and activation; typed generic connection ownership remains a Train B concern.
 - *(reborn-cli)* document the standalone `config init` atomic-write dependency on `tempfile` and call out the default runner cadence change to 5s heartbeats / 200ms polling (down from 10s / 2s).
 - *(reborn)* expose runtime poll settings and document the standalone turn-runner cadence change for callers using `TurnRunnerSettings::default()`.
 - *(channels)* v1 Slack DM policy now defaults to `allowlist` (previously `pairing`); existing installs still configured with `dm_policy=pairing` fall through to `allowlist` as Slack relay pairing is retired ([#5604](https://github.com/nearai/ironclaw/pull/5604)).
@@ -23,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- *(reborn)* remove split-Slack setup/resolver shims, retired connectable-channel/MCP extension rails, fabricated gateway-status UI state, and legacy extension-kind fixtures from Reborn acceptance paths.
 - *(channels)* remove the v1 `pairing_approve` builtin tool and the generic `channel_connection_resume` machinery as part of retiring Slack relay pairing; existing Slack pairing users reconnect via OAuth (Telegram/WASM self-service pairing via the pairing endpoints is unaffected) ([#5604](https://github.com/nearai/ironclaw/pull/5604)).
 
 ## [0.29.1](https://github.com/nearai/ironclaw/compare/ironclaw-v0.29.0...ironclaw-v0.29.1) - 2026-06-04

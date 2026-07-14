@@ -2,8 +2,8 @@
 //!
 //! A *capability surface* is one product-facing face an installed extension
 //! declares through its manifest: model-callable tools, an external chat
-//! channel, credential/account acquisition, and (reserved) triggers and file
-//! exchange. The surface kind answers "which faces of this extension can be
+//! channel, and credential/account acquisition. The surface kind answers
+//! "which faces of this extension can be
 //! configured and enabled?" — it is product taxonomy.
 //!
 //! [`crate::RuntimeKind`] is deliberately *not* part of this vocabulary: how
@@ -14,9 +14,11 @@ use serde::{Deserialize, Serialize};
 
 /// The kind of product-facing surface a manifest declaration projects.
 ///
-/// Extensions declare any combination of these; hosts discover and wire
-/// generic services from the declared kinds instead of maintaining separate
-/// per-kind registries beside the extension registry.
+/// Extensions declare any combination of these; hosts use the declared kinds
+/// for discovery and product grouping instead of maintaining separate
+/// first-class product registries beside the extension registry. A kind does
+/// not itself authorize or wire runtime services: connection ownership and
+/// executable entrypoints require a typed host contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilitySurfaceKind {
@@ -28,12 +30,6 @@ pub enum CapabilitySurfaceKind {
     /// Credential/account acquisition the extension's other surfaces depend
     /// on (OAuth accounts, provider tokens).
     Auth,
-    /// External event/schedule trigger surface. Reserved: no manifest section
-    /// projects this kind yet.
-    Trigger,
-    /// File/attachment exchange surface. Reserved: no manifest section
-    /// projects this kind yet.
-    File,
 }
 
 impl CapabilitySurfaceKind {
@@ -42,8 +38,6 @@ impl CapabilitySurfaceKind {
             Self::Tool => "tool",
             Self::Channel => "channel",
             Self::Auth => "auth",
-            Self::Trigger => "trigger",
-            Self::File => "file",
         }
     }
 }
@@ -66,8 +60,6 @@ mod tests {
             (CapabilitySurfaceKind::Tool, "\"tool\""),
             (CapabilitySurfaceKind::Channel, "\"channel\""),
             (CapabilitySurfaceKind::Auth, "\"auth\""),
-            (CapabilitySurfaceKind::Trigger, "\"trigger\""),
-            (CapabilitySurfaceKind::File, "\"file\""),
         ] {
             assert_eq!(serde_json::to_string(&kind).unwrap(), wire);
             assert_eq!(

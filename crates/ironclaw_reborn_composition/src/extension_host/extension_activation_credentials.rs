@@ -99,8 +99,10 @@ impl ExtensionActivationCredentialGate for RuntimeExtensionActivationCredentialG
 /// tool-call time by runtime credential selection (the auth_required gate).
 /// Workspace-level secrets (bot token, signing secret) are validated by the
 /// setup route itself before activation runs.
+#[cfg(feature = "slack-v2-host-beta")]
 pub(crate) struct ChannelSetupActivationCredentialGate;
 
+#[cfg(feature = "slack-v2-host-beta")]
 #[async_trait]
 impl ExtensionActivationCredentialGate for ChannelSetupActivationCredentialGate {
     async fn ensure_credentials(

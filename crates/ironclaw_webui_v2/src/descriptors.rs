@@ -305,7 +305,7 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
 }
 
 /// Returns whether a route id belongs to any operator-wide WebUI config surface.
-// arch-exempt: large_file, consolidate the existing route predicate in place, plan #6061
+// arch-exempt: large_file, extension and auth route descriptors still await feature-owned module extraction, plan #4088
 pub fn is_webui_v2_operator_webui_config_route_id(route_id: &str) -> bool {
     matches!(
         route_id,

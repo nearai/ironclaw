@@ -56,6 +56,7 @@ pub use product_auth::api::auth_prompt::{
 mod delivered_gate_routing;
 #[cfg(feature = "slack-v2-host-beta")]
 mod host_ingress;
+#[cfg(feature = "slack-v2-host-beta")]
 mod provider_identity;
 mod readiness;
 mod retry_disposition;

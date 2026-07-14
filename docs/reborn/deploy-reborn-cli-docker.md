@@ -189,6 +189,133 @@ the agent connect a Google credential:
 IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI=https://<railway-domain>/api/reborn/product-auth/oauth/google/callback
 ```
 
+## Unified Slack one-time cutover and rollback
+
+The #6061 upgrade migrates persisted split-Slack installation records and the
+retired Slack credential provider into the unified `slack` extension/provider.
+The migration is bounded, idempotent, and runs before product-auth and
+extension services are published. It cannot fence a pre-upgrade process that
+is still writing. This upgrade is therefore a quiesced cutover, not a rolling
+deployment.
+
+Use this runbook once per durable environment. The non-negotiable order is:
+block ingress, stop every pre-#6061 replica/worker, take a restorable backup,
+start exactly one new replica, verify the runtime (not only `/api/health`), and
+only then restore normal replica count and ingress.
+
+### 1. Quiesce every old writer
+
+Put the WebUI and `/webhooks/slack/events` behind maintenance/drain at the
+edge, stop scheduled jobs that can write Reborn state, and scale the Reborn
+service to zero. On a directly managed host, this check must print no process:
+
+```bash
+pgrep -af '[i]ronclaw-reborn' || true
+```
+
+For Postgres, inspect remaining sessions after the service is stopped. Do not
+continue while an old IronClaw process still owns a session:
+
+```bash
+psql "$IRONCLAW_REBORN_POSTGRES_URL" -X -v ON_ERROR_STOP=1 -c \
+  "SELECT pid, application_name, client_addr, state, query_start
+     FROM pg_stat_activity
+    WHERE datname = current_database()
+      AND pid <> pg_backend_pid()
+    ORDER BY pid"
+```
+
+### 2. Capture the pre-cutover restore point
+
+Set a private backup directory on durable storage. Every profile also has
+local home state, so archive the Reborn home even for Postgres deployments:
+
+```bash
+export CUTOVER_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+export CUTOVER_BACKUP_DIR="${CUTOVER_BACKUP_DIR:-$PWD/reborn-cutover-$CUTOVER_ID}"
+export IRONCLAW_REBORN_HOME="${IRONCLAW_REBORN_HOME:-/data/ironclaw-reborn}"
+install -d -m 0700 "$CUTOVER_BACKUP_DIR"
+test -d "$IRONCLAW_REBORN_HOME"
+tar -C "$(dirname "$IRONCLAW_REBORN_HOME")" -czf \
+  "$CUTOVER_BACKUP_DIR/reborn-home.tgz" \
+  "$(basename "$IRONCLAW_REBORN_HOME")"
+tar -tzf "$CUTOVER_BACKUP_DIR/reborn-home.tgz" >/dev/null
+```
+
+For `hosted-single-tenant`, also create and verify a PostgreSQL archive:
+
+```bash
+pg_dump "$IRONCLAW_REBORN_POSTGRES_URL" \
+  --format=custom \
+  --file="$CUTOVER_BACKUP_DIR/reborn-postgres.dump"
+pg_restore --list "$CUTOVER_BACKUP_DIR/reborn-postgres.dump" >/dev/null
+```
+
+Copy the backup off the service volume before continuing. Record the old image
+digest and the backup location in the deployment change record.
+
+### 3. Start one new replica and prove migration completion
+
+Deploy the #6061 image with exactly one replica. A `200` from `/api/health`
+only proves that the listener is alive; hosted Postgres runtime assembly may
+still be migrating. Wait for an authenticated runtime route as well:
+
+```bash
+export REBORN_BASE_URL="${REBORN_BASE_URL:-https://<public-host>}"
+ready=0
+for attempt in $(seq 1 60); do
+  if curl -fsS \
+    -H "Authorization: Bearer $IRONCLAW_REBORN_WEBUI_TOKEN" \
+    "$REBORN_BASE_URL/api/webchat/v2/extensions" >/dev/null; then
+    ready=1
+    break
+  fi
+  sleep 5
+done
+test "$ready" -eq 1
+```
+
+Check startup logs for migration failure, verify Extensions shows exactly one
+Slack entry with tool/auth/channel surfaces, then run one Slack OAuth connect
+and one signed Slack DM smoke test. Restore the normal replica count and reopen
+ingress only after those checks pass.
+
+### 4. Roll back only by restore, or roll forward
+
+Do not start a pre-#6061 binary against post-migration state. If the new release
+cannot remain deployed, keep ingress blocked, stop every new replica, and
+choose one of these two paths:
+
+1. Roll forward to a corrected #6061-compatible image. The migrations are
+   idempotent and may run again.
+2. Restore the complete pre-cutover home and database backups, then restart the
+   exact recorded old image.
+
+For a filesystem-backed profile, restore the archived home while the service
+is stopped:
+
+```bash
+test -f "$CUTOVER_BACKUP_DIR/reborn-home.tgz"
+mv "$IRONCLAW_REBORN_HOME" "$IRONCLAW_REBORN_HOME.failed-$CUTOVER_ID"
+tar -C "$(dirname "$IRONCLAW_REBORN_HOME")" -xzf \
+  "$CUTOVER_BACKUP_DIR/reborn-home.tgz"
+```
+
+For `hosted-single-tenant`, restore the database using the provider-approved
+maintenance procedure; for a dedicated database with no remaining sessions,
+the standard archive restore is:
+
+```bash
+pg_restore --clean --if-exists --no-owner \
+  --dbname="$IRONCLAW_REBORN_POSTGRES_URL" \
+  "$CUTOVER_BACKUP_DIR/reborn-postgres.dump"
+```
+
+Restore both database and home from the same cutover backup. Verify the old
+runtime before reopening ingress. Never combine an old database with a new
+home archive (or the reverse), and never attempt an in-place downgrade of only
+the migrated Slack rows.
+
 ## Slack
 
 Slack routes are compiled into the image, but they are disabled by the default
@@ -212,6 +339,11 @@ enabled = true
 
 Then configure Slack app ids, the bot token, signing secret, and channel
 mappings from WebUI channel setup after the container starts.
+
+For app scopes, callback URLs, and runtime verification, follow
+[`setup-slack-for-reborn-binary.md`](setup-slack-for-reborn-binary.md). For an
+upgrade from the split Slack model, complete the one-time cutover runbook above
+before exposing the new service.
 
 Set the WebUI identity environment variables as usual.
 

@@ -1,3 +1,4 @@
+// arch-exempt: large_file, product workflow facade contract matrix remains co-located, plan #4088
 //! Contract tests for the product workflow facade.
 
 use std::collections::HashMap;

@@ -1842,11 +1842,11 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     let extension_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
     let loaded_extension_installation_store =
         match extension_installation_non_cas_load_policy(profile) {
-            NonCasLoadPolicy::AllowReadOnlyLocalDev => {
+            NonCasLoadPolicy::AllowNonCasLocalDev => {
                 FilesystemExtensionInstallationStore::load_at_with_policy(
                     extension_filesystem.clone(),
                     extension_installation_state_path,
-                    NonCasLoadPolicy::AllowReadOnlyLocalDev,
+                    NonCasLoadPolicy::AllowNonCasLocalDev,
                 )
                 .await
             }
@@ -2324,7 +2324,7 @@ fn extension_installation_non_cas_load_policy(
 ) -> NonCasLoadPolicy {
     match profile {
         RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo => {
-            NonCasLoadPolicy::AllowReadOnlyLocalDev
+            NonCasLoadPolicy::AllowNonCasLocalDev
         }
         RebornCompositionProfile::Disabled
         | RebornCompositionProfile::HostedSingleTenant
@@ -3155,7 +3155,7 @@ pub(crate) async fn open_local_dev_extension_installation_store_for_test(
     let store = FilesystemExtensionInstallationStore::load_at_with_policy(
         filesystem,
         state_path,
-        NonCasLoadPolicy::AllowReadOnlyLocalDev,
+        NonCasLoadPolicy::AllowNonCasLocalDev,
     )
     .await
     .map_err(|error| RebornBuildError::InvalidConfig {
@@ -5413,11 +5413,11 @@ mod tests {
             ),
             (
                 RebornCompositionProfile::LocalDev,
-                NonCasLoadPolicy::AllowReadOnlyLocalDev,
+                NonCasLoadPolicy::AllowNonCasLocalDev,
             ),
             (
                 RebornCompositionProfile::LocalDevYolo,
-                NonCasLoadPolicy::AllowReadOnlyLocalDev,
+                NonCasLoadPolicy::AllowNonCasLocalDev,
             ),
             (
                 RebornCompositionProfile::HostedSingleTenant,

@@ -1,3 +1,4 @@
+// arch-exempt: large_file, the service manifest fixture factory is not yet extracted from this runtime-service contract suite, plan #4088
 use std::{
     sync::{Arc, Mutex},
     time::Duration,

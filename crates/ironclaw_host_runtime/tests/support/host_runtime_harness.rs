@@ -1,3 +1,4 @@
+// arch-exempt: large_file, shared host runtime test harness remains co-located, plan #5905
 #![allow(dead_code)]
 
 use super::legacy_capability_fixture_to_v2;

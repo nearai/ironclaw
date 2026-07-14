@@ -276,11 +276,15 @@ Cutover (complete):
 
 The extension is the top-level product object; a *capability surface* is one
 product-facing face the manifest declares. `CapabilitySurfaceKind`
-(`ironclaw_host_api`) enumerates the vocabulary: `tool`, `channel`, `auth`,
-plus reserved `trigger` and `file`. The host discovers and wires generic
-services from declared surfaces; it must not maintain a separate first-class
-channel registry beside the extension registry, and runtime kind (`wasm` /
-`mcp` / `first_party`) must never decide surface taxonomy.
+(`ironclaw_host_api`) enumerates the Train A vocabulary: `tool`, `channel`,
+and `auth`. The host discovers and wires generic product views from declared
+surfaces; it must not maintain a separate
+first-class channel registry beside the extension registry, and runtime kind
+(`wasm` / `mcp` / `first_party`) must never decide surface taxonomy. Surface
+kinds alone do not authorize or wire runtime services. Train A composition owns
+only the exact host-bundled `slack` channel plus `slack` OAuth combination;
+typed generic connection ownership and executable entrypoints are deferred to
+Train B.
 
 Rules:
 
@@ -300,12 +304,12 @@ Rules:
     declared scopes (sorted, deduplicated) and mask weaker manual-token
     setups; a provider referenced only through retired setups surfaces as
     retired rather than being dropped.
-- Host API contracts must not project coarse `tool`, `auth`, or directionless
-  `channel` section surfaces through `HostApiSurfaceProjection::Kind` — those
-  kinds have dedicated typed declaration paths above. Validation fails closed;
-  channels must use the dedicated directional projection. Coarse projections
-  remain available only for reserved kinds without dedicated typed attributes,
-  such as `trigger` and `file`.
+- Host API contracts project channels only through the directional
+  `HostApiSurfaceProjection::Channel { inbound, outbound }` variant.
+  Directionless channels and coarse host-API projections for tools or auth are
+  intentionally absent: those surfaces derive from the dedicated declaration
+  paths above. Additional surface kinds and projection forms are deferred to
+  the train that introduces their complete contract and runtime behavior.
 - `ProviderId` (`RuntimeCredentialAccountProviderId`) is the credential
   authority namespace, not the extension id: several extensions (gmail,
   google-drive, ...) may share one provider (`google`).

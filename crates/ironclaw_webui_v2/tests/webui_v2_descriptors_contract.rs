@@ -1,3 +1,4 @@
+// arch-exempt: large_file, WebUI descriptor policy contract matrix remains co-located, plan #4088
 //! Sanity contract for [`webui_v2_routes`].
 //!
 //! Locks the full host-owned ingress policy surface per route. Host

@@ -8,7 +8,7 @@
 use std::fmt;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{AgentId, CapabilitySurfaceKind, ProjectId, TenantId, UserId};
+use ironclaw_host_api::{AgentId, CapabilitySurfaceKind, ProjectId, RuntimeKind, TenantId, UserId};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
 
@@ -306,7 +306,7 @@ pub struct ChannelConnectionRequirement {
     pub error_message: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LifecycleProductPayload {
     ExtensionSearch {
@@ -361,14 +361,17 @@ pub struct LifecycleChannelDirections {
     pub outbound: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Outbound lifecycle projection. This is intentionally serialize-only:
+/// privileged host runtime kinds are descriptive response data, never an
+/// inbound authority-bearing value a caller may submit back to the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LifecycleExtensionSummary {
     pub package_ref: LifecyclePackageRef,
     pub name: String,
     pub version: String,
     pub description: String,
     pub source: LifecycleExtensionSource,
-    pub runtime_kind: LifecycleExtensionRuntimeKind,
+    pub runtime: RuntimeKind,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub surface_kinds: Vec<CapabilitySurfaceKind>,
     /// Present iff `surface_kinds` contains [`CapabilitySurfaceKind::Channel`].
@@ -387,7 +390,7 @@ pub struct LifecycleExtensionSummary {
     pub onboarding: Option<LifecycleExtensionOnboarding>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LifecycleSearchExtensionSummary {
     #[serde(flatten)]
     pub summary: LifecycleExtensionSummary,
@@ -407,7 +410,7 @@ pub enum LifecycleInstallScope {
     Private,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LifecycleInstalledExtensionSummary {
     pub summary: LifecycleExtensionSummary,
     pub phase: LifecyclePhase,
@@ -450,30 +453,8 @@ pub enum LifecycleExtensionCredentialSetup {
 #[serde(rename_all = "snake_case")]
 pub enum LifecycleExtensionSource {
     HostBundled,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LifecycleExtensionRuntimeKind {
-    WasmTool,
-    McpServer,
-    FirstParty,
-    System,
-    Script,
-}
-
-impl LifecycleExtensionRuntimeKind {
-    /// Honest runtime name for the wire: implementation detail, clearly
-    /// labeled — never product taxonomy (surfaces carry that).
-    pub fn runtime_wire_name(self) -> &'static str {
-        match self {
-            Self::McpServer => "mcp",
-            Self::FirstParty => "first_party",
-            Self::System => "system",
-            Self::WasmTool => "wasm",
-            Self::Script => "script",
-        }
-    }
+    InstalledLocal,
+    RegistryInstalled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -494,7 +475,7 @@ pub enum LifecycleSkillSource {
     User,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LifecycleProductResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package_ref: Option<LifecyclePackageRef>,

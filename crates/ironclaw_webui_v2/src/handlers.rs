@@ -1,3 +1,4 @@
+// arch-exempt: large_file, WebUI handler assembly remains co-located, plan #4088
 //! WebChat v2 HTTP handlers.
 //!
 //! Every handler:

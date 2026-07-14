@@ -176,6 +176,8 @@ fn phase_label(phase: LifecyclePhase) -> &'static str {
 fn extension_source_label(source: LifecycleExtensionSource) -> &'static str {
     match source {
         LifecycleExtensionSource::HostBundled => "host_bundled",
+        LifecycleExtensionSource::InstalledLocal => "installed_local",
+        LifecycleExtensionSource::RegistryInstalled => "registry_installed",
     }
 }
 
@@ -195,7 +197,7 @@ mod tests {
     use ironclaw_auth::{
         AuthContinuationRef, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
     };
-    use ironclaw_host_api::{AgentId, InvocationId, ResourceScope, TenantId, UserId};
+    use ironclaw_host_api::{AgentId, InvocationId, ResourceScope, RuntimeKind, TenantId, UserId};
     use ironclaw_product_workflow::LifecycleExtensionSummary;
     use secrecy::SecretString;
 
@@ -333,8 +335,7 @@ mod tests {
                         version: "0.1.0".to_string(),
                         description: "line\rrewrite".to_string(),
                         source: LifecycleExtensionSource::HostBundled,
-                        runtime_kind:
-                            ironclaw_product_workflow::LifecycleExtensionRuntimeKind::WasmTool,
+                        runtime: RuntimeKind::Wasm,
                         surface_kinds: Vec::new(),
                         channel_directions: None,
                         channel_connection: None,

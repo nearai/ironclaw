@@ -182,8 +182,13 @@ snapshot in memory while leaving persisted bytes untouched and emitting a
 specific warning. Add a test for this non-persisting compatibility path. CAS
 backends must persist and become byte-stable.
 
-Do not broaden this task into rewriting the store's pre-existing mutation
-methods; record that separate legacy limitation in the PR compatibility notes.
+The final concurrency review broadened this task only far enough to close a
+confirmed lost-update defect in the same store. Every ordinary mutation on a
+CAS-capable backend applies to the latest winning snapshot, and in-memory
+publication happens only after persistence succeeds. Fresh install uses the
+store's atomic manifest-plus-installation transition. Preserve the explicitly
+opted-in non-CAS local-development lifecycle through a bounded per-store worker;
+hosted/CAS-capable profiles never enter that compatibility path.
 
 ### Step 5: Verify and commit
 
@@ -254,6 +259,13 @@ rerunnable apply closure changes only the provider when it is still
 `slack_personal`; current `slack`, other providers, or authoritative deletion
 are no-ops. Map retries to a typed conflict and other failures to a sanitized
 backend error. Never resurrect a concurrently deleted account.
+
+Bound the complete strict traversal as well as each directory: charge every
+retained owner, every base/session scope (including empty roots), and every
+account-directory entry before filename/provider filtering. Production limits
+are 8,192 owners, 65,536 scopes, and 65,536 entries. Test exact-limit success
+and fail-before-write behavior for owner overflow, empty session roots, and
+nonmatching entries.
 
 ### Step 4: Wire every composition-owned durable profile
 
@@ -416,10 +428,11 @@ only one encoding.
 
 ### Step 2: Implement the compatibility boundary
 
-Use `<installation-byte-length>:<installation>:<actor>` for new writes. Parse
-with checked lengths, UTF-8 boundaries, required separator, nonempty actor, and
-typed installation ID validation. Add explicit new and safe-legacy exact-key
-and prefix helpers.
+Use
+`ic1.<installation-byte-length>.<base64url-no-pad(installation)>.<base64url-no-pad(actor)>`
+for new writes. Parse with checked decoded length, canonical base64url segments,
+strict bounds, a nonempty actor, and typed installation-ID validation. Add
+explicit new and safe-legacy exact-key and prefix helpers.
 
 Lookup order is new first, then legacy only when neither component can make the
 old delimiter representation ambiguous. Prefix scans and cleanup recognize
@@ -568,6 +581,8 @@ Document:
 - unified Slack installation and credential transitions;
 - CAS-backend versus legacy local-backend rewrite behavior;
 - rollback implications; and
+- the mandatory one-time quiesced cutover (no pre-Train-A writer overlap) and
+  restore-or-roll-forward rollback rule; and
 - explicit Train B exclusions.
 
 Remove claims of generic manifest-driven identity wiring or migration coverage

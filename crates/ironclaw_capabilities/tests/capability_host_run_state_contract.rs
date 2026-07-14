@@ -1,3 +1,4 @@
+// arch-exempt: large_file, the capability-provider fixture factory is not yet extracted from this cross-crate capability-host contract suite, plan #4088
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};

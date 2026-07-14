@@ -1,4 +1,4 @@
-// arch-exempt: large_file, migration-only test extraction adds one narrow module declaration, plan #6061
+// arch-exempt: large_file, migration factory tests still await separation from the broad factory harness, plan #4469
 #[cfg(feature = "postgres")]
 #[path = "support/postgres.rs"]
 mod postgres_support;

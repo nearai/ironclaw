@@ -13,6 +13,12 @@ Slack bot token and signing secret are configured in WebUI Slack setup and
 stored in the Reborn secret store. Do not put OAuth client secrets or LLM keys
 in `config.toml`.
 
+If this is an upgrade from a pre-#6061 deployment, do not use a rolling
+deployment. First complete the
+[`Unified Slack one-time cutover and rollback`](deploy-reborn-cli-docker.md#unified-slack-one-time-cutover-and-rollback)
+runbook; it quiesces old writers and captures the restore point required for a
+safe rollback.
+
 ## Build or Run With Slack
 
 For local source runs:

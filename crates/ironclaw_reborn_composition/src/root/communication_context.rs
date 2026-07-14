@@ -229,17 +229,18 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use ironclaw_host_api::{AgentId, CapabilitySurfaceKind, ProjectId, TenantId, UserId};
+    use ironclaw_host_api::{
+        AgentId, CapabilitySurfaceKind, ProjectId, RuntimeKind, TenantId, UserId,
+    };
     use ironclaw_product_workflow::{
-        LifecycleExtensionRuntimeKind, LifecycleExtensionSource, LifecycleExtensionSummary,
-        LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
-        LifecyclePhase, LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-        LifecycleProductPayload, LifecycleProductResponse, OutboundPreferencesProductFacade,
-        ProductWorkflowError, RebornOutboundDeliveryTargetId,
-        RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetStatus,
-        RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-        RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-        RebornSetOutboundPreferencesRequest, WebUiAuthenticatedCaller,
+        LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
+        LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductAction,
+        LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
+        LifecycleProductResponse, OutboundPreferencesProductFacade, ProductWorkflowError,
+        RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
+        RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
+        RebornOutboundPreferencesResponse, RebornServicesError, RebornServicesErrorCode,
+        RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, WebUiAuthenticatedCaller,
     };
     use ironclaw_turns::{
         run_profile::{CommunicationContextProvider, ConnectedChannelsState, DeliveryTargetState},
@@ -445,7 +446,7 @@ mod tests {
                 version: "1.0.0".to_string(),
                 description: "channel extension".to_string(),
                 source: LifecycleExtensionSource::HostBundled,
-                runtime_kind: LifecycleExtensionRuntimeKind::FirstParty,
+                runtime: RuntimeKind::FirstParty,
                 surface_kinds: vec![CapabilitySurfaceKind::Channel],
                 channel_directions: None,
                 channel_connection: None,
@@ -468,7 +469,7 @@ mod tests {
                 version: "1.0.0".to_string(),
                 description: "tool extension".to_string(),
                 source: LifecycleExtensionSource::HostBundled,
-                runtime_kind: LifecycleExtensionRuntimeKind::WasmTool,
+                runtime: RuntimeKind::Wasm,
                 surface_kinds: Vec::new(),
                 channel_directions: None,
                 channel_connection: None,

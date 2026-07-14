@@ -446,6 +446,21 @@ def _slack_host_state_path_segment(value: str) -> str:
     return base64.urlsafe_b64encode(value.encode("utf-8")).decode("ascii").rstrip("=")
 
 
+def _installation_scoped_provider_user_id(
+    installation_id: str,
+    external_actor_id: str,
+) -> str:
+    installation_bytes = installation_id.encode("utf-8")
+    return ".".join(
+        (
+            "ic1",
+            str(len(installation_bytes)),
+            _slack_host_state_path_segment(installation_id),
+            _slack_host_state_path_segment(external_actor_id),
+        )
+    )
+
+
 def _slack_setup_from_reborn_home(reborn_home: Path) -> dict[str, object] | None:
     db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
     if not db_path.exists():
@@ -569,7 +584,10 @@ def _seed_slack_personal_identity_binding(
     now: str,
 ) -> dict[str, object]:
     provider = "slack"
-    provider_user_id = f"{installation_id}:{slack_user_id}"
+    provider_user_id = _installation_scoped_provider_user_id(
+        installation_id,
+        slack_user_id,
+    )
     identity_path = (
         "/tenants/reborn-cli/shared/slack-personal-binding/identities/"
         f"{_slack_host_state_path_segment(provider)}/"
@@ -954,7 +972,7 @@ def _slack_personal_auth_preflight(
             account = json.loads(raw)
         except (TypeError, json.JSONDecodeError):
             continue
-        if account.get("provider") != "slack_personal" or account.get("status") != "configured":
+        if account.get("provider") != "slack" or account.get("status") != "configured":
             continue
         scope = account.get("scope")
         resource = scope.get("resource") if isinstance(scope, dict) else None
@@ -1109,7 +1127,7 @@ def _seed_generated_slack_product_auth_if_configured(
     account_id = str(
         uuid.uuid5(
             uuid.NAMESPACE_URL,
-            f"ironclaw-reborn-webui-v2-live-qa/slack_personal/{user_id}",
+            f"ironclaw-reborn-webui-v2-live-qa/slack/{user_id}",
         )
     )
     invocation_id = str(
@@ -1168,8 +1186,8 @@ def _seed_generated_slack_product_auth_if_configured(
         account_path,
         {
             "id": account_id,
-            "provider": "slack_personal",
-            "label": "slack_personal",
+            "provider": "slack",
+            "label": "slack",
             "status": "configured",
             "ownership": "user_reusable",
             "owner_extension": None,

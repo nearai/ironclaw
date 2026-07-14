@@ -1,4 +1,4 @@
-// arch-exempt: large_file, retired extension identity fixtures stay with persistence convergence coverage, plan #6061
+// arch-exempt: large_file, migration and restart fixtures still await extraction from composition extension lifecycle, plan #4470
 use std::{
     collections::BTreeSet,
     sync::{
@@ -356,11 +356,11 @@ async fn load_at_maps_malformed_persisted_manifest_to_manifest_parse_error() {
     assert_eq!(after.entry.body, seeded.entry.body);
 }
 
+#[cfg(feature = "slack-v2-host-beta")]
 #[tokio::test]
-async fn load_at_slack_fold_preserves_canonical_fields_and_uses_enabled_wins() {
+async fn load_at_never_folds_retired_slack_into_untrusted_unified_target() {
     let backend = Arc::new(InMemoryBackend::new());
     let state_path = test_state_path();
-    let cleanup = test_cleanup_requirement();
     let state = WireState {
         manifests: vec![
             WireManifestRecord {
@@ -372,9 +372,259 @@ async fn load_at_slack_fold_preserves_canonical_fields_and_uses_enabled_wins() {
             WireManifestRecord {
                 raw_toml: current_manifest_toml("slack"),
                 source: WireManifestSource::RegistryInstalled,
-                manifest_hash: Some(ManifestHash::new("sha256:unified-slack").unwrap()),
-                removal_cleanup_requirements: vec![cleanup.clone()],
+                manifest_hash: Some(ManifestHash::new("sha256:untrusted-slack").unwrap()),
+                removal_cleanup_requirements: Vec::new(),
             },
+        ],
+        installations: vec![named_installation(
+            "retired-slack",
+            "slack_bot",
+            ExtensionActivationState::Enabled,
+            InstallationOwner::Tenant,
+            Some("sha256:retired-slack"),
+            vec![test_binding("bot", "retired-secret")],
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+            ExtensionHealthStatus::Healthy,
+        )],
+    };
+    let seeded = seed_wire_state(&backend, &state_path, &state).await;
+    let filesystem: Arc<dyn RootFilesystem> = backend.clone();
+
+    let error =
+        match FilesystemExtensionInstallationStore::load_at(filesystem, state_path.clone()).await {
+            Ok(_) => {
+                panic!("an untrusted reserved-id target must never receive retired Slack authority")
+            }
+            Err(error) => error,
+        };
+
+    assert!(matches!(
+        error,
+        ExtensionInstallationError::InvalidInstallation { .. }
+    ));
+    let after = backend.get(&state_path).await.unwrap().unwrap();
+    assert_eq!(after.version, seeded.version);
+    assert_eq!(after.entry.body, seeded.entry.body);
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+#[tokio::test]
+async fn load_at_never_trusts_a_copied_predecessor_hash_without_exact_bytes() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let state_path = test_state_path();
+    let forged_predecessor = format!(
+        "{}\n# attacker-controlled variant\n",
+        include_str!("test_fixtures/pre_train_a_slack_manifest.toml").trim_end()
+    );
+    let state = WireState {
+        manifests: vec![
+            WireManifestRecord {
+                raw_toml: structural_manifest_toml("slack_bot"),
+                source: WireManifestSource::HostBundled,
+                manifest_hash: Some(ManifestHash::new("sha256:retired-slack").unwrap()),
+                removal_cleanup_requirements: Vec::new(),
+            },
+            WireManifestRecord {
+                raw_toml: forged_predecessor,
+                source: WireManifestSource::HostBundled,
+                manifest_hash: Some(
+                    ManifestHash::new(super::PRE_TRAIN_A_SLACK_MANIFEST_HASH).unwrap(),
+                ),
+                removal_cleanup_requirements: Vec::new(),
+            },
+        ],
+        installations: vec![named_installation(
+            "retired-slack",
+            "slack_bot",
+            ExtensionActivationState::Enabled,
+            InstallationOwner::Tenant,
+            Some("sha256:retired-slack"),
+            Vec::new(),
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+            ExtensionHealthStatus::Healthy,
+        )],
+    };
+    let seeded = seed_wire_state(&backend, &state_path, &state).await;
+    let filesystem: Arc<dyn RootFilesystem> = backend.clone();
+
+    let error =
+        match FilesystemExtensionInstallationStore::load_at(filesystem, state_path.clone()).await {
+            Ok(_) => panic!("a copied trusted digest must not authenticate different bytes"),
+            Err(error) => error,
+        };
+
+    assert!(matches!(
+        error,
+        ExtensionInstallationError::InvalidInstallation { .. }
+    ));
+    let after = backend.get(&state_path).await.unwrap().unwrap();
+    assert_eq!(after.version, seeded.version);
+    assert_eq!(after.entry.body, seeded.entry.body);
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+#[tokio::test]
+async fn load_at_accepts_exact_predecessor_with_origin_main_cleanup_metadata() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let state_path = test_state_path();
+    let current = super::bundled_slack_wire_manifest().unwrap();
+    let state = WireState {
+        manifests: vec![
+            WireManifestRecord {
+                raw_toml: structural_manifest_toml("slack_bot"),
+                source: WireManifestSource::HostBundled,
+                manifest_hash: Some(ManifestHash::new("sha256:retired-slack").unwrap()),
+                removal_cleanup_requirements: Vec::new(),
+            },
+            WireManifestRecord {
+                raw_toml: include_str!("test_fixtures/pre_train_a_slack_manifest.toml").to_string(),
+                source: WireManifestSource::HostBundled,
+                manifest_hash: Some(
+                    ManifestHash::new(super::PRE_TRAIN_A_SLACK_MANIFEST_HASH).unwrap(),
+                ),
+                removal_cleanup_requirements: vec![test_cleanup_requirement()],
+            },
+        ],
+        installations: vec![
+            named_installation(
+                "predecessor-slack",
+                "slack",
+                ExtensionActivationState::Installed,
+                InstallationOwner::Tenant,
+                Some(super::PRE_TRAIN_A_SLACK_MANIFEST_HASH),
+                Vec::new(),
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:00:00Z",
+                ExtensionHealthStatus::Healthy,
+            ),
+            named_installation(
+                "retired-slack",
+                "slack_bot",
+                ExtensionActivationState::Enabled,
+                InstallationOwner::Tenant,
+                Some("sha256:retired-slack"),
+                Vec::new(),
+                "2026-01-02T00:00:00Z",
+                "2026-01-02T00:00:00Z",
+                ExtensionHealthStatus::Healthy,
+            ),
+        ],
+    };
+    seed_wire_state(&backend, &state_path, &state).await;
+    let filesystem: Arc<dyn RootFilesystem> = backend;
+
+    let store = FilesystemExtensionInstallationStore::load_at(filesystem, state_path)
+        .await
+        .expect("the exact current-main predecessor cleanup shape must upgrade");
+
+    let manifest = store
+        .get_manifest(&ExtensionId::new("slack").unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(manifest.manifest_hash(), current.manifest_hash.as_ref());
+    assert_eq!(
+        manifest.removal_cleanup_requirements(),
+        current.removal_cleanup_requirements.as_slice()
+    );
+    let installations = store.list_installations().await.unwrap();
+    assert_eq!(installations.len(), 1);
+    assert_eq!(
+        installations[0].manifest_ref().manifest_hash(),
+        current.manifest_hash.as_ref()
+    );
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+#[tokio::test]
+async fn load_at_rejects_exact_predecessor_bytes_with_unrecognized_cleanup_metadata() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let state_path = test_state_path();
+    let state = WireState {
+        manifests: vec![
+            WireManifestRecord {
+                raw_toml: structural_manifest_toml("slack_bot"),
+                source: WireManifestSource::HostBundled,
+                manifest_hash: Some(ManifestHash::new("sha256:retired-slack").unwrap()),
+                removal_cleanup_requirements: Vec::new(),
+            },
+            WireManifestRecord {
+                raw_toml: include_str!("test_fixtures/pre_train_a_slack_manifest.toml").to_string(),
+                source: WireManifestSource::HostBundled,
+                manifest_hash: Some(
+                    ManifestHash::new(super::PRE_TRAIN_A_SLACK_MANIFEST_HASH).unwrap(),
+                ),
+                removal_cleanup_requirements: vec![
+                    ExtensionRemovalCleanupRequirement::channel_connection(
+                        ExtensionRemovalCleanupAdapterId::new("other.connection").unwrap(),
+                        ExtensionRemovalChannelId::new("slack").unwrap(),
+                    ),
+                ],
+            },
+        ],
+        installations: vec![named_installation(
+            "retired-slack",
+            "slack_bot",
+            ExtensionActivationState::Enabled,
+            InstallationOwner::Tenant,
+            Some("sha256:retired-slack"),
+            Vec::new(),
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+            ExtensionHealthStatus::Healthy,
+        )],
+    };
+    let seeded = seed_wire_state(&backend, &state_path, &state).await;
+    let filesystem: Arc<dyn RootFilesystem> = backend.clone();
+
+    let error =
+        match FilesystemExtensionInstallationStore::load_at(filesystem, state_path.clone()).await {
+            Ok(_) => panic!("unrecognized predecessor cleanup metadata must fail closed"),
+            Err(error) => error,
+        };
+
+    assert!(matches!(
+        error,
+        ExtensionInstallationError::InvalidInstallation { .. }
+    ));
+    let after = backend.get(&state_path).await.unwrap().unwrap();
+    assert_eq!(after.version, seeded.version);
+    assert_eq!(after.entry.body, seeded.entry.body);
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+#[tokio::test]
+async fn load_at_slack_fold_preserves_canonical_fields_and_uses_enabled_wins() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let state_path = test_state_path();
+    let current_unified_manifest = super::bundled_slack_wire_manifest().unwrap();
+    let current_unified_hash = current_unified_manifest
+        .manifest_hash
+        .as_ref()
+        .unwrap()
+        .as_str()
+        .to_string();
+    let cleanup = current_unified_manifest
+        .removal_cleanup_requirements
+        .clone();
+    let predecessor_hash = super::PRE_TRAIN_A_SLACK_MANIFEST_HASH;
+    let predecessor_manifest = WireManifestRecord {
+        raw_toml: include_str!("test_fixtures/pre_train_a_slack_manifest.toml").to_string(),
+        source: WireManifestSource::HostBundled,
+        manifest_hash: Some(ManifestHash::new(predecessor_hash).unwrap()),
+        removal_cleanup_requirements: Vec::new(),
+    };
+    let state = WireState {
+        manifests: vec![
+            WireManifestRecord {
+                raw_toml: structural_manifest_toml("slack_bot"),
+                source: WireManifestSource::HostBundled,
+                manifest_hash: Some(ManifestHash::new("sha256:retired-slack").unwrap()),
+                removal_cleanup_requirements: Vec::new(),
+            },
+            predecessor_manifest,
         ],
         installations: vec![
             named_installation(
@@ -382,7 +632,7 @@ async fn load_at_slack_fold_preserves_canonical_fields_and_uses_enabled_wins() {
                 "slack",
                 ExtensionActivationState::Disabled,
                 InstallationOwner::user(ironclaw_host_api::UserId::new("alice").unwrap()),
-                Some("sha256:unified-slack"),
+                Some(predecessor_hash),
                 vec![test_binding("bot", "shared-secret")],
                 "2026-01-02T00:00:00Z",
                 "2026-01-06T00:00:00Z",
@@ -439,7 +689,7 @@ async fn load_at_slack_fold_preserves_canonical_fields_and_uses_enabled_wins() {
     );
     assert_eq!(
         installation.manifest_ref().manifest_hash(),
-        Some(&ManifestHash::new("sha256:unified-slack").unwrap())
+        Some(&ManifestHash::new(current_unified_hash.clone()).unwrap())
     );
 
     let manifest = store
@@ -447,15 +697,12 @@ async fn load_at_slack_fold_preserves_canonical_fields_and_uses_enabled_wins() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        manifest.manifest().source,
-        ManifestSource::RegistryInstalled
-    );
+    assert_eq!(manifest.manifest().source, ManifestSource::HostBundled);
     assert_eq!(
         manifest.manifest_hash(),
-        Some(&ManifestHash::new("sha256:unified-slack").unwrap())
+        Some(&ManifestHash::new(current_unified_hash).unwrap())
     );
-    assert_eq!(manifest.removal_cleanup_requirements(), &[cleanup]);
+    assert_eq!(manifest.removal_cleanup_requirements(), cleanup.as_slice());
     assert!(
         store
             .get_manifest(&ExtensionId::new("slack_bot").unwrap())
@@ -472,6 +719,114 @@ async fn load_at_slack_fold_preserves_canonical_fields_and_uses_enabled_wins() {
     let after_second = backend.get(&state_path).await.unwrap().unwrap();
     assert_eq!(after_second.version, after_first.version);
     assert_eq!(after_second.entry.body, after_first.entry.body);
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+#[tokio::test]
+async fn load_at_never_folds_retired_slack_bot_without_exact_manifest_authority() {
+    let retired_hash = "sha256:retired-slack";
+    let installation = || {
+        named_installation(
+            "retired-slack",
+            "slack_bot",
+            ExtensionActivationState::Enabled,
+            InstallationOwner::Tenant,
+            Some(retired_hash),
+            Vec::new(),
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+            ExtensionHealthStatus::Healthy,
+        )
+    };
+    let manifest = |raw_toml: String, source, hash: &str| WireManifestRecord {
+        raw_toml,
+        source,
+        manifest_hash: Some(ManifestHash::new(hash).expect("test manifest hash")),
+        removal_cleanup_requirements: Vec::new(),
+    };
+    let valid = || {
+        manifest(
+            current_manifest_toml("slack_bot"),
+            WireManifestSource::HostBundled,
+            retired_hash,
+        )
+    };
+    let strict_invalid = current_manifest_toml("slack_bot").replace(
+        "trust = \"third_party\"\n",
+        "trust = \"third_party\"\nunknown_retired_field = true\n",
+    );
+    let cases = [
+        (
+            "orphan installation",
+            WireState {
+                manifests: Vec::new(),
+                installations: vec![installation()],
+            },
+        ),
+        (
+            "duplicate manifests",
+            WireState {
+                manifests: vec![valid(), valid()],
+                installations: vec![installation()],
+            },
+        ),
+        (
+            "strict-invalid current manifest",
+            WireState {
+                manifests: vec![manifest(
+                    strict_invalid,
+                    WireManifestSource::HostBundled,
+                    retired_hash,
+                )],
+                installations: vec![installation()],
+            },
+        ),
+        (
+            "non-host-bundled manifest",
+            WireState {
+                manifests: vec![manifest(
+                    current_manifest_toml("slack_bot"),
+                    WireManifestSource::RegistryInstalled,
+                    retired_hash,
+                )],
+                installations: vec![installation()],
+            },
+        ),
+        (
+            "mismatched installation hash",
+            WireState {
+                manifests: vec![valid()],
+                installations: vec![named_installation(
+                    "retired-slack",
+                    "slack_bot",
+                    ExtensionActivationState::Enabled,
+                    InstallationOwner::Tenant,
+                    Some("sha256:different-retired-slack"),
+                    Vec::new(),
+                    "2026-01-01T00:00:00Z",
+                    "2026-01-01T00:00:00Z",
+                    ExtensionHealthStatus::Healthy,
+                )],
+            },
+        ),
+    ];
+
+    for (case, state) in cases {
+        let backend = Arc::new(InMemoryBackend::new());
+        let state_path = test_state_path();
+        let seeded = seed_wire_state(&backend, &state_path, &state).await;
+        let filesystem: Arc<dyn RootFilesystem> = backend.clone();
+
+        assert!(
+            FilesystemExtensionInstallationStore::load_at(filesystem, state_path.clone())
+                .await
+                .is_err(),
+            "{case} must fail closed"
+        );
+        let after = backend.get(&state_path).await.unwrap().unwrap();
+        assert_eq!(after.version, seeded.version, "{case} changed the version");
+        assert_eq!(after.entry.body, seeded.entry.body, "{case} changed bytes");
+    }
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
@@ -732,6 +1087,7 @@ async fn load_at_never_deletes_orphan_slack_user_installation_without_provenance
     assert_eq!(after.entry.body, seeded.entry.body);
 }
 
+#[cfg(feature = "slack-v2-host-beta")]
 #[tokio::test]
 async fn load_at_slack_fold_uses_tenant_dominance_and_canonical_mixed_policy_without_enabled() {
     let backend = Arc::new(InMemoryBackend::new());
@@ -774,6 +1130,7 @@ async fn load_at_slack_fold_uses_tenant_dominance_and_canonical_mixed_policy_wit
     );
 }
 
+#[cfg(feature = "slack-v2-host-beta")]
 #[tokio::test]
 async fn load_at_slack_fold_propagates_credential_conflict_without_changes() {
     let backend = Arc::new(InMemoryBackend::new());
@@ -1010,7 +1367,7 @@ async fn load_at_non_cas_backend_normalizes_in_memory_without_putting() {
     let store = FilesystemExtensionInstallationStore::load_at_with_policy(
         filesystem,
         state_path.clone(),
-        NonCasLoadPolicy::AllowReadOnlyLocalDev,
+        NonCasLoadPolicy::AllowNonCasLocalDev,
     )
     .await
     .expect("non-CAS backend uses the normalized snapshot in memory");
@@ -1026,6 +1383,175 @@ async fn load_at_non_cas_backend_normalizes_in_memory_without_putting() {
     let after = backend.get(&state_path).await.unwrap().unwrap();
     assert_eq!(after.version, seeded.version);
     assert_eq!(after.entry.body, seeded.entry.body);
+}
+
+#[tokio::test]
+async fn opted_in_local_non_cas_store_persists_install_activate_and_remove() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let state_path = test_state_path();
+    let non_cas = Arc::new(NonCasFilesystem::new_with_unknown_capabilities(
+        backend.clone(),
+    ));
+    let filesystem: Arc<dyn RootFilesystem> = non_cas.clone();
+    let store = FilesystemExtensionInstallationStore::load_at_with_policy(
+        filesystem,
+        state_path.clone(),
+        NonCasLoadPolicy::AllowNonCasLocalDev,
+    )
+    .await
+    .expect("local compatibility store loads");
+    let installation_id = ExtensionInstallationId::new("local-tools").unwrap();
+    let extension_id = ExtensionId::new("local-tools").unwrap();
+
+    store
+        .upsert_manifest_and_installation(
+            manifest_record_for("local-tools"),
+            named_installation(
+                "local-tools",
+                "local-tools",
+                ExtensionActivationState::Installed,
+                InstallationOwner::Tenant,
+                None,
+                Vec::new(),
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:00:00Z",
+                ExtensionHealthStatus::Healthy,
+            ),
+        )
+        .await
+        .expect("local install persists");
+    store
+        .set_activation_state(&installation_id, ExtensionActivationState::Enabled)
+        .await
+        .expect("local activation persists after the first write");
+
+    let reloaded = FilesystemExtensionInstallationStore::load_at_with_policy(
+        non_cas,
+        state_path.clone(),
+        NonCasLoadPolicy::AllowNonCasLocalDev,
+    )
+    .await
+    .expect("activated local state reloads");
+    assert_eq!(
+        reloaded
+            .get_installation(&installation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .activation_state(),
+        ExtensionActivationState::Enabled
+    );
+    reloaded
+        .delete_installation(&installation_id)
+        .await
+        .expect("local installation removal persists");
+    reloaded
+        .delete_manifest(&extension_id)
+        .await
+        .expect("local manifest removal persists");
+
+    let final_store = FilesystemExtensionInstallationStore::load_at_with_policy(
+        backend,
+        state_path,
+        NonCasLoadPolicy::AllowNonCasLocalDev,
+    )
+    .await
+    .expect("removed local state reloads");
+    assert!(final_store.list_manifests().await.unwrap().is_empty());
+    assert!(final_store.list_installations().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn post_migration_store_rejects_new_retired_slack_state() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let state_path = test_state_path();
+    let filesystem: Arc<dyn RootFilesystem> = backend.clone();
+    let store = FilesystemExtensionInstallationStore::load_at(filesystem, state_path.clone())
+        .await
+        .expect("empty post-migration store loads");
+
+    for retired_id in ["slack_bot", "slack_user"] {
+        let error = store
+            .upsert_manifest_and_installation(
+                manifest_record_for(retired_id),
+                named_installation(
+                    retired_id,
+                    retired_id,
+                    ExtensionActivationState::Installed,
+                    InstallationOwner::Tenant,
+                    None,
+                    Vec::new(),
+                    "2026-01-01T00:00:00Z",
+                    "2026-01-01T00:00:00Z",
+                    ExtensionHealthStatus::Healthy,
+                ),
+            )
+            .await
+            .expect_err("retired extension ids cannot be reintroduced");
+        assert!(error.to_string().contains("retired Slack extension ids"));
+    }
+
+    assert!(backend.get(&state_path).await.unwrap().is_none());
+    assert!(store.list_manifests().await.unwrap().is_empty());
+    assert!(store.list_installations().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn cancelled_local_mutation_still_publishes_its_durable_commit() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let state_path = test_state_path();
+    let non_cas = Arc::new(NonCasFilesystem::new(backend));
+    let filesystem: Arc<dyn RootFilesystem> = non_cas.clone();
+    let store = Arc::new(
+        FilesystemExtensionInstallationStore::load_at_with_policy(
+            filesystem,
+            state_path,
+            NonCasLoadPolicy::AllowNonCasLocalDev,
+        )
+        .await
+        .expect("local compatibility store loads"),
+    );
+    non_cas.pause_after_next_put();
+    let caller_store = Arc::clone(&store);
+    let caller = tokio::spawn(async move {
+        caller_store
+            .upsert_manifest_and_installation(
+                manifest_record_for("cancelled-local"),
+                named_installation(
+                    "cancelled-local",
+                    "cancelled-local",
+                    ExtensionActivationState::Installed,
+                    InstallationOwner::Tenant,
+                    None,
+                    Vec::new(),
+                    "2026-01-01T00:00:00Z",
+                    "2026-01-01T00:00:00Z",
+                    ExtensionHealthStatus::Healthy,
+                ),
+            )
+            .await
+    });
+
+    non_cas.wait_for_paused_put().await;
+    caller.abort();
+    non_cas.release_paused_put();
+    assert!(caller.await.is_err(), "the requesting task was cancelled");
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if store
+                .get_manifest(&ExtensionId::new("cancelled-local").unwrap())
+                .await
+                .unwrap()
+                .is_some()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("store-owned worker publishes after caller cancellation");
 }
 
 #[tokio::test]
@@ -1149,6 +1675,200 @@ prompt_doc_ref = "prompts/gmail/echo.md"
             .expect("installation read")
             .is_some()
     );
+}
+
+#[tokio::test]
+async fn independent_store_instances_preserve_each_others_successful_updates() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let state_path = test_state_path();
+    let first_filesystem: Arc<dyn RootFilesystem> = backend.clone();
+    let second_filesystem: Arc<dyn RootFilesystem> = backend.clone();
+    let first = FilesystemExtensionInstallationStore::load_at(first_filesystem, state_path.clone())
+        .await
+        .expect("first store loads");
+    let second =
+        FilesystemExtensionInstallationStore::load_at(second_filesystem, state_path.clone())
+            .await
+            .expect("second store loads from the same absent snapshot");
+
+    first
+        .upsert_manifest_and_installation(
+            manifest_record_for("first-tools"),
+            named_installation(
+                "first-tools",
+                "first-tools",
+                ExtensionActivationState::Installed,
+                InstallationOwner::Tenant,
+                None,
+                Vec::new(),
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:00:00Z",
+                ExtensionHealthStatus::Healthy,
+            ),
+        )
+        .await
+        .expect("first update persists");
+    second
+        .upsert_manifest_and_installation(
+            manifest_record_for("second-tools"),
+            named_installation(
+                "second-tools",
+                "second-tools",
+                ExtensionActivationState::Installed,
+                InstallationOwner::Tenant,
+                None,
+                Vec::new(),
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:00:00Z",
+                ExtensionHealthStatus::Healthy,
+            ),
+        )
+        .await
+        .expect("second update persists without overwriting the first");
+
+    let reloaded = FilesystemExtensionInstallationStore::load_at(backend, state_path)
+        .await
+        .expect("combined state reloads");
+    let installation_ids = reloaded
+        .list_installations()
+        .await
+        .expect("list combined installations")
+        .into_iter()
+        .map(|installation| installation.installation_id().as_str().to_string())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        installation_ids,
+        BTreeSet::from(["first-tools".to_string(), "second-tools".to_string()])
+    );
+    let manifest_ids = reloaded
+        .list_manifests()
+        .await
+        .expect("list combined manifests")
+        .into_iter()
+        .map(|manifest| manifest.extension_id().as_str().to_string())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        manifest_ids,
+        BTreeSet::from(["first-tools".to_string(), "second-tools".to_string()])
+    );
+}
+
+#[tokio::test]
+async fn same_store_serializes_a_queued_noop_behind_a_paused_cas_commit() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let state_path = test_state_path();
+    let paused = Arc::new(PausedCasFilesystem::new(backend.clone()));
+    let filesystem: Arc<dyn RootFilesystem> = paused.clone();
+    let store = Arc::new(
+        FilesystemExtensionInstallationStore::load_at(filesystem, state_path.clone())
+            .await
+            .expect("CAS store loads"),
+    );
+    let manifest = manifest_record_for("queued-tools");
+    let installation = named_installation(
+        "queued-tools",
+        "queued-tools",
+        ExtensionActivationState::Installed,
+        InstallationOwner::Tenant,
+        None,
+        Vec::new(),
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:00Z",
+        ExtensionHealthStatus::Healthy,
+    );
+
+    paused.pause_after_next_put();
+    let first_store = Arc::clone(&store);
+    let first_manifest = manifest.clone();
+    let first_installation = installation.clone();
+    let first = tokio::spawn(async move {
+        first_store
+            .upsert_manifest_and_installation(first_manifest, first_installation)
+            .await
+    });
+    paused.wait_for_paused_put().await;
+
+    let second_store = Arc::clone(&store);
+    let second = tokio::spawn(async move {
+        second_store
+            .upsert_manifest_and_installation(manifest, installation)
+            .await
+    });
+    tokio::task::yield_now().await;
+    paused.release_paused_put();
+
+    first.await.unwrap().expect("first mutation succeeds");
+    second.await.unwrap().expect("queued no-op succeeds");
+    assert!(
+        store
+            .get_manifest(&ExtensionId::new("queued-tools").unwrap())
+            .await
+            .unwrap()
+            .is_some(),
+        "the published projection retains the first committed mutation"
+    );
+    let persisted: WireState = serde_json::from_slice(
+        &backend
+            .get(&state_path)
+            .await
+            .unwrap()
+            .expect("persisted state")
+            .entry
+            .body,
+    )
+    .unwrap();
+    assert!(
+        persisted
+            .manifests
+            .iter()
+            .any(|record| manifest_id(&record.raw_toml).as_deref() == Some("queued-tools"))
+    );
+}
+
+#[tokio::test]
+async fn failed_persistence_does_not_publish_uncommitted_state_in_memory() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let filesystem: Arc<dyn RootFilesystem> = Arc::new(WriteFailureFilesystem {
+        inner: backend.clone(),
+    });
+    let state_path = test_state_path();
+    let store = FilesystemExtensionInstallationStore::load_at(filesystem, state_path.clone())
+        .await
+        .expect("empty store loads without a write");
+
+    let error = store
+        .upsert_manifest_and_installation(
+            manifest_record_for("uncommitted-tools"),
+            named_installation(
+                "uncommitted-tools",
+                "uncommitted-tools",
+                ExtensionActivationState::Installed,
+                InstallationOwner::Tenant,
+                None,
+                Vec::new(),
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:00:00Z",
+                ExtensionHealthStatus::Healthy,
+            ),
+        )
+        .await
+        .expect_err("injected persistence failure must surface");
+
+    assert_eq!(
+        error,
+        ExtensionInstallationError::InvalidInstallation {
+            reason: INSTALLATION_STATE_IO_ERROR.to_string(),
+        }
+    );
+    assert!(
+        store.list_manifests().await.unwrap().is_empty(),
+        "a failed write must not leak the manifest into the process-local projection"
+    );
+    assert!(
+        store.list_installations().await.unwrap().is_empty(),
+        "a failed write must not leak the installation into the process-local projection"
+    );
+    assert!(backend.get(&state_path).await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -1524,6 +2244,18 @@ fn test_manifest_record() -> ExtensionManifestRecord {
     .unwrap()
 }
 
+fn manifest_record_for(extension_id: &str) -> ExtensionManifestRecord {
+    let contracts = product_extension_host_api_contract_registry().expect("host api contracts");
+    ExtensionManifestRecord::from_toml(
+        current_manifest_toml(extension_id),
+        ManifestSource::HostBundled,
+        &HostPortCatalog::empty(),
+        None,
+        &contracts,
+    )
+    .expect("valid test manifest")
+}
+
 fn stored_installation(
     installation_id: &str,
     activation_state: ExtensionActivationState,
@@ -1675,8 +2407,14 @@ fn structural_manifest_toml(extension_id: &str) -> String {
 
 fn test_cleanup_requirement() -> ExtensionRemovalCleanupRequirement {
     ExtensionRemovalCleanupRequirement::channel_connection(
-        ExtensionRemovalCleanupAdapterId::new("slack.connection").unwrap(),
-        ExtensionRemovalChannelId::new("slack").unwrap(),
+        ExtensionRemovalCleanupAdapterId::new(
+            crate::extension_host::extension_removal_cleanup::SLACK_PERSONAL_CONNECTION_CLEANUP_ADAPTER_ID,
+        )
+        .unwrap(),
+        ExtensionRemovalChannelId::new(
+            crate::extension_host::extension_removal_cleanup::SLACK_EXTENSION_REMOVAL_CHANNEL_ID,
+        )
+        .unwrap(),
     )
 }
 
@@ -1726,7 +2464,23 @@ fn named_installation(
     .unwrap()
 }
 
-fn slack_wire_state(installations: Vec<ExtensionInstallation>) -> WireState {
+#[cfg(feature = "slack-v2-host-beta")]
+fn slack_wire_state(mut installations: Vec<ExtensionInstallation>) -> WireState {
+    let unified_manifest = super::bundled_slack_wire_manifest().unwrap();
+    let unified_id = ExtensionId::new("slack").unwrap();
+    let unified_ref =
+        ExtensionManifestRef::new(unified_id.clone(), unified_manifest.manifest_hash.clone());
+    for installation in &mut installations {
+        if installation.extension_id() == &unified_id {
+            *installation = super::rebuild_installation(
+                installation,
+                unified_id.clone(),
+                unified_ref.clone(),
+                installation.activation_state(),
+            )
+            .unwrap();
+        }
+    }
     WireState {
         manifests: vec![
             WireManifestRecord {
@@ -1735,12 +2489,7 @@ fn slack_wire_state(installations: Vec<ExtensionInstallation>) -> WireState {
                 manifest_hash: Some(ManifestHash::new("sha256:retired-slack").unwrap()),
                 removal_cleanup_requirements: Vec::new(),
             },
-            WireManifestRecord {
-                raw_toml: current_manifest_toml("slack"),
-                source: WireManifestSource::HostBundled,
-                manifest_hash: Some(ManifestHash::new("sha256:unified-slack").unwrap()),
-                removal_cleanup_requirements: Vec::new(),
-            },
+            unified_manifest,
         ],
         installations,
     }
@@ -1837,22 +2586,120 @@ impl RootFilesystem for ConflictOnceFilesystem {
 
 struct NonCasFilesystem {
     inner: Arc<InMemoryBackend>,
+    advertise_unknown_capabilities: bool,
     puts: AtomicUsize,
+    pause_next_put: AtomicBool,
+    put_paused: tokio::sync::Notify,
+    put_release: tokio::sync::Notify,
+}
+
+struct PausedCasFilesystem {
+    inner: Arc<InMemoryBackend>,
+    pause_next_put: AtomicBool,
+    put_paused: tokio::sync::Notify,
+    put_release: tokio::sync::Notify,
+}
+
+impl PausedCasFilesystem {
+    fn new(inner: Arc<InMemoryBackend>) -> Self {
+        Self {
+            inner,
+            pause_next_put: AtomicBool::new(false),
+            put_paused: tokio::sync::Notify::new(),
+            put_release: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn pause_after_next_put(&self) {
+        self.pause_next_put.store(true, Ordering::SeqCst);
+    }
+
+    async fn wait_for_paused_put(&self) {
+        self.put_paused.notified().await;
+    }
+
+    fn release_paused_put(&self) {
+        self.put_release.notify_one();
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for PausedCasFilesystem {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        let result = self.inner.put(path, entry, cas).await;
+        if result.is_ok() && self.pause_next_put.swap(false, Ordering::SeqCst) {
+            self.put_paused.notify_one();
+            self.put_release.notified().await;
+        }
+        result
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
 }
 
 impl NonCasFilesystem {
     fn new(inner: Arc<InMemoryBackend>) -> Self {
         Self {
             inner,
+            advertise_unknown_capabilities: false,
             puts: AtomicUsize::new(0),
+            pause_next_put: AtomicBool::new(false),
+            put_paused: tokio::sync::Notify::new(),
+            put_release: tokio::sync::Notify::new(),
         }
+    }
+
+    fn new_with_unknown_capabilities(inner: Arc<InMemoryBackend>) -> Self {
+        Self {
+            advertise_unknown_capabilities: true,
+            ..Self::new(inner)
+        }
+    }
+
+    fn pause_after_next_put(&self) {
+        self.pause_next_put.store(true, Ordering::SeqCst);
+    }
+
+    async fn wait_for_paused_put(&self) {
+        self.put_paused.notified().await;
+    }
+
+    fn release_paused_put(&self) {
+        self.put_release.notify_one();
     }
 }
 
 #[async_trait]
 impl RootFilesystem for NonCasFilesystem {
     fn capabilities(&self) -> BackendCapabilities {
-        BackendCapabilities::bytes_only()
+        if self.advertise_unknown_capabilities {
+            BackendCapabilities::empty()
+        } else {
+            BackendCapabilities::bytes_only()
+        }
     }
 
     async fn put(
@@ -1862,7 +2709,12 @@ impl RootFilesystem for NonCasFilesystem {
         cas: CasExpectation,
     ) -> Result<RecordVersion, FilesystemError> {
         self.puts.fetch_add(1, Ordering::SeqCst);
-        self.inner.put(path, entry, cas).await
+        let result = self.inner.put(path, entry, cas).await;
+        if result.is_ok() && self.pause_next_put.swap(false, Ordering::SeqCst) {
+            self.put_paused.notify_one();
+            self.put_release.notified().await;
+        }
+        result
     }
 
     async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {

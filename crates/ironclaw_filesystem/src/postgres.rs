@@ -1,4 +1,4 @@
-// arch-exempt: large_file, bounded direct-child listing stays with Postgres backend parity, plan #6061
+// arch-exempt: large_file, bounded direct-child listing still awaits extraction into the shared database parity helper, plan #4088
 use std::{collections::BTreeMap, error::Error, time::Duration};
 #[cfg(feature = "postgres")]
 use std::{collections::HashSet, sync::OnceLock};

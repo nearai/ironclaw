@@ -10,26 +10,63 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::{
     CasApply, CasUpdateError, Entry, FilesystemError, RootFilesystem, cas_update_root,
 };
-use ironclaw_host_api::{ExtensionId, VirtualPath};
+use ironclaw_host_api::{ExtensionId, VirtualPath, sha256_digest_token};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::sync::{RwLock, mpsc, oneshot};
 
 use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 
 const DEFAULT_INSTALLATION_STATE_PATH: &str = "/system/extensions/.installations/state.json";
 const INSTALLATION_STATE_IO_ERROR: &str = "failed to load extension installation state";
+const MUTATION_QUEUE_CAPACITY: usize = 32;
+const PRE_TRAIN_A_SLACK_MANIFEST_HASH: &str =
+    "sha256:851f9f08a3d11bd2f1dfbc0318c6e6f642442e4720c4edbe8b553f7343e63d0f";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NonCasLoadPolicy {
+    /// Hosted and durable backends must provide versioned compare-and-swap.
     RequireCas,
-    AllowReadOnlyLocalDev,
+    /// Local-development-only compatibility for the byte filesystem. Mutations
+    /// are serialized by one process-local worker and persisted with atomic
+    /// file replacement; this is not a multi-process coordination contract.
+    AllowNonCasLocalDev,
 }
 
 pub(crate) struct FilesystemExtensionInstallationStore {
-    filesystem: std::sync::Arc<dyn RootFilesystem>,
-    state_path: VirtualPath,
+    published: std::sync::Arc<RwLock<PublishedState>>,
+    mutation_tx: mpsc::Sender<MutationRequest>,
+}
+
+struct PublishedState {
+    generation: u64,
     inner: InMemoryExtensionInstallationStore,
-    save_lock: Mutex<()>,
+}
+
+struct PublishedStateUpdate {
+    generation: u64,
+    state: WireState,
+}
+
+struct MutationRequest {
+    mutation: WireStateMutation,
+    result_tx: oneshot::Sender<Result<(), ExtensionInstallationError>>,
+}
+
+#[derive(Clone, Copy)]
+enum MutationMode {
+    Cas,
+    LocalNonCas,
+}
+
+#[derive(Clone)]
+enum WireStateMutation {
+    UpsertManifest(Box<ExtensionManifestRecord>),
+    UpsertManifestAndInstallation(Box<(ExtensionManifestRecord, ExtensionInstallation)>),
+    UpsertInstallation(Box<ExtensionInstallation>),
+    SetActivationState(ExtensionInstallationId, ExtensionActivationState),
+    DeleteInstallation(ExtensionInstallationId),
+    DeleteManifest(ExtensionId),
+    UpdateHealth(ExtensionInstallationId, ExtensionHealthSnapshot),
 }
 
 impl FilesystemExtensionInstallationStore {
@@ -46,31 +83,45 @@ impl FilesystemExtensionInstallationStore {
         non_cas_policy: NonCasLoadPolicy,
     ) -> Result<Self, ExtensionInstallationError> {
         let inner = InMemoryExtensionInstallationStore::default();
-        let state = match load_normalized_snapshot(filesystem.as_ref(), &state_path).await {
-            Ok(state) => state,
-            Err(CasUpdateError::Apply(error)) => return Err(error),
-            Err(error @ CasUpdateError::CasUnsupported) => {
-                if non_cas_policy == NonCasLoadPolicy::AllowReadOnlyLocalDev {
-                    load_normalized_snapshot_without_cas(filesystem.as_ref(), &state_path).await?
-                } else {
+        let (state, mutation_mode) =
+            match load_normalized_snapshot(filesystem.as_ref(), &state_path).await {
+                Ok(state) => (state, MutationMode::Cas),
+                Err(CasUpdateError::Apply(error)) => return Err(error),
+                Err(error @ CasUpdateError::CasUnsupported) => {
+                    if non_cas_policy == NonCasLoadPolicy::AllowNonCasLocalDev {
+                        (
+                            load_normalized_snapshot_without_cas(filesystem.as_ref(), &state_path)
+                                .await?,
+                            MutationMode::LocalNonCas,
+                        )
+                    } else {
+                        return Err(map_load_backend_error(&state_path, &error));
+                    }
+                }
+                Err(error) => {
                     return Err(map_load_backend_error(&state_path, &error));
                 }
-            }
-            Err(error) => {
-                return Err(map_load_backend_error(&state_path, &error));
-            }
-        };
+            };
         if let Some(state) = state {
             // The CAS outcome comes from the winning snapshot. Loading only
             // after the bounded update finishes prevents a losing attempt from
             // exposing stale or partially normalized state in memory.
             state.load_into(&inner).await?;
         }
-        Ok(Self {
+        let published = std::sync::Arc::new(RwLock::new(PublishedState {
+            generation: 0,
+            inner,
+        }));
+        let mutation_tx = spawn_mutation_worker(
             filesystem,
             state_path,
-            inner,
-            save_lock: Mutex::new(()),
+            std::sync::Arc::clone(&published),
+            mutation_mode,
+            non_cas_policy == NonCasLoadPolicy::AllowNonCasLocalDev,
+        );
+        Ok(Self {
+            published,
+            mutation_tx,
         })
     }
 
@@ -78,9 +129,223 @@ impl FilesystemExtensionInstallationStore {
         default_installation_state_path()
     }
 
-    async fn save_snapshot(&self) -> Result<(), ExtensionInstallationError> {
-        let state = WireState::from_store(&self.inner).await?;
-        write_snapshot(&self.filesystem, &self.state_path, &state).await
+    async fn current_inner(&self) -> InMemoryExtensionInstallationStore {
+        self.published.read().await.inner.clone()
+    }
+
+    async fn apply_mutation(
+        &self,
+        mutation: WireStateMutation,
+    ) -> Result<(), ExtensionInstallationError> {
+        let (result_tx, result_rx) = oneshot::channel();
+        self.mutation_tx
+            .send(MutationRequest {
+                mutation,
+                result_tx,
+            })
+            .await
+            .map_err(|_| invalid_installation_error(INSTALLATION_STATE_IO_ERROR))?;
+        result_rx
+            .await
+            .map_err(|_| invalid_installation_error(INSTALLATION_STATE_IO_ERROR))?
+    }
+}
+
+fn spawn_mutation_worker(
+    filesystem: std::sync::Arc<dyn RootFilesystem>,
+    state_path: VirtualPath,
+    published: std::sync::Arc<RwLock<PublishedState>>,
+    initial_mode: MutationMode,
+    allow_non_cas_local_dev: bool,
+) -> mpsc::Sender<MutationRequest> {
+    let (mutation_tx, mut mutation_rx) = mpsc::channel::<MutationRequest>(MUTATION_QUEUE_CAPACITY);
+    tokio::spawn(async move {
+        let mut generation = 0_u64;
+        let mut mode = initial_mode;
+        while let Some(request) = mutation_rx.recv().await {
+            let result = match generation.checked_add(1) {
+                Some(next_generation) => {
+                    generation = next_generation;
+                    let update = match mode {
+                        MutationMode::Cas => match apply_cas_mutation_request(
+                            filesystem.as_ref(),
+                            &state_path,
+                            request.mutation.clone(),
+                            generation,
+                        )
+                        .await
+                        {
+                            Ok(update) => Ok(update),
+                            Err(CasUpdateError::CasUnsupported) if allow_non_cas_local_dev => {
+                                // Composite/local routers cannot always advertise the
+                                // capabilities of the selected mount. A missing or already
+                                // normalized snapshot can therefore make the load-time CAS
+                                // probe a no-op. Discover the limitation on the first real
+                                // mutation, switch this store-owned worker once, and keep all
+                                // later local writes serialized through it.
+                                mode = MutationMode::LocalNonCas;
+                                apply_local_mutation_request(
+                                    filesystem.as_ref(),
+                                    &state_path,
+                                    request.mutation,
+                                    generation,
+                                )
+                                .await
+                            }
+                            Err(error) => Err(map_store_cas_error(&state_path, error)),
+                        },
+                        MutationMode::LocalNonCas => {
+                            apply_local_mutation_request(
+                                filesystem.as_ref(),
+                                &state_path,
+                                request.mutation,
+                                generation,
+                            )
+                            .await
+                        }
+                    };
+                    match update {
+                        Ok(update) => publish_update(&published, update).await,
+                        Err(error) => Err(error),
+                    }
+                }
+                None => Err(invalid_installation_error(
+                    "extension mutation generation overflowed",
+                )),
+            };
+            let _send_result = request.result_tx.send(result);
+        }
+    });
+    mutation_tx
+}
+
+async fn apply_cas_mutation_request(
+    filesystem: &dyn RootFilesystem,
+    state_path: &VirtualPath,
+    mutation: WireStateMutation,
+    generation: u64,
+) -> Result<PublishedStateUpdate, CasUpdateError<ExtensionInstallationError>> {
+    cas_update_root(
+        filesystem,
+        state_path,
+        decode_wire_state,
+        encode_wire_state,
+        |current| {
+            let mutation = mutation.clone();
+            async move {
+                let current = normalize_wire_state(current.unwrap_or_default())?;
+                let candidate = InMemoryExtensionInstallationStore::default();
+                current.load_into(&candidate).await?;
+                mutation.apply_to(&candidate).await?;
+                let state = WireState::from_store(&candidate).await?;
+                Ok(CasApply::new(
+                    state.clone(),
+                    PublishedStateUpdate { generation, state },
+                ))
+            }
+        },
+    )
+    .await
+}
+
+async fn publish_update(
+    published: &RwLock<PublishedState>,
+    update: PublishedStateUpdate,
+) -> Result<(), ExtensionInstallationError> {
+    // Build the replacement projection before taking the publication lock.
+    // Backend I/O and validation therefore never park readers behind the
+    // store-owned mutation worker.
+    let replacement = InMemoryExtensionInstallationStore::default();
+    update.state.load_into(&replacement).await?;
+    let mut current = published.write().await;
+    if update.generation > current.generation {
+        *current = PublishedState {
+            generation: update.generation,
+            inner: replacement,
+        };
+    }
+    Ok(())
+}
+
+async fn apply_local_mutation_request(
+    filesystem: &dyn RootFilesystem,
+    state_path: &VirtualPath,
+    mutation: WireStateMutation,
+    generation: u64,
+) -> Result<PublishedStateUpdate, ExtensionInstallationError> {
+    let current = match filesystem
+        .get(state_path)
+        .await
+        .map_err(|error| map_filesystem_load_error(state_path, &error))?
+    {
+        Some(versioned) => decode_wire_state(&versioned.entry.body)?,
+        None => WireState::default(),
+    };
+    let current = normalize_wire_state(current)?;
+    let candidate = InMemoryExtensionInstallationStore::default();
+    current.load_into(&candidate).await?;
+    mutation.apply_to(&candidate).await?;
+    let state = WireState::from_store(&candidate).await?;
+    write_snapshot_without_cas(filesystem, state_path, &state).await?;
+    Ok(PublishedStateUpdate { generation, state })
+}
+
+impl WireStateMutation {
+    async fn apply_to(
+        &self,
+        store: &InMemoryExtensionInstallationStore,
+    ) -> Result<(), ExtensionInstallationError> {
+        self.reject_retired_slack_write()?;
+        match self {
+            Self::UpsertManifest(manifest) => {
+                store.upsert_manifest(manifest.as_ref().clone()).await
+            }
+            Self::UpsertManifestAndInstallation(plan) => {
+                store
+                    .upsert_manifest_and_installation(plan.0.clone(), plan.1.clone())
+                    .await
+            }
+            Self::UpsertInstallation(installation) => {
+                store
+                    .upsert_installation(installation.as_ref().clone())
+                    .await
+            }
+            Self::SetActivationState(installation_id, state) => {
+                store.set_activation_state(installation_id, *state).await
+            }
+            Self::DeleteInstallation(installation_id) => {
+                store.delete_installation(installation_id).await
+            }
+            Self::DeleteManifest(extension_id) => store.delete_manifest(extension_id).await,
+            Self::UpdateHealth(installation_id, health) => {
+                store.update_health(installation_id, health.clone()).await
+            }
+        }
+    }
+
+    fn reject_retired_slack_write(&self) -> Result<(), ExtensionInstallationError> {
+        let is_retired = |extension_id: &str| matches!(extension_id, "slack_bot" | "slack_user"); // taxonomy-allow: retired-normal-write-rejection
+        let writes_retired_id = match self {
+            Self::UpsertManifest(manifest) => is_retired(manifest.manifest().id.as_str()),
+            Self::UpsertManifestAndInstallation(pair) => {
+                is_retired(pair.0.manifest().id.as_str())
+                    || is_retired(pair.1.extension_id().as_str())
+            }
+            Self::UpsertInstallation(installation) => {
+                is_retired(installation.extension_id().as_str())
+            }
+            Self::SetActivationState(installation_id, _)
+            | Self::UpdateHealth(installation_id, _) => is_retired(installation_id.as_str()),
+            // Destructive operations stay available for recovery and cleanup;
+            // unlike the mutations above, they cannot reintroduce retired state.
+            Self::DeleteInstallation(_) | Self::DeleteManifest(_) => false,
+        };
+        if writes_retired_id {
+            return Err(invalid_installation_error(
+                "retired Slack extension ids cannot be written after Train A migration",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -167,8 +432,12 @@ fn map_filesystem_load_error(
     invalid_installation_error(INSTALLATION_STATE_IO_ERROR)
 }
 
-async fn write_snapshot(
-    filesystem: &std::sync::Arc<dyn RootFilesystem>,
+/// Compatibility writer for the explicitly opted-in local-development
+/// backend, which has atomic file replacement but no version CAS. A dedicated
+/// per-store worker serializes these transitions without holding a mutex over
+/// backend I/O. Hosted and CAS-capable backends never enter this path.
+async fn write_snapshot_without_cas(
+    filesystem: &dyn RootFilesystem,
     state_path: &VirtualPath,
     state: &WireState,
 ) -> Result<(), ExtensionInstallationError> {
@@ -180,10 +449,20 @@ async fn write_snapshot(
             tracing::debug!(
                 ?error,
                 state_path = %state_path.as_str(),
-                "extension installation state write failed"
+                "local extension installation state write failed"
             );
             invalid_installation_error(INSTALLATION_STATE_IO_ERROR)
         })
+}
+
+fn map_store_cas_error(
+    state_path: &VirtualPath,
+    error: CasUpdateError<ExtensionInstallationError>,
+) -> ExtensionInstallationError {
+    match error {
+        CasUpdateError::Apply(error) => error,
+        error => map_load_backend_error(state_path, &error),
+    }
 }
 
 fn default_installation_state_path() -> Result<VirtualPath, ExtensionInstallationError> {
@@ -199,23 +478,22 @@ impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
     async fn list_manifests(
         &self,
     ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError> {
-        self.inner.list_manifests().await
+        self.current_inner().await.list_manifests().await
     }
 
     async fn get_manifest(
         &self,
         extension_id: &ExtensionId,
     ) -> Result<Option<ExtensionManifestRecord>, ExtensionInstallationError> {
-        self.inner.get_manifest(extension_id).await
+        self.current_inner().await.get_manifest(extension_id).await
     }
 
     async fn upsert_manifest(
         &self,
         manifest: ExtensionManifestRecord,
     ) -> Result<(), ExtensionInstallationError> {
-        let _guard = self.save_lock.lock().await;
-        self.inner.upsert_manifest(manifest).await?;
-        self.save_snapshot().await
+        self.apply_mutation(WireStateMutation::UpsertManifest(Box::new(manifest)))
+            .await
     }
 
     async fn upsert_manifest_and_installation(
@@ -223,39 +501,45 @@ impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
         manifest: ExtensionManifestRecord,
         installation: ExtensionInstallation,
     ) -> Result<(), ExtensionInstallationError> {
-        let _guard = self.save_lock.lock().await;
-        self.inner
-            .upsert_manifest_and_installation(manifest, installation)
-            .await?;
-        self.save_snapshot().await
+        self.apply_mutation(WireStateMutation::UpsertManifestAndInstallation(Box::new(
+            (manifest, installation),
+        )))
+        .await
     }
 
     async fn list_installations(
         &self,
     ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
-        self.inner.list_installations().await
+        self.current_inner().await.list_installations().await
     }
 
     async fn list_enabled_installations(
         &self,
     ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
-        self.inner.list_enabled_installations().await
+        self.current_inner()
+            .await
+            .list_enabled_installations()
+            .await
     }
 
     async fn get_installation(
         &self,
         installation_id: &ExtensionInstallationId,
     ) -> Result<Option<ExtensionInstallation>, ExtensionInstallationError> {
-        self.inner.get_installation(installation_id).await
+        self.current_inner()
+            .await
+            .get_installation(installation_id)
+            .await
     }
 
     async fn upsert_installation(
         &self,
         installation: ExtensionInstallation,
     ) -> Result<(), ExtensionInstallationError> {
-        let _guard = self.save_lock.lock().await;
-        self.inner.upsert_installation(installation).await?;
-        self.save_snapshot().await
+        self.apply_mutation(WireStateMutation::UpsertInstallation(Box::new(
+            installation,
+        )))
+        .await
     }
 
     async fn set_activation_state(
@@ -263,29 +547,29 @@ impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
         installation_id: &ExtensionInstallationId,
         state: ExtensionActivationState,
     ) -> Result<(), ExtensionInstallationError> {
-        let _guard = self.save_lock.lock().await;
-        self.inner
-            .set_activation_state(installation_id, state)
-            .await?;
-        self.save_snapshot().await
+        self.apply_mutation(WireStateMutation::SetActivationState(
+            installation_id.clone(),
+            state,
+        ))
+        .await
     }
 
     async fn delete_installation(
         &self,
         installation_id: &ExtensionInstallationId,
     ) -> Result<(), ExtensionInstallationError> {
-        let _guard = self.save_lock.lock().await;
-        self.inner.delete_installation(installation_id).await?;
-        self.save_snapshot().await
+        self.apply_mutation(WireStateMutation::DeleteInstallation(
+            installation_id.clone(),
+        ))
+        .await
     }
 
     async fn delete_manifest(
         &self,
         extension_id: &ExtensionId,
     ) -> Result<(), ExtensionInstallationError> {
-        let _guard = self.save_lock.lock().await;
-        self.inner.delete_manifest(extension_id).await?;
-        self.save_snapshot().await
+        self.apply_mutation(WireStateMutation::DeleteManifest(extension_id.clone()))
+            .await
     }
 
     async fn update_health(
@@ -293,9 +577,11 @@ impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
         installation_id: &ExtensionInstallationId,
         health: ExtensionHealthSnapshot,
     ) -> Result<(), ExtensionInstallationError> {
-        let _guard = self.save_lock.lock().await;
-        self.inner.update_health(installation_id, health).await?;
-        self.save_snapshot().await
+        self.apply_mutation(WireStateMutation::UpdateHealth(
+            installation_id.clone(),
+            health,
+        ))
+        .await
     }
 }
 
@@ -303,13 +589,63 @@ impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
 /// to this store: public manifest ingestion remains strict and continues to
 /// reject the retired top-level capability shape.
 fn normalize_wire_state(mut state: WireState) -> Result<WireState, ExtensionInstallationError> {
+    // Capture proof from the original bytes before the generic legacy-shape
+    // converter rewrites the predecessor tools-only Slack manifest. This
+    // digest is the exact host-bundled record shipped immediately before
+    // Train A; no source label or caller-supplied manifest hash is trusted as
+    // proof on its own.
+    let has_exact_pre_train_a_slack = state
+        .manifests
+        .iter()
+        .any(is_exact_pre_train_a_slack_record);
     for manifest in &mut state.manifests {
         normalize_persisted_legacy_manifest(manifest)?;
     }
     remove_retired_slack_user_state(&mut state)?;
-    normalize_retired_slack_identity(&mut state)?;
+    normalize_retired_slack_identity(&mut state, has_exact_pre_train_a_slack)?;
     state.installations = canonicalize_installation_rows(state.installations)?;
     Ok(state)
+}
+
+fn is_exact_pre_train_a_slack_record(record: &WireManifestRecord) -> bool {
+    matches!(record.source, WireManifestSource::HostBundled)
+        && record
+            .manifest_hash
+            .as_ref()
+            .is_some_and(|hash| hash.as_str() == PRE_TRAIN_A_SLACK_MANIFEST_HASH)
+        && is_recognized_pre_train_a_slack_cleanup(&record.removal_cleanup_requirements)
+        && sha256_digest_token(record.raw_toml.as_bytes()) == PRE_TRAIN_A_SLACK_MANIFEST_HASH
+}
+
+fn is_recognized_pre_train_a_slack_cleanup(
+    requirements: &[ExtensionRemovalCleanupRequirement],
+) -> bool {
+    // Older predecessor installations predate persisted cleanup metadata.
+    if requirements.is_empty() {
+        return true;
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    {
+        use crate::extension_host::extension_removal_cleanup::{
+            ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapterId,
+            SLACK_EXTENSION_REMOVAL_CHANNEL_ID, SLACK_PERSONAL_CONNECTION_CLEANUP_ADAPTER_ID,
+        };
+
+        let (Ok(adapter), Ok(channel)) = (
+            ExtensionRemovalCleanupAdapterId::new(SLACK_PERSONAL_CONNECTION_CLEANUP_ADAPTER_ID),
+            ExtensionRemovalChannelId::new(SLACK_EXTENSION_REMOVAL_CHANNEL_ID),
+        ) else {
+            return false;
+        };
+        requirements
+            == [ExtensionRemovalCleanupRequirement::channel_connection(
+                adapter, channel,
+            )]
+    }
+
+    #[cfg(not(feature = "slack-v2-host-beta"))]
+    false
 }
 
 /// Remove the retired internal-only Slack user-tools package in the same
@@ -320,7 +656,7 @@ fn normalize_wire_state(mut state: WireState) -> Result<WireState, ExtensionInst
 fn remove_retired_slack_user_state(
     state: &mut WireState,
 ) -> Result<(), ExtensionInstallationError> {
-    const RETIRED_SLACK_USER_ID: &str = "slack_user";
+    const RETIRED_SLACK_USER_ID: &str = "slack_user"; // taxonomy-allow: retired-forward-migration
 
     let manifest_ids = state
         .manifests
@@ -350,42 +686,17 @@ fn remove_retired_slack_user_state(
     if retired_manifest_indices.is_empty() && retired_installations.is_empty() {
         return Ok(());
     }
-    let retired_manifest_index = match retired_manifest_indices.as_slice() {
-        [index] => *index,
-        [] => {
-            return Err(invalid_installation_error(
-                "retired internal Slack user-tools installations require a matching host-bundled manifest",
-            ));
-        }
-        _ => {
-            return Err(invalid_installation_error(
-                "persisted extension state contains multiple retired Slack user-tools manifests",
-            ));
-        }
-    };
-    let retired_manifest = state.manifests[retired_manifest_index]
-        .clone()
-        .into_manifest_record()?;
-    for installation in retired_installations {
-        if retired_manifest.extension_id() != installation.manifest_ref().extension_id() {
-            return Err(ExtensionInstallationError::ManifestExtensionMismatch {
-                extension_id: installation.extension_id().clone(),
-                manifest_extension_id: installation.manifest_ref().extension_id().clone(),
-            });
-        }
-        match (
-            retired_manifest.manifest_hash(),
-            installation.manifest_ref().manifest_hash(),
-        ) {
-            (Some(registered), Some(referenced)) if registered == referenced => {}
-            (None, None) => {}
-            _ => {
-                return Err(ExtensionInstallationError::ManifestHashMismatch {
-                    extension_id: installation.extension_id().clone(),
-                });
-            }
-        }
-    }
+    let retired_manifest = validated_retired_manifest_authority(
+        state,
+        &manifest_ids,
+        RETIRED_SLACK_USER_ID,
+        "retired internal Slack user-tools",
+    )?;
+    validate_retired_installation_authority(
+        &state.installations,
+        RETIRED_SLACK_USER_ID,
+        &retired_manifest,
+    )?;
 
     #[cfg(not(feature = "slack-v2-host-beta"))]
     return Err(invalid_installation_error(
@@ -406,6 +717,74 @@ fn remove_retired_slack_user_state(
             .retain(|installation| installation.extension_id().as_str() != RETIRED_SLACK_USER_ID);
         Ok(())
     }
+}
+
+/// Resolve the exact manifest that authorizes a destructive/retyping retired
+/// state transition. The caller must do this before removing or replacing any
+/// evidence: final validation cannot detect provenance that was already
+/// discarded from the candidate snapshot.
+fn validated_retired_manifest_authority(
+    state: &WireState,
+    manifest_ids: &[String],
+    retired_id: &str,
+    description: &str,
+) -> Result<ExtensionManifestRecord, ExtensionInstallationError> {
+    let retired_indices = manifest_ids
+        .iter()
+        .enumerate()
+        .filter_map(|(index, id)| (id == retired_id).then_some(index))
+        .collect::<Vec<_>>();
+    let index = match retired_indices.as_slice() {
+        [index] => *index,
+        [] => {
+            return Err(invalid_installation_error(format!(
+                "{description} installations require a matching host-bundled manifest"
+            )));
+        }
+        _ => {
+            return Err(invalid_installation_error(format!(
+                "persisted extension state contains multiple {description} manifests"
+            )));
+        }
+    };
+    let record = &state.manifests[index];
+    if !matches!(record.source, WireManifestSource::HostBundled) {
+        return Err(invalid_installation_error(format!(
+            "{description} manifests must be host-bundled records"
+        )));
+    }
+    record.clone().into_manifest_record()
+}
+
+fn validate_retired_installation_authority(
+    installations: &[ExtensionInstallation],
+    retired_id: &str,
+    retired_manifest: &ExtensionManifestRecord,
+) -> Result<(), ExtensionInstallationError> {
+    for installation in installations
+        .iter()
+        .filter(|installation| installation.extension_id().as_str() == retired_id)
+    {
+        if retired_manifest.extension_id() != installation.manifest_ref().extension_id() {
+            return Err(ExtensionInstallationError::ManifestExtensionMismatch {
+                extension_id: installation.extension_id().clone(),
+                manifest_extension_id: installation.manifest_ref().extension_id().clone(),
+            });
+        }
+        match (
+            retired_manifest.manifest_hash(),
+            installation.manifest_ref().manifest_hash(),
+        ) {
+            (Some(registered), Some(referenced)) if registered == referenced => {}
+            (None, None) => {}
+            _ => {
+                return Err(ExtensionInstallationError::ManifestHashMismatch {
+                    extension_id: installation.extension_id().clone(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn normalize_persisted_legacy_manifest(
@@ -470,8 +849,9 @@ fn normalize_persisted_legacy_manifest(
 
 fn normalize_retired_slack_identity(
     state: &mut WireState,
+    has_exact_pre_train_a_slack: bool,
 ) -> Result<(), ExtensionInstallationError> {
-    const RETIRED_SLACK_ID: &str = "slack_bot";
+    const RETIRED_SLACK_ID: &str = "slack_bot"; // taxonomy-allow: retired-forward-migration
     const UNIFIED_SLACK_ID: &str = "slack";
 
     let manifest_ids = state
@@ -487,43 +867,80 @@ fn normalize_retired_slack_identity(
     if !has_retired_state {
         return Ok(());
     }
-    if manifest_ids
-        .iter()
-        .zip(&state.manifests)
-        .any(|(id, record)| {
-            id == RETIRED_SLACK_ID && !matches!(record.source, WireManifestSource::HostBundled)
-        })
-    {
-        return Err(invalid_installation_error(
-            "retired Slack manifests must be persisted as host-bundled records",
-        ));
-    }
+    let retired_manifest = validated_retired_manifest_authority(
+        state,
+        &manifest_ids,
+        RETIRED_SLACK_ID,
+        "retired Slack",
+    )?;
+    validate_retired_installation_authority(
+        &state.installations,
+        RETIRED_SLACK_ID,
+        &retired_manifest,
+    )?;
 
+    let bundled_unified_record = bundled_slack_wire_manifest()?;
+    bundled_unified_record.clone().into_manifest_record()?;
     let unified_indices = manifest_ids
         .iter()
         .enumerate()
         .filter_map(|(index, id)| (id == UNIFIED_SLACK_ID).then_some(index))
         .collect::<Vec<_>>();
-    let unified_record = match unified_indices.as_slice() {
-        [] => bundled_slack_wire_manifest()?,
-        [index] => state.manifests[*index].clone(),
+    match unified_indices.as_slice() {
+        [] => {
+            if state
+                .installations
+                .iter()
+                .any(|installation| installation.extension_id().as_str() == UNIFIED_SLACK_ID)
+            {
+                return Err(invalid_installation_error(
+                    "unified Slack installations require the exact host-bundled manifest",
+                ));
+            }
+            state.manifests.push(bundled_unified_record.clone());
+        }
+        [index] => {
+            let persisted = &state.manifests[*index];
+            // `source` is persisted data, not proof by itself. Requiring the
+            // complete current binary-bundled record prevents a local or
+            // registry package that claimed the reserved `slack` id from
+            // receiving retired host-owned credentials during the fold.
+            let exact_current = persisted == &bundled_unified_record;
+            let exact_predecessor = has_exact_pre_train_a_slack
+                && matches!(persisted.source, WireManifestSource::HostBundled)
+                && persisted
+                    .manifest_hash
+                    .as_ref()
+                    .is_some_and(|hash| hash.as_str() == PRE_TRAIN_A_SLACK_MANIFEST_HASH)
+                && is_recognized_pre_train_a_slack_cleanup(&persisted.removal_cleanup_requirements);
+            if !exact_current && !exact_predecessor {
+                return Err(invalid_installation_error(
+                    "unified Slack migration target must be an exact recognized host-bundled manifest",
+                ));
+            }
+            let persisted_manifest = persisted.clone().into_manifest_record()?;
+            validate_retired_installation_authority(
+                &state.installations,
+                UNIFIED_SLACK_ID,
+                &persisted_manifest,
+            )?;
+            // A recognized predecessor is authenticated before its raw TOML is
+            // normalized, then retargeted to the current binary bundle. This
+            // is a one-way, enumerated upgrade path rather than a generic
+            // HostBundled-source trust bypass.
+            state.manifests[*index] = bundled_unified_record.clone();
+        }
         _ => {
             return Err(invalid_installation_error(
                 "persisted extension state contains multiple unified Slack manifests",
             ));
         }
-    };
-    // Resolve the target through the strict parser before removing any
-    // retired record. Feature-disabled or malformed target state therefore
-    // fails without producing a destructive candidate snapshot.
-    unified_record.clone().into_manifest_record()?;
-    let unified_id = ExtensionId::new(UNIFIED_SLACK_ID).map_err(invalid_installation_error)?;
-    let unified_ref =
-        ExtensionManifestRef::new(unified_id.clone(), unified_record.manifest_hash.clone());
-
-    if unified_indices.is_empty() {
-        state.manifests.push(unified_record);
     }
+    let unified_id = ExtensionId::new(UNIFIED_SLACK_ID).map_err(invalid_installation_error)?;
+    let unified_ref = ExtensionManifestRef::new(
+        unified_id.clone(),
+        bundled_unified_record.manifest_hash.clone(),
+    );
     let mut retained_manifests = Vec::with_capacity(state.manifests.len());
     for record in state.manifests.drain(..) {
         if persisted_manifest_id(&record.raw_toml)? != RETIRED_SLACK_ID {
@@ -534,7 +951,10 @@ fn normalize_retired_slack_identity(
 
     let mut installations = Vec::with_capacity(state.installations.len());
     for installation in state.installations.drain(..) {
-        if installation.extension_id().as_str() == RETIRED_SLACK_ID {
+        if matches!(
+            installation.extension_id().as_str(),
+            RETIRED_SLACK_ID | UNIFIED_SLACK_ID
+        ) {
             installations.push(rebuild_installation(
                 &installation,
                 unified_id.clone(),
@@ -627,7 +1047,7 @@ fn bundled_slack_wire_manifest() -> Result<WireManifestRecord, ExtensionInstalla
         .ok_or_else(|| invalid_installation_error("unified Slack manifest is unavailable"))?;
     Ok(WireManifestRecord {
         raw_toml: package.manifest_toml.clone(),
-        source: WireManifestSource::from_manifest_source(package.source),
+        source: WireManifestSource::from_manifest_source(package.package.manifest.source),
         manifest_hash: Some(
             ManifestHash::new(slack_manifest_digest()).map_err(invalid_installation_error)?,
         ),

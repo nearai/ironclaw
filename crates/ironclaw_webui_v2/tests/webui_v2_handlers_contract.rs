@@ -1,3 +1,4 @@
+// arch-exempt: large_file, WebUI handler caller contract matrix remains co-located, plan #4088
 //! Caller-level contract tests for the WebChat v2 axum handlers.
 //!
 //! Per `.claude/rules/testing.md` "Test Through the Caller", these tests

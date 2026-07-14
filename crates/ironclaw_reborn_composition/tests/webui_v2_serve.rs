@@ -1,3 +1,4 @@
+// arch-exempt: large_file, composed WebUI HTTP contract matrix remains co-located, plan #4088
 //! Caller-level tests for the Reborn-owned WebChat v2 HTTP gateway
 //! composition (`webui_serve`).
 //!

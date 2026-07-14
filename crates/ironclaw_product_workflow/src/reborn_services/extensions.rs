@@ -250,7 +250,7 @@ fn registry_entry(
     summary: LifecycleExtensionSummary,
     installed_ids: &HashSet<String>,
 ) -> RebornExtensionRegistryEntry {
-    let runtime = summary.runtime_kind.runtime_wire_name().to_string();
+    let runtime = summary.runtime.as_str().to_string();
     let surfaces = wire_surfaces(&summary, None);
     let installed = installed_ids.contains(summary.package_ref.id.as_str());
     RebornExtensionRegistryEntry {
@@ -304,7 +304,7 @@ fn extension_info(
     let install_scope = installed.install_scope;
     let summary = installed.summary;
     let has_external_channel_surface = has_external_channel_surface(&summary);
-    let runtime = summary.runtime_kind.runtime_wire_name().to_string();
+    let runtime = summary.runtime.as_str().to_string();
     let channel_unconnected = has_external_channel_surface
         && connections.get(summary.package_ref.id.as_str()) == Some(&false);
     // A channel extension the calling user has not personally connected (for
@@ -359,10 +359,10 @@ fn wire_surfaces(
     summary
         .surface_kinds
         .iter()
-        .filter_map(|kind| match kind {
-            CapabilitySurfaceKind::Tool => Some(RebornExtensionSurface::Tool),
-            CapabilitySurfaceKind::Auth => Some(RebornExtensionSurface::Auth),
-            CapabilitySurfaceKind::Channel => Some(RebornExtensionSurface::Channel {
+        .map(|kind| match kind {
+            CapabilitySurfaceKind::Tool => RebornExtensionSurface::Tool,
+            CapabilitySurfaceKind::Auth => RebornExtensionSurface::Auth,
+            CapabilitySurfaceKind::Channel => RebornExtensionSurface::Channel {
                 inbound: summary
                     .channel_directions
                     .map(|directions| directions.inbound)
@@ -373,9 +373,7 @@ fn wire_surfaces(
                     .unwrap_or(false),
                 connected,
                 connection: summary.channel_connection.clone(),
-            }),
-            // Reserved kinds have no manifest section yet, so no wire form.
-            CapabilitySurfaceKind::Trigger | CapabilitySurfaceKind::File => None,
+            },
         })
         .collect()
 }
@@ -443,7 +441,9 @@ mod tests {
 
     use async_trait::async_trait;
     use ironclaw_auth::{CredentialAccountId, CredentialAccountProjection};
-    use ironclaw_host_api::{AgentId, CapabilitySurfaceKind, ProjectId, TenantId, UserId};
+    use ironclaw_host_api::{
+        AgentId, CapabilitySurfaceKind, ProjectId, RuntimeKind, TenantId, UserId,
+    };
 
     use super::*;
     use crate::reborn_services::StaticChannelConnectionFacade;
@@ -451,10 +451,10 @@ mod tests {
         ChannelConnectionFacade, ExtensionCredentialStatusRequest,
         ExtensionCredentialSubmitRequest, LifecycleChannelDirections,
         LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
-        LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
-        LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecycleSearchExtensionSummary,
-        ProductWorkflowError, RebornExtensionOnboardingState, RebornServicesError,
-        RebornServicesErrorCode, RebornServicesErrorKind, WebUiAuthenticatedCaller,
+        LifecycleExtensionOnboarding, LifecycleExtensionSource, LifecycleInstalledExtensionSummary,
+        LifecyclePackageKind, LifecycleSearchExtensionSummary, ProductWorkflowError,
+        RebornExtensionOnboardingState, RebornServicesError, RebornServicesErrorCode,
+        RebornServicesErrorKind, WebUiAuthenticatedCaller,
     };
 
     #[derive(Default)]
@@ -755,7 +755,7 @@ mod tests {
     #[test]
     fn product_adapter_surface_projects_channel_kind() {
         let mut summary = summary_with_onboarding();
-        summary.runtime_kind = LifecycleExtensionRuntimeKind::FirstParty;
+        summary.runtime = RuntimeKind::FirstParty;
         summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
 
         let entry = registry_entry(summary, &HashSet::new());
@@ -774,26 +774,17 @@ mod tests {
     fn runtime_wire_names_are_implementation_labels_not_taxonomy() {
         // The wire carries the honest runtime name; product taxonomy travels
         // in `surfaces`, so runtime never masquerades as a product kind.
-        assert_eq!(
-            LifecycleExtensionRuntimeKind::WasmTool.runtime_wire_name(),
-            "wasm"
-        );
-        assert_eq!(
-            LifecycleExtensionRuntimeKind::McpServer.runtime_wire_name(),
-            "mcp"
-        );
-        assert_eq!(
-            LifecycleExtensionRuntimeKind::Script.runtime_wire_name(),
-            "script"
-        );
+        assert_eq!(RuntimeKind::Wasm.as_str(), "wasm");
+        assert_eq!(RuntimeKind::Mcp.as_str(), "mcp");
+        assert_eq!(RuntimeKind::Script.as_str(), "script");
 
         // A channel-surface extension keeps its runtime label AND projects
         // the channel surface — two separate axes.
         let mut channel_summary = summary_with_onboarding();
-        channel_summary.runtime_kind = LifecycleExtensionRuntimeKind::WasmTool;
+        channel_summary.runtime = RuntimeKind::Wasm;
         channel_summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
         assert_eq!(
-            channel_summary.runtime_kind.runtime_wire_name(),
+            channel_summary.runtime.as_str(),
             "wasm",
             "runtime label is unchanged by the channel surface"
         );
@@ -808,7 +799,7 @@ mod tests {
     #[test]
     fn registry_entry_wire_uses_runtime_and_surfaces_without_a_top_level_kind() {
         let mut summary = summary_with_onboarding();
-        summary.runtime_kind = LifecycleExtensionRuntimeKind::WasmTool;
+        summary.runtime = RuntimeKind::Wasm;
         summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
         summary.channel_directions = Some(LifecycleChannelDirections {
             inbound: true,
@@ -831,7 +822,7 @@ mod tests {
     #[tokio::test]
     async fn list_projects_external_channel_surface_kind_through_extension_info() {
         let mut summary = summary_with_onboarding();
-        summary.runtime_kind = LifecycleExtensionRuntimeKind::FirstParty;
+        summary.runtime = RuntimeKind::FirstParty;
         summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
         summary.credential_requirements = Vec::new();
         let facade = ListingFacade {
@@ -857,7 +848,7 @@ mod tests {
         );
 
         let mut unconnected_summary = summary_with_onboarding();
-        unconnected_summary.runtime_kind = LifecycleExtensionRuntimeKind::FirstParty;
+        unconnected_summary.runtime = RuntimeKind::FirstParty;
         unconnected_summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
         unconnected_summary.credential_requirements = Vec::new();
         let unconnected = list_extensions(
@@ -900,14 +891,14 @@ mod tests {
         let caller = caller();
         let installed_summary = {
             let mut summary = summary_with_onboarding_for("installed-fixture");
-            summary.runtime_kind = LifecycleExtensionRuntimeKind::FirstParty;
+            summary.runtime = RuntimeKind::FirstParty;
             summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
             summary
         };
         let registry_installed_summary = installed_summary.clone();
         let registry_uninstalled_summary = {
             let mut summary = summary_with_onboarding_for("uninstalled-fixture");
-            summary.runtime_kind = LifecycleExtensionRuntimeKind::FirstParty;
+            summary.runtime = RuntimeKind::FirstParty;
             summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
             summary
         };
@@ -1341,7 +1332,7 @@ mod tests {
             version: "1.0.0".to_string(),
             description: "test extension".to_string(),
             source: LifecycleExtensionSource::HostBundled,
-            runtime_kind: LifecycleExtensionRuntimeKind::WasmTool,
+            runtime: RuntimeKind::Wasm,
             surface_kinds: Vec::new(),
             channel_directions: None,
             channel_connection: None,
@@ -1372,7 +1363,7 @@ mod tests {
             version: "1.0.0".to_string(),
             description: "host-managed MCP extension".to_string(),
             source: LifecycleExtensionSource::HostBundled,
-            runtime_kind: LifecycleExtensionRuntimeKind::McpServer,
+            runtime: RuntimeKind::Mcp,
             surface_kinds: Vec::new(),
             channel_directions: None,
             channel_connection: None,

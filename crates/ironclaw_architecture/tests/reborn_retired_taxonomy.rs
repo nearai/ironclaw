@@ -5,10 +5,13 @@
 //! `kind` wire string, the split `slack_bot` package identity, the
 //! `slack_personal` provider id, and the contract-free manifest parse paths.
 //! This test pins all of it at **zero occurrences** across Reborn code
-//! (`crates/`, the WebUI frontend sources, `tests/integration/`, and Reborn
-//! Python E2E scenarios) so none of it can be reintroduced silently.
+//! (`crates/`, the WebUI frontend sources, `tests/integration/`, Reborn Python
+//! E2E scenarios, and the standalone live-QA harness) so none of it can be
+//! reintroduced silently.
 //!
-//! Sanctioned exceptions are path-scoped, not term-scoped:
+//! Sanctioned migrations and fixtures are path-scoped. Normal-write rejection
+//! boundaries are narrower: the exact retired literal must be on a line marked
+//! `taxonomy-allow: retired-normal-write-rejection` in an allowlisted file.
 //! - `crates/ironclaw_reborn_migration/` reads v1 domain vocabulary by design;
 //! - the two one-time forward data migrations legitimately name the retired
 //!   identities they fold forward
@@ -50,6 +53,10 @@ const RETIRED_TERMS: &[&str] = &[
     // The one-variant lifecycle surface enum (replaced by the shared
     // CapabilitySurfaceKind vocabulary in ironclaw_host_api).
     "LifecycleExtensionSurfaceKind",
+    // Runtime metadata uses ironclaw_host_api::RuntimeKind directly. A second
+    // lifecycle runtime enum previously regenerated `wasm_tool`/`mcp_server`
+    // values through serde where literal-string scanning could not see them.
+    "LifecycleExtensionRuntimeKind",
     // The conflated extension `kind` wire string (replaced by
     // runtime + surfaces).
     "isChannelExtensionKind",
@@ -112,9 +119,8 @@ const SANCTIONED_PATHS: &[&str] = &[
     // term-by-term (same footing as `src/`).
     "crates/ironclaw_gateway/",
     // One-time forward data migrations name what they fold forward.
-    "extension_host/extension_installation_store.rs",
     "extension_host/extension_installation_store/",
-    "product_auth/durable/",
+    "product_auth/durable/tests.rs",
     "tests/facade_factory/product_auth_migration.rs",
     // This gate names every term on purpose.
     "reborn_retired_taxonomy.rs",
@@ -126,7 +132,24 @@ fn is_sanctioned(path: &str) -> bool {
         .any(|fragment| path.contains(fragment))
 }
 
+const RETIRED_REJECTION_PATHS: &[&str] = &[
+    "crates/ironclaw_reborn_composition/src/product_auth/mod.rs",
+    "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
+    "crates/ironclaw_reborn_composition/src/extension_host/extension_installation_store.rs",
+];
+
+fn is_sanctioned_rejection_line(path: &str, line: &str) -> bool {
+    (RETIRED_REJECTION_PATHS.contains(&path)
+        && line.contains("taxonomy-allow: retired-normal-write-rejection"))
+        || (path
+            == "crates/ironclaw_reborn_composition/src/extension_host/extension_installation_store.rs"
+            && line.contains("taxonomy-allow: retired-forward-migration"))
+}
+
 fn is_reborn_python_scenario(relative: &str, contents: &str) -> bool {
+    if relative.starts_with("scripts/reborn_webui_v2_live_qa/") {
+        return relative.ends_with(".py");
+    }
     let file_name = relative.rsplit('/').next().unwrap_or_default();
     let imports_reborn_webui_harness = contents.lines().any(|line| {
         line.trim_start()
@@ -144,6 +167,9 @@ fn is_reborn_python_scenario(relative: &str, contents: &str) -> bool {
 
 fn record_hits(relative: &str, contents: &str, hits: &mut Vec<String>) {
     for (line_index, line) in contents.lines().enumerate() {
+        if is_sanctioned_rejection_line(relative, line) {
+            continue;
+        }
         for term in RETIRED_TERMS {
             if line.contains(term) {
                 hits.push(format!("{relative}:{}: `{term}`", line_index + 1));
@@ -155,6 +181,32 @@ fn record_hits(relative: &str, contents: &str, hits: &mut Vec<String>) {
             }
         }
     }
+}
+
+#[test]
+fn retired_normal_write_rejection_exception_requires_exact_path_and_line_marker() {
+    let allowed_path = "crates/ironclaw_reborn_composition/src/product_auth/mod.rs";
+    let marked = "const RETIRED: &str = \"slack_personal\"; // taxonomy-allow: retired-normal-write-rejection";
+    let unmarked = "const RETIRED: &str = \"slack_personal\";";
+    let mut hits = Vec::new();
+
+    record_hits(allowed_path, marked, &mut hits);
+    assert!(hits.is_empty(), "the exact rejection line is sanctioned");
+
+    record_hits(allowed_path, unmarked, &mut hits);
+    assert_eq!(hits.len(), 1, "an unmarked occurrence must be rejected");
+
+    hits.clear();
+    record_hits(
+        "crates/ironclaw_reborn_composition/src/product_auth/api/auth.rs",
+        marked,
+        &mut hits,
+    );
+    assert_eq!(
+        hits.len(),
+        1,
+        "the marker is inert outside exact boundaries"
+    );
 }
 
 fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>) {
@@ -184,8 +236,9 @@ fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>) {
             || name.ends_with(".mjs")
             || name.ends_with(".js");
         let is_manifest = name.ends_with(".toml");
-        let is_python_scenario =
-            relative.starts_with("tests/e2e/scenarios/") && name.ends_with(".py");
+        let is_python_scenario = (relative.starts_with("tests/e2e/scenarios/")
+            || relative.starts_with("scripts/reborn_webui_v2_live_qa/"))
+            && name.ends_with(".py");
         if !(is_rust || is_frontend || is_manifest || is_python_scenario) {
             continue;
         }
@@ -209,6 +262,11 @@ fn reborn_code_never_references_retired_taxonomy() {
     scan_dir(&root, &root.join("crates"), &mut hits);
     scan_dir(&root, &root.join("tests/integration"), &mut hits);
     scan_dir(&root, &root.join("tests/e2e/scenarios"), &mut hits);
+    scan_dir(
+        &root,
+        &root.join("scripts/reborn_webui_v2_live_qa"),
+        &mut hits,
+    );
     hits.sort();
     hits.dedup();
     assert!(
@@ -230,7 +288,9 @@ fn python_scan_follows_reborn_webui_and_harness_boundaries() {
             .as_nanos()
     ));
     let scenarios = root.join("tests/e2e/scenarios");
+    let live_qa = root.join("scripts/reborn_webui_v2_live_qa");
     std::fs::create_dir_all(&scenarios).expect("create Python fixture directory");
+    std::fs::create_dir_all(&live_qa).expect("create live-QA fixture directory");
     std::fs::write(
         scenarios.join("test_reborn_webui_v2_stale_fixture.py"),
         "fixture = {\"kind\": \"wasm_channel\"}\n",
@@ -272,15 +332,22 @@ fn python_scan_follows_reborn_webui_and_harness_boundaries() {
         "# docs: ironclaw_reborn_composition\nfixture = {\"kind\": \"wasm_channel\"}\n",
     )
     .expect("write legacy gateway fixture with a Reborn documentation reference");
+    std::fs::write(
+        live_qa.join("run_live_qa.py"),
+        "request = {\"provider\": \"slack_personal\"}\n",
+    )
+    .expect("write live-QA fixture");
 
     let mut hits = Vec::new();
     scan_dir(&root, &scenarios, &mut hits);
+    scan_dir(&root, &live_qa, &mut hits);
     std::fs::remove_dir_all(&root).expect("remove Python fixture directory");
     hits.sort();
 
     assert_eq!(
         hits,
         vec![
+            "scripts/reborn_webui_v2_live_qa/run_live_qa.py:1: `\"slack_personal\"`",
             "tests/e2e/scenarios/test_admin_api.py:2: `\"wasm_channel\"`",
             "tests/e2e/scenarios/test_reborn_private_tool_installs.py:2: `\"wasm_channel\"`",
             "tests/e2e/scenarios/test_reborn_responses_api.py:2: `\"wasm_channel\"`",

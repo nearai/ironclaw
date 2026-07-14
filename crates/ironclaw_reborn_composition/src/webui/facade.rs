@@ -1,3 +1,4 @@
+// arch-exempt: large_file, WebUI facade assembly remains co-located, plan #4088
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 

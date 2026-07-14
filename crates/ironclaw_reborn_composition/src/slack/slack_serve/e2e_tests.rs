@@ -72,7 +72,10 @@ use crate::slack::slack_delivery::{
 };
 use crate::{
     AuthChallengeProvider,
-    provider_identity::{RebornUserIdentityLookup, RebornUserIdentityLookupError},
+    provider_identity::{
+        RebornUserIdentityLookup, RebornUserIdentityLookupError,
+        installation_scoped_provider_user_id,
+    },
 };
 
 #[path = "e2e_auth_challenge.rs"]
@@ -383,7 +386,10 @@ fn user_identity_actor_user_resolver() -> Arc<dyn ProductActorUserResolver> {
     Arc::new(
         crate::slack::slack_host_beta::runtime_setup::slack_provider_identity_actor_resolver(
             Arc::new(RecordingUserIdentityLookup::new([(
-                format!("{INSTALLATION}:{SLACK_USER}"),
+                installation_scoped_provider_user_id(
+                    &AdapterInstallationId::new(INSTALLATION).expect("installation"),
+                    SLACK_USER,
+                ),
                 UserId::new(USER).expect("user"), // safety: static test user id is valid.
             )])),
         ),

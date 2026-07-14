@@ -29,7 +29,7 @@ extension (one manifest, one installed identity, e.g. `slack`)
 - `ProviderId` (`slack`, `github`, `google`) — credential authority; several
   extensions may share one (gmail + google-drive + … share `google`).
 - `CapabilitySurfaceKind` (`ironclaw_host_api/src/surface.rs`) — `tool`,
-  `channel`, `auth` (+ reserved `trigger`, `file`).
+  `channel`, `auth`.
 - Surfaces are **derived**: `ExtensionManifestV2::capability_surfaces()`
   (`crates/ironclaw_extensions/src/v2.rs`) projects them from the manifest —
   never store a parallel taxonomy.
@@ -76,10 +76,16 @@ through exactly one entry point:
 4. Binding semantics (unbound actor → fail closed + connect nudge, canonical
    refs only past the boundary) are owned by the conversation-binding
    contract: `docs/reborn/contracts/conversation-binding.md`.
-5. Connect affordance: the lifecycle summary carries `channel_connection`
-   (strategy + copy) built by `channel_connection_requirement()` in
-   `extension_host/extension_lifecycle.rs`; the WebUI channels tab renders it
-   from the extension's surfaces — there is no channel registry to update.
+5. Connect affordance: Train A has one composition-owned inbound connection:
+   the host-bundled unified `slack` package paired with the `slack` product-auth
+   provider. Extension-wide auth surfaces do not encode channel ownership, so
+   every other inbound/auth combination fails closed until a typed association
+   exists. Install checks before side effects, while restore and activation
+   re-check persisted rows. Supported summaries carry the OAuth
+   `channel_connection` built by
+   `channel_connection_requirement()`; the WebUI renders only that typed
+   connection and never infers pairing from onboarding text. Re-verify with
+   `rg -n "ensure_supported_channel_connection|channel_connection_requirement" crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs`.
 6. Operator provisioning that activates the channel goes through
    `activate_for_channel_setup` (the `ChannelSetupActivationCredentialGate`):
    per-caller OAuth accounts never gate operator activation — callers
@@ -99,10 +105,23 @@ through exactly one entry point:
    `crates/ironclaw_extensions/tests/manifest_v2_contract.rs`.
 3. Renaming any persisted identity (provider id, extension id) requires a
    one-time forward data migration, never a runtime alias. Exemplars:
-   `migrate_retired_slack_bot_identity`
+   `normalize_retired_slack_identity`
    (`extension_host/extension_installation_store.rs`) and
    `migrate_retired_slack_personal_provider`
    (`product_auth/durable/mod.rs`), both with idempotency pins.
+   Before the Train A credential migration, stop every pre-Train-A writer;
+   rolling old/new overlap can create a retired row after enumeration. Rollback
+   after cutover means restore the pre-cutover data backup or roll forward.
+   Do not infer safety from a deployment overlap setting alone.
+
+## Persistence cutover rules
+
+- CAS-capable installation-state mutations always reread and update the
+  winning snapshot, and fresh install commits manifest plus installation in
+  one transition.
+- The explicitly opted-in non-CAS local-development profile uses a bounded
+  per-store compatibility worker for normal lifecycle writes. It is not a
+  hosted multi-writer guarantee and is never selected by hosted profiles.
 
 ## Testing surfaces
 
@@ -114,6 +133,13 @@ through exactly one entry point:
   in `available_extensions.rs` asserts kinds + directions over the real asset.
 - Wire: `list_extensions_projects_channel_surface_with_directions_and_connection`
   in `crates/ironclaw_product_workflow/tests/reborn_services_contract.rs`.
+- Unsupported inbound connection policy:
+  `extension_install_rejects_inbound_channel_without_supported_connection_owner`,
+  `extension_install_rejects_inbound_channel_with_unrelated_oauth_surface`,
+  and the persisted restore/activation `connection_owner` tests in
+  `extension_lifecycle.rs` prove every lifecycle entrance fails closed;
+  regenerate locations with `rg -n "connection_owner|unrelated_oauth_surface"
+  crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs`.
 - Frontend: surface helpers live in
   `crates/ironclaw_webui_v2/frontend/src/pages/extensions/lib/extensions-schema.ts`
   (`hasChannelSurface` etc.); run `pnpm --dir crates/ironclaw_webui_v2/frontend test`.

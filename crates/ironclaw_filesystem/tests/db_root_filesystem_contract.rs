@@ -1,4 +1,4 @@
-// arch-exempt: large_file, bounded backend parity coverage stays with the database filesystem contract suite, plan #6061
+// arch-exempt: large_file, bounded backend parity coverage still awaits extraction into a shared root-listing contract module, plan #4088
 #![cfg(any(feature = "libsql", feature = "postgres"))]
 
 use ironclaw_filesystem::RootFilesystem;

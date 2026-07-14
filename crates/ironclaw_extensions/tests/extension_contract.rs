@@ -1,3 +1,4 @@
+// arch-exempt: large_file, the manifest grammar matrix and lifecycle contracts still need separate test modules, plan #4088
 use ironclaw_extensions::*;
 use ironclaw_filesystem::*;
 use ironclaw_host_api::*;

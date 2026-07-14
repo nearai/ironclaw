@@ -12,3 +12,16 @@ pub(crate) mod durable;
 pub(crate) mod oauth;
 #[cfg(feature = "webui-v2-beta")]
 pub(crate) mod serve;
+
+const RETIRED_SLACK_PERSONAL_PROVIDER_ID: &str = "slack_personal"; // taxonomy-allow: retired-normal-write-rejection
+
+fn reject_retired_provider(
+    provider: &ironclaw_auth::AuthProviderId,
+) -> Result<(), ironclaw_auth::AuthProductError> {
+    if provider.as_str() == RETIRED_SLACK_PERSONAL_PROVIDER_ID {
+        return Err(ironclaw_auth::AuthProductError::InvalidRequest {
+            reason: "the slack_personal provider was retired; use slack".to_string(),
+        });
+    }
+    Ok(())
+}

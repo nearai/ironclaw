@@ -46,6 +46,7 @@ where
     F: RootFilesystem + 'static,
 {
     async fn create_flow(&self, request: NewAuthFlow) -> Result<AuthFlowRecord, AuthProductError> {
+        crate::product_auth::reject_retired_provider(&request.provider)?;
         if let Some(binding) = &request.update_binding {
             let account = self
                 .read_account(&request.scope, binding.account_id)
@@ -106,6 +107,7 @@ where
             .read_flow(scope, request.flow_id)
             .await?
             .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        crate::product_auth::reject_retired_provider(&record.provider)?;
         match validate_callback_claim(&mut record, scope, &request, now) {
             Ok(()) => {}
             Err(AuthProductError::UnknownOrExpiredFlow) => {
@@ -139,6 +141,7 @@ where
             .read_flow(scope, input.flow_id)
             .await?
             .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        crate::product_auth::reject_retired_provider(&record.provider)?;
         let callback =
             match prepare_callback_flow(&mut record, scope, &input.opaque_state_hash, now) {
                 Ok(cb) => cb,
@@ -283,6 +286,7 @@ where
             .read_flow(scope, flow_id)
             .await?
             .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        crate::product_auth::reject_retired_provider(&record.provider)?;
         match validate_manual_token_flow(&mut record, scope, &input, now) {
             Ok(()) => {}
             Err(AuthProductError::UnknownOrExpiredFlow) => {

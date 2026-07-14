@@ -1,3 +1,4 @@
+// arch-exempt: large_file, MCP adapter contract matrix remains co-located, plan #5905
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;

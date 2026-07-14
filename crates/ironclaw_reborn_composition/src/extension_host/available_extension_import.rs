@@ -238,7 +238,6 @@ pub(crate) fn imported_extension_package(
             package.id.as_str(),
         )?,
         manifest_toml: record.raw_toml().to_string(),
-        source: ManifestSource::InstalledLocal,
         package,
         cleanup_requirements: Vec::new(),
         assets,
@@ -271,7 +270,7 @@ mod tests {
     use ironclaw_host_api::RuntimeKind;
 
     use crate::extension_host::available_extensions::{
-        AvailableExtensionAssetContent, AvailableExtensionCatalog,
+        AvailableExtensionAssetContent, AvailableExtensionCatalog, RETIRED_RESERVED_EXTENSION_IDS,
     };
 
     #[tokio::test]
@@ -332,7 +331,10 @@ output_schema_ref = "schemas/search.output.json"
         let results = catalog.search("fixture").collect::<Vec<_>>();
 
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].source, ManifestSource::InstalledLocal);
+        assert_eq!(
+            results[0].package.manifest.source,
+            ManifestSource::InstalledLocal
+        );
         let mut asset_paths = results[0]
             .assets
             .iter()
@@ -410,7 +412,10 @@ output_schema_ref = "schemas/search.output.json"
     #[tokio::test]
     async fn filesystem_catalog_skips_reserved_host_bundled_extension_ids() {
         let fs = InMemoryBackend::default();
-        for id in ["gmail", "slack"] {
+        for id in ["gmail", "slack"]
+            .into_iter()
+            .chain(RETIRED_RESERVED_EXTENSION_IDS)
+        {
             fs.write_file(
                 &VirtualPath::new(format!("/system/extensions/{id}/manifest.toml")).unwrap(),
                 b"not parsed because the id is host-bundled",
@@ -618,7 +623,16 @@ prompt_doc_ref = "prompts/run.md"
     fn imported_extension_package_validates_as_installed_local() {
         let package = imported_extension_package(importable_tool_bundle_files("uploaded-tool"))
             .expect("complete wasm tool bundle must import");
-        assert_eq!(package.source, ManifestSource::InstalledLocal);
+        assert_eq!(
+            package.package.manifest.source,
+            ManifestSource::InstalledLocal
+        );
+        assert_eq!(
+            serde_json::to_value(package.summary())
+                .expect("summary serializes")
+                .get("source"),
+            Some(&serde_json::json!("installed_local"))
+        );
         assert_eq!(package.package_ref.id.as_str(), "uploaded-tool");
     }
 
@@ -640,7 +654,10 @@ prompt_doc_ref = "prompts/run.md"
             .search("")
             .find(|package| package.package_ref.id.as_str() == "uploaded-tool")
             .expect("uploaded tool must survive restart reload");
-        assert_eq!(reloaded.source, ManifestSource::InstalledLocal);
+        assert_eq!(
+            reloaded.package.manifest.source,
+            ManifestSource::InstalledLocal
+        );
     }
 
     #[test]
@@ -657,9 +674,11 @@ prompt_doc_ref = "prompts/run.md"
 
     #[test]
     fn imported_extension_package_rejects_reserved_host_bundled_extension_ids() {
-        let error = imported_extension_package(importable_tool_bundle_files("github"))
-            .expect_err("reserved ids must be rejected");
-        assert!(format!("{error}").contains("reserved"));
+        for id in std::iter::once("github").chain(RETIRED_RESERVED_EXTENSION_IDS) {
+            let error = imported_extension_package(importable_tool_bundle_files(id))
+                .expect_err("reserved and retired ids must be rejected");
+            assert!(format!("{error}").contains("reserved"));
+        }
     }
 
     #[test]

@@ -1,3 +1,4 @@
+// arch-exempt: large_file, Reborn facade wire types still await domain extraction, plan #4088
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::ThreadId;
 use ironclaw_product_adapters::{ProductOutboundEnvelope, ProjectionCursor};
@@ -1325,7 +1326,7 @@ pub struct RebornExtensionOnboardingPayload {
 /// omits the legacy `status` field from the earlier unimplemented route shape.
 /// The live browser consumer still uses the v1 setup route, so this v2 contract
 /// can become lifecycle-native before it has compatibility consumers.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RebornSetupExtensionResponse {
     pub package_ref: LifecyclePackageRef,
     pub phase: LifecyclePhase,

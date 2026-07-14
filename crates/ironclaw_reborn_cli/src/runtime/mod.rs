@@ -1,3 +1,4 @@
+// arch-exempt: large_file, Reborn CLI runtime composition remains co-located, plan #4088
 use std::io::{IsTerminal, Write};
 #[cfg(feature = "webui-v2-beta")]
 use std::path::Path;

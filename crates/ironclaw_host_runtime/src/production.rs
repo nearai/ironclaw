@@ -1,3 +1,4 @@
+// arch-exempt: large_file, host-runtime builder aggregation is not yet split from production service assembly, plan #4088
 //! Production composition of the [`HostRuntime`] contract.
 //!
 //! [`DefaultHostRuntime`] is the contract-level facade that upper turn/loop

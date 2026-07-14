@@ -280,6 +280,7 @@ where
         match request {
             CredentialAccountMutation::Create(account) => self.create_account(account).await,
             CredentialAccountMutation::Update(update) => {
+                crate::product_auth::reject_retired_provider(&update.account.provider)?;
                 let lock = self.lock_for(format!("account:{}", update.account_id));
                 let _guard = lock.lock().await;
                 let (mut account, version) = self

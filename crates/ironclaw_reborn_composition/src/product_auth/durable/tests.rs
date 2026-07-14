@@ -490,8 +490,10 @@ async fn migrate_retired_slack_personal_provider_rewrites_accounts_forward() {
     let service =
         FilesystemAuthProductServices::new_with_root(scoped, backend, Arc::clone(&secret_store));
 
-    let created = service
-        .create_account(NewCredentialAccount {
+    let created = seed_persisted_migration_account(
+        &service,
+        CredentialAccountId::new(),
+        NewCredentialAccount {
             scope: scope.clone(),
             provider: AuthProviderId::new("slack_personal").unwrap(),
             label: account_label(),
@@ -502,9 +504,9 @@ async fn migrate_retired_slack_personal_provider_rewrites_accounts_forward() {
             access_secret: Some(SecretHandle::new("slack-access").unwrap()),
             refresh_secret: None,
             scopes: vec![ProviderScope::new("search:read").unwrap()],
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await;
 
     let (_, version_before) = service
         .read_account(&scope, created.id)
@@ -542,6 +544,445 @@ async fn migrate_retired_slack_personal_provider_rewrites_accounts_forward() {
         version_after_second, version_after_first,
         "idempotent pass must not rewrite the record"
     );
+}
+
+fn migration_scope_for_user(user_id: &str) -> AuthProductScope {
+    let resource = ResourceScope {
+        tenant_id: TenantId::new("migration-tests").expect("valid migration-test tenant id"),
+        user_id: UserId::new(user_id).expect("valid migration-test user id"),
+        agent_id: None,
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    };
+    AuthProductScope::new(resource, AuthSurface::Web)
+}
+
+async fn seed_migration_account(
+    service: &FilesystemAuthProductServices<InMemoryBackend>,
+    scope: AuthProductScope,
+    provider: &str,
+    secret_handle: &str,
+) -> CredentialAccount {
+    seed_persisted_migration_account(
+        service,
+        CredentialAccountId::new(),
+        NewCredentialAccount {
+            scope,
+            provider: AuthProviderId::new(provider).expect("valid migration-test provider"),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(
+                SecretHandle::new(secret_handle).expect("valid migration-test secret handle"),
+            ),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        },
+    )
+    .await
+}
+
+async fn seed_persisted_migration_account<F>(
+    service: &FilesystemAuthProductServices<F>,
+    account_id: CredentialAccountId,
+    request: NewCredentialAccount,
+) -> CredentialAccount
+where
+    F: RootFilesystem + 'static,
+{
+    let now = Utc::now();
+    let account = CredentialAccount {
+        id: account_id,
+        scope: request.scope,
+        provider: request.provider,
+        label: request.label,
+        status: request.status,
+        ownership: request.ownership,
+        owner_extension: request.owner_extension,
+        granted_extensions: request.granted_extensions,
+        access_secret: request.access_secret,
+        refresh_secret: request.refresh_secret,
+        scopes: request.scopes,
+        provider_identity: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let path = super::paths::account_path(&account.scope, account.id)
+        .expect("seeded account path is valid");
+    service
+        .write_record(
+            &account.scope.resource,
+            &path,
+            &account,
+            CasExpectation::Absent,
+        )
+        .await
+        .expect("seed persisted pre-Train-A account fixture");
+    account
+}
+
+#[tokio::test]
+async fn retired_slack_personal_provider_is_rejected_at_new_write_boundaries() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let service = test_service(filesystem, secret_store);
+    let scope = test_scope();
+    let retired = AuthProviderId::new("slack_personal").unwrap();
+    let expires_at = Utc::now() + Duration::minutes(5);
+
+    let account_error = service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: retired.clone(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("retired-provider-secret").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .expect_err("new retired-provider accounts fail closed");
+    assert!(matches!(
+        account_error,
+        AuthProductError::InvalidRequest { .. }
+    ));
+
+    let setup_error = service
+        .request_secret_input(ManualTokenSetupRequest {
+            scope: scope.clone(),
+            provider: retired.clone(),
+            label: account_label(),
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            expires_at,
+        })
+        .await
+        .expect_err("new retired-provider interactions fail closed");
+    assert!(matches!(
+        setup_error,
+        AuthProductError::InvalidRequest { .. }
+    ));
+
+    let flow_error = service
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope,
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: retired,
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
+                    .unwrap(),
+                expires_at,
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: Some(OpaqueStateHash::new(fake_digest("retired-state")).unwrap()),
+            pkce_verifier_hash: Some(pkce_hash("retired-verifier")),
+            expires_at,
+        })
+        .await
+        .expect_err("new retired-provider flows fail closed");
+    assert!(matches!(
+        flow_error,
+        AuthProductError::InvalidRequest { .. }
+    ));
+}
+
+#[tokio::test]
+async fn persisted_retired_provider_work_cannot_complete_after_upgrade() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let service = test_service(filesystem, secret_store);
+    let scope = test_scope();
+    let expires_at = Utc::now() + Duration::minutes(5);
+
+    let challenge = service
+        .request_secret_input(ManualTokenSetupRequest {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            expires_at,
+        })
+        .await
+        .unwrap();
+    let AuthChallenge::ManualTokenRequired { interaction_id, .. } = challenge else {
+        panic!("expected manual-token challenge");
+    };
+    let interaction_path = super::paths::interaction_path(&scope, interaction_id).unwrap();
+    let (mut interaction, interaction_version): (serde_json::Value, RecordVersion) = service
+        .read_record(&scope.resource, &interaction_path)
+        .await
+        .unwrap()
+        .expect("persisted interaction fixture");
+    interaction["provider"] = serde_json::json!("slack_personal");
+    service
+        .write_record(
+            &scope.resource,
+            &interaction_path,
+            &interaction,
+            CasExpectation::Version(interaction_version),
+        )
+        .await
+        .unwrap();
+    let submit_error = service
+        .submit_manual_token(
+            &scope,
+            SecretSubmitRequest {
+                interaction_id,
+                secret: SecretString::from("must-not-be-stored"),
+            },
+        )
+        .await
+        .expect_err("persisted retired-provider interaction cannot complete");
+    assert!(matches!(
+        submit_error,
+        AuthProductError::InvalidRequest { .. }
+    ));
+
+    let state_hash = OpaqueStateHash::new(fake_digest("legacy-state")).unwrap();
+    let flow = service
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
+                    .unwrap(),
+                expires_at,
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: Some(state_hash.clone()),
+            pkce_verifier_hash: Some(pkce_hash("legacy-verifier")),
+            expires_at,
+        })
+        .await
+        .unwrap();
+    let flow_path = flow_path(&scope, flow.id).unwrap();
+    let (mut stored_flow, flow_version): (serde_json::Value, RecordVersion) = service
+        .read_record(&scope.resource, &flow_path)
+        .await
+        .unwrap()
+        .expect("persisted flow fixture");
+    stored_flow["provider"] = serde_json::json!("slack_personal");
+    service
+        .write_record(
+            &scope.resource,
+            &flow_path,
+            &stored_flow,
+            CasExpectation::Version(flow_version),
+        )
+        .await
+        .unwrap();
+    let cancel_error = service
+        .cancel_flow(&scope, flow.id)
+        .await
+        .expect_err("persisted retired-provider flow cannot be rewritten during cancellation");
+    assert!(matches!(
+        cancel_error,
+        AuthProductError::InvalidRequest { .. }
+    ));
+    let claim_error = service
+        .claim_oauth_callback(
+            &scope,
+            OAuthCallbackClaimRequest {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash,
+                provider: AuthProviderId::new("slack_personal").unwrap(),
+                pkce_verifier_hash: pkce_hash("legacy-verifier"),
+            },
+        )
+        .await
+        .expect_err("persisted retired-provider OAuth flow cannot complete");
+    assert!(matches!(
+        claim_error,
+        AuthProductError::InvalidRequest { .. }
+    ));
+}
+
+#[tokio::test]
+async fn migrate_retired_slack_personal_provider_fails_closed_on_aggregate_owner_overflow() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = Arc::new(ScopedFilesystem::new(
+        Arc::clone(&backend),
+        crate::invocation_mount_view,
+    ));
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let service =
+        FilesystemAuthProductServices::new_with_root(scoped, Arc::clone(&backend), secret_store);
+    let alice_scope = migration_scope_for_user("migration-alice");
+    let bob_scope = migration_scope_for_user("migration-bob");
+    let alice = seed_migration_account(
+        &service,
+        alice_scope.clone(),
+        "slack_personal",
+        "migration-alice-access",
+    )
+    .await;
+    let bob = seed_migration_account(
+        &service,
+        bob_scope.clone(),
+        "slack_personal",
+        "migration-bob-access",
+    )
+    .await;
+
+    assert_eq!(
+        service
+            .migrate_retired_slack_personal_provider_with_limits(StrictMigrationLimits {
+                owners: 1,
+                scopes: usize::MAX,
+                account_entries: usize::MAX,
+            })
+            .await,
+        Err(AuthProductError::BackendUnavailable)
+    );
+    for (scope, account) in [(alice_scope, alice), (bob_scope, bob)] {
+        let (persisted, _) = service
+            .read_account(&scope, account.id)
+            .await
+            .expect("read account after bounded failure")
+            .expect("seeded account remains");
+        assert_eq!(
+            persisted.provider.as_str(),
+            "slack_personal",
+            "owner overflow must fail before any migration write"
+        );
+    }
+}
+
+#[tokio::test]
+async fn migrate_retired_slack_personal_provider_accepts_exact_aggregate_limits() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = Arc::new(ScopedFilesystem::new(
+        Arc::clone(&backend),
+        crate::invocation_mount_view,
+    ));
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let service =
+        FilesystemAuthProductServices::new_with_root(scoped, Arc::clone(&backend), secret_store);
+    for (user, secret) in [
+        ("migration-exact-alice", "migration-exact-alice-access"),
+        ("migration-exact-bob", "migration-exact-bob-access"),
+    ] {
+        seed_migration_account(
+            &service,
+            migration_scope_for_user(user),
+            "slack_personal",
+            secret,
+        )
+        .await;
+    }
+
+    assert_eq!(
+        service
+            .migrate_retired_slack_personal_provider_with_limits(StrictMigrationLimits {
+                owners: 2,
+                scopes: 2 * AuthSurface::ALL.len(),
+                account_entries: 2,
+            })
+            .await
+            .expect("exact aggregate limits remain admissible"),
+        2
+    );
+}
+
+#[tokio::test]
+async fn migrate_retired_slack_personal_provider_charges_nonmatching_account_entries() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = Arc::new(ScopedFilesystem::new(
+        Arc::clone(&backend),
+        crate::invocation_mount_view,
+    ));
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let service =
+        FilesystemAuthProductServices::new_with_root(scoped, Arc::clone(&backend), secret_store);
+    let scope = migration_scope_for_user("migration-nonmatching");
+    let retired = seed_migration_account(
+        &service,
+        scope.clone(),
+        "slack_personal",
+        "migration-retired-access",
+    )
+    .await;
+    seed_migration_account(&service, scope.clone(), "google", "migration-google-access").await;
+
+    assert_eq!(
+        service
+            .migrate_retired_slack_personal_provider_with_limits(StrictMigrationLimits {
+                owners: 1,
+                scopes: AuthSurface::ALL.len(),
+                account_entries: 1,
+            })
+            .await,
+        Err(AuthProductError::BackendUnavailable),
+        "every account entry must consume the strict budget before provider filtering"
+    );
+    let (persisted, _) = service
+        .read_account(&scope, retired.id)
+        .await
+        .expect("read retired account after bounded failure")
+        .expect("retired account remains");
+    assert_eq!(persisted.provider.as_str(), "slack_personal");
+}
+
+#[tokio::test]
+async fn migrate_retired_slack_personal_provider_charges_empty_session_roots() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = Arc::new(ScopedFilesystem::new(
+        Arc::clone(&backend),
+        crate::invocation_mount_view,
+    ));
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let service =
+        FilesystemAuthProductServices::new_with_root(scoped, Arc::clone(&backend), secret_store);
+    let scope = migration_scope_for_user("migration-empty-session");
+    let retired = seed_migration_account(
+        &service,
+        scope.clone(),
+        "slack_personal",
+        "migration-empty-session-access",
+    )
+    .await;
+    service
+        .filesystem
+        .put(
+            &scope.resource,
+            &ScopedPath::new("/secrets/product-auth/web/sessions/empty-session/non-account-marker")
+                .expect("valid empty-session marker path"),
+            Entry::bytes(Vec::new()),
+            CasExpectation::Absent,
+        )
+        .await
+        .expect("seed an otherwise empty session root");
+
+    assert_eq!(
+        service
+            .migrate_retired_slack_personal_provider_with_limits(StrictMigrationLimits {
+                owners: 1,
+                scopes: AuthSurface::ALL.len(),
+                account_entries: 1,
+            })
+            .await,
+        Err(AuthProductError::BackendUnavailable),
+        "an empty session root still consumes strict traversal budget"
+    );
+    let (persisted, _) = service
+        .read_account(&scope, retired.id)
+        .await
+        .expect("read retired account after bounded failure")
+        .expect("retired account remains");
+    assert_eq!(persisted.provider.as_str(), "slack_personal");
 }
 
 #[tokio::test]
@@ -605,8 +1046,10 @@ async fn migrate_retired_slack_personal_provider_returns_cas_unsupported_error()
     let service =
         FilesystemAuthProductServices::new_with_root(scoped, Arc::clone(&backend), secret_store);
     let scope = test_scope();
-    service
-        .create_account(NewCredentialAccount {
+    seed_persisted_migration_account(
+        &service,
+        CredentialAccountId::new(),
+        NewCredentialAccount {
             scope,
             provider: AuthProviderId::new("slack_personal").unwrap(),
             label: account_label(),
@@ -617,9 +1060,9 @@ async fn migrate_retired_slack_personal_provider_returns_cas_unsupported_error()
             access_secret: Some(SecretHandle::new("unsupported-cas-secret").unwrap()),
             refresh_secret: None,
             scopes: Vec::new(),
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await;
     backend.advertise_cas_unsupported();
 
     assert_eq!(
@@ -642,8 +1085,10 @@ async fn migrate_retired_slack_personal_provider_retries_cas_and_preserves_concu
         secret_store,
     ));
     let scope = test_scope();
-    let created = service
-        .create_account(NewCredentialAccount {
+    let created = seed_persisted_migration_account(
+        service.as_ref(),
+        CredentialAccountId::new(),
+        NewCredentialAccount {
             scope: scope.clone(),
             provider: AuthProviderId::new("slack_personal").unwrap(),
             label: account_label(),
@@ -654,9 +1099,9 @@ async fn migrate_retired_slack_personal_provider_retries_cas_and_preserves_concu
             access_secret: Some(SecretHandle::new("slack-access-old").unwrap()),
             refresh_secret: Some(SecretHandle::new("slack-refresh-old").unwrap()),
             scopes: vec![ProviderScope::new("search:read").unwrap()],
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await;
 
     backend.pause_next_account_put();
     let migration_service = Arc::clone(&service);
@@ -682,8 +1127,15 @@ async fn migrate_retired_slack_personal_provider_retries_cas_and_preserves_concu
         .unwrap(),
     );
     concurrent.updated_at = Utc::now() + Duration::seconds(5);
+    let concurrent_path = super::paths::account_path(&concurrent.scope, concurrent.id)
+        .expect("concurrent pre-Train-A account path");
     service
-        .write_account(&concurrent, CasExpectation::Any)
+        .write_record(
+            &concurrent.scope.resource,
+            &concurrent_path,
+            &concurrent,
+            CasExpectation::Any,
+        )
         .await
         .unwrap();
     backend.resume_account_put();
@@ -712,8 +1164,10 @@ async fn migrate_retired_slack_personal_provider_rejects_embedded_scope_path_mis
     let service =
         FilesystemAuthProductServices::new_with_root(scoped, Arc::clone(&backend), secret_store);
     let scope = test_scope();
-    let created = service
-        .create_account(NewCredentialAccount {
+    let created = seed_persisted_migration_account(
+        &service,
+        CredentialAccountId::new(),
+        NewCredentialAccount {
             scope: scope.clone(),
             provider: AuthProviderId::new("slack_personal").unwrap(),
             label: account_label(),
@@ -724,9 +1178,9 @@ async fn migrate_retired_slack_personal_provider_rejects_embedded_scope_path_mis
             access_secret: Some(SecretHandle::new("slack-access").unwrap()),
             refresh_secret: None,
             scopes: Vec::new(),
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await;
 
     let mut malformed = created.clone();
     malformed.scope.surface = AuthSurface::Chat;
@@ -780,27 +1234,25 @@ async fn migrate_retired_slack_personal_provider_restart_converges_after_partial
         uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
     );
     for account_id in [first_id, second_id] {
-        service
-            .create_account_with_id(
-                account_id,
-                NewCredentialAccount {
-                    scope: scope.clone(),
-                    provider: AuthProviderId::new("slack_personal").unwrap(),
-                    label: account_label(),
-                    status: CredentialAccountStatus::Configured,
-                    ownership: CredentialOwnership::UserReusable,
-                    owner_extension: None,
-                    granted_extensions: Vec::new(),
-                    access_secret: Some(
-                        SecretHandle::new(format!("slack-access-{account_id}")).unwrap(),
-                    ),
-                    refresh_secret: None,
-                    scopes: Vec::new(),
-                },
-                CasExpectation::Absent,
-            )
-            .await
-            .unwrap();
+        seed_persisted_migration_account(
+            &service,
+            account_id,
+            NewCredentialAccount {
+                scope: scope.clone(),
+                provider: AuthProviderId::new("slack_personal").unwrap(),
+                label: account_label(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(
+                    SecretHandle::new(format!("slack-access-{account_id}")).unwrap(),
+                ),
+                refresh_secret: None,
+                scopes: Vec::new(),
+            },
+        )
+        .await;
     }
     backend.fail_account_put_for_after(second_id, 0);
 
@@ -860,25 +1312,23 @@ async fn migrate_retired_slack_personal_provider_keeps_same_id_records_at_distin
         uuid::Uuid::parse_str("00000000-0000-0000-0000-00000000000a").unwrap(),
     );
     for scope in [web_scope.clone(), chat_scope.clone()] {
-        service
-            .create_account_with_id(
-                shared_id,
-                NewCredentialAccount {
-                    scope,
-                    provider: AuthProviderId::new("slack_personal").unwrap(),
-                    label: account_label(),
-                    status: CredentialAccountStatus::Configured,
-                    ownership: CredentialOwnership::UserReusable,
-                    owner_extension: None,
-                    granted_extensions: Vec::new(),
-                    access_secret: Some(SecretHandle::new("shared-id-secret").unwrap()),
-                    refresh_secret: None,
-                    scopes: Vec::new(),
-                },
-                CasExpectation::Absent,
-            )
-            .await
-            .unwrap();
+        seed_persisted_migration_account(
+            &service,
+            shared_id,
+            NewCredentialAccount {
+                scope,
+                provider: AuthProviderId::new("slack_personal").unwrap(),
+                label: account_label(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(SecretHandle::new("shared-id-secret").unwrap()),
+                refresh_secret: None,
+                scopes: Vec::new(),
+            },
+        )
+        .await;
     }
 
     assert_eq!(
@@ -913,8 +1363,10 @@ async fn migrate_retired_slack_personal_provider_does_not_resurrect_concurrent_d
         secret_store,
     ));
     let scope = test_scope();
-    let created = service
-        .create_account(NewCredentialAccount {
+    let created = seed_persisted_migration_account(
+        service.as_ref(),
+        CredentialAccountId::new(),
+        NewCredentialAccount {
             scope: scope.clone(),
             provider: AuthProviderId::new("slack_personal").unwrap(),
             label: account_label(),
@@ -925,9 +1377,9 @@ async fn migrate_retired_slack_personal_provider_does_not_resurrect_concurrent_d
             access_secret: Some(SecretHandle::new("delete-race-secret").unwrap()),
             refresh_secret: None,
             scopes: Vec::new(),
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await;
 
     backend.pause_next_account_put();
     let migration_service = Arc::clone(&service);

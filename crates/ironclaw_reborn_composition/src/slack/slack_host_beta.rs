@@ -2302,7 +2302,7 @@ mod tests {
             .api
             .install_extension(caller.clone(), package_ref)
             .await
-            .expect("install Slack tools extension");
+            .expect("install unified Slack extension");
         let response = bundle
             .api
             .list_extensions(caller)
@@ -2312,7 +2312,7 @@ mod tests {
             .extensions
             .iter()
             .find(|extension| extension.package_ref.id.as_str() == "slack")
-            .expect("Slack tools extension is listed");
+            .expect("unified Slack extension is listed");
 
         assert_eq!(
             slack.runtime, "wasm",
@@ -2369,7 +2369,7 @@ mod tests {
             .api
             .install_extension(caller.clone(), package_ref)
             .await
-            .expect("install Slack bot channel");
+            .expect("install unified Slack extension");
 
         let route_mount = slack_channel_route_admin_route_mount(mounts.channel_routes);
         let response = route_mount

@@ -13,9 +13,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_product_workflow::{
     LifecycleChannelDirections, LifecycleExtensionCredentialRequirement,
-    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
-    LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
-    ProductWorkflowError,
+    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionSource,
+    LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError,
 };
 use toml::Value;
 
@@ -160,14 +159,6 @@ pub(crate) enum AvailableExtensionAssetContent {
 pub(crate) struct AvailableExtensionPackage {
     pub(crate) package_ref: LifecyclePackageRef,
     pub(crate) manifest_toml: String,
-    /// The loader-supplied [`ManifestSource`] this package was validated
-    /// under. Carried so install/migration re-parses (`prepare_install`,
-    /// `prepare_manifest_migration`) validate with the SAME source the
-    /// package entered the catalog with: an uploaded bundle validated as
-    /// `InstalledLocal` must never be re-validated (and persisted) as
-    /// `HostBundled`, which is the only source eligible for
-    /// first-party/system trust and runtime claims.
-    pub(crate) source: ManifestSource,
     pub(crate) package: ExtensionPackage,
     pub(crate) assets: Vec<AvailableExtensionAsset>,
     /// Extension-declared removal-cleanup requirements (#5957): feed the
@@ -191,11 +182,12 @@ impl AvailableExtensionPackage {
             name: self.package.manifest.name.clone(),
             version: self.package.manifest.version.clone(),
             description: self.package.manifest.description.clone(),
-            source: LifecycleExtensionSource::HostBundled,
-            runtime_kind: runtime_kind(&self.package.manifest.runtime),
+            source: lifecycle_extension_source(self.package.manifest.source),
+            runtime: self.package.manifest.runtime_kind(),
             surface_kinds,
             channel_directions,
             channel_connection: super::extension_lifecycle::channel_connection_requirement(
+                self.package.manifest.source,
                 self.package_ref.id.as_str(),
                 &self.package.manifest.name,
                 &surfaces,
@@ -306,13 +298,11 @@ fn onboarding_message(
     }
 }
 
-fn runtime_kind(runtime: &ExtensionRuntime) -> LifecycleExtensionRuntimeKind {
-    match runtime {
-        ExtensionRuntime::Mcp { .. } => LifecycleExtensionRuntimeKind::McpServer,
-        ExtensionRuntime::Wasm { .. } => LifecycleExtensionRuntimeKind::WasmTool,
-        ExtensionRuntime::FirstParty { .. } => LifecycleExtensionRuntimeKind::FirstParty,
-        ExtensionRuntime::System { .. } => LifecycleExtensionRuntimeKind::System,
-        ExtensionRuntime::Script { .. } => LifecycleExtensionRuntimeKind::Script,
+fn lifecycle_extension_source(source: ManifestSource) -> LifecycleExtensionSource {
+    match source {
+        ManifestSource::HostBundled => LifecycleExtensionSource::HostBundled,
+        ManifestSource::InstalledLocal => LifecycleExtensionSource::InstalledLocal,
+        ManifestSource::RegistryInstalled => LifecycleExtensionSource::RegistryInstalled,
     }
 }
 
@@ -663,10 +653,9 @@ pub(crate) fn web_access_manifest_digest() -> String {
     sha256_digest_token(WEB_ACCESS_MANIFEST.as_bytes())
 }
 
-/// The Slack **bot** channel manifest — the model-B product adapter that owns
-/// the Slack Events host-ingress route. `slack_serve` projects the route
-/// descriptor from here; the tools package manifest (`SLACK_MANIFEST`)
-/// carries only WASM tool capabilities, not channel ingress.
+/// The unified host-bundled Slack manifest. It declares the WASM tool
+/// capability provider, the Slack Events channel surface, and Slack OAuth as
+/// one extension; `slack_serve` projects its host-ingress descriptor here.
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) fn slack_manifest_toml() -> &'static str {
     SLACK_MANIFEST
@@ -786,7 +775,6 @@ fn bundled_extension_package(
     Ok(AvailableExtensionPackage {
         package_ref,
         manifest_toml: record.raw_toml().to_string(),
-        source: ManifestSource::HostBundled,
         package,
         cleanup_requirements: Vec::new(),
         assets,
@@ -1691,18 +1679,20 @@ where
         // materialize under this root, so stamping discovery `HostBundled`
         // would let a process restart launder an untrusted upload into
         // first-party trust (#5459 review: import → restart → install).
-        source: ManifestSource::InstalledLocal,
         package,
         cleanup_requirements: Vec::new(),
         assets,
     }))
 }
 
+pub(super) const RETIRED_RESERVED_EXTENSION_IDS: [&str; 2] = ["slack_bot", "slack_user"]; // taxonomy-allow: retired-normal-write-rejection
+
 pub(crate) fn reserved_host_bundled_extension_id(extension_id: &ExtensionId) -> bool {
     matches!(
         extension_id.as_str(),
         "github" | "notion" | "web-access" | "slack" | NEARAI_EXTENSION_ID
-    ) || is_gsuite_extension_id(extension_id)
+    ) || RETIRED_RESERVED_EXTENSION_IDS.contains(&extension_id.as_str())
+        || is_gsuite_extension_id(extension_id)
 }
 
 pub(crate) fn map_binding_error(error: impl std::fmt::Display) -> ProductWorkflowError {
@@ -2269,10 +2259,10 @@ credential_handle = "{id}_bot_token"
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[test]
-    fn bundled_slack_tools_extension_projects_personal_oauth_setup() {
+    fn bundled_unified_slack_extension_projects_oauth_setup() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
-        // Model B: the user-installable tools extension (`slack`) surfaces the
-        // slack_personal OAuth connect requirement, not the hidden bot channel.
+        // The one host-bundled `slack` manifest projects its user OAuth
+        // requirement alongside its tool and channel surfaces.
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").unwrap();
         let summary = catalog.resolve(&package_ref).unwrap().summary();
@@ -3116,18 +3106,17 @@ handle = "web_token"
     #[tokio::test]
     async fn filesystem_catalog_skips_reserved_host_bundled_extension_ids() {
         let fs = InMemoryBackend::default();
-        fs.write_file(
-            &VirtualPath::new("/system/extensions/gmail/manifest.toml").unwrap(),
-            b"not parsed because gmail is host-bundled",
-        )
-        .await
-        .unwrap();
-        fs.write_file(
-            &VirtualPath::new("/system/extensions/slack/manifest.toml").unwrap(),
-            b"not parsed because slack is host-bundled",
-        )
-        .await
-        .unwrap();
+        for id in ["gmail", "slack"]
+            .into_iter()
+            .chain(RETIRED_RESERVED_EXTENSION_IDS)
+        {
+            fs.write_file(
+                &VirtualPath::new(format!("/system/extensions/{id}/manifest.toml")).unwrap(),
+                b"not parsed because the id is host-reserved",
+            )
+            .await
+            .unwrap();
+        }
 
         let catalog = AvailableExtensionCatalog::from_filesystem_root(
             &fs,
@@ -3413,7 +3402,6 @@ output_schema_ref = "schemas/write.output.json"
             package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
                 .unwrap(),
             manifest_toml: MANIFEST.to_string(),
-            source: ManifestSource::HostBundled,
             package,
             cleanup_requirements: Vec::new(),
             assets: vec![

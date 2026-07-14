@@ -74,10 +74,11 @@ use crate::extension_host::available_extensions::{
     AvailableExtensionCatalog, AvailableExtensionPackage, SLACK_EXTENSION_ID,
     imported_extension_package, materialize_available_extension, visible_capability_ids,
 };
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::extension_host::extension_activation_credentials::ChannelSetupActivationCredentialGate;
 use crate::extension_host::extension_activation_credentials::{
-    ChannelSetupActivationCredentialGate, ExtensionActivationCredentialGate,
-    ExtensionActivationCredentialReadiness, RuntimeExtensionActivationCredentialGate,
-    UnavailableExtensionActivationCredentialGate,
+    ExtensionActivationCredentialGate, ExtensionActivationCredentialReadiness,
+    RuntimeExtensionActivationCredentialGate, UnavailableExtensionActivationCredentialGate,
 };
 use crate::extension_host::extension_credential_requirements::{
     manifest_runtime_credential_auth_requirements, package_runtime_credential_auth_requirements,
@@ -836,6 +837,7 @@ impl RebornLocalExtensionManagementPort {
     /// Activate a channel extension for its host-owned OAuth channel-setup path,
     /// which pre-authorizes credentials via the channel-setup gate rather than
     /// requiring already-connected accounts.
+    #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) async fn activate_for_channel_setup(
         &self,
         package_ref: LifecyclePackageRef,
@@ -1841,36 +1843,10 @@ impl RebornLocalExtensionManagementPort {
         &self,
         plan: ExtensionInstallPlan,
     ) -> Result<(), ProductWorkflowError> {
-        let extension_id = plan.installation.extension_id().clone();
-        if let Err(error) = self
-            .installation_store
-            .upsert_manifest(plan.manifest_record)
+        self.installation_store
+            .upsert_manifest_and_installation(plan.manifest_record, plan.installation)
             .await
-        {
-            return Err(map_extension_installation_error(error));
-        }
-        if let Err(error) = self
-            .installation_store
-            .upsert_installation(plan.installation)
-            .await
-        {
-            if let Err(cleanup_error) = self.installation_store.delete_manifest(&extension_id).await
-            {
-                // Fail loud: the installation upsert failed *and* the manifest
-                // rollback failed, so a manifest is now orphaned with no
-                // installation. `ensure_not_installed` treats any manifest as
-                // installed, which would block every retry — surface both
-                // failures so the orphan is visible rather than silently
-                // poisoning future installs.
-                return Err(compensation_failure(
-                    "extension install persistence failed and manifest rollback failed",
-                    map_extension_installation_error(error),
-                    map_extension_installation_error(cleanup_error),
-                ));
-            }
-            return Err(map_extension_installation_error(error));
-        }
-        Ok(())
+            .map_err(map_extension_installation_error)
     }
 
     async fn delete_materialized_extension_files(
@@ -1926,7 +1902,7 @@ fn prepare_install(
     // first-party trust and the bundled hash-migration path below.
     let manifest_record = ExtensionManifestRecord::from_toml(
         &available.manifest_toml,
-        available.source,
+        available.package.manifest.source,
         &host_ports,
         Some(manifest_hash.clone()),
         &contracts,
@@ -1975,7 +1951,7 @@ fn prepare_manifest_migration(
     // whose on-disk manifest changed fails closed instead of migrating.
     let manifest_record = ExtensionManifestRecord::from_toml(
         &available.manifest_toml,
-        available.source,
+        available.package.manifest.source,
         &host_ports,
         Some(manifest_hash.clone()),
         &contracts,
@@ -2075,6 +2051,7 @@ fn activation_success_response(
     let message = activation_success_message(&package_ref, package, &visible_capability_ids);
     let surfaces = package.manifest.capability_surfaces();
     let connection_required = channel_connection_requirement(
+        package.manifest.source,
         package_ref.id.as_str(),
         package.manifest.name.as_str(),
         &surfaces,
@@ -2130,6 +2107,7 @@ fn activation_success_message(
 ) -> String {
     let surfaces = package.manifest.capability_surfaces();
     if let Some(connection) = channel_connection_requirement(
+        package.manifest.source,
         package_ref.id.as_str(),
         package.manifest.name.as_str(),
         &surfaces,
@@ -2177,8 +2155,11 @@ fn ensure_supported_channel_connection(
 ) -> Result<(), ProductWorkflowError> {
     let surfaces = available.package.manifest.capability_surfaces();
     if has_inbound_channel(&surfaces)
-        && (available.source != ManifestSource::HostBundled
-            || !composition_owns_inbound_oauth_connection(available.package.id.as_str(), &surfaces))
+        && !composition_owns_inbound_oauth_connection(
+            available.package.manifest.source,
+            available.package.id.as_str(),
+            &surfaces,
+        )
     {
         return Err(ProductWorkflowError::InvalidBindingRequest {
             reason: format!(
@@ -2195,7 +2176,11 @@ fn ensure_supported_channel_package(
 ) -> Result<(), ProductWorkflowError> {
     let surfaces = package.manifest.capability_surfaces();
     if has_inbound_channel(&surfaces)
-        && !composition_owns_inbound_oauth_connection(package.id.as_str(), &surfaces)
+        && !composition_owns_inbound_oauth_connection(
+            package.manifest.source,
+            package.id.as_str(),
+            &surfaces,
+        )
     {
         return Err(ProductWorkflowError::InvalidBindingRequest {
             reason: format!(
@@ -2222,10 +2207,12 @@ fn has_inbound_channel(surfaces: &[CapabilitySurfaceDeclV2]) -> bool {
 /// own, so every other combination fails closed until Train B introduces a
 /// typed channel-to-connection-owner association.
 fn composition_owns_inbound_oauth_connection(
+    source: ManifestSource,
     package_id: &str,
     surfaces: &[CapabilitySurfaceDeclV2],
 ) -> bool {
-    package_id == SLACK_EXTENSION_ID
+    source == ManifestSource::HostBundled
+        && package_id == SLACK_EXTENSION_ID
         && has_inbound_channel(surfaces)
         && surfaces.iter().any(|surface| {
             matches!(
@@ -2244,11 +2231,12 @@ fn composition_owns_inbound_oauth_connection(
 // other inbound combination is rejected before installation and projects no
 // connection requirement.
 pub(crate) fn channel_connection_requirement(
+    source: ManifestSource,
     channel_id: &str,
     display_name: &str,
     surfaces: &[CapabilitySurfaceDeclV2],
 ) -> Option<ChannelConnectionRequirement> {
-    composition_owns_inbound_oauth_connection(channel_id, surfaces).then(|| {
+    composition_owns_inbound_oauth_connection(source, channel_id, surfaces).then(|| {
         ChannelConnectionRequirement {
             channel: channel_id.to_string(),
             strategy: RebornChannelConnectStrategy::OAuth,
@@ -2506,14 +2494,13 @@ mod tests {
         AgentId, CapabilityId, ExtensionLifecycleOperation, HostPath, HostPortCatalog,
         InvocationId, MountAlias, MountGrant, MountPermissions, MountView, NetworkMethod,
         ProjectId, ResourceScope, RuntimeCredentialAccountSetup, RuntimeHttpEgress,
-        RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, TenantId,
-        TrustClass, UserId,
+        RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind,
+        TenantId, TrustClass, UserId,
     };
     use ironclaw_host_runtime::{SPAWN_SUBAGENT_CAPABILITY_ID, builtin_first_party_package};
     use ironclaw_product_workflow::{
-        LifecycleExtensionRuntimeKind, LifecycleExtensionSource, LifecycleProductAction,
-        LifecycleProductContext, LifecycleProductFacade, LifecycleProductSurfaceContext,
-        LifecycleReadinessBlocker,
+        LifecycleExtensionSource, LifecycleProductAction, LifecycleProductContext,
+        LifecycleProductFacade, LifecycleProductSurfaceContext, LifecycleReadinessBlocker,
     };
     use ironclaw_trust::{HostTrustPolicy, InvalidationBus, TrustPolicy};
 
@@ -2596,7 +2583,7 @@ mod tests {
                     version: "1.0.0".to_string(),
                     description: "Slack channel".to_string(),
                     source: LifecycleExtensionSource::HostBundled,
-                    runtime_kind: LifecycleExtensionRuntimeKind::WasmTool,
+                    runtime: RuntimeKind::Wasm,
                     surface_kinds: vec![CapabilitySurfaceKind::Channel],
                     visible_capability_ids: Vec::new(),
                     visible_read_only_capability_ids: Vec::new(),
@@ -3190,7 +3177,7 @@ output_schema_ref = "schemas/run.output.json"
     #[tokio::test]
     async fn extension_install_rejects_non_host_bundled_slack_oauth_channel() {
         let mut slack = fixture_oauth_external_channel_package("slack", "Slack");
-        slack.source = ManifestSource::RegistryInstalled;
+        slack.package.manifest.source = ManifestSource::RegistryInstalled;
         let (_dir, storage_root, facade, _active_registry, installation_store) =
             extension_lifecycle_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_packages(vec![slack]),
@@ -3248,6 +3235,7 @@ output_schema_ref = "schemas/run.output.json"
         };
 
         let slack_oauth = channel_connection_requirement(
+            ManifestSource::HostBundled,
             "slack",
             "Slack",
             &[channel(true, false), oauth.clone()],
@@ -3257,6 +3245,7 @@ output_schema_ref = "schemas/run.output.json"
 
         assert!(
             channel_connection_requirement(
+                ManifestSource::HostBundled,
                 "teams",
                 "Teams",
                 &[channel(true, true), oauth.clone()],
@@ -3266,12 +3255,19 @@ output_schema_ref = "schemas/run.output.json"
         );
 
         assert!(
-            channel_connection_requirement("slack", "Slack", &[channel(true, false)]).is_none(),
+            channel_connection_requirement(
+                ManifestSource::HostBundled,
+                "slack",
+                "Slack",
+                &[channel(true, false)],
+            )
+            .is_none(),
             "an inbound channel without OAuth must not expose a guaranteed-404 proof-code flow"
         );
 
         assert!(
             channel_connection_requirement(
+                ManifestSource::HostBundled,
                 "outbound-chat",
                 "Outbound Chat",
                 &[
@@ -3288,6 +3284,22 @@ output_schema_ref = "schemas/run.output.json"
             .is_none(),
             "outbound-only OAuth channels do not open an inbound connection gate"
         );
+
+        for source in [
+            ManifestSource::InstalledLocal,
+            ManifestSource::RegistryInstalled,
+        ] {
+            assert!(
+                channel_connection_requirement(
+                    source,
+                    "slack",
+                    "Slack",
+                    &[channel(true, false), oauth.clone()],
+                )
+                .is_none(),
+                "only the host-bundled Slack package may project the composition-owned OAuth connection"
+            );
+        }
     }
 
     #[tokio::test]
@@ -4062,22 +4074,20 @@ output_schema_ref = "schemas/run.output.json"
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
-    async fn slack_tools_extension_installs_activates_and_publishes_capabilities() {
+    async fn unified_slack_extension_installs_activates_and_publishes_capabilities() {
         let (_dir, _storage_root, port, _active_registry, installation_store) =
             extension_management_port_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
-        // Model B: the user-installable Slack extension is the tools package
-        // (`slack`); the bot channel (`slack_bot`) is operator-provisioned and
-        // hidden. Installing the tools extension installs only itself — there is
-        // no hidden companion.
+        // The unified `slack` package is the only installable Slack extension;
+        // its manifest owns tool, auth, and channel surfaces together.
         let slack_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("slack ref");
 
         port.install(slack_ref.clone(), &lifecycle_owner())
             .await
-            .expect("install Slack tools extension");
+            .expect("install unified Slack extension");
 
         let installed_ids = installation_store
             .list_installations()
@@ -4092,7 +4102,7 @@ output_schema_ref = "schemas/run.output.json"
                 .into_iter()
                 .map(String::from)
                 .collect::<BTreeSet<_>>(),
-            "installing the Slack tools extension installs only itself, with no hidden companion"
+            "installing the unified Slack extension creates exactly one installation"
         );
 
         let list = port
@@ -4120,7 +4130,7 @@ output_schema_ref = "schemas/run.output.json"
                 .map(|extension| extension.summary.package_ref.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["slack"],
-            "search exposes the tools extension (slack); the bot channel (slack_bot) is hidden"
+            "search exposes only the unified Slack extension"
         );
 
         port.activate_with_prechecked_credentials_for_test(
@@ -4128,7 +4138,7 @@ output_schema_ref = "schemas/run.output.json"
             ExtensionActivationMode::Static,
         )
         .await
-        .expect("activate Slack tools extension");
+        .expect("activate unified Slack extension");
 
         let active_capability_ids = port
             .active_model_visible_capabilities()
@@ -4139,17 +4149,17 @@ output_schema_ref = "schemas/run.output.json"
             .collect::<BTreeSet<_>>();
         assert!(
             active_capability_ids.contains("slack.search_messages"),
-            "activating the Slack tools extension publishes its read tools"
+            "activating the unified Slack extension publishes its read tools"
         );
         assert!(
             active_capability_ids.contains("slack.send_message"),
-            "activating the Slack tools extension publishes its write tool"
+            "activating the unified Slack extension publishes its write tool"
         );
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
-    async fn slack_tools_extension_activation_requires_personal_oauth() {
+    async fn unified_slack_extension_activation_requires_user_oauth() {
         let (_dir, _storage_root, port, _active_registry, _installation_store) =
             extension_management_port_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
@@ -4205,7 +4215,7 @@ output_schema_ref = "schemas/run.output.json"
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
-    async fn slack_tools_extension_removal_fails_closed_without_channel_cleanup() {
+    async fn unified_slack_extension_removal_fails_closed_without_channel_cleanup() {
         let (_dir, _storage_root, port, _active_registry, installation_store) =
             extension_management_port_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
@@ -6005,6 +6015,56 @@ output_schema_ref = "schemas/run.output.json"
     }
 
     #[tokio::test]
+    async fn fresh_install_uses_one_atomic_store_transition_and_retries_cleanly_after_interruption()
+    {
+        let failing_store = DeleteInstallationFailingStore::fail_next_atomic_install();
+        let (dir, port, _active_registry, store, _trust_policy) = extension_port_with_failing_store(
+            ExtensionRegistry::new(),
+            failing_store,
+            ExtensionLifecycleService::new(ExtensionRegistry::new()),
+        );
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("valid fixture package ref");
+
+        port.install(package_ref.clone(), &lifecycle_owner())
+            .await
+            .expect_err("injected atomic persistence interruption must fail the first install");
+
+        assert!(store.inner.list_manifests().await.unwrap().is_empty());
+        assert!(store.inner.list_installations().await.unwrap().is_empty());
+        assert!(
+            !dir.path()
+                .join("local-dev/system/extensions/fixture")
+                .exists(),
+            "failed persistence must unwind materialized package files"
+        );
+
+        let restarted_active_registry =
+            Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let restarted_trust_policy = test_extension_trust_policy();
+        let restarted_store: Arc<dyn ExtensionInstallationStore> = store.clone();
+        let restarted = RebornLocalExtensionManagementPort::new(
+            Arc::clone(&port.filesystem),
+            AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
+            restarted_store,
+            Arc::new(Mutex::new(ExtensionLifecycleService::new(
+                ExtensionRegistry::new(),
+            ))),
+            test_active_extension_publisher(restarted_active_registry, restarted_trust_policy),
+            None,
+            lifecycle_owner(),
+        );
+
+        restarted
+            .install(package_ref, &lifecycle_owner())
+            .await
+            .expect("restart retries the complete atomic install plan");
+        assert_eq!(store.atomic_install_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(store.inner.list_manifests().await.unwrap().len(), 1);
+        assert_eq!(store.inner.list_installations().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn extension_activate_rejects_lifecycle_package_without_installation() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
@@ -7645,6 +7705,9 @@ output_schema_ref = "schemas/run.output.json"
         /// #5459 P1: fail the NEXT `upsert_installation` once, then clear —
         /// simulates a mid-install persist failure so the retry can heal.
         fail_next_upsert_installation: std::sync::atomic::AtomicBool,
+        require_atomic_install: bool,
+        fail_next_atomic_install: std::sync::atomic::AtomicBool,
+        atomic_install_calls: AtomicUsize,
     }
 
     impl DeleteInstallationFailingStore {
@@ -7675,6 +7738,14 @@ output_schema_ref = "schemas/run.output.json"
                 ..Self::default()
             }
         }
+
+        fn fail_next_atomic_install() -> Self {
+            Self {
+                require_atomic_install: true,
+                fail_next_atomic_install: std::sync::atomic::AtomicBool::new(true),
+                ..Self::default()
+            }
+        }
     }
 
     #[async_trait]
@@ -7696,6 +7767,11 @@ output_schema_ref = "schemas/run.output.json"
             &self,
             manifest: ExtensionManifestRecord,
         ) -> Result<(), ExtensionInstallationError> {
+            if self.require_atomic_install {
+                return Err(ExtensionInstallationError::InvalidInstallation {
+                    reason: "fresh install attempted a non-atomic manifest write".to_string(),
+                });
+            }
             self.inner.upsert_manifest(manifest).await
         }
 
@@ -7704,6 +7780,15 @@ output_schema_ref = "schemas/run.output.json"
             manifest: ExtensionManifestRecord,
             installation: ExtensionInstallation,
         ) -> Result<(), ExtensionInstallationError> {
+            self.atomic_install_calls.fetch_add(1, Ordering::SeqCst);
+            if self
+                .fail_next_atomic_install
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(ExtensionInstallationError::InvalidInstallation {
+                    reason: "injected atomic install interruption".to_string(),
+                });
+            }
             self.inner
                 .upsert_manifest_and_installation(manifest, installation)
                 .await
@@ -8531,7 +8616,6 @@ output_schema_ref = "schemas/search.output.json"
             package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, root_id)
                 .expect("fixture package ref"),
             manifest_toml: manifest_toml.to_string(),
-            source: ManifestSource::HostBundled,
             package,
             cleanup_requirements: Vec::new(),
             assets: vec![

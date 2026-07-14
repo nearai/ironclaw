@@ -30,6 +30,7 @@ where
         &self,
         request: ManualTokenSetupRequest,
     ) -> Result<AuthChallenge, AuthProductError> {
+        crate::product_auth::reject_retired_provider(&request.provider)?;
         if let Some(binding) = &request.update_binding {
             let account = self
                 .read_account(&request.scope, binding.account_id)
@@ -76,6 +77,7 @@ where
             .read_record(&scope.resource, &path)
             .await?
             .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        crate::product_auth::reject_retired_provider(&pending.provider)?;
         if !scope_matches(scope, &pending.scope) {
             return Err(AuthProductError::CrossScopeDenied);
         }

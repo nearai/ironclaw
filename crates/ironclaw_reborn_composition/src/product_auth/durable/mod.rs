@@ -49,6 +49,85 @@ mod tests;
 const MAX_OWNER_SESSION_ROOTS_PER_SURFACE: usize = 1024;
 const MAX_OWNER_RECORDS_PER_ROOT: usize = 1024;
 const MAX_ACCOUNT_DISCOVERY_ENTRIES_PER_ROOT: usize = 1024;
+// The per-directory caps above do not bound their cross-tenant product. Keep
+// the one-time strict migration's retained owners and total traversal work
+// finite; 8,192 owners consume 57,344 of the 65,536 scope budget for the seven
+// mandatory surface roots, leaving bounded room for session roots. Normal
+// keepalive enumeration deliberately keeps its existing mode.
+const STRICT_MIGRATION_LIMITS: StrictMigrationLimits = StrictMigrationLimits {
+    owners: 8_192,
+    scopes: 65_536,
+    account_entries: 65_536,
+};
+
+#[derive(Clone, Copy)]
+struct StrictMigrationLimits {
+    owners: usize,
+    scopes: usize,
+    account_entries: usize,
+}
+
+struct StrictMigrationBudget {
+    limits: StrictMigrationLimits,
+    owners: usize,
+    scopes: usize,
+    account_entries: usize,
+}
+
+impl StrictMigrationBudget {
+    fn new(limits: StrictMigrationLimits) -> Self {
+        Self {
+            limits,
+            owners: 0,
+            scopes: 0,
+            account_entries: 0,
+        }
+    }
+
+    fn charge_owner(&mut self) -> Result<(), AuthProductError> {
+        Self::charge(&mut self.owners, self.limits.owners, "owners")
+    }
+
+    fn charge_scope(&mut self) -> Result<(), AuthProductError> {
+        Self::charge(&mut self.scopes, self.limits.scopes, "scopes")
+    }
+
+    fn charge_account_entry(&mut self) -> Result<(), AuthProductError> {
+        Self::charge(
+            &mut self.account_entries,
+            self.limits.account_entries,
+            "account_entries",
+        )
+    }
+
+    fn charge(
+        current: &mut usize,
+        limit: usize,
+        dimension: &'static str,
+    ) -> Result<(), AuthProductError> {
+        let Some(observed) = current.checked_add(1) else {
+            tracing::error!(
+                migration = "slack_personal_to_slack",
+                budget_dimension = dimension,
+                limit,
+                "strict product-auth migration traversal budget overflowed"
+            );
+            return Err(AuthProductError::BackendUnavailable);
+        };
+        if observed > limit {
+            tracing::error!(
+                migration = "slack_personal_to_slack",
+                budget_dimension = dimension,
+                limit,
+                observed,
+                "strict product-auth migration traversal budget exceeded"
+            );
+            return Err(AuthProductError::BackendUnavailable);
+        }
+        *current = observed;
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AccountEnumerationMode {
@@ -265,6 +344,11 @@ where
         record: &AuthFlowRecord,
         cas: CasExpectation,
     ) -> Result<RecordVersion, AuthProductError> {
+        // This is the durable normal-write boundary for every flow mutation,
+        // including cancellation and continuation settlement. Keeping the
+        // rejection here prevents a less common caller from rewriting a
+        // pre-Train-A provider id after the startup migration.
+        crate::product_auth::reject_retired_provider(&record.provider)?;
         self.write_record(&scope.resource, &flow_path(scope, record.id)?, record, cas)
             .await
     }
@@ -435,6 +519,10 @@ where
         account: &CredentialAccount,
         cas: CasExpectation,
     ) -> Result<RecordVersion, AuthProductError> {
+        // All current account mutations converge through this helper. Raw
+        // pre-Train-A fixtures and the one-time reader use `write_record`
+        // explicitly; normal product code cannot recreate the retired id.
+        crate::product_auth::reject_retired_provider(&account.provider)?;
         self.write_record(
             &account.scope.resource,
             &account_path(&account.scope, account.id)?,
@@ -553,6 +641,16 @@ where
         owner: &CredentialAccountOwnerScope,
         mode: AccountEnumerationMode,
     ) -> Result<Vec<ironclaw_auth::AuthProductScope>, AuthProductError> {
+        self.account_scopes_for_owner_with_mode_and_budget(owner, mode, None)
+            .await
+    }
+
+    async fn account_scopes_for_owner_with_mode_and_budget(
+        &self,
+        owner: &CredentialAccountOwnerScope,
+        mode: AccountEnumerationMode,
+        mut budget: Option<&mut StrictMigrationBudget>,
+    ) -> Result<Vec<ironclaw_auth::AuthProductScope>, AuthProductError> {
         let resource = ResourceScope {
             tenant_id: owner.tenant_id.clone(),
             user_id: owner.user_id.clone(),
@@ -564,15 +662,18 @@ where
         };
         let mut scopes = Vec::new();
         for surface in AuthSurface::ALL {
-            scopes.push(ironclaw_auth::AuthProductScope::new(
-                resource.clone(),
-                surface,
-            ));
+            Self::retain_account_scope(
+                &mut scopes,
+                ironclaw_auth::AuthProductScope::new(resource.clone(), surface),
+                &mut budget,
+            )?;
             if let Some(session_id) = &owner.session_id {
-                scopes.push(
+                Self::retain_account_scope(
+                    &mut scopes,
                     ironclaw_auth::AuthProductScope::new(resource.clone(), surface)
                         .with_session_id(session_id.clone()),
-                );
+                    &mut budget,
+                )?;
                 continue;
             }
             let sessions_root = surface_sessions_root(&resource, surface)?;
@@ -602,13 +703,27 @@ where
                     Err(_) if mode == AccountEnumerationMode::BestEffortKeepalive => continue,
                     Err(_) => return Err(AuthProductError::BackendUnavailable),
                 };
-                scopes.push(
+                Self::retain_account_scope(
+                    &mut scopes,
                     ironclaw_auth::AuthProductScope::new(resource.clone(), surface)
                         .with_session_id(session_id),
-                );
+                    &mut budget,
+                )?;
             }
         }
         Ok(scopes)
+    }
+
+    fn retain_account_scope(
+        scopes: &mut Vec<ironclaw_auth::AuthProductScope>,
+        scope: ironclaw_auth::AuthProductScope,
+        budget: &mut Option<&mut StrictMigrationBudget>,
+    ) -> Result<(), AuthProductError> {
+        if let Some(budget) = budget.as_deref_mut() {
+            budget.charge_scope()?;
+        }
+        scopes.push(scope);
+        Ok(())
     }
 
     async fn account_records_for_owner(
@@ -749,6 +864,14 @@ where
         &self,
         mode: AccountEnumerationMode,
     ) -> Result<Vec<CredentialAccountOwnerScope>, AuthProductError> {
+        self.discover_account_owners_with_budget(mode, None).await
+    }
+
+    async fn discover_account_owners_with_budget(
+        &self,
+        mode: AccountEnumerationMode,
+        mut budget: Option<&mut StrictMigrationBudget>,
+    ) -> Result<Vec<CredentialAccountOwnerScope>, AuthProductError> {
         let Some(tenants_path) = Self::discovery_path("/tenants", mode)? else {
             return Ok(Vec::new());
         };
@@ -776,15 +899,19 @@ where
                 else {
                     continue;
                 };
-                owners.push(CredentialAccountOwnerScope {
-                    tenant_id: tenant_id.clone(),
-                    user_id: user_id.clone(),
-                    agent_id: None,
-                    project_id: None,
-                    mission_id: None,
-                    thread_id: None,
-                    session_id: None,
-                });
+                Self::retain_discovered_owner(
+                    &mut owners,
+                    CredentialAccountOwnerScope {
+                        tenant_id: tenant_id.clone(),
+                        user_id: user_id.clone(),
+                        agent_id: None,
+                        project_id: None,
+                        mission_id: None,
+                        thread_id: None,
+                        session_id: None,
+                    },
+                    &mut budget,
+                )?;
 
                 let agents_raw = format!(
                     "/tenants/{}/users/{}/secrets/agents",
@@ -802,15 +929,19 @@ where
                     else {
                         continue;
                     };
-                    owners.push(CredentialAccountOwnerScope {
-                        tenant_id: tenant_id.clone(),
-                        user_id: user_id.clone(),
-                        agent_id: Some(agent_id.clone()),
-                        project_id: None,
-                        mission_id: None,
-                        thread_id: None,
-                        session_id: None,
-                    });
+                    Self::retain_discovered_owner(
+                        &mut owners,
+                        CredentialAccountOwnerScope {
+                            tenant_id: tenant_id.clone(),
+                            user_id: user_id.clone(),
+                            agent_id: Some(agent_id.clone()),
+                            project_id: None,
+                            mission_id: None,
+                            thread_id: None,
+                            session_id: None,
+                        },
+                        &mut budget,
+                    )?;
                     let Some(projects_path) = Self::discovery_path(
                         &format!("{}/{}/projects", agents_raw, agent_entry.name),
                         mode,
@@ -827,15 +958,19 @@ where
                         else {
                             continue;
                         };
-                        owners.push(CredentialAccountOwnerScope {
-                            tenant_id: tenant_id.clone(),
-                            user_id: user_id.clone(),
-                            agent_id: Some(agent_id.clone()),
-                            project_id: Some(project_id),
-                            mission_id: None,
-                            thread_id: None,
-                            session_id: None,
-                        });
+                        Self::retain_discovered_owner(
+                            &mut owners,
+                            CredentialAccountOwnerScope {
+                                tenant_id: tenant_id.clone(),
+                                user_id: user_id.clone(),
+                                agent_id: Some(agent_id.clone()),
+                                project_id: Some(project_id),
+                                mission_id: None,
+                                thread_id: None,
+                                session_id: None,
+                            },
+                            &mut budget,
+                        )?;
                     }
                 }
 
@@ -858,19 +993,35 @@ where
                     else {
                         continue;
                     };
-                    owners.push(CredentialAccountOwnerScope {
-                        tenant_id: tenant_id.clone(),
-                        user_id: user_id.clone(),
-                        agent_id: None,
-                        project_id: Some(project_id),
-                        mission_id: None,
-                        thread_id: None,
-                        session_id: None,
-                    });
+                    Self::retain_discovered_owner(
+                        &mut owners,
+                        CredentialAccountOwnerScope {
+                            tenant_id: tenant_id.clone(),
+                            user_id: user_id.clone(),
+                            agent_id: None,
+                            project_id: Some(project_id),
+                            mission_id: None,
+                            thread_id: None,
+                            session_id: None,
+                        },
+                        &mut budget,
+                    )?;
                 }
             }
         }
         Ok(owners)
+    }
+
+    fn retain_discovered_owner(
+        owners: &mut Vec<CredentialAccountOwnerScope>,
+        owner: CredentialAccountOwnerScope,
+        budget: &mut Option<&mut StrictMigrationBudget>,
+    ) -> Result<(), AuthProductError> {
+        if let Some(budget) = budget.as_deref_mut() {
+            budget.charge_owner()?;
+        }
+        owners.push(owner);
+        Ok(())
     }
 
     fn validate_located_account(
@@ -898,10 +1049,15 @@ where
     async fn strict_migration_accounts_for_owner(
         &self,
         owner: &CredentialAccountOwnerScope,
+        budget: &mut StrictMigrationBudget,
     ) -> Result<Vec<LocatedCredentialAccount>, AuthProductError> {
         let mut located = Vec::new();
         for scope in self
-            .account_scopes_for_owner_with_mode(owner, AccountEnumerationMode::StrictMigration)
+            .account_scopes_for_owner_with_mode_and_budget(
+                owner,
+                AccountEnumerationMode::StrictMigration,
+                Some(budget),
+            )
             .await?
         {
             let root = account_root(&scope)?;
@@ -923,6 +1079,7 @@ where
             }
             entries.sort_by(|left, right| left.name.cmp(&right.name));
             for entry in entries {
+                budget.charge_account_entry()?;
                 let Some(raw_id) = entry.name.strip_suffix(".json") else {
                     continue;
                 };
@@ -940,7 +1097,9 @@ where
                     return Err(AuthProductError::BackendUnavailable);
                 };
                 Self::validate_located_account(&scope, &path, located_id, &account)?;
-                if account.provider.as_str() == "slack_personal" {
+                if account.provider.as_str()
+                    == crate::product_auth::RETIRED_SLACK_PERSONAL_PROVIDER_ID
+                {
                     located.push(LocatedCredentialAccount {
                         located_scope: scope.clone(),
                         path,
@@ -1003,12 +1162,27 @@ where
     pub(crate) async fn migrate_retired_slack_personal_provider(
         &self,
     ) -> Result<usize, AuthProductError> {
+        self.migrate_retired_slack_personal_provider_with_limits(STRICT_MIGRATION_LIMITS)
+            .await
+    }
+
+    async fn migrate_retired_slack_personal_provider_with_limits(
+        &self,
+        limits: StrictMigrationLimits,
+    ) -> Result<usize, AuthProductError> {
+        let mut budget = StrictMigrationBudget::new(limits);
         let mut retired = Vec::new();
         for owner in self
-            .discover_account_owners(AccountEnumerationMode::StrictMigration)
+            .discover_account_owners_with_budget(
+                AccountEnumerationMode::StrictMigration,
+                Some(&mut budget),
+            )
             .await?
         {
-            retired.extend(self.strict_migration_accounts_for_owner(&owner).await?);
+            retired.extend(
+                self.strict_migration_accounts_for_owner(&owner, &mut budget)
+                    .await?,
+            );
         }
         let unified_provider = ironclaw_auth::AuthProviderId::new("slack")
             .map_err(|_| AuthProductError::BackendUnavailable)?;
@@ -1052,7 +1226,9 @@ where
                     ) {
                         return std::future::ready(Err(error));
                     }
-                    if snapshot.provider.as_str() != "slack_personal" {
+                    if snapshot.provider.as_str()
+                        != crate::product_auth::RETIRED_SLACK_PERSONAL_PROVIDER_ID
+                    {
                         return std::future::ready(Ok(CasApply::no_op(snapshot, 0)));
                     }
                     snapshot.provider = provider.clone();
@@ -1099,6 +1275,7 @@ where
         provider_identity: Option<ironclaw_auth::OAuthProviderIdentity>,
         cas: CasExpectation,
     ) -> Result<(CredentialAccount, RecordVersion), AuthProductError> {
+        crate::product_auth::reject_retired_provider(&request.provider)?;
         validate_new_credential_account(&request)?;
         let now = Utc::now();
         let account = CredentialAccount {

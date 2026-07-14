@@ -22,7 +22,8 @@ use ironclaw_auth::{CredentialAccountId, CredentialAccountProjection};
 use ironclaw_host_api::CapabilitySurfaceKind;
 use ironclaw_host_api::{
     AgentId, ApprovalRequestId, CapabilityId, EffectKind, ExtensionId, InvocationId,
-    PermissionMode, Principal, ProjectId, ResourceScope, SecretHandle, TenantId, ThreadId, UserId,
+    PermissionMode, Principal, ProjectId, ResourceScope, RuntimeKind, SecretHandle, TenantId,
+    ThreadId, UserId,
 };
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductOutboundEnvelope, ProductWorkflowRejectionKind, ProjectionCursor,
@@ -38,20 +39,19 @@ use ironclaw_product_workflow::{
     ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
     ExtensionCredentialSubmitRequest, InboundAttachmentLander, InboundAttachmentReader,
     LifecycleChannelDirections, LifecycleExtensionCredentialRequirement,
-    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
-    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
-    LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductAction,
-    LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
-    LifecycleProductResponse, LifecycleReadinessBlocker, ListPendingApprovalsRequest,
-    ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
-    ListPendingAuthInteractionsResponse, LlmActiveSelection, LlmConfigService,
-    LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
-    LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
-    NearAiWalletLoginResult, OperatorLogsService, OperatorServiceLifecycleService,
-    OperatorStatusService, OutboundPreferencesProductFacade, PendingApprovalInteractionView,
-    ProductAgentBoundCaller, ProductWorkflowError, ProjectCaller, ProjectService,
-    ProjectServiceError, RebornAddMemberRequest, RebornAttachmentRequest, RebornAutomationInfo,
-    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionSource,
+    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
+    LifecyclePackageRef, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
+    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleReadinessBlocker, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
+    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse, LlmActiveSelection,
+    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
+    LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, OperatorLogsService,
+    OperatorServiceLifecycleService, OperatorStatusService, OutboundPreferencesProductFacade,
+    PendingApprovalInteractionView, ProductAgentBoundCaller, ProductWorkflowError, ProjectCaller,
+    ProjectService, ProjectServiceError, RebornAddMemberRequest, RebornAttachmentRequest,
+    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornChannelConnectStrategy, RebornCreateProjectRequest,
     RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornExtensionOnboardingState,
@@ -898,7 +898,7 @@ impl RecordingLifecycleFacade {
             version: "1.0.0".to_string(),
             description: "test extension".to_string(),
             source: LifecycleExtensionSource::HostBundled,
-            runtime_kind: LifecycleExtensionRuntimeKind::FirstParty,
+            runtime: RuntimeKind::FirstParty,
             surface_kinds: Vec::new(),
             channel_directions: None,
             channel_connection: None,
@@ -5219,7 +5219,7 @@ async fn list_extensions_projects_channel_surface_with_directions_and_connection
 }
 
 #[test]
-// arch-exempt: large_file, lifecycle wire contracts stay at the public facade seam, plan #6061
+// arch-exempt: large_file, the lifecycle wire matrix still awaits extraction into its own public-facade contract module, plan #4088
 fn lifecycle_package_kind_rejects_retired_runtime_taxonomy() {
     for retired in ["mcp", "wasm"] {
         let result = serde_json::from_value::<LifecyclePackageKind>(json!(retired));
@@ -9712,7 +9712,7 @@ fn extension_summary(
         version: "1.0.0".to_string(),
         description: "test extension".to_string(),
         source: LifecycleExtensionSource::HostBundled,
-        runtime_kind: LifecycleExtensionRuntimeKind::FirstParty,
+        runtime: RuntimeKind::FirstParty,
         surface_kinds: Vec::new(),
         channel_directions: None,
         channel_connection: None,

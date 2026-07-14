@@ -1,6 +1,12 @@
 # Slack Personal (user-token) OAuth — Flow A, single shared app
 
-Status: in progress (branch `feat/slack-user-tool-oauth-reborn`)
+Status: superseded by the unified Slack extension cutover in #6061.
+
+This is a historical design record. Do not use its split `slack_user` /
+`slack_personal` package and provider model for current work. The current
+contract is the single host-bundled `slack` extension and `slack` provider
+documented in [`docs/reborn/contracts/extensions.md`](../reborn/contracts/extensions.md)
+and [`docs/reborn/setup-slack-for-reborn-binary.md`](../reborn/setup-slack-for-reborn-binary.md).
 
 ## Goal
 

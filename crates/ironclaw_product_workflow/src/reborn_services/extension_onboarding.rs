@@ -1,5 +1,7 @@
+use ironclaw_host_api::RuntimeKind;
+
 use crate::{
-    LifecycleExtensionCredentialSetup, LifecycleExtensionRuntimeKind, LifecycleExtensionSummary,
+    LifecycleExtensionCredentialSetup, LifecycleExtensionSummary,
     LifecycleInstalledExtensionSummary, LifecyclePhase, LifecycleProductPayload,
     LifecycleProductResponse,
 };
@@ -128,10 +130,7 @@ fn no_credential_onboarding(
         Some(activation_instructions(summary))
     } else if let Some(onboarding) = &summary.onboarding {
         Some(onboarding.instructions.clone())
-    } else if matches!(
-        summary.runtime_kind,
-        LifecycleExtensionRuntimeKind::McpServer
-    ) {
+    } else if matches!(summary.runtime, RuntimeKind::Mcp) {
         Some(format!(
             "{} is installed. Activate it to make its MCP tools available.",
             summary.name
@@ -159,10 +158,7 @@ fn no_credential_onboarding(
 }
 
 fn activation_instructions(summary: &LifecycleExtensionSummary) -> String {
-    if matches!(
-        summary.runtime_kind,
-        LifecycleExtensionRuntimeKind::McpServer
-    ) {
+    if matches!(summary.runtime, RuntimeKind::Mcp) {
         format!(
             "{} is installed. Activate it to make its MCP tools available.",
             summary.name
@@ -223,7 +219,7 @@ mod tests {
             "GitHub",
             LifecyclePhase::Installed,
             vec![manual_requirement("github_runtime_token", "github")],
-            LifecycleExtensionRuntimeKind::WasmTool,
+            RuntimeKind::Wasm,
             Some(LifecycleExtensionOnboarding {
                 instructions: "GitHub needs a personal access token before its repository and pull request tools can run.".to_string(),
                 credential_instructions: Some("Create a GitHub personal access token with the repository permissions you want IronClaw to use, then paste it here.".to_string()),
@@ -262,7 +258,7 @@ mod tests {
             "Gmail",
             LifecyclePhase::Installed,
             vec![oauth_requirement("gmail_account", "google")],
-            LifecycleExtensionRuntimeKind::FirstParty,
+            RuntimeKind::FirstParty,
             Some(LifecycleExtensionOnboarding {
                 instructions: "Gmail needs Google OAuth authorization before mail tools can run."
                     .to_string(),
@@ -297,7 +293,7 @@ mod tests {
             "Web Access",
             LifecyclePhase::Installed,
             Vec::new(),
-            LifecycleExtensionRuntimeKind::FirstParty,
+            RuntimeKind::FirstParty,
             Some(LifecycleExtensionOnboarding {
                 instructions: "Web Access does not need credentials. Activate it to make web search and page-content retrieval tools available.".to_string(),
                 credential_instructions: Some("No credentials are required for Web Access.".to_string()),
@@ -328,7 +324,7 @@ mod tests {
             "GitHub",
             LifecyclePhase::Configured,
             vec![manual_requirement("github_runtime_token", "github")],
-            LifecycleExtensionRuntimeKind::WasmTool,
+            RuntimeKind::Wasm,
             Some(LifecycleExtensionOnboarding {
                 instructions: "GitHub needs a personal access token before its repository and pull request tools can run.".to_string(),
                 credential_instructions: Some("Create a GitHub personal access token with the repository permissions you want IronClaw to use, then paste it here.".to_string()),
@@ -357,7 +353,7 @@ mod tests {
             "Gmail",
             LifecyclePhase::Installed,
             vec![oauth_requirement("gmail_account", "google")],
-            LifecycleExtensionRuntimeKind::FirstParty,
+            RuntimeKind::FirstParty,
             Some(LifecycleExtensionOnboarding {
                 instructions: "Gmail needs Google OAuth authorization before mail tools can run."
                     .to_string(),
@@ -395,7 +391,7 @@ mod tests {
             "Gmail",
             LifecyclePhase::Failed,
             vec![oauth_requirement("gmail_account", "google")],
-            LifecycleExtensionRuntimeKind::FirstParty,
+            RuntimeKind::FirstParty,
             Some(LifecycleExtensionOnboarding {
                 instructions: "Gmail activation failed.".to_string(),
                 credential_instructions: Some(
@@ -442,7 +438,7 @@ mod tests {
                         "Other",
                         LifecyclePhase::Installed,
                         Vec::new(),
-                        LifecycleExtensionRuntimeKind::FirstParty,
+                        RuntimeKind::FirstParty,
                         Some(LifecycleExtensionOnboarding {
                             instructions: "Other message".to_string(),
                             credential_instructions: None,
@@ -455,7 +451,7 @@ mod tests {
                         "Target",
                         LifecyclePhase::Installed,
                         Vec::new(),
-                        LifecycleExtensionRuntimeKind::FirstParty,
+                        RuntimeKind::FirstParty,
                         Some(LifecycleExtensionOnboarding {
                             instructions: "Target message".to_string(),
                             credential_instructions: None,
@@ -478,7 +474,7 @@ mod tests {
         name: &str,
         phase: LifecyclePhase,
         credential_requirements: Vec<LifecycleExtensionCredentialRequirement>,
-        runtime_kind: LifecycleExtensionRuntimeKind,
+        runtime: RuntimeKind,
         onboarding: Option<LifecycleExtensionOnboarding>,
     ) -> LifecycleInstalledExtensionSummary {
         LifecycleInstalledExtensionSummary {
@@ -489,7 +485,7 @@ mod tests {
                 version: "1.0.0".to_string(),
                 description: "test extension".to_string(),
                 source: LifecycleExtensionSource::HostBundled,
-                runtime_kind,
+                runtime,
                 surface_kinds: Vec::new(),
                 channel_directions: None,
                 channel_connection: None,

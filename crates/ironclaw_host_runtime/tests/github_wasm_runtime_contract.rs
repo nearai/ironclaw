@@ -1,3 +1,4 @@
+// arch-exempt: large_file, the GitHub WASM manifest fixture factory is not yet extracted from this end-to-end runtime suite, plan #4088
 use std::sync::Arc;
 
 use async_trait::async_trait;

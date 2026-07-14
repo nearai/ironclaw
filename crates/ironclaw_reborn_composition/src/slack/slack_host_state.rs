@@ -1334,10 +1334,7 @@ where
             record.validate(owner)?;
             let updated = match record.state {
                 SlackConnectionState::Active if record.epoch == epoch => {
-                    return Ok(SlackConnectionActivation {
-                        previous: None,
-                        written_version: version,
-                    });
+                    return Ok(SlackConnectionActivation { previous: None });
                 }
                 SlackConnectionState::Active
                     if record
@@ -1362,10 +1359,9 @@ where
                 .write_record(&path, &updated, CasExpectation::Version(version))
                 .await
             {
-                Ok(written_version) => {
+                Ok(_) => {
                     return Ok(SlackConnectionActivation {
                         previous: Some(record),
-                        written_version,
                     });
                 }
                 Err(FilesystemError::VersionMismatch { .. }) => continue,
@@ -1747,65 +1743,22 @@ where
             (previous.state == SlackConnectionState::Active
                 && previous
                     .pending_connection
-                    .is_some_and(|pending| pending.epoch == failed_epoch))
+                    .is_some_and(|pending| pending.epoch == failed_epoch)
+                && previous_identity.as_ref().is_some_and(|identity| {
+                    identity.state == StoredSlackIdentityState::Active
+                        && identity.user_id == binding.user_id.as_str()
+                        && identity.epoch == Some(previous.epoch)
+                }))
             .then(|| previous.without_pending_connection())
         });
-
-        let mut restored_epoch = None;
-        let Some((current_connection, current_connection_version)) = self
-            .read_record::<StoredSlackConnection>(&connection_path)
-            .await
-            .map_err(map_binding_fs_error)?
-        else {
-            return Ok(());
-        };
-        current_connection
-            .validate(&owner)
-            .map_err(|error| RebornUserIdentityBindingError::Backend(error.to_string()))?;
-        if current_connection.state == SlackConnectionState::Active
-            && current_connection.epoch == failed_epoch
-        {
-            let exact_target = restorable_connection.clone().unwrap_or_else(|| {
-                current_connection
-                    .with_state(SlackConnectionState::Disconnected)
-                    .without_pending_connection()
-            });
-            match self
-                .write_record(
-                    &connection_path,
-                    &exact_target,
-                    CasExpectation::Version(activation.written_version),
-                )
-                .await
-            {
-                Ok(_) => restored_epoch = restorable_connection.map(|record| record.epoch),
-                Err(FilesystemError::VersionMismatch { .. }) => {
-                    // A newer reconfigure can only have been staged after the
-                    // failed epoch became active. Do not resurrect the older
-                    // epoch across that write; fence the failed active epoch
-                    // instead. Disconnecting or a promoted newer epoch wins.
-                    if current_connection.state == SlackConnectionState::Active
-                        && current_connection.epoch == failed_epoch
-                    {
-                        let disconnected = current_connection
-                            .with_state(SlackConnectionState::Disconnected)
-                            .without_pending_connection();
-                        match self
-                            .write_record(
-                                &connection_path,
-                                &disconnected,
-                                CasExpectation::Version(current_connection_version),
-                            )
-                            .await
-                        {
-                            Ok(_) | Err(FilesystemError::VersionMismatch { .. }) => {}
-                            Err(error) => return Err(map_binding_fs_error(error)),
-                        }
-                    }
-                }
-                Err(error) => return Err(map_binding_fs_error(error)),
-            }
-        }
+        let restored_epoch = self
+            .reconcile_connection_for_identity_rollback(
+                &owner,
+                &connection_path,
+                failed_epoch,
+                restorable_connection.as_ref(),
+            )
+            .await?;
 
         let Some((current_identity, current_identity_version)) = self
             .read_record::<StoredSlackUserIdentity>(&identity_path)
@@ -1880,6 +1833,81 @@ where
         )
         .await;
         Ok(())
+    }
+
+    async fn reconcile_connection_for_identity_rollback(
+        &self,
+        owner: &SlackConnectionOwner,
+        connection_path: &ScopedPath,
+        failed_epoch: SlackConnectionEpoch,
+        restorable_connection: Option<&StoredSlackConnection>,
+    ) -> Result<Option<SlackConnectionEpoch>, RebornUserIdentityBindingError> {
+        for _ in 0..LIFECYCLE_CAS_RETRIES {
+            let Some((current, version)) = self
+                .read_record::<StoredSlackConnection>(connection_path)
+                .await
+                .map_err(map_binding_fs_error)?
+            else {
+                return Ok(None);
+            };
+            current
+                .validate(owner)
+                .map_err(|error| RebornUserIdentityBindingError::Backend(error.to_string()))?;
+
+            if current.state == SlackConnectionState::Active && current.epoch == failed_epoch {
+                let newer_pending = current
+                    .pending_connection
+                    .filter(|pending| pending.epoch != failed_epoch);
+                let (target, restored_epoch) = if let Some(predecessor) = restorable_connection {
+                    // P -> A -> pending B -> rollback A restores P as the
+                    // ingress authority while preserving the exact pending B
+                    // generation. If B is abandoned or fails concurrently,
+                    // the retry below observes A without B and still restores P.
+                    (
+                        predecessor.with_pending_connection_record(newer_pending),
+                        Some(predecessor.epoch),
+                    )
+                } else {
+                    let target = match newer_pending {
+                        Some(pending) => current.pending_as_connecting(pending),
+                        None => current
+                            .with_state(SlackConnectionState::Disconnected)
+                            .without_pending_connection(),
+                    };
+                    // With no predecessor, failed A must not remain an active
+                    // carrier after B is abandoned. Retype pending B as the
+                    // standalone connecting generation: B can still activate,
+                    // and its failure now converges to B disconnected.
+                    (target, None)
+                };
+
+                match self
+                    .write_record(connection_path, &target, CasExpectation::Version(version))
+                    .await
+                {
+                    Ok(_) => return Ok(restored_epoch),
+                    Err(FilesystemError::VersionMismatch { .. }) => continue,
+                    Err(error) => return Err(map_binding_fs_error(error)),
+                }
+            }
+
+            if current.state == SlackConnectionState::Active
+                && restorable_connection
+                    .is_some_and(|predecessor| predecessor.epoch == current.epoch)
+            {
+                // A concurrent rollback already restored the same predecessor.
+                // Repair its matching identity below rather than tombstoning it.
+                return Ok(Some(current.epoch));
+            }
+
+            // A promoted replacement, a fresh connecting generation, or a
+            // disconnect transition owns the newer lifecycle authority.
+            return Ok(None);
+        }
+
+        Err(RebornUserIdentityBindingError::Backend(
+            "Slack connection rollback changed concurrently".to_string(),
+        ))
     }
 
     async fn bind_user_identity_inner(
@@ -2782,7 +2810,6 @@ struct StoredSlackPendingConnection {
 
 struct SlackConnectionActivation {
     previous: Option<StoredSlackConnection>,
-    written_version: RecordVersion,
 }
 
 struct SlackIdentityBindingRollbackContext {
@@ -2876,6 +2903,17 @@ impl StoredSlackConnection {
         }
     }
 
+    fn with_pending_connection_record(
+        &self,
+        pending_connection: Option<StoredSlackPendingConnection>,
+    ) -> Self {
+        Self {
+            pending_connection,
+            updated_at: Utc::now(),
+            ..self.clone()
+        }
+    }
+
     fn promote_pending_connection(&self) -> Option<Self> {
         let pending = self.pending_connection?;
         Some(Self {
@@ -2887,6 +2925,18 @@ impl StoredSlackConnection {
             updated_at: Utc::now(),
             ..self.clone()
         })
+    }
+
+    fn pending_as_connecting(&self, pending: StoredSlackPendingConnection) -> Self {
+        Self {
+            epoch: pending.epoch,
+            state: SlackConnectionState::Connecting,
+            pending_connection: None,
+            disconnect_cleanup: None,
+            expires_at: pending.expires_at,
+            updated_at: Utc::now(),
+            ..self.clone()
+        }
     }
 
     fn visible_connection_state(&self) -> (SlackConnectionEpoch, SlackConnectionState) {
@@ -3719,6 +3769,236 @@ mod tests {
         assert_eq!(
             resolved.1.as_ref().map(ToString::to_string),
             Some(active_epoch.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_predecessor_survives_pending_reconfigure_abandon() {
+        let state = state();
+        let (owner, predecessor_epoch, _failed_epoch, pending_epoch, _binding, rollback) =
+            stage_predecessor_rollback_with_pending(&state).await;
+
+        rollback.into_future().await;
+
+        assert_connection_and_identity_epoch(
+            &state,
+            &owner,
+            pending_epoch,
+            SlackConnectionState::Connecting,
+            predecessor_epoch,
+        )
+        .await;
+        state
+            .abandon_connection(&owner, pending_epoch)
+            .await
+            .expect("pending replacement is abandoned");
+        assert_connection_and_identity_epoch(
+            &state,
+            &owner,
+            predecessor_epoch,
+            SlackConnectionState::Active,
+            predecessor_epoch,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_predecessor_survives_pending_reconfigure_failure() {
+        let state = state();
+        let (owner, predecessor_epoch, _failed_epoch, pending_epoch, _binding, rollback) =
+            stage_predecessor_rollback_with_pending(&state).await;
+
+        rollback.into_future().await;
+        state
+            .begin_failed_connection_cleanup(&owner, pending_epoch)
+            .await
+            .expect("pending replacement failure cleanup begins");
+        state
+            .complete_failed_connection_cleanup(&owner, pending_epoch)
+            .await
+            .expect("pending replacement failure cleanup completes");
+
+        assert_connection_and_identity_epoch(
+            &state,
+            &owner,
+            predecessor_epoch,
+            SlackConnectionState::Active,
+            predecessor_epoch,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_predecessor_restore_retries_after_pending_abandon_race() {
+        let backend = Arc::new(RouteLockTestBackend::normal());
+        let state = state_with_backend(Arc::clone(&backend));
+        let (owner, predecessor_epoch, _failed_epoch, pending_epoch, _binding, rollback) =
+            stage_predecessor_rollback_with_pending(&state).await;
+        backend.abandon_pending_before_next_connection_write();
+
+        rollback.into_future().await;
+
+        assert!(
+            !backend.pending_abandon_is_armed(),
+            "the backend must inject the pending-abandon CAS race"
+        );
+        assert_connection_and_identity_epoch(
+            &state,
+            &owner,
+            predecessor_epoch,
+            SlackConnectionState::Active,
+            predecessor_epoch,
+        )
+        .await;
+        assert_eq!(
+            state
+                .connection_owner_for_epoch(owner.tenant_id(), owner.user_id(), pending_epoch,)
+                .await
+                .expect("abandoned pending owner lookup"),
+            None,
+            "the abandoned pending generation must not retain connection authority"
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_newer_promotion_wins_predecessor_rollback() {
+        let state = state();
+        let (owner, _predecessor_epoch, _failed_epoch, pending_epoch, binding, rollback) =
+            stage_predecessor_rollback_with_pending(&state).await;
+        state
+            .bind_user_identity_for_epoch(binding, pending_epoch)
+            .await
+            .expect("newer replacement promotes before stale rollback");
+
+        rollback.into_future().await;
+
+        assert_connection_and_identity_epoch(
+            &state,
+            &owner,
+            pending_epoch,
+            SlackConnectionState::Active,
+            pending_epoch,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_stale_active_rollback_preserves_newer_pending_epoch() {
+        let state = state();
+        let owner = SlackConnectionOwner::new(
+            TenantId::new("tenant-alpha").unwrap(),
+            user("user:alice"),
+            installation(),
+        );
+        let active_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
+        let replacement_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
+        let binding = RebornUserIdentityBinding {
+            provider: RebornIdentityProviderId::new("slack").unwrap(),
+            provider_user_id: canonical_provider_user_id_value(),
+            user_id: user("user:alice"),
+        };
+
+        state
+            .begin_connection(&owner, active_epoch, connection_expiry())
+            .await
+            .expect("initial connection begins");
+        let stale_rollback = state
+            .bind_user_identity_for_epoch(binding.clone(), active_epoch)
+            .await
+            .expect("initial identity activates");
+        state
+            .begin_connection(&owner, replacement_epoch, connection_expiry())
+            .await
+            .expect("newer replacement begins");
+
+        stale_rollback.into_future().await;
+
+        assert_eq!(
+            state
+                .connection_state(&owner)
+                .await
+                .expect("pending replacement state survives stale rollback"),
+            Some((replacement_epoch, SlackConnectionState::Connecting))
+        );
+        assert!(
+            state
+                .resolve_user_identity_with_binding_epoch("slack", &canonical_provider_user_id())
+                .await
+                .expect("identity lookup after stale rollback")
+                .is_none(),
+            "the rolled-back active generation must be fenced while its replacement is pending"
+        );
+        state
+            .bind_user_identity_for_epoch(binding, replacement_epoch)
+            .await
+            .expect("newer replacement still activates");
+        assert_eq!(
+            state
+                .connection_state(&owner)
+                .await
+                .expect("replacement connection state"),
+            Some((replacement_epoch, SlackConnectionState::Active))
+        );
+        let resolved = state
+            .resolve_user_identity_with_binding_epoch("slack", &canonical_provider_user_id())
+            .await
+            .expect("identity lookup")
+            .expect("replacement identity resolves");
+        assert_eq!(
+            resolved.1.as_ref().map(ToString::to_string),
+            Some(replacement_epoch.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_active_without_predecessor_does_not_revive_after_pending_abandon() {
+        let state = state();
+        let owner = SlackConnectionOwner::new(
+            TenantId::new("tenant-alpha").unwrap(),
+            user("user:alice"),
+            installation(),
+        );
+        let failed_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
+        let pending_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
+        let binding = RebornUserIdentityBinding {
+            provider: RebornIdentityProviderId::new("slack").unwrap(),
+            provider_user_id: canonical_provider_user_id_value(),
+            user_id: user("user:alice"),
+        };
+
+        state
+            .begin_connection(&owner, failed_epoch, connection_expiry())
+            .await
+            .expect("initial connection begins");
+        let rollback = state
+            .bind_user_identity_for_epoch(binding, failed_epoch)
+            .await
+            .expect("initial identity activates");
+        state
+            .begin_connection(&owner, pending_epoch, connection_expiry())
+            .await
+            .expect("newer replacement begins");
+
+        rollback.into_future().await;
+        state
+            .abandon_connection(&owner, pending_epoch)
+            .await
+            .expect("pending replacement is abandoned");
+
+        assert_eq!(
+            state
+                .connection_state(&owner)
+                .await
+                .expect("abandoned connection state"),
+            Some((pending_epoch, SlackConnectionState::Disconnected)),
+            "failed A must not reappear as active when there is no predecessor"
+        );
+        assert!(
+            state
+                .resolve_user_identity_with_binding_epoch("slack", &canonical_provider_user_id())
+                .await
+                .expect("identity lookup after abandon")
+                .is_none()
         );
     }
 
@@ -6041,6 +6321,92 @@ mod tests {
         )
     }
 
+    async fn stage_predecessor_rollback_with_pending<F>(
+        state: &FilesystemSlackHostState<F>,
+    ) -> (
+        SlackConnectionOwner,
+        SlackConnectionEpoch,
+        SlackConnectionEpoch,
+        SlackConnectionEpoch,
+        RebornUserIdentityBinding,
+        SlackUserIdentityBindingRollback,
+    )
+    where
+        F: RootFilesystem + 'static,
+    {
+        let owner = SlackConnectionOwner::new(
+            TenantId::new("tenant-alpha").unwrap(),
+            user("user:alice"),
+            installation(),
+        );
+        let predecessor_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
+        let failed_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
+        let pending_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
+        let binding = RebornUserIdentityBinding {
+            provider: RebornIdentityProviderId::new("slack").unwrap(),
+            provider_user_id: canonical_provider_user_id_value(),
+            user_id: user("user:alice"),
+        };
+
+        state
+            .begin_connection(&owner, predecessor_epoch, connection_expiry())
+            .await
+            .expect("predecessor connection begins");
+        state
+            .bind_user_identity_for_epoch(binding.clone(), predecessor_epoch)
+            .await
+            .expect("predecessor identity activates");
+        state
+            .begin_connection(&owner, failed_epoch, connection_expiry())
+            .await
+            .expect("failed replacement begins");
+        let rollback = state
+            .bind_user_identity_for_epoch(binding.clone(), failed_epoch)
+            .await
+            .expect("failed replacement activates with rollback context");
+        state
+            .begin_connection(&owner, pending_epoch, connection_expiry())
+            .await
+            .expect("newer replacement becomes pending");
+
+        (
+            owner,
+            predecessor_epoch,
+            failed_epoch,
+            pending_epoch,
+            binding,
+            rollback,
+        )
+    }
+
+    async fn assert_connection_and_identity_epoch<F>(
+        state: &FilesystemSlackHostState<F>,
+        owner: &SlackConnectionOwner,
+        visible_epoch: SlackConnectionEpoch,
+        visible_state: SlackConnectionState,
+        identity_epoch: SlackConnectionEpoch,
+    ) where
+        F: RootFilesystem + 'static,
+    {
+        assert_eq!(
+            state
+                .connection_state(owner)
+                .await
+                .expect("connection state remains readable"),
+            Some((visible_epoch, visible_state))
+        );
+        let resolved = state
+            .resolve_user_identity_with_binding_epoch("slack", &canonical_provider_user_id())
+            .await
+            .expect("identity lookup remains readable")
+            .expect("the authoritative identity resolves");
+        assert_eq!(resolved.0, *owner.user_id());
+        assert_eq!(
+            resolved.1.as_ref().map(ToString::to_string),
+            Some(identity_epoch.to_string())
+        );
+    }
+
     async fn seed_legacy_active_identity<F>(
         state: &FilesystemSlackHostState<F>,
         owner: &SlackConnectionOwner,
@@ -6118,6 +6484,7 @@ mod tests {
         personal_dm_puts: AtomicUsize,
         route_write_failures: AtomicUsize,
         connection_write_failures: AtomicUsize,
+        abandon_pending_before_connection_write: std::sync::atomic::AtomicBool,
         lock_puts: AtomicUsize,
     }
 
@@ -6131,6 +6498,7 @@ mod tests {
                 personal_dm_puts: AtomicUsize::new(0),
                 route_write_failures: AtomicUsize::new(0),
                 connection_write_failures: AtomicUsize::new(0),
+                abandon_pending_before_connection_write: std::sync::atomic::AtomicBool::new(false),
                 lock_puts: AtomicUsize::new(0),
             }
         }
@@ -6144,6 +6512,7 @@ mod tests {
                 personal_dm_puts: AtomicUsize::new(0),
                 route_write_failures: AtomicUsize::new(0),
                 connection_write_failures: AtomicUsize::new(0),
+                abandon_pending_before_connection_write: std::sync::atomic::AtomicBool::new(false),
                 lock_puts: AtomicUsize::new(0),
             }
         }
@@ -6157,6 +6526,7 @@ mod tests {
                 personal_dm_puts: AtomicUsize::new(0),
                 route_write_failures: AtomicUsize::new(0),
                 connection_write_failures: AtomicUsize::new(0),
+                abandon_pending_before_connection_write: std::sync::atomic::AtomicBool::new(false),
                 lock_puts: AtomicUsize::new(0),
             }
         }
@@ -6170,6 +6540,7 @@ mod tests {
                 personal_dm_puts: AtomicUsize::new(0),
                 route_write_failures: AtomicUsize::new(0),
                 connection_write_failures: AtomicUsize::new(0),
+                abandon_pending_before_connection_write: std::sync::atomic::AtomicBool::new(false),
                 lock_puts: AtomicUsize::new(0),
             }
         }
@@ -6180,6 +6551,16 @@ mod tests {
 
         fn fail_next_connection_write(&self) {
             self.connection_write_failures.store(1, Ordering::SeqCst);
+        }
+
+        fn abandon_pending_before_next_connection_write(&self) {
+            self.abandon_pending_before_connection_write
+                .store(true, Ordering::SeqCst);
+        }
+
+        fn pending_abandon_is_armed(&self) -> bool {
+            self.abandon_pending_before_connection_write
+                .load(Ordering::SeqCst)
         }
 
         fn lock_puts(&self) -> usize {
@@ -6199,6 +6580,39 @@ mod tests {
             entry: Entry,
             cas: CasExpectation,
         ) -> Result<RecordVersion, FilesystemError> {
+            if is_connection_record_path(path)
+                && self
+                    .abandon_pending_before_connection_write
+                    .swap(false, Ordering::SeqCst)
+            {
+                let current =
+                    self.inner
+                        .get(path)
+                        .await?
+                        .ok_or_else(|| FilesystemError::NotFound {
+                            path: path.clone(),
+                            operation: FilesystemOperation::ReadFile,
+                        })?;
+                let record = serde_json::from_slice::<StoredSlackConnection>(&current.entry.body)
+                    .map_err(|_| FilesystemError::BackendInfrastructure {
+                    operation: FilesystemOperation::ReadFile,
+                    reason: "injected rollback race could not decode connection".into(),
+                })?;
+                let body =
+                    serde_json::to_vec(&record.without_pending_connection()).map_err(|_| {
+                        FilesystemError::BackendInfrastructure {
+                            operation: FilesystemOperation::WriteFile,
+                            reason: "injected rollback race could not encode connection".into(),
+                        }
+                    })?;
+                self.inner
+                    .put(
+                        path,
+                        Entry::bytes(body).with_content_type(ContentType::json()),
+                        CasExpectation::Version(current.version),
+                    )
+                    .await?;
+            }
             if is_replace_lock_path(path) {
                 let previous_puts = self.lock_puts.fetch_add(1, Ordering::SeqCst);
                 if self.reject_lock_renewal && previous_puts > 0 {

@@ -810,7 +810,7 @@ async def start_reborn_server(
         )
     ):
         process_extra_env["IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI"] = (
-            f"{base_url}/api/reborn/product-auth/oauth/slack_personal/callback"
+            f"{base_url}/api/reborn/product-auth/oauth/slack/callback"
         )
     stdout_path = output_dir / "ironclaw-reborn-serve.stdout.log"
     stderr_path = output_dir / "ironclaw-reborn-serve.stderr.log"
@@ -3241,7 +3241,7 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
                 "Slack personal product-auth preflight did not include an invocation_id"
             )
         accounts_request: dict[str, object] = {
-            "provider": "slack_personal",
+            "provider": "slack",
             "requester_extension": "slack",
             "invocation_id": invocation_id,
             "limit": 10,
@@ -3261,7 +3261,7 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
             account
             for account in accounts
             if isinstance(account, dict)
-            and account.get("provider") == "slack_personal"
+            and account.get("provider") == "slack"
             and account.get("status") == "configured"
         ]
         if not configured_accounts:
@@ -3273,14 +3273,14 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
             "POST",
             "/api/webchat/v2/extensions/slack/setup/oauth/start",
             {
-                "provider": "slack_personal",
+                "provider": "slack",
                 "account_label": "Slack personal OAuth",
                 "scopes": [],
                 "expires_at": _slack_oauth_start_expires_at(),
                 "invocation_id": str(uuid.uuid4()),
             },
         )
-        if oauth_start.get("provider") != "slack_personal":
+        if oauth_start.get("provider") != "slack":
             raise AssertionError(f"Slack OAuth start returned unexpected provider: {oauth_start!r}")
         authorization_url = str(oauth_start.get("authorization_url") or "")
         if not authorization_url.startswith("https://slack.com/oauth/"):

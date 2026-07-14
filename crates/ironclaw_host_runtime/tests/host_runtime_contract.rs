@@ -1,3 +1,4 @@
+// arch-exempt: large_file, host runtime contract matrix remains co-located, plan #5905
 mod support;
 
 use support::legacy_capability_fixture_to_v2;

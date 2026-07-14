@@ -1,3 +1,4 @@
+// arch-exempt: large_file, Slack delivery and race contract fixtures remain co-located, plan #4818
 //! Slack final-reply delivery for immediate-ACK Reborn webhooks.
 //!
 //! Slack Events API requires the HTTP handler to return 2xx quickly. This
@@ -68,8 +69,8 @@ const SLACK_AUTH_CANCELED_MESSAGE: &str = "Authentication canceled.";
 /// Posted when a run blocks on a credential-entry (non-OAuth) auth challenge:
 /// entering a secret in chat is a security risk, so it must be done in the web app.
 const SLACK_AUTH_UNAVAILABLE_MESSAGE: &str = "Setting this up needs a credential (an API key or token). Sharing one here is a security risk — anything entered in chat is stored in the conversation — so credential-based connections can only be set up in the Ironclaw web app. Connect it there, then ask me again here.";
-// Model B: greeting for a first-contact DM from a Slack user who has not yet
-// connected their account. Fixed, host-authored text only — no agent runs.
+// Greeting for a first-contact DM from a Slack user who has not yet connected
+// the unified Slack extension. Fixed, host-authored text only — no agent runs.
 const SLACK_CONNECT_NUDGE_MESSAGE: &str = "\u{1F44B} To use me, connect your Slack account in the Ironclaw web app: install the Slack extension and finish the connect step, then message me here again.";
 const SLACK_DELIVERY_TIMEOUT_MESSAGE: &str =
     "This is taking longer than expected — check the WebUI for the result.";
@@ -753,8 +754,8 @@ impl SlackFinalReplyDeliveryObserver {
         true
     }
 
-    /// Model B: a first-contact DM from a Slack user with no identity binding is
-    /// rejected with `BindingRequired`. Instead of silently dropping it, greet
+    /// A first-contact DM from a Slack user with no identity binding is rejected
+    /// with `BindingRequired`. Instead of silently dropping it, greet
     /// them with a connect nudge — but ONLY in a 1:1 DM. An unbound user's
     /// app-mention in a shared channel also rejects with `BindingRequired`, and
     /// the host nudge must never be posted into a shared channel where everyone
@@ -4760,9 +4761,9 @@ mod tests {
         );
     }
 
-    /// Model B: a rejected first-contact UserMessage from an unbound Slack user
-    /// (BindingRequired) is greeted with a connect nudge — no binding lookup, no
-    /// agent turn. Previously this was silently dropped.
+    /// A rejected first-contact UserMessage from an unbound Slack user
+    /// (`BindingRequired`) is greeted with a connect nudge — no binding lookup
+    /// and no agent turn. Previously this was silently dropped.
     #[tokio::test]
     async fn rejected_unbound_user_message_posts_connect_nudge() {
         let install = "test-install";

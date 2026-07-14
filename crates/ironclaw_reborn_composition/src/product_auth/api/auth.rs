@@ -17,8 +17,8 @@ use ironclaw_auth::{
     CredentialSetupService, InMemoryAuthProductServices, ManualTokenSetupRequest, NewAuthFlow,
     OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
     OAuthCallbackInput, OAuthCompletionCompensationOutcome, OAuthCompletionCompensationRequest,
-    OAuthExchangeCleanupRequest, OAuthProviderCallbackRequest, OAuthProviderExchangeContext,
-    OAuthProviderIdentity, OpaqueStateHash, PkceVerifierHash,
+    OAuthExchangeCleanupRequest, OAuthProviderCallbackRequest, OAuthProviderExchange,
+    OAuthProviderExchangeContext, OAuthProviderIdentity, OpaqueStateHash, PkceVerifierHash,
     ProviderBackedCredentialAccountService, ProviderCallbackOutcome, ProviderScope,
     SecretCleanupReport, SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest,
     SecretSubmitResult, Timestamp, TurnGateAuthFlowQuery, TurnRunRef, scope_matches,
@@ -302,9 +302,10 @@ impl ContinuationDispatchFailure {
 
 /// Compensating action returned by a provider-identity hook that committed
 /// durable state (e.g. the Slack identity binding) before the flow completes.
-/// Awaited only when `complete_oauth_callback` fails after the hook
-/// succeeded; dropped unpolled on the success path. Infallible by contract —
-/// implementations log their own failures.
+/// The callback service transfers it to a detached transaction worker: a
+/// completed credential commit disarms it, while completion failure or caller
+/// cancellation awaits it. Infallible by contract — implementations log their
+/// own failures.
 pub(crate) type OAuthProviderIdentityBindingRollback = Pin<Box<dyn Future<Output = ()> + Send>>;
 pub(crate) type OAuthProviderIdentityCheckFuture = Pin<
     Box<
@@ -314,6 +315,253 @@ pub(crate) type OAuthProviderIdentityCheckFuture = Pin<
 >;
 pub(crate) type OAuthProviderIdentityCheck =
     Box<dyn FnOnce(Option<OAuthProviderIdentity>) -> OAuthProviderIdentityCheckFuture + Send>;
+
+#[derive(Clone, Copy)]
+enum OAuthProviderIdentityBindingDecision {
+    Commit,
+    Rollback,
+}
+
+/// Owns the provider-identity hook independently from the callback request.
+///
+/// The hook may commit durable state before it returns its compensating action.
+/// Running it in this worker closes the cancellation window between that commit
+/// and the callback taking ownership of the rollback future. Dropping the
+/// transaction closes `decision_tx`; the detached worker interprets that as a
+/// rollback and finishes compensation even when the request task is aborted.
+struct OAuthProviderIdentityBindingTransaction {
+    decision_tx: Option<tokio::sync::oneshot::Sender<OAuthProviderIdentityBindingDecision>>,
+    result_rx: Option<tokio::sync::oneshot::Receiver<Result<(), AuthProductError>>>,
+    worker: tokio::task::JoinHandle<()>,
+}
+
+impl OAuthProviderIdentityBindingTransaction {
+    fn spawn(
+        check: OAuthProviderIdentityCheck,
+        provider_identity: Option<OAuthProviderIdentity>,
+    ) -> Self {
+        let (decision_tx, decision_rx) = tokio::sync::oneshot::channel();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            match check(provider_identity).await {
+                Ok(rollback) => {
+                    if result_tx.send(Ok(())).is_err() {
+                        if let Some(rollback) = rollback {
+                            rollback.await;
+                        }
+                        return;
+                    }
+                    if let Some(rollback) = rollback {
+                        match decision_rx.await {
+                            Ok(OAuthProviderIdentityBindingDecision::Commit) => {}
+                            Ok(OAuthProviderIdentityBindingDecision::Rollback) | Err(_) => {
+                                rollback.await;
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    let _send_result = result_tx.send(Err(error));
+                }
+            }
+        });
+        Self {
+            decision_tx: Some(decision_tx),
+            result_rx: Some(result_rx),
+            worker,
+        }
+    }
+
+    async fn wait_until_bound(&mut self) -> Result<(), AuthProductError> {
+        let Some(result_rx) = self.result_rx.take() else {
+            return Err(AuthProductError::BackendUnavailable);
+        };
+        result_rx
+            .await
+            .unwrap_or(Err(AuthProductError::BackendUnavailable))
+    }
+
+    fn send_decision(&mut self, decision: OAuthProviderIdentityBindingDecision) {
+        if let Some(decision_tx) = self.decision_tx.take() {
+            let _send_result = decision_tx.send(decision);
+        }
+    }
+
+    fn commit(mut self) {
+        self.send_decision(OAuthProviderIdentityBindingDecision::Commit);
+        // Completion is already durable. Aborting the decision worker drops an
+        // unneeded rollback future synchronously and cannot undo the binding.
+        self.worker.abort();
+    }
+
+    fn start_rollback(mut self) -> tokio::task::JoinHandle<()> {
+        self.send_decision(OAuthProviderIdentityBindingDecision::Rollback);
+        self.worker
+    }
+}
+
+#[derive(Clone, Copy)]
+enum OAuthExchangeCleanupDecision {
+    Commit,
+    Rollback,
+}
+
+/// Owns cleanup authority for a successful provider exchange until callback
+/// completion is durable.
+///
+/// Backend cleanup and retention operations must terminate on their own. The
+/// worker intentionally survives request cancellation so aborting it on an HTTP
+/// timeout cannot leak an already-created provider exchange.
+struct OAuthExchangeCleanupTransaction {
+    decision_tx: Option<tokio::sync::oneshot::Sender<OAuthExchangeCleanupDecision>>,
+    worker: tokio::task::JoinHandle<()>,
+}
+
+impl OAuthExchangeCleanupTransaction {
+    fn spawn(
+        provider_client: Arc<dyn AuthProviderClient>,
+        cleanup_service: Arc<dyn SecretCleanupService>,
+        context: OAuthProviderExchangeContext,
+        exchange: OAuthProviderExchange,
+    ) -> Self {
+        let (decision_tx, decision_rx) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            if matches!(decision_rx.await, Ok(OAuthExchangeCleanupDecision::Commit)) {
+                return;
+            }
+            if let Err(cleanup_error) = provider_client
+                .cleanup_exchange(context.clone(), &exchange)
+                .await
+            {
+                tracing::warn!(
+                    flow_id = %context.flow_id,
+                    cleanup_error_code = ?cleanup_error.code(),
+                    "OAuth callback transaction failed to clean provider exchange"
+                );
+                if let Err(retain_error) = cleanup_service
+                    .retain_oauth_exchange_for_cleanup(OAuthExchangeCleanupRequest {
+                        scope: context.scope,
+                        flow_id: context.flow_id,
+                        exchange,
+                    })
+                    .await
+                {
+                    tracing::warn!(
+                        flow_id = %context.flow_id,
+                        cleanup_error_code = ?cleanup_error.code(),
+                        retain_error_code = ?retain_error.code(),
+                        "failed to retain OAuth exchange after provider cleanup failure"
+                    );
+                }
+            }
+        });
+        Self {
+            decision_tx: Some(decision_tx),
+            worker,
+        }
+    }
+
+    fn send_decision(&mut self, decision: OAuthExchangeCleanupDecision) {
+        if let Some(decision_tx) = self.decision_tx.take() {
+            let _send_result = decision_tx.send(decision);
+        }
+    }
+
+    fn commit(mut self) {
+        self.send_decision(OAuthExchangeCleanupDecision::Commit);
+        // The completed flow now owns these handles. Synchronously aborting the
+        // idle worker guarantees no later request cancellation can clean them.
+        self.worker.abort();
+    }
+
+    fn start_rollback(mut self) -> tokio::task::JoinHandle<()> {
+        self.send_decision(OAuthExchangeCleanupDecision::Rollback);
+        self.worker
+    }
+
+    async fn rollback(self) {
+        if let Err(error) = self.start_rollback().await {
+            tracing::warn!(%error, "OAuth exchange cleanup transaction worker failed");
+        }
+    }
+}
+
+/// Owns the final durable callback write and both compensating transactions.
+///
+/// `complete_oauth_callback` performs multiple durable writes and may still be
+/// finalizing account state after its flow CAS commits. This worker must run to
+/// a definitive result after request cancellation so compensation follows that
+/// result instead of whether the HTTP task happened to remain alive.
+struct OAuthCallbackCompletionTransaction {
+    result_rx: tokio::sync::oneshot::Receiver<Result<AuthFlowRecord, AuthProductError>>,
+    worker: tokio::task::JoinHandle<()>,
+}
+
+impl OAuthCallbackCompletionTransaction {
+    fn spawn(
+        flow_manager: Arc<dyn AuthFlowManager>,
+        scope: AuthProductScope,
+        input: OAuthCallbackInput,
+        identity_binding: Option<OAuthProviderIdentityBindingTransaction>,
+        exchange_cleanup: OAuthExchangeCleanupTransaction,
+    ) -> Self {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            let result = flow_manager.complete_oauth_callback(&scope, input).await;
+            match result {
+                Ok(completed) => {
+                    if let Some(identity_binding) = identity_binding {
+                        identity_binding.commit();
+                    }
+                    exchange_cleanup.commit();
+                    let _send_result = result_tx.send(Ok(completed));
+                }
+                Err(error) => {
+                    // Send both rollback decisions before awaiting either one.
+                    // If this coordinator is interrupted during compensation,
+                    // both detached workers still run to completion.
+                    let identity_worker =
+                        identity_binding.map(|transaction| transaction.start_rollback());
+                    let exchange_worker = exchange_cleanup.start_rollback();
+                    if let Some(identity_worker) = identity_worker {
+                        let (identity_result, exchange_result) =
+                            tokio::join!(identity_worker, exchange_worker);
+                        if let Err(worker_error) = identity_result {
+                            tracing::warn!(
+                                %worker_error,
+                                "provider identity binding transaction worker failed"
+                            );
+                        }
+                        if let Err(worker_error) = exchange_result {
+                            tracing::warn!(
+                                %worker_error,
+                                "OAuth exchange cleanup transaction worker failed"
+                            );
+                        }
+                    } else if let Err(worker_error) = exchange_worker.await {
+                        tracing::warn!(
+                            %worker_error,
+                            "OAuth exchange cleanup transaction worker failed"
+                        );
+                    }
+                    let _send_result = result_tx.send(Err(error));
+                }
+            }
+        });
+        Self { result_rx, worker }
+    }
+
+    async fn wait(self) -> Result<AuthFlowRecord, AuthProductError> {
+        let Self { result_rx, worker } = self;
+        let result = result_rx
+            .await
+            .unwrap_or(Err(AuthProductError::BackendUnavailable));
+        if let Err(error) = worker.await {
+            tracing::warn!(%error, "OAuth callback completion transaction worker failed");
+        }
+        result
+    }
+}
 
 /// Request to open a Reborn manual-token setup interaction.
 ///
@@ -1114,7 +1362,8 @@ impl RebornProductAuthServices {
         mut provider_identity_check: Option<OAuthProviderIdentityCheck>,
     ) -> Result<RebornOAuthCallbackResponse, RebornOAuthCallbackAttemptError> {
         let mut provider_identity = None;
-        let mut identity_binding_rollback: Option<OAuthProviderIdentityBindingRollback> = None;
+        let mut identity_binding_transaction: Option<OAuthProviderIdentityBindingTransaction> =
+            None;
         let (mut completed, should_dispatch_continuation) = match request.outcome {
             RebornOAuthCallbackOutcome::Authorized { provider_request } => {
                 let claimed = self
@@ -1189,48 +1438,25 @@ impl RebornProductAuthServices {
                             return Err(error.into());
                         }
                     };
+                    let exchange_cleanup_transaction = OAuthExchangeCleanupTransaction::spawn(
+                        Arc::clone(&self.provider_client),
+                        Arc::clone(&self.cleanup_service),
+                        OAuthProviderExchangeContext {
+                            scope: request.scope.clone(),
+                            flow_id: request.flow_id,
+                        },
+                        exchange.clone(),
+                    );
                     if let Some(check) = provider_identity_check.take() {
-                        match check(exchange.provider_identity.clone()).await {
-                            Ok(rollback) => identity_binding_rollback = rollback,
+                        let mut transaction = OAuthProviderIdentityBindingTransaction::spawn(
+                            check,
+                            exchange.provider_identity.clone(),
+                        );
+                        match transaction.wait_until_bound().await {
+                            Ok(()) => identity_binding_transaction = Some(transaction),
                             Err(error) => {
                                 let error_code = error.code();
-                                if let Err(cleanup_error) = self
-                                    .provider_client
-                                    .cleanup_exchange(
-                                        OAuthProviderExchangeContext {
-                                            scope: request.scope.clone(),
-                                            flow_id: request.flow_id,
-                                        },
-                                        &exchange,
-                                    )
-                                    .await
-                                {
-                                    tracing::warn!(
-                                        flow_id = %request.flow_id,
-                                        check_error_code = ?error_code,
-                                        cleanup_error_code = ?cleanup_error.code(),
-                                        "reborn auth callback provider identity check failed and token cleanup failed"
-                                    );
-                                    if let Err(retain_error) = self
-                                        .cleanup_service
-                                        .retain_oauth_exchange_for_cleanup(
-                                            OAuthExchangeCleanupRequest {
-                                                scope: request.scope.clone(),
-                                                flow_id: request.flow_id,
-                                                exchange: exchange.clone(),
-                                            },
-                                        )
-                                        .await
-                                    {
-                                        tracing::warn!(
-                                            flow_id = %request.flow_id,
-                                            check_error_code = ?error_code,
-                                            cleanup_error_code = ?cleanup_error.code(),
-                                            retain_error_code = ?retain_error.code(),
-                                            "failed to retain rejected OAuth exchange for lifecycle cleanup"
-                                        );
-                                    }
-                                }
+                                exchange_cleanup_transaction.rollback().await;
                                 if let Err(fail_error) = self
                                     .flow_manager
                                     .fail_oauth_callback(
@@ -1255,72 +1481,22 @@ impl RebornProductAuthServices {
                         }
                     }
                     provider_identity = exchange.provider_identity.clone();
-                    let exchange_for_cleanup = exchange.clone();
-                    let completed = match self
-                        .flow_manager
-                        .complete_oauth_callback(
-                            &request.scope,
-                            OAuthCallbackInput {
-                                flow_id: request.flow_id,
-                                opaque_state_hash: request.opaque_state_hash.clone(),
-                                outcome: ProviderCallbackOutcome::Authorized {
-                                    exchange: Box::new(exchange),
-                                },
+                    let completed = OAuthCallbackCompletionTransaction::spawn(
+                        Arc::clone(&self.flow_manager),
+                        request.scope.clone(),
+                        OAuthCallbackInput {
+                            flow_id: request.flow_id,
+                            opaque_state_hash: request.opaque_state_hash.clone(),
+                            outcome: ProviderCallbackOutcome::Authorized {
+                                exchange: Box::new(exchange),
                             },
-                        )
-                        .await
-                    {
-                        Ok(completed) => completed,
-                        Err(error) => {
-                            if let Err(cleanup_error) = self
-                                .provider_client
-                                .cleanup_exchange(
-                                    OAuthProviderExchangeContext {
-                                        scope: request.scope.clone(),
-                                        flow_id: request.flow_id,
-                                    },
-                                    &exchange_for_cleanup,
-                                )
-                                .await
-                            {
-                                tracing::warn!(
-                                    flow_id = %request.flow_id,
-                                    completion_error_code = ?error.code(),
-                                    cleanup_error_code = ?cleanup_error.code(),
-                                    "reborn auth callback completion failed and token cleanup failed"
-                                );
-                                if let Err(retain_error) = self
-                                    .cleanup_service
-                                    .retain_oauth_exchange_for_cleanup(
-                                        OAuthExchangeCleanupRequest {
-                                            scope: request.scope.clone(),
-                                            flow_id: request.flow_id,
-                                            exchange: exchange_for_cleanup.clone(),
-                                        },
-                                    )
-                                    .await
-                                {
-                                    tracing::warn!(
-                                        flow_id = %request.flow_id,
-                                        completion_error_code = ?error.code(),
-                                        cleanup_error_code = ?cleanup_error.code(),
-                                        retain_error_code = ?retain_error.code(),
-                                        "failed to retain rejected OAuth exchange for lifecycle cleanup"
-                                    );
-                                }
-                            }
-                            // The identity hook committed durable state (the
-                            // Slack binding is the user-visible "connected"
-                            // signal) before this completion failure, and the
-                            // completed-flow replay path never re-runs the
-                            // hook — undo it so a failed completion cannot
-                            // leave "connected with no usable credential".
-                            if let Some(rollback) = identity_binding_rollback.take() {
-                                rollback.await;
-                            }
-                            return Err(error.into());
-                        }
-                    };
+                        },
+                        identity_binding_transaction.take(),
+                        exchange_cleanup_transaction,
+                    )
+                    .wait()
+                    .await
+                    .map_err(RebornOAuthCallbackError::from)?;
                     (completed, true)
                 }
             }
@@ -1574,6 +1750,7 @@ impl RebornProductAuthServices {
         &self,
         request: RebornOAuthStartFlowRequest,
     ) -> Result<AuthFlowRecord, AuthProductError> {
+        crate::product_auth::reject_retired_provider(&request.provider)?;
         self.flow_manager
             .create_flow(NewAuthFlow {
                 id: request.flow_id,
@@ -1601,6 +1778,7 @@ impl RebornProductAuthServices {
         &self,
         request: RebornDcrOAuthStartFlowRequest,
     ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
+        crate::product_auth::reject_retired_provider(&request.provider)?;
         let Some(registry) = &self.dcr_oauth_registry else {
             return Ok(None);
         };
@@ -1624,6 +1802,8 @@ impl RebornProductAuthServices {
         &self,
         request: RebornManualTokenSetupRequest,
     ) -> Result<RebornManualTokenChallenge, RebornManualTokenError> {
+        crate::product_auth::reject_retired_provider(&request.provider)
+            .map_err(RebornManualTokenError::from)?;
         let challenge = self
             .manual_token_flow_service
             .request_manual_token_flow(ManualTokenSetupRequest {
@@ -2160,6 +2340,632 @@ mod tests {
     struct SharedAuthTestDouble;
 
     struct RejectLifecycleContinuation;
+
+    struct ObservableOAuthProviderClient {
+        cleanup_calls: std::sync::atomic::AtomicUsize,
+        cleanup_called: tokio::sync::Notify,
+    }
+
+    impl ObservableOAuthProviderClient {
+        fn new() -> Self {
+            Self {
+                cleanup_calls: std::sync::atomic::AtomicUsize::new(0),
+                cleanup_called: tokio::sync::Notify::new(),
+            }
+        }
+    }
+
+    struct CompletionGateFlowManager {
+        inner: Arc<InMemoryAuthProductServices>,
+        fail_completion: bool,
+        completion_ready: tokio::sync::Notify,
+        release_completion: tokio::sync::Notify,
+    }
+
+    impl CompletionGateFlowManager {
+        fn new(inner: Arc<InMemoryAuthProductServices>, fail_completion: bool) -> Self {
+            Self {
+                inner,
+                fail_completion,
+                completion_ready: tokio::sync::Notify::new(),
+                release_completion: tokio::sync::Notify::new(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AuthFlowManager for CompletionGateFlowManager {
+        async fn create_flow(
+            &self,
+            request: NewAuthFlow,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
+            self.inner.create_flow(request).await
+        }
+
+        async fn get_flow(
+            &self,
+            scope: &AuthProductScope,
+            flow_id: AuthFlowId,
+        ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
+            self.inner.get_flow(scope, flow_id).await
+        }
+
+        async fn claim_oauth_callback(
+            &self,
+            scope: &AuthProductScope,
+            request: OAuthCallbackClaimRequest,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
+            self.inner.claim_oauth_callback(scope, request).await
+        }
+
+        async fn complete_oauth_callback(
+            &self,
+            scope: &AuthProductScope,
+            input: OAuthCallbackInput,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
+            let result = if self.fail_completion {
+                Err(AuthProductError::BackendUnavailable)
+            } else {
+                self.inner.complete_oauth_callback(scope, input).await
+            };
+            self.completion_ready.notify_one();
+            self.release_completion.notified().await;
+            result
+        }
+
+        async fn complete_credential_selection(
+            &self,
+            scope: &AuthProductScope,
+            input: ironclaw_auth::CredentialSelectionInput,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
+            self.inner.complete_credential_selection(scope, input).await
+        }
+
+        async fn complete_manual_token(
+            &self,
+            scope: &AuthProductScope,
+            input: ironclaw_auth::ManualTokenCompletionInput,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
+            self.inner.complete_manual_token(scope, input).await
+        }
+
+        async fn cancel_manual_token(
+            &self,
+            scope: &AuthProductScope,
+            interaction_id: AuthInteractionId,
+        ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
+            self.inner.cancel_manual_token(scope, interaction_id).await
+        }
+
+        async fn fail_oauth_callback(
+            &self,
+            scope: &AuthProductScope,
+            input: OAuthCallbackFailureInput,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
+            self.inner.fail_oauth_callback(scope, input).await
+        }
+
+        async fn claim_continuation_dispatch(
+            &self,
+            scope: &AuthProductScope,
+            input: AuthContinuationDispatchClaimInput,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
+            self.inner.claim_continuation_dispatch(scope, input).await
+        }
+
+        async fn settle_continuation_dispatch(
+            &self,
+            scope: &AuthProductScope,
+            input: AuthContinuationDispatchSettlementInput,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
+            self.inner.settle_continuation_dispatch(scope, input).await
+        }
+
+        async fn mark_continuation_dispatched(
+            &self,
+            scope: &AuthProductScope,
+            flow_id: AuthFlowId,
+            emitted_at: Timestamp,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
+            self.inner
+                .mark_continuation_dispatched(scope, flow_id, emitted_at)
+                .await
+        }
+
+        async fn cancel_flow(
+            &self,
+            scope: &AuthProductScope,
+            flow_id: AuthFlowId,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
+            self.inner.cancel_flow(scope, flow_id).await
+        }
+    }
+
+    struct RollbackDropSignal(Arc<tokio::sync::Notify>);
+
+    impl Drop for RollbackDropSignal {
+        fn drop(&mut self) {
+            self.0.notify_one();
+        }
+    }
+
+    fn probed_identity_check(
+        rollback_calls: Arc<std::sync::atomic::AtomicUsize>,
+        rollback_dropped: Arc<tokio::sync::Notify>,
+    ) -> OAuthProviderIdentityCheck {
+        Box::new(move |_| {
+            Box::pin(async move {
+                let drop_signal = RollbackDropSignal(rollback_dropped);
+                Ok(Some(Box::pin(async move {
+                    let _drop_signal = drop_signal;
+                    rollback_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                })
+                    as OAuthProviderIdentityBindingRollback))
+            })
+        })
+    }
+
+    #[async_trait::async_trait]
+    impl AuthProviderClient for ObservableOAuthProviderClient {
+        async fn exchange_callback(
+            &self,
+            _context: OAuthProviderExchangeContext,
+            request: OAuthProviderCallbackRequest,
+        ) -> Result<OAuthProviderExchange, AuthProductError> {
+            Ok(OAuthProviderExchange {
+                provider: request.provider,
+                account_label: request.account_label,
+                authorization_code_hash: request.authorization_code_hash,
+                pkce_verifier_hash: request.pkce_verifier_hash,
+                access_secret: ironclaw_host_api::SecretHandle::new("observable-access")
+                    .expect("access handle"),
+                refresh_secret: Some(
+                    ironclaw_host_api::SecretHandle::new("observable-refresh")
+                        .expect("refresh handle"),
+                ),
+                scopes: request.scopes,
+                account_id: None,
+                provider_identity: None,
+            })
+        }
+
+        async fn refresh_token(
+            &self,
+            _request: OAuthProviderRefreshRequest,
+        ) -> Result<OAuthProviderRefresh, AuthProductError> {
+            unreachable!("OAuth callback cancellation test does not refresh tokens")
+        }
+
+        async fn cleanup_exchange(
+            &self,
+            _context: OAuthProviderExchangeContext,
+            _exchange: &OAuthProviderExchange,
+        ) -> Result<(), AuthProductError> {
+            self.cleanup_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.cleanup_called.notify_one();
+            Ok(())
+        }
+    }
+
+    async fn oauth_callback_test_request(
+        shared: &InMemoryAuthProductServices,
+        provider: AuthProviderId,
+    ) -> RebornOAuthCallbackRequest {
+        use ironclaw_auth::{AuthorizationCodeHash, OAuthAuthorizationCode, PkceVerifierSecret};
+
+        let scope = test_auth_product_scope();
+        let opaque_state_hash = OpaqueStateHash::new("d".repeat(64)).expect("state hash");
+        let pkce_verifier_hash = PkceVerifierHash::new("e".repeat(64)).expect("PKCE hash");
+        let expires_at = Utc::now() + chrono::Duration::minutes(5);
+        let flow = shared
+            .create_flow(NewAuthFlow {
+                id: None,
+                scope: scope.clone(),
+                kind: AuthFlowKind::IntegrationCredential,
+                provider: provider.clone(),
+                challenge: AuthChallenge::OAuthUrl {
+                    authorization_url: OAuthAuthorizationUrl::new(
+                        "https://provider.example/authorize",
+                    )
+                    .expect("authorization URL"),
+                    expires_at,
+                },
+                continuation: AuthContinuationRef::SetupOnly,
+                update_binding: None,
+                opaque_state_hash: Some(opaque_state_hash.clone()),
+                pkce_verifier_hash: Some(pkce_verifier_hash.clone()),
+                expires_at,
+            })
+            .await
+            .expect("create OAuth flow");
+        RebornOAuthCallbackRequest {
+            scope,
+            flow_id: flow.id,
+            opaque_state_hash,
+            outcome: RebornOAuthCallbackOutcome::Authorized {
+                provider_request: OAuthProviderCallbackRequest {
+                    provider,
+                    account_label: CredentialAccountLabel::new("observable callback")
+                        .expect("account label"),
+                    authorization_code: OAuthAuthorizationCode::new(SecretString::from(
+                        "authorization-code",
+                    ))
+                    .expect("authorization code"),
+                    authorization_code_hash: AuthorizationCodeHash::new("f".repeat(64))
+                        .expect("authorization code hash"),
+                    pkce_verifier: PkceVerifierSecret::new(SecretString::from("pkce-verifier"))
+                        .expect("PKCE verifier"),
+                    pkce_verifier_hash,
+                    scopes: Vec::new(),
+                },
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn canceled_identity_check_transaction_finishes_and_rolls_back_after_hook_returns() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use ironclaw_auth::{AuthorizationCodeHash, OAuthAuthorizationCode, PkceVerifierSecret};
+
+        let bound = Arc::new(AtomicBool::new(false));
+        let hook_committed = Arc::new(tokio::sync::Notify::new());
+        let release_hook = Arc::new(tokio::sync::Notify::new());
+        let rolled_back = Arc::new(tokio::sync::Notify::new());
+
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let scope = test_auth_product_scope();
+        let provider = AuthProviderId::new("cancel-safe-provider").expect("provider");
+        let opaque_state_hash = OpaqueStateHash::new("a".repeat(64)).expect("state hash");
+        let pkce_verifier_hash = PkceVerifierHash::new("b".repeat(64)).expect("PKCE hash");
+        let expires_at = Utc::now() + chrono::Duration::minutes(5);
+        let flow = shared
+            .create_flow(NewAuthFlow {
+                id: None,
+                scope: scope.clone(),
+                kind: AuthFlowKind::IntegrationCredential,
+                provider: provider.clone(),
+                challenge: AuthChallenge::OAuthUrl {
+                    authorization_url: OAuthAuthorizationUrl::new(
+                        "https://provider.example/authorize",
+                    )
+                    .expect("authorization URL"),
+                    expires_at,
+                },
+                continuation: AuthContinuationRef::SetupOnly,
+                update_binding: None,
+                opaque_state_hash: Some(opaque_state_hash.clone()),
+                pkce_verifier_hash: Some(pkce_verifier_hash.clone()),
+                expires_at,
+            })
+            .await
+            .expect("create OAuth flow");
+        let services = RebornProductAuthServices::from_shared(
+            shared,
+            Arc::new(NoopAuthContinuationDispatcher),
+        );
+
+        let check: OAuthProviderIdentityCheck = {
+            let bound = Arc::clone(&bound);
+            let hook_committed = Arc::clone(&hook_committed);
+            let release_hook = Arc::clone(&release_hook);
+            let rolled_back = Arc::clone(&rolled_back);
+            Box::new(move |_| {
+                Box::pin(async move {
+                    bound.store(true, Ordering::SeqCst);
+                    hook_committed.notify_one();
+                    release_hook.notified().await;
+                    Ok(Some(Box::pin(async move {
+                        bound.store(false, Ordering::SeqCst);
+                        rolled_back.notify_one();
+                    })
+                        as OAuthProviderIdentityBindingRollback))
+                })
+            })
+        };
+
+        let callback = tokio::spawn(async move {
+            services
+                .handle_oauth_callback_with_optional_provider_identity_check(
+                    RebornOAuthCallbackRequest {
+                        scope,
+                        flow_id: flow.id,
+                        opaque_state_hash,
+                        outcome: RebornOAuthCallbackOutcome::Authorized {
+                            provider_request: OAuthProviderCallbackRequest {
+                                provider,
+                                account_label: CredentialAccountLabel::new("cancel safe")
+                                    .expect("account label"),
+                                authorization_code: OAuthAuthorizationCode::new(
+                                    SecretString::from("authorization-code"),
+                                )
+                                .expect("authorization code"),
+                                authorization_code_hash: AuthorizationCodeHash::new("c".repeat(64))
+                                    .expect("authorization code hash"),
+                                pkce_verifier: PkceVerifierSecret::new(SecretString::from(
+                                    "pkce-verifier",
+                                ))
+                                .expect("PKCE verifier"),
+                                pkce_verifier_hash,
+                                scopes: Vec::new(),
+                            },
+                        },
+                    },
+                    Some(check),
+                )
+                .await
+        });
+
+        hook_committed.notified().await;
+        assert!(bound.load(Ordering::SeqCst));
+        callback.abort();
+        callback.await.expect_err("callback task is canceled");
+        release_hook.notify_one();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), rolled_back.notified())
+            .await
+            .expect("detached identity transaction must compensate cancellation");
+        assert!(!bound.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn dropping_bound_identity_transaction_runs_rollback() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let rolled_back = Arc::new(AtomicBool::new(false));
+        let rollback_finished = Arc::new(tokio::sync::Notify::new());
+        let check: OAuthProviderIdentityCheck = {
+            let rolled_back = Arc::clone(&rolled_back);
+            let rollback_finished = Arc::clone(&rollback_finished);
+            Box::new(move |_| {
+                Box::pin(async move {
+                    Ok(Some(Box::pin(async move {
+                        rolled_back.store(true, Ordering::SeqCst);
+                        rollback_finished.notify_one();
+                    })
+                        as OAuthProviderIdentityBindingRollback))
+                })
+            })
+        };
+
+        let mut transaction = OAuthProviderIdentityBindingTransaction::spawn(check, None);
+        transaction
+            .wait_until_bound()
+            .await
+            .expect("identity hook succeeds");
+        drop(transaction);
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            rollback_finished.notified(),
+        )
+        .await
+        .expect("dropping the callback-owned transaction must compensate the binding");
+        assert!(rolled_back.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn committing_bound_identity_transaction_disarms_rollback() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let rolled_back = Arc::new(AtomicBool::new(false));
+        let check: OAuthProviderIdentityCheck = {
+            let rolled_back = Arc::clone(&rolled_back);
+            Box::new(move |_| {
+                Box::pin(async move {
+                    Ok(Some(Box::pin(async move {
+                        rolled_back.store(true, Ordering::SeqCst);
+                    })
+                        as OAuthProviderIdentityBindingRollback))
+                })
+            })
+        };
+
+        let mut transaction = OAuthProviderIdentityBindingTransaction::spawn(check, None);
+        transaction
+            .wait_until_bound()
+            .await
+            .expect("identity hook succeeds");
+        transaction.commit();
+
+        assert!(
+            !rolled_back.load(Ordering::SeqCst),
+            "completed OAuth flow must keep its committed identity binding"
+        );
+    }
+
+    #[tokio::test]
+    async fn canceled_callback_after_exchange_cleans_provider_exchange() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let provider_client = Arc::new(ObservableOAuthProviderClient::new());
+        let provider = AuthProviderId::new("observable-provider").expect("provider");
+        let request = oauth_callback_test_request(shared.as_ref(), provider).await;
+        let services = RebornProductAuthServices::new(
+            shared.clone(),
+            shared.clone(),
+            shared.clone(),
+            shared.clone(),
+            provider_client.clone(),
+            shared,
+            Arc::new(NoopAuthContinuationDispatcher),
+        );
+        let hook_entered = Arc::new(tokio::sync::Notify::new());
+        let release_hook = Arc::new(tokio::sync::Notify::new());
+        let identity_check: OAuthProviderIdentityCheck = {
+            let hook_entered = Arc::clone(&hook_entered);
+            let release_hook = Arc::clone(&release_hook);
+            Box::new(move |_| {
+                Box::pin(async move {
+                    hook_entered.notify_one();
+                    release_hook.notified().await;
+                    Ok(None)
+                })
+            })
+        };
+
+        let callback = tokio::spawn(async move {
+            services
+                .handle_oauth_callback_with_optional_provider_identity_check(
+                    request,
+                    Some(identity_check),
+                )
+                .await
+        });
+        hook_entered.notified().await;
+        callback.abort();
+        callback.await.expect_err("callback task is canceled");
+        release_hook.notify_one();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            provider_client.cleanup_called.notified(),
+        )
+        .await
+        .expect("canceled callback must clean the completed provider exchange");
+        assert_eq!(
+            provider_client
+                .cleanup_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_callback_disarms_provider_exchange_cleanup() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let provider_client = Arc::new(ObservableOAuthProviderClient::new());
+        let provider = AuthProviderId::new("observable-provider").expect("provider");
+        let request = oauth_callback_test_request(shared.as_ref(), provider).await;
+        let services = RebornProductAuthServices::new(
+            shared.clone(),
+            shared.clone(),
+            shared.clone(),
+            shared.clone(),
+            provider_client.clone(),
+            shared,
+            Arc::new(NoopAuthContinuationDispatcher),
+        );
+
+        services
+            .handle_oauth_callback(request)
+            .await
+            .expect("OAuth callback completes");
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            provider_client
+                .cleanup_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "durably completed OAuth callback must retain its provider exchange"
+        );
+    }
+
+    #[tokio::test]
+    async fn canceled_handler_does_not_compensate_durably_completed_callback() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let flow_manager = Arc::new(CompletionGateFlowManager::new(shared.clone(), false));
+        let provider_client = Arc::new(ObservableOAuthProviderClient::new());
+        let provider = AuthProviderId::new("observable-provider").expect("provider");
+        let request = oauth_callback_test_request(shared.as_ref(), provider).await;
+        let rollback_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let rollback_dropped = Arc::new(tokio::sync::Notify::new());
+        let services = RebornProductAuthServices::new(
+            flow_manager.clone(),
+            shared.clone(),
+            shared.clone(),
+            shared.clone(),
+            provider_client.clone(),
+            shared,
+            Arc::new(NoopAuthContinuationDispatcher),
+        );
+        let identity_check =
+            probed_identity_check(Arc::clone(&rollback_calls), Arc::clone(&rollback_dropped));
+
+        let callback = tokio::spawn(async move {
+            services
+                .handle_oauth_callback_with_optional_provider_identity_check(
+                    request,
+                    Some(identity_check),
+                )
+                .await
+        });
+        flow_manager.completion_ready.notified().await;
+        callback.abort();
+        callback.await.expect_err("HTTP handler is canceled");
+        flow_manager.release_completion.notify_one();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            rollback_dropped.notified(),
+        )
+        .await
+        .expect("completion transaction resolves its identity decision");
+        assert_eq!(
+            rollback_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "durably completed callback must not roll back identity"
+        );
+        assert_eq!(
+            provider_client
+                .cleanup_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "durably completed callback must not clean provider exchange"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_completion_compensates_identity_and_exchange_exactly_once() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let flow_manager = Arc::new(CompletionGateFlowManager::new(shared.clone(), true));
+        let provider_client = Arc::new(ObservableOAuthProviderClient::new());
+        let provider = AuthProviderId::new("observable-provider").expect("provider");
+        let request = oauth_callback_test_request(shared.as_ref(), provider).await;
+        let rollback_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let rollback_dropped = Arc::new(tokio::sync::Notify::new());
+        let services = RebornProductAuthServices::new(
+            flow_manager.clone(),
+            shared.clone(),
+            shared.clone(),
+            shared.clone(),
+            provider_client.clone(),
+            shared,
+            Arc::new(NoopAuthContinuationDispatcher),
+        );
+        let identity_check =
+            probed_identity_check(Arc::clone(&rollback_calls), Arc::clone(&rollback_dropped));
+
+        let callback = tokio::spawn(async move {
+            services
+                .handle_oauth_callback_with_optional_provider_identity_check(
+                    request,
+                    Some(identity_check),
+                )
+                .await
+        });
+        flow_manager.completion_ready.notified().await;
+        flow_manager.release_completion.notify_one();
+        callback
+            .await
+            .expect("callback task joins")
+            .expect_err("completion failure propagates");
+        rollback_dropped.notified().await;
+
+        assert_eq!(
+            rollback_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "completion failure rolls identity back once"
+        );
+        assert_eq!(
+            provider_client
+                .cleanup_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "completion failure cleans provider exchange once"
+        );
+    }
 
     #[async_trait]
     impl RebornAuthContinuationDispatcher for RejectLifecycleContinuation {

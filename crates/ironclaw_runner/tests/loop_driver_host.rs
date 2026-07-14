@@ -1,3 +1,4 @@
+// arch-exempt: large_file, runner host-loop contract matrix remains co-located, plan #4088
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     sync::{

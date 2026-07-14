@@ -125,7 +125,7 @@ pub use projects::{
     RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole, RebornProjectState,
     RebornRemoveMemberRequest, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
 };
-// arch-exempt: large_file, remove retired public facade reexports in place, plan #6061
+// arch-exempt: large_file, extension lifecycle projection still awaits extraction from the broad Reborn facade, plan #4088
 pub use types::{
     RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,

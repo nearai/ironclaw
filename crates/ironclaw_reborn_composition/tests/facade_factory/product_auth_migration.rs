@@ -1,6 +1,62 @@
 // safety: test fixtures intentionally seed and inspect durable rows across separate service rebuilds; no single atomic operation.
 use super::*;
 
+use ironclaw_auth::{
+    AuthProductScope, AuthProviderId, CredentialAccount, CredentialAccountId,
+    CredentialAccountLabel, CredentialAccountStatus, CredentialOwnership, ProviderScope,
+};
+use ironclaw_filesystem::{CasExpectation, Entry, RootFilesystem};
+use ironclaw_host_api::{SecretHandle, VirtualPath};
+
+fn product_auth_account_path(
+    scope: &AuthProductScope,
+    account_id: CredentialAccountId,
+) -> VirtualPath {
+    VirtualPath::new(format!(
+        "/tenants/{}/users/{}/secrets/agents/{}/projects/{}/product-auth/web/sessions/{}/accounts/{}.json",
+        scope.resource.tenant_id,
+        scope.resource.user_id,
+        scope.resource.agent_id.as_ref().expect("test agent"),
+        scope.resource.project_id.as_ref().expect("test project"),
+        scope.session_id.as_ref().expect("test session"),
+        account_id
+    ))
+    .expect("valid product-auth fixture path")
+}
+
+async fn seed_retired_slack_account(
+    filesystem: &dyn RootFilesystem,
+    scope: &AuthProductScope,
+    label: &str,
+) -> CredentialAccount {
+    let now = Utc::now();
+    let account = CredentialAccount {
+        id: CredentialAccountId::new(),
+        scope: scope.clone(),
+        provider: AuthProviderId::new("slack_personal").expect("legacy provider fixture"),
+        label: CredentialAccountLabel::new(label).expect("legacy label fixture"),
+        status: CredentialAccountStatus::Configured,
+        ownership: CredentialOwnership::UserReusable,
+        owner_extension: None,
+        granted_extensions: Vec::new(),
+        access_secret: Some(SecretHandle::new("legacy-slack-access").expect("secret handle")),
+        refresh_secret: None,
+        scopes: vec![ProviderScope::new("search:read").expect("provider scope")],
+        provider_identity: None,
+        created_at: now,
+        updated_at: now,
+    };
+    filesystem
+        .put(
+            &product_auth_account_path(scope, account.id),
+            Entry::bytes(serde_json::to_vec(&account).expect("serialize legacy account fixture")),
+            CasExpectation::Absent,
+        )
+        .await
+        .expect("seed persisted pre-Train-A account fixture");
+    account
+}
+
 #[cfg(feature = "libsql")]
 async fn libsql_entry_version(db: &libsql::Database, path: &str) -> i64 {
     let conn = db.connect().expect("connect libsql db");
@@ -31,35 +87,34 @@ async fn local_dev_libsql_rebuild_migrates_slack_personal_before_publishing_serv
     )
     .await
     .unwrap();
-    let product_auth = first_services.product_auth.as_ref().unwrap();
-    let challenge = product_auth
+    let retired_write = first_services
+        .product_auth
+        .as_ref()
+        .expect("local product auth is published")
         .request_manual_token_setup(RebornManualTokenSetupRequest::new(
             scope.clone(),
-            ironclaw_auth::AuthProviderId::new("slack_personal").unwrap(),
-            ironclaw_auth::CredentialAccountLabel::new("Local legacy Slack").unwrap(),
+            AuthProviderId::new("slack_personal").unwrap(),
+            CredentialAccountLabel::new("Rejected legacy Slack").unwrap(),
             ironclaw_auth::AuthContinuationRef::SetupOnly,
             Utc::now() + chrono::Duration::minutes(5),
         ))
         .await
-        .unwrap();
-    let submitted = product_auth
-        .submit_manual_token(RebornManualTokenSubmitRequest::new(
-            scope.clone(),
-            challenge.interaction_id,
-            SecretString::from("local-legacy-slack-token"),
-        ))
-        .await
-        .unwrap();
-    let before = product_auth
-        .credential_account_service()
-        .get_account(ironclaw_auth::CredentialAccountLookupRequest::new(
-            scope.clone(),
-            submitted.account_id,
-        ))
-        .await
-        .unwrap()
-        .unwrap();
+        .expect_err("the current binary must not create retired provider state");
+    assert_eq!(
+        retired_write.code,
+        ironclaw_auth::AuthErrorCode::InvalidRequest
+    );
     drop(first_services);
+    let fixture_db = Arc::new(
+        libsql::Builder::new_local(root.join("reborn-local-dev.db"))
+            .build()
+            .await
+            .expect("open local-dev fixture database"),
+    );
+    let fixture_filesystem = ironclaw_filesystem::LibSqlRootFilesystem::new(fixture_db);
+    let before =
+        seed_retired_slack_account(&fixture_filesystem, &scope, "Local legacy Slack").await;
+    drop(fixture_filesystem);
 
     let rebuilt = build_reborn_services(
         RebornBuildInput::local_dev("test-owner", root)
@@ -73,13 +128,12 @@ async fn local_dev_libsql_rebuild_migrates_slack_personal_before_publishing_serv
         .unwrap()
         .credential_account_service()
         .get_account(ironclaw_auth::CredentialAccountLookupRequest::new(
-            scope,
-            submitted.account_id,
+            scope, before.id,
         ))
         .await
         .unwrap()
         .unwrap();
-    let mut expected = before;
+    let mut expected = before.clone();
     expected.provider = ironclaw_auth::AuthProviderId::new("slack").unwrap();
     assert_eq!(after, expected);
 }
@@ -109,40 +163,11 @@ async fn production_libsql_migrates_slack_personal_before_publishing_services() 
     )
     .await
     .expect("first production build seeds durable product auth");
-    let first_product_auth = first_services
-        .product_auth
-        .as_ref()
-        .expect("production publishes product auth after startup");
-    let retired = ironclaw_auth::AuthProviderId::new("slack_personal").unwrap();
-    let challenge = first_product_auth
-        .request_manual_token_setup(RebornManualTokenSetupRequest::new(
-            scope.clone(),
-            retired,
-            ironclaw_auth::CredentialAccountLabel::new("Slack personal legacy").unwrap(),
-            ironclaw_auth::AuthContinuationRef::SetupOnly,
-            Utc::now() + chrono::Duration::minutes(5),
-        ))
-        .await
-        .unwrap();
-    let submitted = first_product_auth
-        .submit_manual_token(RebornManualTokenSubmitRequest::new(
-            scope.clone(),
-            challenge.interaction_id,
-            SecretString::from("legacy-slack-token"),
-        ))
-        .await
-        .unwrap();
-    let before = first_product_auth
-        .credential_account_service()
-        .get_account(ironclaw_auth::CredentialAccountLookupRequest::new(
-            scope.clone(),
-            submitted.account_id,
-        ))
-        .await
-        .unwrap()
-        .expect("seeded legacy account is durable");
     first_handle.shutdown().await;
     drop(first_services);
+    let fixture_filesystem = ironclaw_filesystem::LibSqlRootFilesystem::new(Arc::clone(&db));
+    let before =
+        seed_retired_slack_account(&fixture_filesystem, &scope, "Slack personal legacy").await;
 
     let (second_notifier, second_handle) = live_wake_notifier();
     let second_services = build_reborn_services(
@@ -168,26 +193,18 @@ async fn production_libsql_migrates_slack_personal_before_publishing_services() 
         .credential_account_service()
         .get_account(ironclaw_auth::CredentialAccountLookupRequest::new(
             scope.clone(),
-            submitted.account_id,
+            before.id,
         ))
         .await
         .unwrap()
         .expect("migrated account remains resolvable");
-    let mut expected = before;
+    let mut expected = before.clone();
     expected.provider = ironclaw_auth::AuthProviderId::new("slack").unwrap();
     assert_eq!(
         after, expected,
         "production migration changes only provider"
     );
-    let account_path = format!(
-        "/tenants/{}/users/{}/secrets/agents/{}/projects/{}/product-auth/web/sessions/{}/accounts/{}.json",
-        scope.resource.tenant_id,
-        scope.resource.user_id,
-        scope.resource.agent_id.as_ref().unwrap(),
-        scope.resource.project_id.as_ref().unwrap(),
-        scope.session_id.as_ref().unwrap(),
-        submitted.account_id
-    );
+    let account_path = product_auth_account_path(&scope, before.id).to_string();
     let version_after_second = libsql_entry_version(&db, &account_path).await;
     second_handle.shutdown().await;
     drop(second_services);
@@ -242,45 +259,19 @@ async fn production_libsql_malformed_product_auth_record_fails_typed_migration()
     )
     .await
     .unwrap();
-    let product_auth = first_services.product_auth.as_ref().unwrap();
-    let challenge = product_auth
-        .request_manual_token_setup(RebornManualTokenSetupRequest::new(
-            scope.clone(),
-            ironclaw_auth::AuthProviderId::new("slack_personal").unwrap(),
-            ironclaw_auth::CredentialAccountLabel::new("Malformed legacy Slack").unwrap(),
-            ironclaw_auth::AuthContinuationRef::SetupOnly,
-            Utc::now() + chrono::Duration::minutes(5),
-        ))
-        .await
-        .unwrap();
-    let submitted = product_auth
-        .submit_manual_token(RebornManualTokenSubmitRequest::new(
-            scope.clone(),
-            challenge.interaction_id,
-            SecretString::from("legacy-slack-token"),
-        ))
-        .await
-        .unwrap();
     first_handle.shutdown().await;
     drop(first_services);
 
-    let account_path = format!(
-        "/tenants/{}/users/{}/secrets/agents/{}/projects/{}/product-auth/web/sessions/{}/accounts/{}.json",
-        scope.resource.tenant_id,
-        scope.resource.user_id,
-        scope.resource.agent_id.as_ref().unwrap(),
-        scope.resource.project_id.as_ref().unwrap(),
-        scope.session_id.as_ref().unwrap(),
-        submitted.account_id
-    );
-    db.connect()
-        .unwrap()
-        .execute(
-            "UPDATE root_filesystem_entries SET contents = ?1 WHERE path = ?2",
-            libsql::params![vec![0xff_u8], account_path],
+    let malformed_id = CredentialAccountId::new();
+    let fixture_filesystem = ironclaw_filesystem::LibSqlRootFilesystem::new(Arc::clone(&db));
+    fixture_filesystem
+        .put(
+            &product_auth_account_path(&scope, malformed_id),
+            Entry::bytes(vec![0xff_u8]),
+            CasExpectation::Absent,
         )
         .await
-        .expect("corrupt seeded record for strict startup test");
+        .expect("seed malformed pre-Train-A account fixture");
 
     let (second_notifier, second_handle) = live_wake_notifier();
     let result = build_reborn_services(
@@ -332,36 +323,11 @@ async fn production_postgres_migrates_slack_personal_before_publishing_services(
     )
     .await
     .unwrap();
-    let product_auth = first_services.product_auth.as_ref().unwrap();
-    let challenge = product_auth
-        .request_manual_token_setup(RebornManualTokenSetupRequest::new(
-            scope.clone(),
-            ironclaw_auth::AuthProviderId::new("slack_personal").unwrap(),
-            ironclaw_auth::CredentialAccountLabel::new("Postgres legacy Slack").unwrap(),
-            ironclaw_auth::AuthContinuationRef::SetupOnly,
-            Utc::now() + chrono::Duration::minutes(5),
-        ))
-        .await
-        .unwrap();
-    let submitted = product_auth
-        .submit_manual_token(RebornManualTokenSubmitRequest::new(
-            scope.clone(),
-            challenge.interaction_id,
-            SecretString::from("postgres-legacy-slack-token"),
-        ))
-        .await
-        .unwrap();
-    let before = product_auth
-        .credential_account_service()
-        .get_account(ironclaw_auth::CredentialAccountLookupRequest::new(
-            scope.clone(),
-            submitted.account_id,
-        ))
-        .await
-        .unwrap()
-        .unwrap();
     first_handle.shutdown().await;
     drop(first_services);
+    let fixture_filesystem = ironclaw_filesystem::PostgresRootFilesystem::new(pool.clone());
+    let before =
+        seed_retired_slack_account(&fixture_filesystem, &scope, "Postgres legacy Slack").await;
 
     let (second_notifier, second_handle) = live_wake_notifier();
     let second_services = build_reborn_services(
@@ -386,23 +352,15 @@ async fn production_postgres_migrates_slack_personal_before_publishing_services(
         .credential_account_service()
         .get_account(ironclaw_auth::CredentialAccountLookupRequest::new(
             scope.clone(),
-            submitted.account_id,
+            before.id,
         ))
         .await
         .unwrap()
         .unwrap();
-    let mut expected = before;
+    let mut expected = before.clone();
     expected.provider = ironclaw_auth::AuthProviderId::new("slack").unwrap();
     assert_eq!(after, expected);
-    let account_path = format!(
-        "/tenants/{}/users/{}/secrets/agents/{}/projects/{}/product-auth/web/sessions/{}/accounts/{}.json",
-        scope.resource.tenant_id,
-        scope.resource.user_id,
-        scope.resource.agent_id.as_ref().unwrap(),
-        scope.resource.project_id.as_ref().unwrap(),
-        scope.session_id.as_ref().unwrap(),
-        submitted.account_id
-    );
+    let account_path = product_auth_account_path(&scope, before.id).to_string();
     let client = pool.get().await.unwrap();
     let version_after_second: i64 = client
         .query_one(
