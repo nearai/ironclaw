@@ -32,6 +32,7 @@ pub(super) fn bundle() -> PackageBundle {
         }),
         // gsuite-family effect grant (Dispatch + Network + UseSecret +
         // ExternalWrite): OAuth-backed Google API access with mail writes.
+        oauth_setup: None,
         trust_effects: Some(vec![
             EffectKind::DispatchCapability,
             EffectKind::Network,

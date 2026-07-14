@@ -1,4 +1,3 @@
-use ironclaw_auth::SLACK_PROVIDER_ID;
 use ironclaw_extensions::{
     CapabilityDeclV2, CapabilityVisibility, ExtensionAssetPath, ExtensionManifestRecord,
     ExtensionPackage, ExtensionRuntime, ManifestSource,
@@ -26,37 +25,9 @@ use crate::llm_admin::nearai_mcp::{
     nearai_mcp_endpoint_from_base, nearai_mcp_endpoint_from_env,
 };
 
-const SLACK_MANIFEST: &str =
-    include_str!("../../../ironclaw_first_party_extensions/assets/slack/manifest.toml");
-const SLACK_WASM_MODULE: &[u8] = include_bytes!(
-    "../../../ironclaw_first_party_extensions/assets/slack/wasm/slack_user_tool.wasm"
-);
 const NEARAI_MCP_MANIFEST: &str =
     include_str!("../../../ironclaw_first_party_extensions/assets/nearai-mcp/manifest.toml");
 const NEARAI_EXTENSION_ID: &str = HostManagedCredentialExtension::NearAi.id();
-pub(crate) const SLACK_EXTENSION_ID: &str = "slack";
-const SLACK_PERSONAL_OAUTH_REQUIREMENT_NAME: &str = "slack_personal_oauth";
-// The slack_personal OAuth setup scopes are the union of the Slack tools'
-// per-capability scopes: the read-only tools request only read scopes, and
-// write tools request chat:write. Because the account is shared and send_message
-// is currently a default tool, a read-only user still grants chat:write;
-// reducing the grant (a write-opt-in / scope-upgrade re-consent flow) is tracked
-// in nearai/ironclaw#5669. `slack_read_only_tools_do_not_request_chat_write`
-// enforces that this list equals the union of the manifest capabilities' scopes
-// and that only write-effect capabilities declare chat:write.
-const SLACK_OAUTH_SETUP_SCOPES: &[&str] = &[
-    "search:read",
-    "channels:history",
-    "groups:history",
-    "im:history",
-    "mpim:history",
-    "channels:read",
-    "groups:read",
-    "im:read",
-    "mpim:read",
-    "users:read",
-    "chat:write",
-];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HostManagedCredentialExtension {
@@ -128,6 +99,12 @@ pub(crate) struct AvailableExtensionPackage {
     /// as each package migrates, its copy moves here and its match arm is
     /// deleted. See overview §3 (package self-containment).
     pub(crate) onboarding_override: Option<LifecycleExtensionOnboarding>,
+    /// Bespoke OAuth-setup credential requirement carried down from a migrated
+    /// inventory bundle, replacing the manifest-derived requirement. `None` for
+    /// packages whose derived requirement is correct. Used by a package whose
+    /// connect flow authorizes a shared account with setup scopes distinct from
+    /// its per-tool runtime scopes.
+    pub(crate) oauth_setup_override: Option<LifecycleExtensionCredentialRequirement>,
 }
 
 impl AvailableExtensionPackage {
@@ -197,12 +174,6 @@ fn onboarding(package: &AvailableExtensionPackage) -> Option<LifecycleExtensionO
     }
 
     match package_ref.id.as_str() {
-        "slack" => Some(onboarding_message(
-            "Slack needs OAuth authorization before the Slack channel can recognize your DMs and before the user-scoped Slack tools can run.",
-            Some("Authorize the Slack account you will use to DM IronClaw."),
-            None,
-            "After authorization completes, DM the Slack bot directly or use the Slack tools from any chat.",
-        )),
         _ => None,
     }
 }
@@ -241,12 +212,14 @@ fn credential_requirements(
     if is_host_managed_credential_extension(&package.package_ref) {
         return Vec::new();
     }
-    // Model B: the user-installable Slack tools extension (`slack`) surfaces the
-    // slack_personal OAuth connect requirement; the bot channel is operator infra.
-    if package.package_ref.kind == LifecyclePackageKind::Extension
-        && package.package_ref.id.as_str() == SLACK_EXTENSION_ID
-    {
-        return slack_personal_oauth_credential_requirements();
+    // A migrated package may carry a bespoke OAuth-setup connect requirement
+    // (a personal-OAuth connect whose setup scopes differ from the per-tool
+    // runtime scopes) that replaces the manifest-derived one. Composition never
+    // names the package — the override rides down from its inventory bundle.
+    if package.package_ref.kind == LifecyclePackageKind::Extension {
+        if let Some(oauth_setup) = &package.oauth_setup_override {
+            return vec![oauth_setup.clone()];
+        }
     }
 
     let mut groups: Vec<CredentialRequirementGroup> = Vec::new();
@@ -295,20 +268,6 @@ fn credential_requirements(
         .collect()
 }
 
-fn slack_personal_oauth_credential_requirements() -> Vec<LifecycleExtensionCredentialRequirement> {
-    vec![LifecycleExtensionCredentialRequirement {
-        name: SLACK_PERSONAL_OAUTH_REQUIREMENT_NAME.to_string(),
-        provider: SLACK_PROVIDER_ID.to_string(),
-        required: true,
-        setup: LifecycleExtensionCredentialSetup::OAuth {
-            scopes: SLACK_OAUTH_SETUP_SCOPES
-                .iter()
-                .map(|scope| (*scope).to_string())
-                .collect(),
-        },
-    }]
-}
-
 struct CredentialRequirementGroup {
     handle: String,
     provider: VendorId,
@@ -346,7 +305,6 @@ impl AvailableExtensionCatalog {
         nearai_mcp_config: Option<&NearAiMcpBootstrapConfig>,
     ) -> Result<Self, ProductWorkflowError> {
         let mut packages = vec![nearai_mcp_package(nearai_mcp_config)?];
-        packages.push(slack_package()?);
         // Packages migrated to the self-contained inventory
         // (`ironclaw_first_party_extensions::packages`) are consumed here as
         // opaque bundles — composition never names them (overview §3).
@@ -505,21 +463,6 @@ fn nearai_mcp_package(
     )
 }
 
-pub(crate) fn slack_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package(SLACK_EXTENSION_ID, "Slack", SLACK_MANIFEST, slack_assets())
-}
-
-pub(crate) fn slack_manifest_digest() -> String {
-    sha256_digest_token(SLACK_MANIFEST.as_bytes())
-}
-
-/// The bundled Slack channel manifest — the MIG-5 legacy alias mount
-/// (`extension_host/legacy_ingress_aliases.rs`) projects its route
-/// descriptor from here.
-pub(crate) fn slack_manifest_toml() -> &'static str {
-    SLACK_MANIFEST
-}
-
 pub(crate) fn nearai_mcp_manifest_toml_for_config(
     config: Option<&NearAiMcpBootstrapConfig>,
 ) -> Result<String, ProductWorkflowError> {
@@ -589,6 +532,20 @@ fn package_from_bundle(
             &copy.credential_next_step,
         )
     });
+    // A bespoke OAuth-setup credential requirement (a personal-OAuth connect)
+    // replaces the manifest-derived one; map the plain bundle data to the host
+    // lifecycle type here.
+    let oauth_setup_override =
+        bundle
+            .oauth_setup
+            .map(|setup| LifecycleExtensionCredentialRequirement {
+                name: setup.requirement_name,
+                provider: setup.provider,
+                required: true,
+                setup: LifecycleExtensionCredentialSetup::OAuth {
+                    scopes: setup.scopes,
+                },
+            });
     let mut package = bundled_extension_package(
         bundle.id,
         bundle.display_name,
@@ -596,6 +553,7 @@ fn package_from_bundle(
         assets,
     )?;
     package.onboarding_override = onboarding_override;
+    package.oauth_setup_override = oauth_setup_override;
     Ok(package)
 }
 
@@ -650,6 +608,7 @@ fn bundled_extension_package(
         channel_presentation,
         assets,
         onboarding_override: None,
+        oauth_setup_override: None,
     })
 }
 
@@ -743,52 +702,6 @@ fn nearai_mcp_assets(manifest: &str) -> Vec<AvailableExtensionAsset> {
                 "../../../ironclaw_first_party_extensions/assets/nearai-mcp/prompts/nearai/web_search.md"
             ),
         ),
-    ]
-}
-
-fn slack_assets() -> Vec<AvailableExtensionAsset> {
-    // The schema/prompt asset dirs now match the extension id (`slack`), but the
-    // WASM binary keeps its legacy `slack_user_tool.wasm` filename (and the tool
-    // uses the `slack_user_token` credential handle), so the assets are spelled
-    // out here rather than derived from the id.
-    macro_rules! slack_schema_asset {
-        ($path:literal) => {
-            bytes_asset(
-                concat!("schemas/slack/", $path),
-                include_bytes!(concat!(
-                    "../../../ironclaw_first_party_extensions/assets/slack/schemas/slack/",
-                    $path
-                )),
-            )
-        };
-    }
-    macro_rules! slack_prompt_asset {
-        ($operation:literal) => {
-            bytes_asset(
-                concat!("prompts/slack/", $operation, ".md"),
-                include_bytes!(concat!(
-                    "../../../ironclaw_first_party_extensions/assets/slack/prompts/slack/",
-                    $operation,
-                    ".md"
-                )),
-            )
-        };
-    }
-
-    vec![
-        bytes_asset("manifest.toml", SLACK_MANIFEST.as_bytes()),
-        slack_schema_asset!("raw_output.v1.json"),
-        slack_schema_asset!("search_messages.input.v1.json"),
-        slack_prompt_asset!("search_messages"),
-        slack_schema_asset!("list_conversations.input.v1.json"),
-        slack_prompt_asset!("list_conversations"),
-        slack_schema_asset!("get_conversation_history.input.v1.json"),
-        slack_prompt_asset!("get_conversation_history"),
-        slack_schema_asset!("get_user_info.input.v1.json"),
-        slack_prompt_asset!("get_user_info"),
-        slack_schema_asset!("send_message.input.v1.json"),
-        slack_prompt_asset!("send_message"),
-        bytes_asset("wasm/slack_user_tool.wasm", SLACK_WASM_MODULE),
     ]
 }
 
@@ -968,6 +881,7 @@ where
             // Filesystem-loaded extensions are not bundled inventory packages;
             // their onboarding (if any) still resolves via `onboarding()`.
             onboarding_override: None,
+            oauth_setup_override: None,
         });
     }
     Ok(packages)
@@ -980,7 +894,7 @@ fn reserved_host_bundled_extension_id(extension_id: &ExtensionId) -> bool {
     ironclaw_first_party_extensions::packages::bundled_package_ids()
         .iter()
         .any(|id| *id == extension_id.as_str())
-        || matches!(extension_id.as_str(), "slack" | NEARAI_EXTENSION_ID)
+        || extension_id.as_str() == NEARAI_EXTENSION_ID
         || is_gsuite_extension_id(extension_id)
 }
 
@@ -1651,9 +1565,20 @@ mod tests {
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").unwrap();
         let package = catalog.resolve(&package_ref).unwrap();
 
-        let ceiling = SLACK_OAUTH_SETUP_SCOPES
+        // The setup-scope ceiling now lives on slack's inventory bundle
+        // (`oauth_setup.scopes`); this pin still enforces that it equals the
+        // union of the manifest capabilities' provider scopes and that only
+        // write-effect tools request chat:write.
+        let slack_bundle = ironclaw_first_party_extensions::packages::bundled_packages()
+            .into_iter()
+            .find(|bundle| bundle.id == "slack")
+            .expect("slack is in the bundled inventory");
+        let ceiling = slack_bundle
+            .oauth_setup
+            .expect("slack declares an OAuth setup requirement")
+            .scopes
             .iter()
-            .map(|scope| scope.to_string())
+            .cloned()
             .collect::<BTreeSet<_>>();
 
         // Manifest v3: per-tool least privilege lives in provider_scopes
@@ -1916,7 +1841,6 @@ handle = "web_token"
 
     #[test]
     fn bundled_manifest_digests_are_sha256_tokens() {
-        assert!(slack_manifest_digest().starts_with("sha256:"));
         // gmail migrated to the inventory; its digest (still sha256-token) is
         // asserted through the trust policy in
         // `factory::tests::builtin_first_party_trust_policy_grants_migrated_gmail_via_inventory`.
@@ -2388,6 +2312,7 @@ output_schema_ref = "schemas/write.output.json"
                 },
             ],
             onboarding_override: None,
+            oauth_setup_override: None,
         }
     }
 }

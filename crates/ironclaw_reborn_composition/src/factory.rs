@@ -133,7 +133,6 @@ use ironclaw_turns::{
 use ironclaw_turns::{InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore};
 
 use crate::RebornProductAuthServicePorts;
-use crate::extension_host::available_extensions::slack_manifest_digest;
 use crate::extension_host::lifecycle::{
     RebornLocalSkillManagementPort, build_local_skill_management_port,
 };
@@ -4027,16 +4026,6 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
         policy.provider.authority_effects,
         None,
     )];
-    entries.push(AdminEntry::for_local_manifest(
-        PackageId::new("slack").map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("Slack personal first-party package id is invalid: {error}"),
-        })?,
-        "/system/extensions/slack/manifest.toml".to_string(),
-        Some(slack_manifest_digest()),
-        HostTrustAssignment::first_party(),
-        slack_user_allowed_effects(),
-        None,
-    ));
     // Packages migrated to the self-contained inventory supply their own trust
     // grant as data (`PackageBundle::trust_effects`); composition still owns the
     // decision (`first_party`) and the policy construction. Each entry is
@@ -4064,15 +4053,6 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
             reason: format!("built-in first-party trust policy is invalid: {error}"),
         }
     })
-}
-
-fn slack_user_allowed_effects() -> Vec<EffectKind> {
-    vec![
-        EffectKind::DispatchCapability,
-        EffectKind::Network,
-        EffectKind::UseSecret,
-        EffectKind::ExternalWrite,
-    ]
 }
 
 #[cfg(all(test, any(feature = "libsql", feature = "postgres")))]
@@ -7850,8 +7830,17 @@ mod tests {
 
     #[test]
     fn builtin_first_party_trust_policy_includes_slack_local_manifest_entry() {
+        // slack migrated to the self-contained inventory; its first-party trust
+        // entry is now produced by the generic `bundled_packages()` loop. This
+        // pin locks that the migration preserved slack's first-party grant and
+        // its manifest-digest binding (wrong digest / wrong path → Sandbox).
         let policy = builtin_first_party_trust_policy().expect("trust policy");
-        let expected_digest = slack_manifest_digest();
+        let slack_bundle = ironclaw_first_party_extensions::packages::bundled_packages()
+            .into_iter()
+            .find(|bundle| bundle.id == "slack")
+            .expect("slack is in the bundled inventory");
+        let expected_digest =
+            ironclaw_host_api::sha256_digest_token(slack_bundle.manifest_toml.as_bytes());
 
         let matching = ironclaw_trust::TrustPolicy::evaluate(
             &policy,

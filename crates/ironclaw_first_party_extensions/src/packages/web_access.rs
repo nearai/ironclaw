@@ -59,6 +59,7 @@ pub(super) fn bundle() -> PackageBundle {
             credential_next_step: "Activate Web Access to publish its tools.".to_string(),
         }),
         // No credentials/egress writes: Dispatch + Network only.
+        oauth_setup: None,
         trust_effects: Some(vec![EffectKind::DispatchCapability, EffectKind::Network]),
     }
 }

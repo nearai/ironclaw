@@ -30,6 +30,7 @@ pub(super) fn bundle() -> PackageBundle {
                 .to_string(),
         }),
         // MCP OAuth extension: Dispatch + Network + UseSecret + ExternalWrite.
+        oauth_setup: None,
         trust_effects: Some(vec![
             EffectKind::DispatchCapability,
             EffectKind::Network,

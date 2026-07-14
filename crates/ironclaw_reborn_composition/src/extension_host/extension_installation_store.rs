@@ -272,7 +272,7 @@ fn migrate_retired_slack_bot_identity(state: &mut WireState) -> bool {
         .any(|record| record.raw_toml.contains("\nid = \"slack\""));
     if !has_unified_record {
         state.manifests.push(WireManifestRecord {
-            raw_toml: super::available_extensions::slack_manifest_toml().to_string(),
+            raw_toml: ironclaw_first_party_extensions::packages::slack_manifest_toml().to_string(),
             source: WireManifestSource::HostBundled,
             manifest_hash: None,
             // Compiled by the backfill path on this same load.

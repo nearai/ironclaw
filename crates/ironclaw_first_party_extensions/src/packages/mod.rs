@@ -19,6 +19,7 @@ mod github;
 mod gmail;
 mod gsuite;
 mod notion;
+mod slack;
 mod telegram;
 mod web_access;
 
@@ -39,6 +40,7 @@ const PACKAGES: &[PackageEntry] = &[
     (gsuite::SHEETS_ID, gsuite::google_sheets_bundle),
     (gsuite::SLIDES_ID, gsuite::google_slides_bundle),
     (notion::ID, notion::bundle),
+    (slack::ID, slack::bundle),
     (telegram::ID, telegram::bundle),
     (web_access::ID, web_access::bundle),
 ];
@@ -67,6 +69,18 @@ pub struct PackageOnboarding {
     pub credential_next_step: String,
 }
 
+/// A bespoke OAuth-*setup* credential requirement a package surfaces instead of
+/// the requirement derived from its manifest tool credentials. Carried as plain
+/// data (provider/name are strings, scopes a list); composition maps it to its
+/// `LifecycleExtensionCredentialRequirement`. Used by packages whose connect
+/// flow authorizes a shared account with setup scopes distinct from the
+/// per-tool runtime scopes (e.g. Slack's personal OAuth connect).
+pub struct PackageOAuthSetup {
+    pub requirement_name: String,
+    pub provider: String,
+    pub scopes: Vec<String>,
+}
+
 /// An opaque, cleanly-built first-party package: identity + display copy +
 /// manifest source + assets + onboarding. Host code consumes this without
 /// naming the package; the concrete identity lives only in the owning package
@@ -78,6 +92,9 @@ pub struct PackageBundle {
     pub assets: Vec<PackageAsset>,
     /// Bespoke onboarding copy, `None` for packages that need no setup guidance.
     pub onboarding: Option<PackageOnboarding>,
+    /// A bespoke OAuth-setup credential requirement that replaces the
+    /// manifest-derived one, `None` when the derived requirement is correct.
+    pub oauth_setup: Option<PackageOAuthSetup>,
     /// Host authority effects this first-party package is granted in the
     /// built-in trust policy, carried as explicit data (not derived from the
     /// manifest — the trust grant is an independent host assertion, defense in
@@ -111,4 +128,14 @@ pub fn bundled_packages() -> Vec<PackageBundle> {
 /// the full bundles.
 pub fn bundled_package_ids() -> Vec<&'static str> {
     PACKAGES.iter().map(|(id, _)| *id).collect()
+}
+
+/// The Slack channel manifest source, as a `&'static str`. A targeted accessor
+/// for the two remaining slack-specific host paths that need the manifest text
+/// without materializing the whole inventory: the legacy Slack Events ingress
+/// alias (MIG-5, scheduled for removal) and the retired-`slack_bot` installation
+/// forward-migration seed. New generic code must consume packages opaquely via
+/// [`bundled_packages`], not this accessor.
+pub fn slack_manifest_toml() -> &'static str {
+    slack::MANIFEST
 }

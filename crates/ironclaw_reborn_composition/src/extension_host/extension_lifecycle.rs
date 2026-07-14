@@ -2328,8 +2328,12 @@ mod tests {
         // fixture — even one named "slack" — resolves to the generic
         // proof-code pairing. That asymmetry is exactly what proves no name
         // hardcode survives (the retired branch keyed OAuth off `id == "slack"`).
-        let slack =
-            crate::extension_host::available_extensions::slack_package().expect("slack package");
+        let catalog =
+            crate::extension_host::available_extensions::AvailableExtensionCatalog::from_first_party_assets()
+                .expect("first-party catalog");
+        let slack_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
+            .expect("slack package ref");
+        let slack = catalog.resolve(&slack_ref).expect("slack package");
         assert_eq!(
             channel_connect_strategy(&slack.package),
             RebornChannelConnectStrategy::OAuth,
@@ -5991,6 +5995,7 @@ output_schema_ref = "schemas/search.output.json"
                 },
             ],
             onboarding_override: None,
+            oauth_setup_override: None,
         }
     }
 

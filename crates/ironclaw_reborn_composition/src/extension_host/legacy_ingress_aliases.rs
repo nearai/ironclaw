@@ -48,7 +48,7 @@ const LEGACY_CHANNEL_INGRESS_ALIASES: &[LegacyChannelIngressAlias] = &[LegacyCha
     route_id: "slack.events",
     extension_id: "slack",
     route_suffix: "events",
-    manifest_toml: crate::extension_host::available_extensions::slack_manifest_toml,
+    manifest_toml: ironclaw_first_party_extensions::packages::slack_manifest_toml,
 }];
 
 /// Build every legacy alias mount over the generic ingress router. The

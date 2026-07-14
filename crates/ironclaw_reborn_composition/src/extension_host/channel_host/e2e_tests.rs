@@ -475,7 +475,7 @@ fn slack_gate_reply_classifier() -> Arc<InboundPayloadClassifier> {
 async fn configured_channel_config() -> Arc<ChannelConfigService> {
     let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
     let record = ExtensionManifestRecord::from_toml(
-        crate::extension_host::available_extensions::slack_manifest_toml(),
+        ironclaw_first_party_extensions::packages::slack_manifest_toml(),
         ManifestSource::HostBundled,
         &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"), // safety: default catalog is valid in tests.
         None,
@@ -590,7 +590,7 @@ async fn slack_test_extension_host() -> Arc<ironclaw_extension_host::ExtensionHo
         let contracts =
             ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"); // safety: default registry is valid in tests.
         ironclaw_extensions::ExtensionManifestRecord::from_toml(
-            crate::extension_host::available_extensions::slack_manifest_toml(),
+            ironclaw_first_party_extensions::packages::slack_manifest_toml(),
             ironclaw_extensions::ManifestSource::HostBundled,
             &host_ports,
             None,

@@ -1029,10 +1029,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "nearaimcp",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
-        "slack",
-    ),
-    (
         "crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs",
         "github",
     ),

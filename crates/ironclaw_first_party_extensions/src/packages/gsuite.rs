@@ -257,6 +257,7 @@ pub(super) fn google_calendar_bundle() -> PackageBundle {
                 publish its tools."
                 .to_string(),
         }),
+        oauth_setup: None,
         trust_effects: Some(trust_effects()),
     }
 }
@@ -286,6 +287,7 @@ pub(super) fn google_docs_bundle() -> PackageBundle {
             ]
         ),
         onboarding: None,
+        oauth_setup: None,
         trust_effects: Some(trust_effects()),
     }
 }
@@ -316,6 +318,7 @@ pub(super) fn google_drive_bundle() -> PackageBundle {
             ]
         ),
         onboarding: None,
+        oauth_setup: None,
         trust_effects: Some(trust_effects()),
     }
 }
@@ -345,6 +348,7 @@ pub(super) fn google_sheets_bundle() -> PackageBundle {
             ]
         ),
         onboarding: None,
+        oauth_setup: None,
         trust_effects: Some(trust_effects()),
     }
 }
@@ -377,6 +381,7 @@ pub(super) fn google_slides_bundle() -> PackageBundle {
             ]
         ),
         onboarding: None,
+        oauth_setup: None,
         trust_effects: Some(trust_effects()),
     }
 }
