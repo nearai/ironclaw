@@ -7,12 +7,10 @@ activation:
     - "code review"
     - "review changes"
     - "review diff"
-    - "review pr"
     - "review pull request"
     - "review commit"
-    - "review my"
   patterns:
-    - "(?i)review\\s+(this|my|the|these|that|latest|recent)\\s+(code|change|changes|diff|PR|pull request|commit)"
+    - "(?i)review\\s+(?:(this|my|the|these|that|latest|recent)\\s+)?(code|change|changes|diff|\\bPR\\b|pull request|commit)"
     - "(?i)(check|look at|inspect)\\s+(this|my|the|these)\\s+(changes|diff|code)"
     - "(?i)review\\s+[a-z0-9._-]+/[a-z0-9._-]+\\s+#?\\d+"
   tags:
