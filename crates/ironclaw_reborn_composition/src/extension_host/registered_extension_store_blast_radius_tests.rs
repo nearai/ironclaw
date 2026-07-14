@@ -1262,8 +1262,7 @@ url = "http://127.0.0.1:9/mcp-unminted-copytree"
 /// after the failed attempt) failed, because `copy_tree` wrote it before
 /// reaching the nested asset file that fails.
 #[tokio::test]
-async fn migrate_registered_id_does_not_leave_stale_destination_manifest_on_partial_copy_failure()
- {
+async fn migrate_registered_id_does_not_leave_stale_destination_manifest_on_partial_copy_failure() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage_root = dir.path().join("local-dev");
     std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
