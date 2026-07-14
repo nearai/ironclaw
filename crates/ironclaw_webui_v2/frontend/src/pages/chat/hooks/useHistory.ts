@@ -63,9 +63,10 @@ export function useHistory(threadId, options = {}) {
     nextCursor: cached?.nextCursor || null,
     isLoading: false,
     // Non-null when an initial or cursor-load failed. Reset to null on a
-    // successful load or when the threadId changes. The chat page renders
-    // this as a user-visible error banner so timeline failures are never
-    // silently swallowed.
+    // successful load, when the threadId changes, or when current-session
+    // messages are visible. The chat page renders this as a user-visible
+    // error banner when a failed timeline load leaves the thread otherwise
+    // empty, without implying a later successful chat turn is broken.
     loadError: null,
   });
   const [stateThreadId, setStateThreadId] = React.useState(threadId);
@@ -182,15 +183,18 @@ export function useHistory(threadId, options = {}) {
         console.error("Failed to load timeline:", err);
         // Identity changed mid-flight — the error isn't the new user's.
         if (authScope() !== issuingScope) return;
-        // Stay loud — surface a user-visible error rather than silently
-        // masking timeline outages. Ignore a stale resolve for a thread the
-        // user already navigated away from (its data is already cached).
+        // Stay loud when the failed load leaves the thread empty. Once the
+        // current session has messages, a full-refresh history miss is stale
+        // context rather than proof that the active chat is broken.
         setState((s) =>
           threadIdRef.current === threadId
             ? {
                 ...s,
                 isLoading: false,
-                loadError: "chat.history.loadFailed",
+                loadError:
+                  !cursor && (s.messages || []).length > 0
+                    ? null
+                    : "chat.history.loadFailed",
               }
             : s,
         );
@@ -226,7 +230,12 @@ export function useHistory(threadId, options = {}) {
       setState((s) => {
         const messages = apply(s.messages || []);
         putCache(key, { messages, nextCursor: s.nextCursor || null });
-        return { ...s, messages, messagesThreadId: targetThreadId };
+        return {
+          ...s,
+          messages,
+          messagesThreadId: targetThreadId,
+          loadError: messages.length > 0 ? null : s.loadError,
+        };
       });
       return;
     }
@@ -258,6 +267,7 @@ export function useHistory(threadId, options = {}) {
           ...s,
           messages,
           messagesThreadId: threadId || s.messagesThreadId,
+          loadError: messages.length > 0 ? null : s.loadError,
         };
       }),
   };

@@ -134,6 +134,46 @@ test("useHistory records a load error when timeline fetch fails", async () => {
   assert.equal(consoleErrors.length, 1);
 });
 
+test("useHistory clears stale load errors once current-session messages are visible", async () => {
+  const setCalls = [];
+  const context = {
+    console: {
+      error: () => {},
+    },
+    fetchTimeline: async () => {
+      throw new Error("timeline unavailable");
+    },
+    authScope: () => "test-user",
+    globalThis: {},
+    messagesFromTimeline: () => {
+      throw new Error("failed timeline should not be transformed");
+    },
+    React: createReactStub({ setCalls }),
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const history = context.globalThis.__testExports.useHistory("thread-1", {});
+  await flushMicrotasks();
+
+  assert.equal(setCalls.at(-1).loadError, "chat.history.loadFailed");
+
+  history.setMessages([
+    {
+      id: "pending-1",
+      role: "user",
+      content: "continue anyway",
+    },
+  ]);
+
+  assert.equal(setCalls.at(-1).loadError, null);
+
+  await history.loadHistory();
+  await flushMicrotasks();
+
+  assert.equal(setCalls.at(-1).isLoading, false);
+  assert.equal(setCalls.at(-1).loadError, null);
+});
+
 test("useHistory tags messages with the thread they belong to (messagesThreadId)", async () => {
   // The cross-thread pairing-panel fix (useChat derive effect) depends on
   // useHistory reporting which thread its `messages` represent, so a consumer can
