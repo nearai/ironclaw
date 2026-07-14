@@ -388,6 +388,18 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
          not the extensions vendor — localized UI copy must name the login providers",
     ),
     (
+        "crates/ironclaw_webui_v2/frontend/src/i18n/",
+        "github",
+        "GitHub named only in localized UI copy (all 11 locales), never the github \
+         extension: the NEAR AI browser-login SSO provider name (onboarding.nearaiLocalSso, \
+         the same key `google` is carved under), GitHub as a skill-install source \
+         (tools.description.builtin.skill_install), and the user-facing display of the \
+         HTTP-tool capability hint (tools.description.builtin.http/.http.save) — the \
+         model-facing source of that hint stays tracked as lane-4 debt at \
+         host_runtime/first_party_tools/http.rs; localized user copy must name the \
+         provider/source it refers to",
+    ),
+    (
         "crates/ironclaw_webui_v2/frontend/src/pages/chat/lib/gates.ts",
         "github",
         "WebUI browser-login SSO provider button/route, not the extensions vendor",
@@ -1196,23 +1208,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/ironclaw_skills/src/types.rs", "github"),
     ("crates/ironclaw_skills/src/types.rs", "google"),
     ("crates/ironclaw_skills/src/types.rs", "slack"),
-    ("crates/ironclaw_webui_v2/frontend/src/i18n/ar.ts", "github"),
-    ("crates/ironclaw_webui_v2/frontend/src/i18n/de.ts", "github"),
-    ("crates/ironclaw_webui_v2/frontend/src/i18n/en.ts", "github"),
-    ("crates/ironclaw_webui_v2/frontend/src/i18n/es.ts", "github"),
-    ("crates/ironclaw_webui_v2/frontend/src/i18n/fr.ts", "github"),
-    ("crates/ironclaw_webui_v2/frontend/src/i18n/hi.ts", "github"),
-    ("crates/ironclaw_webui_v2/frontend/src/i18n/ja.ts", "github"),
-    ("crates/ironclaw_webui_v2/frontend/src/i18n/ko.ts", "github"),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/i18n/pt-BR.ts",
-        "github",
-    ),
-    ("crates/ironclaw_webui_v2/frontend/src/i18n/uk.ts", "github"),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/i18n/zh-CN.ts",
-        "github",
-    ),
 ];
 
 /// One `(relative path, matched term)` scanner hit.
