@@ -2031,11 +2031,17 @@ impl RuntimeCredentialAccountResolver for FixedSlackRuntimeCredentialAccountReso
 }
 
 fn registry_with_slack_user_package() -> ExtensionRegistry {
+    // The unified Slack manifest declares both `ironclaw.capability_provider/v1`
+    // (tools) and `ironclaw.product_adapter/v1` (channel), so parsing it needs
+    // the product-adapter contract registered alongside the defaults.
+    let mut contracts = default_host_api_contract_registry().unwrap();
+    ironclaw_product_adapter_registry::register_product_adapter_host_api_contract(&mut contracts)
+        .unwrap();
     let manifest = ExtensionManifest::parse(
         &std::fs::read_to_string(slack_user_asset_root().join("manifest.toml")).unwrap(),
         ManifestSource::HostBundled,
         &default_host_port_catalog().unwrap(),
-        &default_host_api_contract_registry().unwrap(),
+        &contracts,
     )
     .unwrap();
     let package = ExtensionPackage::from_manifest(
