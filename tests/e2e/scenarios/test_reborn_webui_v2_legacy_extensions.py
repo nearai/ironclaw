@@ -458,13 +458,17 @@ async def _capture_next_confirm(page, *, accept: bool):
     return dialog_future
 
 
-async def _wait_for_request_count(requests: list, count: int, *, timeout: float = 5.0):
+async def _wait_for_request_count(
+    requests: list, minimum_count: int, *, timeout: float = 5.0
+):
     deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:
-        if len(requests) > count:
+        if len(requests) >= minimum_count:
             return
         await asyncio.sleep(0.05)
-    raise AssertionError(f"Timed out waiting for request count > {count}; got {len(requests)}")
+    raise AssertionError(
+        f"Timed out waiting for request count >= {minimum_count}; got {len(requests)}"
+    )
 
 
 async def test_reborn_legacy_extensions_registry_search_and_install(
@@ -513,7 +517,7 @@ async def test_reborn_v2_extension_registry_renders_while_installed_list_is_pend
         defer_extension_list=True,
     )
     try:
-        await _wait_for_request_count(harness["extension_list_requests"], 0)
+        await _wait_for_request_count(harness["extension_list_requests"], 1)
         assert harness["extension_list_requests"], "installed list request must be pending"
         assert not harness["extension_list_gate"].is_set()
         await harness["page"].locator(
@@ -551,11 +555,11 @@ async def test_reborn_legacy_extensions_page_refetches_on_revisit(
 
         await _wait_for_request_count(
             harness["extension_list_requests"],
-            first_extension_fetches,
+            first_extension_fetches + 1,
         )
         await _wait_for_request_count(
             harness["registry_requests"],
-            first_registry_fetches,
+            first_registry_fetches + 1,
         )
     finally:
         await harness["context"].close()
