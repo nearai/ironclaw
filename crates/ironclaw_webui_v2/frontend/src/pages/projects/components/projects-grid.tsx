@@ -70,7 +70,7 @@ function ProjectCard({ project, onOpen, t }) {
       <div className="mt-5 flex items-center justify-between gap-3">
         <div className="text-sm text-iron-300">
           <div>{t("projects.card.spendToday", { value: formatCurrency(project.cost_today_usd || 0) })}</div>
-          <div className="mt-1 text-xs uppercase tracking-[0.16em] text-iron-500">{formatProjectRelativeTime(project.last_activity, t)}</div>
+          <div className="mt-1 text-xs uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{formatProjectRelativeTime(project.last_activity, t)}</div>
         </div>
         <Button
           data-testid="project-open-workspace"
