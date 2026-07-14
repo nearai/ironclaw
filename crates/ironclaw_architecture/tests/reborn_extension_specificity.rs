@@ -1184,14 +1184,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_reborn_traces/src/contribution.rs",
         "telegram",
     ),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/pages/chat/hooks/useChannelOnboarding.ts",
-        "telegram",
-    ),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/pages/chat/hooks/useThreads.ts",
-        "telegram",
-    ),
     ("crates/ironclaw_reborn_traces/src/contribution.rs", "slack"),
     ("crates/ironclaw_skills/src/selector.rs", "github"),
     ("crates/ironclaw_skills/src/types.rs", "github"),

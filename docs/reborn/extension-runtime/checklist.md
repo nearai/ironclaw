@@ -833,12 +833,41 @@ Rules — kept short on purpose:
   empty; composition keeps `ironclaw_slack_extension` as a dev-dependency
   only (the sanctioned test linkage); the CLI supplies the Slack channel
   adapter + extras through `RebornBuildInput::with_channel_extension_bindings`.
-- [ ] DEL-8 The concrete-name scanner allowlist is empty. — Not yet: the
-  shrink-only `ALLOWLIST` (`reborn_extension_specificity.rs`) carries 200
-  `(path, term)` entries after P6; every entry for the deleted
-  `composition/src/slack/**` tree is gone (stale entries fail the gate),
-  and the S5 i18n cut removed the 11 locale slack entries. Target stays
-  empty-at-P7.
+- [ ] DEL-8 The concrete-name scanner allowlist is empty. — In progress: the
+  shrink-only `ALLOWLIST` (`reborn_extension_specificity.rs`) is down to 113
+  `(path, term)` entries (from ~145 at the start of P7b). **Lane A is
+  complete**: every userland first-party package — github, gmail,
+  google-calendar/docs/drive/sheets/slides, notion, slack, telegram,
+  web-access — now lives as a self-contained module under
+  `ironclaw_first_party_extensions::packages`, carrying its embeds, onboarding
+  copy, OAuth-setup credential, and host trust effects as opaque bundle data;
+  composition builds them through `bundled_packages()` and the factory
+  trust-policy iterates the inventory generically (no per-package
+  `AdminEntry`). That cleared all package-machinery names (github, gmail,
+  google×5, notion, web-access, slack) from `available_extensions.rs` and
+  `factory.rs`. The remaining entries are **not** package machinery and fall
+  into three documented-debt buckets, none of which the current gate blocks on
+  (the gate fails only on stale/new-violation, not on a non-empty allowlist):
+  1. **nearai_mcp** — the NEAR AI MCP manifest is assembled at runtime
+     (`nearai_mcp_manifest_toml_for_endpoint` patches `[mcp].server` from
+     env/config), so it cannot be a static bundle without inverting the
+     `llm_admin` config layer down into the inventory crate. Left in
+     composition; bare `nearai` is already a global `TERM_COLLISIONS` carve-out.
+  2. **Runtime-woven references** — a concrete extension named in generic
+     runtime code for channel-routing / outbound-delivery / one-time-migration
+     reasons: composition's Slack outbound-delivery hook and the retired
+     `slack_personal`/channel-state forward migrations, plus `host_api`,
+     `product_adapters`, `product_workflow`, `reborn`, `reborn_traces`, and
+     `skills`. Deep Lane C — each site needs per-site degenericization or an
+     explicit sign-off; not package-shaped.
+  3. **i18n frontend copy** — vendor names (github/google) in localized UI
+     strings across 11 locales: NEAR AI SSO provider names, GitHub-as-skill-host
+     copy, and a capability-routing hint. Borderline between the existing
+     SSO / code-host carve-out classes and debt; degenericizing the routing
+     hint across every translation is impractical, so left as debt pending a
+     classification decision.
+  Target stays empty; buckets 2–3 need the Lane C degenericization/sign-off
+  pass and bucket 1 the config-layer decision.
 - [x] DEL-9 `check-generic-without-concrete.sh` passes in CI: every generic
   crate's dependency tree is free of concrete extension crates and its tests
   pass — the deletion test. — `bash scripts/ci/check-generic-without-concrete.sh`
@@ -852,9 +881,11 @@ Rules — kept short on purpose:
   `shared_secret_header` verification host-side and `setWebhook`/
   `deleteWebhook` over `RestrictedEgress`
   (`crates/ironclaw_telegram_extension/src/channel.rs`). P5 completed the
-  chain: bundled package assets + catalog entry
+  chain: bundled package assets + inventory module
   (`ironclaw_first_party_extensions/assets/telegram/manifest.toml`,
-  `available_extensions.rs::telegram_package`), the binary-assembled
+  `ironclaw_first_party_extensions::packages::telegram`; P7b DEL-8 lane A
+  migrated the former `available_extensions.rs::telegram_package` builder into
+  the self-contained inventory), the binary-assembled
   entrypoint binding (`ironclaw_reborn_cli::runtime::native_extensions`),
   the real channel-egress transport with host-side path-placeholder token
   injection (`HostRuntimeChannelEgressTransport`,
