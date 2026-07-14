@@ -135,6 +135,12 @@ channel is a separate surface. On that footing:
    "messaging core"** (rendering, splitting, target/DM formatting, error
    mapping) *inside the extension crate*, credential-parameterized — but not the
    coordinator's sole-writer reliability layer.
+7. **A hard relay/act boundary, host-enforced and uniform:** replying to the
+   requester is *not a tool* (the model ends the turn; the coordinator delivers
+   on the channel, back to where the request came from); the messaging tools only
+   act *as the user toward others*, are `ask`-gated with a clearly-labeled
+   target, and are denied to unattended automations without pre-authorization
+   (§6.4).
 
 ---
 
@@ -554,6 +560,32 @@ pairing modality (the `Pairing` gate / `PairingRequired` event). A
 missing/expired grant raises the generic gate keyed by the tool's declared vendor
 and resumes — `ToolError::AuthRequired` (`tool_adapter.rs:64`) — routed to the
 OAuth gate or the pairing gate as the vendor requires.
+
+### 6.4 The relay/act boundary — host-enforced, uniform (critical)
+
+The channel-vs-tools split is a confidentiality guarantee, and it must not depend
+on the model classifying correctly. On v1 the model often misused the
+act-as-user tool for a *relay* — self-DMing the user their own results, or
+(worse) posting a private answer into the public source channel. Three simple,
+host-enforced rules make that structurally hard, identically on every channel:
+
+- **Replying to the requester is not a tool.** The model ends the turn; the
+  delivery coordinator delivers the answer on the channel, back to where the
+  request came from (or the user's saved target). There is no "reply to the user"
+  tool to misuse.
+- **Act-as-user is `ask` and clearly labeled.** Every send is confirmed with an
+  approval that names the target ("#eng-bugs — public") and "as you", so a leak
+  or a wrong target is visible and deniable.
+- **Automations deny act-as-user by default.** With no live approver, a
+  routine/heartbeat may relay results on the channel but may not post as the user
+  unless the routine pre-authorized that target.
+
+This is generic (coordinator + dispatch), not per-vendor, and pinned by a
+cross-channel conformance test (`messaging-framework.md` §12). An optional
+hardening — the host auto-blocking a send to the requester's own conversation and
+escalating one to the source channel — may layer on top but is not the
+foundation. **Open (must verify + wire):** the proactive-permission denial and
+the optional guard; neither is confirmed present today.
 
 ---
 
