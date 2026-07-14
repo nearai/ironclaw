@@ -5403,7 +5403,13 @@ output_schema_ref = "schemas/write.output.json"
     const LARGE_ECHO_TAIL: &str = "UNREPLAYED_RAW_TOOL_RESULT_TAIL";
 
     fn large_echo_message() -> String {
-        format!("{}{}", LARGE_ECHO_MESSAGE.repeat(100), LARGE_ECHO_TAIL)
+        // The repeated prefix alone must clearly exceed the result-preview
+        // cap so truncation always lands inside it, well before
+        // `LARGE_ECHO_TAIL` — otherwise the tail (which must never appear in
+        // the model replay) would fit inside an untruncated preview.
+        let cap = ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES;
+        let repeats = cap / LARGE_ECHO_MESSAGE.len() + 20;
+        format!("{}{}", LARGE_ECHO_MESSAGE.repeat(repeats), LARGE_ECHO_TAIL)
     }
 
     #[derive(Debug, Default)]
