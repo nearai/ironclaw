@@ -2302,6 +2302,7 @@ async fn completion_nudge_lets_model_use_tools_to_finish_after_trailing_off() {
             terminate_hint: false,
             byte_len: 0,
             output_digest: None,
+            model_observation: None,
         })],
         stopped_on_suspension: false,
     }]);
