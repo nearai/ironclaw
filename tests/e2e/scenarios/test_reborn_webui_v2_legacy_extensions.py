@@ -534,6 +534,71 @@ async def test_reborn_legacy_extensions_page_refetches_on_revisit(
         await harness["context"].close()
 
 
+async def test_reborn_legacy_extensions_catalog_failure_shows_retry(
+    reborn_v2_server, reborn_v2_browser
+):
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+    registry_available = False
+    registry_requests = 0
+
+    async def fulfill_json(route, payload, status=200):
+        await route.fulfill(
+            status=status,
+            content_type="application/json",
+            body=json.dumps(payload),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    async def handle_extensions(route):
+        nonlocal registry_requests
+        path = urlparse(route.request.url).path
+        if path == "/api/webchat/v2/extensions" and route.request.method == "GET":
+            await fulfill_json(route, {"extensions": []})
+            return
+        if path == "/api/webchat/v2/extensions/registry" and route.request.method == "GET":
+            registry_requests += 1
+            if registry_available:
+                await fulfill_json(route, {"entries": [REGISTRY_TOOL]})
+            else:
+                await fulfill_json(
+                    route,
+                    {"error": "service_unavailable", "kind": "service_unavailable"},
+                    status=503,
+                )
+            return
+        await route.continue_()
+
+    async def handle_connectable_channels(route):
+        await fulfill_json(route, {"channels": []})
+
+    await page.route("**/api/webchat/v2/extensions**", handle_extensions)
+    await page.route("**/api/webchat/v2/channels/connectable", handle_connectable_channels)
+
+    try:
+        await page.goto(
+            f"{reborn_v2_server}/v2/extensions/registry?token={REBORN_V2_AUTH_TOKEN}"
+        )
+        error_banner = page.get_by_role("alert")
+        await expect(error_banner).to_contain_text(
+            "Extension catalog unavailable", timeout=15000
+        )
+        await expect(page.get_by_text("Registry is empty")).to_have_count(0)
+        failed_request_count = registry_requests
+        assert failed_request_count >= 1
+
+        registry_available = True
+        await error_banner.get_by_role("button", name="Retry").click()
+
+        await expect(page.get_by_text("Registry Tool", exact=True)).to_be_visible(
+            timeout=5000
+        )
+        await expect(error_banner).to_have_count(0)
+        assert registry_requests > failed_request_count
+    finally:
+        await context.close()
+
+
 async def test_reborn_legacy_extensions_registry_search_no_match(
     reborn_v2_server, reborn_v2_browser
 ):
