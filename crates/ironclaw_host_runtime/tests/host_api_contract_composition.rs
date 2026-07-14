@@ -80,12 +80,15 @@ async fn default_host_port_catalog_rejects_unknown_required_port() {
     .await
     .unwrap_err();
 
+    // The unified manifest v2 validates a capability's required_host_ports at
+    // base parse, so an unknown port fails closed with the specific
+    // `UnknownHostPort` (naming the capability + port) rather than the older
+    // section-level `HostApiSectionRejected`.
     assert!(
         matches!(
             err,
-            ExtensionError::ManifestV2(ManifestV2Error::HostApiSectionRejected { ref reason, .. })
-                if reason.contains("unknown host port 'host.runtime.not_supported'")
-        ),
+            ExtensionError::ManifestV2(ManifestV2Error::UnknownHostPort { .. })
+        ) && format!("{err:?}").contains("host.runtime.not_supported"),
         "unexpected error: {err:?}"
     );
 }
