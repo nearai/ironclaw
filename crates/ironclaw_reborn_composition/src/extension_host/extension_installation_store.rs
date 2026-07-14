@@ -1,12 +1,14 @@
 use async_trait::async_trait;
 use ironclaw_extensions::{
     ExtensionActivationState, ExtensionHealthSnapshot, ExtensionInstallation,
-    ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
-    ExtensionManifestRecord, ExtensionManifestRef, ExtensionRemovalCleanupRequirement,
-    InMemoryExtensionInstallationStore, ManifestHash, ManifestSource,
-    canonicalize_installation_rows,
+    ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationPersistedParts,
+    ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef,
+    ExtensionRemovalCleanupRequirement, InMemoryExtensionInstallationStore,
+    MANIFEST_SCHEMA_VERSION, ManifestHash, ManifestSource, canonicalize_installation_rows,
 };
-use ironclaw_filesystem::{FilesystemError, RootFilesystem};
+use ironclaw_filesystem::{
+    CasApply, CasUpdateError, Entry, FilesystemError, RootFilesystem, cas_update_root,
+};
 use ironclaw_host_api::{ExtensionId, VirtualPath};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -29,40 +31,21 @@ impl FilesystemExtensionInstallationStore {
         state_path: VirtualPath,
     ) -> Result<Self, ExtensionInstallationError> {
         let inner = InMemoryExtensionInstallationStore::default();
-        match filesystem.read_file(&state_path).await {
-            Ok(bytes) => {
-                let mut state: WireState =
-                    serde_json::from_slice(&bytes).map_err(invalid_installation_error)?;
-                let migrated = migrate_retired_slack_bot_identity(&mut state);
-                let original_installations = state.installations;
-                let normalized_installations =
-                    canonicalize_installation_rows(original_installations.clone())?;
-                let needs_rewrite = migrated || normalized_installations != original_installations;
-                let normalized_state = WireState {
-                    manifests: state.manifests,
-                    installations: normalized_installations,
-                };
-
-                // Validate the complete normalized snapshot before writing it
-                // back. A malformed manifest/installation pair must leave the
-                // persisted bytes untouched and must not expose a half-loaded
-                // store. Both the retired-`slack_bot` fold and row
-                // canonicalization are load-time forward migrations persisted
-                // immediately.
-                normalized_state.load_into(&inner).await?;
-                if needs_rewrite {
-                    write_snapshot(&filesystem, &state_path, &normalized_state).await?;
-                }
+        let state = match load_normalized_snapshot(filesystem.as_ref(), &state_path).await {
+            Ok(state) => state,
+            Err(CasUpdateError::Apply(error)) => return Err(error),
+            Err(CasUpdateError::CasUnsupported) => {
+                load_normalized_snapshot_without_cas(filesystem.as_ref(), &state_path).await?
             }
-            Err(FilesystemError::NotFound { .. }) => {}
             Err(error) => {
-                tracing::debug!(
-                    ?error,
-                    state_path = %state_path.as_str(),
-                    "extension installation state load failed"
-                );
-                return Err(invalid_installation_error(INSTALLATION_STATE_IO_ERROR));
+                return Err(map_load_backend_error(&state_path, &error));
             }
+        };
+        if let Some(state) = state {
+            // The CAS outcome comes from the winning snapshot. Loading only
+            // after the bounded update finishes prevents a losing attempt from
+            // exposing stale or partially normalized state in memory.
+            state.load_into(&inner).await?;
         }
         Ok(Self {
             filesystem,
@@ -80,6 +63,89 @@ impl FilesystemExtensionInstallationStore {
         let state = WireState::from_store(&self.inner).await?;
         write_snapshot(&self.filesystem, &self.state_path, &state).await
     }
+}
+
+async fn load_normalized_snapshot(
+    filesystem: &dyn RootFilesystem,
+    state_path: &VirtualPath,
+) -> Result<Option<WireState>, CasUpdateError<ExtensionInstallationError>> {
+    cas_update_root(
+        filesystem,
+        state_path,
+        decode_wire_state,
+        encode_wire_state,
+        |current| async move {
+            let Some(current) = current else {
+                return Ok(CasApply::no_op(WireState::default(), None));
+            };
+            let normalized = normalize_wire_state(current)?;
+            validate_wire_state(&normalized).await?;
+            Ok(CasApply::new(normalized.clone(), Some(normalized)))
+        },
+    )
+    .await
+}
+
+async fn load_normalized_snapshot_without_cas(
+    filesystem: &dyn RootFilesystem,
+    state_path: &VirtualPath,
+) -> Result<Option<WireState>, ExtensionInstallationError> {
+    let Some(versioned) = filesystem
+        .get(state_path)
+        .await
+        .map_err(|error| map_filesystem_load_error(state_path, &error))?
+    else {
+        return Ok(None);
+    };
+    let current = decode_wire_state(&versioned.entry.body)?;
+    let normalized = normalize_wire_state(current.clone())?;
+    validate_wire_state(&normalized).await?;
+    if normalized != current {
+        tracing::warn!(
+            state_path = %state_path.as_str(),
+            "extension installation state was normalized in memory but not persisted because the filesystem backend does not support CAS"
+        );
+    }
+    Ok(Some(normalized))
+}
+
+fn decode_wire_state(bytes: &[u8]) -> Result<WireState, ExtensionInstallationError> {
+    serde_json::from_slice(bytes).map_err(invalid_installation_error)
+}
+
+fn encode_wire_state(state: &WireState) -> Result<Entry, ExtensionInstallationError> {
+    serde_json::to_vec_pretty(state)
+        .map(Entry::bytes)
+        .map_err(invalid_installation_error)
+}
+
+async fn validate_wire_state(state: &WireState) -> Result<(), ExtensionInstallationError> {
+    let candidate = InMemoryExtensionInstallationStore::default();
+    state.load_into(&candidate).await
+}
+
+fn map_load_backend_error(
+    state_path: &VirtualPath,
+    error: &CasUpdateError<ExtensionInstallationError>,
+) -> ExtensionInstallationError {
+    tracing::debug!(
+        ?error,
+        state_path = %state_path.as_str(),
+        "extension installation state CAS load failed"
+    );
+    invalid_installation_error(INSTALLATION_STATE_IO_ERROR)
+}
+
+fn map_filesystem_load_error(
+    state_path: &VirtualPath,
+    error: &FilesystemError,
+) -> ExtensionInstallationError {
+    tracing::debug!(
+        ?error,
+        state_path = %state_path.as_str(),
+        "extension installation state compatibility load failed"
+    );
+    invalid_installation_error(INSTALLATION_STATE_IO_ERROR)
 }
 
 async fn write_snapshot(
@@ -214,117 +280,236 @@ impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
     }
 }
 
-/// One-time forward migration (NEA-25 unified Slack extension): the Slack
-/// channel package identity `slack_bot` merged into the unified `slack`
-/// extension. Persisted state written by earlier builds may still carry
-/// `slack_bot` manifest records and installation rows; fold them forward so
-/// the store only ever holds the unified identity. The `slack_bot` manifest
-/// record is dropped (the unified manifest ships host-bundled). Its
-/// installation state merges into `slack`'s: an enabled `slack_bot` install
-/// keeps the unified extension enabled, and credential bindings union. This
-/// is a load-time data migration persisted immediately — no code path
-/// resolves the retired identity afterwards.
-fn migrate_retired_slack_bot_identity(state: &mut WireState) -> bool {
-    let manifest_count = state.manifests.len();
-    state
-        .manifests
-        .retain(|record| !record.raw_toml.contains("\nid = \"slack_bot\""));
-    let mut changed = state.manifests.len() != manifest_count;
-
-    let retired: Vec<ExtensionInstallation> = state
-        .installations
-        .iter()
-        .filter(|installation| installation.extension_id().as_str() == "slack_bot")
-        .cloned()
-        .collect();
-    if retired.is_empty() {
-        return changed;
+/// Pure, rerunnable persisted-state normalization. The transition is private
+/// to this store: public manifest ingestion remains strict and continues to
+/// reject the retired top-level capability shape.
+fn normalize_wire_state(mut state: WireState) -> Result<WireState, ExtensionInstallationError> {
+    for manifest in &mut state.manifests {
+        normalize_persisted_legacy_manifest(manifest)?;
     }
-    state
-        .installations
-        .retain(|installation| installation.extension_id().as_str() != "slack_bot");
-    changed = true;
-
-    let retired_enabled = retired
-        .iter()
-        .any(|installation| installation.activation_state() == ExtensionActivationState::Enabled);
-    let retired_bindings: Vec<_> = retired
-        .iter()
-        .flat_map(|installation| installation.credential_bindings().iter().cloned())
-        .collect();
-
-    let Ok(unified_id) = ExtensionId::new("slack") else {
-        return changed;
-    };
-    // The store fails closed on installations without a matching manifest
-    // record. If the legacy state only ever installed the bot channel, no
-    // `slack` record exists yet — seed the host-bundled unified manifest so
-    // the folded installation stays loadable.
-    let has_unified_record = state
-        .manifests
-        .iter()
-        .any(|record| record.raw_toml.contains("\nid = \"slack\""));
-    if !has_unified_record {
-        #[cfg(feature = "slack-v2-host-beta")]
-        {
-            state.manifests.push(WireManifestRecord {
-                raw_toml: super::available_extensions::slack_manifest_toml().to_string(),
-                source: WireManifestSource::HostBundled,
-                manifest_hash: None,
-                removal_cleanup_requirements: Vec::new(),
-            });
-        }
-        #[cfg(not(feature = "slack-v2-host-beta"))]
-        {
-            // Without the Slack feature the unified manifest is not bundled;
-            // drop the orphaned installation instead of failing the load.
-            return changed;
-        }
-    }
-    if let Some(existing) = state
-        .installations
-        .iter_mut()
-        .find(|installation| installation.extension_id() == &unified_id)
-    {
-        let activation = if retired_enabled {
-            ExtensionActivationState::Enabled
-        } else {
-            existing.activation_state()
-        };
-        let mut bindings = existing.credential_bindings().to_vec();
-        for binding in retired_bindings {
-            if !bindings.contains(&binding) {
-                bindings.push(binding);
-            }
-        }
-        if let Ok(merged) = ExtensionInstallation::new(
-            existing.installation_id().clone(),
-            unified_id.clone(),
-            activation,
-            ExtensionManifestRef::new(unified_id, None),
-            bindings,
-            chrono::Utc::now(),
-            existing.owner().clone(),
-        ) {
-            *existing = merged;
-        }
-    } else if let Some(first) = retired.into_iter().next()
-        && let Ok(renamed) = ExtensionInstallation::new(
-            first.installation_id().clone(),
-            unified_id.clone(),
-            first.activation_state(),
-            ExtensionManifestRef::new(unified_id, None),
-            first.credential_bindings().to_vec(),
-            chrono::Utc::now(),
-            first.owner().clone(),
-        )
-    {
-        state.installations.push(renamed);
-    }
-    changed
+    normalize_retired_slack_identity(&mut state)?;
+    state.installations = canonicalize_installation_rows(state.installations)?;
+    Ok(state)
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+fn normalize_persisted_legacy_manifest(
+    record: &mut WireManifestRecord,
+) -> Result<(), ExtensionInstallationError> {
+    if !matches!(record.source, WireManifestSource::HostBundled) {
+        return Ok(());
+    }
+    let mut document: toml::Value =
+        toml::from_str(&record.raw_toml).map_err(invalid_installation_error)?;
+    let Some(root) = document.as_table_mut() else {
+        return Err(invalid_installation_error(
+            "persisted extension manifest root must be a TOML table",
+        ));
+    };
+    let Some(capabilities) = root.get("capabilities") else {
+        return Ok(());
+    };
+    let exact_legacy_shape = root
+        .get("schema_version")
+        .and_then(toml::Value::as_str)
+        .is_some_and(|version| version == MANIFEST_SCHEMA_VERSION)
+        && capabilities
+            .as_array()
+            .is_some_and(|entries| !entries.is_empty())
+        && !root.contains_key("host_api")
+        && !root.contains_key("capability_provider");
+    if !exact_legacy_shape {
+        return Ok(());
+    }
+
+    let capabilities = root.remove("capabilities").ok_or_else(|| {
+        invalid_installation_error("persisted legacy manifest capabilities disappeared")
+    })?;
+    let mut contract = toml::value::Table::new();
+    contract.insert(
+        "id".to_string(),
+        toml::Value::String("ironclaw.capability_provider/v1".to_string()),
+    );
+    contract.insert(
+        "section".to_string(),
+        toml::Value::String("capability_provider.tools".to_string()),
+    );
+    root.insert(
+        "host_api".to_string(),
+        toml::Value::Array(vec![toml::Value::Table(contract)]),
+    );
+    let mut tools = toml::value::Table::new();
+    tools.insert("capabilities".to_string(), capabilities);
+    let mut capability_provider = toml::value::Table::new();
+    capability_provider.insert("tools".to_string(), toml::Value::Table(tools));
+    root.insert(
+        "capability_provider".to_string(),
+        toml::Value::Table(capability_provider),
+    );
+    record.raw_toml = toml::to_string_pretty(&document).map_err(invalid_installation_error)?;
+    // Validate the converted record before any later identity fold can remove
+    // it. This keeps malformed persisted input fail-closed even when the
+    // record belongs to a retired extension identity.
+    record.clone().into_manifest_record()?;
+    Ok(())
+}
+
+fn normalize_retired_slack_identity(
+    state: &mut WireState,
+) -> Result<(), ExtensionInstallationError> {
+    const RETIRED_SLACK_ID: &str = "slack_bot";
+    const UNIFIED_SLACK_ID: &str = "slack";
+
+    let manifest_ids = state
+        .manifests
+        .iter()
+        .map(|record| persisted_manifest_id(&record.raw_toml))
+        .collect::<Result<Vec<_>, _>>()?;
+    let has_retired_state = manifest_ids.iter().any(|id| id == RETIRED_SLACK_ID)
+        || state
+            .installations
+            .iter()
+            .any(|installation| installation.extension_id().as_str() == RETIRED_SLACK_ID);
+    if !has_retired_state {
+        return Ok(());
+    }
+    if manifest_ids
+        .iter()
+        .zip(&state.manifests)
+        .any(|(id, record)| {
+            id == RETIRED_SLACK_ID && !matches!(record.source, WireManifestSource::HostBundled)
+        })
+    {
+        return Err(invalid_installation_error(
+            "retired Slack manifests must be persisted as host-bundled records",
+        ));
+    }
+
+    let unified_indices = manifest_ids
+        .iter()
+        .enumerate()
+        .filter_map(|(index, id)| (id == UNIFIED_SLACK_ID).then_some(index))
+        .collect::<Vec<_>>();
+    let unified_record = match unified_indices.as_slice() {
+        [] => bundled_slack_wire_manifest()?,
+        [index] => state.manifests[*index].clone(),
+        _ => {
+            return Err(invalid_installation_error(
+                "persisted extension state contains multiple unified Slack manifests",
+            ));
+        }
+    };
+    // Resolve the target through the strict parser before removing any
+    // retired record. Feature-disabled or malformed target state therefore
+    // fails without producing a destructive candidate snapshot.
+    unified_record.clone().into_manifest_record()?;
+    let unified_id = ExtensionId::new(UNIFIED_SLACK_ID).map_err(invalid_installation_error)?;
+    let unified_ref =
+        ExtensionManifestRef::new(unified_id.clone(), unified_record.manifest_hash.clone());
+
+    if unified_indices.is_empty() {
+        state.manifests.push(unified_record);
+    }
+    let mut retained_manifests = Vec::with_capacity(state.manifests.len());
+    for record in state.manifests.drain(..) {
+        if persisted_manifest_id(&record.raw_toml)? != RETIRED_SLACK_ID {
+            retained_manifests.push(record);
+        }
+    }
+    state.manifests = retained_manifests;
+
+    let mut installations = Vec::with_capacity(state.installations.len());
+    for installation in state.installations.drain(..) {
+        if installation.extension_id().as_str() == RETIRED_SLACK_ID {
+            installations.push(rebuild_installation(
+                &installation,
+                unified_id.clone(),
+                unified_ref.clone(),
+                installation.activation_state(),
+            )?);
+        } else {
+            installations.push(installation);
+        }
+    }
+    let enabled_wins = installations.iter().any(|installation| {
+        installation.extension_id() == &unified_id
+            && installation.activation_state() == ExtensionActivationState::Enabled
+    });
+    if enabled_wins {
+        for installation in &mut installations {
+            if installation.extension_id() == &unified_id
+                && installation.activation_state() != ExtensionActivationState::Enabled
+            {
+                *installation = rebuild_installation(
+                    installation,
+                    unified_id.clone(),
+                    installation.manifest_ref().clone(),
+                    ExtensionActivationState::Enabled,
+                )?;
+            }
+        }
+    }
+    state.installations = installations;
+    Ok(())
+}
+
+fn rebuild_installation(
+    installation: &ExtensionInstallation,
+    extension_id: ExtensionId,
+    manifest_ref: ExtensionManifestRef,
+    activation_state: ExtensionActivationState,
+) -> Result<ExtensionInstallation, ExtensionInstallationError> {
+    ExtensionInstallation::from_persisted_parts(ExtensionInstallationPersistedParts {
+        installation_id: installation.installation_id().clone(),
+        extension_id,
+        activation_state,
+        manifest_ref,
+        credential_bindings: installation.credential_bindings().to_vec(),
+        health: installation.health().clone(),
+        updated_at: installation.updated_at(),
+        owner: installation.owner().clone(),
+    })
+}
+
+fn persisted_manifest_id(raw_toml: &str) -> Result<String, ExtensionInstallationError> {
+    let document: toml::Value = toml::from_str(raw_toml).map_err(invalid_installation_error)?;
+    document
+        .as_table()
+        .and_then(|root| root.get("id"))
+        .and_then(toml::Value::as_str)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| invalid_installation_error("persisted extension manifest is missing id"))
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+fn bundled_slack_wire_manifest() -> Result<WireManifestRecord, ExtensionInstallationError> {
+    use super::available_extensions::{
+        AvailableExtensionCatalog, SLACK_EXTENSION_ID, slack_manifest_digest,
+    };
+
+    let catalog = AvailableExtensionCatalog::from_first_party_assets_with_nearai_mcp_config(None)
+        .map_err(invalid_installation_error)?;
+    let package = catalog
+        .search(SLACK_EXTENSION_ID)
+        .find(|package| package.package_ref.id.as_str() == SLACK_EXTENSION_ID)
+        .ok_or_else(|| invalid_installation_error("unified Slack manifest is unavailable"))?;
+    Ok(WireManifestRecord {
+        raw_toml: package.manifest_toml.clone(),
+        source: WireManifestSource::from_manifest_source(package.source),
+        manifest_hash: Some(
+            ManifestHash::new(slack_manifest_digest()).map_err(invalid_installation_error)?,
+        ),
+        removal_cleanup_requirements: package.cleanup_requirements.clone(),
+    })
+}
+
+#[cfg(not(feature = "slack-v2-host-beta"))]
+fn bundled_slack_wire_manifest() -> Result<WireManifestRecord, ExtensionInstallationError> {
+    Err(invalid_installation_error(
+        "unified Slack manifest is unavailable in this build",
+    ))
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct WireState {
     manifests: Vec<WireManifestRecord>,
     installations: Vec<ExtensionInstallation>,
@@ -363,7 +548,7 @@ impl WireState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct WireManifestRecord {
     raw_toml: String,
     source: WireManifestSource,
@@ -401,7 +586,7 @@ impl From<ExtensionManifestRecord> for WireManifestRecord {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum WireManifestSource {
     HostBundled,
