@@ -81,7 +81,11 @@ function instantiate(createThreadRequest, overrides = {}) {
       const trimmed = String(title || "").trim();
       return trimmed && trimmed !== threadId ? trimmed : null;
     },
-    queryClient: { invalidateQueries: () => {} },
+    removeThreadList: (data, threadId) => ({
+      ...data,
+      threads: data.threads.filter((thread) => (thread.thread_id || thread.id) !== threadId),
+    }),
+    queryClient: { setQueryData: () => {}, invalidateQueries: () => {} },
     upsertThreadInCache: () => {},
     globalThis: {},
     ...overrides,
@@ -144,10 +148,18 @@ test("handleCreateThread upserts the created thread without refetching the list"
   assert.deepEqual(upserted, [{ thread_id: "thread-created", title: "Created" }]);
 });
 
-test("handleDeleteThread deletes the requested thread and refreshes the list", async () => {
+test("handleDeleteThread removes the requested thread from cache before refreshing", async () => {
   const deleted = [];
   const invalidations = [];
+  const cacheWrites = [];
   const stateChanges = [];
+  let cachedData = {
+    threads: [
+      { thread_id: "thread-old" },
+      { thread_id: "thread-keep" },
+    ],
+    next_cursor: "cursor-1",
+  };
   const hook = instantiate(
     async () => ({ thread: { thread_id: "unused" } }),
     {
@@ -159,6 +171,10 @@ test("handleDeleteThread deletes the requested thread and refreshes the list", a
         deleted.push(threadId);
       },
       queryClient: {
+        setQueryData: (queryKey, update) => {
+          cacheWrites.push([...queryKey]);
+          cachedData = update(cachedData);
+        },
         invalidateQueries: (request) => invalidations.push([...request.queryKey]),
       },
     },
@@ -168,6 +184,11 @@ test("handleDeleteThread deletes the requested thread and refreshes the list", a
 
   assert.deepEqual(deleted, ["thread-old"]);
   assert.deepEqual(stateChanges, [{ index: 0, value: null }]);
+  assert.deepEqual(cacheWrites, [["threads"]]);
+  assert.deepEqual(cachedData, {
+    threads: [{ thread_id: "thread-keep" }],
+    next_cursor: "cursor-1",
+  });
   assert.deepEqual(invalidations, [["threads"]]);
 });
 
@@ -185,6 +206,7 @@ test("handleDeleteThread preserves active thread state when deletion fails", asy
         throw new Error("delete failed");
       },
       queryClient: {
+        setQueryData: (queryKey) => invalidations.push(["cache-write", ...queryKey]),
         invalidateQueries: (request) => invalidations.push([...request.queryKey]),
       },
     },

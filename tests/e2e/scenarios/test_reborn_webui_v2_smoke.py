@@ -72,6 +72,60 @@ async def _wait_for_automation_named(
         ) from None
 
 
+async def _install_fake_v2_event_source(page) -> None:
+    await page.add_init_script(
+        """
+        (() => {
+          let activeStream = null;
+          const currentStream = () => {
+            if (!activeStream || activeStream.readyState === 2) {
+              throw new Error("no EventSource stream is open");
+            }
+            return activeStream;
+          };
+          class FakeEventSource extends EventTarget {
+            constructor(url) {
+              super();
+              this.url = url;
+              this.readyState = 0;
+              if (activeStream && activeStream.readyState !== 2) {
+                activeStream.close();
+              }
+              activeStream = this;
+              setTimeout(() => {
+                if (activeStream !== this || this.readyState === 2) return;
+                this.readyState = 1;
+                if (typeof this.onopen === "function") this.onopen(new Event("open"));
+              }, 0);
+            }
+            close() {
+              this.readyState = 2;
+              if (activeStream === this) activeStream = null;
+            }
+          }
+          window.EventSource = FakeEventSource;
+          window.__emitV2Sse = (type, frame, id = crypto.randomUUID()) => {
+            const stream = currentStream();
+            const event = new MessageEvent(type, {
+              data: JSON.stringify({ type, ...frame }),
+              lastEventId: id,
+            });
+            stream.dispatchEvent(event);
+          };
+          window.__failLatestV2Sse = () => {
+            const stream = currentStream();
+            stream.readyState = 2;
+            if (activeStream === stream) activeStream = null;
+            if (typeof stream.onerror !== "function") {
+              throw new Error("EventSource has no error handler");
+            }
+            stream.onerror(new Event("error"));
+          };
+        })();
+        """
+    )
+
+
 async def test_reborn_v2_serves_shell_and_gates_auth(reborn_v2_server, reborn_v2_browser):
     """The SPA renders the authed shell with a token, and the login view without one."""
     # With a valid token the authenticated chat shell renders.
@@ -385,39 +439,7 @@ async def test_reborn_v2_disconnected_run_stops_typing_and_shows_connection_erro
     thread_id = "thread-disconnected-run"
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
-
-    await page.add_init_script(
-        """
-        (() => {
-          const streams = [];
-          class FakeEventSource extends EventTarget {
-            constructor(url) {
-              super();
-              this.url = url;
-              this.readyState = 0;
-              streams.push(this);
-              setTimeout(() => {
-                this.readyState = 1;
-                if (typeof this.onopen === "function") this.onopen(new Event("open"));
-              }, 0);
-            }
-            close() {
-              this.readyState = 2;
-            }
-          }
-          window.EventSource = FakeEventSource;
-          window.__failLatestV2Sse = () => {
-            const stream = streams[streams.length - 1];
-            if (!stream) throw new Error("no EventSource stream is open");
-            stream.readyState = 2;
-            if (typeof stream.onerror !== "function") {
-              throw new Error("EventSource has no error handler");
-            }
-            stream.onerror(new Event("error"));
-          };
-        })();
-        """
-    )
+    await _install_fake_v2_event_source(page)
 
     async def fulfill_json(route, body, status=200) -> None:
         await route.fulfill(
@@ -506,39 +528,7 @@ async def test_reborn_v2_approval_gate_blocks_composer_send(
     send_requests: list[dict] = []
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
-
-    await page.add_init_script(
-        """
-        (() => {
-          const streams = [];
-          class FakeEventSource extends EventTarget {
-            constructor(url) {
-              super();
-              this.url = url;
-              this.readyState = 0;
-              streams.push(this);
-              setTimeout(() => {
-                this.readyState = 1;
-                if (typeof this.onopen === "function") this.onopen(new Event("open"));
-              }, 0);
-            }
-            close() {
-              this.readyState = 2;
-            }
-          }
-          window.EventSource = FakeEventSource;
-          window.__emitV2Sse = (type, frame, id = "cursor-1") => {
-            const stream = streams[streams.length - 1];
-            if (!stream) throw new Error("no EventSource stream is open");
-            const event = new MessageEvent(type, {
-              data: JSON.stringify({ type, ...frame }),
-              lastEventId: id,
-            });
-            stream.dispatchEvent(event);
-          };
-        })();
-        """
-    )
+    await _install_fake_v2_event_source(page)
 
     async def fulfill_json(route, body, status=200) -> None:
         await route.fulfill(
@@ -647,6 +637,195 @@ async def test_reborn_v2_approval_gate_blocks_composer_send(
         await expect(page.locator(SEL_V2["msg_user"])).to_have_count(1, timeout=1000)
         assert send_requests == []
     finally:
+        await context.close()
+
+
+async def test_reborn_v2_unscoped_activity_stays_with_previous_reply(
+    reborn_v2_server, reborn_v2_browser
+):
+    """POST-seeded run ids keep delayed unscoped activity before its reply.
+
+    This remains a browser E2E because the regression crosses the React-only
+    seam from useChat's submit response into useChatEvents and MessageList DOM
+    grouping; the Rust integration harness cannot observe that client boundary.
+    """
+    thread_id = "thread-unscoped-activity-order"
+    run_id = "run-unscoped-activity-order"
+    send_requests: list[dict] = []
+    timeline_messages: list[dict] = []
+    release_second_send = asyncio.Event()
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+    await _install_fake_v2_event_source(page)
+
+    async def fulfill_json(route, body, status=200) -> None:
+        await route.fulfill(
+            status=status,
+            content_type="application/json",
+            body=json.dumps(body),
+        )
+
+    async def handle_session(route) -> None:
+        await fulfill_json(
+            route,
+            {
+                "tenant_id": "reborn-v2-e2e",
+                "user_id": USER_ID,
+                "capabilities": {},
+                "features": {"reborn_projects": False},
+                "attachments": {
+                    "accept": ["text/plain"],
+                    "max_files_per_message": 4,
+                    "max_bytes_per_file": 1048576,
+                    "max_bytes_per_message": 4194304,
+                },
+            },
+        )
+
+    async def handle_threads(route) -> None:
+        await fulfill_json(
+            route,
+            {
+                "threads": [
+                    {
+                        "thread_id": thread_id,
+                        "title": "Unscoped activity ordering regression",
+                        "created_at": "2026-07-08T13:00:00Z",
+                        "updated_at": "2026-07-08T13:00:00Z",
+                    }
+                ],
+                "next_cursor": None,
+            },
+        )
+
+    async def handle_timeline(route) -> None:
+        await fulfill_json(route, {"messages": timeline_messages, "next_cursor": None})
+
+    async def handle_send(route) -> None:
+        send_requests.append(json.loads(route.request.post_data or "{}"))
+        if len(send_requests) == 1:
+            await fulfill_json(
+                route,
+                {
+                    "thread_id": thread_id,
+                    "accepted_message_ref": "msg:first-user",
+                    "run_id": run_id,
+                    "status": "running",
+                },
+                status=202,
+            )
+            return
+
+        await release_second_send.wait()
+        await fulfill_json(
+            route,
+            {
+                "thread_id": thread_id,
+                "run_id": "run-follow-up",
+                "status": "running",
+            },
+            status=202,
+        )
+
+    await page.route("**/api/webchat/v2/session", handle_session)
+    await page.route("**/api/webchat/v2/threads", handle_threads)
+    await page.route(f"**/api/webchat/v2/threads/{thread_id}/timeline**", handle_timeline)
+    await page.route(f"**/api/webchat/v2/threads/{thread_id}/messages", handle_send)
+
+    try:
+        await page.goto(f"{reborn_v2_server}/v2/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}")
+        composer = page.locator(SEL_V2["chat_composer"])
+        await expect(composer).to_be_visible(timeout=15000)
+
+        await composer.fill("connect my Google tools")
+        await composer.press("Enter")
+        await expect(page.locator(SEL_V2["msg_user"]).first).to_contain_text(
+            "connect my Google tools", timeout=15000
+        )
+
+        timeline_messages[:] = [
+            {
+                "message_id": "first-user",
+                "kind": "user",
+                "content": "connect my Google tools",
+                "sequence": 1,
+                "status": "accepted",
+                "created_at": "2026-07-08T13:00:00Z",
+                "turn_run_id": run_id,
+            },
+            {
+                "message_id": "first-assistant",
+                "kind": "assistant",
+                "content": "Gmail, Calendar, Drive, and Sheets are connected.",
+                "sequence": 2,
+                "status": "finalized",
+                "created_at": "2026-07-08T13:00:10Z",
+                "updated_at": "2026-07-08T13:00:10Z",
+                "turn_run_id": run_id,
+            },
+        ]
+        await page.evaluate(
+            """
+            (runId) => {
+              window.__emitV2Sse("projection_update", {
+                state: {
+                  items: [
+                    { run_status: { run_id: runId, status: "completed" } }
+                  ]
+                }
+              }, "cursor-terminal");
+              window.__emitV2Sse("final_reply", {
+                reply: {
+                  turn_run_id: runId,
+                  text: "Gmail, Calendar, Drive, and Sheets are connected.",
+                  generated_at: "2026-07-08T13:00:10Z"
+                }
+              }, "cursor-final");
+            }
+            """,
+            run_id,
+        )
+        await expect(page.locator(SEL_V2["msg_assistant"]).first).to_contain_text(
+            "Gmail, Calendar, Drive, and Sheets are connected.",
+            timeout=5000,
+        )
+
+        await composer.fill("thanks")
+        await composer.press("Enter")
+        await expect(page.locator(SEL_V2["msg_user"])).to_have_count(2, timeout=5000)
+
+        await page.evaluate(
+            """
+            () => window.__emitV2Sse("capability_activity", {
+              activity: {
+                invocation_id: "invocation-google-connect",
+                capability_id: "builtin.extension_search",
+                status: "completed",
+                subtitle: "Google tools"
+              }
+            }, "cursor-delayed-activity")
+            """
+        )
+        await expect(page.locator(SEL_V2["activity_run"]).first).to_be_visible(
+            timeout=5000
+        )
+
+        order = await page.locator(SEL_V2["message_list_content"]).evaluate(
+            """
+            (node) => Array.from(node.children)
+              .map((child) => {
+                const marker = child.getAttribute("data-testid");
+                if (marker === "msg-user") return "user";
+                if (marker === "activity-run") return "activity";
+                if (marker === "msg-assistant") return "assistant";
+                return null;
+              })
+              .filter(Boolean)
+            """
+        )
+        assert order == ["user", "activity", "assistant", "user"], order
+    finally:
+        release_second_send.set()
         await context.close()
 
 
@@ -931,6 +1110,61 @@ async def test_reborn_v2_thread_list_and_delete(reborn_v2_server):
         remaining = {thread["thread_id"] for thread in relisted.json().get("threads", [])}
         assert drop_id not in remaining, "deleted thread must not reappear in the list"
         assert keep_id in remaining, "untouched thread must remain in the list"
+
+
+async def test_reborn_v2_ui_delete_removes_sidebar_thread_without_refetch(
+    reborn_v2_server, reborn_v2_page
+):
+    """A successful delete updates the rendered sidebar before list revalidation returns."""
+    headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
+    async with httpx.AsyncClient(headers=headers) as client:
+        keep_id = await _create_thread(client, reborn_v2_server)
+        drop_id = await _create_thread(client, reborn_v2_server)
+
+    page = reborn_v2_page
+    # The shared page is opened before this test creates its API fixtures, so
+    # reload once during setup to populate the sidebar. No reload occurs after
+    # deletion; the assertion below runs while list revalidation is blocked.
+    await page.reload()
+    release_refetch = asyncio.Event()
+    refetch_started = asyncio.Event()
+    refetch_finished = asyncio.Event()
+
+    async def delay_thread_list_refetch(route, _request) -> None:
+        refetch_started.set()
+        try:
+            await release_refetch.wait()
+            await route.continue_()
+        finally:
+            refetch_finished.set()
+
+    async def accept_delete_dialog(dialog) -> None:
+        await dialog.accept()
+
+    try:
+        await page.goto(f"{reborn_v2_server}/v2/?token={REBORN_V2_AUTH_TOKEN}")
+        await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(timeout=15000)
+
+        keep_button = page.locator(SEL_V2["thread_delete_for"].format(id=keep_id))
+        drop_button = page.locator(SEL_V2["thread_delete_for"].format(id=drop_id))
+        await expect(keep_button).to_have_count(1, timeout=15000)
+        await expect(drop_button).to_have_count(1, timeout=15000)
+
+        # Hold the delete-triggered list revalidation open. The deleted row must
+        # disappear from the local React Query cache before this request returns.
+        thread_list_pattern = "**/api/webchat/v2/threads"
+        await page.route(thread_list_pattern, delay_thread_list_refetch)
+        page.once("dialog", accept_delete_dialog)
+        await drop_button.click()
+        await asyncio.wait_for(refetch_started.wait(), timeout=5)
+
+        await expect(drop_button).to_have_count(0, timeout=2000)
+        await expect(keep_button).to_have_count(1)
+    finally:
+        release_refetch.set()
+        if refetch_started.is_set():
+            await asyncio.wait_for(refetch_finished.wait(), timeout=5)
+        await page.unroute("**/api/webchat/v2/threads", delay_thread_list_refetch)
 
 
 async def test_reborn_v2_timeline_pagination(reborn_v2_server):
