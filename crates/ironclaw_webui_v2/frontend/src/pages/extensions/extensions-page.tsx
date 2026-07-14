@@ -30,6 +30,7 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     install,
     activate,
     remove,
+    isRemoving,
     importTool,
     isImporting,
     invalidate,
@@ -151,7 +152,7 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
           t("extensions.defaultName")
         }`}
         confirmLabel={t("common.remove")}
-        isConfirming={isBusy}
+        isConfirming={isRemoving}
         onConfirm={handleConfirmRemove}
         onCancel={() => setExtensionToRemove(null)}
       />

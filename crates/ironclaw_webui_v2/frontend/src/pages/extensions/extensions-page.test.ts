@@ -41,7 +41,7 @@ function componentProps(root, component) {
   return props;
 }
 
-function renderExtensionsPage(tab) {
+function renderExtensionsPage(tab, { isBusy = false, isRemoving = false } = {}) {
   const hookValues = [];
   let hookCursor = 0;
   const removeCalls = [];
@@ -81,12 +81,13 @@ function renderExtensionsPage(tab) {
       catalogEntries: [],
       connectableChannels: [],
       isLoading: false,
-      isBusy: false,
+      isBusy,
       actionResult: null,
       clearResult: () => {},
       install: () => {},
       activate: () => {},
       remove: (...args) => removeCalls.push(args),
+      isRemoving,
       invalidate: () => {},
     }),
     useParams: () => ({ tab }),
@@ -115,7 +116,7 @@ for (const tab of ["installed", "unknown"]) {
 }
 
 test("ExtensionsPage removes an extension only after confirming the shared dialog", () => {
-  const harness = renderExtensionsPage("registry");
+  const harness = renderExtensionsPage("registry", { isBusy: true, isRemoving: false });
   const [registry] = componentProps(harness.rendered, harness.RegistryTab);
   const extension = {
     displayName: "GitHub",
@@ -129,6 +130,7 @@ test("ExtensionsPage removes an extension only after confirming the shared dialo
   const [dialog] = componentProps(rendered, harness.ConfirmDialog);
   assert.equal(dialog.open, true);
   assert.equal(dialog.title, "common.remove: GitHub");
+  assert.equal(dialog.isConfirming, false);
 
   dialog.onConfirm();
   assert.equal(harness.removeCalls.length, 1);
