@@ -95,16 +95,18 @@ export function UserDetail({ userId, onBack }) {
               <StatusPill tone={statusTone(user.status)} label={formatUserStatus(user.status, t)} />
             </div>
           </div>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap items-center gap-2 sm:justify-end">
             {user.status === "active"
-              ? (<Button variant="secondary" onClick={() => suspendUser(user.id)}>{t("admin.users.suspend")}</Button>)
-              : (<Button variant="secondary" onClick={() => activateUser(user.id)}>{t("admin.users.activate")}</Button>)}
-            <button
+              ? (<Button variant="secondary" size="sm" className="min-w-24" onClick={() => suspendUser(user.id)}>{t("admin.users.suspend")}</Button>)
+              : (<Button variant="secondary" size="sm" className="min-w-24" onClick={() => activateUser(user.id)}>{t("admin.users.activate")}</Button>)}
+            <Button
+              variant="danger"
+              size="sm"
+              className="min-w-24"
               onClick={() => setConfirmDelete(true)}
-              className="v2-button inline-flex h-10 items-center justify-center rounded-md border border-red-400/30 bg-red-500/10 px-4 text-sm font-semibold text-red-200 hover:bg-red-500/20"
             >
               {t("admin.users.delete")}
-            </button>
+            </Button>
           </div>
         </div>
       </Panel>
