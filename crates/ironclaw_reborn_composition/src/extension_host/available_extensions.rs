@@ -150,6 +150,12 @@ pub(crate) struct AvailableExtensionPackage {
     /// prompt construction via the lifecycle summary (OUT-11).
     pub(crate) channel_presentation: Option<ironclaw_host_api::ChannelPresentation>,
     pub(crate) assets: Vec<AvailableExtensionAsset>,
+    /// Bespoke onboarding copy carried down from a migrated inventory bundle
+    /// (`ironclaw_first_party_extensions::packages`). `None` for packages whose
+    /// onboarding copy still lives in composition's per-id `onboarding()` match;
+    /// as each package migrates, its copy moves here and its match arm is
+    /// deleted. See overview §3 (package self-containment).
+    pub(crate) onboarding_override: Option<LifecycleExtensionOnboarding>,
 }
 
 impl AvailableExtensionPackage {
@@ -174,7 +180,7 @@ impl AvailableExtensionPackage {
             visible_capability_ids,
             visible_read_only_capability_ids,
             credential_requirements: credential_requirements(self),
-            onboarding: onboarding(&self.package_ref),
+            onboarding: onboarding(self),
         }
     }
 }
@@ -199,7 +205,14 @@ fn channel_connection_for_package(
     ))
 }
 
-fn onboarding(package_ref: &LifecyclePackageRef) -> Option<LifecycleExtensionOnboarding> {
+fn onboarding(package: &AvailableExtensionPackage) -> Option<LifecycleExtensionOnboarding> {
+    // Packages migrated to the self-contained inventory carry their onboarding
+    // copy as data (see `package_from_bundle`); composition never names them.
+    if let Some(onboarding) = &package.onboarding_override {
+        return Some(onboarding.clone());
+    }
+
+    let package_ref = &package.package_ref;
     if is_host_managed_credential_extension(package_ref) {
         return Some(onboarding_message(
             "NEAR AI MCP uses the NEAR AI credentials configured for the assistant. If NEAR AI is not configured yet, add a NEAR AI API key in assistant inference settings before activating this extension.",
@@ -212,14 +225,6 @@ fn onboarding(package_ref: &LifecyclePackageRef) -> Option<LifecycleExtensionOnb
     }
 
     match package_ref.id.as_str() {
-        "github" => Some(onboarding_message(
-            "GitHub needs a personal access token before its repository and pull request tools can run.",
-            Some(
-                "Create a GitHub personal access token with the repository permissions you want IronClaw to use, then paste it here.",
-            ),
-            Some("https://github.com/settings/personal-access-tokens/new"),
-            "After saving the token, activate GitHub to publish its tools.",
-        )),
         "gmail" => Some(onboarding_message(
             "Gmail needs Google OAuth authorization before mail tools can run.",
             Some("Authorize the Google account that IronClaw should use for Gmail."),
@@ -734,12 +739,25 @@ fn package_from_bundle(
             },
         })
         .collect();
-    bundled_extension_package(
+    // The bundle carries its onboarding copy as plain data; map it to the host
+    // lifecycle type here (the inventory crate sits below product_workflow and
+    // cannot name `LifecycleExtensionOnboarding`).
+    let onboarding_override = bundle.onboarding.map(|copy| {
+        onboarding_message(
+            &copy.instructions,
+            copy.credential_instructions.as_deref(),
+            copy.setup_url.as_deref(),
+            &copy.credential_next_step,
+        )
+    });
+    let mut package = bundled_extension_package(
         bundle.id,
         bundle.display_name,
         &bundle.manifest_toml,
         assets,
-    )
+    )?;
+    package.onboarding_override = onboarding_override;
+    Ok(package)
 }
 
 fn bundled_extension_package(
@@ -792,6 +810,7 @@ fn bundled_extension_package(
         channel_directions,
         channel_presentation,
         assets,
+        onboarding_override: None,
     })
 }
 
@@ -1652,16 +1671,26 @@ where
             channel_directions,
             channel_presentation,
             assets,
+            // Filesystem-loaded extensions are not bundled inventory packages;
+            // their onboarding (if any) still resolves via `onboarding()`.
+            onboarding_override: None,
         });
     }
     Ok(packages)
 }
 
 fn reserved_host_bundled_extension_id(extension_id: &ExtensionId) -> bool {
-    matches!(
-        extension_id.as_str(),
-        "github" | "notion" | "web-access" | "slack" | NEARAI_EXTENSION_ID
-    ) || is_gsuite_extension_id(extension_id)
+    // Packages migrated to the self-contained inventory are reserved by their
+    // ids (cheap — no embed materialization); the rest stay listed here until
+    // they migrate. A filesystem extension must never shadow a bundled one.
+    ironclaw_first_party_extensions::packages::bundled_package_ids()
+        .iter()
+        .any(|id| *id == extension_id.as_str())
+        || matches!(
+            extension_id.as_str(),
+            "notion" | "web-access" | "slack" | NEARAI_EXTENSION_ID
+        )
+        || is_gsuite_extension_id(extension_id)
 }
 
 fn extension_asset_path(
@@ -3071,6 +3100,7 @@ output_schema_ref = "schemas/write.output.json"
                     content: AvailableExtensionAssetContent::Bytes(wasm_bytes.to_vec()),
                 },
             ],
+            onboarding_override: None,
         }
     }
 }

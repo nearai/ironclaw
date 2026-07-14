@@ -5,13 +5,18 @@ use std::borrow::Cow;
 
 use super::{PackageBundle, bytes_asset};
 
+pub(super) const ID: &str = "telegram";
+
 const MANIFEST: &str = include_str!("../../assets/telegram/manifest.toml");
 
 pub(super) fn bundle() -> PackageBundle {
     PackageBundle {
-        id: "telegram",
+        id: ID,
         display_name: "Telegram",
         manifest_toml: Cow::Borrowed(MANIFEST),
         assets: vec![bytes_asset("manifest.toml", MANIFEST.as_bytes())],
+        // Telegram is bot-token setup handled by the channel host, not an
+        // extension-card onboarding flow: no bespoke copy.
+        onboarding: None,
     }
 }

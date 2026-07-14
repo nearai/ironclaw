@@ -931,15 +931,16 @@ impl RebornServices {
             as Arc<dyn ironclaw_product_workflow::InboundAttachmentReader>)
     }
 
-    /// C-JOURNEY: publish a bundled first-party WASM extension package (e.g.
-    /// github) directly into the local-dev active-extension registry + trust
-    /// policy, bypassing the multi-turn `builtin.extension_install` →
-    /// `builtin.extension_activate` capability handshake. Reaches the SAME
-    /// `ActiveExtensionPublisher::publish` step `activate()` calls
-    /// (`extension_lifecycle.rs`) — the model-visible dispatchable surface —
-    /// so a harness that needs a bundled capability (like `github.*`)
-    /// reachable for dispatch without scripting install/activate turns can
-    /// seed it at construction time. Returns `None` for production-profile
+    /// C-JOURNEY: publish a bundled first-party WASM extension package (e.g. a
+    /// WASM tool extension) directly into the local-dev active-extension
+    /// registry + trust policy, bypassing the multi-turn
+    /// `builtin.extension_install` → `builtin.extension_activate` capability
+    /// handshake. Reaches the SAME `ActiveExtensionPublisher::publish` step
+    /// `activate()` calls (`extension_lifecycle.rs`) — the model-visible
+    /// dispatchable surface — so a harness that needs a bundled tool's
+    /// capabilities reachable for dispatch without scripting install/activate
+    /// turns can seed it at construction time. Returns `None` for
+    /// production-profile
     /// compositions without a local-dev runtime (mirrors
     /// `extension_installation_store_for_test`).
     #[cfg(feature = "test-support")]

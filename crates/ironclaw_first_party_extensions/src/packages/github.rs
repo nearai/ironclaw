@@ -4,17 +4,33 @@
 
 use std::borrow::Cow;
 
-use super::{PackageBundle, bytes_asset};
+use super::{PackageBundle, PackageOnboarding, bytes_asset};
+
+pub(super) const ID: &str = "github";
 
 const MANIFEST: &str = include_str!("../../assets/github/manifest.toml");
 const WASM: &[u8] = include_bytes!("../../assets/github/wasm/github_tool.wasm");
 
 pub(super) fn bundle() -> PackageBundle {
     PackageBundle {
-        id: "github",
+        id: ID,
         display_name: "GitHub",
         manifest_toml: Cow::Borrowed(MANIFEST),
         assets: assets(),
+        onboarding: Some(PackageOnboarding {
+            instructions: "GitHub needs a personal access token before its \
+                repository and pull request tools can run."
+                .to_string(),
+            credential_instructions: Some(
+                "Create a GitHub personal access token with the repository \
+                permissions you want IronClaw to use, then paste it here."
+                    .to_string(),
+            ),
+            setup_url: Some("https://github.com/settings/personal-access-tokens/new".to_string()),
+            credential_next_step: "After saving the token, activate GitHub to \
+                publish its tools."
+                .to_string(),
+        }),
     }
 }
 

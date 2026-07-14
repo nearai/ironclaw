@@ -5990,6 +5990,7 @@ output_schema_ref = "schemas/search.output.json"
                     content: AvailableExtensionAssetContent::Bytes(b"\0asm\x01\0\0\0".to_vec()),
                 },
             ],
+            onboarding_override: None,
         }
     }
 
