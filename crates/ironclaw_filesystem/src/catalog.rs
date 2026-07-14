@@ -353,6 +353,17 @@ impl RootFilesystem for CompositeRootFilesystem {
         self.matching_mount(path)?.backend.list_dir(path).await
     }
 
+    async fn list_dir_bounded(
+        &self,
+        path: &VirtualPath,
+        max_entries: usize,
+    ) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.matching_mount(path)?
+            .backend
+            .list_dir_bounded(path, max_entries)
+            .await
+    }
+
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         self.matching_mount(path)?.backend.stat(path).await
     }
@@ -377,5 +388,105 @@ impl RootFilesystem for CompositeRootFilesystem {
             .backend
             .create_dir_all(path)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::{FileType, FilesystemOperation};
+
+    #[derive(Default)]
+    struct BoundedListProbe {
+        bounded_calls: AtomicUsize,
+        unbounded_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl RootFilesystem for BoundedListProbe {
+        async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+            self.unbounded_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(["a", "b", "c"]
+                .into_iter()
+                .map(|name| DirEntry {
+                    name: name.to_string(),
+                    path: VirtualPath::new(format!("{}/{name}", path.as_str())).unwrap(),
+                    file_type: FileType::File,
+                })
+                .collect())
+        }
+
+        async fn list_dir_bounded(
+            &self,
+            path: &VirtualPath,
+            max_entries: usize,
+        ) -> Result<Vec<DirEntry>, FilesystemError> {
+            self.bounded_calls.fetch_add(1, Ordering::SeqCst);
+            let mut entries = self.list_entries_without_probe(path);
+            entries.truncate(max_entries);
+            Ok(entries)
+        }
+
+        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+            Err(FilesystemError::NotFound {
+                path: path.clone(),
+                operation: FilesystemOperation::Stat,
+            })
+        }
+
+        async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+            Err(FilesystemError::NotFound {
+                path: path.clone(),
+                operation: FilesystemOperation::Delete,
+            })
+        }
+    }
+
+    impl BoundedListProbe {
+        fn list_entries_without_probe(&self, path: &VirtualPath) -> Vec<DirEntry> {
+            ["a", "b", "c"]
+                .into_iter()
+                .map(|name| DirEntry {
+                    name: name.to_string(),
+                    path: VirtualPath::new(format!("{}/{name}", path.as_str())).unwrap(),
+                    file_type: FileType::File,
+                })
+                .collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn composite_list_dir_bounded_delegates_without_unbounded_materialization() {
+        let backend = Arc::new(BoundedListProbe::default());
+        let mut composite = CompositeRootFilesystem::new();
+        composite
+            .mount(
+                MountDescriptor {
+                    virtual_root: VirtualPath::new("/projects").unwrap(),
+                    backend_id: BackendId::new("bounded-probe").unwrap(),
+                    backend_kind: BackendKind::MemoryDocuments,
+                    storage_class: StorageClass::FileContent,
+                    content_kind: ContentKind::GenericFile,
+                    index_policy: IndexPolicy::NotIndexed,
+                    capabilities: BackendCapabilities::default(),
+                },
+                Arc::clone(&backend),
+            )
+            .unwrap();
+        let path = VirtualPath::new("/projects/items").unwrap();
+
+        let entries = composite.list_dir_bounded(&path, 2).await.unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "a");
+        assert_eq!(entries[1].name, "b");
+        assert_eq!(backend.bounded_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            backend.unbounded_calls.load(Ordering::SeqCst),
+            0,
+            "the composite must not fall back to its unbounded list_dir"
+        );
     }
 }

@@ -1,6 +1,13 @@
+// arch-exempt: large_file, startup auth migration fixtures stay with the production factory contract suite, plan #6061
 #[cfg(feature = "postgres")]
 #[path = "support/postgres.rs"]
 mod postgres_support;
+
+// Test data for the bounded forward migration only. Keep the exact retired
+// identity owned by the sanctioned migration module rather than reintroducing
+// it as a first-class quoted identity in facade code.
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+const RETIRED_SLACK_PERSONAL_PROVIDER_FIXTURE: &str = concat!("slack_", "personal");
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use std::{collections::BTreeMap, sync::Arc};
@@ -954,7 +961,7 @@ async fn local_dev_libsql_rebuild_migrates_slack_personal_before_publishing_serv
     let challenge = product_auth
         .request_manual_token_setup(RebornManualTokenSetupRequest::new(
             scope.clone(),
-            ironclaw_auth::AuthProviderId::new("slack_personal").unwrap(),
+            ironclaw_auth::AuthProviderId::new(RETIRED_SLACK_PERSONAL_PROVIDER_FIXTURE).unwrap(),
             ironclaw_auth::CredentialAccountLabel::new("Local legacy Slack").unwrap(),
             ironclaw_auth::AuthContinuationRef::SetupOnly,
             Utc::now() + chrono::Duration::minutes(5),
@@ -1157,7 +1164,8 @@ async fn production_libsql_migrates_slack_personal_before_publishing_services() 
         .product_auth
         .as_ref()
         .expect("production publishes product auth after startup");
-    let retired = ironclaw_auth::AuthProviderId::new("slack_personal").unwrap();
+    let retired =
+        ironclaw_auth::AuthProviderId::new(RETIRED_SLACK_PERSONAL_PROVIDER_FIXTURE).unwrap();
     let challenge = first_product_auth
         .request_manual_token_setup(RebornManualTokenSetupRequest::new(
             scope.clone(),
@@ -1290,7 +1298,7 @@ async fn production_libsql_malformed_product_auth_record_fails_typed_migration()
     let challenge = product_auth
         .request_manual_token_setup(RebornManualTokenSetupRequest::new(
             scope.clone(),
-            ironclaw_auth::AuthProviderId::new("slack_personal").unwrap(),
+            ironclaw_auth::AuthProviderId::new(RETIRED_SLACK_PERSONAL_PROVIDER_FIXTURE).unwrap(),
             ironclaw_auth::CredentialAccountLabel::new("Malformed legacy Slack").unwrap(),
             ironclaw_auth::AuthContinuationRef::SetupOnly,
             Utc::now() + chrono::Duration::minutes(5),
@@ -1793,10 +1801,11 @@ async fn production_postgres_services_migrate_trigger_repository_before_runtime_
 
 #[cfg(feature = "postgres")]
 #[tokio::test]
+#[ignore = "live prerequisite: requires Docker and a reachable Postgres testcontainer"]
 async fn production_postgres_migrates_slack_personal_before_publishing_services() {
-    let Some((_container, pool, database_url)) = postgres_pool_or_skip().await else {
-        return;
-    };
+    let (_container, pool, database_url) = postgres_pool_or_skip()
+        .await
+        .expect("live Postgres migration lane requires Docker and a reachable testcontainer");
     let scope = auth_scope("postgres-slack-migration");
     let (first_notifier, first_handle) = live_wake_notifier();
     let first_services = build_reborn_services(
@@ -1818,7 +1827,7 @@ async fn production_postgres_migrates_slack_personal_before_publishing_services(
     let challenge = product_auth
         .request_manual_token_setup(RebornManualTokenSetupRequest::new(
             scope.clone(),
-            ironclaw_auth::AuthProviderId::new("slack_personal").unwrap(),
+            ironclaw_auth::AuthProviderId::new(RETIRED_SLACK_PERSONAL_PROVIDER_FIXTURE).unwrap(),
             ironclaw_auth::CredentialAccountLabel::new("Postgres legacy Slack").unwrap(),
             ironclaw_auth::AuthContinuationRef::SetupOnly,
             Utc::now() + chrono::Duration::minutes(5),

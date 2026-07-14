@@ -1,3 +1,4 @@
+// arch-exempt: large_file, bounded direct-child listing stays with libSQL backend parity, plan #6061
 use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
@@ -740,6 +741,37 @@ impl RootFilesystem for LibSqlRootFilesystem {
             .child_entries(path, FilesystemOperation::ListDir)
             .await?;
         let children = direct_children(path, rows);
+        if matches!(exact_entry, Some((_, FileType::Directory, _))) && is_not_found(&children) {
+            return Ok(Vec::new());
+        }
+        children
+    }
+
+    async fn list_dir_bounded(
+        &self,
+        path: &VirtualPath,
+        max_entries: usize,
+    ) -> Result<Vec<DirEntry>, FilesystemError> {
+        let exact_entry = self.exact_entry(path).await?;
+        if matches!(exact_entry, Some((_, FileType::File, _))) {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ListDir,
+                reason: "not a directory".to_string(),
+            });
+        }
+        if max_entries == 0 {
+            if matches!(exact_entry, Some((_, FileType::Directory, _)))
+                || self.has_child_entry(path).await?
+            {
+                return Ok(Vec::new());
+            }
+            return Err(not_found(path.clone(), FilesystemOperation::ListDir));
+        }
+
+        let children = self
+            .child_entries_bounded(path, FilesystemOperation::ListDir, max_entries)
+            .await;
         if matches!(exact_entry, Some((_, FileType::Directory, _))) && is_not_found(&children) {
             return Ok(Vec::new());
         }
@@ -1525,6 +1557,86 @@ impl LibSqlRootFilesystem {
         Ok(paths)
     }
 
+    async fn child_entries_bounded(
+        &self,
+        parent: &VirtualPath,
+        operation: FilesystemOperation,
+        max_entries: usize,
+    ) -> Result<Vec<DirEntry>, FilesystemError> {
+        let conn = self.connect().await?;
+        let pattern = child_path_like_pattern(parent);
+        let prefix = format!("{}/", parent.as_str().trim_end_matches('/'));
+        let limit = i64::try_from(max_entries).unwrap_or(i64::MAX);
+        let mut rows = conn
+            .query(
+                r#"
+                WITH descendants AS (
+                    SELECT substr(path, length(?2) + 1) AS tail, is_dir
+                    FROM root_filesystem_entries
+                    WHERE path LIKE ?1 ESCAPE '!'
+                ),
+                named AS (
+                    SELECT
+                        CASE
+                            WHEN instr(tail, '/') = 0 THEN tail
+                            ELSE substr(tail, 1, instr(tail, '/') - 1)
+                        END AS name,
+                        CASE WHEN instr(tail, '/') = 0 THEN 1 ELSE 0 END AS is_direct,
+                        CASE
+                            WHEN instr(tail, '/') = 0 THEN is_dir
+                            ELSE 0
+                        END AS direct_is_dir
+                    FROM descendants
+                )
+                SELECT
+                    name,
+                    CASE
+                        WHEN MAX(is_direct) = 1 THEN MAX(direct_is_dir)
+                        ELSE 1
+                    END AS is_dir
+                FROM named
+                WHERE name <> ''
+                GROUP BY name
+                ORDER BY name COLLATE BINARY
+                LIMIT ?3
+                "#,
+                libsql::params![pattern, prefix, limit],
+            )
+            .await
+            .map_err(|error| libsql_db_error(parent.clone(), operation, error))?;
+        let mut entries = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| libsql_db_error(parent.clone(), operation, error))?
+        {
+            let name: String = row
+                .get(0)
+                .map_err(|error| libsql_db_error(parent.clone(), operation, error))?;
+            let is_dir_raw: i64 = row
+                .get(1)
+                .map_err(|error| libsql_db_error(parent.clone(), operation, error))?;
+            let path = VirtualPath::new(format!(
+                "{}/{}",
+                parent.as_str().trim_end_matches('/'),
+                name
+            ))?;
+            entries.push(DirEntry {
+                name,
+                path,
+                file_type: if is_dir_raw != 0 {
+                    FileType::Directory
+                } else {
+                    FileType::File
+                },
+            });
+        }
+        if entries.is_empty() {
+            return Err(not_found(parent.clone(), operation));
+        }
+        Ok(entries)
+    }
+
     async fn has_child_entry(&self, parent: &VirtualPath) -> Result<bool, FilesystemError> {
         let conn = self.connect().await?;
         let pattern = child_path_like_pattern(parent);
@@ -2181,6 +2293,34 @@ mod tests {
         let (fs, _dir) = fresh_backend().await;
         let out = fs.materialize_ranked(Vec::new()).await.unwrap();
         assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_dir_bounded_limits_sql_rows_before_rust_materialization() {
+        let (fs, _dir) = fresh_backend().await;
+        let parent = VirtualPath::new("/projects/bounded-list").unwrap();
+        fs.write_file(
+            &VirtualPath::new("/projects/bounded-list/a-valid").unwrap(),
+            b"valid",
+        )
+        .await
+        .unwrap();
+        let conn = fs.connect().await.unwrap();
+        conn.execute(
+            "INSERT INTO root_filesystem_entries (path, contents, is_dir) VALUES (?1, ?2, 0)",
+            libsql::params![
+                "/projects/bounded-list/zz\\invalid",
+                libsql::Value::Blob(b"must not materialize".to_vec())
+            ],
+        )
+        .await
+        .unwrap();
+        drop(conn);
+
+        let entries = fs.list_dir_bounded(&parent, 1).await.unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "a-valid");
     }
 
     #[tokio::test]

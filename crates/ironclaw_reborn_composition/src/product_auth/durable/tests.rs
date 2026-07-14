@@ -955,6 +955,56 @@ async fn migrate_retired_slack_personal_provider_does_not_resurrect_concurrent_d
 }
 
 #[tokio::test]
+async fn keepalive_filter_runs_before_per_scope_collection_and_sort() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = Arc::new(ScopedFilesystem::new(
+        Arc::clone(&backend),
+        crate::invocation_mount_view,
+    ));
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let service = FilesystemAuthProductServices::new_with_root(scoped, backend, secret_store);
+    let scope = test_scope();
+    for (provider, status, refresh_secret) in [
+        (
+            google_provider(),
+            CredentialAccountStatus::Configured,
+            Some(SecretHandle::new("keepalive-refresh").unwrap()),
+        ),
+        (
+            AuthProviderId::new("slack").unwrap(),
+            CredentialAccountStatus::Configured,
+            Some(SecretHandle::new("slack-refresh").unwrap()),
+        ),
+        (google_provider(), CredentialAccountStatus::Configured, None),
+    ] {
+        service
+            .create_account(NewCredentialAccount {
+                scope: scope.clone(),
+                provider,
+                label: account_label(),
+                status,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: None,
+                refresh_secret,
+                scopes: Vec::new(),
+            })
+            .await
+            .unwrap();
+    }
+
+    let records = service.list_refresh_candidates().await;
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        service.filtered_scan_records_before_sort(),
+        1,
+        "non-candidates must not enter the per-scope collection that is sorted"
+    );
+}
+
+#[tokio::test]
 async fn filesystem_accounts_survive_service_recreation() {
     let filesystem = test_filesystem();
     let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());

@@ -1,3 +1,4 @@
+// arch-exempt: large_file, bounded backend parity coverage stays with the database filesystem contract suite, plan #6061
 #![cfg(any(feature = "libsql", feature = "postgres"))]
 
 use ironclaw_filesystem::RootFilesystem;
@@ -74,6 +75,64 @@ async fn libsql_root_filesystem_lists_direct_children_sorted_with_virtual_paths(
         ]
     );
     assert_eq!(entries[1].file_type, FileType::Directory);
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_bounded_list_preserves_direct_child_order_and_errors() {
+    let filesystem = libsql_root().await;
+    let parent = VirtualPath::new("/projects/bounded-contract").unwrap();
+    for (leaf, bytes) in [
+        ("a/deep/one", b"one".as_slice()),
+        ("a/deep/two", b"two".as_slice()),
+        ("b", b"b".as_slice()),
+        ("c", b"c".as_slice()),
+    ] {
+        filesystem
+            .write_file(
+                &VirtualPath::new(format!("{}/{leaf}", parent.as_str())).unwrap(),
+                bytes,
+            )
+            .await
+            .unwrap();
+    }
+
+    let entries = filesystem.list_dir_bounded(&parent, 2).await.unwrap();
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a", "b"]
+    );
+    assert_eq!(entries[0].file_type, FileType::Directory);
+    assert_eq!(entries[1].file_type, FileType::File);
+    assert!(
+        filesystem
+            .list_dir_bounded(&parent, 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let file = VirtualPath::new("/projects/bounded-contract/b").unwrap();
+    let file_error = filesystem.list_dir_bounded(&file, 1).await.unwrap_err();
+    assert!(matches!(
+        file_error,
+        FilesystemError::Backend {
+            operation: FilesystemOperation::ListDir,
+            ..
+        }
+    ));
+    let missing = VirtualPath::new("/projects/bounded-contract/missing").unwrap();
+    let missing_error = filesystem.list_dir_bounded(&missing, 0).await.unwrap_err();
+    assert!(matches!(
+        missing_error,
+        FilesystemError::NotFound {
+            operation: FilesystemOperation::ListDir,
+            ..
+        }
+    ));
 }
 
 #[cfg(feature = "libsql")]
@@ -1656,6 +1715,35 @@ mod postgres_tests {
 
     fn vpath(prefix: &str, leaf: &str) -> VirtualPath {
         VirtualPath::new(format!("{prefix}/{leaf}")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn postgres_bounded_list_groups_direct_children_before_limit() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        for leaf in [
+            "bounded/a/deep/one",
+            "bounded/a/deep/two",
+            "bounded/b",
+            "bounded/c",
+        ] {
+            fs.write_file(&vpath(&prefix, leaf), leaf.as_bytes())
+                .await
+                .unwrap();
+        }
+
+        let parent = vpath(&prefix, "bounded");
+        let entries = fs.list_dir_bounded(&parent, 2).await.unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+        assert_eq!(entries[0].file_type, FileType::Directory);
+        assert_eq!(entries[1].file_type, FileType::File);
     }
 
     #[tokio::test]

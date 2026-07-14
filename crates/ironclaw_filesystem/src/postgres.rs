@@ -1,3 +1,4 @@
+// arch-exempt: large_file, bounded direct-child listing stays with Postgres backend parity, plan #6061
 use std::{collections::BTreeMap, error::Error, time::Duration};
 #[cfg(feature = "postgres")]
 use std::{collections::HashSet, sync::OnceLock};
@@ -40,6 +41,36 @@ const POSTGRES_ROOT_FILESYSTEM_MIGRATION_ADVISORY_LOCK: i64 = 824_917_203;
 #[cfg(feature = "postgres")]
 static POSTGRES_ROOT_FILESYSTEM_MIGRATED_SCHEMAS: OnceLock<tokio::sync::Mutex<HashSet<String>>> =
     OnceLock::new();
+
+#[cfg(feature = "postgres")]
+const POSTGRES_LIST_DIR_BOUNDED_SQL: &str = r#"
+    WITH descendants AS (
+        SELECT substring(path FROM char_length($3) + 1) AS tail, is_dir
+        FROM root_filesystem_entries
+        WHERE path >= $1 AND path < $2
+    ),
+    named AS (
+        SELECT
+            split_part(tail, '/', 1) AS name,
+            CASE WHEN position('/' IN tail) = 0 THEN 1 ELSE 0 END AS is_direct,
+            CASE
+                WHEN position('/' IN tail) = 0 AND is_dir THEN 1
+                ELSE 0
+            END AS direct_is_dir
+        FROM descendants
+    )
+    SELECT
+        name,
+        CASE
+            WHEN MAX(is_direct) = 1 THEN MAX(direct_is_dir) = 1
+            ELSE TRUE
+        END AS is_dir
+    FROM named
+    WHERE name <> ''
+    GROUP BY name
+    ORDER BY name COLLATE "C"
+    LIMIT $4
+    "#;
 
 #[cfg(feature = "postgres")]
 impl PostgresRootFilesystem {
@@ -664,6 +695,43 @@ impl RootFilesystem for PostgresRootFilesystem {
         children
     }
 
+    async fn list_dir_bounded(
+        &self,
+        path: &VirtualPath,
+        max_entries: usize,
+    ) -> Result<Vec<DirEntry>, FilesystemError> {
+        let client = self.client().await?;
+        let exact_entry = self.exact_entry_with_client(&client, path).await?;
+        if matches!(exact_entry, Some((_, FileType::File, _))) {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ListDir,
+                reason: "not a directory".to_string(),
+            });
+        }
+        if max_entries == 0 {
+            if matches!(exact_entry, Some((_, FileType::Directory, _)))
+                || self.has_child_entry_with_client(&client, path).await?
+            {
+                return Ok(Vec::new());
+            }
+            return Err(not_found(path.clone(), FilesystemOperation::ListDir));
+        }
+
+        let children = self
+            .child_entries_bounded_with_client(
+                &client,
+                path,
+                FilesystemOperation::ListDir,
+                max_entries,
+            )
+            .await;
+        if matches!(exact_entry, Some((_, FileType::Directory, _))) && is_not_found(&children) {
+            return Ok(Vec::new());
+        }
+        children
+    }
+
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         let client = self.client().await?;
         postgres_stat_with_client(&client, path).await
@@ -970,6 +1038,49 @@ impl PostgresRootFilesystem {
                 ))
             })
             .collect()
+    }
+
+    async fn child_entries_bounded_with_client(
+        &self,
+        client: &deadpool_postgres::Object,
+        parent: &VirtualPath,
+        operation: FilesystemOperation,
+        max_entries: usize,
+    ) -> Result<Vec<DirEntry>, FilesystemError> {
+        let (prefix_lower, prefix_upper) = descendant_path_range(parent);
+        let limit = i64::try_from(max_entries).unwrap_or(i64::MAX);
+        let rows = cached_query(
+            client,
+            POSTGRES_LIST_DIR_BOUNDED_SQL,
+            &[&prefix_lower, &prefix_upper, &prefix_lower, &limit],
+        )
+        .await
+        .map_err(|error| db_error(parent.clone(), operation, error))?;
+        let entries = rows
+            .into_iter()
+            .map(|row| {
+                let name: String = row.get("name");
+                let is_dir: bool = row.get("is_dir");
+                let path = VirtualPath::new(format!(
+                    "{}/{}",
+                    parent.as_str().trim_end_matches('/'),
+                    name
+                ))?;
+                Ok(DirEntry {
+                    name,
+                    path,
+                    file_type: if is_dir {
+                        FileType::Directory
+                    } else {
+                        FileType::File
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>, FilesystemError>>()?;
+        if entries.is_empty() {
+            return Err(not_found(parent.clone(), operation));
+        }
+        Ok(entries)
     }
 
     async fn has_child_entry_with_client(
@@ -2285,6 +2396,14 @@ mod tests {
         assert!("/secrets/a/b/child" >= lower && "/secrets/a/b/child" < upper);
         assert!("/secrets/a/b" < lower); // the path itself is excluded
         assert!("/secrets/a/bb" >= upper); // prefix-sharing sibling excluded
+    }
+
+    #[test]
+    fn bounded_list_query_groups_direct_children_before_limit() {
+        let sql = POSTGRES_LIST_DIR_BOUNDED_SQL;
+        assert!(sql.contains("GROUP BY name"));
+        assert!(sql.contains("ORDER BY name COLLATE \"C\""));
+        assert!(sql.contains("LIMIT $4"));
     }
 
     #[test]

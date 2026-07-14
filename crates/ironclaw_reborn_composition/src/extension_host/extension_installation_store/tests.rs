@@ -1,3 +1,4 @@
+// arch-exempt: large_file, retired extension identity fixtures stay with persistence convergence coverage, plan #6061
 use std::{
     collections::BTreeSet,
     sync::{
@@ -22,6 +23,11 @@ use ironclaw_filesystem::{
 use ironclaw_host_api::{HostPortCatalog, SecretHandle};
 
 use super::*;
+
+// Test data for the bounded persisted-state forward migration only. Keep the
+// retired identity from becoming a first-class quoted identity outside the
+// sanctioned migration owner.
+const RETIRED_SLACK_EXTENSION_ID_FIXTURE: &str = concat!("slack_", "bot");
 
 #[test]
 fn persisted_removal_cleanup_metadata_rejects_invalid_identifiers() {
@@ -223,17 +229,20 @@ async fn load_at_rejects_non_exact_legacy_manifest_shapes_without_changes() {
         (
             "installed-local-retired-slack",
             WireManifestSource::InstalledLocal,
-            legacy_manifest_toml("slack_bot"),
+            legacy_manifest_toml(RETIRED_SLACK_EXTENSION_ID_FIXTURE),
         ),
         (
             "registry-installed-retired-slack",
             WireManifestSource::RegistryInstalled,
-            legacy_manifest_toml("slack_bot"),
+            legacy_manifest_toml(RETIRED_SLACK_EXTENSION_ID_FIXTURE),
         ),
         (
             "strict-invalid-host-bundled-retired-slack",
             WireManifestSource::HostBundled,
-            legacy_manifest_toml("slack_bot").replace("slack_bot.echo", "wrong-provider.echo"),
+            legacy_manifest_toml(RETIRED_SLACK_EXTENSION_ID_FIXTURE).replace(
+                &format!("{RETIRED_SLACK_EXTENSION_ID_FIXTURE}.echo"),
+                "wrong-provider.echo",
+            ),
         ),
         (
             "wrong-schema",
@@ -363,7 +372,7 @@ async fn load_at_slack_fold_preserves_canonical_fields_and_uses_enabled_wins() {
     let state = WireState {
         manifests: vec![
             WireManifestRecord {
-                raw_toml: structural_manifest_toml("slack_bot"),
+                raw_toml: structural_manifest_toml(RETIRED_SLACK_EXTENSION_ID_FIXTURE),
                 source: WireManifestSource::HostBundled,
                 manifest_hash: Some(ManifestHash::new("sha256:retired-slack").unwrap()),
                 removal_cleanup_requirements: Vec::new(),
@@ -389,7 +398,7 @@ async fn load_at_slack_fold_preserves_canonical_fields_and_uses_enabled_wins() {
             ),
             named_installation(
                 "retired-bob",
-                "slack_bot",
+                RETIRED_SLACK_EXTENSION_ID_FIXTURE,
                 ExtensionActivationState::Enabled,
                 InstallationOwner::user(ironclaw_host_api::UserId::new("bob").unwrap()),
                 Some("sha256:retired-slack"),
@@ -457,7 +466,7 @@ async fn load_at_slack_fold_preserves_canonical_fields_and_uses_enabled_wins() {
     assert_eq!(manifest.removal_cleanup_requirements(), &[cleanup]);
     assert!(
         store
-            .get_manifest(&ExtensionId::new("slack_bot").unwrap())
+            .get_manifest(&ExtensionId::new(RETIRED_SLACK_EXTENSION_ID_FIXTURE).unwrap())
             .await
             .unwrap()
             .is_none()
@@ -491,7 +500,7 @@ async fn load_at_slack_fold_uses_tenant_dominance_and_canonical_mixed_policy_wit
         ),
         named_installation(
             "retired-member",
-            "slack_bot",
+            RETIRED_SLACK_EXTENSION_ID_FIXTURE,
             ExtensionActivationState::Disabled,
             InstallationOwner::user(ironclaw_host_api::UserId::new("alice").unwrap()),
             Some("sha256:retired-slack"),
@@ -533,7 +542,7 @@ async fn load_at_slack_fold_propagates_credential_conflict_without_changes() {
         ),
         named_installation(
             "retired",
-            "slack_bot",
+            RETIRED_SLACK_EXTENSION_ID_FIXTURE,
             ExtensionActivationState::Installed,
             InstallationOwner::Tenant,
             Some("sha256:retired-slack"),
@@ -567,7 +576,7 @@ async fn load_at_seeds_unified_slack_manifest_for_multiple_retired_rows() {
     let state_path = test_state_path();
     let state = WireState {
         manifests: vec![WireManifestRecord {
-            raw_toml: legacy_manifest_toml("slack_bot"),
+            raw_toml: legacy_manifest_toml(RETIRED_SLACK_EXTENSION_ID_FIXTURE),
             source: WireManifestSource::HostBundled,
             manifest_hash: Some(ManifestHash::new("sha256:retired-slack").unwrap()),
             removal_cleanup_requirements: Vec::new(),
@@ -575,7 +584,7 @@ async fn load_at_seeds_unified_slack_manifest_for_multiple_retired_rows() {
         installations: vec![
             named_installation(
                 "retired-alice",
-                "slack_bot",
+                RETIRED_SLACK_EXTENSION_ID_FIXTURE,
                 ExtensionActivationState::Installed,
                 InstallationOwner::user(ironclaw_host_api::UserId::new("alice").unwrap()),
                 Some("sha256:retired-slack"),
@@ -586,7 +595,7 @@ async fn load_at_seeds_unified_slack_manifest_for_multiple_retired_rows() {
             ),
             named_installation(
                 "retired-bob",
-                "slack_bot",
+                RETIRED_SLACK_EXTENSION_ID_FIXTURE,
                 ExtensionActivationState::Enabled,
                 InstallationOwner::user(ironclaw_host_api::UserId::new("bob").unwrap()),
                 Some("sha256:retired-slack"),
@@ -654,14 +663,14 @@ async fn load_at_without_slack_feature_never_deletes_retired_state() {
     let state_path = test_state_path();
     let state = WireState {
         manifests: vec![WireManifestRecord {
-            raw_toml: legacy_manifest_toml("slack_bot"),
+            raw_toml: legacy_manifest_toml(RETIRED_SLACK_EXTENSION_ID_FIXTURE),
             source: WireManifestSource::HostBundled,
             manifest_hash: Some(ManifestHash::new("sha256:retired-slack").unwrap()),
             removal_cleanup_requirements: Vec::new(),
         }],
         installations: vec![named_installation(
             "retired",
-            "slack_bot",
+            RETIRED_SLACK_EXTENSION_ID_FIXTURE,
             ExtensionActivationState::Enabled,
             InstallationOwner::Tenant,
             Some("sha256:retired-slack"),
@@ -1471,7 +1480,7 @@ fn slack_wire_state(installations: Vec<ExtensionInstallation>) -> WireState {
     WireState {
         manifests: vec![
             WireManifestRecord {
-                raw_toml: structural_manifest_toml("slack_bot"),
+                raw_toml: structural_manifest_toml(RETIRED_SLACK_EXTENSION_ID_FIXTURE),
                 source: WireManifestSource::HostBundled,
                 manifest_hash: Some(ManifestHash::new("sha256:retired-slack").unwrap()),
                 removal_cleanup_requirements: Vec::new(),

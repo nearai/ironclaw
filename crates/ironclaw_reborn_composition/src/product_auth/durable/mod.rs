@@ -3,6 +3,8 @@
     reason = "durable product-auth is staged for production/webui composition; clippy can check this crate before those callers are enabled"
 )]
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, Weak},
@@ -129,6 +131,8 @@ where
     root: Option<Arc<F>>,
     secret_store: Arc<dyn SecretStore>,
     locks: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
+    #[cfg(test)]
+    filtered_scan_records_before_sort: AtomicUsize,
 }
 
 impl<F> FilesystemAuthProductServices<F>
@@ -144,6 +148,8 @@ where
             root: None,
             secret_store,
             locks: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            filtered_scan_records_before_sort: AtomicUsize::new(0),
         }
     }
 
@@ -163,7 +169,15 @@ where
             root: Some(root),
             secret_store,
             locks: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            filtered_scan_records_before_sort: AtomicUsize::new(0),
         }
+    }
+
+    #[cfg(test)]
+    fn filtered_scan_records_before_sort(&self) -> usize {
+        self.filtered_scan_records_before_sort
+            .load(Ordering::SeqCst)
     }
 
     fn lock_for(&self, key: String) -> Arc<tokio::sync::Mutex<()>> {
@@ -464,6 +478,19 @@ where
         scope: &ironclaw_auth::AuthProductScope,
         max_records: Option<usize>,
     ) -> Result<Vec<CredentialAccount>, AuthProductError> {
+        self.account_records_under_scope_root_filtered_with_limit(scope, max_records, |_| true)
+            .await
+    }
+
+    async fn account_records_under_scope_root_filtered_with_limit<P>(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+        max_records: Option<usize>,
+        predicate: P,
+    ) -> Result<Vec<CredentialAccount>, AuthProductError>
+    where
+        P: Fn(&CredentialAccount) -> bool,
+    {
         let root = account_root(scope)?;
         let entries = match max_records {
             Some(max_records) => {
@@ -498,11 +525,17 @@ where
                 }),
         )
         .buffer_unordered(MAX_CONCURRENT_READS)
-        .try_collect::<Vec<_>>()
-        .await?
-        .into_iter()
-        .flatten()
-        .collect();
+        .try_filter_map(|account| {
+            let selected = account.filter(|account| predicate(account));
+            #[cfg(test)]
+            if selected.is_some() {
+                self.filtered_scan_records_before_sort
+                    .fetch_add(1, Ordering::SeqCst);
+            }
+            std::future::ready(Ok(selected))
+        })
+        .try_collect::<Vec<CredentialAccount>>()
+        .await?;
         accounts.sort_by_key(|account| account.id);
         Ok(accounts)
     }
@@ -597,13 +630,12 @@ where
         let mut accounts = Vec::new();
         for scope in self.account_scopes_for_owner(owner).await? {
             accounts.extend(
-                self.account_records_under_scope_root_with_limit(
+                self.account_records_under_scope_root_filtered_with_limit(
                     &scope,
                     Some(MAX_OWNER_RECORDS_PER_ROOT),
+                    |account| owner.matches(account) && predicate(account),
                 )
-                .await?
-                .into_iter()
-                .filter(|account| owner.matches(account) && predicate(account)),
+                .await?,
             );
         }
         accounts.sort_by_key(|account| account.id);
