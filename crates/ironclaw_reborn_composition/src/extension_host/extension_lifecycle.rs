@@ -492,13 +492,6 @@ impl RebornLocalExtensionManagementPort {
             let catalog = self.catalog.read().await;
             catalog.search(query).collect::<Vec<_>>()
         };
-        let mut summaries = Vec::new();
-        for extension in extensions {
-            summaries.push(
-                self.search_summary(&extension, credential_gate, scope)
-                    .await?,
-            );
-        }
         // Owner-registered packages never enter the shared catalog (boot-leak
         // invariant), so they are searched separately and overlaid here —
         // path sharding scopes the overlay to the calling tenant-owner.
@@ -506,10 +499,54 @@ impl RebornLocalExtensionManagementPort {
             .registered_store
             .search_with_owner_overlay(scope, query)
             .await?;
+        // Item 5 (search's sibling of `installed_summaries`'s existing
+        // batching): load every installation row and every stored manifest
+        // source ONCE instead of letting `search_summary` issue a
+        // `get_installation` + `get_manifest` pair per result.
+        let installations_by_id: std::collections::HashMap<ExtensionId, ExtensionInstallation> =
+            self.installation_store
+                .list_installations()
+                .await
+                .map_err(map_extension_installation_error)?
+                .into_iter()
+                .map(|installation| (installation.extension_id().clone(), installation))
+                .collect();
+        let stored_manifest_sources: std::collections::HashMap<ExtensionId, ManifestSource> = self
+            .installation_store
+            .list_manifests()
+            .await
+            .map_err(map_extension_installation_error)?
+            .into_iter()
+            .map(|record| {
+                (
+                    record.extension_id().clone(),
+                    record.manifest().source.clone(),
+                )
+            })
+            .collect();
+        let mut summaries = Vec::new();
+        for extension in &extensions {
+            summaries.push(
+                Self::search_summary(
+                    extension,
+                    credential_gate,
+                    scope,
+                    &installations_by_id,
+                    &stored_manifest_sources,
+                )
+                .await?,
+            );
+        }
         for extension in &owner_overlay {
             summaries.push(
-                self.search_summary(extension, credential_gate, scope)
-                    .await?,
+                Self::search_summary(
+                    extension,
+                    credential_gate,
+                    scope,
+                    &installations_by_id,
+                    &stored_manifest_sources,
+                )
+                .await?,
             );
         }
         let count = summaries.len();
@@ -828,18 +865,24 @@ impl RebornLocalExtensionManagementPort {
             }))
     }
 
+    /// Item 5 (search's sibling of `installed_summaries`'s existing
+    /// batching): `search()` batch-loads every installation row and every
+    /// stored manifest source ONCE up front, so this does map lookups
+    /// instead of issuing a `get_installation` + `get_manifest` pair per
+    /// search result via the unbatched `search_installation` /
+    /// `registered_row_matches_scope_tenant`.
     async fn search_summary(
-        &self,
         extension: &AvailableExtensionPackage,
         credential_gate: Option<&RuntimeExtensionActivationCredentialGate>,
         scope: &ResourceScope,
+        installations_by_id: &std::collections::HashMap<ExtensionId, ExtensionInstallation>,
+        stored_manifest_sources: &std::collections::HashMap<ExtensionId, ManifestSource>,
     ) -> Result<LifecycleSearchExtensionSummary, ProductWorkflowError> {
         let caller = &scope.user_id;
         let mut summary = extension.summary();
         suppress_search_credential_onboarding(&mut summary);
-        let installation = self
-            .search_installation(&extension.package.id)
-            .await?
+        let installation = installations_by_id
+            .get(&extension.package.id)
             // A foreign user-private install reads as not-installed for this
             // caller (#5459 P1) — same masking as list/project.
             .filter(|installation| installation.owner().visible_to(caller));
@@ -856,20 +899,18 @@ impl RebornLocalExtensionManagementPort {
         // row's OWN stored-manifest effective registered tenant (never the
         // currently-searched descriptor's tenant) to match the caller's
         // scope tenant before reporting a phase at all.
-        if !self
-            .registered_row_matches_scope_tenant(
-                &extension.package.manifest.source,
-                &installation,
-                scope,
-            )
-            .await?
-        {
+        if !Self::registered_row_matches_scope_tenant_batched(
+            &extension.package.manifest.source,
+            installation,
+            stored_manifest_sources.get(installation.extension_id()),
+            scope,
+        ) {
             return Ok(LifecycleSearchExtensionSummary {
                 summary,
                 installation_phase: None,
             });
         }
-        let phase = search_installation_phase(extension, &installation, credential_gate).await?;
+        let phase = search_installation_phase(extension, installation, credential_gate).await?;
         Ok(LifecycleSearchExtensionSummary {
             summary,
             installation_phase: Some(phase),
@@ -5160,10 +5201,13 @@ output_schema_ref = "schemas/run.output.json"
 
     #[tokio::test]
     async fn extension_lifecycle_search_propagates_installation_store_read_error() {
+        // `search`'s Item-5 batching (mirrors `installed_summaries`) replaced
+        // the old per-result `get_installation` call with one `list_installations`
+        // read up front; fail that read instead of `get_installation`.
         let (_dir, port, _active_registry, _failing_store, _trust_policy) =
             extension_port_with_failing_store(
                 ExtensionRegistry::new(),
-                DeleteInstallationFailingStore::fail_get_installation(),
+                DeleteInstallationFailingStore::fail_list_installations(),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
 
@@ -5179,18 +5223,26 @@ output_schema_ref = "schemas/run.output.json"
     }
 
     #[tokio::test]
-    async fn extension_lifecycle_search_rejects_mismatched_installation_row() {
+    async fn extension_lifecycle_remove_rejects_mismatched_installation_row() {
+        // `search`'s Item-5 batching keys its installation map by each row's
+        // OWN extension id, so a mismatched-id row can no longer reach it
+        // (same shape as `installed_summaries`, which has no such check
+        // either). `remove` still calls the unbatched `search_installation`
+        // directly, so this defensive check stays covered through that
+        // still-live caller.
         let (_dir, port, _active_registry, _failing_store, _trust_policy) =
             extension_port_with_failing_store(
                 ExtensionRegistry::new(),
                 DeleteInstallationFailingStore::mismatched_get_installation(),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("valid ref");
 
         let error = port
-            .search("fixture", None, &lifecycle_owner_scope())
+            .remove(package_ref, &lifecycle_owner_scope(), None)
             .await
-            .expect_err("search reports mismatched installation row");
+            .expect_err("remove reports mismatched installation row");
 
         assert!(matches!(
             error,
@@ -8118,8 +8170,8 @@ output_schema_ref = "schemas/run.output.json"
         inner: InMemoryExtensionInstallationStore,
         fail_manifest_delete: bool,
         fail_set_activation_enabled: bool,
-        fail_get_installation: bool,
         mismatched_get_installation: bool,
+        fail_list_installations: bool,
         /// Fail the NEXT `get_manifest` once, then clear — simulates a real
         /// store I/O failure on one read, distinct from a genuine "no
         /// manifest row" miss (`Ok(None)`).
@@ -8144,16 +8196,19 @@ output_schema_ref = "schemas/run.output.json"
             }
         }
 
-        fn fail_get_installation() -> Self {
+        fn mismatched_get_installation() -> Self {
             Self {
-                fail_get_installation: true,
+                mismatched_get_installation: true,
                 ..Self::default()
             }
         }
 
-        fn mismatched_get_installation() -> Self {
+        /// Batched `search`'s Item-5 read (list every installation row once)
+        /// replaces the old per-result `get_installation` call; this fails
+        /// that new read instead.
+        fn fail_list_installations() -> Self {
             Self {
-                mismatched_get_installation: true,
+                fail_list_installations: true,
                 ..Self::default()
             }
         }
@@ -8202,6 +8257,11 @@ output_schema_ref = "schemas/run.output.json"
         async fn list_installations(
             &self,
         ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
+            if self.fail_list_installations {
+                return Err(ExtensionInstallationError::InvalidInstallation {
+                    reason: "list installations failed".to_string(),
+                });
+            }
             self.inner.list_installations().await
         }
 
@@ -8215,11 +8275,6 @@ output_schema_ref = "schemas/run.output.json"
             &self,
             installation_id: &ExtensionInstallationId,
         ) -> Result<Option<ExtensionInstallation>, ExtensionInstallationError> {
-            if self.fail_get_installation {
-                return Err(ExtensionInstallationError::InvalidInstallation {
-                    reason: "get installation failed".to_string(),
-                });
-            }
             if self.mismatched_get_installation {
                 let extension_id = ExtensionId::new("other-fixture").expect("valid extension id");
                 let installation = ExtensionInstallation::new(
