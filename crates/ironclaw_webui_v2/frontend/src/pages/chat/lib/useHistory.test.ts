@@ -262,6 +262,65 @@ test("useHistory keeps cursor load errors visible until history reloads", async 
   );
 });
 
+test("useHistory preserves cursor load errors when a later full refresh fails", async () => {
+  const setCalls = [];
+  let fullRefreshAttempts = 0;
+  const context = {
+    console: {
+      error: () => {},
+    },
+    fetchTimeline: async ({ cursor }) => {
+      if (cursor) {
+        throw new Error("older timeline unavailable");
+      }
+      fullRefreshAttempts += 1;
+      if (fullRefreshAttempts === 1) {
+        return {
+          messages: [
+            {
+              message_id: "current-1",
+              kind: "user",
+              content: "current",
+            },
+          ],
+          next_cursor: "older-cursor",
+        };
+      }
+      throw new Error("refresh unavailable");
+    },
+    authScope: () => "test-user",
+    globalThis: {},
+    messagesFromTimeline: (messages) =>
+      messages.map((message) => ({
+        id: `msg-${message.message_id}`,
+        role: message.kind,
+        content: message.content,
+      })),
+    React: createReactStub({ setCalls }),
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  context.globalThis.__testExports.clearHistoryCache();
+  const history = context.globalThis.__testExports.useHistory("thread-1", {});
+  await flushMicrotasks();
+
+  await history.loadHistory("older-cursor");
+  await flushMicrotasks();
+
+  assert.equal(setCalls.at(-1).loadError, "chat.history.loadFailed");
+  assert.equal(setCalls.at(-1).loadErrorSource, "cursor");
+
+  await history.loadHistory();
+  await flushMicrotasks();
+
+  assert.equal(setCalls.at(-1).loadError, "chat.history.loadFailed");
+  assert.equal(setCalls.at(-1).loadErrorSource, "cursor");
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(setCalls.at(-1).messages.map((message) => message.id))),
+    ["msg-current-1"],
+  );
+});
+
 test("useHistory tags messages with the thread they belong to (messagesThreadId)", async () => {
   // The cross-thread pairing-panel fix (useChat derive effect) depends on
   // useHistory reporting which thread its `messages` represent, so a consumer can

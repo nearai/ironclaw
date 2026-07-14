@@ -192,24 +192,30 @@ export function useHistory(threadId, options = {}) {
         // Stay loud when the failed load leaves the thread empty. Once the
         // current session has messages, a full-refresh history miss is stale
         // context rather than proof that the active chat is broken.
-        setState((s) =>
-          threadIdRef.current === threadId
-            ? {
-                ...s,
-                isLoading: false,
-                loadError:
-                  !cursor && (s.messages || []).length > 0
-                    ? null
-                    : "chat.history.loadFailed",
-                loadErrorSource:
-                  !cursor && (s.messages || []).length > 0
-                    ? null
-                    : cursor
-                      ? "cursor"
-                      : "initial",
-              }
-            : s,
-        );
+        setState((s) => {
+          if (threadIdRef.current !== threadId) return s;
+          const hasCurrentMessages = (s.messages || []).length > 0;
+          const shouldPreserveCursorError =
+            !cursor && hasCurrentMessages && s.loadErrorSource === "cursor";
+          const shouldClearStaleInitialError =
+            !cursor && hasCurrentMessages && !shouldPreserveCursorError;
+          return {
+            ...s,
+            isLoading: false,
+            loadError: shouldPreserveCursorError
+              ? s.loadError
+              : shouldClearStaleInitialError
+                ? null
+                : "chat.history.loadFailed",
+            loadErrorSource: shouldPreserveCursorError
+              ? s.loadErrorSource
+              : shouldClearStaleInitialError
+                ? null
+                : cursor
+                  ? "cursor"
+                  : "initial",
+          };
+        });
       } finally {
         loadingRef.current.delete(threadId);
       }
