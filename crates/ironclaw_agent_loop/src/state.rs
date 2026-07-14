@@ -12,12 +12,12 @@ pub use signature::{
     ArgsHash, CapabilityCallSignature, CapabilityCallSignatureError, CapabilityOutputObservation,
 };
 pub use slots::{
-    CapabilityStrategyState, CompactionPromptSnapshot, CompactionStrategyState,
-    ContextStrategyState, DeferredCompactionWatermark, GateStrategyState, GoalRefreshStrategyState,
-    IndexedMessageKind, MessageIndexEntry, ModelStrategyState, PostCapabilityStageState,
-    RecoveryAttemptClass, RecoveryStrategyState, RepeatedCallWarningPhase,
-    RepeatedCallWarningState, ReplyAdmissionRejection, ReplyAdmissionRejectionReason,
-    ReplyAdmissionStrategyState, StopStrategyState,
+    CapabilityStrategyState, CompactionEffectivenessBaseline, CompactionPromptSnapshot,
+    CompactionStrategyState, ContextStrategyState, DeferredCompactionWatermark, GateStrategyState,
+    GoalRefreshStrategyState, IndexedMessageKind, MessageIndexEntry, ModelStrategyState,
+    PostCapabilityStageState, RecoveryAttemptClass, RecoveryStrategyState,
+    RepeatedCallWarningPhase, RepeatedCallWarningState, ReplyAdmissionRejection,
+    ReplyAdmissionRejectionReason, ReplyAdmissionStrategyState, StopStrategyState,
 };
 
 use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId, ResourceEstimate};
