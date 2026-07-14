@@ -100,22 +100,23 @@ pub use oauth_product_auth::{
 #[cfg(feature = "test-support")]
 pub use outbound_delivery::{
     OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
-    OutboundDeliveryCapabilityTestParts, wrap_outbound_delivery_capabilities_for_test,
 };
 #[cfg(feature = "test-support")]
-pub use project_create::{PROJECT_CREATE_CAPABILITY_ID, wrap_project_create_capability_for_test};
+pub use project_create::PROJECT_CREATE_CAPABILITY_ID;
 #[cfg(feature = "test-support")]
 pub use projection::build_webui_event_stream_for_test;
 #[cfg(feature = "test-support")]
 pub use refreshing_capability_port::{
-    RefreshingLocalDevCapabilityPortTestParts, create_refreshing_local_dev_capability_port_for_test,
+    ExtensionManagementTestHandle, RefreshingLocalDevCapabilityPortTestParts,
+    build_local_dev_extension_management_for_test,
+    create_refreshing_local_dev_capability_port_for_test,
 };
 #[cfg(feature = "test-support")]
 pub use result_read::{RESULT_READ_CAPABILITY_ID, wrap_result_read_capability_for_test};
 #[cfg(feature = "test-support")]
 pub use skill_activation::{
     SKILL_ACTIVATE_CAPABILITY_ID, SkillActivationTestSource,
-    build_local_dev_skill_context_source_for_test, wrap_skill_activation_capability_for_test,
+    build_local_dev_skill_context_source_for_test,
 };
 #[cfg(feature = "test-support")]
 pub use trace_capture::trace_capture_turn_event_sink_for_test;

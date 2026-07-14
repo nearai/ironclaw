@@ -1057,32 +1057,6 @@ pub(crate) fn build_local_dev_approval_gate_evidence_for_test(
     std::sync::Arc::new(LocalDevApprovalGateEvidence { approval_requests })
 }
 
-/// Test-support forwarder for the `project_create` synthetic-capability wrap
-/// (E-PROJ seam). Bridges the private `local_dev` module to `test_support.rs`
-/// without widening any production type's visibility; mirrors the
-/// approval-gate-evidence forwarder above.
-#[cfg(feature = "test-support")]
-pub(crate) fn wrap_project_create_capability_for_test(
-    inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    project_service: std::sync::Arc<dyn ironclaw_product_workflow::ProjectService>,
-    fallback_user_id: ironclaw_host_api::UserId,
-    run_context: ironclaw_turns::run_profile::LoopRunContext,
-    input_resolver: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
-    result_writer: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
-) -> Result<
-    std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    ironclaw_turns::run_profile::AgentLoopHostError,
-> {
-    local_dev::wrap_project_create_capability_for_test(
-        inner,
-        project_service,
-        fallback_user_id,
-        run_context,
-        input_resolver,
-        result_writer,
-    )
-}
-
 /// Test-support forwarder for the `result_read` synthetic-capability wrap
 /// (durable tool-result projection seam, issue #5838). Bridges the private
 /// `local_dev` module to `test_support.rs`; mirrors the `project_create`
@@ -1136,44 +1110,6 @@ pub(crate) fn local_dev_filesystem_skill_context_source_for_test(
         regex_skill_activation_enabled,
     )?;
     Ok((built.source, built.activation_source))
-}
-
-/// Test-support forwarder (E-SKILL seam) for the `skill_activate`
-/// synthetic-capability wrap. Bridges the private `local_dev` module to
-/// `test_support.rs`; mirrors the `project_create` forwarder above. Tests only.
-#[cfg(feature = "test-support")]
-pub(crate) fn wrap_skill_activation_capability_for_test(
-    inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    skill_activation_source: std::sync::Arc<LocalDevSelectableSkillContextSource>,
-    run_context: ironclaw_turns::run_profile::LoopRunContext,
-    input_resolver: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
-    result_writer: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
-) -> Result<
-    std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    ironclaw_turns::run_profile::AgentLoopHostError,
-> {
-    local_dev::wrap_skill_activation_capability_for_test(
-        inner,
-        skill_activation_source,
-        run_context,
-        input_resolver,
-        result_writer,
-    )
-}
-
-/// Test-support forwarder (C-SYNTH outbound seam) for the two
-/// `outbound_delivery_*` synthetic-capability wraps. Bridges the private
-/// `local_dev` module to `test_support`; mirrors the `project_create` /
-/// `skill_activate` forwarders above. Tests only.
-#[cfg(feature = "test-support")]
-pub(crate) fn wrap_outbound_delivery_capabilities_for_test(
-    inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    parts: crate::test_support::OutboundDeliveryCapabilityTestParts,
-) -> Result<
-    std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    ironclaw_turns::run_profile::AgentLoopHostError,
-> {
-    local_dev::wrap_outbound_delivery_capabilities_for_test(inner, parts)
 }
 
 /// Test-support forwarder (harness-port-seam P1 seam) for

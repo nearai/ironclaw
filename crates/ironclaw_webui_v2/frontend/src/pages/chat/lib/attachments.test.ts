@@ -1,7 +1,7 @@
 // @ts-nocheck
 // Unit tests for the composer's attachment staging helpers.
 //
-//   pnpm test -- pages/chat/lib/attachments.test.mts
+//   pnpm test -- pages/chat/lib/attachments.test.ts
 //
 // `stageFiles` reads bytes via the DOM `FileReader`, which Node does not
 // provide, so we install a tiny stub that echoes a data URL the fake file

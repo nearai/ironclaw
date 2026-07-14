@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
 
-import { CONNECTION_STATUS } from "../lib/connection-status.js";
+import { CONNECTION_STATUS } from "../lib/connection-status";
 
 function loadConnectionStatusForTest() {
   const source = readFileSync(new URL("./connection-status.tsx", import.meta.url), "utf8");

@@ -314,8 +314,20 @@ impl RebornBinaryE2EHarness {
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
     ) -> HarnessResult<Self> {
+        // The production capability port resolves the dispatch scope
+        // owner-first from the turn's real binding subject (this harness
+        // submits as the fixed `"alice"` actor, not the profile's default
+        // `"reborn-e2e-builtin-user"`), so the disabled global auto-approve
+        // setting must be seeded under that SAME resolved subject or the
+        // gate never raises -- mirrors
+        // `with_host_runtime_extension_lifecycle_capabilities`.
+        let subject_user = Self::resolve_default_binding_subject_user(conversation_id).await?;
         let host_runtime = Arc::new(
-            crate::reborn_support::harness::profiles::file::file_tools_requiring_approval().await?,
+            crate::reborn_support::harness::profiles::file::file_tools_requiring_approval_profile_for_user(
+                subject_user.as_str(),
+            )?
+            .build()
+            .await?,
         );
         Self::with_model_gateway_capability_mode(
             conversation_id,

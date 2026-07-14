@@ -4,13 +4,13 @@
 // auth gate) opens a popup to an external provider. The callback tab writes a
 // completion payload to localStorage AND posts it on a BroadcastChannel; the
 // opener tab listens on both and also polls localStorage. Both
-// `pages/extensions/hooks/useExtensions.js` and `pages/chat/hooks/useChat.js`
+// `pages/extensions/hooks/useExtensions.ts` and `pages/chat/hooks/useChat.ts`
 // drive that same event/popup contract, so the channel/storage-key constants,
 // the completion parser, the subscribe/read primitives, and the
 // HTTPS-auth-URL + popup helpers live here once. Each hook keeps its own state
 // machine; only this transport/popup contract is shared.
 //
-// Mirrors the style of `lib/channel-connection-events.js`.
+// Mirrors the style of `lib/channel-connection-events.ts`.
 
 export const OAUTH_CALLBACK_CHANNEL = "ironclaw-product-auth";
 export const OAUTH_CALLBACK_STORAGE_KEY = "ironclaw:product-auth:oauth-complete";

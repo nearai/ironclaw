@@ -15,6 +15,20 @@ use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 
+const SLACK_PERSONAL_SCOPES: &[&str] = &[
+    "search:read",
+    "channels:history",
+    "groups:history",
+    "im:history",
+    "mpim:history",
+    "channels:read",
+    "groups:read",
+    "im:read",
+    "mpim:read",
+    "users:read",
+    "chat:write",
+];
+
 #[tokio::test]
 async fn runs_numeric_time_input_through_builtin_tools_group() {
     let g = RebornIntegrationGroup::builtin_tools()
@@ -96,6 +110,105 @@ async fn runs_http_tool_call_through_recorded_egress() {
 }
 
 const HTTP_TOOL_URL: &str = "https://api.example.test/v1/items";
+
+/// A prior assistant refusal is conversation history, not capability truth.
+/// Once Slack is installed and activated, the refreshed tool definitions must
+/// be authoritative and the same conversation must be able to dispatch a real
+/// bundled `slack.*` capability through the production extension runtime.
+#[tokio::test]
+async fn current_tool_surface_overrides_stale_assistant_unavailable_claim() {
+    let group = RebornIntegrationGroup::extension_lifecycle()
+        .await
+        .expect("extension-lifecycle group builds");
+    let caller = group
+        .thread("stale-slack-unavailable-history")
+        .script([
+            RebornScriptedReply::tool_call("slack.list_conversations", json!({})),
+            RebornScriptedReply::text(
+                "I can't inspect Slack because no Slack tools are currently available.",
+            ),
+            RebornScriptedReply::tool_call("slack.list_conversations", json!({})),
+            RebornScriptedReply::text("Slack conversations checked."),
+        ])
+        .build()
+        .await
+        .expect("caller thread builds");
+
+    caller
+        .submit_turn("List my Slack conversations")
+        .await
+        .expect("uninstalled Slack call recovers to a refusal");
+    caller
+        .assert_tool_not_invoked("slack.list_conversations")
+        .await
+        .expect("uninstalled Slack capability is not dispatched");
+    caller
+        .assert_reply_contains("no Slack tools are currently available")
+        .await
+        .expect("stale refusal is persisted in conversation history");
+
+    let lifecycle = group
+        .thread("activate-slack-after-refusal")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.extension_install",
+                json!({"extension_id": "slack"}),
+            ),
+            RebornScriptedReply::tool_call(
+                "builtin.extension_activate",
+                json!({"extension_id": "slack"}),
+            ),
+            RebornScriptedReply::text("Slack is ready."),
+        ])
+        .build()
+        .await
+        .expect("Slack lifecycle thread builds");
+    lifecycle
+        .seed_capability_credential_account(
+            "slack_personal",
+            "itest Slack personal",
+            SLACK_PERSONAL_SCOPES,
+        )
+        .await
+        .expect("Slack personal credential is seeded with real test material");
+    lifecycle
+        .submit_turn("Install and activate Slack")
+        .await
+        .expect("Slack lifecycle turn completes");
+    lifecycle
+        .assert_tool_result_contains("\"activated\":true")
+        .await
+        .expect("Slack activation publishes its capability surface");
+
+    caller
+        .submit_turn("Now list my Slack conversations")
+        .await
+        .expect("refreshed Slack call completes");
+    caller
+        .assert_model_request_contains(
+            "I can't inspect Slack because no Slack tools are currently available.",
+        )
+        .await
+        .expect("current model request retains the stale assistant refusal");
+    caller
+        .assert_model_tools_contains("slack__list_conversations")
+        .await
+        .expect("current model request advertises the activated Slack tool");
+    caller
+        .assert_system_prompt_contains(
+            "The current tool definitions are authoritative for this turn",
+        )
+        .await
+        .expect("system guidance makes current capability truth outrank stale history");
+    caller
+        .assert_tool_invoked("slack.list_conversations")
+        .await
+        .expect("activated Slack capability dispatches through the real runtime");
+    caller
+        .assert_tool_result_contains("\"conversations\":[]")
+        .await
+        .expect("Slack WASM result reaches the model-facing capability result seam");
+}
 
 /// Guards against vacuous pass: with no scripted tool call, both
 /// `assert_tool_invoked` and `assert_egress_request_matching` must return `Err`.

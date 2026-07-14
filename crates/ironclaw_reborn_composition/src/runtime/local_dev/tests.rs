@@ -3139,7 +3139,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_outbound_delivery_capabilities_use_provider_backed_facade() {
+    async fn local_dev_outbound_delivery_targets_list_and_target_set_use_provider() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
             "local-dev-outbound-delivery-owner",
@@ -3280,6 +3280,16 @@ mod tests {
                 .description
                 .contains("before builtin__trigger_create"),
             "list tool description should steer delivery requests before trigger creation"
+        );
+        assert!(
+            list_tool.description.contains("cannot read conversations"),
+            "list tool description must distinguish delivery routing from integration reads"
+        );
+        assert!(
+            list_tool
+                .description
+                .contains("corresponding integration's read capabilities"),
+            "list tool description must route reads through the owning integration"
         );
         let set_tool = tool_definitions
             .iter()

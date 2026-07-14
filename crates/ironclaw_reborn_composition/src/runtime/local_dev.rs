@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     sync::{Arc, Mutex as StdMutex},
 };
 
@@ -79,18 +79,12 @@ pub(crate) use result_read::RESULT_READ_CAPABILITY_ID_FOR_TEST;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use skill_activation::SKILL_ACTIVATE_CAPABILITY_ID;
 
-/// Test-only bridges (E-PROJ / E-SKILL / result_read seams), co-located with
-/// the capability each wraps and re-exported here for the `runtime` caller.
-#[cfg(feature = "test-support")]
-pub(super) use outbound_delivery::wrap_outbound_delivery_capabilities_for_test;
-#[cfg(feature = "test-support")]
-pub(super) use project_create::wrap_project_create_capability_for_test;
+/// Test-only bridge (result_read seam, issue #5838), co-located with the
+/// capability it wraps and re-exported here for the `runtime` caller.
 #[cfg(feature = "test-support")]
 pub(super) use refreshing_capability_port::create_refreshing_local_dev_capability_port_for_test;
 #[cfg(feature = "test-support")]
 pub(super) use result_read::wrap_result_read_capability_for_test;
-#[cfg(feature = "test-support")]
-pub(super) use skill_activation::wrap_skill_activation_capability_for_test;
 
 pub(super) struct LocalDevCapabilityWiring {
     pub(super) capability_factory: Arc<dyn LoopCapabilityPortFactory>,
@@ -259,7 +253,8 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             // `RefreshingLocalDevCapabilityPortConfig`): always empty here.
             capability_execution_mount_overrides: HashMap::new(),
             additional_provider_trust: BTreeMap::new(),
-            capability_id_filter: HashSet::new(),
+            capability_id_filter: None,
+            additional_capability_grants: Vec::new(),
         })
         .await
     }

@@ -80,61 +80,6 @@ pub(super) fn outbound_delivery_capabilities(
     ])
 }
 
-/// Test-only bridge (C-SYNTH outbound seam): wrap `inner` with just the two
-/// `outbound_delivery_*` local-dev synthetic capabilities, so the Reborn
-/// integration-test harness can inject them onto its host-runtime capability
-/// port the same way production does
-/// (`RefreshingLocalDevCapabilityPort::build_inner`). Reuses the real
-/// `outbound_delivery_capabilities` + `wrap_local_dev_synthetic_capabilities`,
-/// so the test path never hand-mirrors the production wrap; builds the same
-/// `StoreApprovalSettingsProvider` production wires so the settings-decision
-/// (`Allow`/`Ask`/`Deny`) route is exercised for real. Mirrors
-/// `wrap_project_create_capability_for_test`. Tests only.
-#[cfg(feature = "test-support")]
-pub(crate) fn wrap_outbound_delivery_capabilities_for_test(
-    inner: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    parts: crate::test_support::OutboundDeliveryCapabilityTestParts,
-) -> Result<Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>, AgentLoopHostError> {
-    let crate::test_support::OutboundDeliveryCapabilityTestParts {
-        facade,
-        fallback_user_id,
-        approval_requests,
-        capability_leases,
-        tool_permission_overrides,
-        auto_approve,
-        persistent_policies,
-        target_set_requires_approval,
-        run_context,
-        input_resolver,
-        result_writer,
-    } = parts;
-
-    let approval_settings: Arc<dyn ApprovalSettingsProvider> = Arc::new(
-        crate::local_dev_authorization::StoreApprovalSettingsProvider::new(
-            tool_permission_overrides,
-            auto_approve,
-            persistent_policies,
-        ),
-    );
-    let capabilities = outbound_delivery_capabilities(
-        facade,
-        fallback_user_id,
-        approval_requests,
-        capability_leases,
-        target_set_requires_approval,
-        approval_settings,
-    )?;
-    super::synthetic_capability::wrap_local_dev_synthetic_capabilities(
-        inner,
-        capabilities,
-        run_context,
-        input_resolver,
-        result_writer,
-        // trajectory_observer: None — not wired in the integration-test harness.
-        None,
-    )
-}
-
 struct OutboundDeliveryTargetsListHandler {
     facade: Arc<dyn OutboundPreferencesProductFacade>,
     fallback_user_id: UserId,
