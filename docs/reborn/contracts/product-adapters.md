@@ -1,8 +1,19 @@
 # Reborn ProductAdapter contract
 
-**Status:** Draft (first slice landing for #3285).
-**Owner crate:** `ironclaw_product_adapters`.
-**Host runtime:** `ironclaw_wasm_product_adapters`.
+> **RETIRED (P7b, DEL-5).** The `ProductAdapter` trait, its
+> `ironclaw_wasm_product_adapters` host runtime crate, and the dead impls were
+> deleted as a consolidation; the live external-protocol contract is
+> **`ChannelAdapter`** (`ironclaw_channel_adapter` / `ironclaw_product_adapters`),
+> onto which ProductAdapter's conformance and outbound-delivery suites were
+> ported unweakened. Concrete integrations ship as first-party extension
+> packages under `crates/ironclaw_first_party_extensions` (P7b, DEL-8 lane A).
+> This document is retained for the historical design record of the
+> parse-inbound / render-outbound boundary; read it for the *shape* of the
+> contract, not for current type or crate names.
+
+**Status:** Retired — superseded by `ChannelAdapter` (see banner above).
+**Former owner crate:** `ironclaw_product_adapters`.
+**Former host runtime:** `ironclaw_wasm_product_adapters` (deleted in DEL-5).
 **First concrete adapter:** `ironclaw_telegram_extension`.
 **Related issues:** #3269 (this contract), #3285 (Telegram tracer bullet),
 #3266 (outbound policy), #3193 (conversation binding), #3094 (gate UX).
