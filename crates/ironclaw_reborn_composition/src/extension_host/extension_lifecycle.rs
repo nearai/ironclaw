@@ -105,9 +105,9 @@ use install_policy::{
     masked_not_installed,
 };
 #[cfg(test)]
-use registered_lifecycle::{OwnerScope, effective_owner_scope};
+use registered_lifecycle::OwnerScope;
 use registered_lifecycle::{
-    RegisteredOwnerLookup, installation_effective_owner_scope,
+    RegisteredOwnerLookup, effective_owner_scope, installation_effective_owner_scope,
     resolve_registered_installation_for_restore,
 };
 
@@ -234,6 +234,23 @@ pub(crate) async fn restore_extension_lifecycle_state(
         (TenantId, UserId),
         RegisteredOwnerLookup,
     > = std::collections::HashMap::new();
+    // Preload every stored manifest's source ONCE (mirrors `installed_summaries`'
+    // `stored_manifest_sources` batching, "Item 5") instead of letting the
+    // loop below issue an awaited `get_manifest` per installation: the pure
+    // `effective_owner_scope` helper needs only this map, no I/O.
+    let stored_manifest_sources: std::collections::HashMap<ExtensionId, ManifestSource> =
+        installation_store
+            .list_manifests()
+            .await
+            .map_err(map_extension_installation_error)?
+            .into_iter()
+            .map(|record| {
+                (
+                    record.extension_id().clone(),
+                    record.manifest().source.clone(),
+                )
+            })
+            .collect();
     for installation in installation_store
         .list_installations()
         .await
@@ -260,10 +277,11 @@ pub(crate) async fn restore_extension_lifecycle_state(
         // not abort restore for every other installation (#5499 review);
         // skip and keep the row (never delete/rewrite persisted state) so it
         // restores once the package reappears.
-        let available = match installation_effective_owner_scope(installation_store, &installation)
-            .await
+        let available = match stored_manifest_sources
+            .get(installation.extension_id())
+            .and_then(|source| effective_owner_scope(&installation, source))
         {
-            Ok(Some(owner_scope)) => {
+            Some(owner_scope) => {
                 match resolve_registered_installation_for_restore(
                     &registered_store,
                     &mut registered_by_owner,
@@ -277,7 +295,7 @@ pub(crate) async fn restore_extension_lifecycle_state(
                     None => continue,
                 }
             }
-            Ok(None) => {
+            None => {
                 // Not a registered row (no stored manifest, or a
                 // non-`UserRegistered` source) — the shared catalog is
                 // authoritative, same as every other non-registered
@@ -299,18 +317,6 @@ pub(crate) async fn restore_extension_lifecycle_state(
                         continue;
                     }
                 }
-            }
-            // A real store I/O failure while resolving the row's own owner
-            // scope — blast-radius policy: skip-and-log this one
-            // installation, never boot-abort the whole restore.
-            Err(error) => {
-                tracing::debug!(
-                    extension_id = installation.extension_id().as_str(),
-                    installation_id = installation.installation_id().as_str(),
-                    %error,
-                    "skipping extension installation restore: failed to read the row's registered-owner scope"
-                );
-                continue;
             }
         };
         if let Err(hash_error) = validate_restored_manifest_hash(&installation, &available) {
