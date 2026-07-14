@@ -5,6 +5,10 @@ runtime — a dedicated effort **after the P0–P7 train**, in the same shape as
 `adr/0001-multiple-accounts-per-vendor.md` (accepted post-train follow-up). It
 is not part of the closing train and must not be stacked onto it.
 
+**Concrete design:** `../messaging-framework.md` — the standard tools, their full
+input/output schemas, and the `[messaging]` opt-in mechanism. This ADR holds the
+decision, rationale, and rejected options; the proposal holds the how.
+
 **Trigger citation (required by `implementation.md` §14):** `overview.md` §7
 excluded a **"Generic 'dynamic tools' abstraction"** with the reason *"MCP is
 the only dynamic source; one `[mcp]` section, owned by the MCP loader"* and the
