@@ -24,6 +24,7 @@ mod reborn_support;
 mod support;
 
 mod scenario_delivery_target_fail_closed;
+mod scenario_final_reply_boundary;
 mod scenario_trigger_persists_after_reopen;
 mod scenario_trigger_self_create_denied;
 mod scenario_triggered_chained_gate;
@@ -44,6 +45,12 @@ async fn triggers_group_e2e() {
     // HEADLINE: create a one-shot Once trigger + list it in thread A, then
     // pause → resume → remove it by id in thread B over the shared repo.
     report.record("verbs_lifecycle", scenario_verbs_lifecycle::run(&g).await);
+    // Product-boundary redaction: a model-authored attempt to repeat a raw
+    // cron, trigger_id, and capability id is replaced before finalization.
+    report.record(
+        "final_reply_boundary",
+        scenario_final_reply_boundary::run(&g).await,
+    );
     // C-DURABLE: independent of `verbs_lifecycle` (its own trigger name/id) —
     // the trigger repository is always on-disk regardless of the group's
     // `StorageMode` (a separate capability-harness filesystem).
