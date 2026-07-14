@@ -87,3 +87,31 @@ Inspect the final diff for production `unwrap`/`expect`, schema or compatibility
 changes, unrelated churn, and stale docs. Commit, push, resolve review threads,
 and monitor required checks plus new review feedback until GitHub reports the
 exact pushed head mergeable with all required checks successful.
+
+## 7. Close final review gaps without weakening atomicity
+
+**Files:**
+
+- `crates/ironclaw_loop_host/src/budget_accountant.rs`
+- `crates/ironclaw_resources/src/filesystem_governor.rs`
+- `crates/ironclaw_resources/src/filesystem_governor/journal.rs`
+
+1. Add a failing accountant test in which a failed provider call selects
+   `Release`, the first storage-backed release fails, the retained action is
+   retried, and no reservation remains. Then keep the model-visible error
+   sanitized while binding the underlying `ResourceError` into the internal
+   accounting-failure log.
+2. Add a test-only recovery barrier and a failing concurrency test that holds
+   journal restart after the authority becomes `Recovering`. While the
+   authority mutex is released, verify that both reload and stale enqueue fail
+   closed; release the barrier and verify the next operation reloads durable
+   state.
+3. Add a failing journal contract test proving one queued delta calls only
+   `append` and two queued deltas call only `append_batch`. Restore the previous
+   singleton branch inside the existing bounded retry loop; do not retry any
+   error other than `BackendBusy` and do not split multi-delta batches.
+4. Run the focused red/green tests after each change, followed by the full
+   `ironclaw_resources`, `ironclaw_loop_host`, caller-level turn contract,
+   workspace clippy, build, architecture, Reborn E2E, and pre-commit commands
+   listed above. Push the rebased head, reply in each inline review thread, and
+   resolve only after the final implementation is visible on GitHub.

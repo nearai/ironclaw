@@ -40,6 +40,8 @@ mod authority;
 mod journal;
 
 use authority::ResourceAuthority;
+#[cfg(test)]
+use journal::JournalRestartHook;
 use journal::{
     PendingResourceDelta, ResourceDeltaJournal, ResourceGovernorDelta,
     compact_resource_governor_snapshot, replay_journal,
@@ -122,6 +124,12 @@ where
     #[cfg(test)]
     fn with_post_commit_hook(mut self, hook: PostCommitHook) -> Self {
         self.post_commit_hook = Some(hook);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_journal_restart_hook(mut self, hook: JournalRestartHook) -> Self {
+        self.delta_journal = self.delta_journal.with_restart_hook(hook);
         self
     }
 
@@ -758,6 +766,64 @@ mod tests {
         assert!(
             matches!(enqueue, Err(ResourceError::Storage { reason }) if reason.contains("authority changed")),
             "stale work must not enqueue while the lifecycle is recovering"
+        );
+    }
+
+    #[test]
+    fn live_recovery_rejects_reload_and_stale_enqueue_until_restart_finishes() {
+        let restart_entered = Arc::new(std::sync::Barrier::new(2));
+        let restart_release = Arc::new(std::sync::Barrier::new(2));
+        let hook_entered = Arc::clone(&restart_entered);
+        let hook_release = Arc::clone(&restart_release);
+        let governor = Arc::new(
+            FilesystemResourceGovernor::new(scoped_resources_fs()).with_journal_restart_hook(
+                Arc::new(move || {
+                    hook_entered.wait();
+                    hook_release.wait();
+                }),
+            ),
+        );
+        let stale = governor.authority().expect("authority");
+        let recovering_governor = Arc::clone(&governor);
+        let recovering_authority = Arc::clone(&stale);
+        let primary_reason = "primary durable journal write failed";
+        let recovery = std::thread::spawn(move || {
+            recovering_governor.invalidate_authority::<()>(
+                &recovering_authority,
+                ResourceError::Storage {
+                    reason: primary_reason.to_string(),
+                },
+            )
+        });
+
+        restart_entered.wait();
+        let reload = governor.authority();
+        let enqueue = governor.enqueue_delta(
+            &stale,
+            ResourceGovernorDelta::AccountSnapshot {
+                account: ResourceAccount::tenant(sample_scope().tenant_id),
+                at: chrono::Utc::now(),
+            },
+        );
+        restart_release.wait();
+        let recovery_result = recovery.join().expect("recovery thread");
+
+        assert!(
+            matches!(reload, Err(ResourceError::Storage { reason }) if reason.contains("recovery in progress")),
+            "new work must not reload authority while journal replacement is in progress"
+        );
+        assert!(
+            matches!(enqueue, Err(ResourceError::Storage { reason }) if reason.contains("authority changed")),
+            "stale work must fail closed while journal replacement is in progress"
+        );
+        assert!(
+            matches!(recovery_result, Err(ResourceError::Storage { reason }) if reason == primary_reason),
+            "recovery must preserve the request's primary storage error"
+        );
+        let replacement = governor.authority().expect("replacement authority");
+        assert!(
+            !Arc::ptr_eq(&replacement, &stale),
+            "successful restart must reload a fresh authority generation"
         );
     }
 

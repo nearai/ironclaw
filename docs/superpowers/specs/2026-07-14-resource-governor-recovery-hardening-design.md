@@ -36,7 +36,8 @@ unlimited bypass.
    cancelled calls retain `Release`. Storage failures retry that exact action
    after governor recovery and never substitute a release for known spend.
 6. Retried storage operations are limited to typed contention outcomes from an
-   atomic all-or-nothing `append_batch`. SQLite/libSQL BUSY/LOCKED and Postgres
+   atomic journal write. A singleton flush uses `append`; a multi-delta flush
+   uses all-or-nothing `append_batch`. SQLite/libSQL BUSY/LOCKED and Postgres
    serialization/deadlock/lock-unavailable errors enter this path; unrelated
    backend failures do not.
 
@@ -67,10 +68,12 @@ will continue starting additional retries. It does not cancel an in-flight SQL
 future at an arbitrary wall-clock timeout because cancellation at the commit
 boundary could create an ambiguous outcome.
 
-`RootFilesystem::append_batch` is the safety contract: success means the whole
-batch committed and error means none committed. A remote backend that cannot
-distinguish a pre-commit contention failure from a lost post-commit response
-must not classify that ambiguous transport outcome as `BackendBusy`.
+`RootFilesystem::append` is the atomic safety contract for a singleton delta;
+`RootFilesystem::append_batch` is the all-or-nothing safety contract for two or
+more deltas. Success means the requested write committed, while a retryable
+contention error means none committed. A remote backend that cannot distinguish
+a pre-commit contention failure from a lost post-commit response must not
+classify that ambiguous transport outcome as `BackendBusy`.
 
 Once a request receives its sequence acknowledgement, it returns success and
 emits its success event. It does not re-check whether another request poisoned
@@ -116,8 +119,14 @@ Regression coverage must prove:
 - default seeding failure prevents reservation/provider admission and retries
   on the next call;
 - reconciliation retries preserve provider-reported usage, while cancellation
-  retries release;
+  retries release, including a transient storage failure on the release path;
+- the internal accounting failure log preserves the bound storage error for
+  operators while the model-visible error remains sanitized;
+- a real concurrent operation cannot reload or enqueue while journal recovery
+  holds the lifecycle in `Recovering` with the authority mutex released;
 - SQLite/libSQL and Postgres contention codes map to `BackendBusy`, and only
-  that typed outcome enters the bounded atomic-batch retry path;
+  that typed outcome enters the bounded atomic journal retry path;
+- singleton flushes use `append`, multi-delta flushes use `append_batch`, and
+  both paths preserve the same retry eligibility and acknowledgement rules;
 - the real libSQL contention contract still fails the affected request,
   reloads the same governor, and writes exactly one successful delta.

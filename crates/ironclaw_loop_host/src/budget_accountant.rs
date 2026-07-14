@@ -324,8 +324,9 @@ impl GovernorBackedAccountant {
                     self.in_flight.remove(&context.run_id);
                     return Ok(());
                 }
-                Err(ResourceError::Storage { .. }) if attempt < max_attempts => {
+                Err(error @ ResourceError::Storage { .. }) if attempt < max_attempts => {
                     tracing::warn!(
+                        error = ?error,
                         attempt,
                         max_attempts,
                         action = entry.pending.kind(),
@@ -347,6 +348,7 @@ impl GovernorBackedAccountant {
         error: &ResourceError,
     ) -> Result<(), LoopModelGatewayError> {
         tracing::warn!(
+            error = ?error,
             error_kind = resource_error_kind(error),
             action = entry.pending.kind(),
             run_id = ?context.run_id,
@@ -419,6 +421,7 @@ impl GovernorBackedAccountant {
         let scope = self.resource_scope(context);
         if let Err(error) = self.seed_if_missing(&scope) {
             tracing::warn!(
+                error = ?error,
                 error_kind = resource_error_kind(&error),
                 run_id = ?context.run_id,
                 "default budget seeding failed; model admission denied"
@@ -499,11 +502,19 @@ impl GovernorBackedAccountant {
                 )
                 .map_err(internal_summary_error)?)
             }
-            Err(_) => Err(LoopModelGatewayError::new(
-                AgentLoopHostErrorKind::BudgetAccountingFailed,
-                "budget reservation failed",
-            )
-            .map_err(internal_summary_error)?),
+            Err(error) => {
+                tracing::warn!(
+                    error = ?error,
+                    error_kind = resource_error_kind(&error),
+                    run_id = ?context.run_id,
+                    "budget reservation failed; model admission denied"
+                );
+                Err(LoopModelGatewayError::new(
+                    AgentLoopHostErrorKind::BudgetAccountingFailed,
+                    "budget reservation failed",
+                )
+                .map_err(internal_summary_error)?)
+            }
         }
     }
 
@@ -758,6 +769,8 @@ fn budget_gate_ref(gate_id: BudgetGateId) -> Option<LoopGateRef> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use crate::budget_cost_table::ZeroCostTable;
     use chrono::Utc;
@@ -780,6 +793,7 @@ mod tests {
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
+    use tracing_test::traced_test;
 
     fn run_context() -> LoopRunContext {
         let scope = TurnScope::new(
@@ -860,6 +874,68 @@ mod tests {
     impl ModelCostTable for CostStub {
         fn cost_for(&self, _: &ModelProfileId) -> Option<ModelCost> {
             Some(self.0)
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailFirstReleaseGovernor {
+        release_calls: AtomicUsize,
+        inner: InMemoryResourceGovernor,
+        fail_first_n: usize,
+    }
+
+    impl ResourceGovernor for FailFirstReleaseGovernor {
+        fn set_limit(
+            &self,
+            account: ResourceAccount,
+            limits: ResourceLimits,
+        ) -> Result<(), ResourceError> {
+            self.inner.set_limit(account, limits)
+        }
+
+        fn reserve_with_outcome(
+            &self,
+            scope: ResourceScope,
+            estimate: ResourceEstimate,
+        ) -> Result<ReservationOutcome, ResourceError> {
+            self.inner.reserve_with_outcome(scope, estimate)
+        }
+
+        fn reserve_with_id_and_outcome(
+            &self,
+            scope: ResourceScope,
+            estimate: ResourceEstimate,
+            reservation_id: ResourceReservationId,
+        ) -> Result<ReservationOutcome, ResourceError> {
+            self.inner
+                .reserve_with_id_and_outcome(scope, estimate, reservation_id)
+        }
+
+        fn reconcile(
+            &self,
+            reservation_id: ResourceReservationId,
+            actual: ResourceUsage,
+        ) -> Result<ResourceReceipt, ResourceError> {
+            self.inner.reconcile(reservation_id, actual)
+        }
+
+        fn release(
+            &self,
+            reservation_id: ResourceReservationId,
+        ) -> Result<ResourceReceipt, ResourceError> {
+            if self.release_calls.fetch_add(1, Ordering::SeqCst) < self.fail_first_n {
+                return Err(ResourceError::Storage {
+                    reason: "synthetic transient release persistence failure".to_string(),
+                });
+            }
+            self.inner.release(reservation_id)
+        }
+
+        fn account_snapshot(
+            &self,
+            account: &ResourceAccount,
+        ) -> Result<Option<AccountSnapshot>, ResourceError> {
+            self.inner.account_snapshot(account)
         }
     }
 
@@ -1013,6 +1089,55 @@ mod tests {
             .await
             .unwrap();
         assert!(!accountant.in_flight.contains_key(&context.run_id));
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn failed_model_release_retains_action_logs_cause_and_recovers() {
+        let governor = Arc::new(FailFirstReleaseGovernor {
+            release_calls: AtomicUsize::new(0),
+            inner: InMemoryResourceGovernor::new(),
+            fail_first_n: 2,
+        });
+        let accountant = GovernorBackedAccountant::new(
+            governor.clone() as Arc<dyn ResourceGovernor>,
+            Arc::new(ZeroCostTable),
+        );
+        let context = run_context();
+        let request = sample_request();
+        accountant.pre_model_call(&context, &request).await.unwrap();
+        let failure =
+            LoopModelGatewayError::new(AgentLoopHostErrorKind::Unavailable, "model unavailable")
+                .unwrap();
+
+        let error = accountant
+            .post_model_call(&context, &request, ModelCallOutcome::Failure(&failure))
+            .await
+            .expect_err("two storage failures should retain the release and fail closed");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::BudgetAccountingFailed);
+        assert_eq!(governor.release_calls.load(Ordering::SeqCst), 2);
+        assert!(
+            accountant.in_flight.contains_key(&context.run_id),
+            "the failed release must remain available for cleanup"
+        );
+        assert!(
+            logs_contain("synthetic transient release persistence failure"),
+            "operator diagnostics must retain the underlying storage cause"
+        );
+
+        accountant.release_in_flight(&context);
+
+        assert_eq!(governor.release_calls.load(Ordering::SeqCst), 3);
+        assert!(
+            !accountant.in_flight.contains_key(&context.run_id),
+            "successful cleanup must remove the retained release"
+        );
+        accountant
+            .pre_model_call(&context, &request)
+            .await
+            .expect("the run must admit a new reservation after cleanup");
+        accountant.release_in_flight(&context);
     }
 
     #[tokio::test]

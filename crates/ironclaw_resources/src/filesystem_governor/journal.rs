@@ -108,7 +108,12 @@ where
     filesystem: Arc<ScopedFilesystem<F>>,
     sender: Mutex<mpsc::Sender<DeltaJournalRequest>>,
     retry_policy: BusyRetryPolicy,
+    #[cfg(test)]
+    restart_hook: Option<JournalRestartHook>,
 }
+
+#[cfg(test)]
+pub(super) type JournalRestartHook = Arc<dyn Fn() + Send + Sync>;
 
 pub(super) struct PendingResourceDelta {
     ack: mpsc::Receiver<Result<SeqNo, ResourceError>>,
@@ -147,6 +152,8 @@ where
             filesystem,
             sender: Mutex::new(sender),
             retry_policy,
+            #[cfg(test)]
+            restart_hook: None,
         }
     }
 
@@ -159,6 +166,10 @@ where
     }
 
     pub(super) fn restart(&self) -> Result<(), ResourceError> {
+        #[cfg(test)]
+        if let Some(hook) = &self.restart_hook {
+            hook();
+        }
         let replacement =
             spawn_delta_journal_flusher(Arc::clone(&self.filesystem), self.retry_policy)?;
         *self
@@ -167,6 +178,12 @@ where
             .map_err(|_| storage_error("resource governor delta journal sender lock poisoned"))? =
             replacement;
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_restart_hook(mut self, hook: JournalRestartHook) -> Self {
+        self.restart_hook = Some(hook);
+        self
     }
 
     pub(super) fn enqueue(
@@ -293,10 +310,19 @@ where
     let started = Instant::now();
     let mut retry = 0;
     let seqs = loop {
-        match filesystem
-            .append_batch(&ResourceScope::system(), &path, payloads.clone())
-            .await
-        {
+        let scope = ResourceScope::system();
+        let append_result = match payloads.as_slice() {
+            [payload] => filesystem
+                .append(&scope, &path, payload.clone())
+                .await
+                .map(|seq| vec![seq]),
+            _ => {
+                filesystem
+                    .append_batch(&scope, &path, payloads.clone())
+                    .await
+            }
+        };
+        match append_result {
             Ok(seqs) => break seqs,
             Err(error @ FilesystemError::BackendBusy { .. }) => {
                 let elapsed = started.elapsed();
@@ -457,8 +483,13 @@ mod tests {
         append_batch_calls: AtomicUsize,
     }
 
-    struct SlowBusyAppendFilesystem {
+    struct BusyOnceAppendBatchFilesystem {
+        append_calls: AtomicUsize,
         append_batch_calls: AtomicUsize,
+    }
+
+    struct SlowBusyAppendFilesystem {
+        append_attempts: AtomicUsize,
         delay: Duration,
     }
 
@@ -471,12 +502,30 @@ mod tests {
         }
     }
 
+    impl BusyOnceAppendBatchFilesystem {
+        fn new() -> Self {
+            Self {
+                append_calls: AtomicUsize::new(0),
+                append_batch_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
     impl SlowBusyAppendFilesystem {
         fn new(delay: Duration) -> Self {
             Self {
-                append_batch_calls: AtomicUsize::new(0),
+                append_attempts: AtomicUsize::new(0),
                 delay,
             }
+        }
+
+        async fn wait_then_busy<T>(&self, path: &VirtualPath) -> Result<T, FilesystemError> {
+            self.append_attempts.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(self.delay).await;
+            Err(FilesystemError::BackendBusy {
+                path: path.clone(),
+                operation: FilesystemOperation::Append,
+            })
         }
     }
 
@@ -534,8 +583,53 @@ mod tests {
             path: &VirtualPath,
             _payload: Vec<u8>,
         ) -> Result<SeqNo, FilesystemError> {
+            let call = self.append_calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                return Err(FilesystemError::BackendBusy {
+                    path: path.clone(),
+                    operation: FilesystemOperation::Append,
+                });
+            }
+            Ok(SeqNo::from_backend(1))
+        }
+
+        async fn append_batch(
+            &self,
+            path: &VirtualPath,
+            _payloads: Vec<Vec<u8>>,
+        ) -> Result<Vec<SeqNo>, FilesystemError> {
+            self.append_batch_calls.fetch_add(1, Ordering::SeqCst);
+            Err(backend_error(
+                path,
+                "singleton append unexpectedly used the batch API",
+            ))
+        }
+
+        async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+            Err(unsupported(path, FilesystemOperation::ListDir))
+        }
+
+        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+            Err(unsupported(path, FilesystemOperation::Stat))
+        }
+    }
+
+    #[async_trait]
+    impl RootFilesystem for BusyOnceAppendBatchFilesystem {
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities::sql_typical().with(Capability::Events)
+        }
+
+        async fn append(
+            &self,
+            path: &VirtualPath,
+            _payload: Vec<u8>,
+        ) -> Result<SeqNo, FilesystemError> {
             self.append_calls.fetch_add(1, Ordering::SeqCst);
-            Err(backend_error(path, "single append is not atomic for retry"))
+            Err(backend_error(
+                path,
+                "multi-delta flush unexpectedly used the singleton API",
+            ))
         }
 
         async fn append_batch(
@@ -570,17 +664,20 @@ mod tests {
             BackendCapabilities::sql_typical().with(Capability::Events)
         }
 
+        async fn append(
+            &self,
+            path: &VirtualPath,
+            _payload: Vec<u8>,
+        ) -> Result<SeqNo, FilesystemError> {
+            self.wait_then_busy(path).await
+        }
+
         async fn append_batch(
             &self,
             path: &VirtualPath,
             _payloads: Vec<Vec<u8>>,
         ) -> Result<Vec<SeqNo>, FilesystemError> {
-            self.append_batch_calls.fetch_add(1, Ordering::SeqCst);
-            tokio::time::sleep(self.delay).await;
-            Err(FilesystemError::BackendBusy {
-                path: path.clone(),
-                operation: FilesystemOperation::Append,
-            })
+            self.wait_then_busy(path).await
         }
 
         async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
@@ -658,8 +755,20 @@ mod tests {
         Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
     }
 
+    fn scoped_busy_once_batch_filesystem(
+        backend: Arc<BusyOnceAppendBatchFilesystem>,
+    ) -> Arc<ScopedFilesystem<BusyOnceAppendBatchFilesystem>> {
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/resources").expect("alias"),
+            VirtualPath::new("/resources").expect("target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view");
+        Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
+    }
+
     #[test]
-    fn transient_busy_append_batch_is_retried_without_using_single_append() {
+    fn transient_busy_single_append_is_retried_without_using_batch() {
         let backend = Arc::new(BusyOnceAppendFilesystem::new());
         let journal = ResourceDeltaJournal::new(scoped_busy_once_filesystem(Arc::clone(&backend)));
         let pending = journal
@@ -672,6 +781,38 @@ mod tests {
         let seq = pending.wait().expect("busy append should recover");
 
         assert_eq!(seq, SeqNo::from_backend(1));
+        assert_eq!(backend.append_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(backend.append_batch_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn transient_busy_multi_delta_batch_is_retried_atomically() {
+        let backend = Arc::new(BusyOnceAppendBatchFilesystem::new());
+        let filesystem = scoped_busy_once_batch_filesystem(Arc::clone(&backend));
+        let account = ResourceAccount::tenant(TenantId::new("tenant1").expect("tenant id"));
+        let requests = [
+            DeltaJournalRequest {
+                delta: ResourceGovernorDelta::AccountSnapshot {
+                    account: account.clone(),
+                    at: Utc::now(),
+                },
+                ack: std::sync::mpsc::channel().0,
+            },
+            DeltaJournalRequest {
+                delta: ResourceGovernorDelta::AccountSnapshot {
+                    account,
+                    at: Utc::now(),
+                },
+                ack: std::sync::mpsc::channel().0,
+            },
+        ];
+
+        let seqs =
+            persist_delta_journal_batch(filesystem.as_ref(), &requests, DEFAULT_BUSY_RETRY_POLICY)
+                .await
+                .expect("busy batch append should recover atomically");
+
+        assert_eq!(seqs, vec![SeqNo::from_backend(1), SeqNo::from_backend(2)]);
         assert_eq!(backend.append_calls.load(Ordering::SeqCst), 0);
         assert_eq!(backend.append_batch_calls.load(Ordering::SeqCst), 2);
     }
@@ -701,7 +842,7 @@ mod tests {
             "busy retry window must fail closed"
         );
         assert_eq!(
-            backend.append_batch_calls.load(Ordering::SeqCst),
+            backend.append_attempts.load(Ordering::SeqCst),
             2,
             "the journal must not start a third database attempt after the retry window is exhausted"
         );
