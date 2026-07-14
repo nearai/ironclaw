@@ -4,7 +4,7 @@ set -euo pipefail
 # Run the deterministic Rust-side Reborn E2E gate.
 # Usage:
 #   scripts/reborn-e2e-rust.sh              # all groups
-#   scripts/reborn-e2e-rust.sh architecture # boundary + host runtime spine
+#   scripts/reborn-e2e-rust.sh architecture # model + boundary + host runtime spine
 #   scripts/reborn-e2e-rust.sh runtimes     # dispatcher/runtime/process lanes
 #   scripts/reborn-e2e-rust.sh substrates   # event/network/secret substrates
 #
@@ -24,6 +24,9 @@ run_test() {
 }
 
 run_architecture() {
+  run_test ironclaw_extensions manifest_v2_contract
+  run_test ironclaw_product_adapter_registry manifest_ingestion
+  run_test ironclaw_architecture reborn_retired_taxonomy
   run_test ironclaw_architecture reborn_dependency_boundaries
   run_test ironclaw_host_runtime host_runtime_contract
   run_test ironclaw_host_runtime host_runtime_services_contract
