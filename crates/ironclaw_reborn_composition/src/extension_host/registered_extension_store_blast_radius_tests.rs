@@ -9,11 +9,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_extensions::{
-    ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
-    ExtensionInstallationStore, ExtensionLifecycleService, ExtensionManifest,
-    ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage, ExtensionRegistry,
-    InMemoryExtensionInstallationStore, InstallationOwner, ManifestHash, ManifestSource,
-    SharedExtensionRegistry,
+    ExtensionActivationState, ExtensionInstallation, ExtensionInstallationError,
+    ExtensionInstallationId, ExtensionInstallationStore, ExtensionLifecycleService,
+    ExtensionManifest, ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage,
+    ExtensionRegistry, InMemoryExtensionInstallationStore, InstallationOwner, ManifestHash,
+    ManifestSource, SharedExtensionRegistry,
 };
 use ironclaw_filesystem::{
     DirEntry, FileStat, FilesystemError, LocalFilesystem, RootFilesystem, VersionedEntry,
@@ -1077,6 +1077,35 @@ async fn migration_continues_after_one_owner_io_failure() {
     );
 }
 
+/// #5970 review (Fix 2): `migrate_legacy_owner_layout`'s TOP-LEVEL
+/// `fs.list_dir(&root)` read (before the per-owner loop) returns
+/// `ProductWorkflowError::Transient` for a real listing failure — distinct
+/// from the `NotFound`/`MountNotFound` early-return, which is the legitimate
+/// "nothing to migrate yet" case. `migration_continues_after_one_owner_io_failure`
+/// above only injects the failure on a per-owner subdirectory (skip-and-log);
+/// this pins the ROOT-level failure, which instead aborts the whole
+/// migration pass.
+#[tokio::test]
+async fn migrate_legacy_owner_layout_propagates_root_list_dir_failure() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage_root = dir.path().join("local-dev");
+    let local_filesystem = mounted_local_filesystem(&storage_root);
+    let root = VirtualPath::new("/system/extensions/registered").expect("valid virtual path");
+    let filesystem = FailListDirFilesystem {
+        inner: local_filesystem,
+        fail_path: root,
+    };
+
+    let error = migrate_legacy_owner_layout(&filesystem)
+        .await
+        .expect_err("a root-level list_dir failure must propagate, not be swallowed");
+
+    assert!(
+        matches!(error, ProductWorkflowError::Transient { .. }),
+        "expected a transient error from the failed registered-root listing, got {error:?}"
+    );
+}
+
 const SIBLING_MIGRATION_OWNER_USER_ID: &str = "a2222222-7fe5-474c-965a-67cb69df3d14";
 const SIBLING_HEALTHY_EXTENSION_ID: &str = "sibling-healthy-mcp";
 const SIBLING_BROKEN_EXTENSION_ID: &str = "sibling-broken-mcp";
@@ -1539,5 +1568,130 @@ async fn migrate_unminted_id_with_existing_destination() {
             .is_some(),
         "the manifest record must still be rekeyed onto the new (minted) id even when the \
          filesystem destination already existed"
+    );
+}
+
+/// Wraps `InMemoryExtensionInstallationStore`, injecting a failure into
+/// `list_manifests` only — the installation-store counterpart to
+/// `FailListDirFilesystem` above, for `migrate_unminted_registered_ids`'s
+/// startup read.
+#[derive(Default)]
+struct FailListManifestsStore {
+    inner: InMemoryExtensionInstallationStore,
+}
+
+#[async_trait]
+impl ExtensionInstallationStore for FailListManifestsStore {
+    async fn list_manifests(
+        &self,
+    ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError> {
+        Err(ExtensionInstallationError::InvalidInstallation {
+            reason: "injected list_manifests failure".to_string(),
+        })
+    }
+
+    async fn get_manifest(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<Option<ExtensionManifestRecord>, ExtensionInstallationError> {
+        self.inner.get_manifest(extension_id).await
+    }
+
+    async fn upsert_manifest(
+        &self,
+        manifest: ExtensionManifestRecord,
+    ) -> Result<(), ExtensionInstallationError> {
+        self.inner.upsert_manifest(manifest).await
+    }
+
+    async fn upsert_manifest_and_installation(
+        &self,
+        manifest: ExtensionManifestRecord,
+        installation: ExtensionInstallation,
+    ) -> Result<(), ExtensionInstallationError> {
+        self.inner
+            .upsert_manifest_and_installation(manifest, installation)
+            .await
+    }
+
+    async fn list_installations(
+        &self,
+    ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
+        self.inner.list_installations().await
+    }
+
+    async fn list_enabled_installations(
+        &self,
+    ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
+        self.inner.list_enabled_installations().await
+    }
+
+    async fn get_installation(
+        &self,
+        installation_id: &ExtensionInstallationId,
+    ) -> Result<Option<ExtensionInstallation>, ExtensionInstallationError> {
+        self.inner.get_installation(installation_id).await
+    }
+
+    async fn upsert_installation(
+        &self,
+        installation: ExtensionInstallation,
+    ) -> Result<(), ExtensionInstallationError> {
+        self.inner.upsert_installation(installation).await
+    }
+
+    async fn set_activation_state(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        state: ExtensionActivationState,
+    ) -> Result<(), ExtensionInstallationError> {
+        self.inner
+            .set_activation_state(installation_id, state)
+            .await
+    }
+
+    async fn delete_installation(
+        &self,
+        installation_id: &ExtensionInstallationId,
+    ) -> Result<(), ExtensionInstallationError> {
+        self.inner.delete_installation(installation_id).await
+    }
+
+    async fn delete_manifest(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<(), ExtensionInstallationError> {
+        self.inner.delete_manifest(extension_id).await
+    }
+
+    async fn update_health(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        health: ironclaw_extensions::ExtensionHealthSnapshot,
+    ) -> Result<(), ExtensionInstallationError> {
+        self.inner.update_health(installation_id, health).await
+    }
+}
+
+/// #5970 review (Fix 1): `migrate_unminted_registered_ids` propagates
+/// `installation_store.list_manifests()` failures via `map_transient`
+/// (`registered_extension_store.rs`), but no test exercised that startup
+/// error path. Pins that a real `list_manifests` failure surfaces as a
+/// `ProductWorkflowError::Transient`, not swallowed or panicking.
+#[tokio::test]
+async fn migrate_unminted_registered_ids_propagates_list_manifests_failure() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage_root = dir.path().join("local-dev");
+    let filesystem = mounted_local_filesystem(&storage_root);
+    let installation_store: Arc<dyn ExtensionInstallationStore> =
+        Arc::new(FailListManifestsStore::default());
+
+    let error = migrate_unminted_registered_ids(&filesystem, &installation_store)
+        .await
+        .expect_err("a list_manifests failure must propagate, not be swallowed");
+
+    assert!(
+        matches!(error, ProductWorkflowError::Transient { .. }),
+        "expected a transient error from the failed list_manifests read, got {error:?}"
     );
 }
