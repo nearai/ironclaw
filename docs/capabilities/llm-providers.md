@@ -30,6 +30,7 @@ ironclaw onboard --provider-only
 | MiniMax               | `minimax`           | `MINIMAX_API_KEY`      | MiniMax-M2.7 models             |
 | Cloudflare Workers AI | `cloudflare`        | `CLOUDFLARE_API_KEY`   | Access to Workers AI            |
 | GitHub Copilot        | `github_copilot`    | `GITHUB_COPILOT_TOKEN` | Multi-models                    |
+| Manifest              | `manifest`          | `MANIFEST_API_KEY`     | Open-source LLM router          |
 | Ollama                | `ollama`            | No                     | Local inference                 |
 | AWS Bedrock           | `bedrock`           | AWS credentials        | Native Converse API             |
 | OpenRouter            | `openai_compatible` | `LLM_API_KEY`          | 300+ models                     |
@@ -225,6 +226,24 @@ Set `BEDROCK_CROSS_REGION` to route requests across AWS regions for capacity:
 | Claude Haiku 4.5  | `anthropic.claude-haiku-4-5-20251001-v1:0`  |
 | Amazon Nova Pro   | `amazon.nova-pro-v1:0`                      |
 | Llama 4 Maverick  | `meta.llama4-maverick-17b-instruct-v1:0`    |
+
+---
+
+## Manifest (Open-Source LLM Router)
+
+[Manifest](https://manifest.build) is an open-source LLM router that cuts inference costs through smart routing across 16+ providers. You get full control over which model handles each request. Route by complexity tier, task-specificity (coding, web browsing, etc.) and custom tiers.
+
+```env
+LLM_BACKEND=manifest
+MANIFEST_API_KEY=mnfst_...
+MANIFEST_MODEL=auto
+```
+
+Manifest is open-source and can be self-hosted with Docker for fully private inference. Override the base URL to point to your local instance:
+
+```env
+MANIFEST_BASE_URL=http://localhost:2099/v1
+```
 
 ---
 
