@@ -3269,6 +3269,22 @@ output_schema_ref = "schemas/run.output.json"
             format!("{shadow_error}").contains("already exists in the catalog"),
             "unexpected error: {shadow_error}"
         );
+
+        // R1's minted hosted-MCP namespace must also be structurally
+        // unreachable via upload, not just filesystem discovery — an
+        // uploaded bundle claiming a minted-looking id must be rejected
+        // before it ever reaches the catalog/duplicate checks above.
+        let namespace_error = facade
+            .import_extension_bundle(
+                lifecycle_surface_context(),
+                importable_tool_zip("mcp-0123456789abcdef"),
+            )
+            .await
+            .expect_err("hosted MCP namespace ids must be rejected on upload");
+        assert!(
+            format!("{namespace_error}").contains("hosted MCP"),
+            "unexpected error: {namespace_error}"
+        );
     }
 
     /// #5499 review finding #3 guard: the unzip/validation phase runs in
