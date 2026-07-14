@@ -1405,3 +1405,139 @@ async fn migrate_registered_id_does_not_leave_stale_destination_manifest_on_part
         "(c) the old installation row must be removed once migration completes"
     );
 }
+
+const EXISTING_DESTINATION_OWNER_USER_ID: &str = "e1010101-7fe5-474c-965a-67cb69df3d16";
+const EXISTING_DESTINATION_OLD_EXTENSION_ID: &str = "acme-mcp-unminted-existing-dest";
+const EXISTING_DESTINATION_MANIFEST_TOML: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "acme-mcp-unminted-existing-dest"
+name = "Acme Unminted Existing-Destination MCP"
+version = "0.1.0"
+description = "Unminted registered MCP whose minted destination already exists (existing-destination migration fixture)"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "http://127.0.0.1:9/mcp-unminted-existing-dest"
+"#;
+const EXISTING_DESTINATION_MARKER_MANIFEST_TOML: &str = "# pre-existing destination manifest — simulates a completed prior migration attempt or a \
+     genuine id collision, must not be clobbered\n";
+
+/// #5970 review (Fix 2): `migrate_registered_id`'s destination-already-exists
+/// branch (`fs.stat(&destination_manifest)` returns `Ok`) skips `copy_tree`
+/// and the destination-manifest write, but every step below it still runs
+/// unconditionally: installation-store rekeying onto the new id, deletion of
+/// the OLD manifest/installation rows, and `fs.delete(&source)`. Pins the
+/// real current behavior: the pre-existing destination content survives
+/// byte-for-byte untouched, the OLD source directory is still removed, and
+/// the installation store is still rekeyed onto the new (minted) id.
+#[tokio::test]
+async fn migrate_unminted_id_with_existing_destination() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage_root = dir.path().join("local-dev");
+    std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
+
+    let default_tenant =
+        TenantId::from_trusted(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string());
+    let owner = UserId::new(EXISTING_DESTINATION_OWNER_USER_ID).expect("valid owner id");
+
+    let old_dir = storage_root
+        .join("system/extensions/registered")
+        .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
+        .join(EXISTING_DESTINATION_OWNER_USER_ID)
+        .join(EXISTING_DESTINATION_OLD_EXTENSION_ID);
+    std::fs::create_dir_all(&old_dir).expect("old descriptor dir");
+    std::fs::write(
+        old_dir.join("manifest.toml"),
+        EXISTING_DESTINATION_MANIFEST_TOML,
+    )
+    .expect("write old manifest");
+
+    let installation_store: Arc<dyn ExtensionInstallationStore> =
+        Arc::new(InMemoryExtensionInstallationStore::default());
+    let (new_id, _) = seed_registered_installation(
+        &installation_store,
+        EXISTING_DESTINATION_MANIFEST_TOML,
+        &default_tenant,
+        &owner,
+        EXISTING_DESTINATION_OLD_EXTENSION_ID,
+        None,
+    )
+    .await;
+    let old_installation_id = ExtensionInstallationId::new(EXISTING_DESTINATION_OLD_EXTENSION_ID)
+        .expect("valid installation id");
+    let old_extension_id =
+        ExtensionId::new(EXISTING_DESTINATION_OLD_EXTENSION_ID).expect("valid extension id");
+
+    // Pre-populate the DESTINATION descriptor as already present — simulating
+    // either a completed prior migration attempt (partial-failure retry) or a
+    // genuine id collision — before running the migration.
+    let destination_dir = storage_root
+        .join("system/extensions/registered")
+        .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
+        .join(EXISTING_DESTINATION_OWNER_USER_ID)
+        .join(new_id.as_str());
+    std::fs::create_dir_all(&destination_dir).expect("destination descriptor dir");
+    std::fs::write(
+        destination_dir.join("manifest.toml"),
+        EXISTING_DESTINATION_MARKER_MANIFEST_TOML,
+    )
+    .expect("write pre-existing destination manifest");
+
+    let filesystem = mounted_local_filesystem(&storage_root);
+    migrate_unminted_registered_ids(&filesystem, &installation_store)
+        .await
+        .expect("migration over an already-present destination must not fail");
+
+    assert_eq!(
+        std::fs::read_to_string(destination_dir.join("manifest.toml"))
+            .expect("read destination manifest"),
+        EXISTING_DESTINATION_MARKER_MANIFEST_TOML,
+        "the pre-existing destination manifest must be preserved untouched, not overwritten by \
+         copy_tree or a re-derived new_toml write"
+    );
+
+    assert!(
+        !old_dir.exists(),
+        "the source directory must still be removed even when the destination already existed"
+    );
+
+    assert!(
+        installation_store
+            .get_installation(&old_installation_id)
+            .await
+            .expect("store read")
+            .is_none(),
+        "the OLD installation row must be removed even when the destination already existed"
+    );
+    assert!(
+        installation_store
+            .get_manifest(&old_extension_id)
+            .await
+            .expect("store read")
+            .is_none(),
+        "the OLD manifest record must be removed even when the destination already existed"
+    );
+
+    let new_installation_id =
+        ExtensionInstallationId::new(new_id.as_str()).expect("valid installation id");
+    assert!(
+        installation_store
+            .get_installation(&new_installation_id)
+            .await
+            .expect("store read")
+            .is_some(),
+        "the installation store must still be rekeyed onto the new (minted) id even when the \
+         filesystem destination already existed"
+    );
+    assert!(
+        installation_store
+            .get_manifest(&new_id)
+            .await
+            .expect("store read")
+            .is_some(),
+        "the manifest record must still be rekeyed onto the new (minted) id even when the \
+         filesystem destination already existed"
+    );
+}
