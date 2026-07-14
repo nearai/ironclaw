@@ -100,6 +100,16 @@ pub enum ToolObservationDetail {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
+    ResultReference {
+        result_ref: String,
+        byte_len: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preview: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total_bytes: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_offset: Option<u64>,
+    },
 }
 
 impl ToolObservationDetail {
@@ -121,6 +131,21 @@ impl ToolObservationDetail {
                     validate_model_observation_detail(detail)?;
                 }
                 Ok(())
+            }
+            Self::ResultReference { result_ref, .. } => {
+                // `preview` is intentionally NOT content-checked here: this
+                // neutral gate has no graceful-degrade path, so an unsafe
+                // preview would drop the whole observation (losing
+                // `result_ref` too) instead of falling back to ref-only.
+                // `ironclaw_threads::ToolResultReferenceEnvelope::new` owns
+                // that canonical secret/control-char scan and degrades
+                // correctly; this arm only bounds shape (issue #5838).
+                validate_non_empty_text(result_ref, "model observation result ref")?;
+                validate_text_len(
+                    result_ref,
+                    "model observation result ref",
+                    MODEL_OBSERVATION_TEXT_MAX_BYTES,
+                )
             }
         }
     }

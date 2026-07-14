@@ -3,6 +3,7 @@ import React from "react";
 import { Icon } from "../design-system/icons";
 import { useT } from "../lib/i18n";
 import { getPinnedIds, subscribePins, togglePin } from "../lib/pin-store";
+import { deleteThreadErrorMessage } from "../lib/thread-errors";
 
 /* React adapter for the pinned-thread store. Lives here (not in pin-store.ts)
  * so the store stays a pure, unit-testable module free of a React import. */
@@ -82,9 +83,12 @@ function ThreadItem({ thread, isActive, isPinned, presentation, onSelect, onDele
       event.preventDefault();
       event.stopPropagation();
       if (!window.confirm(t("thread.deleteConfirm"))) return;
-      Promise.resolve(onDelete?.(thread.id)).catch((err) => {
-        window.alert(err?.message || t("chat.deleteFailed"));
-      });
+      void Promise.resolve()
+        .then(() => onDelete?.(thread.id))
+        .catch((error) => {
+          console.error("Failed to delete thread:", error);
+          window.alert(deleteThreadErrorMessage(error, t));
+        });
     },
     [onDelete, thread.id, t]
   );
@@ -159,9 +163,11 @@ function ThreadItem({ thread, isActive, isPinned, presentation, onSelect, onDele
         onClick={handleDelete}
         title={t("common.deleteChat")}
         aria-label={t("common.deleteChat")}
+        data-testid="thread-delete"
+        data-thread-id={thread.id}
         className={cn(
           "my-1 mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-[6px]",
-          "opacity-0 transition group-hover:opacity-100 focus:opacity-100",
+          "opacity-70 transition hover:opacity-100 focus:opacity-100",
           "text-[var(--v2-text-faint)] hover:bg-[var(--v2-danger-soft)] hover:text-[var(--v2-danger-text)]"
         )}
       >

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- *(slack)* resolve known DM conversation IDs through an exact Slack lookup before encoding mentions, avoiding wrong-target posts when conversation lists are long or display names are ambiguous.
+- *(reborn)* add an explicit tenant extension-ownership migration that assigns every installed extension to every existing user, and clean up the departing user's external connection and personal credentials without tearing down the package for remaining users.
+- *(reborn)* make extension-scoped OAuth and explicit extension removal restart-safe and fenced: malformed callbacks now terminalize durable flows, status reads are observational with an explicit reconciliation command, multi-credential activation waits without revoking completed credentials, Slack cleanup fences ingress before fallible identity deletion, and uninstall cleanup obligations survive catalog/package loss.
+- *(reborn)* allow `builtin.time` parse, convert, format, and diff operations to consume JSON numbers or numeric strings containing Unix seconds, integral Unix milliseconds, and fractional Slack timestamps in addition to ISO 8601 strings.
+
 ### Changed
 
 - *(reborn-cli)* document the standalone `config init` atomic-write dependency on `tempfile` and call out the default runner cadence change to 5s heartbeats / 200ms polling (down from 10s / 2s).

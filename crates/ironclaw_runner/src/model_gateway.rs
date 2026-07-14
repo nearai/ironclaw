@@ -1,6 +1,6 @@
 //! LLM provider-backed Reborn model gateway wiring.
 //!
-//! The loop-support crate owns the host-facing model gateway contract. This
+//! The loop-host crate owns the host-facing model gateway contract. This
 //! adapter lives in the standalone Reborn composition crate because it bridges
 //! that contract to the shared `ironclaw_llm` provider abstraction.
 
@@ -23,7 +23,7 @@ use ironclaw_llm::{
     recover_codex_text_tool_calls_from_tool_names,
     vision_models::is_vision_model,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
     HostManagedModelResponse, HostManagedModelRouteSnapshot, HostManagedModelStreamSink,
@@ -37,7 +37,7 @@ use ironclaw_safety::{
 use ironclaw_threads::{ProviderToolCallReferenceEnvelope, SessionThreadService, ThreadScope};
 use ironclaw_turns::run_profile::LoopModelUsage;
 use ironclaw_turns::{
-    TurnId, TurnRunId,
+    ModelInvalidOutputDetailReason as InvalidOutputReason, TurnId, TurnRunId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
@@ -61,9 +61,6 @@ use crate::{
 const MODEL_CREDITS_EXHAUSTED_SUMMARY: &str = "model provider account is out of credits";
 const PROVIDER_TOOL_ARGUMENTS_OMITTED_MARKER: &str =
     "arguments omitted because they exceeded the host provider-tool limit";
-const PROVIDER_TOOL_ARGUMENTS_PARSE_ERROR_PREFIX: &str =
-    "failed to parse tool-call arguments JSON:";
-const PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY: &str = "model returned invalid tool-call arguments";
 const PROVIDER_TOOL_ARGUMENTS_INVALID_MARKER: &str =
     "arguments omitted because the provider emitted malformed tool-call JSON";
 const CONTEXT_SHADOW_TARGET: &str = "ironclaw::reborn::context_shadow";
@@ -1361,7 +1358,7 @@ fn recover_textual_tool_calls_from_tool_response(
             debug!("reborn model gateway rejected unrecovered textual provider tool-call syntax");
             return Err(HostManagedModelError::safe(
                 HostManagedModelErrorKind::InvalidOutput,
-                "model returned textual tool-call syntax instead of structured tool calls",
+                InvalidOutputReason::TextualToolCallSyntax.safe_summary(),
             ));
         }
         return Ok(response);
@@ -1484,7 +1481,7 @@ async fn tool_response_to_host(
         ) {
             return Err(HostManagedModelError::safe(
                 HostManagedModelErrorKind::InvalidOutput,
-                "model returned a tool call outside the advertised capability surface",
+                InvalidOutputReason::OutsideCapabilitySurface.safe_summary(),
             ));
         }
         for provider_call in &provider_calls {
@@ -1549,7 +1546,7 @@ async fn tool_response_to_host(
             if content.trim().is_empty() {
                 return Err(HostManagedModelError::safe(
                     HostManagedModelErrorKind::InvalidOutput,
-                    "model returned an empty assistant response",
+                    InvalidOutputReason::EmptyAssistantResponse.safe_summary(),
                 ));
             }
             debug!(
@@ -1577,7 +1574,7 @@ async fn tool_response_to_host(
         )),
         FinishReason::ToolUse => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::InvalidOutput,
-            "model returned tool-use finish without tool calls",
+            InvalidOutputReason::ToolUseFinishWithoutToolCalls.safe_summary(),
         )),
         FinishReason::Unknown => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::Unavailable,
@@ -1823,7 +1820,7 @@ fn provider_tool_call_from_llm(
         debug!(%error, "reborn model gateway rejected invalid provider tool name");
         HostManagedModelError::safe(
             HostManagedModelErrorKind::InvalidOutput,
-            "model returned an invalid provider tool name",
+            InvalidOutputReason::InvalidReturnedToolName.safe_summary(),
         )
     })?;
     Ok(ProviderToolCall {
@@ -1843,12 +1840,14 @@ fn provider_tool_arguments_parse_error_summary(parse_error: &str) -> String {
     let summary_line = parse_error.lines().next().unwrap_or(parse_error);
     let sanitized = sanitize_model_visible_text(summary_line.to_string());
     let sanitized = sanitized.trim();
-    if sanitized.starts_with(PROVIDER_TOOL_ARGUMENTS_PARSE_ERROR_PREFIX)
+    if sanitized.starts_with(InvalidOutputReason::TOOL_CALL_ARGUMENTS_PARSE_ERROR_PREFIX)
         && LoopSafeSummary::new(sanitized).is_ok()
     {
         sanitized.to_string()
     } else {
-        PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY.to_string()
+        InvalidOutputReason::InvalidToolCallArguments
+            .safe_summary()
+            .to_string()
     }
 }
 
@@ -1903,7 +1902,7 @@ fn response_to_host_reply(
         )),
         FinishReason::ToolUse => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::InvalidOutput,
-            "model returned unsupported tool calls for a text-only loop",
+            InvalidOutputReason::UnsupportedToolCallsForTextOnlyLoop.safe_summary(),
         )),
         FinishReason::Unknown => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::Unavailable,
@@ -1963,8 +1962,8 @@ fn is_repairable_provider_tool_output_error(error: &HostManagedModelError) -> bo
 }
 
 fn is_provider_tool_arguments_parse_error_summary(safe_summary: &str) -> bool {
-    safe_summary.starts_with(PROVIDER_TOOL_ARGUMENTS_PARSE_ERROR_PREFIX)
-        || safe_summary == PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY
+    safe_summary.starts_with(InvalidOutputReason::TOOL_CALL_ARGUMENTS_PARSE_ERROR_PREFIX)
+        || safe_summary == InvalidOutputReason::InvalidToolCallArguments.safe_summary()
 }
 
 fn provider_tool_repair_messages(
@@ -2249,7 +2248,7 @@ fn validate_provider_replay_identity(
     expected: &ProviderReplayIdentity,
 ) -> Result<(), HostManagedModelError> {
     provider_call.validate().map_err(|error| {
-        ironclaw_loop_support::raw_host_managed_model_error(
+        ironclaw_loop_host::raw_host_managed_model_error(
             "provider_tool_replay",
             "validate_provider_call",
             HostManagedModelErrorKind::InvalidRequest,
@@ -2723,7 +2722,7 @@ mod tests {
 
     fn user_message_with_images(
         content: &str,
-        image_parts: Vec<ironclaw_loop_support::HostManagedModelImagePart>,
+        image_parts: Vec<ironclaw_loop_host::HostManagedModelImagePart>,
     ) -> HostManagedModelMessage {
         HostManagedModelMessage {
             role: HostManagedModelMessageRole::User,
@@ -2742,7 +2741,7 @@ mod tests {
     fn convert_messages_emits_image_url_parts_for_user_image_attachments() {
         let message = user_message_with_images(
             "what is in this image?",
-            vec![ironclaw_loop_support::HostManagedModelImagePart {
+            vec![ironclaw_loop_host::HostManagedModelImagePart {
                 mime_type: "image/png".to_string(),
                 bytes: vec![1, 2, 3, 4],
             }],
@@ -2784,7 +2783,7 @@ mod tests {
         // relies on the transcript's `<attachments>` pointer.
         let message = user_message_with_images(
             "what is in this image?",
-            vec![ironclaw_loop_support::HostManagedModelImagePart {
+            vec![ironclaw_loop_host::HostManagedModelImagePart {
                 mime_type: "image/png".to_string(),
                 bytes: vec![1, 2, 3, 4],
             }],
@@ -2850,7 +2849,10 @@ mod tests {
             "raw_provider_secret api_key=sk-live-secret malformed payload",
         );
 
-        assert_eq!(summary, PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY);
+        assert_eq!(
+            summary,
+            InvalidOutputReason::InvalidToolCallArguments.safe_summary()
+        );
     }
 
     #[test]
@@ -2871,7 +2873,10 @@ mod tests {
             "failed to parse tool-call arguments JSON: expected `,` or `}` at line 1 column 2",
         );
 
-        assert_eq!(summary, PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY);
+        assert_eq!(
+            summary,
+            InvalidOutputReason::InvalidToolCallArguments.safe_summary()
+        );
     }
 
     #[test]

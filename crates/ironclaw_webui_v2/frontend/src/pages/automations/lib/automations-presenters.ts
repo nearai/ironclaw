@@ -294,7 +294,10 @@ function normalizeAutomation(automation, t, locale) {
     recentRuns.find((run) => run.status === "ok" || run.status === "error") ||
     null;
   const lastStatus = lastCompletedRun?.status || automation.last_status;
-  const lastRunAt = lastCompletedRun?.completed_at || automation.last_run_at || null;
+  const lastCompletedRunAt =
+    lastCompletedRun?.completed_at || lastCompletedRun?.timestamp_source || null;
+  const legacyLastRunAt = recentRuns.length === 0 ? automation.last_run_at : null;
+  const lastRunAt = lastCompletedRunAt || legacyLastRunAt || null;
   const normalized = {
     ...automation,
     recent_runs: recentRuns,

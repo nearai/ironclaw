@@ -7,7 +7,7 @@
 - Use these neighboring contracts before changing behavior:
   - `crates/ironclaw_agent_loop/CLAUDE.md`
   - `crates/ironclaw_turns/AGENTS.md`
-  - `crates/ironclaw_loop_support/CLAUDE.md`
+  - `crates/ironclaw_loop_host/CLAUDE.md`
   - `crates/ironclaw_reborn_composition/CLAUDE.md`
 
 ## What This Crate Owns

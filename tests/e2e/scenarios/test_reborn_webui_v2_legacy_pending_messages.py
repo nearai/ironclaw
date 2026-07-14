@@ -192,6 +192,10 @@ async def _open_mocked_pending_page(
         f"{reborn_v2_server}/v2/chat/{initial_thread_id}?token={REBORN_V2_AUTH_TOKEN}"
     )
     await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(timeout=15000)
+    # Composer visibility alone does not prove the route's thread has hydrated.
+    # Wait for the thread-scoped timeline request so sends cannot race through
+    # useChat's new-conversation path with a still-null activeThreadId.
+    await _wait_for_request_count(timeline_requests, 0)
 
     return {
         "context": context,

@@ -19,7 +19,7 @@ mod parity_qa_support;
 mod reborn_support;
 mod support;
 
-use ironclaw_loop_support::HostManagedModelResponse;
+use ironclaw_loop_host::HostManagedModelResponse;
 use ironclaw_product_adapters::{
     DeliveryStatus, ExternalConversationRef, FakeProtocolHttpEgress, FinalReplyView,
     ProductAdapter, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,

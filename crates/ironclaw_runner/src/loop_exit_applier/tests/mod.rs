@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use ironclaw_host_api::{AgentId, ApprovalRequestId, TenantId, ThreadId, UserId};
-use ironclaw_loop_support::SpawnSubagentMode;
+use ironclaw_loop_host::SpawnSubagentMode;
 use ironclaw_threads::{
     AppendAssistantDraftRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
     MessageKind, MessageStatus, SessionThreadService, ThreadHistoryRequest, ThreadMessageId,

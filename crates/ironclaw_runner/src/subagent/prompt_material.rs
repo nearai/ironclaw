@@ -2,7 +2,7 @@ use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_host_api::CapabilityId;
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     SubagentPromptGoal, SubagentPromptMaterial, SubagentPromptMaterialSource, SubagentThreadKind,
     SubagentThreadMetadata,
 };
@@ -291,7 +291,7 @@ mod tests {
     use std::sync::Arc;
 
     use ironclaw_host_api::{AgentId, ThreadId};
-    use ironclaw_loop_support::{SpawnSubagentMode, SubagentKindId};
+    use ironclaw_loop_host::{SpawnSubagentMode, SubagentKindId};
     use ironclaw_threads::{
         AcceptInboundMessageRequest, EnsureThreadRequest, InMemorySessionThreadService,
         MessageContent,

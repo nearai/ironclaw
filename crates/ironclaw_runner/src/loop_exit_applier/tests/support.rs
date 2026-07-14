@@ -59,7 +59,7 @@ pub(super) struct RecordingAwaitDependentRunEvidence {
     scope: TurnScope,
     run_id: TurnRunId,
     gate_ref: GateRef,
-    mode: ironclaw_loop_support::SpawnSubagentMode,
+    mode: ironclaw_loop_host::SpawnSubagentMode,
 }
 
 impl RecordingAwaitDependentRunEvidence {
@@ -67,7 +67,7 @@ impl RecordingAwaitDependentRunEvidence {
         scope: TurnScope,
         run_id: TurnRunId,
         gate_ref: GateRef,
-        mode: ironclaw_loop_support::SpawnSubagentMode,
+        mode: ironclaw_loop_host::SpawnSubagentMode,
     ) -> Self {
         Self {
             scope,
@@ -89,7 +89,7 @@ impl AwaitDependentRunEvidenceStore for RecordingAwaitDependentRunEvidence {
         Ok(*scope == self.scope
             && run_id == self.run_id
             && gate_ref.as_str() == self.gate_ref.as_str()
-            && self.mode == ironclaw_loop_support::SpawnSubagentMode::Blocking)
+            && self.mode == ironclaw_loop_host::SpawnSubagentMode::Blocking)
     }
 }
 

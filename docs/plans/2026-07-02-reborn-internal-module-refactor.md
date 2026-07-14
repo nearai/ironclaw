@@ -61,7 +61,7 @@ Verdicts: **KEEP** (as-is) · **INTERNAL** (decompose/repair inside the crate) �
 | ironclaw_hooks | 25 | 22.6k | KEEP; internal OK (21 mods, biggest 5.0k) |
 | ironclaw_reborn_event_store | 25 | 3.0k | KEEP |
 | ironclaw_host_runtime | 24 | 35.2k | KEEP boundary; internal OK (21 mods, biggest 2.9k) |
-| ironclaw_loop_support | 24 | 29.6k | KEEP; **INTERNAL:** `capability_port.rs` (8.2k) is a god-file — split by capability family when next touched (JIT) |
+| ironclaw_loop_host | 24 | 29.6k | KEEP; **INTERNAL:** `capability_port.rs` (8.2k) is a god-file — split by capability family when next touched (JIT) |
 | ironclaw_product_workflow | 24 | 23.8k | KEEP; **INTERNAL/JIT:** `reborn_services.rs` (6.0k) holds the 70-method `RebornServicesApi` god interface — split by domain (threads/turns/gates/extensions/llm/…) as features demand slices; storage fold-in from tail (below) |
 | ironclaw_reborn_traces | 24 | 17.7k | KEEP; **INTERNAL:** `contribution.rs` = **14.5k lines in one file** — worst god-file in the workspace after composition; dissect into submodules |
 | ironclaw_approvals | 24 | 3.2k | KEEP |
@@ -86,7 +86,7 @@ slack_v2_adapter, telegram_v2_adapter, wasm_product_adapters,
 first_party_extension_ports, event_streams, reborn_identity, hooks_postgres,
 hooks_libsql (dual-backend rule — keep both).
 
-**ironclaw_agent_loop (fan-in 5, 25.5k) → MERGE into `ironclaw_loop_support`** — the one
+**ironclaw_agent_loop (fan-in 5, 25.5k) → MERGE into `ironclaw_loop_host`** — the one
 clean substrate merge: siblings (neither depends on the other), tiny blast radius.
 Optional; schedule when loop work next opens both crates anyway.
 
