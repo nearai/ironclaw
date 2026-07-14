@@ -1,37 +1,73 @@
 ---
 paths:
-  - "src/agent/**"
-  - "src/tools/**"
-  - "src/channels/web/**"
-  - "crates/ironclaw_engine/**"
+  - "crates/ironclaw_capabilities/**"
+  - "crates/ironclaw_host_runtime/**"
+  - "crates/ironclaw_dispatcher/**"
+  - "crates/ironclaw_product_workflow/**"
+  - "crates/ironclaw_first_party_extensions/**"
+  - "crates/ironclaw_webui_v2/**"
+  - "crates/ironclaw_reborn_composition/**"
+  - "crates/ironclaw_agent_loop/**"
+  - "crates/ironclaw_runner/**"
 ---
-# Tool Evidence and Side-Effect Verification
+# Capability evidence and side-effect verification
 
-The most dangerous user-visible bug class is **claim/evidence drift**: the agent narrates "message sent" / "file attached" / "tool installed" with no corresponding side effect. The agent-facing half of this rule lives in `crates/ironclaw_engine/prompts/codeact_postamble.md` ("Claims in FINAL() need tool evidence"). This file documents the *target* code invariants that make the rule enforceable at the tool layer. Several of these are aspirational — where that's the case, it's called out inline so new contributors don't assume an enforcement mechanism exists.
+A successful capability result is a claim about an effect. Side-effecting
+capabilities must return evidence produced by the authoritative boundary, not an
+optimistic local message.
 
-## Engine v2 Side-Effect Gate (target invariant)
+## Result admission
 
-Engine v2 should classify user turns for side-effect intent (send / save / install / schedule / post / write / delete) and a model-final turn that lacks at least one successful tool call matching the intent should be rejected before it reaches the user — surfacing "action not performed" instead of the agent's narration.
+The loop may claim completion only from the structured capability outcome and
+its admitted evidence. Model prose such as “done,” an empty output, or a locally
+constructed success string is not evidence. Correctable failures stay
+model-visible so the loop can retry or explain them; host/infra failures remain
+terminal according to `agent-loop-capabilities.md`.
 
-**Current state:** only a soft tool-intent *nudge* exists in `crates/ironclaw_engine/src/executor/loop_engine.rs`; there is no hard rejection gate. Adding one belongs on the engine roadmap. Until it lands, the prompt-side guidance in `codeact_postamble.md` is the primary defence. Reference: #2544, #2580, #2582, #2541, #2447.
+Examples:
 
-## Empty-Fast Outputs Are Errors (tool-author convention)
+- Provider writes return the provider-issued identifier or revision.
+- Filesystem writes return the committed version/size and may re-read metadata.
+- Installation and activation read back the durable lifecycle state.
+- OAuth completion performs a minimal authenticated read before success.
+- Trigger or automation changes read back the stored definition and schedule.
 
-A tool that completes in `< 1 ms` **and** returns empty content is almost always a silent failure. Tool authors must treat this shape as an error at the tool implementation: return a descriptive `ToolError::ExecutionFailed("empty result from <service>: …")` (or the closest matching variant in `src/tools/tool.rs`) rather than a successful empty `ToolOutput`.
+Empty output from a capability that promises data is an error unless the
+contract explicitly defines an empty success. Fast completion is not itself
+evidence.
 
-**Current state:** the dispatcher does not today enforce a generic "fast + empty = error" rule, and `ToolOutput` / `ActionRecord` do not carry a dedicated byte-count field — timing is captured on `ToolOutput.duration` and content size is implicit in the serialized `result`. A future enforcement path (dedicated `ToolError::EmptyResult` variant, explicit byte-count on `ActionRecord`, UI suppression of the success checkmark on zero-byte output) is desirable; when adding those, update this rule to cite the concrete APIs. Reference: #2545.
+## Read-back rules
 
-## External-Effect Tools Must Read Back
+Use the strongest inexpensive verification the boundary offers:
 
-A tool whose side effect is visible only to an external system (Telegram send, Slack post, file write, extension install, OAuth completion) MUST read back the effect before returning success:
+- provider mutation: provider-issued ID/revision plus a minimal read when the
+  provider is eventually consistent enough to support it;
+- filesystem mutation: committed version/metadata and re-open when durability
+  is the claim;
+- lifecycle mutation: durable installation/activation state and registered
+  surface;
+- auth completion: authenticated identity/account read;
+- trigger/automation mutation: stored definition, schedule, and identity;
+- outbound send: provider delivery/message identifier, not merely queued.
 
-- `telegram_send` → capture and return `message_id` from the API response; error if the response lacks one.
-- `file_write` → re-stat and return the actual byte count; error on mismatch.
-- `extension_install` → call `extensions_list` and assert the new extension is present and active.
-- OAuth completion → perform a minimal authenticated read against the provider before declaring success.
+When read-back is impossible, define an explicit weaker evidence type (for
+example, accepted/queued) rather than reporting completed/delivered.
 
-A tool without a read-back path is claim-only. There is no canonical `unverified` field on `ToolOutput` today — when you write a claim-only tool, include an `unverified: true` key in the JSON `result` body and a clear hedge in the text output ("submitted; delivery not confirmed") so downstream layers and the user can see it. If/when a first-class field lands on `ToolOutput`, migrate to it. References: #2411 Telegram token Save, #2543 Linear MCP OAuth, #2586 Slack Install.
+UI success follows backend evidence. Do not show a local optimistic checkmark
+for install, connect, save, or execute while the durable or provider state is
+unknown.
 
-## Setup UI Round-Trip
+The frontend renders backend evidence or a pending state. It must reconcile
+after reconnect instead of preserving an optimistic mutation indefinitely.
 
-Save / Install / Connect buttons in the setup UI must issue a read-back verification immediately after the write succeeds and render the read-back value (or explicit error) to the user — not a local optimistic checkmark. Install actions dispatch through `ToolDispatcher::dispatch` and surface the resulting `ActionRecord`. A UI success state with no corresponding backend read-back is the same bug class as agent claim drift. References: #2411, #2534, #2543, #2586.
+## Failure tests
+
+Cover missing evidence, malformed provider responses, read-back mismatch,
+accepted-but-not-completed states, duplicate/idempotent retry, and success where
+the UI or model-visible result accidentally drops the evidence.
+
+Tests must drive the production caller and always assert the evidence value and
+sanitized model/user result. Assert durable state and emitted events when those
+effects are part of the capability contract; do not invent either requirement
+for a capability that provides neither. A test that only checks the leaf helper
+does not protect the effect claim.

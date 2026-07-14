@@ -133,6 +133,10 @@ pub struct AuthFlowRecord {
     pub continuation: AuthContinuationRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_account_id: Option<CredentialAccountId>,
+    /// Redacted fingerprint of the secret handles committed by this OAuth
+    /// flow. It fences exact compensation without storing credential material.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_secret_fingerprint: Option<crate::CredentialSecretFingerprint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_binding: Option<CredentialAccountUpdateBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -226,6 +230,41 @@ pub struct OAuthCallbackFailureInput {
     pub error: AuthErrorCode,
 }
 
+/// Exclusive, restart-recoverable claim taken before a continuation side
+/// effect. `claimed_at` doubles as the CAS fence returned to settlement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthContinuationDispatchClaimInput {
+    pub flow_id: AuthFlowId,
+    pub claimed_at: Timestamp,
+}
+
+/// Authoritative result of a claimed continuation side effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthContinuationDispatchOutcome {
+    Dispatched {
+        emitted_at: Timestamp,
+    },
+    /// Release a claim after its durable settlement could not be persisted.
+    /// The side effect may be retried; lifecycle activation is idempotent.
+    RetryableFailure,
+    TerminalFailure {
+        error: AuthErrorCode,
+    },
+}
+
+/// Fenced settlement for one continuation dispatch claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthContinuationDispatchSettlementInput {
+    pub flow_id: AuthFlowId,
+    pub expected_claimed_at: Timestamp,
+    pub outcome: AuthContinuationDispatchOutcome,
+}
+
+/// A callback may reclaim a continuation left in `Completing` after this
+/// interval. Settlement is fenced by the claim timestamp, so the stale worker
+/// cannot overwrite the new owner's result.
+pub const AUTH_CONTINUATION_DISPATCH_LEASE_SECONDS: i64 = 60;
+
 /// User-selected configured credential that completes an account-selection
 /// auth flow without exposing credential internals to product surfaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -295,6 +334,18 @@ pub trait AuthFlowManager: Send + Sync {
         &self,
         scope: &AuthProductScope,
         input: OAuthCallbackFailureInput,
+    ) -> Result<AuthFlowRecord, AuthProductError>;
+
+    async fn claim_continuation_dispatch(
+        &self,
+        scope: &AuthProductScope,
+        input: AuthContinuationDispatchClaimInput,
+    ) -> Result<AuthFlowRecord, AuthProductError>;
+
+    async fn settle_continuation_dispatch(
+        &self,
+        scope: &AuthProductScope,
+        input: AuthContinuationDispatchSettlementInput,
     ) -> Result<AuthFlowRecord, AuthProductError>;
 
     async fn mark_continuation_dispatched(

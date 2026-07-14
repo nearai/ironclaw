@@ -1876,6 +1876,9 @@ pub enum CapabilityOutcome {
         /// Used by ByteCapStrategy to evaluate per-capability byte caps.
         #[serde(default)]
         byte_len: u64,
+        /// Bounded model-visible metadata for the child result.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_observation: Option<ModelVisibleToolObservation>,
     },
     SpawnedChildRun {
         child_run_id: TurnRunId,
@@ -1886,6 +1889,9 @@ pub enum CapabilityOutcome {
         /// Same semantics as AwaitDependentRun.byte_len.
         #[serde(default)]
         byte_len: u64,
+        /// Bounded model-visible metadata for the child result.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_observation: Option<ModelVisibleToolObservation>,
     },
     Denied(CapabilityDenied),
     Failed(CapabilityFailure),
@@ -1927,6 +1933,10 @@ pub struct CapabilityResultMessage {
     /// compatibility and for synthetic results that do not stage real output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_digest: Option<ContentDigest>,
+    /// Bounded, model-visible result metadata or preview. Full output remains
+    /// host-owned and is retrieved only through the result reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_observation: Option<ModelVisibleToolObservation>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -2347,7 +2357,7 @@ pub trait LoopCheckpointPort: Send + Sync {
     /// Stage a checkpoint payload's raw bytes and return an opaque
     /// [`LoopCheckpointStateRef`] that subsequent `checkpoint(...)` calls
     /// can reference. The default impl fails closed; concrete impls live in
-    /// `ironclaw_loop_support` and wrap the host's `CheckpointStateStore`.
+    /// `ironclaw_loop_host` and wrap the host's `CheckpointStateStore`.
     ///
     /// The executor's checkpoint helper calls this method before invoking
     /// `LoopCheckpointPort::checkpoint(...)` so the metadata write references

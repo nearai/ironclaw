@@ -1,5 +1,4 @@
 use clap::{Args, Subcommand};
-use ironclaw_reborn_config::RebornDoctorReport;
 
 use crate::context::RebornCliContext;
 
@@ -18,23 +17,37 @@ enum ConfigSubcommand {
     /// Write a commented stub `config.toml` and `providers.json` into
     /// the Reborn home directory. Refuses to clobber unless --force.
     Init(init::ConfigInitCommand),
+    /// List all configuration keys and their values.
+    List(ConfigListCommand),
+    /// Get a single configuration value by dot-separated key.
+    Get(ConfigGetCommand),
 }
 
 #[derive(Debug, Args)]
 struct ConfigPathCommand;
+
+mod get;
+mod list;
+mod read;
+
+use self::get::ConfigGetCommand;
+use self::list::ConfigListCommand;
 
 impl ConfigCommand {
     pub(crate) fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
         match self.command {
             ConfigSubcommand::Path(command) => command.execute(context),
             ConfigSubcommand::Init(command) => command.execute(context),
+            ConfigSubcommand::List(command) => command.execute(context),
+            ConfigSubcommand::Get(command) => command.execute(context),
         }
     }
 }
 
 impl ConfigPathCommand {
     fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
-        let report = RebornDoctorReport::from_config(context.boot_config().clone());
+        let report =
+            ironclaw_reborn_config::RebornDoctorReport::from_config(context.boot_config().clone());
         let home = context.boot_config().home();
 
         let config_path = home.config_file_path();

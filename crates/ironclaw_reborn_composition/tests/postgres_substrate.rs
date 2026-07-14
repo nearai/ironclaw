@@ -1,5 +1,7 @@
 #![cfg(feature = "postgres")]
 
+#[path = "support/postgres.rs"]
+mod postgres_support;
 mod support;
 
 use std::{sync::Arc, time::Duration};
@@ -20,6 +22,7 @@ use ironclaw_reborn_composition::{
 };
 use ironclaw_reborn_event_store::RebornEventStoreConfig;
 use ironclaw_turns::{TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError};
+use postgres_support::assert_postgres_accepts_connections;
 use secrecy::SecretString;
 use support::production_readiness::{
     assert_required_backend_readiness_diagnostics, required_backend_parity_config,
@@ -265,6 +268,7 @@ async fn postgres_pool_or_skip() -> Option<(
     String,
 )> {
     let (container, database_url) = start_postgres_container().await?;
+    assert_postgres_accepts_connections(&database_url).await;
     let config: tokio_postgres::Config = database_url
         .parse()
         .expect("testcontainer database URL must parse");
@@ -273,10 +277,6 @@ async fn postgres_pool_or_skip() -> Option<(
         .max_size(4)
         .build()
         .expect("Postgres pool must build");
-    let _connection = pool
-        .get()
-        .await
-        .expect("Postgres testcontainer must accept connections");
     Some((container, pool, database_url))
 }
 

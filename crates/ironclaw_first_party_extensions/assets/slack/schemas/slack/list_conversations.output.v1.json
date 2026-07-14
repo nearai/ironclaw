@@ -17,7 +17,7 @@
           "is_im": { "type": "boolean" },
           "is_mpim": { "type": "boolean" },
           "is_member": { "type": "boolean", "description": "Whether the connected account belongs to this channel — the list also contains channels merely visible to you. Absent for DMs." },
-          "user": { "type": "string", "description": "For DMs: raw Slack user ID of the counterpart. Keep for follow-up calls; do not show to the user." },
+          "user": { "type": "string", "description": "For DMs: authoritative raw Slack user ID of the counterpart. Use for follow-up calls or <@U…> mentions; do not show it as plain text to the user." },
           "user_display_name": { "type": "string", "description": "For DMs: human-readable counterpart name resolved via users.info. Use this in user-facing output. Absent when resolution failed." }
         },
         "additionalProperties": true

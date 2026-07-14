@@ -446,6 +446,52 @@ pub struct UpdateToolResultReferenceRequest {
     pub safe_summary: ToolResultSafeSummary,
 }
 
+/// Durable, opaque capability output associated with one transcript result reference.
+///
+/// The bytes are not transcript content. They are only recovered through a
+/// thread-scoped result reader that enforces its own response bound.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PutToolResultRecordRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub result_ref: String,
+    pub content: Vec<u8>,
+}
+
+/// Maximum byte window returned by one durable tool-result read.
+pub const TOOL_RESULT_RECORD_READ_MAX_BYTES: usize = 2 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadToolResultRecordRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub result_ref: String,
+    pub offset: u64,
+    pub max_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolResultRecordChunk {
+    pub content: Vec<u8>,
+    pub total_bytes: u64,
+    pub next_offset: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateToolResultRecordRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub result_ref: String,
+    pub content: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteToolResultRecordRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub result_ref: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateAssistantDraftRequest {
     pub scope: ThreadScope,

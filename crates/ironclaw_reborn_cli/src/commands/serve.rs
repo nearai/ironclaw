@@ -1072,7 +1072,7 @@ mod tests {
     const WEBUI_BASE_URL_ENV: &str = "IRONCLAW_REBORN_WEBUI_BASE_URL";
 
     fn clear_webui_env() {
-        // SAFETY: tests are serialized by `WEBUI_BASE_URL_ENV_LOCK`; no other
+        // SAFETY: tests are serialized by `the shared crate process-env lock`; no other
         // thread reads or writes this env var while the guard is held.
         unsafe { std::env::remove_var(WEBUI_BASE_URL_ENV) };
     }
@@ -1682,11 +1682,9 @@ slack_user_id = "U123"
     #[tokio::test]
     async fn webui_serve_wires_notion_dcr_with_public_base_url_env_origin() {
         let callback_origin = {
-            let _guard = crate::commands::serve_sso::WEBUI_BASE_URL_ENV_LOCK
-                .lock()
-                .expect("env lock");
+            let _guard = crate::runtime::test_env::lock_runtime_env();
             clear_webui_env();
-            // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleaned up before the guard drops.
+            // SAFETY: serialized by the shared crate process-env lock; cleaned up before the guard drops.
             unsafe {
                 std::env::set_var(WEBUI_BASE_URL_ENV, " https://configured.example/ ");
             }
@@ -1722,11 +1720,9 @@ slack_user_id = "U123"
 
     #[test]
     fn webui_notion_dcr_callback_origin_rejects_slash_only_public_base_url_env() {
-        let _guard = crate::commands::serve_sso::WEBUI_BASE_URL_ENV_LOCK
-            .lock()
-            .expect("env lock");
+        let _guard = crate::runtime::test_env::lock_runtime_env();
         clear_webui_env();
-        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleaned up before the guard drops.
+        // SAFETY: serialized by the shared crate process-env lock; cleaned up before the guard drops.
         unsafe {
             std::env::set_var(WEBUI_BASE_URL_ENV, "/");
         }
@@ -1743,11 +1739,9 @@ slack_user_id = "U123"
 
     #[test]
     fn webui_notion_dcr_callback_origin_rejects_public_cleartext_base_url_env() {
-        let _guard = crate::commands::serve_sso::WEBUI_BASE_URL_ENV_LOCK
-            .lock()
-            .expect("env lock");
+        let _guard = crate::runtime::test_env::lock_runtime_env();
         clear_webui_env();
-        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleaned up before the guard drops.
+        // SAFETY: serialized by the shared crate process-env lock; cleaned up before the guard drops.
         unsafe {
             std::env::set_var(WEBUI_BASE_URL_ENV, "http://configured.example");
         }

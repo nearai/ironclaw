@@ -3166,13 +3166,13 @@ impl Inner {
                     error,
                 };
             }
-            // Accumulate the exit's reported usage onto the run so a block/resume
-            // sequence sums each leg rather than overwriting. Best-effort
-            // telemetry; a run that reported no usage leaves the prior total.
+            // The loop reports its cumulative per-run usage at every exit (the
+            // execution state carries the running total across block/resume
+            // legs), so replace rather than accumulate — a block→resume→complete
+            // sequence would otherwise double-count the pre-block legs. A run
+            // that reported no usage leaves the prior total intact.
             if let Some(usage) = model_usage {
-                let mut total = record.model_usage.unwrap_or_default();
-                total.add_assign(&usage);
-                record.model_usage = Some(total);
+                record.model_usage = Some(usage);
             }
             match mapping {
                 LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Completed) => {

@@ -9,10 +9,17 @@ resolution.
 ```bash
 corepack pnpm install --frozen-lockfile
 corepack pnpm dev
+corepack pnpm lint
 corepack pnpm typecheck
 corepack pnpm test
 corepack pnpm build
 ```
+
+`corepack pnpm lint` enforces the authored-source conventions before running
+the TypeScript typecheck: modules under `src/` use `.ts`/`.tsx`, relative module
+imports are extensionless, and React markup does not use legacy `html\`...\``
+tagged templates. Explicit filenames passed to file APIs such as `new URL(...)`
+and generated JavaScript asset names are outside this module-import rule.
 
 `corepack pnpm build` runs Vite and writes ignored preview output to
 `frontend/dist/`. Cargo does not embed that local preview directory. When

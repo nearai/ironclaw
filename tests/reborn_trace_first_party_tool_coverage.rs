@@ -23,7 +23,7 @@ use ironclaw_host_runtime::{
     TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
     builtin_first_party_package,
 };
-use ironclaw_loop_support::{HostManagedModelMessageRole, HostManagedModelResponse};
+use ironclaw_loop_host::{HostManagedModelMessageRole, HostManagedModelResponse};
 use ironclaw_turns::{TurnStatus, run_profile::LoopHostMilestoneKind};
 use parity_qa_support::{
     binary_e2e::{HarnessWaitConfig, RebornBinaryE2EHarness, assert_milestone_order},
@@ -917,7 +917,7 @@ fn skill_md(name: &str, description: &str) -> String {
     format!("---\nname: {name}\ndescription: {description}\n---\nSkill body for {name}.\n")
 }
 
-fn tool_result_count(request: &ironclaw_loop_support::HostManagedModelRequest) -> usize {
+fn tool_result_count(request: &ironclaw_loop_host::HostManagedModelRequest) -> usize {
     request
         .messages
         .iter()

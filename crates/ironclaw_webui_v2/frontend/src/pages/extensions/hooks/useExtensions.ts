@@ -33,7 +33,7 @@ const OAUTH_SETUP_TIMEOUT_MS = 10 * 60 * 1000;
 
 // OAuth callback constants, HTTPS-auth-URL/popup helpers, and completion
 // parsing/matching are the shared product-auth OAuth event contract — see
-// `lib/product-auth-oauth-events.js`. This hook keeps only its setup-watcher
+// `lib/product-auth-oauth-events.ts`. This hook keeps only its setup-watcher
 // state machine below.
 
 function authPopupFailureMessage(reason) {
@@ -61,7 +61,7 @@ function extensionListItemIsConfigured(extension) {
     return true;
   }
   // Same snake/camel fallback chain as `extensionLifecycleState`
-  // (lib/extension-actions.js) so a camelCase snapshot cannot read as
+  // (lib/extension-actions.ts) so a camelCase snapshot cannot read as
   // "not configured" here while the rest of the page treats it as active.
   const state =
     extension.onboarding_state ||
@@ -346,7 +346,7 @@ export function useExtensions() {
     install: installMutation.mutate,
     activate: activateMutation.mutate,
     remove,
-    importTool: importMutation.mutate,
+    importTool: (payload) => importMutation.mutate(payload),
     isImporting: importMutation.isPending,
     invalidate,
   };
@@ -392,6 +392,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
   const queryClient = useQueryClient();
   const packageKey = packageRef?.id || packageRef;
   const watcherRef = React.useRef(null);
+  const oauthGenerationRef = React.useRef(0);
   const configuredRef = React.useRef(false);
   const [isAuthorizing, setIsAuthorizing] = React.useState(false);
   // Retryable error surfaced when the callback popup reports a flow-matched
@@ -437,7 +438,16 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
   }, [packageKey, queryClient]);
 
   const watchOauthProgress = React.useCallback(
-    (popup, { flowId = null, invocationId = null, requireCallbackCompletion = false } = {}) => {
+    (
+      popup,
+      {
+        flowId = null,
+        invocationId = null,
+        requireCallbackCompletion = false,
+        generation,
+      } = {},
+    ) => {
+      if (generation !== oauthGenerationRef.current) return;
       clearWatcher();
       configuredRef.current = false;
       const browserWindow =
@@ -460,13 +470,14 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
       // Guard against overlapping in-flight status polls so a slow request
       // cannot stack fetches across interval ticks.
       let flowStatusPending = false;
+      const isCurrentGeneration = () => generation === oauthGenerationRef.current;
 
       function cleanup() {
         if (stopped) return;
         stopped = true;
         if (timer) browserWindow.clearInterval(timer);
         unsubscribe();
-        setIsAuthorizing(false);
+        if (isCurrentGeneration()) setIsAuthorizing(false);
       }
 
       function stopWatcher() {
@@ -475,7 +486,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
       }
 
       function complete() {
-        if (stopped) return;
+        if (stopped || !isCurrentGeneration()) return;
         if (!configuredRef.current) {
           configuredRef.current = true;
           Promise.resolve(onConfigured?.()).catch(() => {});
@@ -485,7 +496,15 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
       }
 
       function handleCompletion(payload) {
+        if (!isCurrentGeneration()) return false;
         if (failureMatchesFlow(payload, flowId)) {
+          if (invocationId) {
+            pollFlowStatus();
+            // Durable status owns terminal reconciliation when an invocation
+            // id is available. Keep the interval's timeout path alive if the
+            // status endpoint remains unavailable.
+            return false;
+          }
           setAuthError("Authorization failed. Try connecting again.");
           stopWatcher();
           refreshSetupState();
@@ -508,12 +527,18 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
         flowStatusPending = true;
         Promise.resolve(fetchOauthFlowStatus(flowId, invocationId))
           .then((result) => {
-            if (stopped) return;
+            if (stopped || !isCurrentGeneration()) return;
             const status = result?.status;
             if (status === "completed") {
               complete();
-            } else if (status === "failed") {
-              setAuthError("Authorization failed. Try connecting again.");
+            } else if (["failed", "canceled", "expired"].includes(status)) {
+              setAuthError(
+                status === "expired"
+                  ? "Authorization expired. Try connecting again."
+                  : status === "canceled"
+                    ? "Authorization was canceled. Try connecting again."
+                    : "Authorization failed. Try connecting again.",
+              );
               stopWatcher();
               refreshSetupState();
             }
@@ -527,6 +552,10 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
       unsubscribe = subscribeProductAuthOAuthCompletion(browserWindow, handleCompletion);
 
       timer = browserWindow.setInterval(() => {
+        if (!isCurrentGeneration()) {
+          cleanup();
+          return;
+        }
         refreshSetupState();
         if (handleCompletion(readLatestProductAuthOAuthCompletion(browserWindow))) {
           return;
@@ -564,17 +593,32 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
   React.useEffect(() => clearWatcher, [clearWatcher]);
 
   const mutation = useMutation({
-    mutationFn: ({ secret, popup }) =>
-      startExtensionOauth(packageRef, secret).then((res) => {
+    mutationFn: (variables) => {
+      const { secret, popup } = variables;
+      const generation = oauthGenerationRef.current + 1;
+      oauthGenerationRef.current = generation;
+      variables.oauthGeneration = generation;
+      clearWatcher();
+      return startExtensionOauth(packageRef, secret).then((res) => {
         if (res.success === false) {
           throw new Error(res.message || "OAuth setup failed");
         }
         if (res.authorization_url && !isHttpsAuthUrl(res.authorization_url)) {
           throw new Error("Authorization URL must use HTTPS.");
         }
-        return { res, popup };
-      }),
-    onSuccess: ({ res, popup }, variables) => {
+        return { res, popup, generation };
+      });
+    },
+    onSuccess: ({ res, popup, generation }, variables) => {
+      // React Query always receives `generation` from mutationFn. The fallbacks
+      // keep direct unit invocation and older cached mutation results harmless
+      // without weakening the current-generation fence.
+      const resultGeneration =
+        generation ?? variables?.oauthGeneration ?? oauthGenerationRef.current;
+      if (resultGeneration !== oauthGenerationRef.current) {
+        if (popup && !popup.closed) popup.close();
+        return;
+      }
       let authPopup = popup;
       if (res.authorization_url) {
         const opened = openAuthPopup(res.authorization_url, popup);
@@ -592,10 +636,18 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
           flowId,
           invocationId: oauthResponseInvocationId(res),
           requireCallbackCompletion: Boolean(flowId && variables?.secret?.provided),
+          generation: resultGeneration,
         });
       }
     },
     onError: (_err, variables) => {
+      const failedGeneration =
+        variables?.oauthGeneration ?? oauthGenerationRef.current;
+      if (failedGeneration !== oauthGenerationRef.current) {
+        const stalePopup = variables?.popup;
+        if (stalePopup && !stalePopup.closed) stalePopup.close();
+        return;
+      }
       clearWatcher();
       const popup = variables?.popup;
       if (popup && !popup.closed) popup.close();

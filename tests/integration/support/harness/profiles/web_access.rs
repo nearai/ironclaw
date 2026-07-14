@@ -3,17 +3,15 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use ironclaw_extensions::ExtensionRegistry;
-use ironclaw_first_party_extensions::{WEB_GET_CONTENT_CAPABILITY_ID, WEB_SEARCH_CAPABILITY_ID};
-use ironclaw_host_api::{
-    CapabilityId, EffectKind, ExtensionId, MountPermissions, RuntimeKind, UserId,
-};
-use ironclaw_reborn_composition::ProductLiveCapabilityIo;
-
 use super::super::super::harness_web_access;
 use super::super::{
     HarnessResult, HostRuntimeCapabilityHarness, RecordingRuntimeHttpEgress,
     host_runtime_storage_roots, workspace_mounts,
+};
+use ironclaw_extensions::ExtensionRegistry;
+use ironclaw_first_party_extensions::{WEB_GET_CONTENT_CAPABILITY_ID, WEB_SEARCH_CAPABILITY_ID};
+use ironclaw_host_api::{
+    CapabilityId, EffectKind, ExtensionId, MountPermissions, RuntimeKind, UserId,
 };
 
 /// Real capability ids `web_access_tools` registers on the built harness —
@@ -45,12 +43,16 @@ pub(crate) async fn web_access_tools() -> HarnessResult<HostRuntimeCapabilityHar
         Arc::clone(&http_egress),
     )?;
     let mounts = workspace_mounts(MountPermissions::read_write_list_delete())?;
+    let (io, result_writer_io) = super::super::default_capability_io_pair();
     Ok(HostRuntimeCapabilityHarness {
         runtime,
         approval_parts: None,
         auto_approve_settings: None,
         pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
-        io: Arc::new(ProductLiveCapabilityIo::default()),
+        io: Mutex::new(io),
+        result_writer_io: Mutex::new(result_writer_io),
+        durable_capability_io_thread_service: Mutex::new(None),
+        durable_capability_io_requested: false,
         root,
         workspace_root,
         mounts,

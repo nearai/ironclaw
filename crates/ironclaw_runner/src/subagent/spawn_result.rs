@@ -1,7 +1,7 @@
 //! Wire-stable subagent result and tombstone payloads.
 
 use ironclaw_host_api::ThreadId;
-use ironclaw_loop_support::SubagentKindId;
+use ironclaw_loop_host::SubagentKindId;
 use ironclaw_turns::{EventCursor, TurnRunId, TurnStatus};
 use serde::{Deserialize, Serialize};
 

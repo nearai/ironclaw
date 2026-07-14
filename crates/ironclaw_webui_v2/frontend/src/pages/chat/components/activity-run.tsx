@@ -91,7 +91,6 @@ function shouldExpandActivityRun(activity) {
   return (activity || []).some((item) => {
     if (item?.role === "thinking") return true;
     if (
-      item?.toolStatus === "running" ||
       item?.toolStatus === "error" ||
       item?.toolStatus === "declined"
     ) {
@@ -100,7 +99,6 @@ function shouldExpandActivityRun(activity) {
     if (!hasToolCalls(item)) return false;
     return item.toolCalls.some(
       (tool) =>
-        tool?.toolStatus === "running" ||
         tool?.toolStatus === "error" ||
         tool?.toolStatus === "declined",
     );

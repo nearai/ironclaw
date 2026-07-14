@@ -130,11 +130,10 @@ export function isValidProviderId(id) {
 }
 
 // After a model-discovery fetch, decide which model to commit to the form.
-// The model field is a controlled <Select>: when it is empty (or holds a value
-// no longer in the fetched list) the browser shows the first <option> while the
-// form value stays stale, and re-picking that already-shown option fires no
-// change event — so a save would persist an empty/wrong model. Returns the
-// model to commit, or `null` to keep the current selection (already valid).
+// The model field is a controlled SelectMenu: when it is empty (or holds a
+// value no longer in the fetched list), the visible choice should be committed
+// before save. Returns the model to commit, or `null` to keep the current
+// selection (already valid).
 export function nextModelAfterFetch(currentModel, fetchedModels) {
   if (!Array.isArray(fetchedModels) || fetchedModels.length === 0) return null;
   const trimmed = (currentModel || "").trim();

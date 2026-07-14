@@ -53,6 +53,14 @@ pub enum SlackUserAction {
         cursor: Option<String>,
     },
 
+    /// Retrieve one exact conversation by its known conversation ID. For a
+    /// DM, the returned `user` is the authoritative counterpart ID.
+    GetConversationInfo {
+        /// Exact conversation ID (e.g. `C123...` for a channel, `D123...`
+        /// for a DM).
+        channel: String,
+    },
+
     /// Read message history from any conversation you can see — a channel,
     /// a DM, or a group DM — identified by its conversation ID.
     GetConversationHistory {
@@ -99,9 +107,13 @@ pub enum SlackUserAction {
         /// Channel ID or name (e.g., "#general" or "C1234567890"), or a
         /// DM conversation ID.
         channel: String,
-        /// Message text (supports Slack mrkdwn formatting). To notify
-        /// someone, mention them as `<@U…>` with their real user id —
-        /// a plain `@name` does not notify.
+        /// Message text (supports Slack mrkdwn formatting). Never use this
+        /// operation for a run's own final reply when outbound delivery is
+        /// configured. To notify someone else, mention them as `<@U…>` with
+        /// their real user id — a plain `@name` does not notify. Never derive
+        /// a user id from a conversation id. For a known DM conversation ID,
+        /// call `slack.get_conversation_info` and use its `conversation.user`;
+        /// use `slack.list_conversations` only when the ID is unknown.
         text: String,
         /// Optional thread timestamp to reply in a thread.
         #[serde(default)]
@@ -190,7 +202,8 @@ pub struct Conversation {
     /// difference. Absent for DMs (no membership axis).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_member: Option<bool>,
-    /// For DMs (`im`), the user ID on the other side.
+    /// For DMs (`im`), the authoritative user ID on the other side. Use this
+    /// for follow-up calls or mention encoding; never derive it from `id`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
     /// Human-readable name for `user`, resolved via `users.info` (best-effort:
@@ -208,6 +221,13 @@ pub struct ListConversationsResult {
     /// Cursor for the next page (pass as `cursor`). Absent on the last page.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+}
+
+/// Result from get_conversation_info.
+#[derive(Debug, Serialize)]
+pub struct GetConversationInfoResult {
+    pub ok: bool,
+    pub conversation: Conversation,
 }
 
 /// A message from conversation history.

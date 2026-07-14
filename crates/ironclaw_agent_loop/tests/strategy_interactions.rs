@@ -11,7 +11,7 @@ use ironclaw_agent_loop::{
 };
 use ironclaw_turns::{LoopExit, LoopFailureKind, run_profile::LoopRunInfoPort};
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn gate_blocks_before_recovery_budget_exhausts() {
     let (host, _) = MockAgentLoopDriverHost::builder()
         .script(ScenarioScript::approval_required("demo.echo"))
@@ -34,7 +34,7 @@ async fn gate_blocks_before_recovery_budget_exhausts() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn terminate_hint_after_batch_stops_without_extra_model_call() {
     let script = ScenarioScript {
         model_responses: VecDeque::from([ScriptedModelResponse::Calls(vec![
@@ -58,7 +58,7 @@ async fn terminate_hint_after_batch_stops_without_extra_model_call() {
     assert_eq!(host.model_call_count(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn denied_call_repetition_does_not_trip_coarse_failure_escape() {
     let (host, _) = MockAgentLoopDriverHost::builder()
         .script(ScenarioScript::same_failure_repeated(
@@ -87,7 +87,7 @@ async fn denied_call_repetition_does_not_trip_coarse_failure_escape() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn retries_do_not_push_signatures_again() {
     let script = ScenarioScript::same_failure_repeated("demo.echo", "transient", 1)
         .with_single_call_retry_outcomes(vec![

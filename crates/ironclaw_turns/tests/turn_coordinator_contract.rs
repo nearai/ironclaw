@@ -34,7 +34,11 @@ use ironclaw_turns::{
     TurnSpawnTreePort, TurnSpawnTreeStateStore, TurnStateBlockPersistence, TurnStateStore,
     TurnStatus, TurnSurfaceType,
     events::EventCursor,
-    run_profile::{CapabilityOutcome, LoopGateKind, LoopModelRouteSnapshot},
+    run_profile::{
+        CapabilityOutcome, LoopGateKind, LoopModelRouteSnapshot, LoopModelUsage,
+        ModelVisibleToolObservation, ObservationTrust, ToolObservationDetail,
+        ToolObservationStatus,
+    },
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
@@ -155,6 +159,7 @@ fn subagent_capability_outcomes_round_trip_with_suspension_semantics() {
         result_ref: result_ref.clone(),
         safe_summary: "spawned in background".to_string(),
         byte_len: 0,
+        model_observation: None,
     };
     let spawned_json = serde_json::to_value(&spawned).unwrap();
     // #[serde(default)] ensures legacy wire payloads (without byte_len) decode
@@ -185,6 +190,7 @@ fn subagent_capability_outcomes_round_trip_with_suspension_semantics() {
         result_ref: result_ref.clone(),
         safe_summary: "waiting on child".to_string(),
         byte_len: 0,
+        model_observation: None,
     };
     let awaiting_json = serde_json::to_value(&awaiting).unwrap();
     assert_eq!(
@@ -218,6 +224,7 @@ fn subagent_capability_outcomes_round_trip_with_non_zero_byte_len() {
         result_ref,
         safe_summary: "await large".to_string(),
         byte_len: 48_500,
+        model_observation: None,
     };
     let json = serde_json::to_value(&await_dep).expect("serialize");
     let decoded: CapabilityOutcome = serde_json::from_value(json).expect("decode");
@@ -234,6 +241,7 @@ fn subagent_capability_outcomes_round_trip_with_non_zero_byte_len() {
         result_ref,
         safe_summary: "spawn large".to_string(),
         byte_len: 60_000,
+        model_observation: None,
     };
     let json = serde_json::to_value(&spawn).expect("serialize");
     let decoded: CapabilityOutcome = serde_json::from_value(json).expect("decode");
@@ -241,6 +249,49 @@ fn subagent_capability_outcomes_round_trip_with_non_zero_byte_len() {
         assert_eq!(byte_len, 60_000);
     } else {
         panic!("expected SpawnedChildRun variant");
+    }
+}
+
+#[test]
+fn subagent_capability_outcomes_round_trip_model_observation() {
+    let result_ref = LoopResultRef::new("result:child-observation").expect("valid");
+    let observation = ModelVisibleToolObservation {
+        schema_version: 1,
+        status: ToolObservationStatus::Success,
+        summary: "Use result_read to continue this child result.".to_string(),
+        detail: ToolObservationDetail::ResultReference {
+            result_ref: result_ref.as_str().to_string(),
+            byte_len: 2_048,
+            preview: Some("first bounded chunk".to_string()),
+            total_bytes: Some(4_096),
+            next_offset: Some(2_048),
+        },
+        artifacts: Vec::new(),
+        recovery: None,
+        trust: ObservationTrust::UntrustedToolOutput,
+    };
+    let spawned = CapabilityOutcome::SpawnedChildRun {
+        child_run_id: TurnRunId::new(),
+        result_ref: result_ref.clone(),
+        safe_summary: "spawned child".to_string(),
+        byte_len: 2_048,
+        model_observation: Some(observation.clone()),
+    };
+    let awaiting = CapabilityOutcome::AwaitDependentRun {
+        gate_ref: LoopGateRef::new("gate:child-observation").expect("valid"),
+        result_ref,
+        safe_summary: "awaiting child".to_string(),
+        byte_len: 2_048,
+        model_observation: Some(observation),
+    };
+
+    for outcome in [spawned, awaiting] {
+        let serialized = serde_json::to_value(&outcome).expect("serialize");
+        assert!(serialized.to_string().contains("next_offset"));
+        assert_eq!(
+            serde_json::from_value::<CapabilityOutcome>(serialized).expect("deserialize"),
+            outcome
+        );
     }
 }
 
@@ -1212,6 +1263,118 @@ async fn blocked_run_persists_to_sink_and_rehydrates_across_restart() {
         .find(|record| record.run_id == run_id)
         .expect("completed run survives rehydration");
     assert_eq!(restored_terminal_run.status, TurnStatus::Completed);
+}
+
+/// A block→resume→complete sequence must report the run's cumulative token
+/// usage once, not double-count the pre-block legs. The loop carries the running
+/// per-run total in its execution state across the resume, so it reports the
+/// whole run at every validated exit; the store must therefore *replace* the
+/// stored total on each exit rather than accumulate. Regression for the
+/// `2*leg1 + leg2` double-count.
+#[tokio::test]
+async fn block_resume_complete_reports_cumulative_usage_without_double_counting() {
+    let (coordinator, store) = coordinator();
+
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-usage", "idem-usage"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-usage")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Leg 1 accumulates 100 input / 50 output, then blocks on an approval gate.
+    // The loop reports its cumulative-so-far (leg 1).
+    let gate_ref = LoopGateRef::new("gate:usage").unwrap();
+    let leg1 = LoopModelUsage {
+        input_tokens: 100,
+        output_tokens: 50,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+    };
+    store
+        .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            model_usage: Some(leg1),
+            run_id,
+            runner_id,
+            lease_token,
+            mapping: approval_blocked_mapping(
+                TurnCheckpointId::new(),
+                block_state_ref(),
+                &gate_ref,
+            ),
+        })
+        .await
+        .unwrap();
+
+    // Resume the approval gate; the run re-queues for a fresh claim.
+    coordinator
+        .resume_turn(ResumeTurnRequest {
+            scope: scope("thread-usage"),
+            actor: actor(),
+            run_id,
+            gate_resolution_ref: GateRef::new(gate_ref.as_str()).unwrap(),
+            source_binding_ref: SourceBindingRef::new("source-usage-resumed").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-usage-resumed").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-usage-resume").unwrap(),
+            precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedApprovalGate,
+            resume_disposition: None,
+        })
+        .await
+        .unwrap();
+
+    let resumed_runner_id = TurnRunnerId::new();
+    let resumed_lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: resumed_runner_id,
+            lease_token: resumed_lease_token,
+            scope_filter: Some(scope("thread-usage")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Leg 2 adds 40 input / 20 output. Because the loop's execution state carried
+    // leg 1 forward across the resume, the completing exit reports the *run
+    // cumulative* (leg1 + leg2), not just the delta.
+    let cumulative = LoopModelUsage {
+        input_tokens: 140,
+        output_tokens: 70,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+    };
+    store
+        .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            model_usage: Some(cumulative),
+            run_id,
+            runner_id: resumed_runner_id,
+            lease_token: resumed_lease_token,
+            mapping: completed_mapping(),
+        })
+        .await
+        .unwrap();
+
+    let state = coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: scope("thread-usage"),
+            run_id,
+        })
+        .await
+        .unwrap();
+    // The terminal total is the run cumulative (leg1 + leg2), NOT
+    // leg1 + (leg1 + leg2) = 2*leg1 + leg2.
+    assert_eq!(state.model_usage, Some(cumulative));
 }
 
 /// A run recovered *from a restart snapshot* while blocked must still receive a

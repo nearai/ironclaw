@@ -11,7 +11,7 @@ use ironclaw_llm::{
     CompletionRequest, CompletionResponse, CompletionStreamSink, FinishReason, LlmError,
     LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessage,
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelRouteSnapshot,
     HostManagedModelStreamSink, HostManagedToolResultContent, ThreadBackedLoopContextPort,
@@ -3349,10 +3349,10 @@ impl HostManagedModelGateway for InvalidSummaryModelGateway {
         &self,
         _request: HostManagedModelRequest,
     ) -> Result<
-        ironclaw_loop_support::HostManagedModelResponse,
-        ironclaw_loop_support::HostManagedModelError,
+        ironclaw_loop_host::HostManagedModelResponse,
+        ironclaw_loop_host::HostManagedModelError,
     > {
-        Err(ironclaw_loop_support::HostManagedModelError::safe(
+        Err(ironclaw_loop_host::HostManagedModelError::safe(
             self.kind,
             self.safe_summary.clone(),
         ))
