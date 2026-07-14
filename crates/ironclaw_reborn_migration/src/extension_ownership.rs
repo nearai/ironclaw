@@ -159,10 +159,10 @@ mod tests {
     };
     #[cfg(feature = "libsql")]
     use ironclaw_filesystem::{LibSqlRootFilesystem, RootFilesystem, ScopedFilesystem};
-    use ironclaw_host_runtime::default_host_api_contract_registry;
     #[cfg(feature = "libsql")]
     use ironclaw_host_api::AgentId;
     use ironclaw_host_api::{ExtensionId, HostPortCatalog, TenantId, UserId};
+    use ironclaw_host_runtime::default_host_api_contract_registry;
     #[cfg(feature = "libsql")]
     use ironclaw_reborn_identity::{
         FilesystemRebornIdentityStore, RebornUserDirectory, RebornUserRole,

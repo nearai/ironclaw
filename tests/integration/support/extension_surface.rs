@@ -213,6 +213,13 @@ const BUNDLED_EXTENSION_MANIFEST_ASSET_DIRS: &[&str] = &[
 pub fn bundled_extension_manifest_capability_ids()
 -> Result<Vec<ironclaw_host_api::CapabilityId>, Box<dyn std::error::Error + Send + Sync>> {
     let mut registry = ironclaw_extensions::ExtensionRegistry::new();
+    // The unified Slack extension declares both `ironclaw.capability_provider/v1`
+    // (tools) and `ironclaw.product_adapter/v1` (channel), so bundled-manifest
+    // parsing needs the product-adapter contract registered too — matching the
+    // production composition registry (`product_extension_host_api_contract_registry`).
+    let host_ports = ironclaw_host_runtime::default_host_port_catalog()?;
+    let mut contracts = ironclaw_host_runtime::default_host_api_contract_registry()?;
+    ironclaw_product_adapter_registry::register_product_adapter_host_api_contract(&mut contracts)?;
     for dir_name in BUNDLED_EXTENSION_MANIFEST_ASSET_DIRS {
         let asset_root = repo_root()
             .join("crates/ironclaw_first_party_extensions/assets")
@@ -220,8 +227,8 @@ pub fn bundled_extension_manifest_capability_ids()
         let manifest = ironclaw_extensions::ExtensionManifest::parse(
             &std::fs::read_to_string(asset_root.join("manifest.toml"))?,
             ironclaw_extensions::ManifestSource::HostBundled,
-            &ironclaw_host_runtime::default_host_port_catalog()?,
-            &ironclaw_host_runtime::default_host_api_contract_registry()?,
+            &host_ports,
+            &contracts,
         )?;
         // The manifest's OWN `id` (not the asset directory name) must match
         // the `ExtensionPackage` root's last segment — they differ for
