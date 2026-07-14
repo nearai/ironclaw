@@ -11,7 +11,7 @@ function channelsTabSourceForTest() {
     if (line.startsWith("import ")) continue;
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { ChannelsTab, ChannelConnectSections, isSlackPackage, channelSurface, channelConnection, isInboundProofCodeConnection };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { ChannelsTab, ChannelConnectSections, OAuthChannelConnectionSection, isSlackPackage, channelSurface, channelConnection, isInboundProofCodeConnection, isOauthConnection };`;
 }
 
 function channelConnectSectionsForTest(item) {
@@ -23,13 +23,16 @@ function channelConnectSectionsForTest(item) {
       return { strings: Array.from(strings), values };
     },
     redeemPairingCode() {},
+    onConfigure() {},
   };
   vm.runInNewContext(channelsTabSourceForTest(), context);
   return {
     rendered: context.globalThis.__testExports.ChannelConnectSections({ item }),
+    OAuthChannelConnectionSection: context.globalThis.__testExports.OAuthChannelConnectionSection,
     PairingSection: context.PairingSection,
     SlackAdminManagedSection: context.SlackAdminManagedSection,
     redeemPairingCode: context.redeemPairingCode,
+    onConfigure: context.onConfigure,
   };
 }
 
@@ -181,7 +184,7 @@ test("isSlackPackage recognizes the Slack extension package", () => {
 test("channelSurface and channelConnection extract the typed channel surface", () => {
   const context = { globalThis: {} };
   vm.runInNewContext(channelsTabSourceForTest(), context);
-  const { channelSurface, channelConnection, isInboundProofCodeConnection } =
+  const { channelSurface, channelConnection, isInboundProofCodeConnection, isOauthConnection } =
     context.globalThis.__testExports;
 
   const connection = { channel: "telegram", strategy: "inbound_proof_code" };
@@ -212,6 +215,9 @@ test("channelSurface and channelConnection extract the typed channel surface", (
   assert.equal(isInboundProofCodeConnection({ strategy: "oauth" }), false);
   assert.equal(isInboundProofCodeConnection({ strategy: "admin_managed_channels" }), false);
   assert.equal(isInboundProofCodeConnection(null), false);
+  assert.equal(isOauthConnection({ strategy: "oauth" }), true);
+  assert.equal(isOauthConnection({ strategy: "inbound_proof_code" }), false);
+  assert.equal(isOauthConnection(null), false);
 });
 
 test("ChannelConnectSections renders Slack admin management only for the Slack package", () => {
@@ -301,18 +307,56 @@ test("ChannelConnectSections renders inbound-proof-code surfaces as pairing with
     ["pairing", "telegram"],
   ]);
 
-  // OAuth connections (and channels without a connect affordance) render
-  // nothing here — OAuth connect lives in the configure modal.
+  const oauthConnection = {
+    channel: "telegram",
+    strategy: "oauth",
+    instructions: "Connect Telegram with OAuth from the extension configuration.",
+    submit_label: "Connect Telegram",
+  };
+  const oauthView = channelConnectSectionsForTest({
+    package_ref: { id: "telegram" },
+    surfaces: [{ kind: "channel", connection: oauthConnection }],
+  });
+  const oauthSection = oauthView.rendered.children[0];
   assert.equal(
-    channelConnectSectionsForTest({
-      package_ref: { id: "telegram" },
-      surfaces: [{ kind: "channel", connection: { channel: "telegram", strategy: "oauth" } }],
-    }).rendered,
-    null,
+    oauthSection.values[0],
+    oauthView.OAuthChannelConnectionSection,
+    "OAuth channel surfaces render their typed connection copy section",
+  );
+  assert.equal(
+    componentProps(oauthView.rendered, oauthView.OAuthChannelConnectionSection).connection,
+    oauthConnection,
+    "the OAuth card copy is the surface connection",
   );
   assert.equal(
     channelConnectSectionsForTest({ package_ref: { id: "telegram" }, surfaces: [] }).rendered,
     null,
+  );
+});
+
+test("ChannelConnectSections renders Slack admin setup alongside Slack OAuth connection copy", () => {
+  const connection = {
+    channel: "slack",
+    strategy: "oauth",
+    instructions: "Connect Slack with OAuth from the extension configuration.",
+    submit_label: "Connect Slack",
+  };
+  const view = channelConnectSectionsForTest({
+    package_ref: { id: "slack" },
+    surfaces: [
+      { kind: "tool" },
+      { kind: "auth" },
+      { kind: "channel", inbound: true, outbound: true, connected: false, connection },
+    ],
+  });
+
+  assert.equal(view.rendered.children.length, 2);
+  assert.equal(view.rendered.children[0].values[0], view.SlackAdminManagedSection);
+  assert.equal(view.rendered.children[1].values[0], view.OAuthChannelConnectionSection);
+  assert.equal(
+    componentProps(view.rendered, view.OAuthChannelConnectionSection).connection,
+    connection,
+    "Slack OAuth uses the typed surface copy instead of hardcoded onboarding text",
   );
 });
 

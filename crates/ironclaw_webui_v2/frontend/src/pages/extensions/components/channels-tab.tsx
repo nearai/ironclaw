@@ -29,15 +29,74 @@ export function isInboundProofCodeConnection(connection) {
   return connection?.strategy === "inbound_proof_code";
 }
 
-export function ChannelConnectSections({ item }) {
+export function isOauthConnection(connection) {
+  return connection?.strategy === "oauth";
+}
+
+function configurePayload(item) {
+  return {
+    packageRef: item?.package_ref,
+    displayName: item?.display_name || packageId(item),
+    surfaces: item?.surfaces,
+    active: item?.active,
+    authenticated: item?.authenticated,
+    needs_setup: item?.needs_setup,
+    activationStatus: item?.activation_status,
+    onboardingState: item?.onboarding_state,
+  };
+}
+
+export function OAuthChannelConnectionSection({ item, connection, onConfigure, isBusy }) {
+  const instructions = String(connection?.instructions || "").trim();
+  const submitLabel = String(connection?.submit_label || "").trim();
+  if (!instructions && !submitLabel) return null;
+  return (
+    <div className="rounded-[14px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3">
+      {instructions &&
+      (
+        <p className="text-xs leading-5 text-[var(--v2-text-muted)]">
+          {instructions}
+        </p>
+      )}
+      {submitLabel &&
+      (
+        <div className="mt-3 flex justify-end">
+          <button
+            type="button"
+            disabled={isBusy || !onConfigure}
+            onClick={() => onConfigure?.(configurePayload(item))}
+            className="v2-button rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] px-3 py-1.5 text-xs font-medium text-[var(--v2-text-strong)] hover:bg-[var(--v2-surface-muted)] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {submitLabel}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function ChannelConnectSections({ item, onConfigure, isBusy }) {
   const connection = channelConnection(item);
   const sections = [];
   if (isSlackPackage(item)) {
     // Operator-only Slack workspace setup + channel routing. The section
     // self-gates on the operator-scoped setup endpoint, so non-operators see
-    // nothing here; the user OAuth connect lives in the configure modal.
+    // nothing here. The typed OAuth connection copy below stays driven by the
+    // extension surface instead of hardcoded Slack-specific onboarding text.
     sections.push(<SlackAdminManagedSection key="slack-admin" />);
-  } else if (isInboundProofCodeConnection(connection)) {
+  }
+  if (isOauthConnection(connection)) {
+    const channel = connection.channel || packageId(item);
+    sections.push(
+      <OAuthChannelConnectionSection
+        key={`oauth-${channel}`}
+        item={item}
+        connection={connection}
+        onConfigure={onConfigure}
+        isBusy={isBusy}
+      />
+    );
+  } else if (!isSlackPackage(item) && isInboundProofCodeConnection(connection)) {
     const pairingChannel = connection.channel || packageId(item);
     sections.push(
       <PairingSection
@@ -89,7 +148,11 @@ export function ChannelsTab({
                       onRemove={onRemove}
                       isBusy={isBusy}
                     />
-                    <ChannelConnectSections item={ch} />
+                    <ChannelConnectSections
+                      item={ch}
+                      onConfigure={onConfigure}
+                      isBusy={isBusy}
+                    />
                   </div>
                 );
               }
