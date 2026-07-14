@@ -156,9 +156,14 @@ impl<'de> Deserialize<'de> for UserMessagePayload {
         D: Deserializer<'de>,
     {
         let wire = UserMessagePayloadWire::deserialize(deserializer)?;
-        Self::new(wire.text, wire.attachments, wire.trigger)
+        let payload = Self::new(wire.text, wire.attachments, wire.trigger)
             .map(|payload| payload.with_requested_model(wire.requested_model))
-            .map_err(serde::de::Error::custom)
+            .map_err(serde::de::Error::custom)?;
+        // `new` validated the payload while `requested_model` was still `None`;
+        // re-validate the assembled value so the wire-supplied model hint is
+        // bounded like every other ingress field (bypass flagged in PR review).
+        payload.validate().map_err(serde::de::Error::custom)?;
+        Ok(payload)
     }
 }
 
@@ -934,6 +939,42 @@ mod tests {
                 .with_requested_model(Some(String::new()))
                 .requested_model
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn user_message_payload_bounds_requested_model_on_every_path() {
+        let over_limit = "m".repeat(REQUESTED_MODEL_MAX_BYTES + 1);
+
+        // Explicit validation after the builder rejects an over-long hint.
+        let built = UserMessagePayload::new("hi", vec![], ProductTriggerReason::DirectChat)
+            .unwrap()
+            .with_requested_model(Some(over_limit.clone()));
+        assert!(built.validate().is_err());
+
+        // Deserialization must not smuggle an unbounded hint past validation:
+        // the wire path attaches `requested_model` after `new`, so it re-validates.
+        let wire = serde_json::json!({
+            "text": "hi",
+            "attachments": [],
+            "trigger": "direct_chat",
+            "requested_model": over_limit,
+        })
+        .to_string();
+        let decoded: Result<UserMessagePayload, _> = serde_json::from_str(&wire);
+        assert!(
+            decoded.is_err(),
+            "an over-long requested_model must be rejected during deserialization"
+        );
+
+        // A hint at the cap is accepted on both paths.
+        let at_cap = "m".repeat(REQUESTED_MODEL_MAX_BYTES);
+        assert!(
+            UserMessagePayload::new("hi", vec![], ProductTriggerReason::DirectChat)
+                .unwrap()
+                .with_requested_model(Some(at_cap))
+                .validate()
+                .is_ok()
         );
     }
 
