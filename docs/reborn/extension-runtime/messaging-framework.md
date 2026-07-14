@@ -45,49 +45,58 @@ An extension may declare `[channel]` only (a bot entrypoint, no user-acting
 tools — Telegram today), `[messaging]` only (act-as-user tools with no inbound
 bot), or both (Slack).
 
-### 2.1 The relay/act boundary — enforced, uniform (CRITICAL)
+### 2.1 The relay/act boundary — decided by the recipient (CRITICAL)
 
-The split above is a **correctness and confidentiality guarantee**, not a
-convention. The rule in one line: **replying to the person who asked is NOT a
-tool — the model just answers, and the host delivers that answer back to where
-the request came from. The messaging tools are only for talking to *other*
-people/places, as the user.**
+The channel-vs-tools split is a **correctness and confidentiality guarantee**,
+and the rule that decides which surface handles a message is simply **who the
+recipient is:**
 
-The failure this prevents (seen on v1): the model treats "send me the results"
-as a *tool call* and reaches for `send_message`, producing either a nonsensical
-**self-DM** of the user's own results, or — the dangerous case — a
-**confidentiality leak** (a private "summarize this channel and show me the bugs"
-answer posted into the **public source channel**).
+- **Recipient = you (the owner/requester)** → the **channel** delivers it (the
+  Slack bot, the Telegram bot, WebUI). Results, summaries, notifications,
+  automation output, "send me…", "DM me…" — all of it. The model does **not**
+  call a tool for this: it produces the answer and ends the turn, and the host
+  delivers it back to where the request came from (or your saved notification
+  target).
+- **Recipient = anyone else — another person or a channel** → the **messaging
+  tools** send it, **as you** ("DM Sergey", "post to #announcements").
 
-Enforcement, simplest first — three rules, no target math required:
+Two **hard constraints** fall out, both host-enforced:
 
-1. **Relaying to the requester is not a tool.** "send/show/tell **me**", "report
-   back", "let me know" ⇒ the model produces the answer and **ends the turn**;
-   the delivery coordinator sends it back where the request came from (or the
-   user's saved preferred target). The model has nothing to call to reply — so it
-   cannot reply to the wrong place.
-2. **Every act-as-user send is confirmed and clearly labeled.** `send_message`
-   and the other write tools are `default_permission = "ask"`, and the approval
-   the user sees plainly names **what**, **where** ("#eng-bugs — a public
-   channel"), and **as whom** ("as you"). A mis-targeted or leaky send is
-   therefore visible and deniable — the human is the backstop.
-3. **Automations can't act as the user silently.** In a routine/heartbeat there
-   is no one to approve, so an act-as-user send is **denied unless the routine
-   was set up with that specific target ahead of time.** Automations still relay
-   results to you via the channel freely — that is what "and send me the results"
-   means in an automation.
+- **A. The messaging tools never send to you.** You cannot be the recipient of an
+  act-as-you message — that is always a relay, which is the channel's job. A
+  `send_message` whose recipient is you / your own conversation is **blocked**.
+- **B. The channel/bot is never a sender to a third party.** The bot only ever
+  delivers to *you* — as a reply to your own request (where it came from) or a
+  notification to your target. It never initiates a message to someone else,
+  never posts to a channel on your behalf, and never sends *as you*.
+  **Outward-facing is always from you, via the tools.**
 
-That is the whole guarantee, and it holds on every channel because it lives in
-the shared coordinator + dispatch pipeline, not per-vendor code.
+The concrete bugs this kills:
 
-**Optional hardening (belt-and-suspenders, droppable).** IronClaw already knows
-the conversation a request arrived on. If we want to catch a *reflexively
-approved* leak, or skip bugging the user about an obvious mistake, the host can,
-before the `ask`: **auto-block** a send whose target is the user's own reply
-conversation (a self-DM is never a real action), and **escalate the warning**
-when the target is the very group/channel the request came from (the classic
-leak). This layers on top of rules 1–3; it is not the foundation, and if it adds
-confusion it can be dropped in favor of the clear approval alone.
+- **Duplicate send.** "Send me a DM with XYZ" previously became *both* a
+  `send_message` self-DM (as you) *and* the channel relay — you received it
+  twice. Constraint A blocks the self-send, so only the single channel relay
+  happens.
+- **Self-DM / leak.** A private "summarize this channel and show me the bugs"
+  answer has recipient = you, so it is a channel relay, never a post to the
+  source channel — and the bot cannot post it either (constraint B).
+
+A *legitimate* outward send (to someone else) stays `default_permission = "ask"`,
+with the approval plainly naming **what**, **to whom/where** ("#eng-bugs — a
+public channel"), and **as whom** ("as you"). In an **automation**
+(routine/heartbeat) there is no one to approve, so an act-as-you send is **denied
+unless the routine was set up with that target ahead of time** — automations
+still relay results to you via the channel freely.
+
+All of this lives in the shared **coordinator + dispatch** pipeline over the
+owner's identity, so **Slack, Telegram, Discord, and WebUI behave identically** —
+it is what the two surfaces *mean*, not per-vendor logic. Pinned by a
+cross-channel conformance test (§12).
+
+*Product nuance (your call, §13):* invoking IronClaw **in a shared channel**
+replies in that channel (as the bot) via "reply where it came from" — still a
+reply to your request, not a bot-to-third-party send. A stricter variant would
+always DM you privately and put nothing in shared spaces.
 
 ---
 
@@ -618,11 +627,15 @@ framework, which must not fork it.)
   validates and no Slack branch exists in dispatch).
 - **Relay/act boundary conformance (CRITICAL), cross-channel** (§2.1) — the same
   assertions for every messaging extension + the `acme-messenger` fixture:
-  - "summarize `<conversation>` and send me the results" ⇒ the run produces a
-    reply and **does not** call `send_message` (relay only);
-  - `send_message` never delivers the assistant's answer — every call is `ask`,
-    and its approval names the target + "as you" (so a post to the source
-    conversation is visible, never silent);
+  - "summarize `<conversation>` and send me the results" — and "send me a DM with
+    XYZ" ⇒ the run relays **once** via the channel and makes **no** `send_message`
+    call (no duplicate, no self-send);
+  - a `send_message` whose recipient is the owner / their own conversation ⇒
+    **blocked** (constraint A);
+  - the channel/coordinator never delivers to a third-party recipient
+    (constraint B);
+  - a legitimate outward `send_message` (to someone else) ⇒ `ask`, approval names
+    the target + "as you";
   - a **proactive** (routine/heartbeat) run's act-as-user send ⇒ denied unless
     pre-authorized. LLM-trace / integration tests, identical per channel.
 - Repo law: test-first, integration tier for production-wired behavior, both DB
@@ -648,7 +661,13 @@ framework, which must not fork it.)
    fidelity for `edit_message`.
 6. **Output-schema versioning** — how `types.v1` → `types.v2` rolls without a
    wire break for already-installed extensions.
-7. **Relay/act enforcement wiring (§2.1).** Confirm how `ask` resolves in a
-   non-interactive routine/heartbeat (the automation-denial rule depends on it),
-   and whether the optional self/source guard is worth building or the clear,
-   target-naming approval alone suffices.
+7. **Relay/act enforcement wiring (§2.1).** Confirm/wire the two hard
+   constraints — **A** (block a `send_message` whose recipient is the owner) and
+   **B** (the channel/coordinator can only deliver to the owner, never a third
+   party) — plus how `ask` resolves in a non-interactive routine (the
+   automation-denial rule). Verify none silently regress the duplicate /
+   self-send / leak cases.
+8. **Shared-channel replies.** When IronClaw is invoked in a shared channel, does
+   it reply in that channel (as the bot — the default "reply where it came from")
+   or always DM the owner privately? The stricter variant keeps all bot content
+   out of shared spaces; the default matches expected in-channel UX.

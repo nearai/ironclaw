@@ -135,12 +135,11 @@ channel is a separate surface. On that footing:
    "messaging core"** (rendering, splitting, target/DM formatting, error
    mapping) *inside the extension crate*, credential-parameterized — but not the
    coordinator's sole-writer reliability layer.
-7. **A hard relay/act boundary, host-enforced and uniform:** replying to the
-   requester is *not a tool* (the model ends the turn; the coordinator delivers
-   on the channel, back to where the request came from); the messaging tools only
-   act *as the user toward others*, are `ask`-gated with a clearly-labeled
-   target, and are denied to unattended automations without pre-authorization
-   (§6.4).
+7. **A hard relay/act boundary, decided by the recipient (host-enforced,
+   uniform):** to *you* → the channel relays (no tool); to *anyone else* → the
+   tools send *as you*, `ask`-gated. The tools never send to you (blocking the
+   duplicate self-send) and the bot never sends to a third party; automations
+   deny act-as-you without pre-authorization (§6.4).
 
 ---
 
@@ -561,31 +560,30 @@ missing/expired grant raises the generic gate keyed by the tool's declared vendo
 and resumes — `ToolError::AuthRequired` (`tool_adapter.rs:64`) — routed to the
 OAuth gate or the pairing gate as the vendor requires.
 
-### 6.4 The relay/act boundary — host-enforced, uniform (critical)
+### 6.4 The relay/act boundary — decided by the recipient (critical)
 
 The channel-vs-tools split is a confidentiality guarantee, and it must not depend
-on the model classifying correctly. On v1 the model often misused the
-act-as-user tool for a *relay* — self-DMing the user their own results, or
-(worse) posting a private answer into the public source channel. Three simple,
-host-enforced rules make that structurally hard, identically on every channel:
+on the model classifying correctly. **Which surface handles a message is decided
+by the recipient:** to *you* (the owner) → the channel relays it (bot / WebUI);
+to *anyone else* → the messaging tools send it, as you. Two host-enforced hard
+constraints follow:
 
-- **Replying to the requester is not a tool.** The model ends the turn; the
-  delivery coordinator delivers the answer on the channel, back to where the
-  request came from (or the user's saved target). There is no "reply to the user"
-  tool to misuse.
-- **Act-as-user is `ask` and clearly labeled.** Every send is confirmed with an
-  approval that names the target ("#eng-bugs — public") and "as you", so a leak
-  or a wrong target is visible and deniable.
-- **Automations deny act-as-user by default.** With no live approver, a
-  routine/heartbeat may relay results on the channel but may not post as the user
-  unless the routine pre-authorized that target.
+- **A. The messaging tools never send to you.** A `send_message` whose recipient
+  is the owner / their own conversation is blocked — that is a relay, the
+  channel's job. This is what kills the observed **duplicate send**: "send me a DM
+  with XYZ" otherwise becomes both a self-send *and* the channel relay.
+- **B. The channel/bot is never a sender to a third party.** The bot delivers
+  only to the owner — a reply to their own request (where it came from) or a
+  notification to their target — never initiating to someone else, never posting
+  as the user. Outward-facing is always from you.
 
-This is generic (coordinator + dispatch), not per-vendor, and pinned by a
-cross-channel conformance test (`messaging-framework.md` §12). An optional
-hardening — the host auto-blocking a send to the requester's own conversation and
-escalating one to the source channel — may layer on top but is not the
-foundation. **Open (must verify + wire):** the proactive-permission denial and
-the optional guard; neither is confirmed present today.
+A legitimate outward send (to someone else) stays `ask` with a target-naming
+approval; automations deny act-as-user without pre-authorization. This is generic
+(coordinator + dispatch), not per-vendor, and pinned by a cross-channel
+conformance test (`messaging-framework.md` §12). **Open (must verify + wire):**
+constraints A and B and the automation denial are not confirmed present today;
+and whether an in-shared-channel invocation replies in-channel or always DMs the
+owner is a product call (`messaging-framework.md` §13).
 
 ---
 
