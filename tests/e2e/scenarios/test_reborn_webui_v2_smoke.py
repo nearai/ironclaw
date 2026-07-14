@@ -67,7 +67,9 @@ async def _effective_colors(locator) -> dict[str, list[float]]:
         """element => {
           const parse = (value) => {
             const channels = value.match(/[\\d.]+/g)?.map(Number) || [];
-            return [channels[0] || 0, channels[1] || 0, channels[2] || 0,
+            const scale = value.trim().startsWith("color(srgb ") ? 255 : 1;
+            return [(channels[0] || 0) * scale, (channels[1] || 0) * scale,
+              (channels[2] || 0) * scale,
               channels.length > 3 ? channels[3] : 1];
           };
           const over = (front, back) => {
@@ -95,10 +97,11 @@ async def _effective_colors(locator) -> dict[str, list[float]]:
     )
 
 
-async def _assert_readable(locator, label: str) -> None:
+async def _assert_readable(locator, label: str) -> dict[str, list[float]]:
     colors = await _effective_colors(locator)
     ratio = _contrast_ratio(colors["foreground"], colors["background"])
     assert ratio >= 4.5, f"{label} contrast was {ratio:.2f}:1 with colors {colors}"
+    return colors
 
 
 async def _wait_for_automation_named(
@@ -190,7 +193,27 @@ async def test_reborn_v2_light_theme_semantic_colors_have_readable_contrast(
     )
     install_button = reborn_v2_page.get_by_role("button", name="Install").first
     await expect(install_button).to_be_visible(timeout=15000)
-    await _assert_readable(install_button, "light-theme outline button")
+    idle_colors = await _assert_readable(install_button, "light-theme outline button")
+
+    await install_button.hover()
+    hover_colors = await _assert_readable(
+        install_button, "light-theme outline button on hover"
+    )
+    assert hover_colors["background"] != idle_colors["background"], (
+        "outline button hover state did not change its effective background"
+    )
+
+    await reborn_v2_page.mouse.down()
+    try:
+        pressed_colors = await _assert_readable(
+            install_button, "light-theme outline button while pressed"
+        )
+        assert pressed_colors["background"] != hover_colors["background"], (
+            "outline button pressed state did not change its effective background"
+        )
+    finally:
+        await reborn_v2_page.mouse.move(0, 0)
+        await reborn_v2_page.mouse.up()
 
     # The same semantic outline token must remain readable after switching the
     # browser to dark mode; then restore light mode for the success-state check.
