@@ -243,6 +243,7 @@ where
         let turn_submission_result = self
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
+                requested_model: None,
                 scope: resolution.turn_scope.clone(),
                 actor: accepted_message.actor.clone(),
                 accepted_message_ref: accepted_message.message_ref.clone(),

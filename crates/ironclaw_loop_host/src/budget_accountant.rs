@@ -1091,6 +1091,7 @@ mod tests {
             usage: Some(ironclaw_turns::run_profile::LoopModelUsage {
                 input_tokens: 7,
                 output_tokens: 3,
+                ..Default::default()
             }),
         };
         accountant

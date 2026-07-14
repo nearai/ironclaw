@@ -50,6 +50,13 @@ use ironclaw_turns::{
 };
 use tracing::debug;
 
+mod prompt_cache_activity;
+
+use prompt_cache_activity::{
+    ModelCallCacheUsage, PromptCacheActivityLog, PromptCacheCallScope,
+    system_prompt_cache_signature, tool_definitions_cache_signature,
+};
+
 use crate::{
     failure_categories::MODEL_CREDITS_EXHAUSTED_REASON_KIND,
     model_routes::{
@@ -345,6 +352,7 @@ where
     provider: Arc<P>,
     policy: LlmModelProfilePolicy,
     provider_turn_sequence: Arc<AtomicU64>,
+    prompt_cache_activity: Arc<PromptCacheActivityLog>,
 }
 
 impl<P> LlmProviderModelGateway<P>
@@ -366,7 +374,12 @@ where
             provider,
             policy,
             provider_turn_sequence: Arc::new(AtomicU64::new(1)),
+            prompt_cache_activity: Arc::new(PromptCacheActivityLog::default()),
         }
+    }
+
+    fn prompt_cache_scope(&self, run_id: TurnRunId) -> PromptCacheCallScope {
+        PromptCacheCallScope::new(Arc::clone(&self.prompt_cache_activity), run_id)
     }
 }
 
@@ -388,7 +401,14 @@ where
                     "model profile is not permitted",
                 )
             })?;
-        let model_override = request_model_override(route, self.provider.as_ref())?;
+        let model_override = request_model_override(
+            route,
+            self.provider.as_ref(),
+            request
+                .resolved_model_route
+                .as_ref()
+                .map(|snapshot| snapshot.model_id.as_str()),
+        )?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
@@ -405,6 +425,7 @@ where
             None,
             None,
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -423,7 +444,14 @@ where
                     "model profile is not permitted",
                 )
             })?;
-        let model_override = request_model_override(route, self.provider.as_ref())?;
+        let model_override = request_model_override(
+            route,
+            self.provider.as_ref(),
+            request
+                .resolved_model_route
+                .as_ref()
+                .map(|snapshot| snapshot.model_id.as_str()),
+        )?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
@@ -440,6 +468,7 @@ where
             None,
             Some(sink),
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -458,7 +487,14 @@ where
                     "model profile is not permitted",
                 )
             })?;
-        let model_override = request_model_override(route, self.provider.as_ref())?;
+        let model_override = request_model_override(
+            route,
+            self.provider.as_ref(),
+            request
+                .resolved_model_route
+                .as_ref()
+                .map(|snapshot| snapshot.model_id.as_str()),
+        )?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
@@ -479,6 +515,7 @@ where
             Some(provider_turn_scope),
             None,
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -498,7 +535,14 @@ where
                     "model profile is not permitted",
                 )
             })?;
-        let model_override = request_model_override(route, self.provider.as_ref())?;
+        let model_override = request_model_override(
+            route,
+            self.provider.as_ref(),
+            request
+                .resolved_model_route
+                .as_ref()
+                .map(|snapshot| snapshot.model_id.as_str()),
+        )?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
@@ -519,6 +563,7 @@ where
             Some(provider_turn_scope),
             Some(sink),
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -632,6 +677,7 @@ where
     provider_pool: Arc<P>,
     route_resolver: Arc<dyn ModelRouteResolver>,
     provider_turn_sequence: Arc<AtomicU64>,
+    prompt_cache_activity: Arc<PromptCacheActivityLog>,
 }
 
 impl<P> RoutedLlmProviderModelGateway<P>
@@ -643,7 +689,12 @@ where
             provider_pool,
             route_resolver,
             provider_turn_sequence: Arc::new(AtomicU64::new(1)),
+            prompt_cache_activity: Arc::new(PromptCacheActivityLog::default()),
         }
+    }
+
+    fn prompt_cache_scope(&self, run_id: TurnRunId) -> PromptCacheCallScope {
+        PromptCacheCallScope::new(Arc::clone(&self.prompt_cache_activity), run_id)
     }
 }
 
@@ -685,6 +736,7 @@ where
             None,
             None,
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -723,6 +775,7 @@ where
             None,
             Some(sink),
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -765,6 +818,7 @@ where
             Some(provider_turn_scope),
             None,
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -808,6 +862,7 @@ where
             Some(provider_turn_scope),
             Some(sink),
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -976,14 +1031,22 @@ fn host_error_to_model_gateway_error(error: AgentLoopHostError) -> LoopModelGate
 fn request_model_override<P>(
     route: &LlmModelProfileRoute,
     provider: &P,
+    requested_model: Option<&str>,
 ) -> Result<String, HostManagedModelError>
 where
     P: LlmProvider + ?Sized,
 {
-    let model_override = route
-        .model_override
-        .as_deref()
+    // A per-run caller-requested model (an advisory route hint set at submit)
+    // takes precedence over the profile default. Providers that honor
+    // per-request overrides (e.g. NEAR AI) serve the requested model; providers
+    // that bake the model at construction ignore it and fall back to their
+    // active model — the "route if the provider can serve it, else fall back"
+    // behavior, decided at the provider boundary rather than a route allowlist.
+    let model_override = requested_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
         .map(str::to_string)
+        .or_else(|| route.model_override.as_deref().map(str::to_string))
         .unwrap_or_else(|| provider.active_model_name());
     let trimmed = model_override.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default") {
@@ -1078,7 +1141,7 @@ impl CompletionStreamSink for ProviderStreamSink {
 
 #[tracing::instrument(
     level = "debug",
-    skip(provider, completion, capabilities, stream_sink, replay_identity),
+    skip(provider, completion, capabilities, stream_sink, replay_identity, cache_scope),
     fields(
         provider_id = %replay_identity.provider_id,
         provider_model_id = %replay_identity.provider_model_id,
@@ -1092,10 +1155,12 @@ async fn complete_model_request<P>(
     provider_turn_scope: Option<String>,
     stream_sink: Option<Arc<dyn HostManagedModelStreamSink>>,
     replay_identity: ProviderReplayIdentity,
+    cache_scope: Option<PromptCacheCallScope>,
 ) -> Result<HostManagedModelResponse, HostManagedModelError>
 where
     P: LlmProvider + ?Sized,
 {
+    let system_prompt_hash = system_prompt_cache_signature(&completion.messages);
     if let Some(capabilities) = capabilities {
         let tool_definitions = capabilities
             .tool_definitions()
@@ -1132,6 +1197,7 @@ where
                     provider_tool_definition_to_llm(definition)
                 })
                 .collect::<Vec<_>>();
+            let tool_definitions_hash = tool_definitions_cache_signature(&recovery_tool_names);
             let tool_request =
                 ToolCompletionRequest::from_completion_request(completion, llm_tool_definitions);
             debug!("reborn model gateway dispatching tool-capable provider request");
@@ -1166,6 +1232,13 @@ where
                     return Err(map_provider_error(error));
                 }
             };
+            if let Some(scope) = cache_scope.as_ref() {
+                scope.record(
+                    ModelCallCacheUsage::from_tool_response(&response),
+                    tool_definitions_hash,
+                    system_prompt_hash,
+                );
+            }
             let response =
                 recover_textual_tool_calls_from_tool_response(response, &recovery_tool_names)?;
             let host_response_started_at = live_latency_started_at();
@@ -1231,6 +1304,13 @@ where
                             return Err(map_provider_error(error));
                         }
                     };
+                    if let Some(scope) = cache_scope.as_ref() {
+                        scope.record(
+                            ModelCallCacheUsage::from_tool_response(&response),
+                            tool_definitions_hash,
+                            system_prompt_hash,
+                        );
+                    }
                     let mut response = recover_textual_tool_calls_from_tool_response(
                         response,
                         &recovery_tool_names,
@@ -1316,6 +1396,13 @@ where
             return Err(map_provider_error(error));
         }
     };
+    if let Some(scope) = cache_scope.as_ref() {
+        scope.record(
+            ModelCallCacheUsage::from_completion_response(&response),
+            tool_definitions_cache_signature(&[]),
+            system_prompt_hash,
+        );
+    }
     debug!(
         finish_reason = ?response.finish_reason,
         content_bytes = response.content.len(),
@@ -1450,6 +1537,8 @@ async fn tool_response_to_host(
             .with_usage(LoopModelUsage {
                 input_tokens: response.input_tokens,
                 output_tokens: response.output_tokens,
+                cache_read_input_tokens: response.cache_read_input_tokens,
+                cache_creation_input_tokens: response.cache_creation_input_tokens,
             }));
         }
         let advertised_tool_names = capabilities
@@ -1533,6 +1622,8 @@ async fn tool_response_to_host(
         .with_usage(LoopModelUsage {
             input_tokens: response.input_tokens,
             output_tokens: response.output_tokens,
+            cache_read_input_tokens: response.cache_read_input_tokens,
+            cache_creation_input_tokens: response.cache_creation_input_tokens,
         }));
     }
 
@@ -1556,6 +1647,8 @@ async fn tool_response_to_host(
             .with_usage(LoopModelUsage {
                 input_tokens: response.input_tokens,
                 output_tokens: response.output_tokens,
+                cache_read_input_tokens: response.cache_read_input_tokens,
+                cache_creation_input_tokens: response.cache_creation_input_tokens,
             }))
         }
         FinishReason::Length => Err(HostManagedModelError::safe(
@@ -1874,6 +1967,8 @@ fn response_to_host_reply(
     let usage = LoopModelUsage {
         input_tokens: response.input_tokens,
         output_tokens: response.output_tokens,
+        cache_read_input_tokens: response.cache_read_input_tokens,
+        cache_creation_input_tokens: response.cache_creation_input_tokens,
     };
     match response.finish_reason {
         FinishReason::Stop => {
@@ -2362,6 +2457,18 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
     // (api_key=…, sk-…, access_token=…) before the text is stored; the safe
     // summary stays a fixed host-authored category string.
     let provider_detail = error.to_string();
+    if is_unconfigured_provider_error(&error) {
+        // No provider is configured at all: a configuration fault, not an
+        // availability fault. CredentialUnavailable is unclassified in the
+        // loop's recovery mapping, so the run fails fast with the setup hint
+        // on the detail channel instead of riding the multi-minute
+        // availability backoff that exists for real provider outages.
+        return HostManagedModelError::safe(
+            HostManagedModelErrorKind::CredentialUnavailable,
+            "no model provider is configured",
+        )
+        .safe_with_detail(provider_detail);
+    }
     if is_credit_exhaustion_error(&error) {
         return HostManagedModelError::safe(
             HostManagedModelErrorKind::CredentialUnavailable,
@@ -2391,6 +2498,14 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
         ),
     }
     .safe_with_detail(provider_detail)
+}
+
+fn is_unconfigured_provider_error(error: &LlmError) -> bool {
+    matches!(
+        error,
+        LlmError::RequestFailed { provider, .. }
+            if provider == ironclaw_llm::UNCONFIGURED_PROVIDER_ID
+    )
 }
 
 fn is_credit_exhaustion_error(error: &LlmError) -> bool {
@@ -2495,6 +2610,41 @@ mod tests {
             "backticked known-namespace capability must still fire"
         );
         assert_eq!(guard.unwrap().capability_id.as_str(), "builtin.echo");
+    }
+
+    #[test]
+    fn unconfigured_provider_error_maps_to_credential_unavailable_not_availability() {
+        // A placeholder "no LLM configured" failure must not be classified as
+        // an availability-class error: availability errors ride a deep retry
+        // backoff (~minutes), while an unconfigured provider can never
+        // recover by retrying. CredentialUnavailable fails the run fast.
+        let error = LlmError::RequestFailed {
+            provider: ironclaw_llm::UNCONFIGURED_PROVIDER_ID.to_string(),
+            reason: "no LLM provider is configured yet; choose one in Settings → Inference"
+                .to_string(),
+        };
+        assert!(is_unconfigured_provider_error(&error));
+
+        let mapped = map_provider_error(error);
+        assert_eq!(
+            mapped.kind,
+            HostManagedModelErrorKind::CredentialUnavailable
+        );
+        let detail = mapped.detail.expect("setup hint travels on detail");
+        assert!(detail.contains("no LLM provider is configured"));
+    }
+
+    #[test]
+    fn unconfigured_provider_detection_requires_the_placeholder_provider_id() {
+        // A real provider whose *message* mentions configuration must keep
+        // availability-class mapping; only the placeholder provider id
+        // signals the config fault.
+        let err = request_failed("backend not configured correctly");
+        assert!(!is_unconfigured_provider_error(&err));
+        assert_eq!(
+            map_provider_error(err).kind,
+            HostManagedModelErrorKind::Unavailable
+        );
     }
 
     #[test]

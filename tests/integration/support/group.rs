@@ -109,6 +109,7 @@ use super::builder::{
     apply_hermetic_env, binding_request, build_storage_composite, scoped_turns_fs_composite,
     thread_scope_from_binding,
 };
+use super::doubles::RecordingSecurityAuditSink;
 use super::harness::{
     EmptyIdentityContextSource, HarnessCapabilityMode, HarnessCapabilityRecorder,
     HarnessTurnBackend, HostRuntimeCapabilityHarness, RecordingTestCapabilityPort,
@@ -215,6 +216,10 @@ pub(crate) struct GroupSharedStorage {
     /// opted in (C-TRACECAP seam); `None` otherwise. Concrete type (not `Arc<dyn
     /// TurnEventSink>`) so a test can read `.events()` back directly.
     pub(crate) turn_event_sink: Option<Arc<InMemoryTurnEventSink>>,
+    /// W5-WIRING-PARITY: production local-dev always wires a security-audit
+    /// sink; the harness mirrors that shape with a recording sink so tests can
+    /// assert events emitted through real caller paths.
+    pub(crate) security_audit_sink: Arc<RecordingSecurityAuditSink>,
     /// The exact loop milestone sink wired into the group's ONE planned runtime.
     /// Retained so integration tests can assert production loop milestones
     /// without adding event-specific hooks to the runtime path.
@@ -811,6 +816,10 @@ impl RebornIntegrationGroupBuilder {
         } else {
             (None, None, None)
         };
+        let security_audit_sink: Arc<RecordingSecurityAuditSink> =
+            Arc::new(RecordingSecurityAuditSink::default());
+        let hook_security_audit_sink: Arc<dyn ironclaw_events::SecurityAuditSink> =
+            security_audit_sink.clone();
 
         // W5-WIRING-PARITY: bind the literal to a local before consuming it so
         // `harness_planned_runtime_parts_shape` can read the REAL Some/None
@@ -854,6 +863,15 @@ impl RebornIntegrationGroupBuilder {
                 tool_disclosure: self
                     .tool_disclosure
                     .unwrap_or_else(ToolDisclosureMode::from_env),
+                // Loop-level counterpart of hermetic `LLM_MAX_RETRIES=0`:
+                // production rides out provider outages for minutes (deep
+                // availability retries with long backoff), which would stall
+                // scenarios that deliberately script a model failure (e.g.
+                // `failure_category_demasked`). One attempt keeps deliberate
+                // failure paths fast while still exercising retry-then-abort.
+                planned_model_availability_retry_attempts: Some(
+                    std::num::NonZeroU32::new(1).expect("nonzero"),
+                ),
                 ..DefaultPlannedRuntimeConfig::default()
             },
             model_route_resolver: None,
@@ -890,9 +908,10 @@ impl RebornIntegrationGroupBuilder {
             // C-COMMCTX: delivery-preference / connected-channel provider (Some
             // only when `communication_context_provider()` was set).
             communication_context_provider: self.communication_context_provider,
-            // No RecordingSecurityAuditSink double exists yet (nearai/ironclaw#5640);
-            // wiring_parity.rs's ALLOWED_DIVERGENCES tracks this field by name, not line.
-            hook_security_audit_sink: None,
+            // W5-WIRING-PARITY: production local-dev always wires
+            // TracingSecurityAuditSink; the harness mirrors the shape with a
+            // recorder so integration tests can assert emitted events.
+            hook_security_audit_sink: Some(hook_security_audit_sink),
             turn_event_sink: composed_turn_event_sink,
             attachment_read_port: capability_recorder
                 .attachment_test_support()
@@ -917,6 +936,7 @@ impl RebornIntegrationGroupBuilder {
                 capability_recorder,
                 user_profile_source,
                 turn_event_sink: self.turn_event_sink,
+                security_audit_sink,
                 milestone_sink: milestone_sink_for_assertions,
                 trace_capture_scope: trace_capture.map(|(_, scope)| scope),
                 budget_governor,
@@ -1171,6 +1191,7 @@ impl<'g> RebornThreadBuilder<'g> {
         let baseline_result_count = capability_recorder.capability_results().len();
         let baseline_process_count = capability_recorder.recorded_process_commands().len();
         let baseline_network_count = capability_recorder.network_http_requests().len();
+        let baseline_security_audit_count = shared.security_audit_sink.events().len();
         let baseline_turn_event_count = shared
             .turn_event_sink
             .as_ref()
@@ -1264,6 +1285,7 @@ impl<'g> RebornThreadBuilder<'g> {
             baseline_result_count,
             baseline_process_count,
             baseline_network_count,
+            baseline_security_audit_count,
             baseline_turn_event_count,
             baseline_milestone_count,
         })

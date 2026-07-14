@@ -318,6 +318,15 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Harness-port-seam Change 4: same as `.with_builtin_http_tools()` plus a
+    /// confirmed `/host` mount grant, so `wrap_local_dev_surface_disclosure`'s
+    /// scoped-roots note is observable on `read_file`'s captured tool
+    /// definition (the layer is disabled without a confirmed host-home mount).
+    pub fn with_confirmed_host_mount(mut self) -> Self {
+        self.capability = RebornCapabilityBackend::BuiltinHttpToolsConfirmedHostMount;
+        self
+    }
+
     /// Opt-in to real shell execution for this harness. By default the
     /// `BuiltinHttpTools` backend injects an inert `RecordingProcessPort` so that
     /// `builtin.shell` turns record the command without spawning any OS process.
@@ -587,6 +596,9 @@ pub struct RebornIntegrationHarness {
     pub(crate) baseline_process_count: usize,
     /// Network-egress-request count at harness construction. See `baseline_invocation_count`.
     pub(crate) baseline_network_count: usize,
+    /// Security-audit-event count at harness construction. See
+    /// `baseline_invocation_count`.
+    pub(crate) baseline_security_audit_count: usize,
     /// Turn-lifecycle-event count on the group-shared `InMemoryTurnEventSink` at
     /// harness construction, if `.with_turn_event_sink()` opted in. The sink has
     /// no per-thread channel, so without this baseline a group thread's
@@ -1155,6 +1167,17 @@ impl RebornIntegrationHarness {
                 all[self.baseline_turn_event_count.min(all.len())..].to_vec()
             })
             .unwrap_or_default()
+    }
+
+    /// Security-audit events recorded by the always-wired harness recorder, for
+    /// this thread only. Reads the group-shared sink but slices
+    /// `[baseline_security_audit_count..]` so a group thread never sees an
+    /// earlier sibling thread's events.
+    pub(super) fn recorded_security_audit_events(
+        &self,
+    ) -> Vec<ironclaw_events::SecurityAuditEvent> {
+        let all = self._shared.security_audit_sink.events();
+        all[self.baseline_security_audit_count.min(all.len())..].to_vec()
     }
 
     /// Every `data:` URL from a `ContentPart::ImageUrl` part across all captured
@@ -1805,6 +1828,11 @@ pub(crate) fn apply_hermetic_env() {
             std::env::set_var("IRONCLAW_DISABLE_OS_KEYCHAIN", "1");
             std::env::set_var("TZ", "UTC");
             std::env::set_var("LLM_MAX_RETRIES", "0");
+            // Loop-level counterpart of LLM_MAX_RETRIES=0: production rides
+            // out provider outages for minutes (deep availability retries with
+            // long backoff), which would stall any scenario that deliberately
+            // scripts a model failure. One attempt keeps failure paths fast.
+            std::env::set_var("IRONCLAW_REBORN_MODEL_AVAILABILITY_RETRY_ATTEMPTS", "1");
             std::env::remove_var("NEARAI_CHEAP_MODEL");
             std::env::remove_var("NEARAI_FALLBACK_MODEL");
             std::env::remove_var("LLM_CHEAP_MODEL");

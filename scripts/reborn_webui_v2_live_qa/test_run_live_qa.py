@@ -487,6 +487,16 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             payload: dict[str, object] | None = None,
         ) -> dict[str, object]:
             fetched_paths.append(path)
+            if method == "POST" and path == "/api/webchat/v2/extensions/install":
+                self.assertEqual(
+                    payload,
+                    {"package_ref": {"kind": "extension", "id": "slack"}},
+                )
+                return {
+                    "success": True,
+                    "message": "Slack installed",
+                    "onboarding_state": "auth_required",
+                }
             if method == "POST" and path == "/api/reborn/product-auth/accounts/list":
                 self.assertEqual(payload["provider"], "slack_personal")
                 self.assertEqual(payload["requester_extension"], "slack")
@@ -516,6 +526,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     "status": "pending",
                 }
             self.assertEqual(method, "GET")
+            if path == "/api/webchat/v2/extensions":
+                return {"extensions": []}
             self.assertEqual(path, "/api/webchat/v2/channels/connectable")
             return {
                 "channels": [
@@ -647,9 +659,16 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             fetched_paths,
             [
                 "/api/webchat/v2/channels/connectable",
+                "/api/webchat/v2/extensions",
+                "/api/webchat/v2/extensions/install",
                 "/api/reborn/product-auth/accounts/list",
                 "/api/webchat/v2/extensions/slack/setup/oauth/start",
             ],
+        )
+        self.assertEqual(result.details["slack_install_message"], "Slack installed")
+        self.assertEqual(
+            result.details["slack_install_onboarding_state"],
+            "auth_required",
         )
         self.assertEqual(result.details["slack_product_auth_account_count"], 1)
         self.assertEqual(
@@ -875,6 +894,47 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "Message the IronClaw Reborn app in Slack to get a pairing code, "
                 "then paste it here."
             )
+        )
+
+    def test_extension_is_listed_recognizes_an_existing_package(self):
+        extensions = [
+            {"package_ref": {"kind": "extension", "id": "github"}},
+            {"package_ref": {"kind": "extension", "id": "slack"}},
+        ]
+
+        self.assertTrue(run_live_qa._extension_is_listed(extensions, "slack"))
+        self.assertFalse(run_live_qa._extension_is_listed(extensions, "gmail"))
+
+    def test_extension_install_preflight_reuses_existing_installation(self):
+        async def fake_fetch(_page: object, path: str) -> dict[str, object]:
+            self.assertEqual(path, "/api/webchat/v2/extensions")
+            return {
+                "extensions": [
+                    {"package_ref": {"kind": "extension", "id": "slack"}}
+                ]
+            }
+
+        async def fail_if_install_runs(*_args, **_kwargs) -> dict[str, object]:
+            raise AssertionError("existing Slack installation must not be reinstalled")
+
+        observed: dict[str, object] = {}
+        with (
+            patch.object(run_live_qa, "_fetch_webui_json", new=fake_fetch),
+            patch.object(run_live_qa, "_webui_json", new=fail_if_install_runs),
+        ):
+            asyncio.run(
+                run_live_qa._ensure_extension_installed_on_page(
+                    object(),
+                    observed,
+                    package_id="slack",
+                    display_name="Slack",
+                )
+            )
+
+        self.assertEqual(observed["slack_install_message"], "Slack already installed")
+        self.assertEqual(
+            observed["slack_install_onboarding_state"],
+            "existing_installation",
         )
 
     def test_product_connect_cases_start_from_chat_then_verify_registry(self):
@@ -2014,6 +2074,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "display_name": "Slack",
                 "required_tools": [
                     "slack.list_conversations",
+                    "slack.get_conversation_info",
                     "slack.get_conversation_history",
                 ],
             },
@@ -2179,6 +2240,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "display_name": "Slack",
                 "required_tools": [
                     "slack.list_conversations",
+                    "slack.get_conversation_info",
                     "slack.get_conversation_history",
                 ],
                 "ensure_installed": True,
@@ -2537,6 +2599,35 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                         timestamp,
                     ),
                 )
+                preview = {
+                    "invocation_id": invocation_id,
+                    "capability_id": capability_id,
+                    "status": "completed",
+                    "input_summary": json.dumps(
+                        {"channel": "C0CURRENT1"}, indent=2
+                    ),
+                }
+                thread_message = {
+                    "message_id": f"message-{invocation_id}",
+                    "thread_id": thread_id,
+                    "kind": "capability_display_preview",
+                    "turn_run_id": run_id,
+                    "content": json.dumps(preview),
+                }
+                db.execute(
+                    """
+                    INSERT INTO root_filesystem_entries (
+                        path, contents, is_dir, created_at, updated_at,
+                        content_type, kind
+                    ) VALUES (?, ?, 0, ?, ?, 'application/json', 'thread_message')
+                    """,
+                    (
+                        f"/threads/{thread_id}/messages/{invocation_id}.json",
+                        json.dumps(thread_message),
+                        timestamp,
+                        timestamp,
+                    ),
+                )
                 db.commit()
 
         def drive(
@@ -2639,6 +2730,17 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "run_id": "run-current",
                 "invocation_ids": {capability_id: ["invocation-current"]},
                 "statuses": {capability_id: ["completed"]},
+                "input_arguments": {
+                    capability_id: [{"channel": "C_REDACTED"}]
+                },
+                "terminal_sequence": [
+                    {
+                        "seq": 1,
+                        "capability_id": capability_id,
+                        "invocation_id": "invocation-current",
+                        "status": "completed",
+                    }
+                ],
             },
         )
         self.assertTrue(replay_current.success)
@@ -2743,6 +2845,115 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertTrue(chat.details["inconclusive"])
         self.assertFalse(chat.details["blocking"])
 
+    def test_slack_correctness_requires_lookup_before_write(self):
+        async def fake_live_chat_case(_ctx, **kwargs):
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=True,
+                latency_ms=1,
+                details={
+                    "full_reply_text": "posted",
+                    "submission_identity": {
+                        "accepted_message_ref": "msg:current",
+                        "thread_id": "thread-current",
+                        "turn_id": "turn-current",
+                        "run_id": "run-current",
+                    },
+                },
+            )
+
+        def drive(
+            sequence: list[str],
+            *,
+            lookup_channel: str = "D0EXPECTED1",
+        ) -> run_live_qa.ProbeResult:
+            evidence = {
+                "accepted_message_ref": "msg:current",
+                "thread_id": "thread-current",
+                "turn_id": "turn-current",
+                "run_id": "run-current",
+                "invocation_ids": {
+                    "slack.get_conversation_info": ["invocation-lookup"],
+                    "slack.send_message": ["invocation-send"],
+                },
+                "statuses": {
+                    "slack.get_conversation_info": ["completed"],
+                    "slack.send_message": ["completed"],
+                },
+                "input_arguments": {
+                    "slack.get_conversation_info": [
+                        {"channel": lookup_channel}
+                    ],
+                    "slack.send_message": [{"channel": "D0EXPECTED1"}],
+                },
+                "terminal_sequence": [
+                    {
+                        "seq": index + 1,
+                        "capability_id": capability_id,
+                        "invocation_id": f"invocation-{index + 1}",
+                        "status": "completed",
+                    }
+                    for index, capability_id in enumerate(sequence)
+                ],
+            }
+            with (
+                patch.object(
+                    run_live_qa,
+                    "_live_chat_case",
+                    side_effect=fake_live_chat_case,
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_current_turn_capability_evidence",
+                    return_value=evidence,
+                ),
+            ):
+                result, _ = asyncio.run(
+                    run_live_qa._slack_correctness_chat_reply(
+                        self._dummy_ctx(),
+                        case_name="qa_10_order_test",
+                        started=run_live_qa.time.monotonic(),
+                        prompt="Resolve the DM, then send the message.",
+                        answer_marker="ANSWER_MARKER",
+                        extra_details={},
+                        expected_capability="slack.get_conversation_info",
+                        expected_capability_sequence=(
+                            "slack.get_conversation_info",
+                            "slack.send_message",
+                        ),
+                        expected_capability_arguments={
+                            "slack.get_conversation_info": {
+                                "channel": "D0EXPECTED1"
+                            }
+                        },
+                    )
+                )
+            return result
+
+        ordered = drive(
+            ["slack.get_conversation_info", "slack.send_message"]
+        )
+        reversed_order = drive(
+            ["slack.send_message", "slack.get_conversation_info"]
+        )
+        wrong_lookup = drive(
+            ["slack.get_conversation_info", "slack.send_message"],
+            lookup_channel="D0WRONG001",
+        )
+
+        self.assertTrue(ordered.success)
+        self.assertFalse(reversed_order.success)
+        self.assertEqual(
+            reversed_order.details["failure_category"],
+            "unexpected_capability_order",
+        )
+        self.assertFalse(wrong_lookup.success)
+        self.assertEqual(
+            wrong_lookup.details["failure_category"],
+            "unexpected_capability_arguments",
+        )
+
     def test_qa_10e_prompt_echo_without_current_turn_history_call_fails(self):
         captured: dict[str, object] = {}
 
@@ -2836,7 +3047,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "qa_10c_slack_thread_replies": "slack.get_thread_replies",
                 "qa_10d_slack_channel_membership": "slack.list_conversations",
                 "qa_10e_slack_error_honesty": "slack.get_conversation_history",
-                "qa_10f_slack_mention_encoding": "slack.send_message",
+                "qa_10f_slack_mention_encoding": "slack.get_conversation_info",
                 "qa_10g_slack_last_message_sent": "slack.get_conversation_history",
                 "qa_10h_slack_email_hallucination_guard": "slack.get_user_info",
             },
@@ -6489,6 +6700,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "mention_targets_counterpart",
                 "_wait_for_authored_slack_message",
                 "author_mismatch",
+                "expected_capability_sequence",
+                "slack.send_message",
             ),
             run_live_qa.case_qa_10g_slack_last_message_sent: (
                 "LASTSENT_",

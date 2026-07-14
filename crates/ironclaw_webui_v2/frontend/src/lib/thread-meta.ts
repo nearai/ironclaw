@@ -30,10 +30,10 @@ export function byActivityDesc(a, b) {
 }
 
 /* Naming note: a separate `formatRelativeTime` lives in
- * pages/admin/lib/admin-presenters.js with completely different semantics
+ * pages/admin/lib/admin-presenters.ts with completely different semantics
  * ("5m ago" duration vs this file's "HH:MM | Mon D" stamp). The exports
  * here are deliberately namespaced to make the difference obvious to a
- * grep. A future canonical lib/time.js could consolidate both, but that
+ * grep. A future canonical lib/time.ts could consolidate both, but that
  * refactor is out of scope here. */
 
 /** Sidebar row label: HH:MM if today, otherwise "Mon D". */

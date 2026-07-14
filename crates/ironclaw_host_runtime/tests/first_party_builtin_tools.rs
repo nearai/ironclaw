@@ -3347,6 +3347,43 @@ async fn builtin_shell_returns_stderr_and_nonzero_exit_without_dispatch_failure(
 }
 
 #[tokio::test]
+async fn builtin_shell_path_bearing_failure_reason_rides_the_diagnostic_detail() {
+    // Loop-boundary pin for the "model-visible tool-failure reasons" feature:
+    // a shell rejection reason that names a concrete path (here the sensitive
+    // credential path guard) fails the strict loop safe-summary validator, so
+    // the message degrades to the fixed category sentence — but the raw
+    // reason must NOT be dropped: it rides the diagnostic detail that the
+    // loop layer scrubs and carries to the model.
+    let runtime = runtime();
+    let failure = invoke_failure_with_context(
+        &runtime,
+        SHELL_CAPABILITY_ID,
+        json!({"command": "cat /etc/shadow"}),
+        execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy()),
+    )
+    .await;
+
+    let message = failure
+        .message
+        .as_deref()
+        .expect("failure carries a message");
+    assert!(
+        !message.contains("/etc/shadow"),
+        "the raw path must not leak into the strict summary channel: {message}"
+    );
+    let Some(DispatchFailureDetail::Diagnostic { text }) = &failure.detail else {
+        panic!(
+            "expected the raw reason on the diagnostic detail, got {:?}",
+            failure.detail
+        );
+    };
+    assert!(
+        text.contains("/etc/shadow"),
+        "the model-visible diagnostic must carry the concrete path: {text}"
+    );
+}
+
+#[tokio::test]
 async fn builtin_shell_uses_configured_tenant_sandbox_process_port() {
     let local_process = Arc::new(RecordingProcessPort::default());
     let sandbox_transport = Arc::new(RecordingSandboxTransport::default());
@@ -3403,7 +3440,7 @@ async fn builtin_shell_reuses_v1_shell_validation() {
     ] {
         let err = invoke_shell(input).await.unwrap_err();
 
-        assert_eq!(err, RuntimeFailureKind::Backend);
+        assert_eq!(err, RuntimeFailureKind::PolicyDenied);
     }
 }
 
@@ -3420,6 +3457,30 @@ async fn builtin_shell_rejects_invalid_inputs_before_spawn() {
 
         assert_eq!(err, RuntimeFailureKind::InvalidInput);
     }
+}
+
+#[tokio::test]
+async fn builtin_shell_invalid_input_failure_carries_the_reason_through_the_runtime() {
+    // Test-through-the-caller for the shell_error mapping: the failure the
+    // loop (and ultimately the model) receives must say WHAT was wrong with
+    // the call, not just an input-encode category.
+    let runtime = runtime();
+    let failure = invoke_failure_with_context(
+        &runtime,
+        SHELL_CAPABILITY_ID,
+        json!({}),
+        execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy()),
+    )
+    .await;
+
+    assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+    let summary = failure
+        .safe_summary()
+        .expect("shell invalid-input failure must carry a reason");
+    assert!(
+        summary.contains("missing 'command' parameter"),
+        "failure should carry the parameter reason, got: {summary}"
+    );
 }
 
 #[tokio::test]

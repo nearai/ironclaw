@@ -30,6 +30,7 @@ fn actor() -> TurnActor {
 
 fn submit_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest {
     SubmitTurnRequest {
+        requested_model: None,
         scope: scope(thread),
         actor: actor(),
         accepted_message_ref: AcceptedMessageRef::new(format!("message-{idempotency_key}"))

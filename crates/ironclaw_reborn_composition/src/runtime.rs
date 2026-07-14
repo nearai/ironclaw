@@ -1057,32 +1057,6 @@ pub(crate) fn build_local_dev_approval_gate_evidence_for_test(
     std::sync::Arc::new(LocalDevApprovalGateEvidence { approval_requests })
 }
 
-/// Test-support forwarder for the `project_create` synthetic-capability wrap
-/// (E-PROJ seam). Bridges the private `local_dev` module to `test_support.rs`
-/// without widening any production type's visibility; mirrors the
-/// approval-gate-evidence forwarder above.
-#[cfg(feature = "test-support")]
-pub(crate) fn wrap_project_create_capability_for_test(
-    inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    project_service: std::sync::Arc<dyn ironclaw_product_workflow::ProjectService>,
-    fallback_user_id: ironclaw_host_api::UserId,
-    run_context: ironclaw_turns::run_profile::LoopRunContext,
-    input_resolver: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
-    result_writer: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
-) -> Result<
-    std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    ironclaw_turns::run_profile::AgentLoopHostError,
-> {
-    local_dev::wrap_project_create_capability_for_test(
-        inner,
-        project_service,
-        fallback_user_id,
-        run_context,
-        input_resolver,
-        result_writer,
-    )
-}
-
 /// Test-support forwarder for the `result_read` synthetic-capability wrap
 /// (durable tool-result projection seam, issue #5838). Bridges the private
 /// `local_dev` module to `test_support.rs`; mirrors the `project_create`
@@ -1136,44 +1110,6 @@ pub(crate) fn local_dev_filesystem_skill_context_source_for_test(
         regex_skill_activation_enabled,
     )?;
     Ok((built.source, built.activation_source))
-}
-
-/// Test-support forwarder (E-SKILL seam) for the `skill_activate`
-/// synthetic-capability wrap. Bridges the private `local_dev` module to
-/// `test_support.rs`; mirrors the `project_create` forwarder above. Tests only.
-#[cfg(feature = "test-support")]
-pub(crate) fn wrap_skill_activation_capability_for_test(
-    inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    skill_activation_source: std::sync::Arc<LocalDevSelectableSkillContextSource>,
-    run_context: ironclaw_turns::run_profile::LoopRunContext,
-    input_resolver: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
-    result_writer: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
-) -> Result<
-    std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    ironclaw_turns::run_profile::AgentLoopHostError,
-> {
-    local_dev::wrap_skill_activation_capability_for_test(
-        inner,
-        skill_activation_source,
-        run_context,
-        input_resolver,
-        result_writer,
-    )
-}
-
-/// Test-support forwarder (C-SYNTH outbound seam) for the two
-/// `outbound_delivery_*` synthetic-capability wraps. Bridges the private
-/// `local_dev` module to `test_support`; mirrors the `project_create` /
-/// `skill_activate` forwarders above. Tests only.
-#[cfg(feature = "test-support")]
-pub(crate) fn wrap_outbound_delivery_capabilities_for_test(
-    inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    parts: crate::test_support::OutboundDeliveryCapabilityTestParts,
-) -> Result<
-    std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    ironclaw_turns::run_profile::AgentLoopHostError,
-> {
-    local_dev::wrap_outbound_delivery_capabilities_for_test(inner, parts)
 }
 
 /// Test-support forwarder (harness-port-seam P1 seam) for
@@ -2410,6 +2346,7 @@ impl RebornRuntime {
         let response = match self
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
+                requested_model: None,
                 scope: scope.clone(),
                 actor: TurnActor::new(self.actor_user_id.clone()),
                 accepted_message_ref: accepted_message_ref.clone(),
@@ -3115,6 +3052,8 @@ pub async fn build_reborn_runtime(
         model_gateway_override,
         #[cfg(any(test, feature = "test-support"))]
         model_cost_table_override,
+        #[cfg(any(test, feature = "test-support"))]
+        model_availability_retry_attempts_override,
     } = input;
 
     let mut services_input = services_input.ok_or(RebornRuntimeError::InvalidArgument {
@@ -3817,6 +3756,19 @@ pub async fn build_reborn_runtime(
             planned_default_iteration_limit: optional_nonzero_u32_env(
                 "IRONCLAW_REBORN_PLANNED_DEFAULT_ITERATION_LIMIT",
             )?,
+            planned_model_availability_retry_attempts: {
+                #[cfg(any(test, feature = "test-support"))]
+                let resolved = match model_availability_retry_attempts_override {
+                    Some(attempts) => Some(attempts),
+                    None => optional_nonzero_u32_env(
+                        "IRONCLAW_REBORN_MODEL_AVAILABILITY_RETRY_ATTEMPTS",
+                    )?,
+                };
+                #[cfg(not(any(test, feature = "test-support")))]
+                let resolved =
+                    optional_nonzero_u32_env("IRONCLAW_REBORN_MODEL_AVAILABILITY_RETRY_ATTEMPTS")?;
+                resolved
+            },
         },
         model_route_resolver: None,
         cancellation_factory: None,
@@ -4678,7 +4630,7 @@ impl ironclaw_llm::LlmProvider for PlaceholderLlmProvider {
 #[cfg(feature = "root-llm-provider")]
 fn placeholder_unconfigured_error() -> ironclaw_llm::LlmError {
     ironclaw_llm::LlmError::RequestFailed {
-        provider: "unconfigured".to_string(),
+        provider: ironclaw_llm::UNCONFIGURED_PROVIDER_ID.to_string(),
         reason: "no LLM provider is configured yet; choose one in Settings → Inference".to_string(),
     }
 }
@@ -4703,8 +4655,12 @@ fn build_stub_gateway() -> Arc<dyn ironclaw_loop_host::HostManagedModelGateway> 
             &self,
             _request: HostManagedModelRequest,
         ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+            // A missing gateway is a build-configuration fault, not an
+            // availability blip: CredentialUnavailable is unclassified in
+            // loop recovery, so runs fail fast instead of riding the
+            // availability backoff budget.
             Err(HostManagedModelError::safe(
-                HostManagedModelErrorKind::Unavailable,
+                HostManagedModelErrorKind::CredentialUnavailable,
                 "no LLM gateway wired (build with `root-llm-provider` feature)",
             ))
         }
@@ -7790,7 +7746,10 @@ output_schema_ref = "schemas/write.output.json"
             interval: Duration::from_millis(10),
             max_total: RUNTIME_POLL_TIMEOUT,
         })
-        .with_model_gateway_override(gateway.clone());
+        .with_model_gateway_override(gateway.clone())
+        // Keep >= 2 retries (the test pins retry-then-fail) but well under
+        // the production budget so the deliberate outage fails in seconds.
+        .with_model_availability_retry_attempts(std::num::NonZeroU32::new(2).expect("nonzero"));
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
@@ -8219,6 +8178,7 @@ output_schema_ref = "schemas/write.output.json"
         let parent = runtime
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
+                requested_model: None,
                 scope: parent_scope.clone(),
                 actor: actor.clone(),
                 accepted_message_ref: AcceptedMessageRef::new("msg:cancel-parent").unwrap(),
@@ -10563,6 +10523,7 @@ output_schema_ref = "schemas/write.output.json"
         let submitted = runtime
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
+                requested_model: None,
                 scope: scope.clone(),
                 actor: actor.clone(),
                 accepted_message_ref: AcceptedMessageRef::new("msg:audit").unwrap(),
@@ -11144,6 +11105,7 @@ output_schema_ref = "schemas/write.output.json"
         let submitted_a = runtime
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
+                requested_model: None,
                 scope: scope.clone(),
                 actor: actor.clone(),
                 accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy-a").unwrap(),

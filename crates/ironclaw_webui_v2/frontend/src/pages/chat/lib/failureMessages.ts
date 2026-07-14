@@ -1,9 +1,9 @@
-import { isConnectionLostStatus } from "./connection-status.js";
+import { isConnectionLostStatus } from "./connection-status";
 import {
   createErrorChatMessage,
   isErrorChatMessage,
   RUN_FAILURE_ID_PREFIX,
-} from "./message-types.js";
+} from "./message-types";
 
 export const CONNECTION_LOST_RUN_FAILURE_MESSAGE =
   "Connection to the server was lost. Please reconnect and try again.";

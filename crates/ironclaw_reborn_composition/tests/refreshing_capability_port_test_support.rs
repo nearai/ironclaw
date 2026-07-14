@@ -380,7 +380,7 @@ fn test_parts(
     run_context: LoopRunContext,
     runtime: Arc<StubHostRuntime>,
     shared_io: Arc<SharedStubCapabilityIo>,
-    capability_id_filter: HashSet<CapabilityId>,
+    capability_id_filter: Option<HashSet<CapabilityId>>,
     capability_execution_mount_overrides: HashMap<CapabilityId, ironclaw_host_api::MountView>,
     additional_provider_trust: BTreeMap<ExtensionId, ironclaw_trust::TrustDecision>,
 ) -> RefreshingLocalDevCapabilityPortTestParts {
@@ -409,6 +409,10 @@ fn test_parts(
         capability_execution_mount_overrides,
         additional_provider_trust,
         capability_id_filter,
+        // Extension-lane seams (harness-port-seam P1 Change 3): None/empty =
+        // the no-op surface this stub-runtime suite always ran with.
+        extension_management: None,
+        additional_capability_grants: Vec::new(),
     }
 }
 
@@ -422,7 +426,7 @@ async fn port_builds_and_includes_synthetic_capabilities() {
         run_context("builds").await,
         Arc::new(StubHostRuntime::new()),
         shared_io,
-        HashSet::new(),
+        None,
         HashMap::new(),
         BTreeMap::new(),
     );
@@ -469,7 +473,7 @@ async fn capability_id_filter_narrows_visible_surface() {
         run_context("filter").await,
         Arc::new(StubHostRuntime::new()),
         shared_io,
-        filter,
+        Some(filter),
         HashMap::new(),
         BTreeMap::new(),
     );
@@ -494,6 +498,53 @@ async fn capability_id_filter_narrows_visible_surface() {
     );
 }
 
+/// `Some(empty set)` is a real, distinct narrowing (zero granted builtin
+/// capabilities) from `None` (no filtering at all) -- the tri-state fix's
+/// core invariant. Synthetic capabilities (`project_create`) still bypass
+/// the filter entirely, since they wrap the port directly.
+#[tokio::test]
+async fn capability_id_filter_some_empty_grants_zero_capabilities() {
+    let shared_io = Arc::new(SharedStubCapabilityIo::new());
+    let parts = test_parts(
+        run_context("empty-filter").await,
+        Arc::new(StubHostRuntime::new()),
+        shared_io,
+        Some(HashSet::new()),
+        HashMap::new(),
+        BTreeMap::new(),
+    );
+    let port = create_refreshing_local_dev_capability_port_for_test(parts)
+        .await
+        .expect("port assembles");
+
+    let definitions = port.tool_definitions().expect("tool definitions");
+    let builtin_ids: Vec<&str> = definitions
+        .iter()
+        .map(|definition| definition.capability_id.as_str())
+        .filter(|id| {
+            id.starts_with("builtin.")
+                && *id != PROJECT_CREATE_CAPABILITY_ID
+                && *id != RESULT_READ_CAPABILITY_ID
+        })
+        .collect();
+    assert!(
+        builtin_ids.is_empty(),
+        "Some(empty) must grant zero builtin capabilities: {definitions:?}"
+    );
+    assert!(
+        definitions
+            .iter()
+            .any(|definition| definition.capability_id.as_str() == PROJECT_CREATE_CAPABILITY_ID),
+        "synthetic project_create capability bypasses the filter entirely: {definitions:?}"
+    );
+    assert!(
+        definitions
+            .iter()
+            .any(|definition| definition.capability_id.as_str() == RESULT_READ_CAPABILITY_ID),
+        "synthetic result_read capability bypasses the filter entirely (issue #5838): {definitions:?}"
+    );
+}
+
 /// (iv) input-ref/result-ref correlate through ONE shared io: register a
 /// provider tool call for `project_create`, invoke it, and confirm the
 /// result staged under the returned `result_ref` is readable back through
@@ -506,7 +557,7 @@ async fn input_and_result_refs_correlate_through_one_shared_io() {
         run_context("io").await,
         Arc::new(StubHostRuntime::new()),
         shared_io.clone(),
-        HashSet::new(),
+        None,
         HashMap::new(),
         BTreeMap::new(),
     );
@@ -594,7 +645,7 @@ async fn capability_execution_mount_overrides_reach_invocation_context() {
         run_context("mount-override").await,
         runtime.clone(),
         shared_io,
-        HashSet::new(),
+        None,
         overrides,
         BTreeMap::new(),
     );
@@ -673,7 +724,7 @@ async fn additional_provider_trust_is_forwarded_to_visible_request() {
         run_context("provider-trust").await,
         runtime.clone(),
         shared_io,
-        HashSet::new(),
+        None,
         HashMap::new(),
         additional_provider_trust,
     );
@@ -747,7 +798,7 @@ async fn multi_entry_collection_knobs_round_trip() {
         run_context("multi-entry").await,
         runtime.clone(),
         shared_io,
-        filter,
+        Some(filter),
         overrides,
         additional_provider_trust,
     );

@@ -326,6 +326,12 @@ impl<'a> PromptPlanningPipeline<'a> {
             capability_view.clone(),
         )
         .await?;
+        // The candidate bundle refreshed compaction_prompt from a real prompt
+        // build, so a compaction completed on an earlier iteration (SkipModel
+        // compaction-only turn, forced-shrink retry) can now be judged with
+        // its summary included — before the strategy decides whether to
+        // compact again below.
+        observe_pending_compaction_effectiveness(&mut self.state);
         if let Some(exit) = self.cancel_boundary().await? {
             return Ok(PromptStep::Exit(exit));
         }
@@ -348,6 +354,10 @@ impl<'a> PromptPlanningPipeline<'a> {
                     capability_view.clone(),
                 )
                 .await?;
+                // The rebuilt bundle's prompt estimate includes the injected
+                // summary — judge the compaction that just ran against its
+                // trigger-kind baseline.
+                observe_pending_compaction_effectiveness(&mut self.state);
                 if let Some(exit) = self.cancel_boundary().await? {
                     return Ok(PromptStep::Exit(exit));
                 }
@@ -467,6 +477,7 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
             drop_through_seq,
             preserve_tail_tokens,
             deadline_ms,
+            effectiveness_baseline,
         } = decision
         else {
             return Ok(PromptCompactionOutcome::Skipped(state));
@@ -555,6 +566,19 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
         state
             .compaction_prompt
             .retain_after_sequence(drop_through_seq);
+        // Circuit-breaker accounting is deferred: the retained prompt
+        // estimate here excludes the injected summary (the rebuilt bundle
+        // isn't known yet), so judging effectiveness now would mark a
+        // compaction whose huge summary keeps the prompt oversized as
+        // "effective". Stash the trigger-kind-specific baseline; the
+        // executor consumes it via observe_pending_compaction_effectiveness
+        // once the prompt bundle is next rebuilt and observed_prompt_tokens
+        // includes the summary. After `INEFFECTIVE_COMPACTION_TRIP_LIMIT`
+        // consecutive ineffective runs the strategies stop threshold-
+        // triggered compaction for the remainder of the run — Claude Code
+        // measured ~250K wasted API calls/day from exactly this
+        // compact-recompact doom loop before adding a breaker.
+        state.compaction_state.pending_effectiveness_baseline = Some(effectiveness_baseline);
         CheckpointStage
             .emit_progress(
                 self.ctx,
@@ -725,6 +749,36 @@ pub(super) async fn build_prompt_bundle_for_surface(
         rendered_reply_admission_control,
         rendered_repeated_call_warning,
     })
+}
+
+/// Consumes a completed compaction's pending effectiveness baseline against
+/// the freshly rebuilt prompt estimate (which now includes the injected
+/// summary) and updates the circuit-breaker accounting.
+///
+/// Callers must only invoke this after `compaction_prompt` was refreshed from
+/// a real prompt bundle; a no-op when no compaction is awaiting judgement.
+fn observe_pending_compaction_effectiveness(state: &mut LoopExecutionState) {
+    let Some(baseline) = state.compaction_state.pending_effectiveness_baseline.take() else {
+        return;
+    };
+    let post_compaction_prompt_tokens = state.compaction_prompt.observed_prompt_tokens;
+    let circuit_was_open = state.compaction_state.compaction_circuit_open;
+    // `take()` already cleared the pending slot, so the cloned successor state
+    // carries no stale baseline.
+    state.compaction_state = state
+        .compaction_state
+        .with_compaction_effectiveness_observed(post_compaction_prompt_tokens, baseline);
+    if !circuit_was_open && state.compaction_state.compaction_circuit_open {
+        // debug!, not warn!: internal loop diagnostics — info!/warn! render in
+        // the REPL/TUI and corrupt the interactive display.
+        debug!(
+            consecutive_ineffective_compactions =
+                state.compaction_state.consecutive_ineffective_compactions,
+            post_compaction_prompt_tokens,
+            effectiveness_baseline_tokens = baseline.tokens(),
+            "context compaction circuit breaker opened after repeated ineffective compactions; threshold-triggered compaction disabled for the remainder of this run"
+        );
+    }
 }
 
 fn refresh_compaction_prompt_from_index(

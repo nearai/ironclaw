@@ -14,7 +14,7 @@ import {
   formatThreadType,
   projectCount,
   threadPresentation,
-} from "./projects-presenters.ts";
+} from "./projects-presenters";
 
 const t = (key, params = {}) => {
   const translations = {
