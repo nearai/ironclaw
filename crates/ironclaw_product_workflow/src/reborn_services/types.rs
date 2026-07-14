@@ -225,22 +225,8 @@ pub struct RebornServiceLifecycleResponse {
 #[serde(rename_all = "snake_case")]
 pub enum RebornChannelConnectStrategy {
     InboundProofCode,
-    AdminManagedChannels,
-    WebGeneratedCode,
-    QrCode,
     #[serde(rename = "oauth")]
     OAuth,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornChannelConnectAction {
-    pub title: String,
-    pub instructions: String,
-    #[serde(rename = "input_placeholder")]
-    pub input_placeholder: String,
-    pub submit_label: String,
-    pub success_message: String,
-    pub error_message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

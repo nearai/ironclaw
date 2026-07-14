@@ -626,13 +626,6 @@ fn slack_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     Ok(package)
 }
 
-/// After the slack_bot/slack unification there is no separate internal
-/// operator-provisioned Slack package to hide; the unified `slack` extension is
-/// user-installable, so no package ref is treated as internal.
-pub(crate) fn is_internal_extension_package_ref(_package_ref: &LifecyclePackageRef) -> bool {
-    false
-}
-
 pub(crate) fn google_calendar_manifest_digest() -> String {
     sha256_digest_token(GOOGLE_CALENDAR_MANIFEST.as_bytes())
 }
@@ -2196,15 +2189,15 @@ credential_handle = "{id}_bot_token"
                 .expect("valid NEAR AI extension ref");
         let notion_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion")
             .expect("valid Notion extension ref");
-        let mcp_ref = LifecyclePackageRef::new(LifecyclePackageKind::Mcp, NEARAI_EXTENSION_ID)
-            .expect("valid MCP ref");
+        let skill_ref = LifecyclePackageRef::new(LifecyclePackageKind::Skill, NEARAI_EXTENSION_ID)
+            .expect("valid skill ref");
 
         #[cfg(feature = "root-llm-provider")]
         assert!(is_host_managed_credential_extension(&nearai_ref));
         #[cfg(not(feature = "root-llm-provider"))]
         assert!(!is_host_managed_credential_extension(&nearai_ref));
         assert!(!is_host_managed_credential_extension(&notion_ref));
-        assert!(!is_host_managed_credential_extension(&mcp_ref));
+        assert!(!is_host_managed_credential_extension(&skill_ref));
     }
 
     #[test]

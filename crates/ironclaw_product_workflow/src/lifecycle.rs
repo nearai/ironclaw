@@ -85,8 +85,6 @@ bounded_lifecycle_string!(
 pub enum LifecyclePackageKind {
     Extension,
     Skill,
-    Mcp,
-    Wasm,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

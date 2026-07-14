@@ -72,7 +72,7 @@ mod install_policy;
 
 use crate::extension_host::available_extensions::{
     AvailableExtensionCatalog, AvailableExtensionPackage, imported_extension_package,
-    is_internal_extension_package_ref, materialize_available_extension, visible_capability_ids,
+    materialize_available_extension, visible_capability_ids,
 };
 use crate::extension_host::extension_activation_credentials::{
     ChannelSetupActivationCredentialGate, ExtensionActivationCredentialGate,
@@ -561,9 +561,6 @@ impl RebornLocalExtensionManagementPort {
             ) else {
                 continue;
             };
-            if is_internal_extension_package_ref(&package_ref) {
-                continue;
-            }
             let available = {
                 let catalog = self.catalog.read().await;
                 let Ok(available) = catalog.resolve(&package_ref) else {

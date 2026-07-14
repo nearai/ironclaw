@@ -53,12 +53,12 @@ use ironclaw_product_workflow::{
     ProjectServiceError, RebornAddMemberRequest, RebornAttachmentRequest, RebornAutomationInfo,
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornCreateProjectRequest, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
-    RebornExtensionOnboardingState, RebornExtensionSurface, RebornGetProjectRequest,
-    RebornGetRunStateRequest, RebornListMembersRequest, RebornListMembersResponse,
-    RebornListProjectsRequest, RebornListProjectsResponse, RebornLogLevel, RebornLogQueryRequest,
-    RebornLogQueryResponse, RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigSetRequest,
+    RebornAutomationState, RebornChannelConnectStrategy, RebornCreateProjectRequest,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornExtensionOnboardingState,
+    RebornExtensionSurface, RebornGetProjectRequest, RebornGetRunStateRequest,
+    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
+    RebornListProjectsResponse, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigSetRequest,
     RebornOperatorLogsQuery, RebornOperatorSetupRequest, RebornOperatorSetupStatus,
     RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
     RebornOperatorStatusState, RebornOperatorSurfaceStatus, RebornOperatorToolCatalog,
@@ -5219,18 +5219,48 @@ async fn list_extensions_projects_channel_surface_with_directions_and_connection
 }
 
 #[test]
-fn channel_connect_action_serializes_neutral_input_placeholder() {
-    let action = RebornChannelConnectAction {
-        title: "Slack channel access".to_string(),
-        instructions: "Choose allowed channels.".to_string(),
-        input_placeholder: "C0123456789".to_string(),
-        submit_label: "Save channels".to_string(),
-        success_message: "Slack channels saved.".to_string(),
-        error_message: "Slack channel update failed.".to_string(),
-    };
+// arch-exempt: large_file, lifecycle wire contracts stay at the public facade seam, plan #6061
+fn lifecycle_package_kind_rejects_retired_runtime_taxonomy() {
+    for retired in ["mcp", "wasm"] {
+        let result = serde_json::from_value::<LifecyclePackageKind>(json!(retired));
+        assert!(
+            result.is_err(),
+            "retired lifecycle kind {retired} must fail"
+        );
+    }
 
-    let serialized = serde_json::to_value(&action).expect("action serializes");
-    assert_eq!(serialized["input_placeholder"], "C0123456789");
+    assert_eq!(
+        serde_json::from_value::<LifecyclePackageKind>(json!("extension"))
+            .expect("extension remains a lifecycle package kind"),
+        LifecyclePackageKind::Extension
+    );
+    assert_eq!(
+        serde_json::from_value::<LifecyclePackageKind>(json!("skill"))
+            .expect("skill remains a lifecycle package kind"),
+        LifecyclePackageKind::Skill
+    );
+}
+
+#[test]
+fn channel_connect_strategy_rejects_retired_setup_taxonomy() {
+    for retired in ["admin_managed_channels", "web_generated_code", "qr_code"] {
+        let result = serde_json::from_value::<RebornChannelConnectStrategy>(json!(retired));
+        assert!(
+            result.is_err(),
+            "retired channel connection strategy {retired} must fail"
+        );
+    }
+
+    assert_eq!(
+        serde_json::from_value::<RebornChannelConnectStrategy>(json!("inbound_proof_code"))
+            .expect("proof-code pairing remains supported"),
+        RebornChannelConnectStrategy::InboundProofCode
+    );
+    assert_eq!(
+        serde_json::from_value::<RebornChannelConnectStrategy>(json!("oauth"))
+            .expect("OAuth remains supported"),
+        RebornChannelConnectStrategy::OAuth
+    );
 }
 
 #[tokio::test]
