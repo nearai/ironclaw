@@ -1,3 +1,4 @@
+// arch-exempt: large_file, canonical executor regression remains with shared loop fixtures, plan #4088
 use std::collections::VecDeque;
 
 use ironclaw_host_api::{
@@ -3311,6 +3312,42 @@ async fn model_unrecoverable_host_error_preserves_sanitized_diagnostics() {
             safe_summary: LoopSafeSummary::new("model credentials are unavailable").expect("safe"),
             reason_kind: None,
             diagnostic_ref: Some(LoopDiagnosticRef::new("diag:model-credentials").expect("valid")),
+            detail: None,
+        }
+    );
+}
+
+#[tokio::test]
+async fn model_budget_accounting_failure_preserves_kind_without_model_retry() {
+    let accounting_error = || {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::BudgetAccountingFailed,
+            "resource accounting storage is unavailable",
+        )
+    };
+    let host = MockHost::new(Vec::new()).with_model_errors(vec![
+        accounting_error(),
+        accounting_error(),
+        accounting_error(),
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let error = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect_err("accounting outages must remain typed host failures");
+
+    assert_eq!(host.model_requests().len(), 1);
+    assert_eq!(
+        error,
+        AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Model,
+            kind: AgentLoopHostErrorKind::BudgetAccountingFailed,
+            safe_summary: LoopSafeSummary::new("resource accounting storage is unavailable")
+                .expect("safe"),
+            reason_kind: None,
+            diagnostic_ref: None,
             detail: None,
         }
     );

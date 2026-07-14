@@ -124,8 +124,9 @@ pub struct LoopModelGatewayRequest {
 /// `AgentLoopHostErrorKind::CredentialUnavailable` means the host could not
 /// provide a scoped, non-reusable credential for the selected provider/model;
 /// callers must treat it as a host-owned credential acquisition failure, not as
-/// provider output. `AgentLoopHostErrorKind::BudgetExceeded` can also surface
-/// after a provider failure when post-call accounting/release fails closed.
+/// provider output. `AgentLoopHostErrorKind::BudgetAccountingFailed` can
+/// surface after a provider failure when post-call accounting/release fails
+/// closed; it is distinct from a provider or configured-budget exhaustion.
 pub struct LoopModelGatewayError {
     pub kind: AgentLoopHostErrorKind,
     pub safe_summary: LoopSafeSummary,

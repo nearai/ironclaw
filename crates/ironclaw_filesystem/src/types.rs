@@ -103,6 +103,15 @@ pub enum FilesystemError {
         operation: FilesystemOperation,
         reason: String,
     },
+    /// The backend could not acquire its write lock before its configured
+    /// deadline. Unlike [`Self::Backend`], this is a typed transient outcome:
+    /// callers may retry an operation whose interface guarantees an error did
+    /// not commit a partial side effect (for example [`RootFilesystem::append_batch`](crate::RootFilesystem::append_batch)).
+    #[error("filesystem backend is busy during {operation} at {path}")]
+    BackendBusy {
+        path: VirtualPath,
+        operation: FilesystemOperation,
+    },
     /// Compare-and-swap precondition failed: the existing record's version did
     /// not match the caller's expectation. Stores typically retry by reading
     /// the current version and re-applying the transformation.

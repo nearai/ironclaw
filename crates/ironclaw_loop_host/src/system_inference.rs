@@ -185,6 +185,9 @@ fn map_model_error(kind: HostManagedModelErrorKind) -> SystemInferenceError {
     let safe_summary = match kind {
         HostManagedModelErrorKind::Cancelled => return SystemInferenceError::Cancelled,
         HostManagedModelErrorKind::BudgetExceeded => "system inference budget exceeded",
+        HostManagedModelErrorKind::BudgetAccountingFailed => {
+            "system inference resource accounting unavailable"
+        }
         HostManagedModelErrorKind::Unavailable => "system inference unavailable",
         HostManagedModelErrorKind::CredentialUnavailable => {
             "system inference credential unavailable"
@@ -206,6 +209,9 @@ fn map_gateway_error(error: LoopModelGatewayError) -> SystemInferenceError {
                 safe_summary: safe("system inference budget exceeded"),
             }
         }
+        AgentLoopHostErrorKind::BudgetAccountingFailed => SystemInferenceError::Failed {
+            safe_summary: safe("system inference resource accounting unavailable"),
+        },
         AgentLoopHostErrorKind::PolicyDenied => SystemInferenceError::Failed {
             safe_summary: safe("system inference policy denied"),
         },

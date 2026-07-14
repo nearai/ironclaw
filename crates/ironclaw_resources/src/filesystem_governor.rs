@@ -134,14 +134,27 @@ where
 
     fn enqueue_delta(
         &self,
+        authority: &Arc<ResourceAuthority>,
         delta: ResourceGovernorDelta,
     ) -> Result<PendingResourceDelta, ResourceError> {
+        let guard = self.authority.lock().map_err(|_| ResourceError::Storage {
+            reason: "resource governor authority lock poisoned while enqueueing delta".to_string(),
+        })?;
+        let is_current = guard
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, authority));
+        if !is_current {
+            return Err(ResourceError::Storage {
+                reason: "resource governor authority changed before delta enqueue".to_string(),
+            });
+        }
+        authority.check_available()?;
         self.delta_journal.enqueue(delta)
     }
 
     fn finish_delta(
         &self,
-        authority: &ResourceAuthority,
+        authority: &Arc<ResourceAuthority>,
         pending: PendingResourceDelta,
     ) -> Result<SeqNo, ResourceError> {
         let seq = pending.wait()?;
@@ -185,12 +198,30 @@ where
         }
     }
 
-    fn poison<T>(
+    fn invalidate_authority<T>(
         &self,
-        authority: &ResourceAuthority,
+        authority: &Arc<ResourceAuthority>,
         error: ResourceError,
     ) -> Result<T, ResourceError> {
         authority.poison(error.clone());
+        let mut guard = self.authority.lock().map_err(|_| ResourceError::Storage {
+            reason: "resource governor authority lock poisoned during recovery".to_string(),
+        })?;
+        if guard
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, authority))
+        {
+            let error_kind = match &error {
+                ResourceError::Storage { .. } => "storage",
+                _ => "authority_invariant",
+            };
+            warn!(
+                error_kind,
+                "resource governor authority invalidated; the next operation will reload durable state"
+            );
+            *guard = None;
+            self.delta_journal.restart()?;
+        }
         Err(error)
     }
 
@@ -217,9 +248,9 @@ where
                     account: account.clone(),
                     at: now,
                 };
-                match self.enqueue_delta(delta) {
+                match self.enqueue_delta(&authority, delta) {
                     Ok(pending) => Some(pending),
-                    Err(error) => return self.poison(&authority, error),
+                    Err(error) => return self.invalidate_authority(&authority, error),
                 }
             } else {
                 None
@@ -229,7 +260,7 @@ where
         if let Some(pending) = pending
             && let Err(error) = self.finish_delta(&authority, pending)
         {
-            return self.poison(&authority, error);
+            return self.invalidate_authority(&authority, error);
         }
         Ok(tally)
     }
@@ -257,9 +288,9 @@ where
                     account: account.clone(),
                     at: now,
                 };
-                match self.enqueue_delta(delta) {
+                match self.enqueue_delta(&authority, delta) {
                     Ok(pending) => Some(pending),
-                    Err(error) => return self.poison(&authority, error),
+                    Err(error) => return self.invalidate_authority(&authority, error),
                 }
             } else {
                 None
@@ -269,7 +300,7 @@ where
         if let Some(pending) = pending
             && let Err(error) = self.finish_delta(&authority, pending)
         {
-            return self.poison(&authority, error);
+            return self.invalidate_authority(&authority, error);
         }
         Ok(tally)
     }
@@ -299,13 +330,13 @@ where
                 limits,
                 at: now,
             };
-            match self.enqueue_delta(delta) {
+            match self.enqueue_delta(&authority, delta) {
                 Ok(pending) => pending,
-                Err(error) => return self.poison(&authority, error),
+                Err(error) => return self.invalidate_authority(&authority, error),
             }
         };
         if let Err(error) = self.finish_delta(&authority, pending) {
-            return self.poison(&authority, error);
+            return self.invalidate_authority(&authority, error);
         }
         self.event_sink
             .emit(BudgetEvent::LimitChanged { account, at: now });
@@ -357,7 +388,7 @@ where
                     Ok(record) => {
                         reservations.insert(reservation_id, record);
                     }
-                    Err(error) => return self.poison(&authority, error),
+                    Err(error) => return self.invalidate_authority(&authority, error),
                 }
             }
             match result {
@@ -368,9 +399,9 @@ where
                         reservation_id,
                         at: now,
                     };
-                    let pending = match self.enqueue_delta(delta) {
+                    let pending = match self.enqueue_delta(&authority, delta) {
                         Ok(pending) => pending,
-                        Err(error) => return self.poison(&authority, error),
+                        Err(error) => return self.invalidate_authority(&authority, error),
                     };
                     (outcome, pending)
                 }
@@ -382,7 +413,7 @@ where
             }
         };
         if let Err(error) = self.finish_delta(&authority, pending) {
-            return self.poison(&authority, error);
+            return self.invalidate_authority(&authority, error);
         }
         if let Err(error) = authority.check_available() {
             let result = Err(error);
@@ -431,7 +462,7 @@ where
                     Ok(record) => {
                         reservations.insert(reservation_id, record);
                     }
-                    Err(error) => return self.poison(&authority, error),
+                    Err(error) => return self.invalidate_authority(&authority, error),
                 }
             }
             let receipt = result?;
@@ -440,14 +471,14 @@ where
                 actual,
                 at: now,
             };
-            let pending = match self.enqueue_delta(delta) {
+            let pending = match self.enqueue_delta(&authority, delta) {
                 Ok(pending) => pending,
-                Err(error) => return self.poison(&authority, error),
+                Err(error) => return self.invalidate_authority(&authority, error),
             };
             (receipt, pending)
         };
         if let Err(error) = self.finish_delta(&authority, pending) {
-            return self.poison(&authority, error);
+            return self.invalidate_authority(&authority, error);
         }
         self.event_sink.emit(BudgetEvent::Reconciled {
             account: most_specific_account(&receipt.scope),
@@ -493,7 +524,7 @@ where
                     Ok(record) => {
                         reservations.insert(reservation_id, record);
                     }
-                    Err(error) => return self.poison(&authority, error),
+                    Err(error) => return self.invalidate_authority(&authority, error),
                 }
             }
             let receipt = result?;
@@ -501,14 +532,14 @@ where
                 reservation_id,
                 at: now,
             };
-            let pending = match self.enqueue_delta(delta) {
+            let pending = match self.enqueue_delta(&authority, delta) {
                 Ok(pending) => pending,
-                Err(error) => return self.poison(&authority, error),
+                Err(error) => return self.invalidate_authority(&authority, error),
             };
             (receipt, pending)
         };
         if let Err(error) = self.finish_delta(&authority, pending) {
-            return self.poison(&authority, error);
+            return self.invalidate_authority(&authority, error);
         }
         self.event_sink.emit(BudgetEvent::Released {
             account: most_specific_account(&receipt.scope),
@@ -539,9 +570,9 @@ where
                     account: account.clone(),
                     at: now,
                 };
-                match self.enqueue_delta(delta) {
+                match self.enqueue_delta(&authority, delta) {
                     Ok(pending) => Some(pending),
-                    Err(error) => return self.poison(&authority, error),
+                    Err(error) => return self.invalidate_authority(&authority, error),
                 }
             } else {
                 None
@@ -551,7 +582,7 @@ where
         if let Some(pending) = pending
             && let Err(error) = self.finish_delta(&authority, pending)
         {
-            return self.poison(&authority, error);
+            return self.invalidate_authority(&authority, error);
         }
         Ok(snapshot)
     }
@@ -603,6 +634,27 @@ mod tests {
             thread_id: None,
             invocation_id: InvocationId::new(),
         }
+    }
+
+    #[test]
+    fn stale_authority_cannot_enqueue_into_restarted_journal_generation() {
+        let governor = FilesystemResourceGovernor::new(scoped_resources_fs());
+        let stale = governor.authority().expect("authority");
+        *governor.authority.lock().expect("authority lock") = None;
+        let account = ResourceAccount::tenant(sample_scope().tenant_id);
+
+        let result = governor.enqueue_delta(
+            &stale,
+            ResourceGovernorDelta::AccountSnapshot {
+                account,
+                at: chrono::Utc::now(),
+            },
+        );
+
+        assert!(
+            matches!(result, Err(ResourceError::Storage { reason }) if reason.contains("authority changed")),
+            "a stale operation must fail closed instead of writing into the replacement journal"
+        );
     }
 
     #[test]

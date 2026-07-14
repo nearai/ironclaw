@@ -229,6 +229,10 @@ tracing-test = "0.2"
 name = "production_runtime_automations"
 required-features = ["libsql"]
 
+[[test]]
+name = "resource_governor_libsql_contract"
+required-features = ["libsql"]
+
 [build-dependencies]
 ironclaw_skills = { path = "../ironclaw_skills" }
 serde_json = "1"

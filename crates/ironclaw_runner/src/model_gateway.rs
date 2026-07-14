@@ -1,3 +1,4 @@
+// arch-exempt: large_file, targeted model error mapping stays with the gateway adapter, plan #4088
 //! LLM provider-backed Reborn model gateway wiring.
 //!
 //! The loop-host crate owns the host-facing model gateway contract. This
@@ -2006,11 +2007,12 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
         AgentLoopHostErrorKind::Unauthorized | AgentLoopHostErrorKind::PolicyDenied => {
             HostManagedModelErrorKind::PolicyDenied
         }
-        AgentLoopHostErrorKind::BudgetExceeded | AgentLoopHostErrorKind::BudgetAccountingFailed => {
-            HostManagedModelErrorKind::BudgetExceeded
-        }
+        AgentLoopHostErrorKind::BudgetExceeded => HostManagedModelErrorKind::BudgetExceeded,
         AgentLoopHostErrorKind::BudgetApprovalRequired => {
             HostManagedModelErrorKind::BudgetApprovalRequired
+        }
+        AgentLoopHostErrorKind::BudgetAccountingFailed => {
+            HostManagedModelErrorKind::BudgetAccountingFailed
         }
         AgentLoopHostErrorKind::Cancelled => HostManagedModelErrorKind::Cancelled,
         AgentLoopHostErrorKind::Invalid
@@ -2632,6 +2634,20 @@ mod tests {
         );
         let detail = mapped.detail.expect("setup hint travels on detail");
         assert!(detail.contains("no LLM provider is configured"));
+    }
+
+    #[test]
+    fn capability_budget_accounting_error_is_not_collapsed_to_budget_exceeded() {
+        let mapped = map_capability_host_error(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::BudgetAccountingFailed,
+            "resource accounting storage is unavailable",
+        ));
+
+        assert_eq!(
+            mapped.kind,
+            HostManagedModelErrorKind::BudgetAccountingFailed,
+            "accounting infrastructure failure must cross the model gateway unchanged"
+        );
     }
 
     #[test]

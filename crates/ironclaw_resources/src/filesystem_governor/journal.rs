@@ -1,4 +1,5 @@
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
 use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem, SeqNo};
@@ -17,6 +18,9 @@ use super::{fs_error, storage_error};
 
 const DELTA_LOG_PATH: &str = "/resources/deltas/log";
 const DELTA_JOURNAL_MAX_BATCH: usize = 256;
+const DELTA_JOURNAL_BUSY_RETRIES: usize = 3;
+const DELTA_JOURNAL_BUSY_BACKOFF_BASE: Duration = Duration::from_millis(25);
+const DELTA_JOURNAL_BUSY_BACKOFF_MAX: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -85,8 +89,8 @@ pub(super) struct ResourceDeltaJournal<F>
 where
     F: RootFilesystem,
 {
-    sender: mpsc::Sender<DeltaJournalRequest>,
-    _filesystem: std::marker::PhantomData<F>,
+    filesystem: Arc<ScopedFilesystem<F>>,
+    sender: Mutex<mpsc::Sender<DeltaJournalRequest>>,
 }
 
 pub(super) struct PendingResourceDelta {
@@ -103,17 +107,21 @@ where
     F: RootFilesystem + 'static,
 {
     pub(super) fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
-        let (sender, receiver) = mpsc::channel();
-        if let Err(error) = std::thread::Builder::new()
-            .name("resource-governor-delta-journal".to_string())
-            .spawn(move || run_delta_journal_flusher(filesystem, receiver))
-        {
-            warn!(reason = %error, "resource governor delta journal thread failed to start");
-        }
+        let sender = spawn_delta_journal_flusher(Arc::clone(&filesystem));
         Self {
-            sender,
-            _filesystem: std::marker::PhantomData,
+            filesystem,
+            sender: Mutex::new(sender),
         }
+    }
+
+    pub(super) fn restart(&self) -> Result<(), ResourceError> {
+        let replacement = spawn_delta_journal_flusher(Arc::clone(&self.filesystem));
+        *self
+            .sender
+            .lock()
+            .map_err(|_| storage_error("resource governor delta journal sender lock poisoned"))? =
+            replacement;
+        Ok(())
     }
 
     pub(super) fn enqueue(
@@ -122,10 +130,28 @@ where
     ) -> Result<PendingResourceDelta, ResourceError> {
         let (ack, receiver) = mpsc::channel();
         self.sender
+            .lock()
+            .map_err(|_| storage_error("resource governor delta journal sender lock poisoned"))?
             .send(DeltaJournalRequest { delta, ack })
             .map_err(|_| storage_error("resource governor delta journal stopped"))?;
         Ok(PendingResourceDelta { ack: receiver })
     }
+}
+
+fn spawn_delta_journal_flusher<F>(
+    filesystem: Arc<ScopedFilesystem<F>>,
+) -> mpsc::Sender<DeltaJournalRequest>
+where
+    F: RootFilesystem + 'static,
+{
+    let (sender, receiver) = mpsc::channel();
+    if let Err(error) = std::thread::Builder::new()
+        .name("resource-governor-delta-journal".to_string())
+        .spawn(move || run_delta_journal_flusher(filesystem, receiver))
+    {
+        warn!(reason = %error, "resource governor delta journal thread failed to start");
+    }
+    sender
 }
 
 impl PendingResourceDelta {
@@ -204,23 +230,50 @@ where
         .iter()
         .map(|request| serde_json::to_vec(&request.delta).map_err(storage_error))
         .collect::<Result<Vec<_>, _>>()?;
-    if let [payload] = payloads.as_slice() {
-        return filesystem
-            .append(&ResourceScope::system(), &path, payload.clone())
+    let mut attempt = 0;
+    let seqs = loop {
+        match filesystem
+            .append_batch(&ResourceScope::system(), &path, payloads.clone())
             .await
-            .map(|seq| vec![seq])
-            .map_err(fs_error);
-    }
-    let seqs = filesystem
-        .append_batch(&ResourceScope::system(), &path, payloads)
-        .await
-        .map_err(fs_error)?;
+        {
+            Ok(seqs) => break seqs,
+            Err(FilesystemError::BackendBusy { .. }) if attempt < DELTA_JOURNAL_BUSY_RETRIES => {
+                attempt += 1;
+                let delay = busy_retry_delay(attempt);
+                warn!(
+                    attempt,
+                    max_retries = DELTA_JOURNAL_BUSY_RETRIES,
+                    delay_ms = delay.as_millis(),
+                    batch_size = requests.len(),
+                    "resource governor delta journal waiting for filesystem writer"
+                );
+                tokio::time::sleep(delay).await;
+            }
+            Err(error) => return Err(fs_error(error)),
+        }
+    };
     if seqs.len() != requests.len() {
         return Err(storage_error(
             "resource governor delta batch append returned an unexpected ack count",
         ));
     }
     Ok(seqs)
+}
+
+fn busy_retry_delay(attempt: usize) -> Duration {
+    let exponent = u32::try_from(attempt.saturating_sub(1)).unwrap_or(u32::MAX);
+    let multiplier = 2u32.saturating_pow(exponent);
+    let base = DELTA_JOURNAL_BUSY_BACKOFF_BASE
+        .saturating_mul(multiplier)
+        .min(DELTA_JOURNAL_BUSY_BACKOFF_MAX);
+    let jitter_ceiling_ms = base.as_millis().max(1) as u64;
+    let jitter_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as u64
+        % jitter_ceiling_ms;
+    base.saturating_add(Duration::from_millis(jitter_ms))
+        .min(DELTA_JOURNAL_BUSY_BACKOFF_MAX)
 }
 
 pub(super) fn compact_resource_governor_snapshot<F>(
@@ -298,7 +351,10 @@ fn delta_log_path() -> Result<ScopedPath, ResourceError> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use async_trait::async_trait;
     use ironclaw_filesystem::{
@@ -314,6 +370,20 @@ mod tests {
 
     struct GatedAppendFilesystem {
         release: Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    struct BusyOnceAppendFilesystem {
+        append_calls: AtomicUsize,
+        append_batch_calls: AtomicUsize,
+    }
+
+    impl BusyOnceAppendFilesystem {
+        fn new() -> Self {
+            Self {
+                append_calls: AtomicUsize::new(0),
+                append_batch_calls: AtomicUsize::new(0),
+            }
+        }
     }
 
     impl GatedAppendFilesystem {
@@ -345,6 +415,47 @@ mod tests {
             payloads: Vec<Vec<u8>>,
         ) -> Result<Vec<SeqNo>, FilesystemError> {
             self.wait_for_release(path).await?;
+            Ok((1..=payloads.len() as u64)
+                .map(SeqNo::from_backend)
+                .collect())
+        }
+
+        async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+            Err(unsupported(path, FilesystemOperation::ListDir))
+        }
+
+        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+            Err(unsupported(path, FilesystemOperation::Stat))
+        }
+    }
+
+    #[async_trait]
+    impl RootFilesystem for BusyOnceAppendFilesystem {
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities::sql_typical().with(Capability::Events)
+        }
+
+        async fn append(
+            &self,
+            path: &VirtualPath,
+            _payload: Vec<u8>,
+        ) -> Result<SeqNo, FilesystemError> {
+            self.append_calls.fetch_add(1, Ordering::SeqCst);
+            Err(backend_error(path, "single append is not atomic for retry"))
+        }
+
+        async fn append_batch(
+            &self,
+            path: &VirtualPath,
+            payloads: Vec<Vec<u8>>,
+        ) -> Result<Vec<SeqNo>, FilesystemError> {
+            let call = self.append_batch_calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                return Err(FilesystemError::BackendBusy {
+                    path: path.clone(),
+                    operation: FilesystemOperation::Append,
+                });
+            }
             Ok((1..=payloads.len() as u64)
                 .map(SeqNo::from_backend)
                 .collect())
@@ -399,6 +510,36 @@ mod tests {
         )])
         .expect("mount view");
         Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
+    }
+
+    fn scoped_busy_once_filesystem(
+        backend: Arc<BusyOnceAppendFilesystem>,
+    ) -> Arc<ScopedFilesystem<BusyOnceAppendFilesystem>> {
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/resources").expect("alias"),
+            VirtualPath::new("/resources").expect("target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view");
+        Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
+    }
+
+    #[test]
+    fn transient_busy_append_batch_is_retried_without_using_single_append() {
+        let backend = Arc::new(BusyOnceAppendFilesystem::new());
+        let journal = ResourceDeltaJournal::new(scoped_busy_once_filesystem(Arc::clone(&backend)));
+        let pending = journal
+            .enqueue(ResourceGovernorDelta::AccountSnapshot {
+                account: ResourceAccount::tenant(TenantId::new("tenant1").expect("tenant id")),
+                at: Utc::now(),
+            })
+            .expect("enqueue delta");
+
+        let seq = pending.wait().expect("busy append should recover");
+
+        assert_eq!(seq, SeqNo::from_backend(1));
+        assert_eq!(backend.append_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.append_batch_calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]

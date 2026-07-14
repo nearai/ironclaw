@@ -118,11 +118,29 @@ pub(crate) fn libsql_db_error(
     operation: FilesystemOperation,
     error: libsql::Error,
 ) -> FilesystemError {
+    if is_libsql_contention(&error) {
+        return FilesystemError::BackendBusy { path, operation };
+    }
     FilesystemError::Backend {
         path,
         operation,
         reason: error.to_string(),
     }
+}
+
+#[cfg(feature = "libsql")]
+fn is_libsql_contention(error: &libsql::Error) -> bool {
+    const SQLITE_BUSY: i32 = 5;
+    const SQLITE_LOCKED: i32 = 6;
+
+    let primary_code = match error {
+        libsql::Error::SqliteFailure(code, _) => Some(*code),
+        libsql::Error::RemoteSqliteFailure(code, extended_code, _) => {
+            Some(if *code == 0 { *extended_code } else { *code })
+        }
+        _ => None,
+    };
+    primary_code.is_some_and(|code| matches!(code & 0xff, SQLITE_BUSY | SQLITE_LOCKED))
 }
 
 #[cfg(any(feature = "postgres", feature = "libsql"))]
@@ -297,4 +315,51 @@ pub(crate) fn page_offset_to_i64(path: &VirtualPath, offset: u64) -> Result<i64,
         operation: FilesystemOperation::Query,
         reason: format!("page offset {offset} exceeds backend i64 range"),
     })
+}
+
+#[cfg(all(test, feature = "libsql"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn libsql_busy_and_locked_errors_preserve_retryable_contention() {
+        let path = VirtualPath::new("/resources/deltas/log").expect("valid path"); // safety: test-only fixture
+
+        for error in [
+            libsql::Error::SqliteFailure(5, "database is busy".to_string()),
+            libsql::Error::SqliteFailure(6, "database is locked".to_string()),
+            libsql::Error::SqliteFailure(261, "extended busy code".to_string()),
+            libsql::Error::RemoteSqliteFailure(5, 517, "remote database is busy".to_string()),
+            libsql::Error::RemoteSqliteFailure(0, 262, "remote table is locked".to_string()),
+        ] {
+            let error = libsql_db_error(path.clone(), FilesystemOperation::Append, error);
+
+            assert!(matches!( // safety: test-only assertion
+                error,
+                FilesystemError::BackendBusy {
+                    path: error_path,
+                    operation: FilesystemOperation::Append,
+                } if error_path == path
+            ));
+        }
+    }
+
+    #[test]
+    fn libsql_non_contention_errors_remain_terminal_backend_errors() {
+        let path = VirtualPath::new("/resources/deltas/log").expect("valid path"); // safety: test-only fixture
+        let error = libsql_db_error(
+            path.clone(),
+            FilesystemOperation::Append,
+            libsql::Error::SqliteFailure(11, "database disk image is malformed".to_string()),
+        );
+
+        assert!(matches!( // safety: test-only assertion
+            error,
+            FilesystemError::Backend {
+                path: error_path,
+                operation: FilesystemOperation::Append,
+                ..
+            } if error_path == path
+        ));
+    }
 }

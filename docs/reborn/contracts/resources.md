@@ -265,7 +265,9 @@ pub trait ResourceGovernor {
 
 The V1 crate started with an in-memory implementation for contract tests. Production now uses `FilesystemResourceGovernor`: process-local, per-account-sharded quota authority backed by the shared `RootFilesystem` append log. Quotas are process-global in the hosted runtime, so the in-process authority owns admission decisions; successful mutations update memory and enqueue their delta while holding the relevant per-account gate, then wait for durable group-commit acknowledgement after releasing that gate. This is not a distributed quota service: deployments must not run multiple independent filesystem governors over the same quota domain. Multi-replica deployments need one elected authority for each quota domain or a different distributed admission primitive. `FilesystemResourceGovernorStore` remains as the CAS snapshot compaction store at `/resources/snapshot.json`; restart recovery loads that snapshot and replays `/resources/deltas/log` from the recorded cursor.
 
-Persistent implementations add a storage failure mode to every governor operation that touches durable state, including `set_limit`. Lock, read, write, serialization, deserialization, or snapshot schema validation failures return `ResourceError::Storage` and must fail closed: callers must not start costed or quota-limited work when storage state cannot be trusted. Durable snapshots are versioned with `schema_version`; unknown top-level fields, partial snapshots, malformed JSON, and unsupported future schema versions are rejected instead of being silently ignored.
+The delta journal always uses the atomic `RootFilesystem::append_batch` contract, including for a one-delta flush. A backend may classify lock contention as `FilesystemError::BackendBusy`; the journal retries only that typed transient outcome with bounded backoff. It must not retry an untyped backend error or any operation that could have committed a partial side effect. The active authority generation is checked while enqueueing, so an operation that raced with recovery cannot write stale in-memory state into a replacement journal worker.
+
+Persistent implementations add a storage failure mode to every governor operation that touches durable state, including `set_limit`. Lock, read, write, serialization, deserialization, or snapshot schema validation failures return `ResourceError::Storage` and must fail closed: callers must not start costed or quota-limited work when storage state cannot be trusted. If a journal write still fails after any permitted transient retries, the request returns an error, the failed authority generation is invalidated, and the next operation reloads the snapshot and journal before proceeding. An optimistic mutation from the failed generation must not survive that reload. Recovery never converts the failed request into success and never bypasses durable accounting. Durable snapshots are versioned with `schema_version`; unknown top-level fields, partial snapshots, malformed JSON, and unsupported future schema versions are rejected instead of being silently ignored.
 
 ---
 
@@ -279,6 +281,9 @@ Local contract tests should prove:
 - active reservations consume concurrency slots
 - persistent snapshots reload limits, active holds, and reconciled usage across governor instances
 - persistent snapshots reject malformed JSON, unknown fields, partial snapshots, and unsupported schema versions with `ResourceError::Storage`
+- transient backend contention retries only the atomic journal batch operation and does not duplicate a delta
+- a terminal journal write failure fails the request, invalidates the failed authority generation, and reloads durable state on the next operation
+- an operation holding a stale authority generation cannot enqueue into the replacement journal worker
 - concurrent reservations cannot oversubscribe a scope
 - release frees reserved-but-unused capacity and records no spend
 - reconcile records actual usage and releases active reservation
