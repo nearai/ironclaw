@@ -16,9 +16,14 @@
 
 use std::sync::Arc;
 
-use ironclaw_extensions::{ExtensionInstallationStore, InMemoryExtensionInstallationStore};
+use ironclaw_extensions::{
+    ExtensionInstallationId, ExtensionInstallationStore, InMemoryExtensionInstallationStore,
+    ManifestHash,
+};
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::{InvocationId, ResourceScope, TenantId, UserId, VirtualPath};
+use ironclaw_host_api::{
+    ExtensionId, InvocationId, ResourceScope, TenantId, UserId, VirtualPath, sha256_digest_token,
+};
 use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef};
 
 use crate::extension_host::available_extensions::{AssetLoading, AvailableExtensionCatalog};
@@ -478,6 +483,151 @@ async fn corrupt_manifest_under_one_owner_does_not_break_other_owners_listing_or
             .is_some(),
         "owner B's registered extension must be published after restore, unaffected by owner \
          A's corrupt sibling manifest"
+    );
+}
+
+/// Builds a `UserRegistered` manifest at the given id/url/name — used by the
+/// hash-drift fixture below, which needs each row seeded at its own
+/// already-correctly-minted id (so restore's id-migration pass, which always
+/// recomputes the stored hash from current content, is a no-op and the
+/// hash-check step is what's actually exercised).
+fn owner_a_registered_manifest_toml(id: &ExtensionId, url: &str, name: &str) -> String {
+    format!(
+        r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "{id}"
+name = "{name}"
+version = "0.1.0"
+description = "User-registered hosted MCP server (T1 hash-drift fixture)"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "{url}"
+"#,
+        id = id.as_str(),
+    )
+}
+
+/// Fix B (#5970 review): the hash-mismatch skip-and-preserve branch in
+/// `restore_extension_lifecycle_state` (a genuinely DRIFTED persisted
+/// manifest hash, as opposed to a parse failure — that's
+/// `corrupt_manifest_under_one_owner_does_not_break_other_owners_listing_or_restore`
+/// above) had no dedicated restore coverage. Both rows are seeded at their
+/// already-correctly-minted id (distinct urls, so they mint to distinct ids)
+/// so id-migration is a no-op and doesn't recompute the seeded hash out from
+/// under the fixture. Pins: the drifted installation is absent from the
+/// active registry after restore, its row SURVIVES untouched in the
+/// installation store (skip-and-log never deletes or rewrites persisted
+/// state), and a healthy sibling under the same owner still restores and
+/// publishes normally.
+#[tokio::test]
+async fn drifted_manifest_hash_skips_restore_and_preserves_row_alongside_healthy_sibling() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage_root = dir.path().join("local-dev");
+    let filesystem: Arc<dyn RootFilesystem> = Arc::new(mounted_local_filesystem(&storage_root));
+
+    let owner_a = UserId::new(OWNER_USER_ID).expect("valid owner id");
+    let default_tenant =
+        TenantId::from_trusted(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string());
+
+    // Healthy sibling under the same owner.
+    let healthy_url = "http://127.0.0.1:9/mcp-hash-drift-healthy";
+    let healthy_id = minted_extension_id(&default_tenant, &owner_a, healthy_url);
+    let healthy_manifest =
+        owner_a_registered_manifest_toml(&healthy_id, healthy_url, "Acme Good MCP");
+    let healthy_dir = storage_root
+        .join("system/extensions/registered")
+        .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
+        .join(OWNER_USER_ID)
+        .join(healthy_id.as_str());
+    std::fs::create_dir_all(&healthy_dir).expect("healthy manifest dir");
+    std::fs::write(healthy_dir.join("manifest.toml"), &healthy_manifest)
+        .expect("write healthy manifest");
+
+    // Drifted sibling: the on-disk descriptor is well-formed, but the
+    // installation row's stored manifest hash is deliberately wrong, so it
+    // no longer matches what `available_manifest_hash` computes from the
+    // real on-disk content — a genuine drift, not a parse failure.
+    let drifted_url = "http://127.0.0.1:9/mcp-hash-drift-drifted";
+    let drifted_id = minted_extension_id(&default_tenant, &owner_a, drifted_url);
+    let drifted_manifest =
+        owner_a_registered_manifest_toml(&drifted_id, drifted_url, "Acme Drifted MCP");
+    let drifted_dir = storage_root
+        .join("system/extensions/registered")
+        .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
+        .join(OWNER_USER_ID)
+        .join(drifted_id.as_str());
+    std::fs::create_dir_all(&drifted_dir).expect("drifted manifest dir");
+    std::fs::write(drifted_dir.join("manifest.toml"), &drifted_manifest)
+        .expect("write drifted manifest");
+
+    let installation_store: Arc<dyn ExtensionInstallationStore> =
+        Arc::new(InMemoryExtensionInstallationStore::default());
+    seed_registered_installation(
+        &installation_store,
+        &healthy_manifest,
+        &default_tenant,
+        &owner_a,
+        healthy_id.as_str(),
+        None,
+    )
+    .await;
+    let wrong_hash = ManifestHash::new(sha256_digest_token(b"not-the-real-manifest-bytes"))
+        .expect("valid manifest hash");
+    seed_registered_installation(
+        &installation_store,
+        &drifted_manifest,
+        &default_tenant,
+        &owner_a,
+        drifted_id.as_str(),
+        Some(wrong_hash.clone()),
+    )
+    .await;
+
+    let empty_catalog = AvailableExtensionCatalog::from_packages(Vec::new());
+    let boot = fresh_boot_fixture();
+
+    restore_extension_lifecycle_state(
+        &empty_catalog,
+        &filesystem,
+        &installation_store,
+        &boot.lifecycle_service,
+        &boot.active_extensions,
+    )
+    .await
+    .expect(
+        "restore must survive one owner's drifted registered manifest hash and continue to \
+         the healthy sibling",
+    );
+
+    assert!(
+        boot.active_registry
+            .snapshot()
+            .get_extension(&drifted_id)
+            .is_none(),
+        "the drifted installation must be absent from the active registry after restore"
+    );
+    assert!(
+        boot.active_registry
+            .snapshot()
+            .get_extension(&healthy_id)
+            .is_some(),
+        "the healthy sibling under the same owner must still publish normally"
+    );
+
+    let drifted_installation_id =
+        ExtensionInstallationId::new(drifted_id.as_str()).expect("valid installation id");
+    let drifted_row = installation_store
+        .get_installation(&drifted_installation_id)
+        .await
+        .expect("store read")
+        .expect("the drifted row must survive untouched, never deleted or rewritten");
+    assert_eq!(
+        drifted_row.manifest_ref().manifest_hash(),
+        Some(&wrong_hash),
+        "the drifted row's stored hash must be left exactly as seeded, not migrated"
     );
 }
 
