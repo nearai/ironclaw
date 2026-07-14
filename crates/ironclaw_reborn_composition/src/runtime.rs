@@ -1852,8 +1852,9 @@ impl RebornRuntime {
 
     /// Read-only scoped filesystem spanning every mount the standalone WebUI
     /// filesystem viewer can browse (workspace files + persistent memory), over
-    /// the same composite root the agent's tools resolve through. `None` when no
-    /// local runtime is composed, or when the browse mount view can't be built.
+    /// the same composite root the agent's tools resolve through. `None` only
+    /// when no local runtime is composed; scope-specific mount resolution errors
+    /// surface during browse operations.
     ///
     /// Distinct from [`Self::webui_workspace_filesystem`]: that handle is the
     /// read-write workspace-only view used to land attachments, whereas this is

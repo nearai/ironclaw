@@ -488,7 +488,7 @@ impl HostManagedModelGateway for MemoryWriteGateway {
 
     async fn stream_model_with_capabilities(
         &self,
-        _request: HostManagedModelRequest,
+        request: HostManagedModelRequest,
         capabilities: Arc<dyn LoopCapabilityPort>,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         let call_index = {
@@ -501,14 +501,14 @@ impl HostManagedModelGateway for MemoryWriteGateway {
             index
         };
         if call_index > 0 {
-            let tool_result = _request
+            let tool_result = request
                 .messages
                 .iter()
                 .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
                 .expect("follow-up model call must include memory_write result");
             assert!(
-                tool_result.content.contains("status written")
-                    && tool_result.content.contains("path MEMORY.md"),
+                tool_result.content.contains("written")
+                    && tool_result.content.contains("MEMORY.md"),
                 "memory_write must persist MEMORY.md before the browser isolation assertion, got: {}",
                 tool_result.content
             );
@@ -1975,9 +1975,10 @@ async fn webui_filesystem_memory_mount_is_scoped_to_authenticated_user() {
         .expect("user B memory read oneshot");
     let status = response.status();
     let body = String::from_utf8_lossy(&read_body_bytes(response).await).to_string();
-    assert!(
-        status == StatusCode::NOT_FOUND || status == StatusCode::FORBIDDEN,
-        "user B must not read user A's memory document through the WebUI filesystem browser; status={status}, body={body}"
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "user B must not read user A's memory document through the WebUI filesystem browser; body={body}"
     );
     assert!(
         !body.contains(MEMORY_ISOLATION_MARKER),
@@ -2039,6 +2040,25 @@ async fn webui_filesystem_memory_mount_is_scoped_to_authenticated_user() {
     assert!(
         body.contains(MEMORY_ISOLATION_MARKER),
         "user A should read her own memory marker through the WebUI filesystem browser: {body}"
+    );
+
+    let response = router
+        .clone()
+        .oneshot(bearer_get_with_token(
+            "/api/webchat/v2/fs/content?mount=memory&path=MEMORY.md",
+            USER_B_TOKEN,
+        ))
+        .await
+        .expect("user B canonical memory read oneshot");
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "user B must not read user A's canonical memory document"
+    );
+    let body = String::from_utf8_lossy(&read_body_bytes(response).await).to_string();
+    assert!(
+        !body.contains(MEMORY_ISOLATION_MARKER),
+        "user B canonical memory response body leaked user A's memory marker: {body}"
     );
 
     harness
