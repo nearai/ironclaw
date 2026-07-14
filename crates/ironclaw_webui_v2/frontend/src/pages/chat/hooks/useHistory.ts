@@ -71,6 +71,10 @@ export function useHistory(threadId, options = {}) {
     // Cursor-load errors should stay visible across SSE/optimistic message
     // updates; only a successful history load proves pagination recovered.
     loadErrorSource: null,
+    // True only after optimistic/SSE-driven updates in this SPA session. Cached
+    // timeline rows alone do not prove a later background refresh miss is safe
+    // to hide.
+    hasCurrentSessionMessages: Boolean(cached?.hasCurrentSessionMessages),
   });
   const [stateThreadId, setStateThreadId] = React.useState(threadId);
   if (stateThreadId !== threadId) {
@@ -83,6 +87,7 @@ export function useHistory(threadId, options = {}) {
       isLoading: Boolean(threadId) && !entry,
       loadError: null,
       loadErrorSource: null,
+      hasCurrentSessionMessages: Boolean(entry?.hasCurrentSessionMessages),
     });
   }
   // Synchronous reentrancy guard, tracked PER THREAD — `isLoading` in state is
@@ -117,6 +122,7 @@ export function useHistory(threadId, options = {}) {
           isLoading: false,
           loadError: null,
           loadErrorSource: null,
+          hasCurrentSessionMessages: false,
         });
         return;
       }
@@ -140,6 +146,7 @@ export function useHistory(threadId, options = {}) {
         if (authScope() !== issuingScope) return;
 
         const pendingMessages = cursor ? [] : getPendingMessages?.() || [];
+        const hasPendingMessages = pendingMessages.length > 0;
         const renderable = messagesFromTimeline(data.messages || [], pendingMessages, threadId);
         const nextCursor = data.next_cursor || null;
 
@@ -154,12 +161,19 @@ export function useHistory(threadId, options = {}) {
         // The active thread cache is refreshed again below after merging
         // client-only messages from the live state.
         if (!cursor) {
-          const cachedMessages = historyCache.get(key)?.messages || [];
+          const cachedEntry = historyCache.get(key);
+          const cachedMessages = cachedEntry?.messages || [];
           const cacheMerged = mergeFullRefresh(renderable, cachedMessages, {
             preserveClientOnly,
             finalReplyTimestampByRun,
           });
-          putCache(key, { messages: cacheMerged, nextCursor });
+          putCache(key, {
+            messages: cacheMerged,
+            nextCursor,
+            hasCurrentSessionMessages: Boolean(
+              cachedEntry?.hasCurrentSessionMessages || hasPendingMessages,
+            ),
+          });
         }
 
         setState((prev) => {
@@ -175,7 +189,9 @@ export function useHistory(threadId, options = {}) {
               finalReplyTimestampByRun,
             });
           }
-          putCache(key, { messages: merged, nextCursor });
+          const hasCurrentSessionMessages =
+            prev.hasCurrentSessionMessages || hasPendingMessages;
+          putCache(key, { messages: merged, nextCursor, hasCurrentSessionMessages });
           return {
             messages: merged,
             messagesThreadId: threadId,
@@ -183,6 +199,7 @@ export function useHistory(threadId, options = {}) {
             isLoading: false,
             loadError: null,
             loadErrorSource: null,
+            hasCurrentSessionMessages,
           };
         });
       } catch (err) {
@@ -194,11 +211,9 @@ export function useHistory(threadId, options = {}) {
         // context rather than proof that the active chat is broken.
         setState((s) => {
           if (threadIdRef.current !== threadId) return s;
-          const hasCurrentMessages = (s.messages || []).length > 0;
-          const shouldPreserveCursorError =
-            !cursor && hasCurrentMessages && s.loadErrorSource === "cursor";
+          const shouldPreserveCursorError = !cursor && s.loadErrorSource === "cursor";
           const shouldClearStaleInitialError =
-            !cursor && hasCurrentMessages && !shouldPreserveCursorError;
+            !cursor && s.hasCurrentSessionMessages && !shouldPreserveCursorError;
           return {
             ...s,
             isLoading: false,
@@ -235,6 +250,7 @@ export function useHistory(threadId, options = {}) {
       isLoading: Boolean(threadId) && !entry,
       loadError: null,
       loadErrorSource: null,
+      hasCurrentSessionMessages: Boolean(entry?.hasCurrentSessionMessages),
     });
     if (threadId) loadHistory();
   }, [threadId, loadHistory]);
@@ -248,15 +264,21 @@ export function useHistory(threadId, options = {}) {
     if (threadIdRef.current === targetThreadId) {
       setState((s) => {
         const messages = apply(s.messages || []);
+        const hasCurrentSessionMessages = messages.length > 0;
         const shouldClearLoadError =
           messages.length > 0 && s.loadErrorSource !== "cursor";
-        putCache(key, { messages, nextCursor: s.nextCursor || null });
+        putCache(key, {
+          messages,
+          nextCursor: s.nextCursor || null,
+          hasCurrentSessionMessages,
+        });
         return {
           ...s,
           messages,
           messagesThreadId: targetThreadId,
           loadError: shouldClearLoadError ? null : s.loadError,
           loadErrorSource: shouldClearLoadError ? null : s.loadErrorSource,
+          hasCurrentSessionMessages,
         };
       });
       return;
@@ -264,7 +286,11 @@ export function useHistory(threadId, options = {}) {
 
     const entry = historyCache.get(key) || { messages: [], nextCursor: null };
     const messages = apply(entry.messages || []);
-    putCache(key, { messages, nextCursor: entry.nextCursor || null });
+    putCache(key, {
+      messages,
+      nextCursor: entry.nextCursor || null,
+      hasCurrentSessionMessages: messages.length > 0,
+    });
   }, []);
 
   return {
@@ -280,12 +306,17 @@ export function useHistory(threadId, options = {}) {
       setState((s) => {
         const messages =
           typeof updater === "function" ? updater(s.messages) : updater;
+        const hasCurrentSessionMessages = messages.length > 0;
         const shouldClearLoadError =
           messages.length > 0 && s.loadErrorSource !== "cursor";
         // Keep the cache in step with optimistic sends and SSE-driven
         // updates so returning to the thread shows the latest messages.
         if (threadId) {
-          putCache(cacheKey(threadId), { messages, nextCursor: s.nextCursor });
+          putCache(cacheKey(threadId), {
+            messages,
+            nextCursor: s.nextCursor,
+            hasCurrentSessionMessages,
+          });
         }
         return {
           ...s,
@@ -293,6 +324,7 @@ export function useHistory(threadId, options = {}) {
           messagesThreadId: threadId || s.messagesThreadId,
           loadError: shouldClearLoadError ? null : s.loadError,
           loadErrorSource: shouldClearLoadError ? null : s.loadErrorSource,
+          hasCurrentSessionMessages,
         };
       }),
   };

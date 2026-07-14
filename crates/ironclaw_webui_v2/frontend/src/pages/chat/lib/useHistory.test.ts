@@ -321,6 +321,63 @@ test("useHistory preserves cursor load errors when a later full refresh fails", 
   );
 });
 
+test("useHistory reports failed background refreshes for cached history", async () => {
+  const setCalls = [];
+  let attempts = 0;
+  const context = {
+    console: {
+      error: () => {},
+    },
+    fetchTimeline: async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        return {
+          messages: [
+            {
+              message_id: "cached-1",
+              kind: "assistant",
+              content: "cached history",
+            },
+          ],
+          next_cursor: null,
+        };
+      }
+      throw new Error("refresh unavailable");
+    },
+    authScope: () => "test-user",
+    globalThis: {},
+    messagesFromTimeline: (messages) =>
+      messages.map((message) => ({
+        id: `msg-${message.message_id}`,
+        role: message.kind,
+        content: message.content,
+      })),
+    React: createReactStub({ setCalls }),
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  context.globalThis.__testExports.clearHistoryCache();
+
+  context.globalThis.__testExports.useHistory("thread-1", {});
+  await flushMicrotasks();
+
+  const cachedHistory = context.globalThis.__testExports.useHistory("thread-1", {});
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(cachedHistory.messages.map((message) => message.id))),
+    ["msg-cached-1"],
+  );
+
+  await flushMicrotasks();
+
+  assert.equal(setCalls.at(-1).isLoading, false);
+  assert.equal(setCalls.at(-1).loadError, "chat.history.loadFailed");
+  assert.equal(setCalls.at(-1).loadErrorSource, "initial");
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(setCalls.at(-1).messages.map((message) => message.id))),
+    ["msg-cached-1"],
+  );
+});
+
 test("useHistory tags messages with the thread they belong to (messagesThreadId)", async () => {
   // The cross-thread pairing-panel fix (useChat derive effect) depends on
   // useHistory reporting which thread its `messages` represent, so a consumer can
