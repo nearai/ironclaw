@@ -1,7 +1,9 @@
 use chrono::{DateTime, Utc};
+use ironclaw_common::llm_costs::RunCost;
 use ironclaw_host_api::ThreadId;
 use ironclaw_product_adapters::{ProductOutboundEnvelope, ProjectionCursor};
 use ironclaw_threads::{SessionThreadRecord, SummaryArtifact, ThreadMessageRecord};
+use ironclaw_turns::run_profile::LoopModelUsage;
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunResponse, EventCursor, GateRef, ResumeTurnResponse,
     RetryTurnResponse, SanitizedFailure, TurnCheckpointId, TurnRunId, TurnRunState, TurnStatus,
@@ -496,7 +498,9 @@ pub struct RebornGetRunStateRequest {
 /// Deliberately omits M3-internal fields carried on [`TurnRunState`]:
 /// `scope`, `source_binding_ref`, `reply_target_binding_ref`, and
 /// `resolved_model_route`. Route handlers and downstream M5 consumers must
-/// build their views from this surface only.
+/// build their views from this surface only. Per-run token `usage` and USD
+/// `cost` are surfaced (mirroring the OpenAI-compatible API); the resolved
+/// model route stays internal — only its model id feeds cost pricing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornGetRunStateResponse {
     pub turn_id: String,
@@ -513,10 +517,32 @@ pub struct RebornGetRunStateResponse {
     pub gate_ref: Option<GateRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<SanitizedFailure>,
+    /// Cumulative token usage for the run, once the model has reported it.
+    /// `None` until the first model response lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<LoopModelUsage>,
+    /// USD cost priced from `usage` for the run's resolved model. `None` when
+    /// usage is absent or no concrete model was resolved (a default-model run
+    /// reports usage without cost until the active model is surfaced).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<RunCost>,
 }
 
 impl From<TurnRunState> for RebornGetRunStateResponse {
     fn from(value: TurnRunState) -> Self {
+        // Price cost only when the run reported usage AND a concrete model was
+        // resolved (the model id feeds the cost table). `resolved_model_route`
+        // itself stays internal — only its model id crosses to the priced cost.
+        let cost = match (value.model_usage, value.resolved_model_route.as_ref()) {
+            (Some(usage), Some(route)) => Some(RunCost::from_usage(
+                route.model_id.as_str(),
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_read_input_tokens,
+                usage.cache_creation_input_tokens,
+            )),
+            _ => None,
+        };
         Self {
             turn_id: value.turn_id.to_string(),
             run_id: value.run_id,
@@ -536,6 +562,8 @@ impl From<TurnRunState> for RebornGetRunStateResponse {
                 .failure
                 .as_ref()
                 .map(SanitizedFailure::public_projection),
+            usage: value.model_usage,
+            cost,
         }
     }
 }

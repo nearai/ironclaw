@@ -9515,6 +9515,7 @@ output_schema_ref = "schemas/write.output.json"
                     thread_id: Some(created.thread.thread_id.to_string()),
                     content: Some("hello webui stream".to_string()),
                     attachments: Vec::new(),
+                    model: None,
                 },
             )
             .await
@@ -10754,6 +10755,7 @@ output_schema_ref = "schemas/write.output.json"
                     thread_id: Some(created.thread.thread_id.to_string()),
                     content: Some("$webui-helper please help".to_string()),
                     attachments: Vec::new(),
+                    model: None,
                 },
             )
             .await
@@ -11137,6 +11139,7 @@ output_schema_ref = "schemas/write.output.json"
                     thread_id: Some(thread_id.to_string()),
                     content: Some("message B while thread is busy".to_string()),
                     attachments: Vec::new(),
+                    model: None,
                 },
             )
             .await
@@ -11247,6 +11250,7 @@ output_schema_ref = "schemas/write.output.json"
                     thread_id: Some(thread_id.to_string()),
                     content: Some("message C after thread is free".to_string()),
                     attachments: Vec::new(),
+                    model: None,
                 },
             )
             .await

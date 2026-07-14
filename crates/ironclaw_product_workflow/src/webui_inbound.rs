@@ -155,6 +155,12 @@ pub struct WebUiSendMessageRequest {
     pub content: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<WebUiInboundAttachment>,
+    /// Caller-selected model for this turn. A hint routed to when the operator
+    /// has it configured, otherwise the run falls back to the deployment's
+    /// active model. The `"default"` alias and empty values are treated as "no
+    /// selection". `None` for clients that don't pick a model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 impl WebUiSendMessageRequest {
@@ -430,6 +436,9 @@ pub enum WebUiInboundCommand {
         actor: TurnActor,
         client_action_id: IdempotencyKey,
         content: String,
+        /// Normalized caller-requested model hint (`"default"`/empty already
+        /// dropped to `None`). Set on the submitted turn's `requested_model`.
+        requested_model: Option<String>,
     },
     CancelRun {
         request: CancelRunRequest,
@@ -488,6 +497,10 @@ impl WebUiSendMessageRequest {
             actor: caller.actor(),
             client_action_id,
             content,
+            requested_model: self
+                .model
+                .as_deref()
+                .and_then(ironclaw_common::model_selection::requested_model_hint),
         })
     }
 }

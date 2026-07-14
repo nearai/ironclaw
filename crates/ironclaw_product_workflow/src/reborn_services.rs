@@ -3621,6 +3621,7 @@ impl RebornServicesApi for RebornServices {
             actor,
             client_action_id,
             content,
+            requested_model,
         } = command
         else {
             return Err(RebornServicesError::internal_invariant());
@@ -3755,7 +3756,7 @@ impl RebornServicesApi for RebornServices {
         )?;
         let product_context = ironclaw_product_context::resolve_web_ui(scope.product_owner(&actor));
         let submit = SubmitTurnRequest {
-            requested_model: None,
+            requested_model,
             scope: scope.clone(),
             actor,
             accepted_message_ref: accepted_message_ref.clone(),
