@@ -48,6 +48,7 @@ use crate::product_auth::serve::{
     run_with_backend_timeout, scope_from_authenticated_caller_parts_requiring_invocation,
     scope_hint, scoped_update_binding_for_requester,
 };
+use crate::provider_identity::installation_scoped_provider_user_id_prefix;
 use crate::slack::slack_host_beta::SlackPersonalConnectionScopeResolver;
 use crate::slack::slack_personal_binding::{
     RebornUserIdentityBindingError, SlackConnectionEpoch, SlackConnectionOwner,
@@ -340,7 +341,8 @@ fn slack_personal_oauth_abandon_hook(
                 return Err(ProductAuthRouteFailure::backend_unavailable());
             }
         };
-        let provider_user_id_prefix = format!("{}:", connection_owner.installation_id().as_str());
+        let provider_user_id_prefix =
+            installation_scoped_provider_user_id_prefix(connection_owner.installation_id());
         if matches!(
             failure_stage,
             RebornOAuthCallbackFailureStage::ContinuationSideEffect

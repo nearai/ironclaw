@@ -5,9 +5,7 @@
 //! turn/outbound ports. They intentionally do not reuse the legacy Slack channel
 //! or legacy pairing store.
 
-// arch-exempt: large_file, triggered Slack gate-route e2e coverage stays with
-// the existing Slack harness; decomposition tracked in
-// docs/plans/2026-07-02-reborn-internal-module-refactor.md.
+// arch-exempt: large_file, Slack gate-route E2E harness decomposition, plan #5905
 
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -72,7 +70,10 @@ use crate::slack::slack_delivery::{
     PostSubmitDeliveryHook, SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
     SlackFinalReplyDeliverySettings, TriggeredRunDeliveryDriver,
 };
-use crate::{AuthChallengeProvider, RebornUserIdentityLookup, RebornUserIdentityLookupError};
+use crate::{
+    AuthChallengeProvider,
+    provider_identity::{RebornUserIdentityLookup, RebornUserIdentityLookupError},
+};
 
 #[path = "e2e_auth_challenge.rs"]
 mod e2e_auth_challenge;
@@ -2984,6 +2985,14 @@ impl RebornUserIdentityLookup for RecordingUserIdentityLookup {
             return Ok(false);
         }
         Ok(self.bindings.values().any(|bound| bound == user_id))
+    }
+
+    async fn provider_user_identity_record_exists(
+        &self,
+        provider: &str,
+        provider_user_id: &str,
+    ) -> Result<bool, RebornUserIdentityLookupError> {
+        Ok(provider == "slack" && self.bindings.contains_key(provider_user_id))
     }
 }
 

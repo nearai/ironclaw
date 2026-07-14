@@ -29,7 +29,11 @@ use ironclaw_slack_v2_adapter::{SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID};
 use crate::{
     RebornProductAuthServices, SlackHostBetaMounts,
     extension_host::available_extensions::SLACK_EXTENSION_ID,
-    provider_identity::{RebornUserIdentityLookup, parse_installation_scoped_provider_user_id},
+    provider_identity::{
+        ProviderIdentityKeyGeneration, RebornUserIdentityLookup,
+        installation_scoped_provider_user_id_prefix,
+        parse_any_installation_scoped_provider_user_id,
+    },
     slack::slack_host_beta::{SlackPersonalConnectionScope, SlackPersonalConnectionScopeResolver},
     slack::slack_outbound_targets::SlackPersonalDmTargetStore,
     slack::slack_personal_binding::{
@@ -108,7 +112,39 @@ impl SlackChannelConnectionFacade {
     ) -> Result<(), RebornServicesError> {
         let adapter_kind = AdapterKind::new(SLACK_V2_ADAPTER_ID)
             .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
+        let canonical_logical_keys = bindings
+            .iter()
+            .filter_map(|binding| {
+                let binding = binding.binding();
+                (binding.provider.as_str() == SLACK_IDENTITY_PROVIDER)
+                    .then(|| {
+                        parse_any_installation_scoped_provider_user_id(
+                            binding.provider_user_id.as_str(),
+                        )
+                    })
+                    .flatten()
+            })
+            .filter_map(|(generation, installation_id, actor_id)| {
+                (generation == ProviderIdentityKeyGeneration::Canonical)
+                    .then_some((installation_id, actor_id))
+            })
+            .collect::<HashSet<_>>();
+        let mut handled_logical_keys = HashSet::new();
         for binding in bindings {
+            let Some((generation, installation_id, actor_id)) =
+                parse_any_installation_scoped_provider_user_id(
+                    binding.binding().provider_user_id.as_str(),
+                )
+            else {
+                continue;
+            };
+            let logical_key = (installation_id, actor_id);
+            if (generation == ProviderIdentityKeyGeneration::Legacy
+                && canonical_logical_keys.contains(&logical_key))
+                || !handled_logical_keys.insert(logical_key)
+            {
+                continue;
+            }
             let Some((installation_id, external_actor_ref)) =
                 slack_identity_conversation_actor(binding.binding())?
             else {
@@ -198,7 +234,8 @@ impl ChannelConnectionFacade for SlackChannelConnectionFacade {
         let Some(scope) = self.resolve_personal_connection_scope().await? else {
             return Ok(HashMap::from([("slack".to_string(), false)]));
         };
-        let provider_user_id_prefix = format!("{}:", scope.installation_id.as_str());
+        let provider_user_id_prefix =
+            installation_scoped_provider_user_id_prefix(&scope.installation_id);
         let connected = self
             .user_identity_lookup
             .user_has_provider_binding_with_provider_user_id_prefix(
@@ -252,8 +289,8 @@ impl ChannelConnectionFacade for SlackChannelConnectionFacade {
             .map_err(|error| RebornServicesError::internal_from(error.to_string()))?
         {
             let binding = binding.binding();
-            if let Some((installation_id, _)) =
-                parse_installation_scoped_provider_user_id(binding.provider_user_id.as_str())
+            if let Some((_, installation_id, _)) =
+                parse_any_installation_scoped_provider_user_id(binding.provider_user_id.as_str())
             {
                 installations.insert(installation_id);
             } else {
@@ -299,7 +336,8 @@ impl ChannelConnectionFacade for SlackChannelConnectionFacade {
                 )
                 .await
                 .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
-            let provider_user_id_prefix = format!("{}:", installation_id.as_str());
+            let provider_user_id_prefix =
+                installation_scoped_provider_user_id_prefix(installation_id);
             self.delete_slack_identity_bindings_after_unpair(
                 &caller.user_id,
                 Some(provider_user_id_prefix.as_str()),
@@ -394,8 +432,8 @@ fn slack_identity_conversation_actor(
     if binding.provider.as_str() != SLACK_IDENTITY_PROVIDER {
         return Ok(None);
     }
-    let Some((installation_id, slack_user_id)) =
-        parse_installation_scoped_provider_user_id(binding.provider_user_id.as_str())
+    let Some((_, installation_id, slack_user_id)) =
+        parse_any_installation_scoped_provider_user_id(binding.provider_user_id.as_str())
     else {
         tracing::warn!(
             provider_user_id = binding.provider_user_id.as_str(),
@@ -467,7 +505,11 @@ mod tests {
 
     use super::*;
     use crate::{
-        provider_identity::{RebornUserIdentityLookupError, installation_scoped_provider_user_id},
+        provider_identity::{
+            RebornUserIdentityLookupError, installation_scoped_provider_user_id,
+            installation_scoped_provider_user_id_matches_prefix,
+            legacy_installation_scoped_provider_user_id,
+        },
         slack::slack_outbound_targets::{
             InMemorySlackPersonalDmTargetStore, SlackPersonalDmTarget, SlackPersonalDmTargetKey,
         },
@@ -486,10 +528,13 @@ mod tests {
         let team_id = SlackTeamId::new("T123");
         let user_id = UserId::new("user:alice").expect("user");
         let slack_provider_user_id = installation_scoped_provider_user_id(&installation_id, "U123");
-        let identity_store = Arc::new(RecordingSlackIdentityStore::new([(
-            slack_provider_user_id,
-            user_id.clone(),
-        )]));
+        let legacy_provider_user_id =
+            legacy_installation_scoped_provider_user_id(&installation_id, "U123")
+                .expect("legacy key");
+        let identity_store = Arc::new(RecordingSlackIdentityStore::new([
+            (slack_provider_user_id, user_id.clone()),
+            (legacy_provider_user_id, user_id.clone()),
+        ]));
         let dm_target_store = Arc::new(InMemorySlackPersonalDmTargetStore::new());
         let actor_pairings = Arc::new(RecordingConversationActorPairingService::default());
         let dm_target_key = SlackPersonalDmTargetKey::new(
@@ -574,7 +619,10 @@ mod tests {
             vec![(
                 "slack".to_string(),
                 user_id,
-                Some("install-alpha:".to_string())
+                Some(installation_scoped_provider_user_id_prefix(
+                    &ironclaw_product_adapters::AdapterInstallationId::new("install-alpha")
+                        .expect("installation"),
+                ))
             )]
         );
         assert_eq!(
@@ -1040,7 +1088,10 @@ mod tests {
             vec![(
                 SLACK_IDENTITY_PROVIDER.to_string(),
                 user_id,
-                Some("install-alpha:".to_string()),
+                Some(installation_scoped_provider_user_id_prefix(
+                    &ironclaw_product_adapters::AdapterInstallationId::new("install-alpha")
+                        .expect("installation"),
+                )),
             )],
             "setup-free cleanup recovers the installation prefix from the durable identity"
         );
@@ -1169,7 +1220,16 @@ mod tests {
         deleted_prefixes.sort();
         assert_eq!(
             deleted_prefixes,
-            vec!["install-current:".to_string(), "install-stale:".to_string()]
+            vec![
+                installation_scoped_provider_user_id_prefix(
+                    &ironclaw_product_adapters::AdapterInstallationId::new("install-stale")
+                        .expect("installation"),
+                ),
+                installation_scoped_provider_user_id_prefix(
+                    &ironclaw_product_adapters::AdapterInstallationId::new("install-current")
+                        .expect("installation"),
+                ),
+            ]
         );
     }
 
@@ -1734,10 +1794,28 @@ mod tests {
                 |(provider_user_id, bound_user_id)| {
                     bound_user_id == user_id
                         && provider_user_id_prefix
-                            .map(|prefix| provider_user_id.starts_with(prefix))
+                            .map(|prefix| {
+                                installation_scoped_provider_user_id_matches_prefix(
+                                    provider_user_id,
+                                    prefix,
+                                )
+                            })
                             .unwrap_or(true)
                 },
             ))
+        }
+
+        async fn provider_user_identity_record_exists(
+            &self,
+            provider: &str,
+            provider_user_id: &str,
+        ) -> Result<bool, RebornUserIdentityLookupError> {
+            Ok(provider == SLACK_IDENTITY_PROVIDER
+                && self
+                    .bindings
+                    .lock()
+                    .expect("lock")
+                    .contains_key(provider_user_id))
         }
     }
 
@@ -1755,7 +1833,12 @@ mod tests {
                 .iter()
                 .filter(|(provider_user_id, bound_user_id)| {
                     let prefix_matches = provider_user_id_prefix
-                        .map(|prefix| provider_user_id.starts_with(prefix))
+                        .map(|prefix| {
+                            installation_scoped_provider_user_id_matches_prefix(
+                                provider_user_id,
+                                prefix,
+                            )
+                        })
                         .unwrap_or(true);
                     provider == SLACK_IDENTITY_PROVIDER
                         && *bound_user_id == user_id
@@ -1774,8 +1857,12 @@ mod tests {
                     .filter(|(provider_user_id, bound_user_id)| {
                         provider == SLACK_IDENTITY_PROVIDER
                             && *bound_user_id == user_id
-                            && provider_user_id_prefix
-                                .is_none_or(|prefix| provider_user_id.starts_with(prefix))
+                            && provider_user_id_prefix.is_none_or(|prefix| {
+                                installation_scoped_provider_user_id_matches_prefix(
+                                    provider_user_id,
+                                    prefix,
+                                )
+                            })
                     })
                     .map(|(provider_user_id, bound_user_id)| {
                         cleanup_binding(provider, provider_user_id, bound_user_id, binding_epoch)
@@ -1828,7 +1915,12 @@ mod tests {
             let mut tombstoned = Vec::new();
             bindings.retain(|provider_user_id, bound_user_id| {
                 let prefix_matches = provider_user_id_prefix
-                    .map(|prefix| provider_user_id.starts_with(prefix))
+                    .map(|prefix| {
+                        installation_scoped_provider_user_id_matches_prefix(
+                            provider_user_id,
+                            prefix,
+                        )
+                    })
                     .unwrap_or(true);
                 let should_delete = bound_user_id == user_id && prefix_matches;
                 if should_delete {

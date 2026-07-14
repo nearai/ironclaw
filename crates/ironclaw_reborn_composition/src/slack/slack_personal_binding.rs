@@ -13,7 +13,7 @@ use ironclaw_product_adapters::AdapterInstallationId;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::provider_identity::installation_scoped_provider_user_id;
+use crate::provider_identity::{external_actor_id_is_valid, installation_scoped_provider_user_id};
 use crate::slack::slack_channel_connection::SLACK_IDENTITY_PROVIDER;
 use crate::slack::slack_serve::{
     SlackApiAppId, SlackEnterpriseId, SlackInstallationSelector, SlackTeamId, SlackUserId,
@@ -453,6 +453,7 @@ impl SlackPersonalUserBindingService {
         request: &SlackPersonalUserBindingRequest,
     ) -> Result<(), SlackPersonalUserBindingError> {
         validate_slack_id("slack user", request.slack_user_id.as_str())?;
+        validate_provider_actor_id("slack user", request.slack_user_id.as_str())?;
         validate_slack_id("slack team", request.team_id.as_str())?;
         validate_optional_slack_id(
             "slack enterprise",
@@ -507,6 +508,7 @@ impl SlackPersonalUserBindingService {
         slack_user_id: &SlackUserId,
     ) -> Result<(), SlackPersonalUserBindingError> {
         validate_slack_id("slack user", slack_user_id.as_str())?;
+        validate_provider_actor_id("slack user", slack_user_id.as_str())?;
         let installation = self.installation_for_principal(principal, installation_id)?;
         ensure_tenant_app_scoped(&installation.selector, principal, installation_id)
     }
@@ -562,6 +564,12 @@ impl SlackPersonalUserBindingService {
         slack_user_id: SlackUserId,
         user_id: UserId,
     ) -> Result<RebornUserIdentityBinding, RebornUserIdentityBindingError> {
+        if !external_actor_id_is_valid(slack_user_id.as_str()) {
+            return Err(RebornUserIdentityBindingError::InvalidIdentityField {
+                field: "provider_user_id",
+                reason: "external actor must be at most 512 bytes and contain no control characters",
+            });
+        }
         Ok(RebornUserIdentityBinding {
             provider: RebornIdentityProviderId::new(SLACK_IDENTITY_PROVIDER)?,
             provider_user_id: RebornIdentityProviderUserId::new(
@@ -675,6 +683,19 @@ fn validate_slack_id(
     Ok(())
 }
 
+fn validate_provider_actor_id(
+    field: &'static str,
+    value: &str,
+) -> Result<(), SlackPersonalUserBindingError> {
+    if !external_actor_id_is_valid(value) {
+        return Err(SlackPersonalUserBindingError::InvalidSlackId {
+            field,
+            reason: "must be at most 512 bytes and contain no control characters",
+        });
+    }
+    Ok(())
+}
+
 fn validate_optional_slack_id(
     field: &'static str,
     value: Option<&str>,
@@ -748,7 +769,10 @@ mod tests {
             binding,
             RebornUserIdentityBinding {
                 provider: provider("slack"),
-                provider_user_id: provider_user_id("install-alpha:U123"),
+                provider_user_id: provider_user_id(&installation_scoped_provider_user_id(
+                    &installation("install-alpha"),
+                    "U123",
+                )),
                 user_id: user("user:alice"),
             }
         );
@@ -938,7 +962,10 @@ mod tests {
             store.bindings(),
             vec![RebornUserIdentityBinding {
                 provider: provider("slack"),
-                provider_user_id: provider_user_id("install-alpha:U123"),
+                provider_user_id: provider_user_id(&installation_scoped_provider_user_id(
+                    &installation("install-alpha"),
+                    "U123",
+                )),
                 user_id: user("user:alice"),
             }]
         );
@@ -1038,6 +1065,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bind_installation_actor_rejects_oversized_slack_user_without_write() {
+        let store = Arc::new(RecordingBindingStore::default());
+        let service = service(
+            SlackInstallationSelector::app_team("A-app", "T-team"),
+            store.clone(),
+        );
+
+        let error = service
+            .bind_installation_actor(
+                principal("tenant-alpha", "user:alice"),
+                installation("install-alpha"),
+                SlackUserId::new("U".repeat(513)),
+            )
+            .await
+            .expect_err("oversized slack user is rejected");
+
+        assert!(matches!(
+            error,
+            SlackPersonalUserBindingError::InvalidSlackId { .. }
+        ));
+        assert_eq!(store.bindings(), Vec::<RebornUserIdentityBinding>::new());
+    }
+
+    #[tokio::test]
     async fn bind_installation_actor_propagates_store_error() {
         let store = Arc::new(RecordingBindingStore::with_error(
             RebornUserIdentityBindingError::Backend("store down".into()),
@@ -1066,7 +1117,10 @@ mod tests {
             store.bindings(),
             vec![RebornUserIdentityBinding {
                 provider: provider("slack"),
-                provider_user_id: provider_user_id("install-alpha:U123"),
+                provider_user_id: provider_user_id(&installation_scoped_provider_user_id(
+                    &installation("install-alpha"),
+                    "U123",
+                )),
                 user_id: user("user:alice"),
             }]
         );

@@ -173,10 +173,6 @@ pub use product_auth::api::auth::{
 pub use product_auth::serve::SlackPersonalOAuthBindingConfig;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
-pub use provider_identity::{
-    ProviderIdentityActorResolver, RebornUserIdentityLookup, RebornUserIdentityLookupError,
-    installation_scoped_provider_user_id,
-};
 pub use readiness::{
     RebornFacadeReadiness, RebornReadiness, RebornReadinessDiagnostic,
     RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,

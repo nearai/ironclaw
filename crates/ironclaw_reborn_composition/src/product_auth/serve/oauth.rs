@@ -2695,7 +2695,14 @@ mod tests {
         assert_eq!(bindings.len(), 1);
         assert_eq!(bindings[0].user_id.as_str(), "user-alpha");
         assert_eq!(bindings[0].provider.as_str(), "slack");
-        assert_eq!(bindings[0].provider_user_id.as_str(), "install-alpha:U123");
+        assert_eq!(
+            bindings[0].provider_user_id.as_str(),
+            crate::provider_identity::installation_scoped_provider_user_id(
+                &ironclaw_product_adapters::AdapterInstallationId::new("install-alpha")
+                    .expect("installation"),
+                "U123",
+            )
+        );
         assert_eq!(provider_client.calls(), 1);
         assert_eq!(provider_client.cleanup_calls(), 0);
         let owner_scope = AuthProductScope::new(
@@ -4028,7 +4035,10 @@ mod tests {
                     binding.provider.as_str() == provider
                         && binding.user_id == *user_id
                         && provider_user_id_prefix.is_none_or(|prefix| {
-                            binding.provider_user_id.as_str().starts_with(prefix)
+                            crate::provider_identity::installation_scoped_provider_user_id_matches_prefix(
+                                binding.provider_user_id.as_str(),
+                                prefix,
+                            )
                         })
                 })
                 .map(|(binding, epoch)| {
@@ -4053,7 +4063,10 @@ mod tests {
                     binding.provider.as_str() == provider
                         && binding.user_id == *user_id
                         && provider_user_id_prefix.is_none_or(|prefix| {
-                            binding.provider_user_id.as_str().starts_with(prefix)
+                            crate::provider_identity::installation_scoped_provider_user_id_matches_prefix(
+                                binding.provider_user_id.as_str(),
+                                prefix,
+                            )
                         })
                         && expected_epoch.is_none_or(|expected| **epoch == Some(expected))
                 })
@@ -4086,8 +4099,12 @@ mod tests {
                 let binding_epoch = binding_epochs[index];
                 let should_delete = binding.provider.as_str() == provider
                     && binding.user_id == *user_id
-                    && provider_user_id_prefix
-                        .is_none_or(|prefix| binding.provider_user_id.as_str().starts_with(prefix))
+                    && provider_user_id_prefix.is_none_or(|prefix| {
+                        crate::provider_identity::installation_scoped_provider_user_id_matches_prefix(
+                            binding.provider_user_id.as_str(),
+                            prefix,
+                        )
+                    })
                     && expected_epoch.is_none_or(|expected| binding_epoch == Some(expected));
                 if should_delete {
                     deleted.push(SlackUserIdentityCleanupBinding::new(
@@ -5319,7 +5336,12 @@ mod tests {
             .delete_user_identity_bindings_for_user_at_epoch(
                 crate::slack::slack_channel_connection::SLACK_IDENTITY_PROVIDER,
                 &user_id,
-                Some("install-alpha:"),
+                Some(
+                    &crate::provider_identity::installation_scoped_provider_user_id_prefix(
+                        &ironclaw_product_adapters::AdapterInstallationId::new("install-alpha")
+                            .expect("installation"),
+                    ),
+                ),
                 fence.cleanup_selector().epoch(),
             )
             .await
