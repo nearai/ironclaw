@@ -807,10 +807,11 @@ async fn search_overlay_skips_assets_while_resolve_still_inlines_them() {
     std::fs::write(descriptor_dir.join("extra.txt"), b"asset bytes")
         .expect("write extra asset file");
 
-    let search_results =
-        search_with_owner_overlay_for_scope(port.filesystem.as_ref(), &owner_scope, "acme")
-            .await
-            .expect("owner overlay search runs");
+    let search_results = port
+        .registered_store
+        .search_with_owner_overlay(&owner_scope, "acme")
+        .await
+        .expect("owner overlay search runs");
     assert_eq!(search_results.len(), 1);
     assert!(
         search_results[0].assets.is_empty(),
@@ -818,11 +819,12 @@ async fn search_overlay_skips_assets_while_resolve_still_inlines_them() {
         search_results[0].assets
     );
 
-    let resolved =
-        resolve_registered_for_scope(port.filesystem.as_ref(), &owner_scope, &package_ref)
-            .await
-            .expect("resolve runs")
-            .expect("registered package resolves");
+    let resolved = port
+        .registered_store
+        .resolve_for_scope(&owner_scope, &package_ref)
+        .await
+        .expect("resolve runs")
+        .expect("registered package resolves");
     assert!(
         !resolved.assets.is_empty(),
         "resolve (install/restore path) must still inline assets"

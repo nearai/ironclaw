@@ -12,13 +12,12 @@
 use std::{collections::HashMap, sync::Arc};
 
 use ironclaw_extensions::{ExtensionInstallation, ExtensionInstallationStore, ManifestSource};
-use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{ExtensionId, ResourceScope, TenantId, UserId};
 use ironclaw_product_workflow::{LifecyclePackageRef, ProductWorkflowError};
 
 use crate::extension_host::available_extensions::AvailableExtensionPackage;
 use crate::extension_host::registered_extension_store::{
-    RegisteredExtensionStore, is_owner_registered, list_for_owner,
+    FilesystemRegisteredExtensionStore, is_owner_registered,
 };
 
 use super::{
@@ -141,7 +140,7 @@ pub(super) enum RegisteredOwnerLookup {
 /// skip-and-log-and-continue this one installation (already logged here);
 /// `Ok(Some(_))` is the resolved package to restore.
 pub(super) async fn resolve_registered_installation_for_restore(
-    filesystem: &Arc<dyn RootFilesystem>,
+    registered_store: &FilesystemRegisteredExtensionStore,
     registered_by_owner: &mut HashMap<(TenantId, UserId), RegisteredOwnerLookup>,
     tenant_id: &TenantId,
     owner: &UserId,
@@ -149,7 +148,7 @@ pub(super) async fn resolve_registered_installation_for_restore(
 ) -> Result<Option<Arc<AvailableExtensionPackage>>, ProductWorkflowError> {
     let owner_key = (tenant_id.clone(), owner.clone());
     if !registered_by_owner.contains_key(&owner_key) {
-        match list_for_owner(filesystem.as_ref(), tenant_id, owner).await {
+        match registered_store.list_for_owner(tenant_id, owner).await {
             Ok(packages) => {
                 let by_id = packages
                     .into_iter()
@@ -249,12 +248,13 @@ impl RebornLocalExtensionManagementPort {
         // Item 6: `installed_summaries` (this method's only caller) reads
         // only summary fields, never `.assets` — skip the per-entry
         // directory-asset read.
-        match RegisteredExtensionStore::list_for_scope(
-            self.filesystem.as_ref(),
-            scope,
-            crate::extension_host::available_extensions::AssetLoading::Skip,
-        )
-        .await
+        match self
+            .registered_store
+            .list_for_scope(
+                scope,
+                crate::extension_host::available_extensions::AssetLoading::Skip,
+            )
+            .await
         {
             Ok(packages) => packages
                 .into_iter()
@@ -315,14 +315,12 @@ impl RebornLocalExtensionManagementPort {
         if !owner_scope.matches(scope) {
             return Ok(None);
         }
-        Ok(list_for_owner(
-            self.filesystem.as_ref(),
-            owner_scope.tenant_id(),
-            owner_scope.owner(),
-        )
-        .await?
-        .into_iter()
-        .find(|package| &package.package_ref == package_ref)
-        .map(Arc::new))
+        Ok(self
+            .registered_store
+            .list_for_owner(owner_scope.tenant_id(), owner_scope.owner())
+            .await?
+            .into_iter()
+            .find(|package| &package.package_ref == package_ref)
+            .map(Arc::new))
     }
 }

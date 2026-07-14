@@ -92,9 +92,8 @@ use crate::extension_host::mcp_discovery::{
     HostedMcpDiscoveryError, discover_hosted_mcp_package, is_hosted_http_mcp_package,
 };
 use crate::extension_host::registered_extension_store::{
-    available_extension_not_found, is_owner_registered, migrate_legacy_owner_layout,
-    migrate_unminted_registered_ids, resolve_registered_for_scope,
-    search_with_owner_overlay_for_scope,
+    FilesystemRegisteredExtensionStore, available_extension_not_found, is_owner_registered,
+    migrate_legacy_owner_layout, migrate_unminted_registered_ids,
 };
 
 pub(crate) use active_publication::ActiveExtensionPublisher;
@@ -123,6 +122,7 @@ const RETIRED_SLACK_USER_EXTENSION_ID: &str = "slack_user";
 // and registry ownership first; tracked in #4091.
 pub(crate) struct RebornLocalExtensionManagementPort {
     filesystem: Arc<dyn RootFilesystem>,
+    registered_store: FilesystemRegisteredExtensionStore,
     catalog: Arc<RwLock<AvailableExtensionCatalog>>,
     installation_store: Arc<dyn ExtensionInstallationStore>,
     lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
@@ -220,6 +220,10 @@ pub(crate) async fn restore_extension_lifecycle_state(
     // silently vanish from restore and listing.
     migrate_legacy_owner_layout(filesystem.as_ref()).await?;
     migrate_unminted_registered_ids(filesystem.as_ref(), installation_store).await?;
+    // Restore runs before `RebornLocalExtensionManagementPort` exists, so it
+    // builds its own store handle from the same filesystem the port will
+    // later hold, rather than reaching through a not-yet-constructed port.
+    let registered_store = FilesystemRegisteredExtensionStore::new(Arc::clone(filesystem));
     // Per-boot batching (no cross-boot caching): a catalog-miss installation
     // falls back to its row's owner-scoped registered set, and multiple
     // installations can share the same (tenant, owner). Load each owner's
@@ -261,7 +265,7 @@ pub(crate) async fn restore_extension_lifecycle_state(
         {
             Ok(Some(owner_scope)) => {
                 match resolve_registered_installation_for_restore(
-                    filesystem,
+                    &registered_store,
                     &mut registered_by_owner,
                     owner_scope.tenant_id(),
                     owner_scope.owner(),
@@ -406,8 +410,10 @@ impl RebornLocalExtensionManagementPort {
         credential_cleanup: Option<Arc<dyn ExtensionCredentialCleanup>>,
         tenant_operator_user_id: UserId,
     ) -> Self {
+        let registered_store = FilesystemRegisteredExtensionStore::new(Arc::clone(&filesystem));
         Self {
             filesystem,
+            registered_store,
             catalog: Arc::new(RwLock::new(catalog)),
             installation_store,
             lifecycle_service,
@@ -490,8 +496,10 @@ impl RebornLocalExtensionManagementPort {
         // Owner-registered packages never enter the shared catalog (boot-leak
         // invariant), so they are searched separately and overlaid here —
         // path sharding scopes the overlay to the calling tenant-owner.
-        let owner_overlay =
-            search_with_owner_overlay_for_scope(self.filesystem.as_ref(), scope, query).await?;
+        let owner_overlay = self
+            .registered_store
+            .search_with_owner_overlay(scope, query)
+            .await?;
         for extension in &owner_overlay {
             summaries.push(
                 self.search_summary(extension, credential_gate, scope)
@@ -786,11 +794,11 @@ impl RebornLocalExtensionManagementPort {
         if let Some(available) = catalog_hit {
             return Ok(Some(available));
         }
-        Ok(
-            resolve_registered_for_scope(self.filesystem.as_ref(), scope, package_ref)
-                .await?
-                .map(Arc::new),
-        )
+        Ok(self
+            .registered_store
+            .resolve_for_scope(scope, package_ref)
+            .await?
+            .map(Arc::new))
     }
 
     async fn search_summary(

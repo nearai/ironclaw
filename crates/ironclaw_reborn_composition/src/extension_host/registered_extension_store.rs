@@ -176,6 +176,58 @@ impl RegisteredExtensionStore {
     }
 }
 
+/// Concrete owner-scoped registered-extension reader wrapping a composition
+/// filesystem handle. The single production caller is
+/// `RebornLocalExtensionManagementPort::registered_store`; a concrete struct
+/// with inherent methods is enough since there is exactly one implementor and
+/// no `dyn` injection point (types.md "traits must earn their keep"). Each
+/// method delegates to the matching generic free function/associated
+/// function above, so behavior is byte-for-byte identical to today's
+/// call sites — this type only saves callers from re-passing
+/// `self.filesystem.as_ref()` at every call.
+pub(crate) struct FilesystemRegisteredExtensionStore {
+    filesystem: Arc<dyn RootFilesystem>,
+}
+
+impl FilesystemRegisteredExtensionStore {
+    pub(crate) fn new(filesystem: Arc<dyn RootFilesystem>) -> Self {
+        Self { filesystem }
+    }
+
+    pub(crate) async fn list_for_scope(
+        &self,
+        scope: &ResourceScope,
+        asset_loading: AssetLoading,
+    ) -> Result<Vec<AvailableExtensionPackage>, ProductWorkflowError> {
+        RegisteredExtensionStore::list_for_scope(self.filesystem.as_ref(), scope, asset_loading)
+            .await
+    }
+
+    pub(crate) async fn search_with_owner_overlay(
+        &self,
+        scope: &ResourceScope,
+        query: &str,
+    ) -> Result<Vec<AvailableExtensionPackage>, ProductWorkflowError> {
+        search_with_owner_overlay_for_scope(self.filesystem.as_ref(), scope, query).await
+    }
+
+    pub(crate) async fn resolve_for_scope(
+        &self,
+        scope: &ResourceScope,
+        package_ref: &LifecyclePackageRef,
+    ) -> Result<Option<AvailableExtensionPackage>, ProductWorkflowError> {
+        resolve_registered_for_scope(self.filesystem.as_ref(), scope, package_ref).await
+    }
+
+    pub(crate) async fn list_for_owner(
+        &self,
+        tenant_id: &TenantId,
+        owner: &UserId,
+    ) -> Result<Vec<AvailableExtensionPackage>, ProductWorkflowError> {
+        list_for_owner(self.filesystem.as_ref(), tenant_id, owner).await
+    }
+}
+
 fn registered_package_has_minted_id(
     package: &AvailableExtensionPackage,
     scope: &ResourceScope,
