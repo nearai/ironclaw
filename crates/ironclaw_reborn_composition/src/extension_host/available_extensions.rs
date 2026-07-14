@@ -1,11 +1,9 @@
 // arch-exempt: large_file, first-party asset catalog remains 2.9k lines after import/materialization extraction; future asset-registry split, plan #5499
 use std::sync::Arc;
 
-#[cfg(feature = "slack-v2-host-beta")]
-use ironclaw_auth::SLACK_PROVIDER_ID;
 use ironclaw_extensions::{
-    CapabilityDeclV2, CapabilityVisibility, ExtensionManifestRecord, ExtensionPackage,
-    ExtensionRuntime, HostApiContractRegistry, ManifestSource,
+    CapabilityDeclV2, CapabilitySurfaceDeclV2, CapabilityVisibility, ExtensionManifestRecord,
+    ExtensionPackage, ExtensionRuntime, HostApiContractRegistry, ManifestSource,
 };
 use ironclaw_filesystem::{DirEntry, FileType, FilesystemError, RootFilesystem};
 use ironclaw_first_party_extensions::is_gsuite_extension_id;
@@ -13,12 +11,11 @@ use ironclaw_host_api::{
     CapabilityId, CapabilitySurfaceKind, ExtensionId, HostPortCatalog,
     RuntimeCredentialAccountProviderId, VirtualPath, sha256_digest_token,
 };
-use ironclaw_product_adapters::{ProductCapabilityFlag, ProductSurfaceKind};
 use ironclaw_product_workflow::{
-    ChannelConnectionRequirement, LifecycleChannelDirections,
-    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
-    LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
-    LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError,
+    LifecycleChannelDirections, LifecycleExtensionCredentialRequirement,
+    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
+    LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
+    ProductWorkflowError,
 };
 use toml::Value;
 
@@ -85,8 +82,6 @@ const NEARAI_MCP_MANIFEST: &str =
     include_str!("../../../ironclaw_first_party_extensions/assets/nearai-mcp/manifest.toml");
 const NEARAI_EXTENSION_ID: &str = HostManagedCredentialExtension::NearAi.id();
 pub(crate) const SLACK_EXTENSION_ID: &str = "slack";
-#[cfg(feature = "slack-v2-host-beta")]
-const SLACK_PERSONAL_OAUTH_REQUIREMENT_NAME: &str = "slack_personal_oauth";
 // The slack_personal OAuth setup scopes are the union of the Slack tools'
 // per-capability scopes: the read-only tools request only read scopes, and
 // write tools request chat:write. Because the account is shared and send_message
@@ -174,17 +169,6 @@ pub(crate) struct AvailableExtensionPackage {
     /// first-party/system trust and runtime claims.
     pub(crate) source: ManifestSource,
     pub(crate) package: ExtensionPackage,
-    /// Surface kinds projected once from the manifest record at construction and
-    /// cached here. Deliberately not re-derived in `summary()`: the projection
-    /// (`product_adapter_sections`) needs the full `ExtensionManifestRecord`, and
-    /// each loader parses the manifest exactly once (see
-    /// `surface_kinds_from_manifest_record`). Keep in sync at construction.
-    pub(crate) surface_kinds: Vec<CapabilitySurfaceKind>,
-    /// Directional shape of the channel surface (from the product-adapter
-    /// section's capability flags), present iff `surface_kinds` contains
-    /// [`CapabilitySurfaceKind::Channel`]. Cached at construction like
-    /// `surface_kinds`.
-    pub(crate) channel_directions: Option<LifecycleChannelDirections>,
     pub(crate) assets: Vec<AvailableExtensionAsset>,
     /// Extension-declared removal-cleanup requirements (#5957): feed the
     /// removal-cleanup registry on uninstall. Empty unless the bundled
@@ -194,6 +178,8 @@ pub(crate) struct AvailableExtensionPackage {
 
 impl AvailableExtensionPackage {
     pub(crate) fn summary(&self) -> LifecycleExtensionSummary {
+        let surfaces = self.package.manifest.capability_surfaces();
+        let (surface_kinds, channel_directions) = summarize_surfaces(&surfaces);
         let visible_capability_ids = visible_capability_ids(self)
             .map(|id| id.as_str().to_string())
             .collect::<Vec<_>>();
@@ -207,9 +193,13 @@ impl AvailableExtensionPackage {
             description: self.package.manifest.description.clone(),
             source: LifecycleExtensionSource::HostBundled,
             runtime_kind: runtime_kind(&self.package.manifest.runtime),
-            surface_kinds: self.surface_kinds.clone(),
-            channel_directions: self.channel_directions,
-            channel_connection: channel_connection_for_package(&self.package_ref, self),
+            surface_kinds,
+            channel_directions,
+            channel_connection: super::extension_lifecycle::channel_connection_requirement(
+                self.package_ref.id.as_str(),
+                &self.package.manifest.name,
+                &surfaces,
+            ),
             visible_capability_ids,
             visible_read_only_capability_ids,
             credential_requirements: credential_requirements(self),
@@ -218,22 +208,32 @@ impl AvailableExtensionPackage {
     }
 }
 
-/// Connect affordance for the package's channel surface: inbound channel
-/// surfaces require a caller-scoped account binding before messages map to a
-/// user, so their summaries carry the connect strategy + copy. Outbound-only
-/// and non-channel packages have nothing to connect.
-fn channel_connection_for_package(
-    package_ref: &LifecyclePackageRef,
-    package: &AvailableExtensionPackage,
-) -> Option<ChannelConnectionRequirement> {
-    let directions = package.channel_directions?;
-    if !directions.inbound {
-        return None;
+fn summarize_surfaces(
+    surfaces: &[CapabilitySurfaceDeclV2],
+) -> (
+    Vec<CapabilitySurfaceKind>,
+    Option<LifecycleChannelDirections>,
+) {
+    let mut surface_kinds = Vec::new();
+    let mut channel_directions: Option<LifecycleChannelDirections> = None;
+    for surface in surfaces {
+        let kind = surface.kind();
+        if !surface_kinds.contains(&kind) {
+            surface_kinds.push(kind);
+        }
+        if let CapabilitySurfaceDeclV2::Channel {
+            inbound, outbound, ..
+        } = surface
+        {
+            let directions = channel_directions.get_or_insert(LifecycleChannelDirections {
+                inbound: false,
+                outbound: false,
+            });
+            directions.inbound |= *inbound;
+            directions.outbound |= *outbound;
+        }
     }
-    Some(super::extension_lifecycle::channel_connection_requirement(
-        package_ref.id.as_str(),
-        &package.package.manifest.name,
-    ))
+    (surface_kinds, channel_directions)
 }
 
 fn onboarding(package_ref: &LifecyclePackageRef) -> Option<LifecycleExtensionOnboarding> {
@@ -326,15 +326,6 @@ fn credential_requirements(
     if is_host_managed_credential_extension(&package.package_ref) {
         return Vec::new();
     }
-    // Model B: the user-installable Slack tools extension (`slack`) surfaces the
-    // slack_personal OAuth connect requirement; the bot channel is operator infra.
-    #[cfg(feature = "slack-v2-host-beta")]
-    if package.package_ref.kind == LifecyclePackageKind::Extension
-        && package.package_ref.id.as_str() == SLACK_EXTENSION_ID
-    {
-        return slack_personal_oauth_credential_requirements();
-    }
-
     let mut groups: Vec<CredentialRequirementGroup> = Vec::new();
     for capability in &package.package.manifest.capabilities {
         for requirement in &capability.runtime_credentials {
@@ -379,21 +370,6 @@ fn credential_requirements(
             }
         })
         .collect()
-}
-
-#[cfg(feature = "slack-v2-host-beta")]
-fn slack_personal_oauth_credential_requirements() -> Vec<LifecycleExtensionCredentialRequirement> {
-    vec![LifecycleExtensionCredentialRequirement {
-        name: SLACK_PERSONAL_OAUTH_REQUIREMENT_NAME.to_string(),
-        provider: SLACK_PROVIDER_ID.to_string(),
-        required: true,
-        setup: LifecycleExtensionCredentialSetup::OAuth {
-            scopes: SLACK_OAUTH_SETUP_SCOPES
-                .iter()
-                .map(|scope| (*scope).to_string())
-                .collect(),
-        },
-    }]
 }
 
 struct CredentialRequirementGroup {
@@ -804,8 +780,6 @@ fn bundled_extension_package(
     .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
         reason: format!("bundled {label} extension manifest is invalid: {error}"),
     })?;
-    let surface_kinds = surface_kinds_from_manifest_record(&record, label)?;
-    let channel_directions = channel_directions_from_manifest_record(&record, label)?;
     let manifest = record.manifest().clone().try_into().map_err(|error| {
         ProductWorkflowError::InvalidBindingRequest {
             reason: format!("bundled {label} extension manifest is invalid: {error}"),
@@ -821,58 +795,9 @@ fn bundled_extension_package(
         manifest_toml: record.raw_toml().to_string(),
         source: ManifestSource::HostBundled,
         package,
-        surface_kinds,
-        channel_directions,
         cleanup_requirements: Vec::new(),
         assets,
     })
-}
-
-pub(crate) fn surface_kinds_from_manifest_record(
-    record: &ExtensionManifestRecord,
-    _label: &str,
-) -> Result<Vec<CapabilitySurfaceKind>, ProductWorkflowError> {
-    // Deduplicated, order-stable projection of the manifest's declared
-    // surfaces (tool, channel, auth, ...) — the manifest is the single source
-    // of truth; no section re-parse.
-    let mut surface_kinds = Vec::new();
-    for surface in record.manifest().capability_surfaces() {
-        let kind = surface.kind();
-        if !surface_kinds.contains(&kind) {
-            surface_kinds.push(kind);
-        }
-    }
-    Ok(surface_kinds)
-}
-
-/// Directional shape of the package's channel surface, read from the
-/// product-adapter section's typed capability flags: `inbound_messages` marks
-/// message ingress, `external_final_reply_push` marks host-owned outbound
-/// delivery. `None` when the manifest declares no external-channel section.
-pub(crate) fn channel_directions_from_manifest_record(
-    record: &ExtensionManifestRecord,
-    label: &str,
-) -> Result<Option<LifecycleChannelDirections>, ProductWorkflowError> {
-    let sections =
-        ironclaw_product_adapter_registry::product_adapter_sections(record).map_err(|error| {
-            ProductWorkflowError::InvalidBindingRequest {
-                reason: format!("{label} ProductAdapter manifest projection is invalid: {error}"),
-            }
-        })?;
-    let mut directions: Option<LifecycleChannelDirections> = None;
-    for section in sections
-        .iter()
-        .filter(|section| section.surface_kind() == ProductSurfaceKind::ExternalChannel)
-    {
-        let flags = section.capabilities();
-        let entry = directions.get_or_insert(LifecycleChannelDirections {
-            inbound: false,
-            outbound: false,
-        });
-        entry.inbound |= flags.contains(ProductCapabilityFlag::InboundMessages);
-        entry.outbound |= flags.contains(ProductCapabilityFlag::ExternalFinalReplyPush);
-    }
-    Ok(directions)
 }
 
 fn github_assets() -> Vec<AvailableExtensionAsset> {
@@ -1743,8 +1668,6 @@ where
         contracts,
     )
     .map_err(map_binding_error)?;
-    let surface_kinds = surface_kinds_from_manifest_record(&record, entry.name.as_str())?;
-    let channel_directions = channel_directions_from_manifest_record(&record, entry.name.as_str())?;
     let manifest = record
         .manifest()
         .clone()
@@ -1777,8 +1700,6 @@ where
         // first-party trust (#5459 review: import → restart → install).
         source: ManifestSource::InstalledLocal,
         package,
-        surface_kinds,
-        channel_directions,
         cleanup_requirements: Vec::new(),
         assets,
     }))
@@ -1854,6 +1775,72 @@ mod tests {
 
     use super::*;
     use crate::extension_host::available_extension_import::extension_asset_path;
+
+    fn channel_manifest(id: &str, name: &str, flags: &str, oauth_provider: Option<&str>) -> String {
+        let auth = oauth_provider.map_or_else(String::new, |provider| {
+            format!(
+                r#"
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "{id}.whoami"
+description = "Resolve the connected account"
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  {{ handle = "{id}_account", source = {{ type = "product_auth_account", provider = "{provider}", setup = {{ kind = "oauth", scopes = ["identity:read"] }} }}, audience = {{ scheme = "https", host_pattern = "example.com" }}, target = {{ type = "header", name = "authorization", prefix = "Bearer " }} }},
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/whoami.input.json"
+output_schema_ref = "schemas/whoami.output.json"
+required_host_ports = ["host.runtime.http_egress"]
+"#,
+            )
+        });
+        format!(
+            r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "{id}"
+name = "{name}"
+version = "0.1.0"
+description = "Channel projection fixture"
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "{id}_host"
+
+[[host_api]]
+id = "ironclaw.product_adapter/v1"
+section = "product_adapter.events"
+
+[product_adapter.events]
+surface_kind = "external_channel"
+
+[product_adapter.events.auth]
+kind = "request_signature"
+header_name = "X-Channel-Signature"
+timestamp_header_name = "X-Channel-Timestamp"
+
+[product_adapter.events.capabilities]
+flags = {flags}
+
+[[product_adapter.events.required_credentials]]
+handle = "{id}_bot_token"
+
+[[product_adapter.events.egress]]
+host = "example.com"
+credential_handle = "{id}_bot_token"
+
+{auth}
+"#,
+        )
+    }
+
     #[test]
     fn visible_capability_ids_include_write_effects() {
         let extension = test_extension_package();
@@ -2299,7 +2286,7 @@ mod tests {
 
         assert_eq!(summary.credential_requirements.len(), 1);
         let requirement = &summary.credential_requirements[0];
-        assert_eq!(requirement.name, "slack_personal_oauth");
+        assert_eq!(requirement.name, "slack_user_token");
         assert_eq!(requirement.provider, "slack");
         assert!(requirement.required);
         assert!(matches!(
@@ -2736,9 +2723,133 @@ mod tests {
             .expect("unified slack summary carries channel directions");
         assert!(directions.inbound, "Slack channel surface is inbound");
         assert!(directions.outbound, "Slack channel surface is outbound");
+        assert_eq!(
+            summary
+                .channel_connection
+                .as_ref()
+                .expect("inbound OAuth channel carries a connection affordance")
+                .strategy,
+            ironclaw_product_workflow::RebornChannelConnectStrategy::OAuth
+        );
         assert!(
             !summary.visible_capability_ids.is_empty(),
             "unified slack publishes model-visible tools"
+        );
+    }
+
+    #[test]
+    fn channel_connection_strategy_comes_from_typed_channel_and_auth_surfaces() {
+        let renamed_oauth = bundled_extension_package(
+            "renamed-chat",
+            "Renamed Chat",
+            &channel_manifest(
+                "renamed-chat",
+                "Renamed Chat",
+                r#"["inbound_messages"]"#,
+                Some("slack"),
+            ),
+            Vec::new(),
+        )
+        .expect("valid OAuth channel");
+        let renamed_summary = renamed_oauth.summary();
+        assert_eq!(
+            renamed_summary
+                .channel_connection
+                .as_ref()
+                .map(|connection| connection.strategy),
+            Some(ironclaw_product_workflow::RebornChannelConnectStrategy::OAuth),
+            "OAuth must not depend on the package being literally named slack"
+        );
+
+        let slack_without_oauth = bundled_extension_package(
+            "slack",
+            "Slack",
+            &channel_manifest("slack", "Slack", r#"["inbound_messages"]"#, None),
+            Vec::new(),
+        )
+        .expect("valid proof-code channel");
+        let slack_summary = slack_without_oauth.summary();
+        assert_eq!(
+            slack_summary
+                .channel_connection
+                .as_ref()
+                .map(|connection| connection.strategy),
+            Some(ironclaw_product_workflow::RebornChannelConnectStrategy::InboundProofCode),
+            "a package name must not spoof OAuth behavior"
+        );
+
+        let outbound_oauth = bundled_extension_package(
+            "outbound-chat",
+            "Outbound Chat",
+            &channel_manifest(
+                "outbound-chat",
+                "Outbound Chat",
+                r#"["external_final_reply_push"]"#,
+                Some("slack"),
+            ),
+            Vec::new(),
+        )
+        .expect("valid outbound OAuth channel");
+        let outbound_summary = outbound_oauth.summary();
+        assert_eq!(
+            outbound_summary.channel_directions,
+            Some(LifecycleChannelDirections {
+                inbound: false,
+                outbound: true,
+            })
+        );
+        assert!(
+            outbound_summary.channel_connection.is_none(),
+            "outbound-only channels do not require a caller inbound binding"
+        );
+    }
+
+    #[test]
+    fn summary_ors_directions_across_multiple_typed_channel_surfaces() {
+        const MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "multi-channel"
+name = "Multi Channel"
+version = "0.1.0"
+description = "Multiple channel sections"
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "multi_channel_host"
+
+[[host_api]]
+id = "ironclaw.product_adapter/v1"
+section = "product_adapter.events"
+
+[[host_api]]
+id = "ironclaw.product_adapter/v1"
+section = "product_adapter.delivery"
+
+[product_adapter.events]
+surface_kind = "external_channel"
+[product_adapter.events.auth]
+kind = "bearer_token"
+[product_adapter.events.capabilities]
+flags = ["inbound_messages"]
+
+[product_adapter.delivery]
+surface_kind = "external_channel"
+[product_adapter.delivery.auth]
+kind = "bearer_token"
+[product_adapter.delivery.capabilities]
+flags = ["external_final_reply_push"]
+"#;
+        let package =
+            bundled_extension_package("multi-channel", "Multi Channel", MANIFEST, Vec::new())
+                .expect("valid multi-channel manifest");
+
+        assert_eq!(
+            package.summary().channel_directions,
+            Some(LifecycleChannelDirections {
+                inbound: true,
+                outbound: true,
+            })
         );
     }
 
@@ -3073,12 +3184,20 @@ credential_handle = "channel_ext_token"
 "#;
 
         let fs = InMemoryBackend::default();
-        fs.write_file(
-            &VirtualPath::new("/system/extensions/channel-ext/manifest.toml").unwrap(),
-            MANIFEST.as_bytes(),
-        )
-        .await
-        .unwrap();
+        for (id, flags) in [
+            ("channel-in", r#"["inbound_messages"]"#),
+            ("channel-out", r#"["external_final_reply_push"]"#),
+        ] {
+            let manifest = MANIFEST
+                .replace("channel-ext", id)
+                .replace(r#"["inbound_messages"]"#, flags);
+            fs.write_file(
+                &VirtualPath::new(format!("/system/extensions/{id}/manifest.toml")).unwrap(),
+                manifest.as_bytes(),
+            )
+            .await
+            .unwrap();
+        }
 
         let catalog = AvailableExtensionCatalog::from_filesystem_root(
             &fs,
@@ -3087,15 +3206,30 @@ credential_handle = "channel_ext_token"
         .await
         .unwrap();
 
-        let results = catalog.search("channel-ext").collect::<Vec<_>>();
-        assert_eq!(results.len(), 1, "filesystem manifest should be loaded");
-
-        let package = results.into_iter().next().unwrap();
-        assert_eq!(
-            package.summary().surface_kinds,
-            vec![CapabilitySurfaceKind::Channel],
-            "filesystem-loaded external_channel manifest must project ExternalChannel surface kind"
-        );
+        for (id, expected) in [
+            (
+                "channel-in",
+                LifecycleChannelDirections {
+                    inbound: true,
+                    outbound: false,
+                },
+            ),
+            (
+                "channel-out",
+                LifecycleChannelDirections {
+                    inbound: false,
+                    outbound: true,
+                },
+            ),
+        ] {
+            let package = catalog
+                .search(id)
+                .next()
+                .expect("filesystem manifest loaded");
+            let summary = package.summary();
+            assert_eq!(summary.surface_kinds, vec![CapabilitySurfaceKind::Channel]);
+            assert_eq!(summary.channel_directions, Some(expected));
+        }
     }
 
     #[derive(Default)]
@@ -3280,8 +3414,6 @@ output_schema_ref = "schemas/write.output.json"
             manifest_toml: MANIFEST.to_string(),
             source: ManifestSource::HostBundled,
             package,
-            surface_kinds: Vec::new(),
-            channel_directions: None,
             cleanup_requirements: Vec::new(),
             assets: vec![
                 AvailableExtensionAsset {

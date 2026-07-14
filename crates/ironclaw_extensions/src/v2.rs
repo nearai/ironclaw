@@ -1,3 +1,4 @@
+// arch-exempt: large_file, manifest projection stays centralized for Train A, plan #6061
 //! Extension Manifest v2.
 //!
 //! v2 is the manifest shape consumed by Reborn. It is intentionally additive in
@@ -242,12 +243,25 @@ pub struct HostApiManifestContext<'a> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HostApiManifestProjection {
     pub capabilities: Vec<CapabilityDeclV2>,
-    /// Product-facing surface kinds the validated section declares (e.g. a
-    /// `channel` surface for an external-channel product-adapter section).
-    /// Tool and auth kinds are rejected here — they have dedicated
-    /// declaration paths (capability declarations and product-auth
-    /// credential requirements); see [`CapabilitySurfaceDeclV2`].
-    pub surfaces: Vec<CapabilitySurfaceKind>,
+    /// Product-facing surfaces the validated section declares. Channel
+    /// projections carry their typed direction flags; coarse reserved kinds
+    /// remain available for host APIs that do not need further attributes.
+    /// The registry stamps the trusted contract id and section origin.
+    pub surfaces: Vec<HostApiSurfaceProjection>,
+}
+
+/// A surface projected by one validated host-API section before the extensions
+/// registry stamps its origin. Contracts cannot supply origins and therefore
+/// cannot impersonate another contract or manifest section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostApiSurfaceProjection {
+    /// External conversation surface. Direction comes from the owning
+    /// contract's validated capability vocabulary, never from a section name
+    /// or runtime kind.
+    Channel { inbound: bool, outbound: bool },
+    /// Reserved coarse surface kind for contracts whose product shape has no
+    /// additional typed attributes.
+    Kind(CapabilitySurfaceKind),
 }
 
 /// Error a host API contract raises for one manifest section.
@@ -399,31 +413,44 @@ impl HostApiContractRegistry {
                 }
                 projected.capabilities.push(capability);
             }
-            for kind in section_projection.surfaces {
-                if matches!(
-                    kind,
-                    CapabilitySurfaceKind::Tool | CapabilitySurfaceKind::Auth
-                ) {
-                    // Fail closed: tool and auth surfaces derive from their
-                    // dedicated declaration paths. A contract projecting them
-                    // as opaque section surfaces is an implementation bug.
-                    return Err(ManifestV2Error::HostApiSectionRejected {
-                        id: host_api.id.clone(),
-                        section: host_api.section.clone(),
-                        reason: format!(
-                            "host API contracts must not project '{kind}' section surfaces; \
-                             tool surfaces derive from capability declarations and auth \
-                             surfaces from product-auth credential requirements"
-                        ),
-                    });
+            for surface in section_projection.surfaces {
+                match surface {
+                    HostApiSurfaceProjection::Channel { inbound, outbound } => {
+                        projected.surfaces.push(CapabilitySurfaceDeclV2::Channel {
+                            host_api: host_api.id.clone(),
+                            section: host_api.section.clone(),
+                            inbound,
+                            outbound,
+                        });
+                    }
+                    HostApiSurfaceProjection::Kind(kind) => {
+                        if matches!(
+                            kind,
+                            CapabilitySurfaceKind::Tool
+                                | CapabilitySurfaceKind::Channel
+                                | CapabilitySurfaceKind::Auth
+                        ) {
+                            // Fail closed: these surfaces have dedicated typed
+                            // declaration paths. Accepting an opaque projection
+                            // would create a second, less precise authority.
+                            return Err(ManifestV2Error::HostApiSectionRejected {
+                                id: host_api.id.clone(),
+                                section: host_api.section.clone(),
+                                reason: format!(
+                                    "host API contracts must not project '{kind}' as a coarse \
+                                     section surface; use the dedicated typed declaration path"
+                                ),
+                            });
+                        }
+                        projected
+                            .surfaces
+                            .push(CapabilitySurfaceDeclV2::HostApiSection {
+                                kind,
+                                host_api: host_api.id.clone(),
+                                section: host_api.section.clone(),
+                            });
+                    }
                 }
-                projected
-                    .surfaces
-                    .push(CapabilitySurfaceDeclV2::HostApiSection {
-                        kind,
-                        host_api: host_api.id.clone(),
-                        section: host_api.section.clone(),
-                    });
             }
         }
         sections.reject_unreferenced_operational_sections(&manifest.host_apis)?;
@@ -491,6 +518,14 @@ pub enum CapabilitySurfaceDeclV2 {
         provider: RuntimeCredentialAccountProviderId,
         setup: RuntimeCredentialAccountSetup,
     },
+    /// An external conversation surface projected by a validated host API
+    /// contract. Direction is preserved alongside the registry-stamped origin.
+    Channel {
+        host_api: HostApiId,
+        section: ManifestSectionPath,
+        inbound: bool,
+        outbound: bool,
+    },
     /// A surface projected by a host API contract section, stamped with the
     /// owning contract id and section path (e.g. a `channel` surface from an
     /// `ironclaw.product_adapter/v1` external-channel section).
@@ -506,6 +541,7 @@ impl CapabilitySurfaceDeclV2 {
         match self {
             Self::Tool { .. } => CapabilitySurfaceKind::Tool,
             Self::Auth { .. } => CapabilitySurfaceKind::Auth,
+            Self::Channel { .. } => CapabilitySurfaceKind::Channel,
             Self::HostApiSection { kind, .. } => *kind,
         }
     }

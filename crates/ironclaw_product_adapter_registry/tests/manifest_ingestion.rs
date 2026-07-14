@@ -283,16 +283,18 @@ fn external_channel_section_projects_a_channel_capability_surface() {
         .collect();
     assert_eq!(channels.len(), 1, "{surfaces:?}");
     match channels[0] {
-        CapabilitySurfaceDeclV2::HostApiSection {
-            kind,
+        CapabilitySurfaceDeclV2::Channel {
             host_api,
             section,
+            inbound,
+            outbound,
         } => {
-            assert_eq!(*kind, CapabilitySurfaceKind::Channel);
             assert_eq!(host_api.as_str(), "ironclaw.product_adapter/v1");
             assert_eq!(section.as_str(), "product_adapter.inbound");
+            assert!(*inbound);
+            assert!(*outbound);
         }
-        other => panic!("expected a host-API channel surface, got {other:?}"),
+        other => panic!("expected a typed channel surface, got {other:?}"),
     }
     // An adapter-only manifest declares no tools: the wasm runtime kind must
     // not leak a tool (or any other) surface into the product taxonomy.
@@ -302,6 +304,54 @@ fn external_channel_section_projects_a_channel_capability_surface() {
             .all(|surface| surface.kind() == CapabilitySurfaceKind::Channel),
         "{surfaces:?}"
     );
+}
+
+#[test]
+fn external_channel_directions_are_projected_from_validated_capability_flags() {
+    for (flags, expected_inbound, expected_outbound) in [
+        (r#"["inbound_messages"]"#, true, false),
+        (r#"["external_final_reply_push"]"#, false, true),
+    ] {
+        let raw = manifest("").replace(
+            r#"["inbound_messages", "external_final_reply_push"]"#,
+            flags,
+        );
+        let record = parse(&raw).unwrap();
+        let channels = record
+            .manifest()
+            .capability_surfaces()
+            .into_iter()
+            .filter(|surface| surface.kind() == CapabilitySurfaceKind::Channel)
+            .collect::<Vec<_>>();
+
+        assert!(
+            matches!(
+                channels.as_slice(),
+                [CapabilitySurfaceDeclV2::Channel {
+                    inbound,
+                    outbound,
+                    ..
+                }] if *inbound == expected_inbound && *outbound == expected_outbound
+            ),
+            "flags={flags}, channels={channels:?}"
+        );
+    }
+}
+
+#[test]
+fn channel_directions_do_not_depend_on_the_product_adapter_section_name() {
+    let raw = manifest("").replace("product_adapter.inbound", "product_adapter.events");
+    let record = parse(&raw).unwrap();
+
+    assert!(matches!(
+        record.manifest().capability_surfaces().as_slice(),
+        [CapabilitySurfaceDeclV2::Channel {
+            section,
+            inbound: true,
+            outbound: true,
+            ..
+        }] if section.as_str() == "product_adapter.events"
+    ));
 }
 
 #[test]

@@ -410,9 +410,9 @@ pub use v2::{
     CapabilityDeclV2, CapabilitySurfaceDeclV2, CapabilityVisibility, ExtensionManifestV2,
     ExtensionRuntimeV2, HookSectionEntryV2, HostApiContractRegistry, HostApiId,
     HostApiManifestContext, HostApiManifestContract, HostApiManifestProjection,
-    HostApiMultiplicity, HostApiRefV2, HostApiSectionError, MANIFEST_SCHEMA_VERSION,
-    MAX_HOOK_ENTRY_BYTES, MAX_MANIFEST_BYTES, MAX_MANIFEST_HOOKS, ManifestSectionPath,
-    ManifestSource, ManifestV2Error, RESERVED_HOST_BUNDLED_ID_PREFIX,
+    HostApiMultiplicity, HostApiRefV2, HostApiSectionError, HostApiSurfaceProjection,
+    MANIFEST_SCHEMA_VERSION, MAX_HOOK_ENTRY_BYTES, MAX_MANIFEST_BYTES, MAX_MANIFEST_HOOKS,
+    ManifestSectionPath, ManifestSource, ManifestV2Error, RESERVED_HOST_BUNDLED_ID_PREFIX,
 };
 
 pub type CapabilityManifest = CapabilityDeclV2;

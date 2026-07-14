@@ -1,3 +1,4 @@
+// arch-exempt: large_file, manifest contract matrix stays adjacent to the parser, plan #6061
 //! Extension Manifest v2 contract tests.
 
 use std::sync::Arc;
@@ -6,8 +7,8 @@ use ironclaw_extensions::{
     CapabilityProviderHostApiContract, CapabilitySurfaceDeclV2, CapabilityVisibility,
     ExtensionManifestV2, ExtensionRuntimeV2, HostApiContractRegistry, HostApiId,
     HostApiManifestContext, HostApiManifestContract, HostApiManifestProjection,
-    HostApiMultiplicity, HostApiRefV2, HostApiSectionError, MANIFEST_SCHEMA_VERSION,
-    ManifestSectionPath, ManifestSource, ManifestV2Error,
+    HostApiMultiplicity, HostApiRefV2, HostApiSectionError, HostApiSurfaceProjection,
+    MANIFEST_SCHEMA_VERSION, ManifestSectionPath, ManifestSource, ManifestV2Error,
 };
 use ironclaw_host_api::{
     CapabilityProfileId, CapabilitySurfaceKind, ExtensionId, HostPortCatalog, HostPortCatalogEntry,
@@ -1926,7 +1927,7 @@ surface_kind = "telegram"
 struct SurfaceProjectingContract {
     id: HostApiId,
     prefix: &'static str,
-    surfaces: Vec<CapabilitySurfaceKind>,
+    surfaces: Vec<HostApiSurfaceProjection>,
 }
 
 impl HostApiManifestContract for SurfaceProjectingContract {
@@ -2189,7 +2190,10 @@ fn contract_projected_channel_surface_is_retained_with_origin() {
         .register(Arc::new(SurfaceProjectingContract {
             id: HostApiId::new("ironclaw.product_adapter/v1").unwrap(),
             prefix: "product_adapter",
-            surfaces: vec![CapabilitySurfaceKind::Channel],
+            surfaces: vec![HostApiSurfaceProjection::Channel {
+                inbound: true,
+                outbound: false,
+            }],
         }))
         .unwrap();
 
@@ -2215,17 +2219,82 @@ fn contract_projected_channel_surface_is_retained_with_origin() {
         other => panic!("expected a tool surface, got {other:?}"),
     }
     match &surfaces[1] {
-        CapabilitySurfaceDeclV2::HostApiSection {
-            kind,
+        CapabilitySurfaceDeclV2::Channel {
             host_api,
             section,
+            inbound,
+            outbound,
         } => {
-            assert_eq!(*kind, CapabilitySurfaceKind::Channel);
             assert_eq!(host_api.as_str(), "ironclaw.product_adapter/v1");
             assert_eq!(section.as_str(), "product_adapter.inbound");
+            assert!(*inbound);
+            assert!(!*outbound);
         }
         other => panic!("expected a channel surface, got {other:?}"),
     }
+
+    let production_manifest: ironclaw_extensions::ExtensionManifest = manifest.try_into().unwrap();
+    assert!(matches!(
+        production_manifest.capability_surfaces().as_slice(),
+        [
+            CapabilitySurfaceDeclV2::Tool { .. },
+            CapabilitySurfaceDeclV2::Channel {
+                inbound: true,
+                outbound: false,
+                ..
+            }
+        ]
+    ));
+}
+
+#[test]
+fn contract_projected_coarse_surface_preserves_its_kind_and_origin() {
+    let mut registry = HostApiContractRegistry::new();
+    registry
+        .register(Arc::new(SurfaceProjectingContract {
+            id: HostApiId::new("ironclaw.product_adapter/v1").unwrap(),
+            prefix: "product_adapter",
+            surfaces: vec![HostApiSurfaceProjection::Kind(
+                CapabilitySurfaceKind::Trigger,
+            )],
+        }))
+        .unwrap();
+
+    let toml = format!(
+        r#"
+schema_version = "{schema}"
+id = "timer"
+name = "Timer"
+version = "0.1.0"
+description = "Timer surface"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/timer.wasm"
+
+[[host_api]]
+id = "ironclaw.product_adapter/v1"
+section = "product_adapter.timer"
+
+[product_adapter.timer]
+surface_kind = "timer"
+"#,
+        schema = MANIFEST_SCHEMA_VERSION,
+    );
+    let manifest =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog(), &registry)
+            .unwrap();
+
+    assert!(matches!(
+        manifest.capability_surfaces().as_slice(),
+        [CapabilitySurfaceDeclV2::HostApiSection {
+            kind: CapabilitySurfaceKind::Trigger,
+            host_api,
+            section,
+        }] if host_api.as_str() == "ironclaw.product_adapter/v1"
+            && section.as_str() == "product_adapter.timer"
+    ));
 }
 
 #[test]
@@ -2240,7 +2309,7 @@ fn contracts_cannot_project_tool_or_auth_section_surfaces() {
             .register(Arc::new(SurfaceProjectingContract {
                 id: HostApiId::new("ironclaw.product_adapter/v1").unwrap(),
                 prefix: "product_adapter",
-                surfaces: vec![bad_kind],
+                surfaces: vec![HostApiSurfaceProjection::Kind(bad_kind)],
             }))
             .unwrap();
         let toml = format!(

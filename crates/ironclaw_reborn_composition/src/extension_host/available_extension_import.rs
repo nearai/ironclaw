@@ -8,8 +8,7 @@ use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef, Produ
 
 use super::available_extensions::{
     AvailableExtensionAsset, AvailableExtensionAssetContent, AvailableExtensionPackage,
-    bytes_asset, channel_directions_from_manifest_record, map_binding_error,
-    reserved_host_bundled_extension_id, surface_kinds_from_manifest_record,
+    bytes_asset, map_binding_error, reserved_host_bundled_extension_id,
 };
 use super::extension_bundle::{
     MAX_EXTENSION_BUNDLE_FILES, MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES,
@@ -195,8 +194,6 @@ pub(crate) fn imported_extension_package(
     }
     let id = extension_id.as_str();
     let root = VirtualPath::new(format!("/system/extensions/{id}")).map_err(map_binding_error)?;
-    let surface_kinds = surface_kinds_from_manifest_record(&record, id)?;
-    let channel_directions = channel_directions_from_manifest_record(&record, id)?;
     let manifest = record
         .manifest()
         .clone()
@@ -244,8 +241,6 @@ pub(crate) fn imported_extension_package(
         source: ManifestSource::InstalledLocal,
         package,
         cleanup_requirements: Vec::new(),
-        surface_kinds,
-        channel_directions,
         assets,
     })
 }

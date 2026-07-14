@@ -449,9 +449,9 @@ mod tests {
     use crate::reborn_services::StaticChannelConnectionFacade;
     use crate::{
         ChannelConnectionFacade, ExtensionCredentialStatusRequest,
-        ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialRequirement,
-        LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding,
-        LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
+        ExtensionCredentialSubmitRequest, LifecycleChannelDirections,
+        LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
+        LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
         LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecycleSearchExtensionSummary,
         ProductWorkflowError, RebornExtensionOnboardingState, RebornServicesError,
         RebornServicesErrorCode, RebornServicesErrorKind, WebUiAuthenticatedCaller,
@@ -803,6 +803,29 @@ mod tests {
                 .any(|surface| matches!(surface, RebornExtensionSurface::Channel { .. })),
             "the channel surface projects alongside the runtime label"
         );
+    }
+
+    #[test]
+    fn registry_entry_wire_uses_runtime_and_surfaces_without_a_top_level_kind() {
+        let mut summary = summary_with_onboarding();
+        summary.runtime_kind = LifecycleExtensionRuntimeKind::WasmTool;
+        summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
+        summary.channel_directions = Some(LifecycleChannelDirections {
+            inbound: true,
+            outbound: false,
+        });
+
+        let wire = serde_json::to_value(registry_entry(summary, &HashSet::new()))
+            .expect("registry entry serializes");
+        let object = wire.as_object().expect("registry entry is an object");
+        assert_eq!(object.get("runtime"), Some(&serde_json::json!("wasm")));
+        assert!(object.contains_key("surfaces"));
+        assert!(
+            !object.contains_key("kind"),
+            "runtime and product taxonomy must not collapse into a top-level kind: {wire}"
+        );
+        assert_eq!(wire["package_ref"]["kind"], "extension");
+        assert_eq!(wire["surfaces"][0]["kind"], "channel");
     }
 
     #[tokio::test]

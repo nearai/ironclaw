@@ -7,18 +7,18 @@ use ironclaw_auth::{
     SecretCleanupRequest,
 };
 use ironclaw_extensions::{
-    CapabilityVisibility, ExtensionActivationState, ExtensionError, ExtensionInstallation,
-    ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
-    ExtensionLifecycleService, ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage,
-    InstallationOwner, ManifestHash, ManifestSource,
+    CapabilitySurfaceDeclV2, CapabilityVisibility, ExtensionActivationState, ExtensionError,
+    ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
+    ExtensionInstallationStore, ExtensionLifecycleService, ExtensionManifestRecord,
+    ExtensionManifestRef, ExtensionPackage, InstallationOwner, ManifestHash, ManifestSource,
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, CapabilitySurfaceKind, EffectKind, ExtensionId,
-    NetworkTargetPattern, PermissionMode, ResourceScope, RuntimeCredentialAuthRequirement,
-    RuntimeCredentialRequirement, RuntimeHttpEgress, UserId, VirtualPath, sha256_digest_token,
+    NetworkTargetPattern, PermissionMode, ResourceScope, RuntimeCredentialAccountSetup,
+    RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement, RuntimeHttpEgress, UserId,
+    VirtualPath, sha256_digest_token,
 };
-use ironclaw_product_adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use ironclaw_product_workflow::{
     ChannelConnectionRequirement, LifecycleBlockerRef, LifecycleExtensionSummary,
     LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
@@ -2112,14 +2112,12 @@ fn activation_success_response(
 ) -> LifecycleProductResponse {
     let visible_capability_ids = package_visible_capability_ids(package);
     let message = activation_success_message(&package_ref, package, &visible_capability_ids);
-    let connection_required = if package_declares_inbound_product_adapter(package) {
-        Some(channel_connection_requirement(
-            package_ref.id.as_str(),
-            package.manifest.name.as_str(),
-        ))
-    } else {
-        None
-    };
+    let surfaces = package.manifest.capability_surfaces();
+    let connection_required = channel_connection_requirement(
+        package_ref.id.as_str(),
+        package.manifest.name.as_str(),
+        &surfaces,
+    );
     let mut response = response_with_payload(
         Some(package_ref),
         LifecyclePhase::Active,
@@ -2169,9 +2167,17 @@ fn activation_success_message(
     package: &ExtensionPackage,
     visible_capability_ids: &[String],
 ) -> String {
-    if package_declares_inbound_product_adapter(package) {
-        if package_ref.id.as_str() == "slack" {
-            return "Slack is installed as an inbound entrypoint. If WebChat shows a Slack account connection panel, tell the user to configure Slack OAuth for this extension rather than pasting anything into normal chat. If the user's Slack account is already connected, continue the user's original request; Slack DMs and WebUI chat can use the same user-scoped Slack tools.".to_string();
+    let surfaces = package.manifest.capability_surfaces();
+    if let Some(connection) = channel_connection_requirement(
+        package_ref.id.as_str(),
+        package.manifest.name.as_str(),
+        &surfaces,
+    ) {
+        if connection.strategy == RebornChannelConnectStrategy::OAuth {
+            return format!(
+                "{name} is installed as an inbound entrypoint. If WebChat shows a {name} account connection panel, tell the user to configure {name} OAuth for this extension rather than pasting anything into normal chat. If the user's {name} account is already connected, continue the user's original request; {name} DMs and WebUI chat can use the same user-scoped {name} tools.",
+                name = package.manifest.name.as_str(),
+            );
         }
         return format!(
             "{} is installed as an external channel. If WebChat shows a channel connection panel, tell the user to open the extension's app or bot, get the pairing code or connection challenge, and paste it into the WebChat connection panel rather than normal chat. If the user's channel account is already connected, continue the user's original request instead of asking them to pair again. Do not claim the channel can receive or send messages for the user until connection is confirmed.",
@@ -2192,11 +2198,10 @@ fn activation_success_message(
     message
 }
 
-// Build the structured connect requirement for an inbound channel. The Slack OAuth
-// copy is kept identical to the connectable-channels descriptor so the in-chat
-// panel and the Settings panel read identically — enforced by
-// `slack_requirement_copy_matches_connectable_descriptor`, not just by convention.
-// Any other inbound channel gets a generic proof-code prompt. NOTE: no such
+// Build the structured connect requirement for an inbound channel. OAuth is
+// selected only when the same typed manifest projection also declares an OAuth
+// auth surface; package ids, runtime kinds, and section names are irrelevant.
+// An inbound channel without OAuth gets a generic proof-code prompt. NOTE: no such
 // channel ships today (Slack is the only inbound product adapter), and no
 // backend mounts the generic proof-code redeem route — the first non-Slack
 // inbound channel must mount one alongside this requirement or its submit
@@ -2204,18 +2209,41 @@ fn activation_success_message(
 pub(crate) fn channel_connection_requirement(
     channel_id: &str,
     display_name: &str,
-) -> ChannelConnectionRequirement {
-    if channel_id == "slack" {
-        ChannelConnectionRequirement {
-            channel: "slack".to_string(),
+    surfaces: &[CapabilitySurfaceDeclV2],
+) -> Option<ChannelConnectionRequirement> {
+    let inbound = surfaces.iter().any(|surface| {
+        matches!(
+            surface,
+            CapabilitySurfaceDeclV2::Channel { inbound: true, .. }
+        )
+    });
+    if !inbound {
+        return None;
+    }
+    let oauth = surfaces.iter().any(|surface| {
+        matches!(
+            surface,
+            CapabilitySurfaceDeclV2::Auth {
+                setup: RuntimeCredentialAccountSetup::OAuth { .. },
+                ..
+            }
+        )
+    });
+    if oauth {
+        Some(ChannelConnectionRequirement {
+            channel: channel_id.to_string(),
             strategy: RebornChannelConnectStrategy::OAuth,
-            instructions: "Connect Slack with OAuth from the extension configuration, then message the Slack bot directly.".to_string(),
+            instructions: format!(
+                "Connect {display_name} with OAuth from the extension configuration, then message the {display_name} bot directly."
+            ),
             input_placeholder: String::new(),
-            submit_label: "Connect Slack".to_string(),
-            error_message: "Slack OAuth connection failed. Try configuring Slack again.".to_string(),
-        }
+            submit_label: format!("Connect {display_name}"),
+            error_message: format!(
+                "{display_name} OAuth connection failed. Try configuring {display_name} again."
+            ),
+        })
     } else {
-        ChannelConnectionRequirement {
+        Some(ChannelConnectionRequirement {
             channel: channel_id.to_string(),
             strategy: RebornChannelConnectStrategy::InboundProofCode,
             instructions: format!(
@@ -2225,15 +2253,8 @@ pub(crate) fn channel_connection_requirement(
             input_placeholder: "Enter pairing code".to_string(),
             submit_label: "Connect".to_string(),
             error_message: "Pairing failed. Check the code and try again.".to_string(),
-        }
+        })
     }
-}
-
-fn package_declares_inbound_product_adapter(package: &ExtensionPackage) -> bool {
-    package.manifest.host_apis.iter().any(|host_api| {
-        host_api.id.as_str() == PRODUCT_ADAPTER_HOST_API_ID
-            && host_api.section.as_str() == "product_adapter.inbound"
-    })
 }
 fn extension_ids_from_package_ref(
     package_ref: &LifecyclePackageRef,
@@ -2970,32 +2991,24 @@ output_schema_ref = "schemas/run.output.json"
     }
 
     #[tokio::test]
-    async fn extension_activate_returns_slack_oauth_guidance_for_external_channel_package() {
-        let (_dir, _storage_root, facade, _active_registry, _installation_store) =
-            extension_lifecycle_fixture_with_catalog_and_service(
-                AvailableExtensionCatalog::from_packages(vec![fixture_external_channel_package(
-                    "slack", "Slack",
-                )]),
+    async fn extension_activate_returns_oauth_guidance_for_renamed_external_channel_package() {
+        let (_dir, _storage_root, port, _active_registry, _installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(vec![
+                    fixture_oauth_external_channel_package("renamed-chat", "Slack"),
+                ]),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
-        let package_ref =
-            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("valid ref");
-        facade
-            .execute(
-                lifecycle_surface_context(),
-                LifecycleProductAction::ExtensionInstall {
-                    package_ref: package_ref.clone(),
-                },
-            )
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "renamed-chat")
+            .expect("valid ref");
+        port.install(package_ref.clone(), &lifecycle_owner())
             .await
             .expect("install slack channel");
 
-        let activate = facade
-            .execute(
-                lifecycle_surface_context(),
-                LifecycleProductAction::ExtensionActivate {
-                    package_ref: package_ref.clone(),
-                },
+        let activate = port
+            .activate_with_prechecked_credentials_for_test(
+                package_ref.clone(),
+                ExtensionActivationMode::Static,
             )
             .await
             .expect("activate slack channel");
@@ -3031,7 +3044,7 @@ output_schema_ref = "schemas/run.output.json"
         let requirement = connection_required
             .as_ref()
             .expect("slack channel activation must carry a structured connection requirement");
-        assert_eq!(requirement.channel, "slack");
+        assert_eq!(requirement.channel, "renamed-chat");
         assert_eq!(requirement.strategy, RebornChannelConnectStrategy::OAuth);
         assert_eq!(requirement.input_placeholder, "");
         assert_eq!(requirement.submit_label, "Connect Slack");
@@ -3106,6 +3119,60 @@ output_schema_ref = "schemas/run.output.json"
             requirement.instructions.contains("Telegram"),
             "generic channel copy should name the channel: {}",
             requirement.instructions
+        );
+    }
+
+    #[test]
+    fn channel_connection_reducer_uses_typed_surfaces_not_package_identity() {
+        let channel = |inbound, outbound| CapabilitySurfaceDeclV2::Channel {
+            host_api: ironclaw_extensions::HostApiId::new("ironclaw.product_adapter/v1")
+                .expect("host API id"),
+            section: ironclaw_extensions::ManifestSectionPath::new("product_adapter.events")
+                .expect("section path"),
+            inbound,
+            outbound,
+        };
+        let oauth = CapabilitySurfaceDeclV2::Auth {
+            provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("chat-auth")
+                .expect("provider id"),
+            setup: RuntimeCredentialAccountSetup::OAuth {
+                scopes: vec!["identity:read".to_string()],
+            },
+        };
+
+        let renamed_oauth = channel_connection_requirement(
+            "renamed-chat",
+            "Renamed Chat",
+            &[channel(true, false), oauth],
+        )
+        .expect("inbound OAuth channel connects");
+        assert_eq!(renamed_oauth.strategy, RebornChannelConnectStrategy::OAuth);
+
+        let slack_named_without_oauth =
+            channel_connection_requirement("slack", "Slack", &[channel(true, false)])
+                .expect("inbound proof-code channel connects");
+        assert_eq!(
+            slack_named_without_oauth.strategy,
+            RebornChannelConnectStrategy::InboundProofCode
+        );
+
+        assert!(
+            channel_connection_requirement(
+                "outbound-chat",
+                "Outbound Chat",
+                &[
+                    channel(false, true),
+                    CapabilitySurfaceDeclV2::Auth {
+                        provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new(
+                            "chat-auth",
+                        )
+                        .expect("provider id"),
+                        setup: RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+                    },
+                ],
+            )
+            .is_none(),
+            "outbound-only OAuth channels do not open an inbound connection gate"
         );
     }
 
@@ -8021,6 +8088,44 @@ output_schema_ref = "schemas/run.output.json"
     }
 
     fn fixture_external_channel_package(id: &str, name: &str) -> AvailableExtensionPackage {
+        fixture_external_channel_package_with_oauth(id, name, false)
+    }
+
+    fn fixture_oauth_external_channel_package(id: &str, name: &str) -> AvailableExtensionPackage {
+        fixture_external_channel_package_with_oauth(id, name, true)
+    }
+
+    fn fixture_external_channel_package_with_oauth(
+        id: &str,
+        name: &str,
+        oauth: bool,
+    ) -> AvailableExtensionPackage {
+        let oauth_section = if oauth {
+            format!(
+                r#"
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "{id}.whoami"
+description = "Resolve the connected account"
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  {{ handle = "{id}_account", source = {{ type = "product_auth_account", provider = "slack", setup = {{ kind = "oauth", scopes = ["identity:read"] }} }}, audience = {{ scheme = "https", host_pattern = "example.com" }}, target = {{ type = "header", name = "authorization", prefix = "Bearer " }} }},
+]
+default_permission = "ask"
+visibility = "host_internal"
+input_schema_ref = "schemas/whoami.input.json"
+output_schema_ref = "schemas/whoami.output.json"
+required_host_ports = ["host.runtime.http_egress"]
+"#,
+            )
+        } else {
+            String::new()
+        };
         let manifest = format!(
             r#"
 schema_version = "reborn.extension_manifest.v2"
@@ -8055,12 +8160,11 @@ handle = "{id}_bot_token"
 [[product_adapter.inbound.egress]]
 host = "example.com"
 credential_handle = "{id}_bot_token"
+
+{oauth_section}
 "#
         );
-        let mut package =
-            fixture_extension_package_from_manifest_with_product_adapter_contracts(&manifest, id);
-        package.surface_kinds = vec![CapabilitySurfaceKind::Channel];
-        package
+        fixture_extension_package_from_manifest_with_product_adapter_contracts(&manifest, id)
     }
 
     fn fixture_external_channel_package_with_cleanup(
@@ -8277,17 +8381,13 @@ output_schema_ref = "schemas/search.output.json"
         manifest_toml: &str,
         root_id: &str,
     ) -> AvailableExtensionPackage {
-        let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
-        contracts
-            .register(Arc::new(
-                ironclaw_product_adapter_registry::ProductAdapterHostApiContract::new()
-                    .expect("product adapter host API contract"),
-            ))
-            .expect("register product adapter host API contract");
+        let contracts = product_extension_host_api_contract_registry().expect("host API contracts");
+        let host_ports =
+            ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog");
         let manifest = ExtensionManifest::parse(
             manifest_toml,
             ManifestSource::HostBundled,
-            &HostPortCatalog::empty(),
+            &host_ports,
             &contracts,
         )
         .expect("fixture manifest");
@@ -8310,8 +8410,6 @@ output_schema_ref = "schemas/search.output.json"
             source: ManifestSource::HostBundled,
             package,
             cleanup_requirements: Vec::new(),
-            surface_kinds: Vec::new(),
-            channel_directions: None,
             assets: vec![
                 AvailableExtensionAsset {
                     path: "manifest.toml".to_string(),

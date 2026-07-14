@@ -19,12 +19,11 @@ use ironclaw_extensions::{
     ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationStore,
     ExtensionManifestRecord, ExtensionManifestV2, HostApiContractRegistry, HostApiId,
     HostApiManifestContext, HostApiManifestContract, HostApiManifestProjection,
-    HostApiMultiplicity, HostApiRefV2, HostApiSectionError, ManifestSectionPath, ManifestSource,
-    ManifestV2Error,
+    HostApiMultiplicity, HostApiRefV2, HostApiSectionError, HostApiSurfaceProjection,
+    ManifestSectionPath, ManifestSource, ManifestV2Error,
 };
 use ironclaw_host_api::{
-    CapabilitySurfaceKind, ExtensionId, HostPortCatalog, IngressAuthPolicy, IngressRouteDescriptor,
-    IngressRouteId,
+    ExtensionId, HostPortCatalog, IngressAuthPolicy, IngressRouteDescriptor, IngressRouteId,
 };
 use ironclaw_product_adapters::{
     AuthRequirement, DeclaredEgressTarget, EgressCredentialHandle, ProductAdapterCapabilities,
@@ -446,7 +445,14 @@ impl HostApiManifestContract for ProductAdapterHostApiContract {
         // `synchronous_api`) describe host-native surfaces and project no
         // extension surface.
         let surfaces = match parsed.surface_kind() {
-            ProductSurfaceKind::ExternalChannel => vec![CapabilitySurfaceKind::Channel],
+            ProductSurfaceKind::ExternalChannel => vec![HostApiSurfaceProjection::Channel {
+                inbound: parsed
+                    .capabilities()
+                    .contains(ProductCapabilityFlag::InboundMessages),
+                outbound: parsed
+                    .capabilities()
+                    .contains(ProductCapabilityFlag::ExternalFinalReplyPush),
+            }],
             ProductSurfaceKind::Web
             | ProductSurfaceKind::Cli
             | ProductSurfaceKind::SynchronousApi => Vec::new(),
