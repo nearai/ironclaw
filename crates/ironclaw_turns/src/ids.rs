@@ -319,6 +319,17 @@ impl RunProfileId {
         Self::from_trusted_static("long_running_mission")
     }
 
+    /// Dedicated run profile for local-dev/benchmark harness runs. Identical to
+    /// `interactive_default` except driver-specific nudges (final-answer
+    /// synthesis on no-progress, self-verification before finalizing a
+    /// tool-assisted answer) are enabled — both are fail-open and bounded to
+    /// one extra tool-free call each, so they're safe to always run when
+    /// measuring reborn's own capability ceiling, without changing the
+    /// default behavior every other `interactive_default` consumer gets.
+    pub fn benchmark_default() -> Self {
+        Self::from_trusted_static("benchmark_default")
+    }
+
     /// Dedicated run profile for scheduled-trigger fires (issue #5505). Its
     /// `capability_surface_profile_id` selects the capability surface that the
     /// Reborn runtime composition (`ironclaw_runner::runtime`) narrows to deny

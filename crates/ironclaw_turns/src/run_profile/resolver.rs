@@ -228,6 +228,16 @@ impl RunProfileDefinition {
         self
     }
 
+    /// Override just the driver-specific-nudges bit of this definition's
+    /// steering policy, leaving every other field (including the rest of
+    /// `steering_policy`) untouched. Additive builder for profiles derived
+    /// via `interactive_like` that want the nudges on without duplicating
+    /// the whole `interactive_profile()` body.
+    pub fn with_driver_specific_nudges(mut self, allow: bool) -> Self {
+        self.steering_policy.allow_driver_specific_nudges = allow;
+        self
+    }
+
     fn resolve(&self, request: &RunProfileResolutionRequest) -> ResolvedRunProfile {
         let mut provenance = provenance_for(self, request);
         let resource_budget_policy = self.resolve_resource_budget_policy(request, &mut provenance);

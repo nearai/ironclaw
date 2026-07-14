@@ -287,10 +287,34 @@ pub fn scheduled_trigger_planned_profile_definition()
     )
 }
 
+/// Dedicated run profile for benchmark/local-dev harness runs (nearai-bench's
+/// `--framework ironclaw-reborn`). Identical to the default planned profile
+/// except driver-specific nudges are enabled — see
+/// `RunProfileId::benchmark_default` for why this is safe to always run when
+/// measuring reborn's own capability ceiling without changing the default
+/// planned profile every other consumer gets.
+pub fn benchmark_planned_profile_definition()
+-> Result<RunProfileDefinition, RunProfileRegistryError> {
+    let descriptor = planned_driver_descriptor()
+        .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
+    Ok(planned_like_profile_definition(
+        RunProfileId::benchmark_default(),
+        descriptor,
+        INTERACTIVE_CAPABILITY_SURFACE_PROFILE_ID,
+    )?
+    .with_driver_specific_nudges(true))
+}
+
 pub fn register_default_planned_profile(
     registry: &mut InMemoryRunProfileRegistry,
 ) -> Result<(), RunProfileRegistryError> {
     registry.register(planned_default_profile_definition()?)
+}
+
+pub fn register_benchmark_planned_profile(
+    registry: &mut InMemoryRunProfileRegistry,
+) -> Result<(), RunProfileRegistryError> {
+    registry.register(benchmark_planned_profile_definition()?)
 }
 
 pub fn register_subagent_planned_profile(
@@ -311,6 +335,7 @@ pub fn default_planned_run_profile_resolver()
     register_default_planned_profile(&mut registry)?;
     register_subagent_planned_profile(&mut registry)?;
     register_scheduled_trigger_planned_profile(&mut registry)?;
+    register_benchmark_planned_profile(&mut registry)?;
     let implicit_default = planned_default_profile_id()
         .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
     Ok(InMemoryRunProfileResolver::new_with_implicit_default(

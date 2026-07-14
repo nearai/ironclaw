@@ -2352,7 +2352,7 @@ impl RebornRuntime {
                 accepted_message_ref: accepted_message_ref.clone(),
                 source_binding_ref: self.source_binding_ref.clone(),
                 reply_target_binding_ref: self.reply_target_binding_ref.clone(),
-                requested_run_profile: None,
+                requested_run_profile: default_requested_run_profile(),
                 idempotency_key,
                 received_at: Utc::now(),
                 requested_run_id: None,
@@ -4194,6 +4194,29 @@ struct LocalDevSkillContextSource {
 }
 
 const LOCAL_DEV_MAX_SKILL_CONTEXT_TOKENS: usize = 6000;
+
+/// Requested run profile for newly-submitted turns. Resolves to the
+/// `benchmark_default` planned profile (driver-specific nudges enabled — see
+/// `RunProfileId::benchmark_default`) when `IRONCLAW_REBORN_BENCHMARK_PROFILE`
+/// is set to a truthy value, otherwise `None` (the implicit default planned
+/// profile, unchanged behavior for every other caller).
+fn default_requested_run_profile() -> Option<ironclaw_turns::RunProfileRequest> {
+    let truthy = matches!(
+        std::env::var("IRONCLAW_REBORN_BENCHMARK_PROFILE")
+            .ok()
+            .as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes")
+    );
+    if !truthy {
+        return None;
+    }
+    Some(
+        ironclaw_turns::RunProfileRequest::new(
+            ironclaw_turns::RunProfileId::benchmark_default().as_str(),
+        )
+        .expect("benchmark_default is a valid run profile request"),
+    )
+}
 
 fn optional_nonzero_u32_env(
     key: &'static str,
