@@ -68,6 +68,9 @@ export function useHistory(threadId, options = {}) {
     // error banner when a failed timeline load leaves the thread otherwise
     // empty, without implying a later successful chat turn is broken.
     loadError: null,
+    // Cursor-load errors should stay visible across SSE/optimistic message
+    // updates; only a successful history load proves pagination recovered.
+    loadErrorSource: null,
   });
   const [stateThreadId, setStateThreadId] = React.useState(threadId);
   if (stateThreadId !== threadId) {
@@ -79,6 +82,7 @@ export function useHistory(threadId, options = {}) {
       nextCursor: entry?.nextCursor || null,
       isLoading: Boolean(threadId) && !entry,
       loadError: null,
+      loadErrorSource: null,
     });
   }
   // Synchronous reentrancy guard, tracked PER THREAD — `isLoading` in state is
@@ -112,6 +116,7 @@ export function useHistory(threadId, options = {}) {
           nextCursor: null,
           isLoading: false,
           loadError: null,
+          loadErrorSource: null,
         });
         return;
       }
@@ -177,6 +182,7 @@ export function useHistory(threadId, options = {}) {
             nextCursor,
             isLoading: false,
             loadError: null,
+            loadErrorSource: null,
           };
         });
       } catch (err) {
@@ -195,6 +201,12 @@ export function useHistory(threadId, options = {}) {
                   !cursor && (s.messages || []).length > 0
                     ? null
                     : "chat.history.loadFailed",
+                loadErrorSource:
+                  !cursor && (s.messages || []).length > 0
+                    ? null
+                    : cursor
+                      ? "cursor"
+                      : "initial",
               }
             : s,
         );
@@ -216,6 +228,7 @@ export function useHistory(threadId, options = {}) {
       // the background so the content area doesn't flash empty.
       isLoading: Boolean(threadId) && !entry,
       loadError: null,
+      loadErrorSource: null,
     });
     if (threadId) loadHistory();
   }, [threadId, loadHistory]);
@@ -229,12 +242,15 @@ export function useHistory(threadId, options = {}) {
     if (threadIdRef.current === targetThreadId) {
       setState((s) => {
         const messages = apply(s.messages || []);
+        const shouldClearLoadError =
+          messages.length > 0 && s.loadErrorSource !== "cursor";
         putCache(key, { messages, nextCursor: s.nextCursor || null });
         return {
           ...s,
           messages,
           messagesThreadId: targetThreadId,
-          loadError: messages.length > 0 ? null : s.loadError,
+          loadError: shouldClearLoadError ? null : s.loadError,
+          loadErrorSource: shouldClearLoadError ? null : s.loadErrorSource,
         };
       });
       return;
@@ -258,6 +274,8 @@ export function useHistory(threadId, options = {}) {
       setState((s) => {
         const messages =
           typeof updater === "function" ? updater(s.messages) : updater;
+        const shouldClearLoadError =
+          messages.length > 0 && s.loadErrorSource !== "cursor";
         // Keep the cache in step with optimistic sends and SSE-driven
         // updates so returning to the thread shows the latest messages.
         if (threadId) {
@@ -267,7 +285,8 @@ export function useHistory(threadId, options = {}) {
           ...s,
           messages,
           messagesThreadId: threadId || s.messagesThreadId,
-          loadError: messages.length > 0 ? null : s.loadError,
+          loadError: shouldClearLoadError ? null : s.loadError,
+          loadErrorSource: shouldClearLoadError ? null : s.loadErrorSource,
         };
       }),
   };
