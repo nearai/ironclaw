@@ -84,6 +84,13 @@ The transition will:
 This is a persistence-format transition, not a second public manifest parser.
 New input with top-level capabilities remains invalid.
 
+Some legacy local-development mounts explicitly do not implement versioned
+CAS. Those mounts must never receive a blind-write fallback: startup may use a
+fully validated normalized snapshot in memory while leaving the persisted bytes
+untouched and warning that the migration will repeat. CAS-capable production
+backends must persist the transition and become byte-stable. Expanding the
+legacy local backend into a versioned database is outside Train A.
+
 ### 2. Canonical `slack_bot` installation fold
 
 The Slack identity transition will be fallible and feature-safe. It will first
@@ -198,7 +205,8 @@ conversation lookup.
       canonical.
 - [ ] Feature-disabled startup never deletes state.
 - [ ] Typed errors propagate.
-- [ ] Restart is idempotent and byte-stable.
+- [ ] Restart is logically idempotent everywhere and byte-stable on CAS-capable
+      backends.
 - [ ] Concurrent updates cannot be overwritten.
 
 ### Slack credential migration
