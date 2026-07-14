@@ -995,7 +995,6 @@ fn local_dev_result_reference_observation(
             total_bytes,
             next_offset,
             item_count,
-            final_reply_presentation: None,
         },
         artifacts: vec![ModelVisibleArtifact {
             artifact_ref: result_ref.as_str().to_string(),

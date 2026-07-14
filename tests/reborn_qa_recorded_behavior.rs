@@ -266,37 +266,66 @@ fn assert_tool_argument_string_field_eq(trace: &LlmTrace, tool: &str, field: &st
     );
 }
 
-fn assert_routine_tool_contract(case: &QaPhrase, cron_fragment: &str) {
-    // Recorded final prose is model-authored canned text and is not evidence
-    // for the product redaction boundary. Whole-turn trigger integration owns
-    // that assertion; this fixture contract pins only tool choice and args.
+fn assert_routine_contract(case: &QaPhrase, cron_fragment: &str) {
     let trace = load_qa_trace(case.fixture);
     assert_tool_called_with(&trace, "builtin.trigger_create", &[cron_fragment]);
+    let reply = final_text_reply(&trace).unwrap_or_else(|| {
+        panic!(
+            "{} should end with a finalized assistant reply",
+            case.fixture
+        )
+    });
+    let normalized = reply.to_ascii_lowercase();
+    assert!(
+        normalized.contains("routine"),
+        "{} should describe the user-facing routine: {reply}",
+        case.fixture
+    );
+    assert!(
+        !reply.contains(cron_fragment),
+        "{} leaked the raw cron expression {cron_fragment}: {reply}",
+        case.fixture
+    );
+    for internal_term in [
+        "trigger",
+        "trigger_id",
+        "agent_id",
+        "project_id",
+        "delivery_target_id",
+        "builtin.",
+        "builtin__",
+    ] {
+        assert!(
+            !normalized.contains(internal_term),
+            "{} leaked internal term {internal_term:?}: {reply}",
+            case.fixture
+        );
+    }
 }
 
 #[tokio::test]
 async fn contract_routine_health_ping_creates_5_minute_trigger() {
-    assert_routine_tool_contract(&ROUTINE_HEALTH_PING, "*/5 * * * *");
+    assert_routine_contract(&ROUTINE_HEALTH_PING, "*/5 * * * *");
 }
 
 #[tokio::test]
 async fn contract_routine_meeting_prep_creates_30_minute_trigger() {
-    assert_routine_tool_contract(&ROUTINE_MEETING_PREP, "*/30 * * * *");
+    assert_routine_contract(&ROUTINE_MEETING_PREP, "*/30 * * * *");
 }
 
 #[tokio::test]
 async fn contract_routine_release_watch_creates_5_minute_trigger() {
-    assert_routine_tool_contract(&ROUTINE_RELEASE_WATCH, "*/5 * * * *");
+    assert_routine_contract(&ROUTINE_RELEASE_WATCH, "*/5 * * * *");
 }
 
 #[tokio::test]
 async fn contract_routine_crm_inbox_creates_30_minute_trigger() {
-    assert_routine_tool_contract(&ROUTINE_CRM_INBOX, "*/30 * * * *");
+    assert_routine_contract(&ROUTINE_CRM_INBOX, "*/30 * * * *");
 }
 
 #[tokio::test]
 async fn contract_routine_hn_monitor_creates_hourly_trigger() {
-    assert_routine_tool_contract(&ROUTINE_HN_MONITOR, "0 * * * *");
+    assert_routine_contract(&ROUTINE_HN_MONITOR, "0 * * * *");
 }
 
 #[tokio::test]

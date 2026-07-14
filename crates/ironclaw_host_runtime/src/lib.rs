@@ -97,13 +97,6 @@ pub use first_party_tools::{
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
     builtin_first_party_package, builtin_first_party_package_for_process_backend,
 };
-/// Capability-owned Routine presentation consumed by generic composition and
-/// loop boundaries. Ownership is enforced by the `routine_presentation_boundary`
-/// architecture test.
-pub use first_party_tools::{
-    RoutineInputPresentation, routine_input_presentation, routine_output_presentation,
-    routine_title,
-};
 #[cfg(any(test, feature = "test-support"))]
 pub use first_party_tools::{
     TriggerManagementClock, builtin_first_party_handlers_with_trigger_clock,

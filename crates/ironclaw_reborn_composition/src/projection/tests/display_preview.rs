@@ -1299,7 +1299,6 @@ async fn capability_display_preview_store_marks_truncated_side_channel_summary()
             output_kind: "unified_diff".to_string(),
             subtitle: Some("/workspace/main.rs".to_string()),
             truncated: false,
-            final_reply_presentation: None,
         }),
     );
 

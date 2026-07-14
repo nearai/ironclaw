@@ -9,9 +9,6 @@ use ironclaw_host_api::{
     CapabilityDisplayOutputPreview, CapabilityDisplayText, CapabilityId, InvocationId,
     truncate_capability_display_text,
 };
-use ironclaw_host_runtime::{
-    routine_input_presentation, routine_output_presentation, routine_title,
-};
 use ironclaw_product_adapters::{
     CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
     CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput, ProductAdapterError,
@@ -27,6 +24,7 @@ use super::capability_activity_status_wire;
 
 pub(crate) const SANITIZE_JSON_MAX_DEPTH: usize = 32;
 const COMPLETED_PREVIEW_PENDING_TIMEOUT_SECONDS: i64 = 10;
+const ROUTINE_LIST_PREVIEW_LIMIT: usize = 10;
 
 #[async_trait]
 pub(super) trait CapabilityDisplayPreviewSource: Send + Sync {
@@ -578,13 +576,11 @@ fn output_preview_for_capability(
     value: &serde_json::Value,
     display_preview: Option<&CapabilityDisplayOutputPreview>,
 ) -> OutputPreview {
+    if let Some(operation) = routine_capability(capability_id) {
+        return routine_output_preview(operation, value);
+    }
     display_preview
         .map(output_preview_from_display)
-        .or_else(|| {
-            routine_output_presentation(capability_id, value)
-                .as_ref()
-                .map(output_preview_from_display)
-        })
         .unwrap_or_else(|| output_preview(value))
 }
 
@@ -604,8 +600,8 @@ fn output_preview_from_display(value: &CapabilityDisplayOutputPreview) -> Output
 }
 
 fn input_summary(capability_id: &str, value: &serde_json::Value) -> Option<CapabilityDisplayText> {
-    if let Some(presentation) = routine_input_presentation(capability_id, value) {
-        return Some(presentation.summary);
+    if let Some(operation) = routine_capability(capability_id) {
+        return Some(routine_input_summary(operation, value));
     }
 
     if capability_matches(capability_id, "shell")
@@ -836,6 +832,24 @@ fn capability_matches(capability_id: &str, short_name: &str) -> bool {
             .is_some_and(|prefix| prefix.ends_with('.') || prefix.ends_with("__"))
 }
 
+fn capability_short_name(capability_id: &str) -> &str {
+    let dotted = capability_id.rsplit_once('.').map(|(_, suffix)| suffix);
+    let double_underscored = capability_id.rsplit_once("__").map(|(_, suffix)| suffix);
+    match (dotted, double_underscored) {
+        (Some(dotted), Some(double_underscored)) => {
+            // The shortest suffix follows the rightmost supported provider separator.
+            if dotted.len() <= double_underscored.len() {
+                dotted
+            } else {
+                double_underscored
+            }
+        }
+        (Some(dotted), None) => dotted,
+        (None, Some(double_underscored)) => double_underscored,
+        (None, None) => capability_id,
+    }
+}
+
 fn string_arg<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
     keys.iter()
         .find_map(|key| value.get(*key).and_then(serde_json::Value::as_str))
@@ -900,6 +914,67 @@ fn safe_capability_title(capability_id: &str) -> &str {
         .unwrap_or(capability_id)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoutineCapability {
+    Create,
+    List,
+    Remove,
+    Pause,
+    Resume,
+}
+
+impl RoutineCapability {
+    fn title(self) -> &'static str {
+        match self {
+            Self::List => "Routines",
+            Self::Create | Self::Remove | Self::Pause | Self::Resume => "Routine",
+        }
+    }
+
+    fn output_summary(self, value: &serde_json::Value) -> &'static str {
+        if let Some(field) = self.mutation_presence_field() {
+            return match value.get(field).and_then(serde_json::Value::as_bool) {
+                Some(true) => self.successful_output_summary(),
+                Some(false) => "Routine not found",
+                None => "Routine status unavailable",
+            };
+        }
+
+        self.successful_output_summary()
+    }
+
+    fn successful_output_summary(self) -> &'static str {
+        match self {
+            Self::Create => "Routine created",
+            Self::List => "Routines listed",
+            Self::Remove => "Routine removed",
+            Self::Pause => "Routine paused",
+            Self::Resume => "Routine resumed",
+        }
+    }
+
+    /// Mirrors the first-party trigger handler result contract: removal uses
+    /// "removed", while pause/resume state transitions use "updated".
+    fn mutation_presence_field(self) -> Option<&'static str> {
+        match self {
+            Self::Remove => Some("removed"),
+            Self::Pause | Self::Resume => Some("updated"),
+            Self::Create | Self::List => None,
+        }
+    }
+}
+
+fn routine_capability(capability_id: &str) -> Option<RoutineCapability> {
+    match capability_short_name(capability_id) {
+        "trigger_create" => Some(RoutineCapability::Create),
+        "trigger_list" => Some(RoutineCapability::List),
+        "trigger_remove" => Some(RoutineCapability::Remove),
+        "trigger_pause" => Some(RoutineCapability::Pause),
+        "trigger_resume" => Some(RoutineCapability::Resume),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum CapabilityTitleFallback {
     FullId,
@@ -907,13 +982,230 @@ enum CapabilityTitleFallback {
 }
 
 fn capability_title(capability_id: &str, fallback: CapabilityTitleFallback) -> &str {
-    if let Some(title) = routine_title(capability_id) {
+    if let Some(title) = routine_capability(capability_id).map(RoutineCapability::title) {
         return title;
     }
     match fallback {
         CapabilityTitleFallback::FullId => capability_id,
         CapabilityTitleFallback::ShortName => safe_capability_title(capability_id),
     }
+}
+
+fn routine_input_summary(
+    operation: RoutineCapability,
+    value: &serde_json::Value,
+) -> CapabilityDisplayText {
+    match operation {
+        RoutineCapability::Create => {}
+        RoutineCapability::List => {
+            return bounded_display_text(
+                "routine list request",
+                CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+            );
+        }
+        RoutineCapability::Remove => {
+            return bounded_display_text(
+                "routine removal request",
+                CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+            );
+        }
+        RoutineCapability::Pause => {
+            return bounded_display_text(
+                "routine pause request",
+                CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+            );
+        }
+        RoutineCapability::Resume => {
+            return bounded_display_text(
+                "routine resume request",
+                CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+            );
+        }
+    }
+
+    // Explicit display allowlist: only these user-facing top-level fields are
+    // read. Prompt, action, ids, delivery metadata, and nested wrapper values
+    // must never be traversed into the activity preview.
+    let mut summary = SummaryBuilder::default();
+    if let Some(name) = string_arg(value, &["name"]) {
+        let name = bounded_summary_value(name);
+        summary.push_with_truncation("routine", name.text, name.truncated);
+    }
+    if let Some(schedule) = routine_schedule_label(value.get("schedule")) {
+        summary.push("schedule", schedule);
+    }
+    if let Some(timezone) = value
+        .get("schedule")
+        .and_then(|schedule| schedule.get("timezone"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|timezone| !timezone.is_empty())
+    {
+        let timezone = bounded_summary_value(timezone);
+        summary.push_with_truncation("timezone", timezone.text, timezone.truncated);
+    }
+    summary.finish().unwrap_or_else(|| {
+        bounded_display_text(
+            "routine creation request",
+            CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+        )
+    })
+}
+
+fn routine_output_preview(
+    operation: RoutineCapability,
+    value: &serde_json::Value,
+) -> OutputPreview {
+    let summary = bounded_display_text(
+        operation.output_summary(value),
+        CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+    );
+    let mut truncated = summary.truncated;
+    let lines = match operation {
+        RoutineCapability::List => routine_list_preview_lines(value, &mut truncated),
+        RoutineCapability::Create
+        | RoutineCapability::Remove
+        | RoutineCapability::Pause
+        | RoutineCapability::Resume => {
+            routine_record_preview_lines(operation, value, &mut truncated)
+        }
+    };
+    let preview = bounded_preview_text(&lines.join("\n"));
+    OutputPreview {
+        summary: non_empty(summary.text),
+        preview: non_empty(preview.text),
+        kind: "text".to_string(),
+        truncated: truncated || preview.truncated,
+    }
+}
+
+fn routine_record_preview_lines(
+    operation: RoutineCapability,
+    value: &serde_json::Value,
+    truncated: &mut bool,
+) -> Vec<String> {
+    let mut lines = vec![operation.output_summary(value).to_string()];
+    let Some(trigger) = value.get("trigger").filter(|trigger| trigger.is_object()) else {
+        return lines;
+    };
+    if let Some(name) = trigger
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|name| !name.is_empty())
+    {
+        let name = bounded_summary_value(name);
+        *truncated |= name.truncated;
+        lines[0] = format!("{}: {}", operation.output_summary(value), name.text);
+    }
+    if matches!(
+        operation,
+        RoutineCapability::Create | RoutineCapability::Pause | RoutineCapability::Resume
+    ) && let Some(schedule) = routine_schedule_label(trigger.get("schedule"))
+    {
+        lines.push(format!("Schedule: {schedule}"));
+    }
+    if matches!(
+        operation,
+        RoutineCapability::Create | RoutineCapability::Resume
+    ) && let Some(next_run) = trigger
+        .get("next_run_at")
+        .and_then(serde_json::Value::as_str)
+        .and_then(format_utc_datetime)
+    {
+        lines.push(format!("Next run: {next_run}"));
+    }
+    lines
+}
+
+fn routine_list_preview_lines(value: &serde_json::Value, truncated: &mut bool) -> Vec<String> {
+    let Some(triggers) = value.get("triggers").and_then(serde_json::Value::as_array) else {
+        return vec!["Routines listed".to_string()];
+    };
+    let visible_count = triggers.len().min(ROUTINE_LIST_PREVIEW_LIMIT);
+    let overflow_count = usize::from(triggers.len() > ROUTINE_LIST_PREVIEW_LIMIT);
+    let mut lines = Vec::with_capacity(visible_count + overflow_count + 1);
+    lines.push(match triggers.len() {
+        0 => "No routines found".to_string(),
+        1 => "1 routine found".to_string(),
+        count => format!("{count} routines found"),
+    });
+    for trigger in triggers.iter().take(ROUTINE_LIST_PREVIEW_LIMIT) {
+        let Some(name) = trigger
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        let name = bounded_summary_value(name);
+        *truncated |= name.truncated;
+        let state = routine_state_label(trigger.get("state"));
+        let schedule = routine_schedule_label(trigger.get("schedule"));
+        let mut line = name.text;
+        if state.is_some() || schedule.is_some() {
+            let detail_bytes = state.map_or(0, str::len)
+                + schedule.map_or(0, str::len)
+                + usize::from(state.is_some() && schedule.is_some()) * 2;
+            line.reserve(3 + detail_bytes);
+            line.push_str(" — ");
+            if let Some(state) = state {
+                line.push_str(state);
+            }
+            if let Some(schedule) = schedule {
+                if state.is_some() {
+                    line.push_str(", ");
+                }
+                line.push_str(schedule);
+            }
+        }
+        lines.push(line);
+    }
+    if triggers.len() > ROUTINE_LIST_PREVIEW_LIMIT {
+        *truncated = true;
+        lines.push(format!(
+            "Showing first {ROUTINE_LIST_PREVIEW_LIMIT} routines"
+        ));
+    }
+    lines
+}
+
+/// Reads the first-party trigger output shape with kind "cron" or "once".
+/// Missing or non-string kinds are omitted; unknown string kinds degrade to
+/// the safe generic "scheduled" label instead of exposing raw schedule data.
+fn routine_schedule_label(schedule: Option<&serde_json::Value>) -> Option<&'static str> {
+    match schedule?.get("kind").and_then(serde_json::Value::as_str)? {
+        "cron" => Some("recurring"),
+        "once" => Some("one-time"),
+        _ => Some("scheduled"),
+    }
+}
+
+fn routine_state_label(state: Option<&serde_json::Value>) -> Option<&'static str> {
+    match state?.as_str()? {
+        "scheduled" => Some("active"),
+        "paused" => Some("paused"),
+        "completed" => Some("completed"),
+        _ => Some("unknown"),
+    }
+}
+
+/// Formats an optional backend RFC 3339 timestamp for display. Malformed
+/// values are intentionally omitted because this preview field is advisory;
+/// the authoritative trigger record remains unchanged.
+fn format_utc_datetime(value: &str) -> Option<String> {
+    let datetime = match chrono::DateTime::parse_from_rfc3339(value) {
+        Ok(datetime) => datetime,
+        Err(_) => {
+            // Do not attach the raw host-provided value: it is not trusted for logs.
+            tracing::debug!("routine display preview omitted malformed next_run_at");
+            return None;
+        }
+    };
+    Some(
+        datetime
+            .with_timezone(&chrono::Utc)
+            .format("%Y-%m-%d %H:%M UTC")
+            .to_string(),
+    )
 }
 
 fn safe_path_subtitle(value: &serde_json::Value) -> Option<String> {
@@ -932,8 +1224,13 @@ fn safe_path_subtitle(value: &serde_json::Value) -> Option<String> {
 /// `input_summary` (URL stripping, shell redaction, byte bounds) and falls back
 /// to the path subtitle for tools without a recognized primary argument.
 fn primary_arg_subtitle(capability_id: &str, value: &serde_json::Value) -> Option<String> {
-    if let Some(presentation) = routine_input_presentation(capability_id, value) {
-        return presentation.subtitle;
+    if routine_capability(capability_id) == Some(RoutineCapability::Create)
+        && let Some(name) = string_arg(value, &["name"])
+    {
+        return non_empty(bounded_summary_value(name).text);
+    }
+    if routine_capability(capability_id).is_some() {
+        return None;
     }
 
     // Search-shaped tools → the query string.

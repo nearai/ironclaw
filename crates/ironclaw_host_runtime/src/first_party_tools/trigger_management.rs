@@ -23,7 +23,6 @@ use crate::{
 use super::{
     FIRST_PARTY_MAX_OUTPUT_BYTES, bounded_input_size, bounded_output_bytes,
     first_party_capability_manifest, input_error, resource_profile,
-    trigger_presentation::routine_output_presentation,
 };
 
 const TRIGGER_LIST_MAX_LIMIT: usize = 100;
@@ -38,9 +37,6 @@ pub const TRIGGER_RESUME_CAPABILITY_ID: &str = "builtin.trigger_resume";
 
 const TRIGGER_CREATE_DESCRIPTION: &str = include_str!("prompts/trigger_create.md");
 const TRIGGER_LIST_DESCRIPTION: &str = include_str!("prompts/trigger_list.md");
-const TRIGGER_REMOVE_DESCRIPTION: &str = include_str!("prompts/trigger_remove.md");
-const TRIGGER_PAUSE_DESCRIPTION: &str = include_str!("prompts/trigger_pause.md");
-const TRIGGER_RESUME_DESCRIPTION: &str = include_str!("prompts/trigger_resume.md");
 
 pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
@@ -60,21 +56,21 @@ pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         )?,
         first_party_capability_manifest(
             TRIGGER_REMOVE_CAPABILITY_ID,
-            TRIGGER_REMOVE_DESCRIPTION,
+            "Remove a caller-scoped scheduled trigger",
             vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
             PermissionMode::Ask,
             resource_profile(),
         )?,
         first_party_capability_manifest(
             TRIGGER_PAUSE_CAPABILITY_ID,
-            TRIGGER_PAUSE_DESCRIPTION,
+            "Pause a caller-scoped scheduled trigger so it remains retained but does not fire",
             vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
             PermissionMode::Ask,
             resource_profile(),
         )?,
         first_party_capability_manifest(
             TRIGGER_RESUME_CAPABILITY_ID,
-            TRIGGER_RESUME_DESCRIPTION,
+            "Resume a caller-scoped paused trigger so it may fire on its stored schedule",
             vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
             PermissionMode::Ask,
             resource_profile(),
@@ -254,14 +250,10 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
             }
         };
         let output_bytes = bounded_output_bytes(&output, FIRST_PARTY_MAX_OUTPUT_BYTES)?;
-        let display_preview = routine_output_presentation(request.capability_id.as_str(), &output);
-        Ok(
-            FirstPartyCapabilityResult::new(
-                output,
-                elapsed_usage_with_bytes(started, output_bytes),
-            )
-            .with_display_preview(display_preview),
-        )
+        Ok(FirstPartyCapabilityResult::new(
+            output,
+            elapsed_usage_with_bytes(started, output_bytes),
+        ))
     }
 }
 
@@ -905,25 +897,6 @@ mod tests {
             TRIGGER_CREATE_DESCRIPTION.contains("pass delivery_target_id with an id from")
                 && TRIGGER_CREATE_DESCRIPTION.contains("builtin__outbound_delivery_targets_list"),
             "trigger_create description must teach per-trigger delivery routing: {TRIGGER_CREATE_DESCRIPTION}"
-        );
-    }
-
-    #[test]
-    fn every_trigger_verb_description_requires_safe_routine_presentation() {
-        for (verb, description) in [
-            ("create", TRIGGER_CREATE_DESCRIPTION),
-            ("list", TRIGGER_LIST_DESCRIPTION),
-            ("remove", TRIGGER_REMOVE_DESCRIPTION),
-            ("pause", TRIGGER_PAUSE_DESCRIPTION),
-            ("resume", TRIGGER_RESUME_DESCRIPTION),
-        ] {
-            assert!(description.contains("user-facing reply"), "{verb}");
-            assert!(description.contains("routine"), "{verb}");
-            assert!(description.contains("never expose"), "{verb}");
-        }
-        assert!(
-            !TRIGGER_LIST_DESCRIPTION.contains("tasks"),
-            "list output does not provide a safe task summary"
         );
     }
 

@@ -283,7 +283,6 @@ fn channel_connection_display_preview(
         output_kind: CHANNEL_CONNECTION_REQUIRED_OUTPUT_KIND.to_string(),
         subtitle: None,
         truncated: false,
-        final_reply_presentation: None,
     })
 }
 

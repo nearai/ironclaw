@@ -20,10 +20,7 @@ pub use slots::{
     ReplyAdmissionStrategyState, StopStrategyState,
 };
 
-use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityFinalReplyPresentation, CapabilityId, CorrelationId,
-    ResourceEstimate,
-};
+use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId, ResourceEstimate};
 use ironclaw_turns::{
     LoopGateRef, LoopMessageRef, LoopResultRef,
     run_profile::{
@@ -65,12 +62,6 @@ pub struct LoopExecutionState {
     #[serde(default)]
     pub seen_capability_output_digests: BoundedRing<CapabilityOutputObservation, 64>,
     pub recent_failure_kinds: BoundedRing<LoopFailureKind, 8>,
-    /// Capability-owned presentation policies carried from completed tool
-    /// results until the assistant reply is finalized. Generic loop code does
-    /// not interpret capability ids or result fields; it only applies these
-    /// typed, bounded policies at the transcript boundary.
-    #[serde(default)]
-    pub pending_final_reply_presentations: BoundedRing<CapabilityFinalReplyPresentation, 8>,
     /// Rolling window of assistant-output token counts (from
     /// `LoopModelResponse::usage.output_tokens`). The default stop
     /// strategy uses this to detect diminishing-returns loops:
@@ -293,7 +284,6 @@ impl LoopExecutionState {
             recent_call_signatures: BoundedRing::new(),
             seen_capability_output_digests: BoundedRing::new(),
             recent_failure_kinds: BoundedRing::new(),
-            pending_final_reply_presentations: BoundedRing::new(),
             recent_output_token_counts: BoundedRing::new(),
             cumulative_model_usage: None,
             final_answer_nudges_used: 0,
@@ -361,7 +351,6 @@ impl LoopExecutionState {
         self.input_cursor = LoopInputCursor::origin_for_run(context);
         self.assistant_refs.clear();
         self.result_refs.clear();
-        self.pending_final_reply_presentations = BoundedRing::new();
         // A retry rebases onto a different run id; the failed run's token total
         // belongs to that run and must not be re-reported under the new one.
         // (Same-run gate resumes return early above, preserving the total.)
@@ -823,10 +812,6 @@ mod tests {
         state
             .result_refs
             .push(ironclaw_turns::LoopResultRef::new("result:source-run").unwrap());
-        state.pending_final_reply_presentations.push(
-            CapabilityFinalReplyPresentation::new("Source-run safe reply")
-                .expect("safe presentation"),
-        );
         state.iteration = 4;
         state.cumulative_model_usage = Some(ironclaw_turns::run_profile::LoopModelUsage {
             input_tokens: 100,
@@ -878,7 +863,6 @@ mod tests {
         );
         assert!(rebased.assistant_refs.is_empty());
         assert!(rebased.result_refs.is_empty());
-        assert!(rebased.pending_final_reply_presentations.is_empty());
         // A retry rebases onto a different run id, so the failed run's token
         // total must be dropped rather than re-reported under the new run.
         assert!(rebased.cumulative_model_usage.is_none());

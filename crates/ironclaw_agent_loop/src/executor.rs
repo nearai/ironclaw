@@ -22,9 +22,7 @@ mod prompt;
 mod reply_admission;
 mod turn_stop;
 
-use assistant_reply::{
-    AssistantReplyInput, AssistantReplyStage, apply_capability_final_reply_presentation,
-};
+use assistant_reply::{AssistantReplyInput, AssistantReplyStage};
 use budget::{BudgetInput, BudgetStage, BudgetStep};
 use capabilities::{CapabilityInput, CapabilityStage};
 use capability_helpers::{
