@@ -3,7 +3,7 @@
 > **RETIRED (P7b, DEL-5).** The `ProductAdapter` trait, its
 > `ironclaw_wasm_product_adapters` host runtime crate, and the dead impls were
 > deleted as a consolidation; the live external-protocol contract is
-> **`ChannelAdapter`** (`ironclaw_channel_adapter` / `ironclaw_product_adapters`),
+> **`ChannelAdapter`** (`ironclaw_product_adapters::channel_adapter`),
 > onto which ProductAdapter's conformance and outbound-delivery suites were
 > ported unweakened. Concrete integrations ship as first-party extension
 > packages under `crates/ironclaw_first_party_extensions` (P7b, DEL-8 lane A).

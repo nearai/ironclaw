@@ -302,7 +302,7 @@ Rules:
 - Host API contracts must not project `tool` or `auth` section surfaces —
   those kinds have dedicated declaration paths above. Validation fails
   closed.
-- `ProviderId` (`RuntimeCredentialAccountProviderId`) is the credential
+- `VendorId` is the credential
   authority namespace, not the extension id: several extensions (gmail,
   google-drive, ...) may share one provider (`google`).
 

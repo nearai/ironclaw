@@ -559,7 +559,7 @@ pub struct RuntimeCredentialRequirement {
 
 pub enum RuntimeCredentialRequirementSource {
     SecretHandle,
-    ProductAuthAccount { provider: RuntimeCredentialAccountProviderId },
+    ProductAuthAccount { provider: VendorId, setup: RuntimeCredentialAccountSetup },
 }
 ```
 

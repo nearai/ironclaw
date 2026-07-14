@@ -367,7 +367,7 @@ struct OAuthProductAuthInfra {
 /// the durable `FilesystemAuthProductServices`. The two callers
 /// (`build_oauth_product_auth_for_test` and
 /// `build_google_oauth_product_auth_for_test`) differ only in the egress
-/// constructor, the `HostOAuthProviderSpec` fields, and the optional
+/// constructor (the scripted token-response body) and the optional
 /// `.with_provider_client()` call.
 fn build_oauth_product_auth_infra() -> OAuthProductAuthInfra {
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};

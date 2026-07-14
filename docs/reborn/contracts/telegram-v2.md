@@ -1,9 +1,19 @@
 # Telegram WASM v2 ProductAdapter
 
-**Status:** First-slice tracer-bullet for #3285 (default off).
+> **RETIRED (P7b, DEL-5/DEL-2).** This document describes the original Telegram
+> tracer-bullet against the now-deleted `ProductAdapter` trait and its
+> `ironclaw_wasm_product_adapters` host-runtime crate. The live contract is
+> **`ChannelAdapter`** (`ironclaw_product_adapters::channel_adapter`); Telegram
+> ships as the first-party extension package `ironclaw_telegram_extension`, and
+> inbound signature verification is host-owned recipe verification
+> (`shared_secret_header`), not an adapter-crate `SharedSecretHeaderAuth`. Read
+> this for the *shape* of the parse-inbound / render-outbound boundary, not for
+> current type or crate names — see `product-adapters.md` and
+> `docs/reborn/extension-runtime/`.
+
+**Status:** Retired — superseded by `ChannelAdapter` (see banner above).
 **Crate:** `ironclaw_telegram_extension`.
-**Host runtime:** `ironclaw_wasm_product_adapters`.
-**Contract:** `ironclaw_product_adapters` (see `product-adapters.md`).
+**Contract:** `ChannelAdapter` (`ironclaw_product_adapters`; see `product-adapters.md`).
 
 ## Goals
 

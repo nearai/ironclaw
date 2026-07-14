@@ -53,12 +53,33 @@ Rules — kept short on purpose:
   tools outside the namespace/count/schema-size/effects ceiling are rejected;
   only the `[mcp]` connection credential and server host carry authority —
   discovered tools cannot add credentials or egress.
+  — PARTIAL: the manifest half is built + tested (`[mcp]` mutual-exclusion +
+  required-field checks, `crates/ironclaw_extensions/tests/manifest_v3_contract.rs`);
+  the runtime discovery-ceiling *rejection* (out-of-namespace/count/schema-size/
+  effects) is not pinned by a MAN-6-named test — loader-owned discovery is
+  covered structurally under TOOL-9. Ticks with a ceiling-rejection test.
 - [ ] MAN-7 Two extensions with the same vendor id and identical-except-scopes
   recipes activate and share one vendor record; differing recipes fail
   activation with a conflict error.
-- [ ] MAN-8 `trigger`/`file` remain reserved kinds with no runtime binding.
-- [ ] MAN-9 Retired-taxonomy gate still passes (no `slack_bot`/
-  `slack_personal`/channel-as-product vocabulary).
+  — PARTIAL: the recipe union/conflict logic is unit-tested
+  (`shared_vendor_recipes_union_scopes_and_reject_conflicts`,
+  `crates/ironclaw_extension_host/src/recipes.rs`), asserting both extension
+  names in the conflict error; but the *activation-caller* path (two extensions
+  activating → shared record / conflict-fails-activation) is not pinned by a
+  caller-level test. Ticks with that activation-tier test.
+- [x] MAN-8 `trigger`/`file` remain reserved kinds with no runtime binding. —
+  `CapabilitySurfaceKind::{Trigger,File}` are reserved enum variants
+  (`crates/ironclaw_host_api/src/surface.rs`, doc "no manifest section projects
+  this kind yet"), wire-pinned by
+  `surface_kind_wire_shape_is_snake_case_and_matches_as_str`; nothing binds them
+  at runtime by construction — the binding rule (LIFE-1) binds only
+  `tools`/`channel` and no loader path exists for `trigger`/`file`.
+- [x] MAN-9 Retired-taxonomy gate still passes (no `slack_bot`/
+  `slack_personal`/channel-as-product vocabulary). —
+  `reborn_code_never_references_retired_taxonomy`
+  (`crates/ironclaw_architecture/tests/reborn_retired_taxonomy.rs`) scans
+  `crates/` + `tests/integration/` and pins the retired vocabulary at zero;
+  green under `cargo test -p ironclaw_architecture`.
 - [ ] MAN-10 `[channel].conversation_model` is required and validated;
   conversation binding honors the declared model through a caller-level
   workflow test; the WebUI's internal channel uses the same enum.
@@ -173,13 +194,21 @@ Rules — kept short on purpose:
   — `cleanup_failure_lands_in_removal_pending_and_retry_completes`
   (`tests/lifecycle_contract.rs`): a cleanup failure lands `RemovalPending`,
   never runs the later auth/delete steps, and the extension stays unpublished.
-- [x] LIFE-12 Removing one extension preserves grants of a shared vendor
+- [ ] LIFE-12 Removing one extension preserves grants of a shared vendor
   still used by another active extension; removes them when it was the last
   consumer.
-  — the removal context carries `other_active_extension_ids`
-  (`removal_context_reports_other_active_extensions_for_shared_vendor`); the
-  shared-vendor grant policy itself is enforced by the injected auth-revoke
-  hook, proven end-to-end with the P3 auth engine.
+  — PARTIAL (P6-deferred). The removal *context* carries
+  `other_active_extension_ids` and is unit-pinned
+  (`removal_context_reports_other_active_extensions_for_shared_vendor`), but
+  only for the empty case — that test installs a single extension and asserts
+  the context is empty; it discards the peer binding it builds. The grant
+  *policy* is NOT enforced yet: the production hook
+  `FacadeOwnedRemovalHooks::revoke_and_delete_grants`
+  (`crates/ironclaw_reborn_composition/src/extension_host/generic_host.rs`) is a
+  no-op stub ("grants are facade-owned until the P6 extraction"), so
+  preserve-on-shared-vendor / remove-on-last-consumer is unimplemented and
+  unproven. Ticks when the P6 host-owned removal pipeline lands the policy with
+  a caller-level test exercising a live peer.
 - [x] LIFE-13 Conversation/LLM history survives extension removal. — removal
   runs the vendor-blind removable-channel cleanup (grants, integration state,
   identity bindings — `3812d9fe3`) and never touches turn/LLM history stores
@@ -354,8 +383,13 @@ Rules — kept short on purpose:
   is the only `AuthProviderClient` composition builds
   (`compose_provider_client`,
   `crates/ironclaw_reborn_composition/src/product_auth/credentials/product_auth_providers.rs`);
-  the specificity scanner allowlist shrank by 19 entries with the deleted
-  per-vendor modules (`reborn_generic_code_names_no_concrete_extension`).
+  the `ironclaw_auth` engine crate carries zero concrete-vendor literals and the
+  extension ABI (`wit/channel.wit`) has no auth trait. CAVEAT: the parenthetical
+  "no vendor-conditional in composition" is not yet literal — the specificity
+  gate `reborn_generic_code_names_no_concrete_extension` passes against a
+  non-empty allowlist that still lists composition vendor branches (e.g.
+  `extension_host/gsuite.rs`); that residue is tracked by DEL-8, not blocked
+  here. The per-vendor auth modules/specs were deleted (AUTH-16).
 - [x] AUTH-2 The authorize URL is host-constructed; recipes cannot supply or
   override `state`, `redirect_uri`, PKCE, `client_id`, `response_type`, or the
   scope parameter. — `authorize_url_is_host_constructed_for_every_oauth_vendor_row`,
@@ -598,13 +632,12 @@ Rules — kept short on purpose:
   (`extension_host/channel_delivery.rs`).
 - [x] ING-12 Slack and Telegram inbound both pass through the same router and
   workflow caller with zero host branches (one integration proof each). —
-  Slack: the full `slack_serve/e2e_tests.rs` scenario suite (24 tests) now
-  drives the generic router + recipe verifier + `SlackChannelAdapter` +
-  generic sink through the alias mount (e.g.
+  Slack: the full
+  `crates/ironclaw_reborn_composition/src/extension_host/channel_host/e2e_tests.rs`
+  scenario suite (28 tests) now drives the generic router + recipe verifier +
+  `SlackChannelAdapter` + generic sink through the alias mount (e.g.
   `slack_dm_delivers_final_reply_after_immediate_ack`,
-  `slack_events_rejects_forged_hmac_signature`), and
-  `build_slack_events_route_mount_dispatches_signed_event_callback`
-  (`slack_host_beta.rs`) proves it over the composed runtime. Acme proves the
+  `slack_events_rejects_forged_hmac_signature`). Acme proves the
   route-agnostic half (`tests/integration/extension_ingress.rs`). Telegram
   (P5): `telegram_update_becomes_a_turn_and_a_coordinated_reply`
   (`tests/integration/extension_delivery.rs`) drives a signed update through
@@ -633,13 +666,13 @@ Rules — kept short on purpose:
   through `RunDeliveryServices.coordinator` (`run_delivery_contract.rs`, 11
   scenarios); the P5 cutover deleted the direct Slack send lane
   (`slack_delivery.rs`, `slack_egress.rs`, `slack_dm_open.rs`) and re-pointed
-  all 24 `slack_serve/e2e_tests.rs` scenarios through the coordinator.
+  all 28 `channel_host/e2e_tests.rs` scenarios through the coordinator.
 - [x] OUT-2 Target resolution preserves source-route replies and preference
   targets; unauthorized/unavailable targets fail closed. — Policy-class
   deliveries run the SAME `OutboundPolicyService` pipeline (source-route
   reply-target validation + preference targets) inside the coordinator;
-  fail-closed rows: `revoked_or_rejected_target_does_not_call_render_or_egress`,
-  `require_direct_message_true_propagates_to_resolver_and_maps_to_rejected`,
+  fail-closed rows: `coordinator_rejected_policy_decision_does_not_reach_the_adapter`,
+  `coordinator_require_direct_message_rejects_non_dm_target_without_egress`,
   `coordinator_fails_closed_when_the_channel_is_unavailable`,
   `coordinator_notice_fails_closed_when_the_channel_is_unavailable`
   (`outbound_delivery_contract.rs`); the triggered path resolves the
@@ -657,10 +690,11 @@ Rules — kept short on purpose:
   `ChannelAdapter::deliver(envelope, &dyn RestrictedEgress)` receives no
   store by signature; all status writes live in
   `delivery_coordinator.rs`; the factory constructs the coordinator only
-  when a real channel-egress transport exists (no transport → `None`, and
-  Slack host construction then fails with
-  `RuntimeHttpEgressUnavailable` rather than wiring a no-op sink —
-  `factory.rs`, `slack_host_beta.rs`).
+  when a real channel-egress transport exists — with no transport the factory
+  returns `delivery_coordinator: None` rather than wiring a no-op sink
+  (`crates/ironclaw_reborn_composition/src/factory.rs`). There is deliberately
+  no no-op-sink constructor (`delivery_coordinator.rs` doc), so the guarantee
+  is structural rather than a dedicated test.
 - [x] OUT-5 Retry/backoff, dedupe, single-flight, and shutdown drain are
   generic and tested with a scripted adapter. —
   `coordinator_retries_fully_retryable_reports_then_delivers` (bounded
@@ -700,12 +734,13 @@ Rules — kept short on purpose:
   DNS-rebind are the host-runtime egress layer's existing SSRF guards —
   `channel_egress.rs::header_injection_reaches_the_network_request` pins the
   pinned-policy handoff).
-- [x] OUT-9 Delivery attempt persistence passes on both DBs. —
-  `reborn_integration_outbound_store_durability` (dedicated both-DB store
-  suite) plus the P5 delivery proofs' `Delivered`-attempt assertions run
-  matrixed over `StorageMode::{LibSql,Postgres}`
-  (`tests/integration/extension_delivery.rs`; a Postgres provisioning
-  failure is a test failure, never a skip).
+- [x] OUT-9 Delivery attempt persistence passes on both DBs. — the P5 delivery
+  proofs' `Delivered`-attempt assertions run matrixed over
+  `StorageMode::{LibSql,Postgres}` (`tests/integration/extension_delivery.rs`;
+  a Postgres provisioning failure is a test failure, never a skip). NOTE: the
+  separately-cited `reborn_integration_outbound_store_durability` binary is
+  libsql-only (its single test is a fresh-libsql reopen); the both-DB guarantee
+  rides the delivery-proof matrix above, not that store suite.
 - [x] OUT-10 Slack rendering/splitting/DM-provisioning and Telegram rendering
   live only in their crates (fixture unit tests) with one outbound
   integration proof each. — Rendering/splitting/`conversations.open` DM
@@ -873,12 +908,17 @@ Rules — kept short on purpose:
     sanctioned DEL-7 dev-dep, and incidental doc/tool-string examples that name
     an extension but branch on nothing. Tagged and inventoried; each is the
     owner's degenericize-or-carve decision.
-- [x] DEL-9 `check-generic-without-concrete.sh` passes in CI: every generic
+- [ ] DEL-9 `check-generic-without-concrete.sh` passes in CI: every generic
   crate's dependency tree is free of concrete extension crates and its tests
-  pass — the deletion test. — `bash scripts/ci/check-generic-without-concrete.sh`
-  green post-deletion with `TEMPORARY_EXCEPTIONS` empty (63 generic
-  crates checked; the P6 S6 lane deletion removed the composition→slack
-  edge; full per-crate test runs included).
+  pass — the deletion test. — LOCAL pass, NOT yet CI-wired. The script is
+  correct with `TEMPORARY_EXCEPTIONS` empty; `bash
+  scripts/ci/check-generic-without-concrete.sh --trees-only` is green
+  ("dependency graphs clean", 63 generic crates). The *dependency-direction*
+  half runs in CI via the `ironclaw_architecture` arch test
+  (`concrete_extension_crates_link_only_from_the_binary_and_tests`), but **no
+  CI workflow invokes this script**, so the "in CI" clause and the full
+  per-crate isolated-test form are unmet. Wiring the script into a CI job (and
+  marking it required) is the remaining step — tracked jointly with REL-5.
 - [x] DEL-10 Telegram runs as a real installed package (manifest +
   `activate()` webhook registration) — the addition test proven by the second
   production channel. — Adapter half (P4):
