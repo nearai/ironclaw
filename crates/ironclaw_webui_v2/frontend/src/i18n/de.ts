@@ -1290,7 +1290,7 @@ registerPack("de", {
   "automations.hold.auth": "Wartet darauf, dass Sie ein Konto erneut verbinden",
   "automations.hold.inProgress": "Vorheriger Lauf läuft noch",
   "automations.hold.meta.inProgress":
-    "Gestartet {since} · nächster Lauf startet, sobald dieser abgeschlossen ist · {count} geplante Vorkommen während der Pause verstrichen",
+    "Gestartet {since} · nächster Lauf startet, sobald dieser abgeschlossen ist · {count} geplante Vorkommen während der laufenden Ausführung verstrichen",
   "automations.hold.meta.inProgressUnknownCount":
     "Gestartet {since} · nächster Lauf startet, sobald dieser abgeschlossen ist · Anzahl verstrichener geplanter Vorkommen nicht verfügbar",
   "automations.hold.meta.paused":

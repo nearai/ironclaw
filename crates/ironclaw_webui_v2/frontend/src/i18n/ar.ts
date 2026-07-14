@@ -1290,7 +1290,7 @@ registerPack("ar", {
   "automations.hold.auth": "بانتظار إعادة ربط حساب",
   "automations.hold.inProgress": "التشغيل السابق لا يزال قيد التنفيذ",
   "automations.hold.meta.inProgress":
-    "بدأ {since} · سيبدأ التشغيل التالي بعد انتهاء هذا · مرّت {count} من الأوقات المجدولة أثناء التوقف",
+    "بدأ {since} · سيبدأ التشغيل التالي بعد انتهاء هذا · مرّت {count} من الأوقات المجدولة أثناء استمرار التشغيل",
   "automations.hold.meta.inProgressUnknownCount":
     "بدأ {since} · سيبدأ التشغيل التالي بعد انتهاء هذا · عدد الأوقات المجدولة المنقضية غير متوفر",
   "automations.hold.meta.paused":

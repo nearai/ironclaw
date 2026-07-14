@@ -1291,7 +1291,7 @@ registerPack("es", {
   "automations.hold.auth": "Esperando que vuelvas a conectar una cuenta",
   "automations.hold.inProgress": "La ejecución anterior sigue en curso",
   "automations.hold.meta.inProgress":
-    "Iniciado {since} · la próxima ejecución comenzará cuando esta termine · {count} ocurrencias programadas transcurridas mientras estaba en pausa",
+    "Iniciado {since} · la próxima ejecución comenzará cuando esta termine · {count} ocurrencias programadas transcurridas mientras el bloqueo estuvo activo",
   "automations.hold.meta.inProgressUnknownCount":
     "Iniciado {since} · la próxima ejecución comenzará cuando esta termine · recuento de ocurrencias programadas transcurridas no disponible",
   "automations.hold.meta.paused":

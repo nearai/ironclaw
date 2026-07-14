@@ -1290,7 +1290,7 @@ registerPack("ko", {
   "automations.hold.auth": "계정 재연결을 기다리는 중입니다",
   "automations.hold.inProgress": "이전 실행이 아직 진행 중입니다",
   "automations.hold.meta.inProgress":
-    "{since}에 시작됨 · 완료 후 다음 실행이 시작됩니다 · 보류 중 예정된 발생 시점 {count}개 경과",
+    "{since}에 시작됨 · 완료 후 다음 실행이 시작됩니다 · 실행 중 예정된 발생 시점 {count}개 경과",
   "automations.hold.meta.inProgressUnknownCount":
     "{since}에 시작됨 · 완료 후 다음 실행이 시작됩니다 · 예정된 발생 시점 경과 수를 알 수 없음",
   "automations.hold.meta.paused":
