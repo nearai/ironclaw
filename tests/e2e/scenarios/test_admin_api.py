@@ -135,28 +135,71 @@ async def test_get_user_detail(admin_client, test_user):
     assert user["display_name"] == "E2E Test User"
 
 
-async def test_existing_user_detail_hides_unsupported_token_reissue(
-    reborn_v2_page, reborn_v2_server, test_user
+async def test_admin_token_visibility_matches_user_creation_lifecycle(
+    admin_client, reborn_v2_page, reborn_v2_server, test_user
 ):
-    """Existing users expose only backend-supported actions in the admin UI."""
+    """Creation shows the one-time token; existing-user details do not."""
     await reborn_v2_page.goto(
         f"{reborn_v2_server}/v2/admin/users?token={REBORN_V2_AUTH_TOKEN}"
     )
-    await reborn_v2_page.get_by_role(
-        "button", name="E2E Test User", exact=True
-    ).click()
+    created_user_id = None
+    try:
+        display_name = f"UI Token User {uuid.uuid4().hex[:8]}"
+        email = f"ui-token-{uuid.uuid4().hex[:8]}@example.com"
+        await reborn_v2_page.get_by_role(
+            "button", name="New user", exact=True
+        ).click()
+        create_form = reborn_v2_page.locator("form")
+        await create_form.locator('input[type="text"]').fill(display_name)
+        await create_form.locator('input[type="email"]').fill(email)
 
-    await expect(
-        reborn_v2_page.get_by_role("heading", name="E2E Test User", exact=True)
-    ).to_be_visible(timeout=15000)
-    await expect(
-        reborn_v2_page.get_by_role("button", name="Create token", exact=True)
-    ).to_have_count(0)
-    await expect(
-        reborn_v2_page.get_by_text(
-            "Copy this now — it will not be shown again.", exact=True
-        )
-    ).to_have_count(0)
+        async with reborn_v2_page.expect_response(
+            lambda response: response.request.method == "POST"
+            and response.url.endswith(f"{ADMIN_BASE}/users")
+        ) as response_info:
+            await create_form.get_by_role(
+                "button", name="Create user", exact=True
+            ).click()
+        create_response = await response_info.value
+        assert create_response.status == 200
+        created = await create_response.json()
+        created_user_id = created["user"]["user_id"]
+        one_time_token = created["api_token"]
+
+        await expect(
+            reborn_v2_page.get_by_text("Token created", exact=True)
+        ).to_be_visible(timeout=15000)
+        await expect(
+            reborn_v2_page.locator("code").filter(has_text=one_time_token)
+        ).to_be_visible()
+        await expect(
+            reborn_v2_page.get_by_text(
+                "Copy this now — it will not be shown again.", exact=True
+            )
+        ).to_be_visible()
+
+        await reborn_v2_page.get_by_role(
+            "button", name="E2E Test User", exact=True
+        ).click()
+        await expect(
+            reborn_v2_page.get_by_role(
+                "heading", name="E2E Test User", exact=True
+            )
+        ).to_be_visible(timeout=15000)
+        await expect(
+            reborn_v2_page.get_by_role("button", name="Create token", exact=True)
+        ).to_have_count(0)
+        await expect(
+            reborn_v2_page.get_by_text(
+                "Copy this now — it will not be shown again.", exact=True
+            )
+        ).to_have_count(0)
+    finally:
+        if created_user_id is not None:
+            cleanup = await admin_client.delete(
+                f"{ADMIN_BASE}/users/{created_user_id}"
+            )
+            assert cleanup.status_code == 200, cleanup.text
 
 
 async def test_update_user_profile(admin_client, test_user):
