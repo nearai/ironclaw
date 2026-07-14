@@ -91,6 +91,18 @@ fn hosted_mcp_mint_rejects_hostless_url() {
     assert!(HostedMcpExtensionId::mint(&tenant, &owner, "mailto:foo@bar.com", "").is_err());
 }
 
+/// #5970 review: query strings must be rejected at mint time, not folded into
+/// the mint hash — `account_label` is the designed-for-purpose mechanism for
+/// multi-account/endpoint differentiation, and folding a query string in
+/// would require exact normalization to avoid reintroducing the collision bug
+/// at a smaller blast radius.
+#[test]
+fn hosted_mcp_mint_rejects_query_bearing_url() {
+    let tenant = TenantId::from_trusted("tenant-a".to_string());
+    let owner = UserId::new(OWNER_USER_ID).expect("valid owner id");
+    assert!(HostedMcpExtensionId::mint(&tenant, &owner, "https://host/mcp?account=a", "").is_err());
+}
+
 #[tokio::test]
 async fn registered_load_rejects_valid_shaped_id_with_wrong_digest() {
     let temp = tempfile::tempdir().expect("tempdir");

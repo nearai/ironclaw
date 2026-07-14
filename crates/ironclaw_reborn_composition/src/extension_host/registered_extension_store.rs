@@ -112,6 +112,16 @@ fn normalized_hosted_mcp_url(url: &str) -> Result<String, ProductWorkflowError> 
             reason: "registered MCP URL must include a host".to_string(),
         })?
         .to_ascii_lowercase();
+    // Query strings differentiate accounts/endpoints out-of-band from
+    // `account_label` (the designed-for-purpose mechanism, see
+    // `HostedMcpExtensionId::mint`'s doc comment) and would otherwise require
+    // exact query normalization to avoid reintroducing a collision at a
+    // smaller blast radius — reject instead, mirroring `HostedMcpEndpoint::parse`.
+    if parsed.query().is_some() {
+        return Err(ProductWorkflowError::InvalidBindingRequest {
+            reason: "registered MCP URL must not include a query string".to_string(),
+        });
+    }
     let path = parsed.path().trim_end_matches('/');
     let normalized_path = if path.is_empty() { "/" } else { path };
     let port = parsed
