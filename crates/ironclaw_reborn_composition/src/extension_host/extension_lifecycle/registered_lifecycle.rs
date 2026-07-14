@@ -20,10 +20,7 @@ use crate::extension_host::registered_extension_store::{
     FilesystemRegisteredExtensionStore, is_owner_registered,
 };
 
-use super::{
-    RebornLocalExtensionManagementPort, extension_ids_from_package_ref,
-    map_extension_installation_error,
-};
+use super::{RebornLocalExtensionManagementPort, map_extension_installation_error};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct OwnerScope {
@@ -277,22 +274,22 @@ impl RebornLocalExtensionManagementPort {
     /// registered-sourced, the caller cannot see it, or the row's own
     /// registered descriptor cannot be found (a genuine miss, not a catalog
     /// fallback — the row's provenance already ruled the catalog out).
+    ///
+    /// `installation` is the row `resolve_available_for_scope` already fetched
+    /// for this same `package_ref`'s installation id — passed in rather than
+    /// re-fetched here so the caller's `get_installation` reaches the store
+    /// exactly once per resolution instead of twice.
     pub(super) async fn resolve_registered_row_for_package_ref(
         &self,
         package_ref: &LifecyclePackageRef,
         scope: &ResourceScope,
+        installation: Option<&ExtensionInstallation>,
     ) -> Result<Option<Arc<AvailableExtensionPackage>>, ProductWorkflowError> {
-        let (_, installation_id) = extension_ids_from_package_ref(package_ref)?;
-        let Some(installation) = self
-            .installation_store
-            .get_installation(&installation_id)
-            .await
-            .map_err(map_extension_installation_error)?
-        else {
+        let Some(installation) = installation else {
             return Ok(None);
         };
         let Some(owner_scope) =
-            installation_effective_owner_scope(&self.installation_store, &installation).await?
+            installation_effective_owner_scope(&self.installation_store, installation).await?
         else {
             return Ok(None);
         };

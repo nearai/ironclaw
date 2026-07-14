@@ -557,16 +557,16 @@ impl RebornLocalExtensionManagementPort {
         scope: &ResourceScope,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let caller = &scope.user_id;
-        let (_, installation_id) = extension_ids_from_package_ref(&package_ref)?;
-        let available = self
+        let ResolvedAvailableExtension {
+            package: available,
+            installation,
+        } = self
             .resolve_available_for_scope(&package_ref, scope)
             .await?
             .ok_or_else(available_extension_not_found)?;
-        let mut installation = self
-            .installation_store
-            .get_installation(&installation_id)
-            .await
-            .map_err(map_extension_installation_error)?
+        // Reuses the row `resolve_available_for_scope` already fetched for
+        // this same package ref instead of a second `get_installation` call.
+        let mut installation = installation
             // A foreign user-private install projects as not-installed for
             // this caller — same masking as search/list (#5459 P1).
             .filter(|installation| installation.owner().visible_to(caller));
@@ -782,29 +782,50 @@ impl RebornLocalExtensionManagementPort {
     /// never enter the shared catalog (boot-leak invariant). `Ok(None)` is a
     /// genuine miss (a foreign owner's registered package included); `Err` is
     /// a real registered-store read failure.
+    ///
+    /// Also returns the installation row fetched along the way (by
+    /// `package_ref`'s installation id, regardless of which branch below
+    /// resolves the package) so `project`/`install` — which both need that
+    /// same row right after calling this — don't issue a second
+    /// `get_installation` for the id they just resolved.
     async fn resolve_available_for_scope(
         &self,
         package_ref: &LifecyclePackageRef,
         scope: &ResourceScope,
-    ) -> Result<Option<Arc<AvailableExtensionPackage>>, ProductWorkflowError> {
-        if let Some(available) = self
-            .resolve_registered_row_for_package_ref(package_ref, scope)
+    ) -> Result<Option<ResolvedAvailableExtension>, ProductWorkflowError> {
+        let (_, installation_id) = extension_ids_from_package_ref(package_ref)?;
+        let installation = self
+            .installation_store
+            .get_installation(&installation_id)
+            .await
+            .map_err(map_extension_installation_error)?;
+        if let Some(package) = self
+            .resolve_registered_row_for_package_ref(package_ref, scope, installation.as_ref())
             .await?
         {
-            return Ok(Some(available));
+            return Ok(Some(ResolvedAvailableExtension {
+                package,
+                installation,
+            }));
         }
         let catalog_hit = {
             let catalog = self.catalog.read().await;
             catalog.resolve(package_ref).ok()
         };
-        if let Some(available) = catalog_hit {
-            return Ok(Some(available));
+        if let Some(package) = catalog_hit {
+            return Ok(Some(ResolvedAvailableExtension {
+                package,
+                installation,
+            }));
         }
         Ok(self
             .registered_store
             .resolve_for_scope(scope, package_ref)
             .await?
-            .map(Arc::new))
+            .map(|package| ResolvedAvailableExtension {
+                package: Arc::new(package),
+                installation,
+            }))
     }
 
     async fn search_summary(
@@ -971,10 +992,19 @@ impl RebornLocalExtensionManagementPort {
         // registered-set fallback is caller-scoped, so a foreign owner's
         // registered package is not-found here — which is what makes the
         // operator-eviction arm below unreachable for registered ids.
+        //
+        // Deliberately NOT reusing `resolve_available_for_scope`'s own
+        // (pre-lock) installation-row read for the `existing` decision below:
+        // that snapshot can go stale across the `operation_lock.lock().await`
+        // yield point, and this match is the mutation decision (fresh install
+        // vs. join/evict membership on an id another caller may have just
+        // installed concurrently). It must read the row again once the lock
+        // is held, exactly like `remove`'s own fresh-under-lock read.
         let available = self
             .resolve_available_for_scope(&package_ref, scope)
             .await?
-            .ok_or_else(available_extension_not_found)?;
+            .ok_or_else(available_extension_not_found)?
+            .package;
         let _operation_guard = self.operation_lock.lock().await;
         let installation_id =
             ExtensionInstallationId::new(available.package.id.as_str().to_string())
@@ -2292,6 +2322,15 @@ struct HostedMcpDiscoveryRequest {
 struct ExtensionInstallPlan {
     manifest_record: ExtensionManifestRecord,
     installation: ExtensionInstallation,
+}
+
+/// `resolve_available_for_scope`'s result: the resolved package, plus the
+/// installation row it already fetched for `package_ref`'s installation id
+/// along the way — so `project`/`install` reuse that row instead of calling
+/// `get_installation` a second time for the id they just resolved.
+struct ResolvedAvailableExtension {
+    package: Arc<AvailableExtensionPackage>,
+    installation: Option<ExtensionInstallation>,
 }
 
 fn prepare_install(
