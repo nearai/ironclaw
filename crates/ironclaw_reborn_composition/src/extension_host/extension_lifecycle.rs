@@ -102,6 +102,7 @@ use active_publication::extension_trust_policy_input;
 use install_policy::{
     RemoveDecision, decide_install_on_existing, decide_remove, derive_owner,
     ensure_caller_may_operate, ensure_registered_row_tenant_match, install_scope_for_owner,
+    masked_not_installed,
 };
 #[cfg(test)]
 use registered_lifecycle::{OwnerScope, effective_owner_scope};
@@ -1000,12 +1001,31 @@ impl RebornLocalExtensionManagementPort {
                     // owners, astronomically unlikely rather than
                     // structurally prevented.
                     Some(owner) => owner,
-                    None => decide_install_on_existing(
-                        &available.package.id,
-                        existing.owner(),
-                        caller,
-                        &self.tenant_operator_user_id,
-                    )?,
+                    None => {
+                        // The catalog/registry resolution above did not come
+                        // from a `UserRegistered` manifest, but `existing`
+                        // (looked up by raw id) may still itself be a
+                        // registered row — e.g. a stuck bare-literal id from
+                        // a failed one-time id migration colliding with an
+                        // unrelated catalog package of the same id. A
+                        // catalog-sourced resolution must never claim or
+                        // evict a registered row it did not actually
+                        // resolve, so fail closed with the same masked
+                        // denial a foreign caller gets on a real registered
+                        // row (#5970 review).
+                        if installation_effective_owner_scope(&self.installation_store, &existing)
+                            .await?
+                            .is_some()
+                        {
+                            return Err(masked_not_installed(existing.extension_id()));
+                        }
+                        decide_install_on_existing(
+                            &available.package.id,
+                            existing.owner(),
+                            caller,
+                            &self.tenant_operator_user_id,
+                        )?
+                    }
                 };
                 self.installation_store
                     .upsert_installation(existing.with_owner(new_owner))

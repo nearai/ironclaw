@@ -6,7 +6,9 @@
 //! owner/tenant isolation across list/project/activate/remove, and the
 //! per-owner-batched boot-restore fallback's registered arm.
 
-use crate::extension_host::registered_test_support::minted_extension_id;
+use crate::extension_host::registered_test_support::{
+    minted_extension_id, mounted_local_filesystem, seed_registered_installation,
+};
 
 use super::*;
 
@@ -1083,6 +1085,182 @@ async fn foreign_and_operator_install_of_registered_package_is_not_found() {
                 .owner()
                 .visible_to(&owner_scope.user_id),
         "a distinct operator's failed install attempt must not evict the registered row to Tenant"
+    );
+}
+
+/// SECURITY (#5970 review): a bare-literal (non-minted) `UserRegistered` id
+/// stuck by a failed one-time id migration (`migrate_unminted_registered_ids`,
+/// skip-logged) can collide with an unrelated `InstalledLocal` catalog
+/// package sharing the same literal id — the `mcp-` namespace reservation
+/// only protects minted ids. Before the fix, `install()`'s fallback branch
+/// never checked whether the row `existing` at that id was itself a
+/// registered install before calling `decide_install_on_existing`, so a
+/// catalog-sourced resolution (`registration_owner` returns `None`) let a
+/// foreign member join, or the tenant operator evict, ownership of another
+/// owner's private registration it never actually resolved. Both attempts
+/// must instead get the masked "is not installed" denial, and the row must
+/// be untouched.
+#[tokio::test]
+async fn install_on_catalog_collision_with_stuck_registered_row_is_masked_not_installed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage_root = dir.path().join("local-dev");
+    let tenant = TenantId::new("default").expect("valid tenant");
+    let owner_a = UserId::new("owner-a").expect("valid user");
+    let stuck_id = "acme-stuck-migration";
+
+    let manifest_toml = registered_isolation_manifest_toml(
+        &ExtensionId::new(stuck_id).expect("valid extension id"),
+        REGISTERED_ISOLATION_URL,
+    );
+    let owner_dir = storage_root
+        .join("system/extensions/registered")
+        .join(tenant.as_str())
+        .join(owner_a.as_str())
+        .join(stuck_id);
+    std::fs::create_dir_all(&owner_dir).expect("registered manifest dir");
+    std::fs::write(owner_dir.join("manifest.toml"), &manifest_toml)
+        .expect("write registered descriptor");
+
+    // The colliding `InstalledLocal` catalog package, materialized under the
+    // shared root exactly as an admin bundle import would land it (an
+    // unrelated import that happens to reuse the stuck literal id).
+    let colliding_manifest_toml = format!(
+        r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "{stuck_id}"
+name = "Colliding Installed Local Extension"
+version = "0.1.0"
+description = "Catalog package colliding with a stuck registered id"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/colliding.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "{stuck_id}.search"
+description = "Search colliding data"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/search.input.json"
+output_schema_ref = "schemas/search.output.json"
+"#
+    );
+    let colliding_dir = storage_root.join("system/extensions").join(stuck_id);
+    std::fs::create_dir_all(&colliding_dir).expect("colliding catalog manifest dir");
+    std::fs::write(
+        colliding_dir.join("manifest.toml"),
+        &colliding_manifest_toml,
+    )
+    .expect("write colliding catalog descriptor");
+
+    let installation_store: Arc<dyn ExtensionInstallationStore> =
+        Arc::new(InMemoryExtensionInstallationStore::default());
+    seed_registered_installation(
+        &installation_store,
+        &manifest_toml,
+        &tenant,
+        &owner_a,
+        stuck_id,
+        None,
+    )
+    .await;
+
+    let installation_id = ExtensionInstallationId::new(stuck_id).expect("valid installation id");
+    let package_ref =
+        LifecyclePackageRef::new(LifecyclePackageKind::Extension, stuck_id).expect("valid ref");
+
+    // Foreign member: owner-a is this port's tenant operator, so owner-b is
+    // a plain member unrelated to the row.
+    let other_scope = resource_scope_for("default", "owner-b");
+    let filesystem = mounted_local_filesystem(&storage_root);
+    let catalog = AvailableExtensionCatalog::from_filesystem_root(
+        &filesystem,
+        &VirtualPath::new("/system/extensions").expect("valid virtual path"),
+    )
+    .await
+    .expect("catalog scan of the shared root");
+    let port = RebornLocalExtensionManagementPort::new(
+        Arc::new(filesystem),
+        catalog,
+        installation_store.clone(),
+        Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        ))),
+        test_active_extension_publisher(
+            Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new())),
+            test_extension_trust_policy(),
+        ),
+        None,
+        owner_a.clone(),
+    );
+    let error = port
+        .install(package_ref.clone(), &other_scope)
+        .await
+        .expect_err("a foreign caller must not claim a catalog-colliding registered row");
+    assert!(
+        error.to_string().contains("is not installed"),
+        "must be the masked not-installed denial: {error}"
+    );
+    let row = installation_store
+        .get_installation(&installation_id)
+        .await
+        .expect("store read")
+        .expect("registered row present");
+    assert!(
+        !row.owner().is_tenant() && row.owner().visible_to(&owner_a),
+        "a foreign caller's failed install must not evict or rewrite the registered row's owner"
+    );
+
+    // Tenant operator, a distinct identity from owner-a (Item E pattern from
+    // the sibling test above): `decide_install_on_existing`'s operator arm
+    // would otherwise evict the row to `Tenant`.
+    let operator_scope = resource_scope_for("default", "tenant-operator-c");
+    let operator_filesystem = mounted_local_filesystem(&storage_root);
+    let operator_catalog = AvailableExtensionCatalog::from_filesystem_root(
+        &operator_filesystem,
+        &VirtualPath::new("/system/extensions").expect("valid virtual path"),
+    )
+    .await
+    .expect("catalog scan of the shared root");
+    let operator_port = RebornLocalExtensionManagementPort::new(
+        Arc::new(operator_filesystem),
+        operator_catalog,
+        installation_store.clone(),
+        Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        ))),
+        test_active_extension_publisher(
+            Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new())),
+            test_extension_trust_policy(),
+        ),
+        None,
+        operator_scope.user_id.clone(),
+    );
+    let operator_error = operator_port
+        .install(package_ref, &operator_scope)
+        .await
+        .expect_err("the tenant operator must not evict a catalog-colliding registered row");
+    assert!(
+        operator_error.to_string().contains("is not installed"),
+        "must be the masked not-installed denial: {operator_error}"
+    );
+    let row_after_operator_attempt = installation_store
+        .get_installation(&installation_id)
+        .await
+        .expect("store read")
+        .expect("registered row present");
+    assert!(
+        !row_after_operator_attempt.owner().is_tenant()
+            && row_after_operator_attempt.owner().visible_to(&owner_a),
+        "the tenant operator's failed install attempt must not evict the registered row to Tenant"
     );
 }
 

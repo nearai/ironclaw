@@ -24,7 +24,9 @@ use ironclaw_product_workflow::{LifecycleInstallScope, ProductWorkflowError};
 /// returns on a mismatch — identical shape whether the row belongs to a
 /// different user or (#5459 P1 cross-tenant follow-up) the same user id in a
 /// different tenant, so neither leaks which is true to a non-owner caller.
-fn masked_not_installed(extension_id: &ExtensionId) -> ProductWorkflowError {
+/// `pub(super)` so `install()`'s catalog-collision guard (#5970 review) can
+/// return the identical denial shape without a second definition.
+pub(super) fn masked_not_installed(extension_id: &ExtensionId) -> ProductWorkflowError {
     ProductWorkflowError::InvalidBindingRequest {
         reason: format!("extension {} is not installed", extension_id.as_str()),
     }
