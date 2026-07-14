@@ -216,6 +216,18 @@ where
     // contract, or extending the transactional path to a backend that
     // lacks multi-key transactions) — a materially larger change than this
     // bug warrants; tracked as a follow-up rather than folded into this fix.
+    //
+    // This registry lives on the service struct, not on the backend/
+    // filesystem it wraps — so the ordering guarantee above additionally
+    // assumes exactly one `FilesystemSessionThreadService` is ever live for
+    // a given backend at a time. `ironclaw_reborn_composition`'s factory
+    // wiring constructs this service once per store graph at boot, but that
+    // wiring also has a "reopen" code path for rebuilding a store graph
+    // mid-process — whether that path can produce a second live instance
+    // overlapping with in-flight calls on the old one is not yet verified.
+    // If it can, this registry needs to move into shared backend state
+    // instead of living here. Tracked as a follow-up, not re-litigated by
+    // this comment alone.
     inbound_message_write_locks: Mutex<HashMap<String, Weak<AsyncMutex<()>>>>,
     known_thread_index_rows: Mutex<HashSet<String>>,
     known_thread_source_rows: Mutex<HashMap<String, HashSet<ThreadId>>>,
@@ -3081,34 +3093,41 @@ fn thread_root_string(scope: &ThreadScope, thread_id: &ThreadId) -> String {
 /// keys the thread-index bookkeeping sets/maps and deliberately uses a
 /// different string shape (`thread_index_cache_key(scope) + thread_id`) for
 /// that subsystem.
+///
+/// Length-prefixed so the encoding is injective: a plain `"{tenant}:{root}"`
+/// concatenation would let a `:` inside `tenant` collide with the delimiter
+/// (e.g. tenant `"a:b"` + root `"c"` vs. tenant `"a"` + root `"b:c"`), which
+/// would let one thread's cache entry or write lock be served under another
+/// thread's key. Prefixing each component with its byte length removes any
+/// delimiter-placement ambiguity regardless of what characters appear inside
+/// the components.
 fn thread_scope_key(scope: &ThreadScope, thread_id: &ThreadId) -> String {
-    format!(
-        "{}:{}",
-        scope.tenant_id.as_str(),
-        thread_root_string(scope, thread_id)
-    )
+    let tenant = scope.tenant_id.as_str();
+    let root = thread_root_string(scope, thread_id);
+    format!("{}:{tenant}:{}:{root}", tenant.len(), root.len())
 }
 
 /// Get-or-create a weak-referenced per-key async lock. Callers hold the
 /// returned `Arc` for the duration of their critical section; once the last
-/// holder drops it, `retain` below reclaims the now-dead entry on the next
-/// lookup instead of leaking one lock per key forever.
+/// holder drops it, `retain` reclaims the now-dead entry the next time this
+/// key misses, instead of leaking one lock per key forever. The live-key hit
+/// path skips `retain` so repeated lookups for the same in-use key (the
+/// common case on this now-hot path) stay O(1) rather than rescanning the
+/// whole map.
 fn weak_keyed_lock(
     locks: &Mutex<HashMap<String, Weak<AsyncMutex<()>>>>,
     key: String,
 ) -> Arc<AsyncMutex<()>> {
-    locks
+    let mut locks = locks
         .lock()
-        .map(|mut locks| {
-            locks.retain(|_, lock| lock.strong_count() > 0);
-            if let Some(lock) = locks.get(&key).and_then(|lock| lock.upgrade()) {
-                return lock;
-            }
-            let lock = Arc::new(AsyncMutex::new(()));
-            locks.insert(key, Arc::downgrade(&lock));
-            lock
-        })
-        .unwrap_or_else(|_| Arc::new(AsyncMutex::new(())))
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(lock) = locks.get(&key).and_then(|lock| lock.upgrade()) {
+        return lock;
+    }
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    let lock = Arc::new(AsyncMutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    lock
 }
 
 fn evict_hash_map_entry_over_limit<T>(
@@ -3583,7 +3602,7 @@ mod tests {
     use tokio::sync::Mutex as AsyncMutex;
 
     use super::message_sequence_index::{sequence_from_index_filename, sequence_index_filename};
-    use super::{InboundIdempotencyKey, idempotency_record_key};
+    use super::{InboundIdempotencyKey, idempotency_record_key, thread_scope_key};
     use crate::ThreadScope;
 
     #[test]
@@ -3649,6 +3668,39 @@ mod tests {
 
         assert!(record_key.starts_with("sha256-"));
         assert_eq!(record_key.len(), "sha256-".len() + 64);
+    }
+
+    /// `thread_scope_key` must stay injective in `(tenant, thread_root)` even
+    /// though `validate_scope_id` allows `:` inside scope ids (it only
+    /// forbids `/`, `\`, and control characters). A plain
+    /// `"{tenant}:{root}"` join is ambiguous once a `:` can appear inside a
+    /// component and land on the delimiter; length-prefixing each component
+    /// removes that ambiguity. These two pairs redistribute a `:` across the
+    /// tenant/agent-id boundary and must still produce distinct keys.
+    #[test]
+    fn thread_scope_key_is_injective_when_ids_contain_the_delimiter_char() {
+        use ironclaw_host_api::ThreadId;
+
+        let scope_a = ThreadScope {
+            tenant_id: TenantId::new("a:b").unwrap(),
+            agent_id: AgentId::new("c").unwrap(),
+            project_id: None,
+            owner_user_id: None,
+            mission_id: None,
+        };
+        let scope_b = ThreadScope {
+            tenant_id: TenantId::new("a").unwrap(),
+            agent_id: AgentId::new("b:c").unwrap(),
+            project_id: None,
+            owner_user_id: None,
+            mission_id: None,
+        };
+        let thread_id = ThreadId::new("d").unwrap();
+
+        assert_ne!(
+            thread_scope_key(&scope_a, &thread_id),
+            thread_scope_key(&scope_b, &thread_id),
+        );
     }
 
     /// Migration safety: a thread that already assigned message sequences under

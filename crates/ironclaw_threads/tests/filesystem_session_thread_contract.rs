@@ -471,6 +471,84 @@ async fn filesystem_accept_inbound_message_write_lock_releases_after_failed_writ
     );
 }
 
+/// PR #6096 review gap: the non-transactional fallback's sequence-index
+/// write (`finish_new_message_indexes` -> `write_message_sequence_index`)
+/// runs *after* `put_new_message_record` succeeds and *after* the issue
+/// #6047 per-thread write lock in `accept_inbound_message` has already been
+/// released (see the `{ ... }` block scoping the lock in
+/// `filesystem_service.rs::accept_inbound_message`). That's the opposite of
+/// `filesystem_accept_inbound_message_write_lock_releases_after_failed_write`
+/// above, which fails *inside* the lock. This test proves both halves for
+/// the outside-the-lock failure: the caller still gets the error, and —
+/// because the lock was already released before the sequence-index write
+/// ran — a subsequent call to the SAME thread is not blocked behind it.
+#[tokio::test]
+async fn filesystem_accept_inbound_message_sequence_index_failure_releases_lock() {
+    let backend = Arc::new(SequenceOrderRaceBackend::new());
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-seq-index-fail", "alice");
+    let service = Arc::new(FilesystemSessionThreadService::new(scoped));
+    let scope = scope("fs-seq-index-fail");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-seq-index-fail").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    backend
+        .fail_next_sequence_index_write
+        .store(true, Ordering::SeqCst);
+
+    let first = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text(
+                "message record write succeeds, sequence index write fails",
+            ),
+        })
+        .await;
+    assert!(
+        first.is_err(),
+        "the injected sequence-index write failure must propagate to the caller even though \
+         the message record itself was already durably written"
+    );
+
+    // The write lock releases before `finish_new_message_indexes` runs, so
+    // this call must not be blocked behind the first call's failure.
+    let second = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        service.accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("second message"),
+        }),
+    )
+    .await
+    .expect(
+        "REGRESSION: the sequence-index failure happens after the write lock is released, so \
+         a subsequent call to the same thread must not hang",
+    )
+    .expect("second call succeeds");
+    assert_eq!(
+        second.sequence, 2,
+        "sequence 1 was reserved by the first attempt, whose message record was written \
+         durably before its sequence-index write failed"
+    );
+}
+
 /// Issue #6047: the per-thread write lock must be scoped per `(scope,
 /// thread_id)`, not globally or per-tenant. A regression that widened the
 /// lock's key (e.g. to the scope alone) would serialize unrelated threads'
@@ -3513,12 +3591,16 @@ impl FailOnceThreadRecordReadBackend {
 /// sequence number and is now stalled on the write). A `put` whose body
 /// contains `FAIL-MARKER` instead fails immediately with a backend error —
 /// used to prove the write lock releases via RAII even when the guarded
-/// write errors out.
+/// write errors out. Setting `fail_next_sequence_index_write` makes the
+/// *next* `put` to a `messages_by_sequence` index path fail once (then
+/// auto-clears) — used to prove the same for a failure that lands after the
+/// write lock has already been released.
 struct SequenceOrderRaceBackend {
     inner: InMemoryBackend,
     a_reserved: Notify,
     release_a: Notify,
     a_reserve_seen: AtomicBool,
+    fail_next_sequence_index_write: AtomicBool,
 }
 
 impl SequenceOrderRaceBackend {
@@ -3528,11 +3610,16 @@ impl SequenceOrderRaceBackend {
             a_reserved: Notify::new(),
             release_a: Notify::new(),
             a_reserve_seen: AtomicBool::new(false),
+            fail_next_sequence_index_write: AtomicBool::new(false),
         }
     }
 
     fn is_message_record_path(path: &VirtualPath) -> bool {
         path.as_str().contains("/messages/") && path.as_str().ends_with(".json")
+    }
+
+    fn is_message_sequence_index_path(path: &VirtualPath) -> bool {
+        path.as_str().contains("/messages_by_sequence/") && path.as_str().ends_with(".json")
     }
 }
 
@@ -3551,6 +3638,19 @@ impl RootFilesystem for SequenceOrderRaceBackend {
         entry: Entry,
         cas: CasExpectation,
     ) -> Result<RecordVersion, FilesystemError> {
+        if Self::is_message_sequence_index_path(path)
+            && self
+                .fail_next_sequence_index_write
+                .swap(false, Ordering::SeqCst)
+        {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::WriteFile,
+                reason: "injected failure for issue #6047 sequence-index lock-release \
+                         regression test"
+                    .to_string(),
+            });
+        }
         if Self::is_message_record_path(path) {
             let contains = |marker: &[u8]| {
                 entry
