@@ -16,11 +16,12 @@ use ironclaw_host_api::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::{CasApply, CasUpdateError, cas_update};
+use super::{CasApply, CasUpdateError, cas_update, cas_update_root};
 use crate::{
-    BackendCapabilities, CasExpectation, ContentType, DirEntry, Entry, FileStat, FilesystemError,
-    FilesystemOperation, InMemoryBackend, RecordKind, RecordVersion, RootFilesystem,
-    ScopedFilesystem, VersionedEntry,
+    BackendCapabilities, BackendId, BackendKind, Capability, CasExpectation,
+    CompositeRootFilesystem, ContentKind, ContentType, DirEntry, Entry, FileStat, FilesystemError,
+    FilesystemOperation, InMemoryBackend, IndexPolicy, MountDescriptor, RecordKind, RecordVersion,
+    RootFilesystem, ScopedFilesystem, StorageClass, VersionedEntry,
 };
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────
@@ -43,6 +44,10 @@ const COUNTER_PATH: &str = "/counters/state.json";
 
 fn counter_path() -> ScopedPath {
     ScopedPath::new(COUNTER_PATH).unwrap()
+}
+
+fn root_counter_path() -> VirtualPath {
+    VirtualPath::new("/engine/counters/state.json").unwrap()
 }
 
 fn decode_counter(bytes: &[u8]) -> Result<Counter, TestError> {
@@ -81,12 +86,16 @@ async fn increment(current: Option<Counter>) -> Result<CasApply<Counter, u64>, T
 /// would silently clobber — the test asserts it never does.
 struct NonCasBackend {
     inner: InMemoryBackend,
+    get_called: AtomicBool,
+    put_called: AtomicBool,
 }
 
 impl NonCasBackend {
     fn new() -> Self {
         Self {
             inner: InMemoryBackend::new(),
+            get_called: AtomicBool::new(false),
+            put_called: AtomicBool::new(false),
         }
     }
 }
@@ -104,8 +113,59 @@ impl RootFilesystem for NonCasBackend {
         entry: Entry,
         _cas: CasExpectation,
     ) -> Result<RecordVersion, FilesystemError> {
+        self.put_called.store(true, Ordering::SeqCst);
         // Blind overwrite: ignore the caller's CAS expectation entirely.
         self.inner.put(path, entry, CasExpectation::Any).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.get_called.store(true, Ordering::SeqCst);
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+}
+
+/// CAS-capable backend that records every write precondition while delegating
+/// storage to the real in-memory implementation.
+struct RecordingBackend {
+    inner: Arc<InMemoryBackend>,
+    put_expectations: std::sync::Mutex<Vec<CasExpectation>>,
+}
+
+impl RecordingBackend {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(InMemoryBackend::new()),
+            put_expectations: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn expectations(&self) -> Vec<CasExpectation> {
+        self.put_expectations.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for RecordingBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities::in_memory_full()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.put_expectations.lock().unwrap().push(cas);
+        self.inner.put(path, entry, cas).await
     }
 
     async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
@@ -118,6 +178,82 @@ impl RootFilesystem for NonCasBackend {
 
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         self.inner.stat(path).await
+    }
+}
+
+/// Injects one winning write immediately before the caller's first versioned
+/// put. The stale write must fail, forcing the helper to reread and reapply
+/// against the winner's value and version.
+struct OneRaceBackend {
+    inner: Arc<InMemoryBackend>,
+    raced: AtomicBool,
+    get_calls: AtomicUsize,
+    put_expectations: std::sync::Mutex<Vec<CasExpectation>>,
+}
+
+impl OneRaceBackend {
+    fn new(inner: Arc<InMemoryBackend>) -> Self {
+        Self {
+            inner,
+            raced: AtomicBool::new(false),
+            get_calls: AtomicUsize::new(0),
+            put_expectations: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for OneRaceBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities::in_memory_full()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.put_expectations.lock().unwrap().push(cas);
+        if matches!(cas, CasExpectation::Version(_)) && !self.raced.swap(true, Ordering::SeqCst) {
+            let current = self.inner.get(path).await?.expect("seeded race value");
+            self.inner
+                .put(
+                    path,
+                    encode_counter(&Counter { value: 10 }).unwrap(),
+                    CasExpectation::Version(current.version),
+                )
+                .await?;
+        }
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.get_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+}
+
+fn counter_mount_descriptor() -> MountDescriptor {
+    MountDescriptor {
+        virtual_root: VirtualPath::new("/engine/counters").unwrap(),
+        backend_id: BackendId::new("root-cas-test").unwrap(),
+        backend_kind: BackendKind::DatabaseFilesystem,
+        storage_class: StorageClass::StructuredRecords,
+        content_kind: ContentKind::SystemState,
+        index_policy: IndexPolicy::NotIndexed,
+        capabilities: BackendCapabilities::empty()
+            .with(Capability::Read)
+            .with(Capability::Write)
+            .with_txn(crate::TxnCapability::Cas),
     }
 }
 
@@ -223,6 +359,282 @@ impl RootFilesystem for HangingBackend {
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn root_absent_record_creation_uses_absent_expectation() {
+    let backend = RecordingBackend::new();
+
+    let outcome = cas_update_root(
+        &backend,
+        &root_counter_path(),
+        decode_counter,
+        encode_counter,
+        increment,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, 1);
+    assert_eq!(backend.expectations(), vec![CasExpectation::Absent]);
+}
+
+#[tokio::test]
+async fn root_version_mismatch_rereads_and_reapplies_to_fresh_snapshot() {
+    let inner = Arc::new(InMemoryBackend::new());
+    let path = root_counter_path();
+    let initial_version = inner
+        .put(
+            &path,
+            encode_counter(&Counter { value: 1 }).unwrap(),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+    let backend = OneRaceBackend::new(Arc::clone(&inner));
+    let apply_calls = AtomicUsize::new(0);
+
+    let outcome = cas_update_root(
+        &backend,
+        &path,
+        decode_counter,
+        encode_counter,
+        |current: Option<Counter>| {
+            apply_calls.fetch_add(1, Ordering::SeqCst);
+            increment(current)
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, 11, "retry must apply to the concurrent winner");
+    assert_eq!(backend.get_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(apply_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        backend.put_expectations.lock().unwrap().as_slice(),
+        [
+            CasExpectation::Version(initial_version),
+            CasExpectation::Version(RecordVersion::from_backend(2)),
+        ]
+    );
+    let stored = inner.get(&path).await.unwrap().unwrap();
+    assert_eq!(decode_counter(&stored.entry.body).unwrap().value, 11);
+}
+
+#[tokio::test]
+async fn root_equality_no_op_suppresses_write() {
+    let backend = RecordingBackend::new();
+    let path = root_counter_path();
+    let version_before = backend
+        .inner
+        .put(
+            &path,
+            encode_counter(&Counter { value: 5 }).unwrap(),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+    cas_update_root(
+        &backend,
+        &path,
+        decode_counter,
+        encode_counter,
+        |current: Option<Counter>| async move {
+            let snapshot = current.unwrap();
+            Ok::<_, TestError>(CasApply::new(snapshot, ()))
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(backend.expectations().is_empty());
+    assert_eq!(
+        backend.inner.get(&path).await.unwrap().unwrap().version,
+        version_before
+    );
+}
+
+#[tokio::test]
+async fn root_explicit_no_op_on_absent_record_suppresses_write() {
+    let backend = RecordingBackend::new();
+
+    let outcome = cas_update_root(
+        &backend,
+        &root_counter_path(),
+        decode_counter,
+        encode_counter,
+        |current: Option<Counter>| async move {
+            assert!(current.is_none());
+            Ok::<_, TestError>(CasApply::no_op(Counter { value: 0 }, 42))
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, 42);
+    assert!(backend.expectations().is_empty());
+    assert!(
+        backend
+            .inner
+            .get(&root_counter_path())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn root_known_non_cas_backend_rejects_before_get_apply_or_put() {
+    let backend = NonCasBackend::new();
+    let apply_called = AtomicBool::new(false);
+
+    let result = cas_update_root(
+        &backend,
+        &root_counter_path(),
+        decode_counter,
+        encode_counter,
+        |current: Option<Counter>| {
+            apply_called.store(true, Ordering::SeqCst);
+            increment(current)
+        },
+    )
+    .await;
+
+    assert!(matches!(result, Err(CasUpdateError::CasUnsupported)));
+    assert!(!backend.get_called.load(Ordering::SeqCst));
+    assert!(!apply_called.load(Ordering::SeqCst));
+    assert!(!backend.put_called.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn root_unknown_capabilities_defer_to_op_time_unsupported() {
+    let backend = UnsupportedWriteBackend::new();
+    let apply_called = AtomicBool::new(false);
+
+    let result = cas_update_root(
+        &backend,
+        &root_counter_path(),
+        decode_counter,
+        encode_counter,
+        |current: Option<Counter>| {
+            apply_called.store(true, Ordering::SeqCst);
+            increment(current)
+        },
+    )
+    .await;
+
+    assert!(matches!(result, Err(CasUpdateError::CasUnsupported)));
+    assert!(apply_called.load(Ordering::SeqCst));
+    assert!(backend.put_called.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn root_decode_error_is_preserved_without_put() {
+    let path = root_counter_path();
+    let decode_backend = RecordingBackend::new();
+    decode_backend
+        .inner
+        .put(
+            &path,
+            Entry::bytes(b"not-json".to_vec()),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+    let decode_result: Result<u64, CasUpdateError<TestError>> = cas_update_root(
+        &decode_backend,
+        &path,
+        decode_counter,
+        encode_counter,
+        increment,
+    )
+    .await;
+    match decode_result {
+        Err(CasUpdateError::Apply(error)) => assert!(!error.0.is_empty()),
+        other => panic!("decode error must remain Apply, got {other:?}"),
+    }
+    assert!(decode_backend.expectations().is_empty());
+}
+
+#[tokio::test]
+async fn root_apply_error_is_preserved_without_put() {
+    let path = root_counter_path();
+    let apply_backend = RecordingBackend::new();
+    let apply_result: Result<u64, CasUpdateError<TestError>> = cas_update_root(
+        &apply_backend,
+        &path,
+        decode_counter,
+        encode_counter,
+        |_current: Option<Counter>| async move {
+            Err::<CasApply<Counter, u64>, _>(TestError("apply".to_string()))
+        },
+    )
+    .await;
+    match apply_result {
+        Err(CasUpdateError::Apply(error)) => assert_eq!(error.0, "apply"),
+        other => panic!("apply error must remain Apply, got {other:?}"),
+    }
+    assert!(apply_backend.expectations().is_empty());
+}
+
+#[tokio::test]
+async fn root_encode_error_is_preserved_without_put() {
+    let path = root_counter_path();
+    let encode_backend = RecordingBackend::new();
+    let encode_result: Result<u64, CasUpdateError<TestError>> = cas_update_root(
+        &encode_backend,
+        &path,
+        decode_counter,
+        |_snapshot: &Counter| -> Result<Entry, TestError> { Err(TestError("encode".to_string())) },
+        increment,
+    )
+    .await;
+    match encode_result {
+        Err(CasUpdateError::Apply(error)) => assert_eq!(error.0, "encode"),
+        other => panic!("encode error must remain Apply, got {other:?}"),
+    }
+    assert!(encode_backend.expectations().is_empty());
+}
+
+#[tokio::test]
+async fn root_accepts_dyn_root_filesystem() {
+    let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+
+    let outcome = cas_update_root(
+        filesystem.as_ref(),
+        &root_counter_path(),
+        decode_counter,
+        encode_counter,
+        increment,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, 1);
+}
+
+#[tokio::test]
+async fn root_composite_with_unknown_aggregate_capabilities_routes_to_cas_mount() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let mut composite = CompositeRootFilesystem::new();
+    composite
+        .mount(counter_mount_descriptor(), Arc::clone(&backend))
+        .unwrap();
+
+    let outcome = cas_update_root(
+        &composite,
+        &root_counter_path(),
+        decode_counter,
+        encode_counter,
+        increment,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, 1);
+    let stored = backend.get(&root_counter_path()).await.unwrap().unwrap();
+    assert_eq!(decode_counter(&stored.entry.body).unwrap().value, 1);
+}
 
 #[tokio::test]
 async fn create_if_absent_first_write_succeeds() {

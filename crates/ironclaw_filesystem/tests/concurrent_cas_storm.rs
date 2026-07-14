@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use ironclaw_filesystem::{
     CasApply, CasExpectation, ContentType, Entry, FilesystemError, InMemoryBackend, RootFilesystem,
-    ScopedFilesystem, cas_update,
+    ScopedFilesystem, cas_update, cas_update_root,
 };
 use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, ScopedPath, VirtualPath,
@@ -113,6 +113,39 @@ async fn run_storm<F: RootFilesystem + 'static>(fs: Arc<ScopedFilesystem<F>>) {
     );
 }
 
+/// Root-path counterpart of [`run_storm`]. It drives the same contention
+/// invariant through `cas_update_root` without changing or replacing the
+/// existing scoped-path regression coverage.
+async fn run_root_storm<F: RootFilesystem + 'static>(root: Arc<F>, path: VirtualPath) {
+    for _ in 0..ITERATIONS {
+        let mut handles = Vec::new();
+        for _ in 0..WRITERS {
+            let root = Arc::clone(&root);
+            let path = path.clone();
+            handles.push(tokio::spawn(async move {
+                cas_update_root(root.as_ref(), &path, decode, encode, increment)
+                    .await
+                    .expect("concurrent root cas_update must not fail");
+            }));
+        }
+        for handle in handles {
+            handle.await.expect("root writer task must not panic");
+        }
+    }
+
+    let stored = root
+        .get(&path)
+        .await
+        .expect("final root read must succeed")
+        .expect("root counter must exist after the storm");
+    let counter = decode(&stored.entry.body).unwrap();
+    assert_eq!(
+        counter.value,
+        WRITERS * ITERATIONS,
+        "every concurrent root increment must land exactly once (no lost updates)"
+    );
+}
+
 /// `WRITERS`-way contention on `delete_if_version` itself, repeated over
 /// `DELETE_STORM_ROUNDS` recreate/delete cycles. Round-A review finding
 /// (PR #5749): the earlier CAS storm only ever exercised `put`/`cas_update`
@@ -191,6 +224,15 @@ async fn in_memory_concurrent_cas_storm_has_no_lost_updates() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn in_memory_root_concurrent_cas_storm_has_no_lost_updates() {
+    run_root_storm(
+        Arc::new(InMemoryBackend::new()),
+        VirtualPath::new("/engine/root-counters/state.json").unwrap(),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn in_memory_concurrent_delete_if_version_storm_has_exactly_one_winner_per_round() {
     let fs = Arc::new(scoped(Arc::new(InMemoryBackend::new()), "/engine/counters"));
     run_delete_storm(fs).await;
@@ -206,6 +248,21 @@ async fn libsql_concurrent_cas_storm_has_no_errors_or_lost_updates() {
     root.run_migrations().await.unwrap();
     let fs = Arc::new(scoped(root, "/engine/counters"));
     run_storm(fs).await;
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn libsql_root_concurrent_cas_storm_has_no_errors_or_lost_updates() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("root-cas-storm.db");
+    let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let root = Arc::new(ironclaw_filesystem::LibSqlRootFilesystem::new(db));
+    root.run_migrations().await.unwrap();
+    run_root_storm(
+        root,
+        VirtualPath::new("/engine/root-counters/state.json").unwrap(),
+    )
+    .await;
 }
 
 #[cfg(feature = "libsql")]
@@ -257,6 +314,20 @@ async fn postgres_concurrent_cas_storm_has_no_errors_or_lost_updates() {
     let target = format!("/engine/cas_storm_{}", uuid::Uuid::new_v4().simple());
     let fs = Arc::new(scoped(root, &target));
     run_storm(fs).await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn postgres_root_concurrent_cas_storm_has_no_errors_or_lost_updates() {
+    let Some(root) = connect_postgres_for_storm().await else {
+        return;
+    };
+    let path = VirtualPath::new(format!(
+        "/engine/root_cas_storm_{}/state.json",
+        uuid::Uuid::new_v4().simple()
+    ))
+    .unwrap();
+    run_root_storm(root, path).await;
 }
 
 #[cfg(feature = "postgres")]

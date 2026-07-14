@@ -39,7 +39,7 @@ mod vector;
 pub use backend::{EventRecord, StorageTxn};
 pub use cas::{
     CasApply, CasUpdateError, FILESYSTEM_APPLY_TIMEOUT, FILESYSTEM_CAS_BACKOFF_BASE,
-    FILESYSTEM_CAS_BACKOFF_MAX, FILESYSTEM_CAS_RETRIES, cas_update,
+    FILESYSTEM_CAS_BACKOFF_MAX, FILESYSTEM_CAS_RETRIES, cas_update, cas_update_root,
 };
 pub use catalog::{CompositeRootFilesystem, MountDescriptor, PathPlacement};
 pub use hsm::HsmBackend;

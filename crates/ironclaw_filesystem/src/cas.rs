@@ -19,8 +19,8 @@
 //!
 //! ## Contract
 //!
-//! [`cas_update`] never holds a lock across an `.await`. It runs a bounded
-//! read-modify-write loop:
+//! [`cas_update`] and [`cas_update_root`] never hold a lock across an `.await`.
+//! They share one bounded read-modify-write loop:
 //!
 //! 1. Read the current versioned snapshot for `path` (decoding it via the
 //!    caller's `decode`, or treating an absent record as `None`).
@@ -47,10 +47,9 @@
 //!
 //! ## Capability gate (fail closed)
 //!
-//! Before attempting any write, [`cas_update`] asserts the backend can honor
+//! Before attempting any write, both entrypoints assert the backend can honor
 //! compare-and-swap. There are two layers, because the production composite
-//! router cannot answer capabilities without a concrete path
-//! (see [`ScopedFilesystem::capabilities`]):
+//! router cannot answer capabilities without a concrete path:
 //!
 //! - **Pre-flight:** if the backend advertises a *known* capability shape
 //!   (anything other than the empty default), and that shape does **not**
@@ -74,7 +73,7 @@
 use std::future::Future;
 use std::time::Duration;
 
-use ironclaw_host_api::{ResourceScope, ScopedPath};
+use ironclaw_host_api::{ResourceScope, ScopedPath, VirtualPath};
 
 use crate::{
     BackendCapabilities, CasExpectation, Entry, FilesystemError, FilesystemOperation,
@@ -243,6 +242,105 @@ pub async fn cas_update<F, S, T, E, D, N, A, Fut>(
     path: &ScopedPath,
     decode: D,
     encode: N,
+    apply: A,
+) -> Result<T, CasUpdateError<E>>
+where
+    F: RootFilesystem + ?Sized,
+    S: PartialEq + Clone,
+    D: Fn(&[u8]) -> Result<S, E>,
+    N: Fn(&S) -> Result<Entry, E>,
+    A: FnMut(Option<S>) -> Fut,
+    Fut: Future<Output = Result<CasApply<S, T>, E>>,
+{
+    let target = CasTarget::Scoped {
+        filesystem,
+        scope,
+        path,
+    };
+    cas_update_target(&target, decode, encode, apply).await
+}
+
+/// Lock-free, bounded, capability-gated CAS read-modify-write over a canonical
+/// root-filesystem path.
+///
+/// This is the trusted-root counterpart of [`cas_update`]. It exists for
+/// composition-owned stores that already hold a [`RootFilesystem`] and a
+/// canonical [`VirtualPath`]; untrusted callers must continue to use
+/// [`ScopedFilesystem`]. Both entrypoints share the same capability gate,
+/// timeout, retry loop, equality fast path, and error mapping.
+pub async fn cas_update_root<F, S, T, E, D, N, A, Fut>(
+    filesystem: &F,
+    path: &VirtualPath,
+    decode: D,
+    encode: N,
+    apply: A,
+) -> Result<T, CasUpdateError<E>>
+where
+    F: RootFilesystem + ?Sized,
+    S: PartialEq + Clone,
+    D: Fn(&[u8]) -> Result<S, E>,
+    N: Fn(&S) -> Result<Entry, E>,
+    A: FnMut(Option<S>) -> Fut,
+    Fut: Future<Output = Result<CasApply<S, T>, E>>,
+{
+    let target = CasTarget::Root { filesystem, path };
+    cas_update_target(&target, decode, encode, apply).await
+}
+
+enum CasTarget<'a, F: ?Sized> {
+    Scoped {
+        filesystem: &'a ScopedFilesystem<F>,
+        scope: &'a ResourceScope,
+        path: &'a ScopedPath,
+    },
+    Root {
+        filesystem: &'a F,
+        path: &'a VirtualPath,
+    },
+}
+
+impl<F> CasTarget<'_, F>
+where
+    F: RootFilesystem + ?Sized,
+{
+    fn capabilities(&self) -> BackendCapabilities {
+        match self {
+            Self::Scoped { filesystem, .. } => filesystem.capabilities(),
+            Self::Root { filesystem, .. } => filesystem.capabilities(),
+        }
+    }
+
+    async fn get(&self) -> Result<Option<crate::VersionedEntry>, FilesystemError> {
+        match self {
+            Self::Scoped {
+                filesystem,
+                scope,
+                path,
+            } => filesystem.get(scope, path).await,
+            Self::Root { filesystem, path } => filesystem.get(path).await,
+        }
+    }
+
+    async fn put(
+        &self,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<crate::RecordVersion, FilesystemError> {
+        match self {
+            Self::Scoped {
+                filesystem,
+                scope,
+                path,
+            } => filesystem.put(scope, path, entry, cas).await,
+            Self::Root { filesystem, path } => filesystem.put(path, entry, cas).await,
+        }
+    }
+}
+
+async fn cas_update_target<F, S, T, E, D, N, A, Fut>(
+    target: &CasTarget<'_, F>,
+    decode: D,
+    encode: N,
     mut apply: A,
 ) -> Result<T, CasUpdateError<E>>
 where
@@ -257,12 +355,12 @@ where
     // *known* shape; the composite router advertises the empty default and
     // defers to the op-time check below. Either way we never fall back to
     // `CasExpectation::Any`.
-    let capabilities = filesystem.capabilities();
+    let capabilities = target.capabilities();
     if capabilities_known(&capabilities) && !capabilities_support_cas(&capabilities) {
         return Err(CasUpdateError::CasUnsupported);
     }
 
-    let loop_future = cas_update_loop(filesystem, scope, path, &decode, &encode, &mut apply);
+    let loop_future = cas_update_loop(target, &decode, &encode, &mut apply);
     match tokio::time::timeout(FILESYSTEM_APPLY_TIMEOUT, loop_future).await {
         Ok(result) => result,
         Err(_) => Err(CasUpdateError::Timeout),
@@ -270,9 +368,7 @@ where
 }
 
 async fn cas_update_loop<F, S, T, E, D, N, A, Fut>(
-    filesystem: &ScopedFilesystem<F>,
-    scope: &ResourceScope,
-    path: &ScopedPath,
+    target: &CasTarget<'_, F>,
     decode: &D,
     encode: &N,
     apply: &mut A,
@@ -289,7 +385,7 @@ where
         // 1. Read the current versioned snapshot. Pure reads are lock-free; a
         //    reader racing a write observes either the previous or next
         //    committed version, never a torn one.
-        let (current, version) = match filesystem.get(scope, path).await {
+        let (current, version) = match target.get().await {
             Ok(Some(versioned)) => {
                 let decoded = decode(&versioned.entry.body).map_err(CasUpdateError::Apply)?;
                 (Some(decoded), Some(versioned.version))
@@ -329,7 +425,7 @@ where
             Some(version) => CasExpectation::Version(version),
             None => CasExpectation::Absent,
         };
-        match filesystem.put(scope, path, entry, cas).await {
+        match target.put(entry, cas).await {
             Ok(_) => return Ok(outcome),
             // 5a. Lost the CAS race — re-read and retry with backoff.
             //     Skip the sleep on the final attempt: no retry follows it,
