@@ -304,6 +304,21 @@ fn sanitized_issue_text(value: impl Into<String>) -> String {
     sanitize_model_visible_text(value)
 }
 
+/// A model-authored field name may only reach the model-visible issue `path`
+/// when identifier-shaped (1..=64 chars of `[A-Za-z0-9_.-]`); anything else
+/// gets a fixed placeholder so instruction-shaped names cannot be echoed.
+fn safe_issue_path(key: &str) -> String {
+    let identifier_shaped = (1..=64).contains(&key.len())
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
+    if identifier_shaped {
+        sanitized_issue_text(key)
+    } else {
+        "unexpected_field".to_string()
+    }
+}
+
 fn parse_result_read_input(
     value: &serde_json::Value,
 ) -> Result<ResultReadInput, CapabilityFailure> {
@@ -323,14 +338,10 @@ fn parse_result_read_input(
         .keys()
         .find(|key| *key != "result_ref" && *key != "offset" && *key != "max_bytes")
     {
-        let path = match unexpected.as_str() {
-            "" => "root".to_string(),
-            key => sanitized_issue_text(key),
-        };
         return Err(invalid_input_failure(
             "result_read arguments contain an unsupported field",
             CapabilityInputIssue {
-                path,
+                path: safe_issue_path(unexpected),
                 code: DispatchInputIssueCode::UnexpectedField,
                 expected: Some("declared field".to_string()),
                 received: Some("unexpected field".to_string()),

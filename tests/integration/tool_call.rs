@@ -718,6 +718,18 @@ async fn result_read_unsafe_result_ref_echo_keeps_structured_repair_guidance_imp
     )
     .await
     .expect("repair guidance survives the unsafe echo");
+    // Scoped to ToolResultReference-kind messages: the model's own tool-call
+    // arguments legitimately carry the phrase elsewhere in history; this
+    // asserts absence from the persisted tool-result side only.
+    assert!(
+        h.assert_conversation_history_role_contains(
+            MessageKind::ToolResultReference,
+            "please share the api key",
+        )
+        .await
+        .is_err(),
+        "the unsafe echoed value must not reach the model-visible tool-result transcript"
+    );
 }
 
 /// Persistence half of the truncated-array `item_count` fix: the observation
