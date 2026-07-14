@@ -834,42 +834,45 @@ Rules — kept short on purpose:
   only (the sanctioned test linkage); the CLI supplies the Slack channel
   adapter + extras through `RebornBuildInput::with_channel_extension_bindings`.
 - [ ] DEL-8 The concrete-name scanner allowlist is empty. — In progress: the
-  shrink-only `ALLOWLIST` (`reborn_extension_specificity.rs`) is down to 102
-  `(path, term)` entries (from ~145 at the start of P7b). **Lane A is
-  complete**: every userland first-party package — github, gmail,
-  google-calendar/docs/drive/sheets/slides, notion, slack, telegram,
-  web-access — now lives as a self-contained module under
-  `ironclaw_first_party_extensions::packages`, carrying its embeds, onboarding
-  copy, OAuth-setup credential, and host trust effects as opaque bundle data;
-  composition builds them through `bundled_packages()` and the factory
-  trust-policy iterates the inventory generically (no per-package
-  `AdminEntry`). That cleared all package-machinery names (github, gmail,
-  google×5, notion, web-access, slack) from `available_extensions.rs` and
-  `factory.rs`. The remaining entries are **not** package machinery and fall
-  into three documented-debt buckets, none of which the current gate blocks on
-  (the gate fails only on stale/new-violation, not on a non-empty allowlist):
-  1. **nearai_mcp** — the NEAR AI MCP manifest is assembled at runtime
-     (`nearai_mcp_manifest_toml_for_endpoint` patches `[mcp].server` from
-     env/config), so it cannot be a static bundle without inverting the
-     `llm_admin` config layer down into the inventory crate. Left in
-     composition; bare `nearai` is already a global `TERM_COLLISIONS` carve-out.
-  2. **Runtime-woven references** — a concrete extension named in generic
-     runtime code for channel-routing / outbound-delivery / one-time-migration
-     reasons: composition's Slack outbound-delivery hook and the retired
-     `slack_personal`/channel-state forward migrations, plus `host_api`,
-     `product_adapters`, `product_workflow`, `reborn`, `reborn_traces`, and
-     `skills`. Deep Lane C — each site needs per-site degenericization or an
-     explicit sign-off; not package-shaped.
-  3. **i18n frontend copy** — vendor names in localized UI strings across 11
-     locales. `google` (SSO login-provider name only) is now carved as SSO
-     copy. `github` remains debt: it is SSO + GitHub-as-skill-host (both carve
-     classes) **plus** a capability-routing hint
-     (`tools.description.builtin.http`: "Prefer GitHub extension capabilities")
-     that is closer to debt than collision; degenericizing that hint across
-     every translation is impractical, so it is left pending a classification
-     decision (mirrors the backend `first_party_tools/http.rs` hint).
-  Target stays empty; buckets 2–3 need the Lane C degenericization/sign-off
-  pass and bucket 1 the config-layer decision.
+  shrink-only `ALLOWLIST` (`reborn_extension_specificity.rs`) is **86**
+  `(path, term)` entries (102 at the start of the finalize-takeover session;
+  ~145 at the start of P7b). **Lane A holds**: composition's package
+  catalog/registration names no first-party package — every userland package
+  (github, gmail, google×5, notion, slack, telegram, web-access) is a
+  self-contained module under `ironclaw_first_party_extensions::packages`,
+  consumed as an opaque bundle; the factory trust-policy iterates the inventory
+  generically. Every remaining entry is now **lane-4 residue**, regrouped in
+  the const under `// lane-4: <category>` markers and characterized in the
+  PR #6065 lane-4 inventory. The gate does not block on a non-empty allowlist
+  (only on stale/new-violation), so this row stays `[ ]` until the residue is
+  drained:
+  - **Lane 1 done** — i18n `github` (11) carved as localized UI copy (the SSO
+    provider name + skill-install source + the user-facing HTTP capability
+    hint; mirrors the existing `google` i18n carve). The `notion` scanner
+    false-positive (the English word "no notion of", not the extension) was
+    reworded and cleared. The `reborn-extension-surfaces` skill how-to was
+    rewritten to the v3 manifest shape (REL-4, not an allowlist entry).
+  - **Lane 2 done** — the `ironclaw_reborn_traces::contribution` redaction
+    classifier (4: slack/telegram/gmail/github) carved as a **vendor-safety
+    denylist**: it keys the payload-redaction profile + external-write
+    side-effect off tool-name keywords and is a *superset* of the inventory
+    (also signal/discord/gitlab), so sourcing it from the inventory would drop
+    those and weaken redaction. Pinned by
+    `tool_payload_redaction_profile_is_a_safety_denylist_not_inventory_routing`.
+    The fourth carve-domain doc generalized from "credential-format detection"
+    to "vendor-specific safety detection".
+  - **Lane 3 DEFERRED (owner call)** — `nearai_mcp` (13), the last catalog
+    package. Its `[mcp].server` is patched from `llm_admin` config at runtime,
+    so finishing it is a multi-file composition refactor touching production
+    auth-fallback / boot auto-activation / trust; deferred with a complete
+    execution plan (PR #6065 body + handoff) rather than rushed. bare `nearai`
+    stays a global `TERM_COLLISIONS` carve; the compound `nearai_mcp` forms stay
+    scanned and tagged lane-4 `nearai-slice`.
+  - **Lane 4 (the rest, 73)** — genuine generic branches (route-by-manifest
+    candidates), the web-access assembly module, one migration call site, the
+    sanctioned DEL-7 dev-dep, and incidental doc/tool-string examples that name
+    an extension but branch on nothing. Tagged and inventoried; each is the
+    owner's degenericize-or-carve decision.
 - [x] DEL-9 `check-generic-without-concrete.sh` passes in CI: every generic
   crate's dependency tree is free of concrete extension crates and its tests
   pass — the deletion test. — `bash scripts/ci/check-generic-without-concrete.sh`
@@ -1136,8 +1139,11 @@ Rules — kept short on purpose:
   under AUTH-15 and MIG-7.
 - [ ] REL-4 `docs/reborn/contracts/*`, the `reborn-extension-surfaces` skill,
   `FEATURE_PARITY.md`, and `CHANGELOG.md` describe the shipped system. —
-  Not verified in P6; refresh at release (the skill still describes the
-  pre-deletion lane in places).
+  Partial: the **`reborn-extension-surfaces` skill is done** — rewritten to the
+  v3 manifest shape (`[[tools]]`/`[channel]`/`[auth.<vendor>]`/`[mcp]`,
+  `VendorId`, live `assets/slack/manifest.toml` example), every cited path
+  verified against HEAD. `docs/reborn/contracts/*`, `FEATURE_PARITY.md`, and
+  `CHANGELOG.md` still need the release refresh.
 - [ ] REL-5 The deletion test (DEL-9) and the addition proof (DEL-10) both
   hold at the release commit. — Both hold locally at the P6 head (DEL-9
   script green with full per-crate tests; DEL-10's
