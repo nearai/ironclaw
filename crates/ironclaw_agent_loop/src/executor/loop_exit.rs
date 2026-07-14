@@ -85,7 +85,7 @@ pub(super) async fn try_final_answer_nudge(
     state.final_answer_nudges_used += 1;
     let bundle = match ctx.host.build_prompt_bundle(request).await {
         Ok(bundle) => bundle,
-        Err(error) => return nudge_bail("prompt", error),
+        Err(error) => return nudge_bail("final_answer", "prompt", error),
     };
 
     let model_preference = model_preference_to_host(ctx.planner.model().preference(state).await)?;
@@ -106,7 +106,7 @@ pub(super) async fn try_final_answer_nudge(
     };
     let response = match ctx.host.stream_model(model_request).await {
         Ok(response) => response,
-        Err(error) => return nudge_bail("model", error),
+        Err(error) => return nudge_bail("final_answer", "model", error),
     };
 
     let usage = response.usage;
@@ -136,7 +136,7 @@ pub(super) async fn try_final_answer_nudge(
                         .await
                     {
                         Ok(reply_ref) => reply_ref,
-                        Err(error) => return nudge_bail("transcript", error),
+                        Err(error) => return nudge_bail("final_answer", "transcript", error),
                     };
                     state.recent_output_token_counts.push(output_tokens);
                     state.accumulate_model_usage(usage);
@@ -208,7 +208,7 @@ pub(super) async fn try_self_verification_pass(
     state.self_verification_used += 1;
     let bundle = match ctx.host.build_prompt_bundle(request).await {
         Ok(bundle) => bundle,
-        Err(error) => return nudge_bail("prompt", error),
+        Err(error) => return nudge_bail("self_verification", "prompt", error),
     };
 
     let model_preference = model_preference_to_host(ctx.planner.model().preference(state).await)?;
@@ -225,7 +225,7 @@ pub(super) async fn try_self_verification_pass(
     };
     let response = match ctx.host.stream_model(model_request).await {
         Ok(response) => response,
-        Err(error) => return nudge_bail("model", error),
+        Err(error) => return nudge_bail("self_verification", "model", error),
     };
 
     let usage = response.usage;
@@ -247,7 +247,7 @@ pub(super) async fn try_self_verification_pass(
                         .await
                     {
                         Ok(reply_ref) => reply_ref,
-                        Err(error) => return nudge_bail("transcript", error),
+                        Err(error) => return nudge_bail("self_verification", "transcript", error),
                     };
                     state.recent_output_token_counts.push(output_tokens);
                     state.accumulate_model_usage(usage);
@@ -266,7 +266,12 @@ pub(super) async fn try_self_verification_pass(
 /// its normal exit. Only explicit cancellation is propagated. The underlying
 /// cause is logged (never erased) — this is the fail-open counterpart to the
 /// `map_err(|_| ...)?` pattern the executor otherwise forbids.
+///
+/// `nudge_name` identifies which nudge is bailing (there is more than one
+/// driver-specific nudge sharing this fallback path) so the log line is
+/// actionable rather than generic.
 fn nudge_bail(
+    nudge_name: &'static str,
     stage: &'static str,
     error: AgentLoopHostError,
 ) -> Result<Option<LoopMessageRef>, AgentLoopExecutorError> {
@@ -274,10 +279,11 @@ fn nudge_bail(
         return Err(AgentLoopExecutorError::Cancelled);
     }
     tracing::debug!(
+        nudge_name,
         nudge_stage = stage,
         error_kind = ?error.kind,
         detail = %error.safe_summary,
-        "final-answer nudge host call failed; falling back to normal exit"
+        "nudge host call failed; falling back to normal exit"
     );
     Ok(None)
 }
