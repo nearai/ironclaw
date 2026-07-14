@@ -562,7 +562,11 @@ outbound messages directly.
   wall-clock cron slots, so it keeps accruing while the trigger is paused or
   whenever the poller isn't running at all.
 - Omission rule: `active_hold` is absent entirely when the active run resolves
-  to `Terminal` or `Missing` (nothing to report), or when the underlying
-  active-run lookup or schedule-slot derivation fails or times out. This is a
-  display-only projection and must never fail the read; any lookup problem
-  degrades to omission, not an error.
+  to `Terminal` or `Missing` (nothing to report), or when the active-run
+  lookup itself fails or times out. A schedule-slot derivation failure
+  (malformed persisted schedule) does **not** omit the hold — it degrades
+  only `elapsed_occurrences` to absent (with `elapsed_occurrences_capped =
+  false`) while the hold itself, including `reason` and `since`, is still
+  returned. This is a display-only projection and must never fail the read;
+  any lookup or derivation problem degrades gracefully rather than
+  surfacing an error.
