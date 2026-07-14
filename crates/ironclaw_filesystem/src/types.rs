@@ -103,10 +103,11 @@ pub enum FilesystemError {
         operation: FilesystemOperation,
         reason: String,
     },
-    /// The backend could not acquire its write lock before its configured
-    /// deadline. Unlike [`Self::Backend`], this is a typed transient outcome:
-    /// callers may retry an operation whose interface guarantees an error did
-    /// not commit a partial side effect (for example [`RootFilesystem::append_batch`](crate::RootFilesystem::append_batch)).
+    /// The backend reported a retryable database contention outcome that did
+    /// not commit the attempted operation (for example SQLite BUSY/LOCKED or a
+    /// PostgreSQL transaction conflict). Unlike [`Self::Backend`], callers may
+    /// retry when the operation's interface also guarantees an error did not
+    /// commit a partial side effect (for example [`RootFilesystem::append_batch`](crate::RootFilesystem::append_batch)).
     #[error("filesystem backend is busy during {operation} at {path}")]
     BackendBusy {
         path: VirtualPath,

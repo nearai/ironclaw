@@ -1,5 +1,5 @@
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
 use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem, SeqNo};
@@ -18,9 +18,25 @@ use super::{fs_error, storage_error};
 
 const DELTA_LOG_PATH: &str = "/resources/deltas/log";
 const DELTA_JOURNAL_MAX_BATCH: usize = 256;
-const DELTA_JOURNAL_BUSY_RETRIES: usize = 3;
-const DELTA_JOURNAL_BUSY_BACKOFF_BASE: Duration = Duration::from_millis(25);
-const DELTA_JOURNAL_BUSY_BACKOFF_MAX: Duration = Duration::from_millis(250);
+const DEFAULT_BUSY_RETRY_POLICY: BusyRetryPolicy = BusyRetryPolicy {
+    max_retries: 3,
+    max_elapsed: Duration::from_secs(5),
+    backoff_base: Duration::from_millis(25),
+    backoff_max: Duration::from_millis(250),
+    jitter: true,
+};
+
+#[derive(Clone, Copy)]
+struct BusyRetryPolicy {
+    max_retries: usize,
+    /// Bounds how long the journal will continue starting additional database
+    /// attempts. An individual backend operation remains bounded by the
+    /// backend's own lock wait (for local libSQL, `busy_timeout`).
+    max_elapsed: Duration,
+    backoff_base: Duration,
+    backoff_max: Duration,
+    jitter: bool,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -91,6 +107,7 @@ where
 {
     filesystem: Arc<ScopedFilesystem<F>>,
     sender: Mutex<mpsc::Sender<DeltaJournalRequest>>,
+    retry_policy: BusyRetryPolicy,
 }
 
 pub(super) struct PendingResourceDelta {
@@ -107,15 +124,43 @@ where
     F: RootFilesystem + 'static,
 {
     pub(super) fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
-        let sender = spawn_delta_journal_flusher(Arc::clone(&filesystem));
+        Self::with_retry_policy(filesystem, DEFAULT_BUSY_RETRY_POLICY)
+    }
+
+    fn with_retry_policy(
+        filesystem: Arc<ScopedFilesystem<F>>,
+        retry_policy: BusyRetryPolicy,
+    ) -> Self {
+        let sender = match spawn_delta_journal_flusher(Arc::clone(&filesystem), retry_policy) {
+            Ok(sender) => sender,
+            Err(_) => {
+                warn!(
+                    error_kind = "thread_spawn",
+                    "resource governor delta journal thread failed to start"
+                );
+                let (sender, receiver) = mpsc::channel();
+                drop(receiver);
+                sender
+            }
+        };
         Self {
             filesystem,
             sender: Mutex::new(sender),
+            retry_policy,
         }
     }
 
+    #[cfg(test)]
+    fn new_with_retry_policy(
+        filesystem: Arc<ScopedFilesystem<F>>,
+        retry_policy: BusyRetryPolicy,
+    ) -> Self {
+        Self::with_retry_policy(filesystem, retry_policy)
+    }
+
     pub(super) fn restart(&self) -> Result<(), ResourceError> {
-        let replacement = spawn_delta_journal_flusher(Arc::clone(&self.filesystem));
+        let replacement =
+            spawn_delta_journal_flusher(Arc::clone(&self.filesystem), self.retry_policy)?;
         *self
             .sender
             .lock()
@@ -136,22 +181,31 @@ where
             .map_err(|_| storage_error("resource governor delta journal stopped"))?;
         Ok(PendingResourceDelta { ack: receiver })
     }
+
+    #[cfg(test)]
+    pub(super) fn poison_sender_lock(&self) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = self.sender.lock().expect("sender lock"); // safety: test-only helper deliberately poisons this lock under #[cfg(test)].
+            panic!("poison journal sender lock for restart failure coverage");
+        }));
+    }
 }
 
 fn spawn_delta_journal_flusher<F>(
     filesystem: Arc<ScopedFilesystem<F>>,
-) -> mpsc::Sender<DeltaJournalRequest>
+    retry_policy: BusyRetryPolicy,
+) -> Result<mpsc::Sender<DeltaJournalRequest>, ResourceError>
 where
     F: RootFilesystem + 'static,
 {
     let (sender, receiver) = mpsc::channel();
-    if let Err(error) = std::thread::Builder::new()
+    std::thread::Builder::new()
         .name("resource-governor-delta-journal".to_string())
-        .spawn(move || run_delta_journal_flusher(filesystem, receiver))
-    {
-        warn!(reason = %error, "resource governor delta journal thread failed to start");
-    }
-    sender
+        .spawn(move || run_delta_journal_flusher(filesystem, receiver, retry_policy))
+        .map_err(|error| {
+            storage_error(format!("resource governor delta journal thread: {error}"))
+        })?;
+    Ok(sender)
 }
 
 impl PendingResourceDelta {
@@ -174,6 +228,7 @@ impl PendingResourceDelta {
 fn run_delta_journal_flusher<F>(
     filesystem: Arc<ScopedFilesystem<F>>,
     receiver: mpsc::Receiver<DeltaJournalRequest>,
+    retry_policy: BusyRetryPolicy,
 ) where
     F: RootFilesystem + 'static,
 {
@@ -201,7 +256,11 @@ fn run_delta_journal_flusher<F>(
                 Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
             }
         }
-        let result = runtime.block_on(persist_delta_journal_batch(filesystem.as_ref(), &requests));
+        let result = runtime.block_on(persist_delta_journal_batch(
+            filesystem.as_ref(),
+            &requests,
+            retry_policy,
+        ));
         match result {
             Ok(seqs) => {
                 for (request, seq) in requests.into_iter().zip(seqs) {
@@ -221,6 +280,7 @@ fn run_delta_journal_flusher<F>(
 async fn persist_delta_journal_batch<F>(
     filesystem: &ScopedFilesystem<F>,
     requests: &[DeltaJournalRequest],
+    retry_policy: BusyRetryPolicy,
 ) -> Result<Vec<SeqNo>, ResourceError>
 where
     F: RootFilesystem,
@@ -230,20 +290,36 @@ where
         .iter()
         .map(|request| serde_json::to_vec(&request.delta).map_err(storage_error))
         .collect::<Result<Vec<_>, _>>()?;
-    let mut attempt = 0;
+    let started = Instant::now();
+    let mut retry = 0;
     let seqs = loop {
         match filesystem
             .append_batch(&ResourceScope::system(), &path, payloads.clone())
             .await
         {
             Ok(seqs) => break seqs,
-            Err(FilesystemError::BackendBusy { .. }) if attempt < DELTA_JOURNAL_BUSY_RETRIES => {
-                attempt += 1;
-                let delay = busy_retry_delay(attempt);
+            Err(error @ FilesystemError::BackendBusy { .. }) => {
+                let elapsed = started.elapsed();
+                if retry >= retry_policy.max_retries || elapsed >= retry_policy.max_elapsed {
+                    warn!(
+                        attempts = retry + 1,
+                        max_retries = retry_policy.max_retries,
+                        elapsed_ms = elapsed.as_millis(),
+                        retry_window_ms = retry_policy.max_elapsed.as_millis(),
+                        batch_size = requests.len(),
+                        "resource governor delta journal filesystem contention exhausted"
+                    );
+                    return Err(fs_error(error));
+                }
+                retry += 1;
+                let delay = busy_retry_delay(retry, retry_policy)
+                    .min(retry_policy.max_elapsed.saturating_sub(elapsed));
                 warn!(
-                    attempt,
-                    max_retries = DELTA_JOURNAL_BUSY_RETRIES,
+                    retry,
+                    max_retries = retry_policy.max_retries,
                     delay_ms = delay.as_millis(),
+                    elapsed_ms = elapsed.as_millis(),
+                    retry_window_ms = retry_policy.max_elapsed.as_millis(),
                     batch_size = requests.len(),
                     "resource governor delta journal waiting for filesystem writer"
                 );
@@ -260,12 +336,16 @@ where
     Ok(seqs)
 }
 
-fn busy_retry_delay(attempt: usize) -> Duration {
+fn busy_retry_delay(attempt: usize, policy: BusyRetryPolicy) -> Duration {
     let exponent = u32::try_from(attempt.saturating_sub(1)).unwrap_or(u32::MAX);
     let multiplier = 2u32.saturating_pow(exponent);
-    let base = DELTA_JOURNAL_BUSY_BACKOFF_BASE
+    let base = policy
+        .backoff_base
         .saturating_mul(multiplier)
-        .min(DELTA_JOURNAL_BUSY_BACKOFF_MAX);
+        .min(policy.backoff_max);
+    if !policy.jitter {
+        return base;
+    }
     let jitter_ceiling_ms = base.as_millis().max(1) as u64;
     let jitter_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -273,7 +353,7 @@ fn busy_retry_delay(attempt: usize) -> Duration {
         .subsec_nanos() as u64
         % jitter_ceiling_ms;
     base.saturating_add(Duration::from_millis(jitter_ms))
-        .min(DELTA_JOURNAL_BUSY_BACKOFF_MAX)
+        .min(policy.backoff_max)
 }
 
 pub(super) fn compact_resource_governor_snapshot<F>(
@@ -377,11 +457,25 @@ mod tests {
         append_batch_calls: AtomicUsize,
     }
 
+    struct SlowBusyAppendFilesystem {
+        append_batch_calls: AtomicUsize,
+        delay: Duration,
+    }
+
     impl BusyOnceAppendFilesystem {
         fn new() -> Self {
             Self {
                 append_calls: AtomicUsize::new(0),
                 append_batch_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl SlowBusyAppendFilesystem {
+        fn new(delay: Duration) -> Self {
+            Self {
+                append_batch_calls: AtomicUsize::new(0),
+                delay,
             }
         }
     }
@@ -470,6 +564,34 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl RootFilesystem for SlowBusyAppendFilesystem {
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities::sql_typical().with(Capability::Events)
+        }
+
+        async fn append_batch(
+            &self,
+            path: &VirtualPath,
+            _payloads: Vec<Vec<u8>>,
+        ) -> Result<Vec<SeqNo>, FilesystemError> {
+            self.append_batch_calls.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(self.delay).await;
+            Err(FilesystemError::BackendBusy {
+                path: path.clone(),
+                operation: FilesystemOperation::Append,
+            })
+        }
+
+        async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+            Err(unsupported(path, FilesystemOperation::ListDir))
+        }
+
+        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+            Err(unsupported(path, FilesystemOperation::Stat))
+        }
+    }
+
     impl GatedAppendFilesystem {
         async fn wait_for_release(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
             let release = self
@@ -524,6 +646,18 @@ mod tests {
         Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
     }
 
+    fn scoped_slow_busy_filesystem(
+        backend: Arc<SlowBusyAppendFilesystem>,
+    ) -> Arc<ScopedFilesystem<SlowBusyAppendFilesystem>> {
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/resources").expect("alias"),
+            VirtualPath::new("/resources").expect("target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view");
+        Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
+    }
+
     #[test]
     fn transient_busy_append_batch_is_retried_without_using_single_append() {
         let backend = Arc::new(BusyOnceAppendFilesystem::new());
@@ -540,6 +674,37 @@ mod tests {
         assert_eq!(seq, SeqNo::from_backend(1));
         assert_eq!(backend.append_calls.load(Ordering::SeqCst), 0);
         assert_eq!(backend.append_batch_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn busy_retry_window_stops_starting_new_database_attempts_after_deadline() {
+        let backend = Arc::new(SlowBusyAppendFilesystem::new(Duration::from_millis(30)));
+        let journal = ResourceDeltaJournal::new_with_retry_policy(
+            scoped_slow_busy_filesystem(Arc::clone(&backend)),
+            BusyRetryPolicy {
+                max_retries: 10,
+                max_elapsed: Duration::from_millis(50),
+                backoff_base: Duration::from_millis(10),
+                backoff_max: Duration::from_millis(10),
+                jitter: false,
+            },
+        );
+        let pending = journal
+            .enqueue(ResourceGovernorDelta::AccountSnapshot {
+                account: ResourceAccount::tenant(TenantId::new("tenant1").expect("tenant id")),
+                at: Utc::now(),
+            })
+            .expect("enqueue delta");
+
+        assert!(
+            pending.wait().is_err(),
+            "busy retry window must fail closed"
+        );
+        assert_eq!(
+            backend.append_batch_calls.load(Ordering::SeqCst),
+            2,
+            "the journal must not start a third database attempt after the retry window is exhausted"
+        );
     }
 
     #[test]

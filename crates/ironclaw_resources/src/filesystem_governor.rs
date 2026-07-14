@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem, SeqNo};
 use ironclaw_host_api::{ResourceReservationId, ResourceScope};
@@ -46,6 +47,15 @@ use journal::{
 
 const DEFAULT_COMPACTION_INTERVAL: usize = 1024;
 
+enum AuthorityLifecycle {
+    Vacant,
+    Ready(Arc<ResourceAuthority>),
+    Recovering,
+}
+
+#[cfg(test)]
+type PostCommitHook = Arc<dyn Fn(&Arc<ResourceAuthority>) + Send + Sync>;
+
 /// Filesystem-backed governor with process-local quota authority.
 pub struct FilesystemResourceGovernor<F>
 where
@@ -53,7 +63,7 @@ where
 {
     filesystem: Arc<ScopedFilesystem<F>>,
     snapshot_store: FilesystemResourceGovernorStore<F>,
-    authority: Mutex<Option<Arc<ResourceAuthority>>>,
+    authority: Mutex<AuthorityLifecycle>,
     delta_journal: ResourceDeltaJournal<F>,
     workers: AsyncStorageWorkerPoolCell,
     clock: Arc<dyn Clock>,
@@ -61,6 +71,8 @@ where
     compaction_interval: usize,
     deltas_since_compaction: AtomicUsize,
     compaction_in_flight: Arc<AtomicBool>,
+    #[cfg(test)]
+    post_commit_hook: Option<PostCommitHook>,
 }
 
 impl<F> FilesystemResourceGovernor<F>
@@ -72,13 +84,15 @@ where
             snapshot_store: FilesystemResourceGovernorStore::new(Arc::clone(&filesystem)),
             delta_journal: ResourceDeltaJournal::new(Arc::clone(&filesystem)),
             filesystem,
-            authority: Mutex::new(None),
+            authority: Mutex::new(AuthorityLifecycle::Vacant),
             workers: new_worker_pool_cell(),
             clock: Arc::new(SystemClock),
             event_sink: Arc::new(NoOpBudgetEventSink),
             compaction_interval: DEFAULT_COMPACTION_INTERVAL,
             deltas_since_compaction: AtomicUsize::new(0),
             compaction_in_flight: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            post_commit_hook: None,
         }
     }
 
@@ -105,15 +119,32 @@ where
         self
     }
 
+    #[cfg(test)]
+    fn with_post_commit_hook(mut self, hook: PostCommitHook) -> Self {
+        self.post_commit_hook = Some(hook);
+        self
+    }
+
     fn authority(&self) -> Result<Arc<ResourceAuthority>, ResourceError> {
         let mut guard = self.authority.lock().map_err(|_| ResourceError::Storage {
             reason: "resource governor authority lock poisoned".to_string(),
         })?;
-        if let Some(authority) = guard.as_ref() {
-            return Ok(Arc::clone(authority));
+        match &*guard {
+            AuthorityLifecycle::Ready(authority) => return Ok(Arc::clone(authority)),
+            AuthorityLifecycle::Recovering => {
+                return Err(ResourceError::Storage {
+                    reason: "resource governor authority recovery in progress".to_string(),
+                });
+            }
+            AuthorityLifecycle::Vacant => {}
         }
+        let started = Instant::now();
         let loaded = Arc::new(self.load_authority()?);
-        *guard = Some(Arc::clone(&loaded));
+        *guard = AuthorityLifecycle::Ready(Arc::clone(&loaded));
+        tracing::debug!(
+            elapsed_ms = started.elapsed().as_millis(),
+            "resource governor durable authority loaded"
+        );
         Ok(loaded)
     }
 
@@ -140,9 +171,10 @@ where
         let guard = self.authority.lock().map_err(|_| ResourceError::Storage {
             reason: "resource governor authority lock poisoned while enqueueing delta".to_string(),
         })?;
-        let is_current = guard
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, authority));
+        let is_current = matches!(
+            &*guard,
+            AuthorityLifecycle::Ready(current) if Arc::ptr_eq(current, authority)
+        );
         if !is_current {
             return Err(ResourceError::Storage {
                 reason: "resource governor authority changed before delta enqueue".to_string(),
@@ -160,6 +192,10 @@ where
         let seq = pending.wait()?;
         authority.set_latest_seq(seq)?;
         self.maybe_compact();
+        #[cfg(test)]
+        if let Some(hook) = self.post_commit_hook.as_ref() {
+            hook(authority);
+        }
         Ok(seq)
     }
 
@@ -204,24 +240,71 @@ where
         error: ResourceError,
     ) -> Result<T, ResourceError> {
         authority.poison(error.clone());
-        let mut guard = self.authority.lock().map_err(|_| ResourceError::Storage {
-            reason: "resource governor authority lock poisoned during recovery".to_string(),
-        })?;
-        if guard
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, authority))
-        {
+        let mut guard = match self.authority.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                warn!(
+                    error_kind = "authority_lock",
+                    "resource governor authority lock failed while starting recovery"
+                );
+                return Err(error);
+            }
+        };
+        let restart_journal = matches!(
+            &*guard,
+            AuthorityLifecycle::Ready(current) if Arc::ptr_eq(current, authority)
+        );
+        if restart_journal {
             let error_kind = match &error {
                 ResourceError::Storage { .. } => "storage",
                 _ => "authority_invariant",
             };
             warn!(
                 error_kind,
-                "resource governor authority invalidated; the next operation will reload durable state"
+                "resource governor authority invalidated; coordinating journal replacement"
             );
-            *guard = None;
-            self.delta_journal.restart()?;
+            *guard = AuthorityLifecycle::Recovering;
         }
+        drop(guard);
+        if !restart_journal {
+            return Err(error);
+        }
+
+        let started = Instant::now();
+        let restart = self.delta_journal.restart();
+        let mut guard = match self.authority.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                warn!(
+                    error_kind = "authority_lock",
+                    "resource governor authority lock failed while completing recovery"
+                );
+                return Err(error);
+            }
+        };
+        match restart {
+            Ok(()) => {
+                // `Recovering` prevented both reload and enqueue while the
+                // authority lock was released for thread creation.
+                *guard = AuthorityLifecycle::Vacant;
+                warn!(
+                    recovery_elapsed_ms = started.elapsed().as_millis(),
+                    "resource governor journal replacement installed; the next operation will reload durable state"
+                );
+            }
+            Err(_) => {
+                // Preserve the primary request error and keep the poisoned
+                // authority installed. A secondary recovery failure must fail
+                // later work closed. Do not log the raw secondary error.
+                *guard = AuthorityLifecycle::Ready(Arc::clone(authority));
+                warn!(
+                    error_kind = "journal_restart",
+                    recovery_elapsed_ms = started.elapsed().as_millis(),
+                    "resource governor delta journal restart failed after authority invalidation"
+                );
+            }
+        }
+        drop(guard);
         Err(error)
     }
 
@@ -414,11 +497,6 @@ where
         };
         if let Err(error) = self.finish_delta(&authority, pending) {
             return self.invalidate_authority(&authority, error);
-        }
-        if let Err(error) = authority.check_available() {
-            let result = Err(error);
-            emit_reserve_events(self.event_sink.as_ref(), &result, now);
-            return result;
         }
         let result = Ok(outcome);
         emit_reserve_events(self.event_sink.as_ref(), &result, now);
@@ -640,7 +718,7 @@ mod tests {
     fn stale_authority_cannot_enqueue_into_restarted_journal_generation() {
         let governor = FilesystemResourceGovernor::new(scoped_resources_fs());
         let stale = governor.authority().expect("authority");
-        *governor.authority.lock().expect("authority lock") = None;
+        *governor.authority.lock().expect("authority lock") = AuthorityLifecycle::Vacant;
         let account = ResourceAccount::tenant(sample_scope().tenant_id);
 
         let result = governor.enqueue_delta(
@@ -654,6 +732,107 @@ mod tests {
         assert!(
             matches!(result, Err(ResourceError::Storage { reason }) if reason.contains("authority changed")),
             "a stale operation must fail closed instead of writing into the replacement journal"
+        );
+    }
+
+    #[test]
+    fn recovering_lifecycle_rejects_reload_and_stale_enqueue() {
+        let governor = FilesystemResourceGovernor::new(scoped_resources_fs());
+        let stale = governor.authority().expect("authority");
+        *governor.authority.lock().expect("authority lock") = AuthorityLifecycle::Recovering;
+        let account = ResourceAccount::tenant(sample_scope().tenant_id);
+
+        let reload = governor.authority();
+        let enqueue = governor.enqueue_delta(
+            &stale,
+            ResourceGovernorDelta::AccountSnapshot {
+                account,
+                at: chrono::Utc::now(),
+            },
+        );
+
+        assert!(
+            matches!(reload, Err(ResourceError::Storage { reason }) if reason.contains("recovery in progress")),
+            "new work must not publish an authority before journal replacement is installed"
+        );
+        assert!(
+            matches!(enqueue, Err(ResourceError::Storage { reason }) if reason.contains("authority changed")),
+            "stale work must not enqueue while the lifecycle is recovering"
+        );
+    }
+
+    #[test]
+    fn journal_restart_failure_does_not_mask_primary_storage_error() {
+        let governor = FilesystemResourceGovernor::new(scoped_resources_fs());
+        let authority = governor.authority().expect("authority");
+        governor.delta_journal.poison_sender_lock();
+        let primary_reason = "primary durable journal write failed";
+
+        let result: Result<(), ResourceError> = governor.invalidate_authority(
+            &authority,
+            ResourceError::Storage {
+                reason: primary_reason.to_string(),
+            },
+        );
+
+        assert!(
+            matches!(result, Err(ResourceError::Storage { reason }) if reason == primary_reason),
+            "journal restart failure must not replace the request's primary storage error"
+        );
+        let installed = governor.authority().expect("installed authority");
+        assert!(
+            Arc::ptr_eq(&installed, &authority),
+            "a failed journal restart must leave the poisoned generation installed"
+        );
+        assert!(
+            installed.check_available().is_err(),
+            "new work must fail closed while no replacement journal is available"
+        );
+    }
+
+    #[test]
+    fn authority_lock_failure_does_not_mask_primary_storage_error() {
+        let governor = FilesystemResourceGovernor::new(scoped_resources_fs());
+        let authority = governor.authority().expect("authority");
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = governor.authority.lock().expect("authority lock");
+            panic!("poison authority lock for recovery coverage");
+        }));
+        let primary_reason = "primary durable journal write failed";
+
+        let result: Result<(), ResourceError> = governor.invalidate_authority(
+            &authority,
+            ResourceError::Storage {
+                reason: primary_reason.to_string(),
+            },
+        );
+
+        assert!(
+            matches!(result, Err(ResourceError::Storage { reason }) if reason == primary_reason),
+            "authority lock failure must not replace the request's primary storage error"
+        );
+    }
+
+    #[test]
+    fn durably_acked_reservation_is_not_retroactively_failed_by_generation_poison() {
+        let governor = FilesystemResourceGovernor::new(scoped_resources_fs())
+            .with_post_commit_hook(Arc::new(|authority| {
+                authority.poison(ResourceError::Storage {
+                    reason: "later journal generation failure".to_string(),
+                });
+            }));
+
+        let result = governor.reserve(
+            sample_scope(),
+            ResourceEstimate {
+                usd: Some(dec!(0.25)),
+                ..ResourceEstimate::default()
+            },
+        );
+
+        assert!(
+            result.is_ok(),
+            "the reservation's own durable ack is authoritative even if later work poisons the generation"
         );
     }
 

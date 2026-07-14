@@ -1,3 +1,4 @@
+// arch-exempt: large_file, accounting state-machine behavior remains colocated with its production adapter and focused contract tests, plan #6089
 //! Budget reservation glue for the Reborn loop's model gateway.
 //!
 //! [`GovernorBackedAccountant`] is the concrete
@@ -93,6 +94,26 @@ pub struct GovernorBackedAccountant {
 struct InFlightReservation {
     id: ResourceReservationId,
     estimate: ResourceEstimate,
+    pending: PendingAccounting,
+}
+
+#[derive(Debug, Clone)]
+enum PendingAccounting {
+    /// Provider work may still be active. Cancellation converts this to a
+    /// release before attempting synchronous cleanup.
+    Active,
+    Release,
+    Reconcile(ResourceUsage),
+}
+
+impl PendingAccounting {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Release => "release",
+            Self::Reconcile(_) => "reconcile",
+        }
+    }
 }
 
 impl std::fmt::Debug for GovernorBackedAccountant {
@@ -220,25 +241,30 @@ impl GovernorBackedAccountant {
         Some(id)
     }
 
-    fn seed_if_missing(&self, scope: &ResourceScope) {
+    fn seed_if_missing(&self, scope: &ResourceScope) -> Result<(), ResourceError> {
         let Some(policy) = self.seeding_policy.as_ref() else {
-            return;
+            return Ok(());
         };
         let user_account = ResourceAccount::user(scope.tenant_id.clone(), scope.user_id.clone());
-        self.install_if_unseeded(&user_account, &policy.user_daily);
+        self.install_if_unseeded(&user_account, &policy.user_daily)?;
         if let Some(project_id) = scope.project_id.clone() {
             let project_account = ResourceAccount::project(
                 scope.tenant_id.clone(),
                 scope.user_id.clone(),
                 project_id,
             );
-            self.install_if_unseeded(&project_account, &policy.project_daily);
+            self.install_if_unseeded(&project_account, &policy.project_daily)?;
         }
+        Ok(())
     }
 
-    fn install_if_unseeded(&self, account: &ResourceAccount, limits: &ResourceLimits) {
+    fn install_if_unseeded(
+        &self,
+        account: &ResourceAccount,
+        limits: &ResourceLimits,
+    ) -> Result<(), ResourceError> {
         if self.seeded.contains(account) {
-            return;
+            return Ok(());
         }
         // Honor existing user/admin overrides: a successful read showing
         // an existing limit means seeding is a no-op. We mark seeded only
@@ -249,27 +275,89 @@ impl GovernorBackedAccountant {
         match self.governor.account_snapshot(account) {
             Ok(Some(snapshot)) if snapshot.limits.is_some() => {
                 self.seeded.insert(account.clone());
+                Ok(())
             }
-            Ok(_) => match self.governor.set_limit(account.clone(), limits.clone()) {
-                Ok(()) => {
-                    self.seeded.insert(account.clone());
+            Ok(_) => {
+                self.governor.set_limit(account.clone(), limits.clone())?;
+                self.seeded.insert(account.clone());
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn mark_pending(
+        &self,
+        context: &LoopRunContext,
+        pending: PendingAccounting,
+    ) -> Option<InFlightReservation> {
+        let mut entry = self.in_flight.get_mut(&context.run_id)?;
+        entry.pending = pending;
+        Some(entry.clone())
+    }
+
+    fn settle_in_flight(
+        &self,
+        context: &LoopRunContext,
+        max_attempts: usize,
+    ) -> Result<(), ResourceError> {
+        let Some(entry) = self
+            .in_flight
+            .get(&context.run_id)
+            .map(|entry| entry.clone())
+        else {
+            return Ok(());
+        };
+        let max_attempts = max_attempts.max(1);
+        for attempt in 1..=max_attempts {
+            let result = match &entry.pending {
+                PendingAccounting::Active | PendingAccounting::Release => {
+                    self.governor.release(entry.id).map(|_| ())
                 }
-                Err(err) => {
+                PendingAccounting::Reconcile(actual) => self
+                    .governor
+                    .reconcile(entry.id, actual.clone())
+                    .map(|_| ()),
+            };
+            match result {
+                Ok(()) => {
+                    self.in_flight.remove(&context.run_id);
+                    return Ok(());
+                }
+                Err(ResourceError::Storage { .. }) if attempt < max_attempts => {
                     tracing::warn!(
-                        ?err,
-                        ?account,
-                        "seeding default budget for account failed; will retry on next call"
+                        attempt,
+                        max_attempts,
+                        action = entry.pending.kind(),
+                        run_id = ?context.run_id,
+                        reservation_id = ?entry.id,
+                        "budget accounting storage failure; retrying retained terminal action"
                     );
                 }
-            },
-            Err(err) => {
-                tracing::warn!(
-                    ?err,
-                    ?account,
-                    "reading account snapshot for seeding failed; will retry on next call"
-                );
+                Err(error) => return Err(error),
             }
         }
+        Ok(())
+    }
+
+    fn accounting_failure(
+        &self,
+        context: &LoopRunContext,
+        entry: &InFlightReservation,
+        error: &ResourceError,
+    ) -> Result<(), LoopModelGatewayError> {
+        tracing::warn!(
+            error_kind = resource_error_kind(error),
+            action = entry.pending.kind(),
+            run_id = ?context.run_id,
+            reservation_id = ?entry.id,
+            "budget accounting failed; retained terminal action remains available for cleanup"
+        );
+        Err(LoopModelGatewayError::new(
+            AgentLoopHostErrorKind::BudgetAccountingFailed,
+            "budget accounting failed",
+        )
+        .map_err(internal_summary_error)?)
     }
 
     fn estimate_for(&self, request: &ModelWorkRequest) -> ResourceEstimate {
@@ -307,6 +395,15 @@ impl GovernorBackedAccountant {
         context: &LoopRunContext,
         estimate: ResourceEstimate,
     ) -> Result<(), LoopModelGatewayError> {
+        if let Some(entry) = self
+            .in_flight
+            .get(&context.run_id)
+            .map(|entry| entry.clone())
+            && !matches!(&entry.pending, PendingAccounting::Active)
+            && let Err(error) = self.settle_in_flight(context, 2)
+        {
+            return self.accounting_failure(context, &entry, &error);
+        }
         // Reject a second concurrent reservation for the same run: the loop
         // calls model work serially per run, so overlap means a prior post-call
         // leaked. Hold one reservation only — release the new hold immediately
@@ -320,7 +417,18 @@ impl GovernorBackedAccountant {
         }
 
         let scope = self.resource_scope(context);
-        self.seed_if_missing(&scope);
+        if let Err(error) = self.seed_if_missing(&scope) {
+            tracing::warn!(
+                error_kind = resource_error_kind(&error),
+                run_id = ?context.run_id,
+                "default budget seeding failed; model admission denied"
+            );
+            return Err(LoopModelGatewayError::new(
+                AgentLoopHostErrorKind::BudgetAccountingFailed,
+                "default budget initialization failed",
+            )
+            .map_err(internal_summary_error)?);
+        }
         let reservation_id = ResourceReservationId::new();
         match self
             .governor
@@ -336,6 +444,7 @@ impl GovernorBackedAccountant {
                         slot.insert(InFlightReservation {
                             id: outcome.reservation.id,
                             estimate,
+                            pending: PendingAccounting::Active,
                         });
                     }
                     Entry::Occupied(_) => {
@@ -432,10 +541,6 @@ impl LoopModelBudgetAccountant for GovernorBackedAccountant {
         _request: &ModelWorkRequest,
         outcome: ModelWorkOutcome,
     ) -> Result<(), LoopModelGatewayError> {
-        // Peek without removing — only clear the in-flight entry after the
-        // governor confirms the reconcile/release succeeded. Otherwise a
-        // transient storage error would orphan the reservation in the
-        // governor with no id left here to retry or audit.
         let entry = match self.in_flight.get(&context.run_id) {
             Some(e) => e.clone(),
             None => {
@@ -444,34 +549,20 @@ impl LoopModelBudgetAccountant for GovernorBackedAccountant {
                 return Ok(());
             }
         };
-        let reservation_id = entry.id;
-        let result = match outcome {
+        let pending = match outcome {
             ModelWorkOutcome::Success(usage) => {
                 let usage = usage_for_model_work(usage, &entry.estimate);
-                self.governor.reconcile(reservation_id, usage).map(|_| ())
+                PendingAccounting::Reconcile(usage)
             }
-            ModelWorkOutcome::Failure(_) => self.governor.release(reservation_id).map(|_| ()),
+            ModelWorkOutcome::Failure(_) => PendingAccounting::Release,
         };
-        match result {
-            Ok(()) => {
-                self.in_flight.remove(&context.run_id);
-                Ok(())
-            }
-            Err(err) => {
-                tracing::warn!(
-                    error = ?err,
-                    run_id = ?context.run_id,
-                    reservation_id = ?reservation_id,
-                    "budget accounting failed during post-model-call reconciliation; \
-                     reservation id retained for retry/cleanup"
-                );
-                Err(LoopModelGatewayError::new(
-                    AgentLoopHostErrorKind::BudgetAccountingFailed,
-                    "budget accounting failed",
-                )
-                .unwrap_or_else(|reason| panic!("internal summary invariant violated: {reason}")))
-            }
+        let Some(entry) = self.mark_pending(context, pending) else {
+            return Ok(());
+        };
+        if let Err(error) = self.settle_in_flight(context, 2) {
+            return self.accounting_failure(context, &entry, &error);
         }
+        Ok(())
     }
 
     /// Override the default `post_model_call` so the assistant model path
@@ -487,10 +578,6 @@ impl LoopModelBudgetAccountant for GovernorBackedAccountant {
         _request: &LoopModelRequest,
         outcome: ModelCallOutcome<'_>,
     ) -> Result<(), LoopModelGatewayError> {
-        // Peek without removing — only clear the in-flight entry after the
-        // governor confirms the reconcile/release succeeded. Otherwise a
-        // transient storage error would orphan the reservation in the
-        // governor with no id left here to retry or audit.
         let entry = match self.in_flight.get(&context.run_id) {
             Some(e) => e.clone(),
             None => {
@@ -499,8 +586,7 @@ impl LoopModelBudgetAccountant for GovernorBackedAccountant {
                 return Ok(());
             }
         };
-        let reservation_id = entry.id;
-        let result = match outcome {
+        let pending = match outcome {
             ModelCallOutcome::Success(response) => {
                 let usage = usage_for_response(
                     response,
@@ -509,33 +595,21 @@ impl LoopModelBudgetAccountant for GovernorBackedAccountant {
                     &response.effective_model_profile_id,
                     &self.default_cost,
                 );
-                self.governor.reconcile(reservation_id, usage).map(|_| ())
+                PendingAccounting::Reconcile(usage)
             }
-            ModelCallOutcome::Failure(_) => self.governor.release(reservation_id).map(|_| ()),
+            ModelCallOutcome::Failure(_) => PendingAccounting::Release,
         };
-        match result {
-            Ok(()) => {
-                self.in_flight.remove(&context.run_id);
-                Ok(())
-            }
-            Err(err) => {
-                tracing::warn!(
-                    error = ?err,
-                    run_id = ?context.run_id,
-                    reservation_id = ?reservation_id,
-                    "budget accounting failed during post-model-call reconciliation; \
-                     reservation id retained for retry/cleanup"
-                );
-                Err(LoopModelGatewayError::new(
-                    AgentLoopHostErrorKind::BudgetAccountingFailed,
-                    "budget accounting failed",
-                )
-                .unwrap_or_else(|reason| panic!("internal summary invariant violated: {reason}")))
-            }
+        let Some(entry) = self.mark_pending(context, pending) else {
+            return Ok(());
+        };
+        if let Err(error) = self.settle_in_flight(context, 2) {
+            return self.accounting_failure(context, &entry, &error);
         }
+        Ok(())
     }
 
-    /// Synchronous best-effort release for cancellation paths.
+    /// Synchronous best-effort finalization for cancellation and failed
+    /// post-accounting paths.
     ///
     /// `HostManagedLoopModelPort`'s RAII guard calls this when the
     /// model future is dropped mid-await — before `post_model_call`
@@ -543,34 +617,39 @@ impl LoopModelBudgetAccountant for GovernorBackedAccountant {
     ///
     /// Idempotency / failure handling:
     ///
-    /// - We **peek** the in-flight entry first, attempt the governor
-    ///   release, and only remove the entry on success. On a transient
-    ///   storage error the entry stays in `in_flight` with a warning
-    ///   logged, so a later retry / cleanup hook still has the
-    ///   reservation id needed to close the hold (review feedback:
-    ///   Medium #4).
+    /// - A reservation still marked `Active` is a cancellation and becomes a
+    ///   release. A post-call entry already marked `Reconcile` retains its
+    ///   known provider usage and retries reconciliation instead.
+    /// - The entry is removed only after the governor confirms the retained
+    ///   action. On a storage error it remains available for a later cleanup.
     /// - This method is safe to call after a successful
     ///   `post_model_call`. `post_model_call` removes the entry on
     ///   success, so a follow-up `release_in_flight` short-circuits
     ///   on the `is_none` branch (review feedback: Medium #3 — the
     ///   RAII guard stays armed across `post_model_call`'s await).
     fn release_in_flight(&self, context: &LoopRunContext) {
-        let Some(entry) = self.in_flight.get(&context.run_id).map(|e| e.clone()) else {
+        let Some(entry) = self
+            .in_flight
+            .get(&context.run_id)
+            .map(|entry| entry.clone())
+        else {
             return;
         };
-        match self.governor.release(entry.id) {
-            Ok(_) => {
-                self.in_flight.remove(&context.run_id);
-            }
-            Err(error) => {
-                tracing::warn!(
-                    ?error,
-                    run_id = ?context.run_id,
-                    reservation_id = ?entry.id,
-                    "cancellation-safe release of in-flight budget reservation failed; \
-                     entry retained for a future retry / cleanup hook"
-                );
-            }
+        let entry = if matches!(&entry.pending, PendingAccounting::Active) {
+            self.mark_pending(context, PendingAccounting::Release)
+                .unwrap_or(entry)
+        } else {
+            entry
+        };
+        if let Err(error) = self.settle_in_flight(context, 2) {
+            tracing::warn!(
+                error = ?error,
+                action = entry.pending.kind(),
+                run_id = ?context.run_id,
+                reservation_id = ?entry.id,
+                "cancellation-safe finalization of in-flight budget reservation failed; \
+                 retained action remains available for future cleanup"
+            );
         }
     }
 }
@@ -660,6 +739,19 @@ fn internal_summary_error(reason: String) -> LoopModelGatewayError {
     .unwrap_or_else(|_| panic!("internal budget-accountant invariant: {reason}"))
 }
 
+fn resource_error_kind(error: &ResourceError) -> &'static str {
+    match error {
+        ResourceError::LimitExceeded { .. } => "limit_exceeded",
+        ResourceError::RequiresApproval { .. } => "requires_approval",
+        ResourceError::ReservationAlreadyExists { .. } => "reservation_already_exists",
+        ResourceError::InvalidEstimate { .. } => "invalid_estimate",
+        ResourceError::ReservationMismatch { .. } => "reservation_mismatch",
+        ResourceError::UnknownReservation { .. } => "unknown_reservation",
+        ResourceError::ReservationClosed { .. } => "reservation_closed",
+        ResourceError::Storage { .. } => "storage",
+    }
+}
+
 fn budget_gate_ref(gate_id: BudgetGateId) -> Option<LoopGateRef> {
     LoopGateRef::new(format!("gate:budget-{gate_id}")).ok()
 }
@@ -669,10 +761,10 @@ mod tests {
     use super::*;
     use crate::budget_cost_table::ZeroCostTable;
     use chrono::Utc;
-    use ironclaw_host_api::{TenantId, ThreadId};
+    use ironclaw_host_api::{ResourceReceipt, TenantId, ThreadId};
     use ironclaw_resources::{
-        BudgetPeriod, BudgetThresholds, FakeClock, InMemoryResourceGovernor, ResourceAccount,
-        ResourceLimits,
+        AccountSnapshot, BudgetPeriod, BudgetThresholds, FakeClock, InMemoryResourceGovernor,
+        ReservationOutcome, ResourceAccount, ResourceLimits,
     };
     use ironclaw_turns::{
         AgentLoopDriverDescriptor, RunProfileId, RunProfileVersion, TurnActor, TurnId, TurnRunId,
@@ -1155,9 +1247,9 @@ mod tests {
 
     #[tokio::test]
     async fn seeding_retry_after_transient_failure_uses_failing_governor() {
-        // A governor that always fails set_limit must not poison `seeded`
-        // — a subsequent call should re-attempt seeding instead of
-        // silently proceeding without the intended default cap.
+        // A failed default-limit write must fail admission and must not poison
+        // `seeded` — a subsequent call re-attempts seeding instead of calling
+        // the provider without the intended cap.
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         #[derive(Debug, Default)]
@@ -1219,10 +1311,7 @@ mod tests {
             }
         }
 
-        use ironclaw_host_api::ResourceReceipt;
-        use ironclaw_resources::{
-            AccountSnapshot, ReservationOutcome, ResourceDimension, ResourceLimits,
-        };
+        use ironclaw_resources::ResourceDimension;
         let governor: Arc<dyn ResourceGovernor> = Arc::new(FailingSetLimitGovernor {
             calls: AtomicUsize::new(0),
             inner: InMemoryResourceGovernor::new(),
@@ -1242,21 +1331,173 @@ mod tests {
         let accountant = GovernorBackedAccountant::new(governor.clone(), Arc::new(ZeroCostTable))
             .with_seeding_policy(policy);
         let request = sample_request();
-        // First call: set_limit fails. The reservation itself still
-        // succeeds (free against ZeroCostTable), so the account now has a
-        // ledger row — but no limits, which is exactly the seeded-but-
-        // unprotected hole the rule forbids.
-        accountant.pre_model_call(&context, &request).await.unwrap();
+        // First call: set_limit fails, so admission fails closed before a
+        // reservation is created.
+        let first_error = accountant
+            .pre_model_call(&context, &request)
+            .await
+            .expect_err("failed budget seeding must reject model admission");
+        assert_eq!(
+            first_error.kind,
+            AgentLoopHostErrorKind::BudgetAccountingFailed
+        );
         let first = governor.account_snapshot(&user_account).unwrap();
         assert!(
             first.as_ref().map(|s| s.limits.is_none()).unwrap_or(true),
             "first pre_model_call should leave the account without a limit when set_limit fails",
         );
-        // Drop the in-flight reservation so the next pre_model_call is allowed.
-        accountant.in_flight.clear();
+        assert!(
+            !accountant.in_flight.contains_key(&context.run_id),
+            "failed seeding must not create a resource reservation"
+        );
         // Second call: set_limit succeeds; cap is now in place.
         accountant.pre_model_call(&context, &request).await.unwrap();
         let snapshot = governor.account_snapshot(&user_account).unwrap().unwrap();
         assert_eq!(snapshot.limits.unwrap().max_usd, Some(dec!(5.00)));
+    }
+
+    #[tokio::test]
+    async fn reconciliation_retries_never_release_known_spend_or_brick_the_run() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Debug)]
+        struct FailFirstReconcileGovernor {
+            reconcile_calls: AtomicUsize,
+            release_calls: AtomicUsize,
+            inner: InMemoryResourceGovernor,
+            fail_first_n: usize,
+        }
+
+        impl ResourceGovernor for FailFirstReconcileGovernor {
+            fn set_limit(
+                &self,
+                account: ResourceAccount,
+                limits: ResourceLimits,
+            ) -> Result<(), ResourceError> {
+                self.inner.set_limit(account, limits)
+            }
+
+            fn reserve_with_outcome(
+                &self,
+                scope: ResourceScope,
+                estimate: ResourceEstimate,
+            ) -> Result<ReservationOutcome, ResourceError> {
+                self.inner.reserve_with_outcome(scope, estimate)
+            }
+
+            fn reserve_with_id_and_outcome(
+                &self,
+                scope: ResourceScope,
+                estimate: ResourceEstimate,
+                reservation_id: ResourceReservationId,
+            ) -> Result<ReservationOutcome, ResourceError> {
+                self.inner
+                    .reserve_with_id_and_outcome(scope, estimate, reservation_id)
+            }
+
+            fn reconcile(
+                &self,
+                reservation_id: ResourceReservationId,
+                actual: ResourceUsage,
+            ) -> Result<ResourceReceipt, ResourceError> {
+                if self.reconcile_calls.fetch_add(1, Ordering::SeqCst) < self.fail_first_n {
+                    return Err(ResourceError::Storage {
+                        reason: "synthetic transient reconciliation failure".to_string(),
+                    });
+                }
+                self.inner.reconcile(reservation_id, actual)
+            }
+
+            fn release(
+                &self,
+                reservation_id: ResourceReservationId,
+            ) -> Result<ResourceReceipt, ResourceError> {
+                self.release_calls.fetch_add(1, Ordering::SeqCst);
+                self.inner.release(reservation_id)
+            }
+
+            fn account_snapshot(
+                &self,
+                account: &ResourceAccount,
+            ) -> Result<Option<AccountSnapshot>, ResourceError> {
+                self.inner.account_snapshot(account)
+            }
+        }
+
+        let governor = Arc::new(FailFirstReconcileGovernor {
+            reconcile_calls: AtomicUsize::new(0),
+            release_calls: AtomicUsize::new(0),
+            inner: InMemoryResourceGovernor::new(),
+            fail_first_n: 1,
+        });
+        let accountant = GovernorBackedAccountant::new(
+            governor.clone() as Arc<dyn ResourceGovernor>,
+            Arc::new(ZeroCostTable),
+        );
+        let context = run_context();
+        let request = sample_request();
+        accountant.pre_model_call(&context, &request).await.unwrap();
+        let response = LoopModelResponse {
+            chunks: vec![],
+            safe_reasoning_deltas: Vec::new(),
+            output: ironclaw_turns::run_profile::ParentLoopOutput::AssistantReply(
+                ironclaw_turns::run_profile::AssistantReply {
+                    content: "ok".to_string(),
+                },
+            ),
+            effective_model_profile_id: ModelProfileId::new("acct_model").unwrap(),
+            usage: Some(ironclaw_turns::run_profile::LoopModelUsage {
+                input_tokens: 7,
+                output_tokens: 3,
+                ..Default::default()
+            }),
+        };
+
+        accountant
+            .post_model_call(&context, &request, ModelCallOutcome::Success(&response))
+            .await
+            .expect("transient reconciliation failure should recover in the post-call hook");
+
+        assert_eq!(governor.reconcile_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            governor.release_calls.load(Ordering::SeqCst),
+            0,
+            "known provider usage must never be replaced by a zero-spend release"
+        );
+        assert!(!accountant.in_flight.contains_key(&context.run_id));
+
+        // If both post-call attempts fail, the retained reconcile action is
+        // retried before the next call for the same run. It must settle known
+        // spend first, then create the new reservation without releasing the
+        // failed call as zero spend.
+        let governor = Arc::new(FailFirstReconcileGovernor {
+            reconcile_calls: AtomicUsize::new(0),
+            release_calls: AtomicUsize::new(0),
+            inner: InMemoryResourceGovernor::new(),
+            fail_first_n: 2,
+        });
+        let accountant = GovernorBackedAccountant::new(
+            governor.clone() as Arc<dyn ResourceGovernor>,
+            Arc::new(ZeroCostTable),
+        );
+        let context = run_context();
+        accountant.pre_model_call(&context, &request).await.unwrap();
+        let error = accountant
+            .post_model_call(&context, &request, ModelCallOutcome::Success(&response))
+            .await
+            .expect_err("two storage failures should retain reconciliation and fail closed");
+        assert_eq!(error.kind, AgentLoopHostErrorKind::BudgetAccountingFailed);
+        assert!(accountant.in_flight.contains_key(&context.run_id));
+
+        accountant
+            .pre_model_call(&context, &request)
+            .await
+            .expect("the next call should settle retained usage before reserving again");
+        assert_eq!(governor.reconcile_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(governor.release_calls.load(Ordering::SeqCst), 0);
+        assert!(
+            accountant.in_flight.contains_key(&context.run_id),
+            "the successful retry should be followed by the new active reservation"
+        );
     }
 }

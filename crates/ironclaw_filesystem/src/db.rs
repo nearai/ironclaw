@@ -105,11 +105,21 @@ pub(crate) fn db_error(
     operation: FilesystemOperation,
     error: tokio_postgres::Error,
 ) -> FilesystemError {
+    if error.code().is_some_and(is_postgres_contention) {
+        return FilesystemError::BackendBusy { path, operation };
+    }
     FilesystemError::Backend {
         path,
         operation,
         reason: error.to_string(),
     }
+}
+
+#[cfg(feature = "postgres")]
+fn is_postgres_contention(code: &tokio_postgres::error::SqlState) -> bool {
+    code == &tokio_postgres::error::SqlState::T_R_SERIALIZATION_FAILURE
+        || code == &tokio_postgres::error::SqlState::T_R_DEADLOCK_DETECTED
+        || code == &tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE
 }
 
 #[cfg(feature = "libsql")]
@@ -361,5 +371,103 @@ mod tests {
                 ..
             } if error_path == path
         ));
+    }
+}
+
+#[cfg(all(test, feature = "postgres"))]
+mod postgres_tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use tokio_postgres::error::SqlState;
+
+    use super::*;
+
+    #[test]
+    fn postgres_transient_write_conflicts_are_retryable_contention() {
+        for code in [
+            SqlState::T_R_SERIALIZATION_FAILURE,
+            SqlState::T_R_DEADLOCK_DETECTED,
+            SqlState::LOCK_NOT_AVAILABLE,
+        ] {
+            assert!(is_postgres_contention(&code));
+        }
+
+        assert!(!is_postgres_contention(&SqlState::UNIQUE_VIOLATION));
+    }
+
+    #[tokio::test]
+    async fn postgres_real_lock_not_available_maps_to_backend_busy_when_configured() {
+        if std::env::var("IRONCLAW_SKIP_POSTGRES_TESTS").is_ok() {
+            return;
+        }
+        let url = std::env::var("IRONCLAW_FILESYSTEM_POSTGRES_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"));
+        let Ok(url) = url else {
+            return;
+        };
+        let (locker, locker_connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+            .await
+            .expect("configured Postgres locker connection");
+        let (contender, contender_connection) =
+            tokio_postgres::connect(&url, tokio_postgres::NoTls)
+                .await
+                .expect("configured Postgres contender connection");
+        let locker_task = tokio::spawn(async move {
+            let _ = locker_connection.await;
+        });
+        let contender_task = tokio::spawn(async move {
+            let _ = contender_connection.await;
+        });
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        let table = format!("ironclaw_lock_mapping_{suffix}");
+        locker
+            .batch_execute(&format!(
+                "CREATE TABLE {table} (id INTEGER PRIMARY KEY); \
+                 INSERT INTO {table} (id) VALUES (1);"
+            ))
+            .await
+            .expect("create lock-test row");
+        locker
+            .batch_execute("BEGIN")
+            .await
+            .expect("begin locker transaction");
+        locker
+            .query_one(
+                &format!("SELECT id FROM {table} WHERE id = 1 FOR UPDATE"),
+                &[],
+            )
+            .await
+            .expect("locker holds row lock");
+
+        let postgres_error = contender
+            .query_one(
+                &format!("SELECT id FROM {table} WHERE id = 1 FOR UPDATE NOWAIT"),
+                &[],
+            )
+            .await
+            .expect_err("NOWAIT contender must receive lock-not-available");
+        assert_eq!(postgres_error.code(), Some(&SqlState::LOCK_NOT_AVAILABLE));
+
+        let path = VirtualPath::new("/resources/deltas/log").expect("valid path");
+        let mapped = db_error(path.clone(), FilesystemOperation::Append, postgres_error);
+        assert!(matches!(
+            mapped,
+            FilesystemError::BackendBusy {
+                path: error_path,
+                operation: FilesystemOperation::Append,
+            } if error_path == path
+        ));
+
+        locker
+            .batch_execute(&format!("ROLLBACK; DROP TABLE {table};"))
+            .await
+            .expect("release lock and remove test table");
+        drop(locker);
+        drop(contender);
+        locker_task.await.expect("locker connection task");
+        contender_task.await.expect("contender connection task");
     }
 }
