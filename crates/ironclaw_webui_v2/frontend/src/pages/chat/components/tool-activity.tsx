@@ -278,7 +278,7 @@ function ToolDetailPanel({
             </button>
           )
         )}
-        <span className="ml-auto shrink-0 px-1 py-1 font-mono text-[10px] text-iron-500">
+        <span className="ml-auto shrink-0 px-1 py-1 font-mono text-[10px] text-[var(--v2-text-muted)]">
           {toolStatus === "error"
             ? t("tool.exitError")
             : toolStatus === "declined"
