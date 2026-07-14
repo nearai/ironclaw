@@ -914,11 +914,19 @@ async fn migration_continues_after_one_owner_io_failure() {
              never abort the whole migration pass",
     );
 
+    // Legacy migration also mints a hosted-MCP id for each descriptor it
+    // moves (R1), so the migrated directory is keyed by the minted id, not
+    // the pre-migration `MIGRATION_GOOD_EXTENSION_ID` folder name.
+    let default_tenant =
+        TenantId::from_trusted(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string());
+    let good_owner = UserId::new(MIGRATION_GOOD_OWNER_USER_ID).expect("valid owner id");
+    let good_minted_id = minted_id(&default_tenant, &good_owner, MIGRATION_GOOD_MANIFEST_TOML);
+
     let migrated_good_manifest = storage_root
         .join("system/extensions/registered")
         .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
         .join(MIGRATION_GOOD_OWNER_USER_ID)
-        .join(MIGRATION_GOOD_EXTENSION_ID)
+        .join(good_minted_id.as_str())
         .join("manifest.toml");
     assert!(
         migrated_good_manifest.is_file(),
