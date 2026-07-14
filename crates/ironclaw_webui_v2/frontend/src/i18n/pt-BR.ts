@@ -1289,7 +1289,10 @@ registerPack("pt-BR", {
   "automations.hold.approval": "Aguardando sua aprovação",
   "automations.hold.auth": "Aguardando você reconectar uma conta",
   "automations.hold.inProgress": "A execução anterior ainda está em andamento",
-  "automations.hold.meta.inProgress": "Iniciado {since} · a próxima execução começa após esta terminar",
+  "automations.hold.meta.inProgress":
+    "Iniciado {since} · a próxima execução começa após esta terminar · {count} ocorrências programadas transcorreram enquanto pausado",
+  "automations.hold.meta.inProgressUnknownCount":
+    "Iniciado {since} · a próxima execução começa após esta terminar · contagem de ocorrências programadas transcorridas indisponível",
   "automations.hold.meta.paused":
     "Pausado desde {since} · {count} ocorrências programadas transcorreram enquanto pausado",
   "automations.hold.meta.pausedUnknownCount":

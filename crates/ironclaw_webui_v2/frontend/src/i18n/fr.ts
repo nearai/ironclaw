@@ -1289,7 +1289,10 @@ registerPack("fr", {
   "automations.hold.approval": "En attente de votre approbation",
   "automations.hold.auth": "En attente de la reconnexion d'un compte",
   "automations.hold.inProgress": "L'exécution précédente est toujours en cours",
-  "automations.hold.meta.inProgress": "Démarré {since} · la prochaine exécution commencera une fois celle-ci terminée",
+  "automations.hold.meta.inProgress":
+    "Démarré {since} · la prochaine exécution commencera une fois celle-ci terminée · {count} occurrences planifiées écoulées pendant la pause",
+  "automations.hold.meta.inProgressUnknownCount":
+    "Démarré {since} · la prochaine exécution commencera une fois celle-ci terminée · nombre d'occurrences planifiées écoulées indisponible",
   "automations.hold.meta.paused":
     "En pause depuis {since} · {count} occurrences planifiées écoulées pendant la pause",
   "automations.hold.meta.pausedUnknownCount":

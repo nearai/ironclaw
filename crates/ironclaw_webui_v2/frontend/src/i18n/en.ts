@@ -914,7 +914,10 @@ registerPack("en", {
     "Paused since {since} · {count} scheduled occurrences elapsed while held",
   "automations.hold.meta.pausedUnknownCount":
     "Paused since {since} · scheduled occurrence count unavailable",
-  "automations.hold.meta.inProgress": "Started {since} · next run starts after it finishes",
+  "automations.hold.meta.inProgress":
+    "Started {since} · next run starts after it finishes · {count} scheduled occurrences elapsed while held",
+  "automations.hold.meta.inProgressUnknownCount":
+    "Started {since} · next run starts after it finishes · scheduled occurrence count unavailable",
   "automations.detail.emptyTitle": "Select an automation",
   "automations.detail.emptyDescription":
     "Choose a schedule to inspect recent runs.",

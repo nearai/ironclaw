@@ -1289,7 +1289,10 @@ registerPack("hi", {
   "automations.hold.approval": "आपकी स्वीकृति की प्रतीक्षा है",
   "automations.hold.auth": "आपके किसी खाते को फिर से कनेक्ट करने की प्रतीक्षा है",
   "automations.hold.inProgress": "पिछला रन अभी भी चल रहा है",
-  "automations.hold.meta.inProgress": "{since} को शुरू हुआ · अगला रन इसके पूरा होने के बाद शुरू होगा",
+  "automations.hold.meta.inProgress":
+    "{since} को शुरू हुआ · अगला रन इसके पूरा होने के बाद शुरू होगा · रुके रहने के दौरान {count} निर्धारित अवसर बीत गए",
+  "automations.hold.meta.inProgressUnknownCount":
+    "{since} को शुरू हुआ · अगला रन इसके पूरा होने के बाद शुरू होगा · बीते हुए निर्धारित अवसरों की संख्या उपलब्ध नहीं है",
   "automations.hold.meta.paused":
     "{since} से रुका हुआ · रुके रहने के दौरान {count} निर्धारित अवसर बीत गए",
   "automations.hold.meta.pausedUnknownCount":

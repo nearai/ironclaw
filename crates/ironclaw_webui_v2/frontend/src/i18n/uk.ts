@@ -1289,7 +1289,10 @@ registerPack("uk", {
   "automations.hold.approval": "Очікує на ваше схвалення",
   "automations.hold.auth": "Очікує повторного підключення облікового запису",
   "automations.hold.inProgress": "Попередній запуск ще триває",
-  "automations.hold.meta.inProgress": "Розпочато {since} · наступний запуск почнеться після завершення цього",
+  "automations.hold.meta.inProgress":
+    "Розпочато {since} · наступний запуск почнеться після завершення цього · під час утримання минуло {count} запланованих моментів запуску",
+  "automations.hold.meta.inProgressUnknownCount":
+    "Розпочато {since} · наступний запуск почнеться після завершення цього · кількість минулих запланованих моментів запуску недоступна",
   "automations.hold.meta.paused":
     "Призупинено з {since} · під час утримання минуло {count} запланованих моментів запуску",
   "automations.hold.meta.pausedUnknownCount":

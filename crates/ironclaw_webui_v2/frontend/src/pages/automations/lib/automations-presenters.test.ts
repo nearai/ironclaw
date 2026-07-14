@@ -52,7 +52,10 @@ const EN_SCHEDULE = {
   "automations.hold.meta.paused":
     "Paused since {since} · {count} scheduled occurrences elapsed while held",
   "automations.hold.meta.pausedUnknownCount": "Paused since {since} · run count unavailable",
-  "automations.hold.meta.inProgress": "Started {since} · next run starts after it finishes",
+  "automations.hold.meta.inProgress":
+    "Started {since} · next run starts after it finishes · {count} scheduled occurrences elapsed while held",
+  "automations.hold.meta.inProgressUnknownCount":
+    "Started {since} · next run starts after it finishes · run count unavailable",
   "automations.date.unknown": "Unknown",
   "automations.date.notScheduled": "Not scheduled",
   "automations.date.noRuns": "No runs yet",
@@ -936,17 +939,22 @@ test("normalizeAutomations renders unavailable-count copy when elapsed_occurrenc
   assert.doesNotMatch(automations[0].hold_meta_label, /0 scheduled occurrences elapsed/);
 });
 
-test("normalizeAutomations uses the in-progress hold variant without an elapsed-occurrence count", () => {
+// #6066 follow-up: active_hold_projection computes elapsed_occurrences for
+// EVERY active hold regardless of reason — in_progress holds must surface
+// the same capped/unknown/exact count states as approval/auth/other holds,
+// while keeping their distinct "previous run still executing" framing.
+test("normalizeAutomations uses the in-progress hold variant with an exact elapsed-occurrence count", () => {
   const automations = normalizeAutomations({
     automations: [
       {
-        automation_id: "held-in-progress",
+        automation_id: "held-in-progress-exact",
         name: "Held on in-flight run",
         source: { type: "schedule", cron: "0 9 * * *" },
         state: "active",
         active_hold: {
           reason: "in_progress",
           since: "2026-07-14T00:51:00Z",
+          elapsed_occurrences: 3,
         },
       },
     ],
@@ -955,7 +963,56 @@ test("normalizeAutomations uses the in-progress hold variant without an elapsed-
   assert.equal(automations[0].primary_status_label, "Previous run still in progress");
   assert.equal(automations[0].primary_status_tone, "info");
   assert.match(automations[0].hold_meta_label, /^Started /);
-  assert.match(automations[0].hold_meta_label, /next run starts after it finishes$/);
+  assert.match(automations[0].hold_meta_label, /next run starts after it finishes/);
+  assert.match(automations[0].hold_meta_label, /3 scheduled occurrences elapsed while held$/);
+});
+
+test("normalizeAutomations renders in-progress elapsed_occurrences_capped as 99+", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "held-in-progress-capped",
+        name: "Held on in-flight run with capped elapsed occurrences",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "active",
+        active_hold: {
+          reason: "in_progress",
+          since: "2026-07-14T00:51:00Z",
+          elapsed_occurrences: 99,
+          elapsed_occurrences_capped: true,
+        },
+      },
+    ],
+  });
+
+  assert.equal(automations[0].primary_status_label, "Previous run still in progress");
+  assert.match(automations[0].hold_meta_label, /^Started /);
+  assert.match(automations[0].hold_meta_label, /next run starts after it finishes/);
+  assert.match(automations[0].hold_meta_label, /99\+ scheduled occurrences elapsed/);
+});
+
+test("normalizeAutomations renders in-progress unavailable-count copy when elapsed_occurrences is null", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "held-in-progress-unknown-count",
+        name: "Held on in-flight run with unknown elapsed count",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "active",
+        active_hold: {
+          reason: "in_progress",
+          since: "2026-07-14T00:51:00Z",
+          elapsed_occurrences: null,
+        },
+      },
+    ],
+  });
+
+  assert.equal(automations[0].primary_status_label, "Previous run still in progress");
+  assert.match(automations[0].hold_meta_label, /^Started /);
+  assert.match(automations[0].hold_meta_label, /next run starts after it finishes/);
+  assert.match(automations[0].hold_meta_label, /run count unavailable$/);
+  assert.doesNotMatch(automations[0].hold_meta_label, /0 scheduled occurrences elapsed/);
 });
 
 test("normalizeAutomations leaves status rendering unchanged when active_hold is absent", () => {
