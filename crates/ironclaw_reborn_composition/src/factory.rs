@@ -5292,7 +5292,7 @@ mod tests {
         RebornReadinessDiagnostic, RebornReadinessState, runtime::SKILL_ACTIVATE_CAPABILITY_ID,
     };
 
-    use crate::approval_test_support::test_scope;
+    use crate::scope_test_support::test_scope;
 
     #[cfg(feature = "libsql")]
     #[test]

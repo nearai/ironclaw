@@ -48,6 +48,8 @@ mod product_auth;
 mod production_runtime_policy;
 mod profile_approval_authorization;
 mod projection;
+#[cfg(test)]
+mod scope_test_support;
 mod slack;
 pub use product_auth::api::auth_prompt::{
     AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller,

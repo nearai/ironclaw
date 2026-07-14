@@ -1,8 +1,5 @@
 use ironclaw_approvals::{ApprovalResolver, AutoApproveSettingInput, AutoApproveSettingStore};
-use ironclaw_host_api::{
-    Action, CapabilityId, ExecutionContext, InvocationId, Principal, ResourceEstimate,
-    ResourceScope, UserId,
-};
+use ironclaw_host_api::{Action, CapabilityId, ExecutionContext, Principal, ResourceEstimate};
 use ironclaw_host_runtime::{
     RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
     RuntimeFailureKind,
@@ -14,13 +11,6 @@ use crate::local_dev_capability_policy::{
     LocalDevApprovalPolicyAction, LocalDevCapabilityPolicyError, local_dev_one_shot_lease_approval,
 };
 use crate::{RebornServices, factory::RebornLocalRuntimeServices};
-
-/// Local-default `ResourceScope` for `user` — shared by the `factory.rs` and
-/// `runtime.rs` test modules (this module is the crate's `#[cfg(test)]`
-/// shared-support home despite the approval-flavored name).
-pub(crate) fn test_scope(user: UserId) -> ResourceScope {
-    ResourceScope::local_default(user, InvocationId::new()).expect("valid local scope") // safety: test-only fixture setup.
-}
 
 /// Turn the global auto-approve switch off for `context`'s actor scope.
 /// Global auto-approve defaults ON, so any test exercising the per-tool approval

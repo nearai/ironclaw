@@ -5108,7 +5108,7 @@ output_schema_ref = "schemas/write.output.json"
         RebornCompositionProfile, RebornReadiness, RebornReadinessState, RebornRuntimeError,
     };
 
-    use crate::approval_test_support::test_scope;
+    use crate::scope_test_support::test_scope;
 
     use super::{
         RebornSkillSourceKind, TRUSTED_LAPTOP_ACCESS_AUDIT_KIND,
