@@ -109,7 +109,8 @@ test("extensionLifecycleState does not call active unauthenticated setup active"
   assert.equal(
     extensionLifecycleState({
       package_ref: { kind: "extension", id: "slack" },
-      kind: "wasm_tool",
+      runtime: "wasm",
+      surfaces: [...channelSurfaces, { kind: "auth" }],
       active: true,
       authenticated: false,
       needs_setup: true,

@@ -462,7 +462,7 @@ test("ChannelsTab does not render duplicate fallback pairing when the channel su
   );
 });
 
-test("ChannelsTab falls back to pairing only when the surface connection did not handle it", () => {
+test("ChannelsTab never invents pairing from legacy onboarding state", () => {
   const bareItem = {
     package_ref: { id: "telegram" },
     runtime: "wasm",
@@ -474,18 +474,15 @@ test("ChannelsTab falls back to pairing only when the surface connection did not
 
   assert.equal(
     renderedComponentCount(view.rendered, view.PairingSection),
-    1,
-    "pairing_required without a surface connection still gets the fallback pairing card",
+    0,
+    "pairing_required without a typed connection must not expose an unsupported flow",
   );
-  const fallback = renderedNodeContainingComponent(view.rendered, view.PairingSection);
-  assert.equal(componentPropAfter(fallback, view.PairingSection), "telegram");
-  assert.equal(fallback.values[2], view.redeemPairingCode);
 
   const pairingView = channelsTabForTest({
     ...TAB_PROPS,
     channels: [{ ...bareItem, onboarding_state: "pairing" }],
   });
-  assert.equal(renderedComponentCount(pairingView.rendered, pairingView.PairingSection), 1);
+  assert.equal(renderedComponentCount(pairingView.rendered, pairingView.PairingSection), 0);
 
   const activeView = channelsTabForTest({
     ...TAB_PROPS,

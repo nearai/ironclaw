@@ -12,7 +12,6 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
   const [configuring, setConfiguring] = React.useState(null);
 
   const {
-    status,
     channels,
     tools,
     channelRegistry,

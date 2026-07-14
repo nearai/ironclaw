@@ -19,10 +19,6 @@ import { redeemPairingCode } from "../lib/pairing-api";
 import { activateExtension } from "../lib/extensions-api";
 import { notifyChannelConnected } from "../../../lib/channel-connection-events";
 
-// Model B: the visible Slack extension is the user-tools package (id `slack`),
-// not the bot channel (which is hidden operator infrastructure).
-const SLACK_TOOLS_EXTENSION_ID = "slack";
-
 export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
   const t = useT();
   const extensionName = extension?.displayName || extension?.packageRef?.id || t("extensions.defaultName");
@@ -35,18 +31,23 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     typeof extension?.packageRef === "string"
       ? extension.packageRef
       : extension?.packageRef?.id || "";
-  const channelId = extension?.channel || packageId;
+  const channelSurface = extension?.surfaces?.find(
+    (surface) => surface?.kind === "channel",
+  );
+  const channelConnection = channelSurface?.connection || null;
+  const channelId = channelConnection?.channel || extension?.channel || packageId;
   const lifecycleState = extensionLifecycleState(extension);
-  // This flag gates the tools extension's post-OAuth auto-activate.
-  const isSlackToolsExtension =
-    channelId.toLowerCase() === SLACK_TOOLS_EXTENSION_ID;
-  const handleOauthConfigured = React.useCallback(async () => {
-    onClose();
-    if (isSlackToolsExtension && packageId) {
-      try {
-        await activateExtension({ id: packageId });
-      } catch {
-        console.error("Slack activation after OAuth failed.");
+  const requiresOauthChannelActivation =
+    channelConnection?.strategy === "oauth";
+  const handleOauthConfigured = React.useCallback(async ({ isCurrent = () => true } = {}) => {
+    if (!isCurrent()) return;
+    if (requiresOauthChannelActivation && packageId) {
+      const activation = await activateExtension({ id: packageId });
+      if (!isCurrent()) return;
+      if (activation?.success === false) {
+        throw new Error(
+          activation.message || "Channel activation after authorization failed.",
+        );
       }
     }
     // invalidateQueries refetches active queries and resolves when they
@@ -56,6 +57,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
         (queryKey) => queryClient.invalidateQueries({ queryKey }),
       ),
     );
+    if (!isCurrent()) return;
     // Broadcast channel-connected (same event pairing redemption sends) so an
     // open chat card for this channel clears and its parked request resumes —
     // connecting from the Extensions page must not strand the chat surface.
@@ -66,8 +68,11 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
         console.error("channel connection broadcast after OAuth failed.");
       }
     }
+    if (!isCurrent()) return;
     if (onSaved) onSaved();
-  }, [channelId, extension?.surfaces, isSlackToolsExtension, onClose, onSaved, packageId, queryClient]);
+    if (!isCurrent()) return;
+    onClose();
+  }, [channelId, extension?.surfaces, onClose, onSaved, packageId, queryClient, requiresOauthChannelActivation]);
   const oauthMutation = useOauthSetup(extension?.packageRef, {
     onConfigured: handleOauthConfigured,
   });
@@ -106,8 +111,8 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     [oauthMutation]
   );
 
-  // Some channel extensions may still use proof-code setup: redeem a code,
-  // then best-effort activate so the channel goes live.
+  // Proof-code setup is available only when the typed channel projection says
+  // so; onboarding text alone cannot invent a connection mechanism.
   const oauthSecrets = secrets.filter(
     (secret) => (secret.setup?.kind || "manual_token") === "oauth"
   );
@@ -115,8 +120,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     (secret) => (secret.setup?.kind || "manual_token") === "manual_token"
   );
   const isPairingChannel =
-    !isSlackToolsExtension &&
-    hasChannelSurface(extension) &&
+    channelConnection?.strategy === "inbound_proof_code" &&
     (lifecycleState === "pairing" || lifecycleState === "pairing_required");
   const channelPairingInstructions = t("pairing.instructions");
   const channelPairingPlaceholder = t("pairing.placeholder");
@@ -125,10 +129,11 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
   const pairingMutation = useMutation({
     mutationFn: async (code) => {
       const result = await redeemPairingCode(channelId, code);
-      try {
-        await activateExtension({ id: packageId || channelId });
-      } catch {
-        console.error("channel activation after pairing failed.");
+      const activation = await activateExtension({ id: packageId || channelId });
+      if (activation?.success === false) {
+        throw new Error(
+          activation.message || "Channel activation after pairing failed.",
+        );
       }
       return result;
     },

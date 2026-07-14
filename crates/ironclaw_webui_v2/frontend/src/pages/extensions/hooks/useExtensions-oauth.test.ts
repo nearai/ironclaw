@@ -104,6 +104,257 @@ test("useOauthSetup exposes the popup-watcher phase as authorizing", () => {
   ]);
 });
 
+test("useOauthSetup surfaces a failed post-authorization activation and stops", async () => {
+  const stateUpdates = [];
+  const intervals = [];
+  const invalidations = [];
+  const storage = new Map([
+    [
+      "ironclaw:product-auth:oauth-complete",
+      JSON.stringify({
+        type: "ironclaw:product-auth:oauth-complete",
+        status: "completed",
+        flowId: "flow-activation-fails",
+      }),
+    ],
+  ]);
+  let mutationConfig = null;
+  let stateIndex = 0;
+  const popup = { closed: false, location: { href: "about:blank" } };
+  const context = {
+    Date,
+    Error,
+    React: {
+      useCallback: (fn) => fn,
+      useEffect: () => {},
+      useRef: (initial) => ({ current: initial }),
+      useState: (initial) => {
+        const index = stateIndex++;
+        return [
+          typeof initial === "function" ? initial() : initial,
+          (value) => stateUpdates.push({ index, value }),
+        ];
+      },
+    },
+    URL,
+    activateExtension: () => {},
+    approvePairingCode: () => {},
+    fetchExtensionRegistry: () => {},
+    fetchExtensionSetup: () => {},
+    fetchExtensions: () => {},
+    fetchOauthFlowStatus: () => Promise.resolve(null),
+    fetchPairingRequests: () => {},
+    gatewayStatus: () => {},
+    globalThis: {},
+    installExtension: () => {},
+    removeExtension: () => {},
+    startExtensionOauth: () => {},
+    submitExtensionSetup: () => {},
+    useMutation: (config) => {
+      mutationConfig = config;
+      return { isPending: false, mutate: () => {}, error: null };
+    },
+    useQuery: () => ({ data: {}, isLoading: false }),
+    useQueryClient: () => ({
+      getQueryData: () => null,
+      invalidateQueries: ({ queryKey }) => invalidations.push(queryKey),
+    }),
+    useT: () => (key) => key,
+    window: {
+      clearInterval: () => {},
+      localStorage: {
+        getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+        setItem: (key, value) => storage.set(key, String(value)),
+      },
+      open: () => popup,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      setInterval: (callback) => {
+        intervals.push(callback);
+        return intervals.length;
+      },
+    },
+  };
+  vm.runInNewContext(useExtensionsOauthSourceForTest(), context);
+
+  context.globalThis.__testExports.useOauthSetup(
+    { id: "slack" },
+    {
+      onConfigured: async () => {
+        throw new Error("activation failed");
+      },
+    },
+  );
+  mutationConfig.onSuccess(
+    {
+      res: {
+        authorization_url: "https://slack.com/oauth/v2/authorize",
+        flow_id: "flow-activation-fails",
+      },
+      popup,
+    },
+    { secret: { provider: "slack", provided: false } },
+  );
+  await flushAsyncWork();
+
+  assert.ok(
+    stateUpdates.some(
+      ({ index, value }) =>
+        index === 1 &&
+        value ===
+          "Authorization succeeded, but extension activation failed. Try connecting again.",
+    ),
+    "the required activation failure must remain visible and retryable",
+  );
+  assert.deepEqual(
+    stateUpdates.filter(({ index }) => index === 0),
+    [
+      { index: 0, value: true },
+      { index: 0, value: false },
+    ],
+    "the watcher must stop after surfacing the failed follow-up",
+  );
+  assert.ok(invalidations.length > 0, "failed activation refreshes authoritative setup state");
+});
+
+test("useOauthSetup keeps a pending follow-up generation fenced from replay and a newer flow", async () => {
+  const stateUpdates = [];
+  const intervals = [];
+  const storage = new Map();
+  let mutationConfig = null;
+  let stateIndex = 0;
+  let flowNumber = 0;
+  let rejectFlowAFollowUp;
+  const flowAFollowUp = new Promise((_resolve, reject) => {
+    rejectFlowAFollowUp = reject;
+  });
+  const popupA = { closed: false, close() { this.closed = true; }, location: { href: "about:blank" } };
+  const popupB = { closed: false, close() { this.closed = true; }, location: { href: "about:blank" } };
+  const context = {
+    Date,
+    Error,
+    Promise,
+    React: {
+      useCallback: (fn) => fn,
+      useEffect: () => {},
+      useRef: (initial) => ({ current: initial }),
+      useState: (initial) => {
+        const index = stateIndex++;
+        return [
+          typeof initial === "function" ? initial() : initial,
+          (value) => stateUpdates.push({ index, value }),
+        ];
+      },
+    },
+    URL,
+    activateExtension: () => {},
+    approvePairingCode: () => {},
+    fetchExtensionRegistry: () => {},
+    fetchExtensionSetup: () => {},
+    fetchExtensions: () => {},
+    fetchOauthFlowStatus: () => Promise.resolve(null),
+    fetchPairingRequests: () => {},
+    globalThis: {},
+    installExtension: () => {},
+    removeExtension: () => {},
+    startExtensionOauth: () => {
+      flowNumber += 1;
+      if (flowNumber === 3) {
+        return Promise.reject(new Error("flow C start failed"));
+      }
+      return Promise.resolve({
+        authorization_url: "https://slack.com/oauth/v2/authorize",
+        flow_id: flowNumber === 1 ? "flow-a" : "flow-b",
+      });
+    },
+    submitExtensionSetup: () => {},
+    useMutation: (config) => {
+      mutationConfig = config;
+      return { isPending: false, mutate: () => {}, error: null };
+    },
+    useQuery: () => ({ data: {}, isLoading: false }),
+    useQueryClient: () => ({
+      getQueryData: () => null,
+      invalidateQueries: () => {},
+    }),
+    useT: () => (key) => key,
+    window: {
+      clearInterval: () => {},
+      localStorage: {
+        getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+        setItem: (key, value) => storage.set(key, String(value)),
+      },
+      open: () => popupA,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      setInterval: (callback) => {
+        intervals.push(callback);
+        return intervals.length;
+      },
+    },
+  };
+  vm.runInNewContext(useExtensionsOauthSourceForTest(), context);
+  context.globalThis.__testExports.useOauthSetup(
+    { id: "slack" },
+    {
+      onConfigured: () => flowAFollowUp,
+    },
+  );
+
+  const variablesA = { secret: { provided: false }, popup: popupA };
+  mutationConfig.onSuccess(await mutationConfig.mutationFn(variablesA), variablesA);
+  storage.set(
+    "ironclaw:product-auth:oauth-complete",
+    JSON.stringify({
+      type: "ironclaw:product-auth:oauth-complete",
+      status: "completed",
+      flowId: "flow-a",
+    }),
+  );
+  intervals[0]();
+  intervals[0]();
+  assert.deepEqual(
+    stateUpdates.filter(({ index }) => index === 0),
+    [{ index: 0, value: true }],
+    "replayed completion must not stop authorizing while its follow-up is pending",
+  );
+
+  const variablesB = { secret: { provided: false }, popup: popupB };
+  mutationConfig.onSuccess(await mutationConfig.mutationFn(variablesB), variablesB);
+  rejectFlowAFollowUp(new Error("stale flow A failed"));
+  await flushAsyncWork();
+
+  assert.equal(popupB.closed, false);
+  assert.deepEqual(
+    stateUpdates.filter(({ index }) => index === 0),
+    [
+      { index: 0, value: true },
+      { index: 0, value: true },
+    ],
+    "flow A must not stop flow B's watcher",
+  );
+  assert.ok(
+    !stateUpdates.some(
+      ({ index, value }) => index === 1 && typeof value === "string",
+    ),
+    "flow A must not stamp an activation error onto flow B",
+  );
+
+  const variablesC = { secret: { provided: false }, popup: popupA };
+  let flowCError;
+  try {
+    await mutationConfig.mutationFn(variablesC);
+  } catch (error) {
+    flowCError = error;
+  }
+  mutationConfig.onError(flowCError, variablesC);
+  assert.deepEqual(
+    stateUpdates.filter(({ index }) => index === 0).at(-1),
+    { index: 0, value: false },
+    "a newer OAuth start failure must clear the stale flow's busy state",
+  );
+});
+
 test("useOauthSetup waits for the matching Slack OAuth callback when reconnecting an existing token", () => {
   const stateUpdates = [];
   const intervals = [];

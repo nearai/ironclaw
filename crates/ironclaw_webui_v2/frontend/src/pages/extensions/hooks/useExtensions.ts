@@ -1,7 +1,6 @@
 // @ts-nocheck
 import React from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { gatewayStatus } from "../../../lib/api";
 import {
   completionMatchesFlow,
   failureMatchesFlow,
@@ -94,12 +93,6 @@ export function useExtensions() {
   const t = useT();
   const queryClient = useQueryClient();
 
-  const statusQuery = useQuery({
-    queryKey: ["gateway-status-extensions"],
-    queryFn: gatewayStatus,
-    staleTime: 10_000,
-  });
-
   const extensionsQuery = useQuery({
     queryKey: ["extensions"],
     queryFn: fetchExtensions,
@@ -115,7 +108,6 @@ export function useExtensions() {
   const invalidate = React.useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ["extensions"] });
     queryClient.invalidateQueries({ queryKey: ["extension-registry"] });
-    queryClient.invalidateQueries({ queryKey: ["gateway-status-extensions"] });
   }, [queryClient]);
 
   const [actionResult, setActionResult] = React.useState(null);
@@ -243,7 +235,6 @@ export function useExtensions() {
     },
   });
 
-  const status = statusQuery.data || {};
   const extensions = extensionsQuery.data?.extensions || [];
   const registry = registryQuery.data?.entries || [];
   const extensionById = new Map(
@@ -315,7 +306,6 @@ export function useExtensions() {
   );
 
   return {
-    status,
     extensions,
     channels,
     tools,
@@ -451,6 +441,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
       let stopped = false;
       let timer = null;
       let unsubscribe = () => {};
+      let followUpPending = false;
       // Guard against overlapping in-flight status polls so a slow request
       // cannot stack fetches across interval ticks.
       let flowStatusPending = false;
@@ -471,9 +462,41 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
 
       function complete() {
         if (stopped || !isCurrentGeneration()) return;
-        if (!configuredRef.current) {
-          configuredRef.current = true;
-          Promise.resolve(onConfigured?.()).catch(() => {});
+        if (configuredRef.current || followUpPending) return;
+        configuredRef.current = true;
+        let followUp;
+        try {
+          followUp = onConfigured?.({ isCurrent: isCurrentGeneration });
+        } catch {
+          configuredRef.current = false;
+          setAuthError(
+            "Authorization succeeded, but extension activation failed. Try connecting again.",
+          );
+          stopWatcher();
+          refreshSetupState();
+          return;
+        }
+        if (followUp && typeof followUp.then === "function") {
+          followUpPending = true;
+          Promise.resolve(followUp).then(
+            () => {
+              if (!isCurrentGeneration()) return;
+              followUpPending = false;
+              stopWatcher();
+              refreshSetupState();
+            },
+            () => {
+              if (!isCurrentGeneration()) return;
+              followUpPending = false;
+              configuredRef.current = false;
+              setAuthError(
+                "Authorization succeeded, but extension activation failed. Try connecting again.",
+              );
+              stopWatcher();
+              refreshSetupState();
+            },
+          );
+          return;
         }
         stopWatcher();
         refreshSetupState();
@@ -633,6 +656,10 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
         return;
       }
       clearWatcher();
+      // Starting a newer generation invalidates the old watcher before the
+      // request completes. If this start itself fails there may be no current
+      // watcher left to clear the busy flag, so reset it explicitly.
+      setIsAuthorizing(false);
       const popup = variables?.popup;
       if (popup && !popup.closed) popup.close();
     },

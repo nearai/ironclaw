@@ -295,7 +295,8 @@ test("setup-required primary action reads Connect for a channel and Configure fo
 test("active package with missing auth renders auth needed setup state", () => {
   const rendered = renderExtensionCard({
     package_ref: { kind: "extension", id: "slack" },
-    kind: "wasm_tool",
+    runtime: "wasm",
+    surfaces: [...channelSurfaces, { kind: "auth" }],
     display_name: "Slack",
     active: true,
     authenticated: false,
@@ -310,9 +311,9 @@ test("active package with missing auth renders auth needed setup state", () => {
     "missing Slack OAuth should show auth needed instead of active",
   );
   assert.equal(
-    renderedContainsValue(rendered, "configure"),
+    renderedContainsValue(rendered, "connect"),
     true,
-    "missing Slack OAuth should keep the setup action available",
+    "missing Slack OAuth should keep the typed channel connection action available",
   );
   assert.equal(renderedContainsValue(rendered, "active"), false);
 });

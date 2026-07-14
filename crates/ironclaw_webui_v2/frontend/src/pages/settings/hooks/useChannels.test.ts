@@ -26,22 +26,24 @@ function useChannelsSourceForTest() {
 
 function useChannelsForTest({ extensions, registry }) {
   const queryData = new Map([
-    ["gateway-status-settings", { enabled_channels: ["http"] }],
     ["extensions", { extensions }],
     ["extension-registry", { entries: registry }],
   ]);
+  const queryKeys = [];
   const context = {
     globalThis: {},
-    gatewayStatus: () => {},
     fetchExtensions: () => {},
     fetchExtensionRegistry: () => {},
     // The real surface-taxonomy helper, so channel grouping matches the
     // extensions page (and production) exactly.
     hasChannelSurface,
-    useQuery: (config) => ({ data: queryData.get(config.queryKey[0]), isLoading: false }),
+    useQuery: (config) => {
+      queryKeys.push(config.queryKey[0]);
+      return { data: queryData.get(config.queryKey[0]), isLoading: false };
+    },
   };
   vm.runInNewContext(useChannelsSourceForTest(), context);
-  return context.globalThis.__testExports.useChannels();
+  return { result: context.globalThis.__testExports.useChannels(), queryKeys };
 }
 
 const channelSurfaces = [
@@ -75,7 +77,7 @@ test("useChannels derives channels from the extension channel surface, not the r
     surfaces: toolSurfaces,
   };
 
-  const result = useChannelsForTest({
+  const { result, queryKeys } = useChannelsForTest({
     extensions: [slack, github, impostor],
     registry: [],
   });
@@ -85,7 +87,12 @@ test("useChannels derives channels from the extension channel surface, not the r
     ["slack"],
     "only surface-declared channels appear in the settings channels group",
   );
-  assert.equal(result.status.enabled_channels[0], "http");
+  assert.deepEqual(
+    queryKeys,
+    ["extensions", "extension-registry"],
+    "settings must not present fabricated live state from the gateway-status stub",
+  );
+  assert.equal("status" in result, false);
 });
 
 test("useChannels offers uninstalled channel-surface registry entries and nothing else", () => {
@@ -111,7 +118,7 @@ test("useChannels offers uninstalled channel-surface registry entries and nothin
     installed: false,
   };
 
-  const result = useChannelsForTest({
+  const { result } = useChannelsForTest({
     extensions: [],
     registry: [telegramEntry, installedSlackEntry, mcpToolEntry],
   });
@@ -124,7 +131,7 @@ test("useChannels offers uninstalled channel-surface registry entries and nothin
 });
 
 test("useChannels exposes no runtime-grouped MCP rails: runtime is a badge, never a grouping axis", () => {
-  const result = useChannelsForTest({ extensions: [], registry: [] });
+  const { result } = useChannelsForTest({ extensions: [], registry: [] });
   assert.equal(
     "mcpServers" in result,
     false,

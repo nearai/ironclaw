@@ -80,9 +80,6 @@ export function ChannelsTab({
           <div className="grid grid-cols-1 gap-4">
             {installedChannels.map(
               (ch) => {
-                const connection = channelConnection(ch);
-                const pairingHandledBySurface =
-                  isInboundProofCodeConnection(connection);
                 return (
                   <div key={packageId(ch)} className="flex flex-col gap-3">
                     <ExtensionCard
@@ -93,14 +90,6 @@ export function ChannelsTab({
                       isBusy={isBusy}
                     />
                     <ChannelConnectSections item={ch} />
-                    {!isSlackPackage(ch) &&
-                    !pairingHandledBySurface &&
-                    (ch.onboarding_state === "pairing_required" ||
-                      ch.onboarding_state === "pairing") &&
-                    ( <PairingSection
-                      channel={packageId(ch)}
-                      redeemFn={redeemPairingCode}
-                    /> )}
                   </div>
                 );
               }

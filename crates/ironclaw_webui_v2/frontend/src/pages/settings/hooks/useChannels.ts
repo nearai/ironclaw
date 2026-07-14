@@ -1,5 +1,4 @@
 import { useQuery } from "@tanstack/react-query";
-import { gatewayStatus } from "../../../lib/api";
 import { fetchExtensions, fetchExtensionRegistry } from "../lib/settings-api";
 import { hasChannelSurface } from "../../extensions/lib/extensions-schema";
 
@@ -8,12 +7,6 @@ import { hasChannelSurface } from "../../extensions/lib/extensions-schema";
 // declared channel surface exactly like the extensions page; runtime is never
 // a grouping axis, so there is no separate MCP rail here.
 export function useChannels() {
-  const statusQuery = useQuery({
-    queryKey: ["gateway-status-settings"],
-    queryFn: gatewayStatus,
-    staleTime: 10_000,
-  });
-
   const extensionsQuery = useQuery({
     queryKey: ["extensions"],
     queryFn: fetchExtensions,
@@ -24,7 +17,6 @@ export function useChannels() {
     queryFn: fetchExtensionRegistry,
   });
 
-  const status = statusQuery.data || {};
   const extensions = extensionsQuery.data?.extensions || [];
   const registry = registryQuery.data?.entries || [];
 
@@ -33,7 +25,7 @@ export function useChannels() {
     (entry) => hasChannelSurface(entry) && !entry.installed
   );
 
-  const isLoading = statusQuery.isLoading || extensionsQuery.isLoading;
+  const isLoading = extensionsQuery.isLoading || registryQuery.isLoading;
 
-  return { status, channels, channelRegistry, extensions, isLoading };
+  return { channels, channelRegistry, extensions, isLoading };
 }

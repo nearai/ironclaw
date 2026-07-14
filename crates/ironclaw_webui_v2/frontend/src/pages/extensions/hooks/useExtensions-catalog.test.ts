@@ -31,7 +31,6 @@ function useExtensionsForTest({ extensions, registry }) {
   const queryData = new Map([
     ["extensions", { extensions }],
     ["extension-registry", { entries: registry }],
-    ["gateway-status-extensions", {}],
   ]);
   const context = {
     React: {

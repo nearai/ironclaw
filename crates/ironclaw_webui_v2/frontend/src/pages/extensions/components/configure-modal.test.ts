@@ -11,6 +11,18 @@ import { redeemPairingCode as realRedeemPairingCode } from "../lib/pairing-api";
 // Wire-shaped surface fixtures: a channel extension declares a channel
 // surface; a plain tool extension declares only a tool surface.
 const channelSurfaces = [{ kind: "channel", inbound: true, outbound: true }];
+const oauthChannelSurfaces = [{
+  kind: "channel",
+  inbound: true,
+  outbound: true,
+  connection: { channel: "slack", strategy: "oauth" },
+}];
+const proofCodeChannelSurfaces = [{
+  kind: "channel",
+  inbound: true,
+  outbound: true,
+  connection: { channel: "telegram", strategy: "inbound_proof_code" },
+}];
 const toolSurfaces = [{ kind: "tool" }];
 
 function configureModalSourceForTest() {
@@ -207,7 +219,7 @@ function findHandler(node, bodyMarker, seen = new Set()) {
 
 test("ConfigureModal renders the code-entry panel for a channel extension that uses manual setup", () => {
   const { rendered, mutationConfig } = renderModal({
-    surfaces: channelSurfaces,
+    surfaces: proofCodeChannelSurfaces,
     packageRef: { kind: "extension", id: "telegram" },
     channel: "telegram",
     displayName: "Telegram",
@@ -233,7 +245,7 @@ test("ConfigureModal renders Slack OAuth without opening the popup automatically
     },
   };
   const { rendered, oauthCalls, openedPopups } = renderModal({
-    surfaces: channelSurfaces,
+    surfaces: oauthChannelSurfaces,
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
@@ -273,7 +285,7 @@ test("ConfigureModal does not show a generic activate action beside Slack OAuth"
     },
   };
   const { rendered } = renderModal({
-    surfaces: channelSurfaces,
+    surfaces: oauthChannelSurfaces,
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
@@ -296,7 +308,7 @@ test("ConfigureModal does not show a generic activate action beside Slack OAuth"
   assert.doesNotMatch(body, /extensions\.activate/);
 });
 
-test("ConfigureModal activates the Slack extension after OAuth setup completes", async () => {
+test("ConfigureModal activates the typed Slack OAuth channel after setup completes", async () => {
   const slackOauthSecret = {
     name: "slack_oauth",
     provider: "slack",
@@ -311,7 +323,12 @@ test("ConfigureModal activates the Slack extension after OAuth setup completes",
   };
   let closed = false;
   const { calls, invalidations, notifications, oauthSetupArgs } = renderModal({
-    surfaces: channelSurfaces,
+    surfaces: [{
+      kind: "channel",
+      inbound: true,
+      outbound: true,
+      connection: { channel: "slack", strategy: "oauth" },
+    }],
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
@@ -354,9 +371,55 @@ test("ConfigureModal activates the Slack extension after OAuth setup completes",
   ]);
 });
 
+test("ConfigureModal does not close or broadcast after its OAuth flow becomes stale", async () => {
+  let resolveActivation;
+  const activation = new Promise((resolve) => {
+    resolveActivation = resolve;
+  });
+  let current = true;
+  let closed = false;
+  const { calls, invalidations, notifications, oauthSetupArgs } = renderModal({
+    surfaces: oauthChannelSurfaces,
+    packageRef: { kind: "extension", id: "slack" },
+    channel: "slack",
+    displayName: "Slack",
+    onboardingState: "setup_required",
+    setupResult: {
+      secrets: [{
+        name: "slack_oauth",
+        provider: "slack",
+        provided: false,
+        setup: { kind: "oauth", scopes: ["users:read"] },
+      }],
+      fields: [],
+      onboarding: null,
+      isLoading: false,
+      error: null,
+    },
+    activate: () => activation,
+    onClose: () => {
+      closed = true;
+    },
+  });
+
+  const completion = oauthSetupArgs[0][1].onConfigured({
+    isCurrent: () => current,
+  });
+  current = false;
+  resolveActivation();
+  await completion;
+
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
+    ["activate", { id: "slack" }],
+  ]);
+  assert.deepEqual(invalidations, [], "a stale flow must not refresh or mutate current UI state");
+  assert.deepEqual(notifications, [], "a stale flow must not broadcast channel readiness");
+  assert.equal(closed, false, "a stale flow must not close the current modal");
+});
+
 test("ConfigureModal surfaces a failed OAuth flow as a retryable error", () => {
   const { rendered } = renderModal({
-    surfaces: channelSurfaces,
+    surfaces: oauthChannelSurfaces,
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
@@ -384,7 +447,7 @@ test("ConfigureModal surfaces a failed OAuth flow as a retryable error", () => {
   );
 });
 
-test("ConfigureModal closes as soon as Slack OAuth setup completes", async () => {
+test("ConfigureModal waits for required channel activation before closing", async () => {
   const slackOauthSecret = {
     name: "slack_oauth",
     provider: "slack",
@@ -403,7 +466,7 @@ test("ConfigureModal closes as soon as Slack OAuth setup completes", async () =>
     releaseActivation = resolve;
   });
   const { oauthSetupArgs } = renderModal({
-    surfaces: channelSurfaces,
+    surfaces: oauthChannelSurfaces,
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
@@ -427,10 +490,49 @@ test("ConfigureModal closes as soon as Slack OAuth setup completes", async () =>
   const configuredPromise = oauthSetupArgs[0][1].onConfigured();
   await new Promise((resolve) => setImmediate(resolve));
 
-  assert.equal(closed, true);
+  assert.equal(closed, false, "the modal stays open until activation succeeds");
 
   releaseActivation();
   await configuredPromise;
+  assert.equal(closed, true);
+});
+
+test("ConfigureModal fails closed when post-OAuth channel activation fails", async () => {
+  let closed = false;
+  let saved = false;
+  const { notifications, oauthSetupArgs } = renderModal({
+    surfaces: oauthChannelSurfaces,
+    packageRef: { kind: "extension", id: "slack" },
+    channel: "slack",
+    displayName: "Slack",
+    onboardingState: "setup_required",
+    setupResult: {
+      secrets: [{
+        name: "slack_oauth",
+        provider: "slack",
+        provided: false,
+        setup: { kind: "oauth", invocation_id: "invocation-alpha" },
+      }],
+      fields: [],
+      onboarding: null,
+      isLoading: false,
+      error: null,
+    },
+    activate: async () => {
+      throw new Error("activation boom");
+    },
+    onClose: () => {
+      closed = true;
+    },
+    onSaved: () => {
+      saved = true;
+    },
+  });
+
+  await assert.rejects(oauthSetupArgs[0][1].onConfigured(), /activation boom/);
+  assert.equal(closed, false);
+  assert.equal(saved, false);
+  assert.deepEqual(notifications, []);
 });
 
 test("ConfigureModal keeps Slack OAuth visibly loading while waiting for authorization", () => {
@@ -447,7 +549,7 @@ test("ConfigureModal keeps Slack OAuth visibly loading while waiting for authori
     },
   };
   const { rendered } = renderModal({
-    surfaces: channelSurfaces,
+    surfaces: oauthChannelSurfaces,
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
@@ -481,7 +583,7 @@ test("ConfigureModal does not render the pairing panel for a non-channel extensi
 
 test("ConfigureModal does not route setup-required channels to the pairing panel", () => {
   const { rendered } = renderModal({
-    surfaces: channelSurfaces,
+    surfaces: proofCodeChannelSurfaces,
     onboardingState: "setup_required",
   });
 
@@ -490,7 +592,7 @@ test("ConfigureModal does not route setup-required channels to the pairing panel
 
 test("ConfigureModal localizes channel pairing copy", () => {
   const { rendered } = renderModal({
-    surfaces: channelSurfaces,
+    surfaces: proofCodeChannelSurfaces,
     packageRef: { kind: "extension", id: "telegram" },
     channel: "telegram",
     displayName: "Telegram",
@@ -516,7 +618,7 @@ test("ConfigureModal localizes channel pairing copy", () => {
 
 test("ConfigureModal renders a localized close label through ModalShell", () => {
   const { context, rendered } = renderModal({
-    surfaces: channelSurfaces,
+    surfaces: proofCodeChannelSurfaces,
     onboardingState: "pairing_required",
     translate: (key) =>
       ({
@@ -537,7 +639,7 @@ test("ConfigureModal renders a localized close label through ModalShell", () => 
 test("ConfigureModal pairing redeems then activates, invalidates queries, and closes", async () => {
   let closed = false;
   const { calls, invalidations, mutationConfig } = renderModal({
-    surfaces: channelSurfaces,
+    surfaces: proofCodeChannelSurfaces,
     packageRef: { kind: "extension", id: "telegram" },
     channel: "telegram",
     displayName: "Telegram",
@@ -564,7 +666,7 @@ test("ConfigureModal pairing redeems then activates, invalidates queries, and cl
 
 test("ConfigureModal pairing redeems by channel slug and activates package id", async () => {
   const { calls, invalidations, mutationConfig } = renderModal({
-    surfaces: channelSurfaces,
+    surfaces: proofCodeChannelSurfaces,
     onboardingState: "pairing_required",
     packageRef: { kind: "extension", id: "telegram-host-package" },
     channel: "telegram",
@@ -638,7 +740,7 @@ test("ConfigureModal pairing through the real API waits for blocked chats to res
     };
 
     const { mutationConfig } = renderModal({
-      surfaces: channelSurfaces,
+      surfaces: proofCodeChannelSurfaces,
       packageRef: { kind: "extension", id: "telegram" },
       channel: "telegram",
       displayName: "Telegram",
@@ -680,9 +782,9 @@ test("ConfigureModal pairing through the real API waits for blocked chats to res
   }
 });
 
-test("ConfigureModal treats post-redeem activation failure as best-effort", async () => {
+test("ConfigureModal fails closed when post-redeem activation fails", async () => {
   const { calls, mutationConfig } = renderModal({
-    surfaces: channelSurfaces,
+    surfaces: proofCodeChannelSurfaces,
     packageRef: { kind: "extension", id: "telegram" },
     channel: "telegram",
     displayName: "Telegram",
@@ -692,11 +794,7 @@ test("ConfigureModal treats post-redeem activation failure as best-effort", asyn
     },
   });
 
-  // The mutation must resolve with the successful redemption even though the
-  // follow-up activation threw — a connected account is not surfaced as a
-  // pairing failure.
-  const result = await mutationConfig.mutationFn("A1B2C3");
-  assert.deepEqual(result, { success: true });
+  await assert.rejects(mutationConfig.mutationFn("A1B2C3"), /activation boom/);
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
     ["redeem", "telegram", "A1B2C3"],
     ["activate", { id: "telegram" }],
