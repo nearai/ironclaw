@@ -261,6 +261,7 @@ mod tests {
         CapabilityId, HostPath, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
         ResourceScope, RuntimeDispatchErrorKind, UserId, VirtualPath,
     };
+    use ironclaw_turns::run_profile::LoopSafeSummary;
     use serde_json::json;
 
     #[test]
@@ -440,5 +441,133 @@ mod tests {
             MountPermissions::read_write(),
         )])
         .expect("mount view")
+    }
+
+    #[tokio::test]
+    async fn out_of_scope_path_rejection_names_the_path_and_available_roots() {
+        // A model that targets a path outside the scoped mounts (the classic
+        // failure: absolute paths like /testbed/... from a task description)
+        // must learn WHY the call failed and which roots exist — a bare
+        // input-encode category leaves it retrying the same call blind.
+        //
+        // FilesystemDenied maps to a Denied loop outcome, whose ONLY
+        // model-visible channel is the safe summary itself. The summary must
+        // therefore both pass the strict loop validator (which rejects `/`)
+        // AND carry a delimiter-free rendering of the path and roots — a
+        // raw-path summary would silently degrade to the generic category
+        // sentence at the runtime boundary.
+        let temp_root = tempfile::TempDir::new().expect("temp root");
+        let mut local_filesystem = LocalFilesystem::new();
+        local_filesystem
+            .mount_local(
+                VirtualPath::new("/projects").expect("virtual path"),
+                HostPath::from_path_buf(temp_root.path().to_path_buf()),
+            )
+            .expect("projects mount");
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(local_filesystem);
+        let mounts = workspace_mounts();
+        let scope = ResourceScope::local_default(
+            UserId::new("out-of-scope-user").expect("user id"),
+            InvocationId::new(),
+        )
+        .expect("resource scope");
+        let state = super::CodingCapabilityState::default();
+        let read_capability_id = CapabilityId::new("builtin.read_file").expect("capability id");
+
+        let input = json!({ "path": "/testbed/replacer.go" });
+        let request = super::CodingCapabilityRequest::new(
+            &read_capability_id,
+            super::CodingCapabilityKind::ReadFile,
+            &scope,
+            Some(&mounts),
+            filesystem,
+            &input,
+        );
+        let err = state
+            .dispatch(&request)
+            .await
+            .expect_err("out-of-scope absolute path must be rejected");
+
+        assert_eq!(err.kind(), RuntimeDispatchErrorKind::FilesystemDenied);
+        let summary = err
+            .safe_summary()
+            .expect("rejection must carry a model-visible reason");
+        assert!(
+            LoopSafeSummary::new(summary.to_string()).is_ok(),
+            "summary must survive the strict loop safe-summary validator \
+             (otherwise it degrades to the generic category sentence and the \
+             model never sees the reason), got: {summary}"
+        );
+        assert!(
+            summary.contains("testbed replacer.go"),
+            "summary should name the offending path, got: {summary}"
+        );
+        assert!(
+            summary.contains("workspace"),
+            "summary should name the available scoped roots, got: {summary}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_only_mount_write_rejection_carries_an_actionable_validated_reason() {
+        // Writing through a read-only scoped mount must fail with
+        // FilesystemDenied AND tell the model which path hit the permission
+        // wall — and, as above, the reason must survive the strict loop
+        // safe-summary validator because Denied outcomes have no diagnostic
+        // detail channel.
+        let temp_root = tempfile::TempDir::new().expect("temp root");
+        std::fs::create_dir_all(temp_root.path().join("workspace")).expect("workspace dir");
+        let mut local_filesystem = LocalFilesystem::new();
+        local_filesystem
+            .mount_local(
+                VirtualPath::new("/projects").expect("virtual path"),
+                HostPath::from_path_buf(temp_root.path().to_path_buf()),
+            )
+            .expect("projects mount");
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(local_filesystem);
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").expect("mount alias"),
+            VirtualPath::new("/projects/workspace").expect("virtual path"),
+            MountPermissions::read_only(),
+        )])
+        .expect("mount view");
+        let scope = ResourceScope::local_default(
+            UserId::new("read-only-write-user").expect("user id"),
+            InvocationId::new(),
+        )
+        .expect("resource scope");
+        let state = super::CodingCapabilityState::default();
+        let write_capability_id = CapabilityId::new("builtin.write_file").expect("capability id");
+
+        let input = json!({ "path": "/workspace/notes.txt", "content": "hello" });
+        let request = super::CodingCapabilityRequest::new(
+            &write_capability_id,
+            super::CodingCapabilityKind::WriteFile,
+            &scope,
+            Some(&mounts),
+            filesystem,
+            &input,
+        );
+        let err = state
+            .dispatch(&request)
+            .await
+            .expect_err("write through a read-only mount must be rejected");
+
+        assert_eq!(err.kind(), RuntimeDispatchErrorKind::FilesystemDenied);
+        let summary = err
+            .safe_summary()
+            .expect("permission rejection must carry a model-visible reason");
+        assert!(
+            LoopSafeSummary::new(summary.to_string()).is_ok(),
+            "summary must survive the strict loop safe-summary validator, got: {summary}"
+        );
+        assert!(
+            summary.contains("workspace notes.txt"),
+            "summary should name the denied path, got: {summary}"
+        );
+        assert!(
+            summary.contains("does not permit"),
+            "summary should say the mount refused the operation, got: {summary}"
+        );
     }
 }

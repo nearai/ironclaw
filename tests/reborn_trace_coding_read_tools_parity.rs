@@ -8,7 +8,7 @@ mod support;
 
 use ironclaw_host_api::CapabilityId;
 use ironclaw_host_runtime::{GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID};
-use ironclaw_loop_support::{HostManagedModelMessageRole, HostManagedModelResponse};
+use ironclaw_loop_host::{HostManagedModelMessageRole, HostManagedModelResponse};
 use ironclaw_turns::{TurnStatus, run_profile::LoopHostMilestoneKind};
 use parity_qa_support::{
     binary_e2e::{RebornBinaryE2EHarness, assert_milestone_order},

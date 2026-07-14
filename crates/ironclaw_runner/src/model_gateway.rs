@@ -1,6 +1,6 @@
 //! LLM provider-backed Reborn model gateway wiring.
 //!
-//! The loop-support crate owns the host-facing model gateway contract. This
+//! The loop-host crate owns the host-facing model gateway contract. This
 //! adapter lives in the standalone Reborn composition crate because it bridges
 //! that contract to the shared `ironclaw_llm` provider abstraction.
 
@@ -23,7 +23,7 @@ use ironclaw_llm::{
     recover_codex_text_tool_calls_from_tool_names,
     vision_models::is_vision_model,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
     HostManagedModelResponse, HostManagedModelRouteSnapshot, HostManagedModelStreamSink,
@@ -37,7 +37,7 @@ use ironclaw_safety::{
 use ironclaw_threads::{ProviderToolCallReferenceEnvelope, SessionThreadService, ThreadScope};
 use ironclaw_turns::run_profile::LoopModelUsage;
 use ironclaw_turns::{
-    TurnId, TurnRunId,
+    ModelInvalidOutputDetailReason as InvalidOutputReason, TurnId, TurnRunId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
@@ -61,9 +61,6 @@ use crate::{
 const MODEL_CREDITS_EXHAUSTED_SUMMARY: &str = "model provider account is out of credits";
 const PROVIDER_TOOL_ARGUMENTS_OMITTED_MARKER: &str =
     "arguments omitted because they exceeded the host provider-tool limit";
-const PROVIDER_TOOL_ARGUMENTS_PARSE_ERROR_PREFIX: &str =
-    "failed to parse tool-call arguments JSON:";
-const PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY: &str = "model returned invalid tool-call arguments";
 const PROVIDER_TOOL_ARGUMENTS_INVALID_MARKER: &str =
     "arguments omitted because the provider emitted malformed tool-call JSON";
 const CONTEXT_SHADOW_TARGET: &str = "ironclaw::reborn::context_shadow";
@@ -1361,7 +1358,7 @@ fn recover_textual_tool_calls_from_tool_response(
             debug!("reborn model gateway rejected unrecovered textual provider tool-call syntax");
             return Err(HostManagedModelError::safe(
                 HostManagedModelErrorKind::InvalidOutput,
-                "model returned textual tool-call syntax instead of structured tool calls",
+                InvalidOutputReason::TextualToolCallSyntax.safe_summary(),
             ));
         }
         return Ok(response);
@@ -1482,7 +1479,7 @@ async fn tool_response_to_host(
         ) {
             return Err(HostManagedModelError::safe(
                 HostManagedModelErrorKind::InvalidOutput,
-                "model returned a tool call outside the advertised capability surface",
+                InvalidOutputReason::OutsideCapabilitySurface.safe_summary(),
             ));
         }
         for provider_call in &provider_calls {
@@ -1545,7 +1542,7 @@ async fn tool_response_to_host(
             if content.trim().is_empty() {
                 return Err(HostManagedModelError::safe(
                     HostManagedModelErrorKind::InvalidOutput,
-                    "model returned an empty assistant response",
+                    InvalidOutputReason::EmptyAssistantResponse.safe_summary(),
                 ));
             }
             debug!(
@@ -1571,7 +1568,7 @@ async fn tool_response_to_host(
         )),
         FinishReason::ToolUse => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::InvalidOutput,
-            "model returned tool-use finish without tool calls",
+            InvalidOutputReason::ToolUseFinishWithoutToolCalls.safe_summary(),
         )),
         FinishReason::Unknown => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::Unavailable,
@@ -1817,7 +1814,7 @@ fn provider_tool_call_from_llm(
         debug!(%error, "reborn model gateway rejected invalid provider tool name");
         HostManagedModelError::safe(
             HostManagedModelErrorKind::InvalidOutput,
-            "model returned an invalid provider tool name",
+            InvalidOutputReason::InvalidReturnedToolName.safe_summary(),
         )
     })?;
     Ok(ProviderToolCall {
@@ -1837,12 +1834,14 @@ fn provider_tool_arguments_parse_error_summary(parse_error: &str) -> String {
     let summary_line = parse_error.lines().next().unwrap_or(parse_error);
     let sanitized = sanitize_model_visible_text(summary_line.to_string());
     let sanitized = sanitized.trim();
-    if sanitized.starts_with(PROVIDER_TOOL_ARGUMENTS_PARSE_ERROR_PREFIX)
+    if sanitized.starts_with(InvalidOutputReason::TOOL_CALL_ARGUMENTS_PARSE_ERROR_PREFIX)
         && LoopSafeSummary::new(sanitized).is_ok()
     {
         sanitized.to_string()
     } else {
-        PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY.to_string()
+        InvalidOutputReason::InvalidToolCallArguments
+            .safe_summary()
+            .to_string()
     }
 }
 
@@ -1895,7 +1894,7 @@ fn response_to_host_reply(
         )),
         FinishReason::ToolUse => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::InvalidOutput,
-            "model returned unsupported tool calls for a text-only loop",
+            InvalidOutputReason::UnsupportedToolCallsForTextOnlyLoop.safe_summary(),
         )),
         FinishReason::Unknown => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::Unavailable,
@@ -1955,8 +1954,8 @@ fn is_repairable_provider_tool_output_error(error: &HostManagedModelError) -> bo
 }
 
 fn is_provider_tool_arguments_parse_error_summary(safe_summary: &str) -> bool {
-    safe_summary.starts_with(PROVIDER_TOOL_ARGUMENTS_PARSE_ERROR_PREFIX)
-        || safe_summary == PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY
+    safe_summary.starts_with(InvalidOutputReason::TOOL_CALL_ARGUMENTS_PARSE_ERROR_PREFIX)
+        || safe_summary == InvalidOutputReason::InvalidToolCallArguments.safe_summary()
 }
 
 fn provider_tool_repair_messages(
@@ -2241,7 +2240,7 @@ fn validate_provider_replay_identity(
     expected: &ProviderReplayIdentity,
 ) -> Result<(), HostManagedModelError> {
     provider_call.validate().map_err(|error| {
-        ironclaw_loop_support::raw_host_managed_model_error(
+        ironclaw_loop_host::raw_host_managed_model_error(
             "provider_tool_replay",
             "validate_provider_call",
             HostManagedModelErrorKind::InvalidRequest,
@@ -2363,6 +2362,18 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
     // (api_key=…, sk-…, access_token=…) before the text is stored; the safe
     // summary stays a fixed host-authored category string.
     let provider_detail = error.to_string();
+    if is_unconfigured_provider_error(&error) {
+        // No provider is configured at all: a configuration fault, not an
+        // availability fault. CredentialUnavailable is unclassified in the
+        // loop's recovery mapping, so the run fails fast with the setup hint
+        // on the detail channel instead of riding the multi-minute
+        // availability backoff that exists for real provider outages.
+        return HostManagedModelError::safe(
+            HostManagedModelErrorKind::CredentialUnavailable,
+            "no model provider is configured",
+        )
+        .safe_with_detail(provider_detail);
+    }
     if is_credit_exhaustion_error(&error) {
         return HostManagedModelError::safe(
             HostManagedModelErrorKind::CredentialUnavailable,
@@ -2392,6 +2403,14 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
         ),
     }
     .safe_with_detail(provider_detail)
+}
+
+fn is_unconfigured_provider_error(error: &LlmError) -> bool {
+    matches!(
+        error,
+        LlmError::RequestFailed { provider, .. }
+            if provider == ironclaw_llm::UNCONFIGURED_PROVIDER_ID
+    )
 }
 
 fn is_credit_exhaustion_error(error: &LlmError) -> bool {
@@ -2496,6 +2515,41 @@ mod tests {
             "backticked known-namespace capability must still fire"
         );
         assert_eq!(guard.unwrap().capability_id.as_str(), "builtin.echo");
+    }
+
+    #[test]
+    fn unconfigured_provider_error_maps_to_credential_unavailable_not_availability() {
+        // A placeholder "no LLM configured" failure must not be classified as
+        // an availability-class error: availability errors ride a deep retry
+        // backoff (~minutes), while an unconfigured provider can never
+        // recover by retrying. CredentialUnavailable fails the run fast.
+        let error = LlmError::RequestFailed {
+            provider: ironclaw_llm::UNCONFIGURED_PROVIDER_ID.to_string(),
+            reason: "no LLM provider is configured yet; choose one in Settings → Inference"
+                .to_string(),
+        };
+        assert!(is_unconfigured_provider_error(&error));
+
+        let mapped = map_provider_error(error);
+        assert_eq!(
+            mapped.kind,
+            HostManagedModelErrorKind::CredentialUnavailable
+        );
+        let detail = mapped.detail.expect("setup hint travels on detail");
+        assert!(detail.contains("no LLM provider is configured"));
+    }
+
+    #[test]
+    fn unconfigured_provider_detection_requires_the_placeholder_provider_id() {
+        // A real provider whose *message* mentions configuration must keep
+        // availability-class mapping; only the placeholder provider id
+        // signals the config fault.
+        let err = request_failed("backend not configured correctly");
+        assert!(!is_unconfigured_provider_error(&err));
+        assert_eq!(
+            map_provider_error(err).kind,
+            HostManagedModelErrorKind::Unavailable
+        );
     }
 
     #[test]
@@ -2715,7 +2769,7 @@ mod tests {
 
     fn user_message_with_images(
         content: &str,
-        image_parts: Vec<ironclaw_loop_support::HostManagedModelImagePart>,
+        image_parts: Vec<ironclaw_loop_host::HostManagedModelImagePart>,
     ) -> HostManagedModelMessage {
         HostManagedModelMessage {
             role: HostManagedModelMessageRole::User,
@@ -2734,7 +2788,7 @@ mod tests {
     fn convert_messages_emits_image_url_parts_for_user_image_attachments() {
         let message = user_message_with_images(
             "what is in this image?",
-            vec![ironclaw_loop_support::HostManagedModelImagePart {
+            vec![ironclaw_loop_host::HostManagedModelImagePart {
                 mime_type: "image/png".to_string(),
                 bytes: vec![1, 2, 3, 4],
             }],
@@ -2776,7 +2830,7 @@ mod tests {
         // relies on the transcript's `<attachments>` pointer.
         let message = user_message_with_images(
             "what is in this image?",
-            vec![ironclaw_loop_support::HostManagedModelImagePart {
+            vec![ironclaw_loop_host::HostManagedModelImagePart {
                 mime_type: "image/png".to_string(),
                 bytes: vec![1, 2, 3, 4],
             }],
@@ -2842,7 +2896,10 @@ mod tests {
             "raw_provider_secret api_key=sk-live-secret malformed payload",
         );
 
-        assert_eq!(summary, PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY);
+        assert_eq!(
+            summary,
+            InvalidOutputReason::InvalidToolCallArguments.safe_summary()
+        );
     }
 
     #[test]
@@ -2863,7 +2920,10 @@ mod tests {
             "failed to parse tool-call arguments JSON: expected `,` or `}` at line 1 column 2",
         );
 
-        assert_eq!(summary, PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY);
+        assert_eq!(
+            summary,
+            InvalidOutputReason::InvalidToolCallArguments.safe_summary()
+        );
     }
 
     #[test]

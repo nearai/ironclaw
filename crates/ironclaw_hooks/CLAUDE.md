@@ -5,7 +5,7 @@ hooks across the Reborn loop. It does not own:
 
 - The runner-facing `AgentLoopDriver` trait — that stays in `ironclaw_turns`.
 - The concrete `LoopCapabilityPort` / `LoopPromptPort` / `LoopModelPort` impls —
-  those stay in `ironclaw_loop_support` and `ironclaw_runner`.
+  those stay in `ironclaw_loop_host` and `ironclaw_runner`.
 - The Reborn-side middleware composition that wraps host ports — that lives in
   `ironclaw_runner::loop_driver_host` and consumes types from this crate.
 - Extension bundle loading and installation. Installed-tier WASM hooks execute

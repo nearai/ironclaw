@@ -1,8 +1,8 @@
 //! Concurrent CAS-storm regression tests (#5466).
 //!
 //! Drives many genuinely parallel `cas_update` read-modify-write loops —
-//! multi-threaded tokio runtime, `tokio::spawn` per writer — against one
-//! shared snapshot path, per backend. The libSQL variant is the
+//! multi-threaded tokio runtime, `tokio::spawn` per writer and round — against
+//! one shared snapshot path, per backend. The libSQL variant is the
 //! regression pin for #5466: the previous connection-per-operation
 //! policy intermittently failed inside the C library (`SQLITE_MISUSE`,
 //! spurious `disk I/O error`) under exactly this load, and a
@@ -73,7 +73,9 @@ fn scoped<F: RootFilesystem>(root: Arc<F>, target: &str) -> ScopedFilesystem<F> 
     )
 }
 
-/// 16 spawned writers x 100 CAS increments each against one snapshot.
+/// 100 rounds of 16 spawned writers, each performing one CAS increment against
+/// the same snapshot. Keeping rounds explicit bounds each operation's competing
+/// writes below `cas_update`'s retry cap while preserving real contention.
 /// Every `cas_update` must succeed (no backend errors — defect 1 of
 /// #5466) and the final counter must equal `WRITERS * ITERATIONS`
 /// (no lost updates — defect 2).
@@ -81,21 +83,21 @@ async fn run_storm<F: RootFilesystem + 'static>(fs: Arc<ScopedFilesystem<F>>) {
     let scope = ResourceScope::system();
     let path = ScopedPath::new("/counters/state.json").unwrap();
 
-    let mut handles = Vec::new();
-    for _ in 0..WRITERS {
-        let fs = Arc::clone(&fs);
-        let scope = scope.clone();
-        let path = path.clone();
-        handles.push(tokio::spawn(async move {
-            for _ in 0..ITERATIONS {
+    for _ in 0..ITERATIONS {
+        let mut handles = Vec::new();
+        for _ in 0..WRITERS {
+            let fs = Arc::clone(&fs);
+            let scope = scope.clone();
+            let path = path.clone();
+            handles.push(tokio::spawn(async move {
                 cas_update(fs.as_ref(), &scope, &path, decode, encode, increment)
                     .await
                     .expect("concurrent cas_update must not fail");
-            }
-        }));
-    }
-    for handle in handles {
-        handle.await.expect("writer task must not panic");
+            }));
+        }
+        for handle in handles {
+            handle.await.expect("writer task must not panic");
+        }
     }
 
     let stored = fs

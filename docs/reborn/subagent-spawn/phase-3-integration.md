@@ -435,7 +435,7 @@ tests that exercise only the default family still compile.
 
 use std::sync::Arc;
 
-use ironclaw_loop_support::SpawnCapableLoopCapabilityPortFactory; // P2.A
+use ironclaw_loop_host::SpawnCapableLoopCapabilityPortFactory; // P2.A
 use ironclaw_turns::{TurnCoordinator, ...};
 
 use ironclaw_runner::{
@@ -1450,7 +1450,7 @@ cargo fmt --all -- --check
 cargo clippy --all --benches --tests --examples --all-features    # zero warnings
 cargo test -p ironclaw_runner                                     # crate unit + integration
 cargo test -p ironclaw_reborn_composition                         # product composition + E2E
-cargo test -p ironclaw_turns -p ironclaw_agent_loop -p ironclaw_loop_support
+cargo test -p ironclaw_turns -p ironclaw_agent_loop -p ironclaw_loop_host
 cargo test -p ironclaw_architecture --test reborn_dependency_boundaries
 scripts/reborn-e2e-rust.sh architecture
 cargo test                                                        # full workspace

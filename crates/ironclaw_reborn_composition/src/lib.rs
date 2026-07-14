@@ -35,6 +35,7 @@ mod factory;
 mod failure_lane;
 mod failure_summary;
 mod input;
+mod lifecycle_auth_continuation;
 mod llm_admin;
 mod local_dev_authorization;
 mod local_dev_capability_policy;
@@ -118,8 +119,9 @@ pub use ironclaw_triggers::TriggerId;
 pub use ironclaw_turns::TurnStatus;
 #[cfg(feature = "root-llm-provider")]
 pub use llm_admin::llm_catalog::{
-    RebornLlmCatalogError, resolve_against_registry, resolve_llm_selection_against_catalog,
-    resolve_reborn_runtime_llm,
+    ProviderCatalogValidationError, RebornLlmCatalogError, resolve_against_registry,
+    resolve_llm_selection_against_catalog, resolve_reborn_runtime_llm,
+    validate_reborn_provider_catalog_contents,
 };
 #[cfg(feature = "root-llm-provider")]
 pub use llm_admin::llm_config_service::{LlmReloadTrigger, RebornLlmConfigService};

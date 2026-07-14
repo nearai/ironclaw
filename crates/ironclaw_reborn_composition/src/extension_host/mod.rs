@@ -23,6 +23,7 @@ pub(crate) mod extension_lifecycle_capabilities;
 #[cfg(test)]
 pub(crate) mod extension_lifecycle_capabilities_auth_tests;
 pub(crate) mod extension_lifecycle_command;
+pub(crate) mod extension_removal_cleanup;
 pub(crate) mod gsuite;
 pub(crate) mod host_api_contracts;
 pub(crate) mod lifecycle;

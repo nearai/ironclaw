@@ -7,8 +7,10 @@
 //! can inspect exactly what carried over and what was dropped. Nothing is ever
 //! silently lost: a value that has no Reborn home lands here as a `LossyItem`.
 
-use ironclaw_host_api::UserId;
 use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "full-migration")]
+use ironclaw_host_api::UserId;
 
 /// The domain a converted item or a loss belongs to. Keeps report entries
 /// grouped and greppable rather than free-text.
@@ -118,6 +120,7 @@ impl MigrationReport {
     /// (threads owner, secrets, memory docs, identities, routines, missions) so
     /// the "validate → skip + record" shape has a single definition and cannot
     /// drift between copies.
+    #[cfg(feature = "full-migration")]
     pub(crate) fn valid_user_id(
         &mut self,
         domain: Domain,

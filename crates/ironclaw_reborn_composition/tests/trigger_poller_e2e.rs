@@ -23,7 +23,7 @@ use ironclaw_host_runtime::{
     RuntimeCapabilityOutcome, RuntimeCapabilityRequest, TRIGGER_CREATE_CAPABILITY_ID,
     TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse,
 };
@@ -55,7 +55,7 @@ const TRIGGER_PROMPT: &str = "trigger-e2e-prompt-marker-do-not-rephrase";
 /// the trigger repository after the fire settles.
 const SELF_CREATE_MARKER_TRIGGER_NAME: &str = "self-created-by-fire-should-not-exist";
 /// Mirrors the production capability-id -> provider-tool-name transform
-/// (`provider_tool_name_base` in `ironclaw_loop_support::capability_port`,
+/// (`provider_tool_name_base` in `ironclaw_loop_host::capability_port`,
 /// private to that crate) so this test tracks the `TRIGGER_*_CAPABILITY_ID`
 /// constants automatically instead of hardcoding their mapped results. Only
 /// the `.` -> `__` replacement is needed for these capability ids (all of the

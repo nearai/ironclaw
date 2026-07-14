@@ -1,3 +1,4 @@
+// arch-exempt: large_file, cross-surface auth interaction contract suite, plan #5905
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -179,6 +180,22 @@ impl AuthFlowManager for RecordingFlowManager {
         &self,
         _scope: &AuthProductScope,
         _input: OAuthCallbackFailureInput,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        Err(AuthProductError::BackendUnavailable)
+    }
+
+    async fn claim_continuation_dispatch(
+        &self,
+        _scope: &AuthProductScope,
+        _input: ironclaw_auth::AuthContinuationDispatchClaimInput,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        Err(AuthProductError::BackendUnavailable)
+    }
+
+    async fn settle_continuation_dispatch(
+        &self,
+        _scope: &AuthProductScope,
+        _input: ironclaw_auth::AuthContinuationDispatchSettlementInput,
     ) -> Result<AuthFlowRecord, AuthProductError> {
         Err(AuthProductError::BackendUnavailable)
     }
@@ -1743,6 +1760,7 @@ fn auth_flow(
             gate_ref: AuthGateRef::new(gate_ref.as_str()).unwrap(),
         },
         credential_account_id,
+        credential_secret_fingerprint: None,
         update_binding: Option::<CredentialAccountUpdateBinding>::None,
         opaque_state_hash: None,
         pkce_verifier_hash: None,
