@@ -104,12 +104,17 @@ export function useExtensions() {
   const extensionsQuery = useQuery({
     queryKey: ["extensions"],
     queryFn: fetchExtensions,
+    // The page must distinguish an offline request from a successful empty
+    // catalog. TanStack's default online mode pauses without calling queryFn,
+    // leaving both data and error empty and reproducing the misleading state.
+    networkMode: "always",
     refetchOnMount: "always",
   });
 
   const registryQuery = useQuery({
     queryKey: ["extension-registry"],
     queryFn: fetchExtensionRegistry,
+    networkMode: "always",
     refetchOnMount: "always",
   });
 

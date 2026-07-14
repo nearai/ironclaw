@@ -144,6 +144,7 @@ test("useExtensions merges registry and installed entries with installed first",
 test("useExtensions exposes catalog errors and refetches both catalog queries", async () => {
   const catalogError = new Error("catalog unavailable");
   const refetched = [];
+  const queryConfigs = [];
   const context = {
     React: {
       useCallback: (fn) => fn,
@@ -166,7 +167,9 @@ test("useExtensions exposes catalog errors and refetches both catalog queries", 
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},
     useMutation: () => ({ isPending: false, mutate: () => {} }),
-    useQuery: ({ queryKey }) => {
+    useQuery: (config) => {
+      queryConfigs.push(config);
+      const { queryKey } = config;
       const key = queryKey[0];
       return {
         data: key === "extensions" ? { extensions: [] } : key === "extension-registry" ? { entries: [] } : {},
@@ -189,6 +192,14 @@ test("useExtensions exposes catalog errors and refetches both catalog queries", 
   assert.equal(result.extensionsError, null);
   assert.equal(result.registryError, catalogError);
   assert.equal(result.error, catalogError);
+  assert.equal(
+    queryConfigs.find(({ queryKey }) => queryKey[0] === "extensions")?.networkMode,
+    "always",
+  );
+  assert.equal(
+    queryConfigs.find(({ queryKey }) => queryKey[0] === "extension-registry")?.networkMode,
+    "always",
+  );
   await result.refetch();
   assert.deepEqual(refetched, ["extensions", "extension-registry"]);
 });
