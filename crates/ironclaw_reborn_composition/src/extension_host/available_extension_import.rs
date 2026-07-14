@@ -197,7 +197,8 @@ pub(crate) fn imported_extension_package(
     // hosted MCP namespace is never legitimately theirs — mirrors
     // `load_filesystem_packages`'s identical rejection, closing the same gap
     // for the interactive upload ingress.
-    if super::registered_extension_store::is_hosted_mcp_id_namespace(&extension_id) {
+    if crate::extension_host::registered_extension_store::is_hosted_mcp_id_namespace(&extension_id)
+    {
         return Err(map_binding_error(format!(
             "extension id `{}` is reserved for hosted MCP registrations and cannot be imported",
             extension_id.as_str()

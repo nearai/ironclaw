@@ -27,7 +27,7 @@ use crate::extension_host::registered_extension_store::{
     HostedMcpExtensionId, RegisteredExtensionStore, migrate_legacy_owner_layout,
 };
 use crate::extension_host::registered_test_support::{
-    fresh_boot_fixture, mounted_local_filesystem, seed_registered_installation,
+    fresh_boot_fixture, minted_extension_id, mounted_local_filesystem, seed_registered_installation,
 };
 
 const OWNER_USER_ID: &str = "3eee560a-7fe5-474c-965a-67cb69df3d04";
@@ -49,18 +49,6 @@ kind = "mcp"
 transport = "http"
 url = "http://127.0.0.1:9/mcp"
 "#;
-
-fn minted_id(
-    tenant: &TenantId,
-    owner: &UserId,
-    manifest_toml: &str,
-) -> ironclaw_host_api::ExtensionId {
-    let value = toml::from_str::<toml::Value>(manifest_toml).expect("manifest TOML"); // safety: test-only fixture parsing.
-    let url = value["runtime"]["url"].as_str().expect("hosted MCP URL"); // safety: test-only fixture parsing.
-    HostedMcpExtensionId::mint(tenant, owner, url, "")
-        .expect("mint hosted MCP id") // safety: test-only fixture minting.
-        .into_extension_id()
-}
 
 #[test]
 fn hosted_mcp_ids_are_deterministic_and_account_scoped() {
@@ -370,7 +358,7 @@ async fn corrupt_manifest_under_one_owner_does_not_break_other_owners_listing_or
     let owner_b = UserId::new(OTHER_OWNER_USER_ID).expect("valid owner id");
     let default_tenant =
         TenantId::from_trusted(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string());
-    let owner_a_good_id = minted_id(&default_tenant, &owner_a, OWNER_A_GOOD_MANIFEST_TOML);
+    let owner_a_good_id = minted_extension_id(&default_tenant, &owner_a, "http://127.0.0.1:9/mcp");
     let owner_a_good_manifest =
         OWNER_A_GOOD_MANIFEST_TOML.replace(OWNER_A_GOOD_EXTENSION_ID, owner_a_good_id.as_str());
 
@@ -659,10 +647,10 @@ async fn restore_migrates_nested_legacy_registered_assets() {
         .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
         .join(NESTED_ASSETS_OWNER_USER_ID)
         .join(
-            minted_id(
+            minted_extension_id(
                 &TenantId::from_trusted(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string()),
                 &UserId::new(NESTED_ASSETS_OWNER_USER_ID).expect("valid owner id"),
-                NESTED_ASSETS_MANIFEST_TOML,
+                "http://127.0.0.1:9/mcp",
             )
             .as_str(),
         );
@@ -770,10 +758,10 @@ async fn migration_preserves_existing_tenant_scoped_descriptor_and_leaves_diverg
         !legacy_dir.exists(),
         "the legacy descriptor must move into its owner-unique minted path"
     );
-    let minted_legacy_id = minted_id(
+    let minted_legacy_id = minted_extension_id(
         &TenantId::from_trusted(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string()),
         &UserId::new(COLLISION_OWNER_USER_ID).expect("valid owner id"),
-        COLLISION_LEGACY_MANIFEST_TOML,
+        "http://legacy.example/mcp",
     );
     assert!(
         tenant_scoped_dir

@@ -34,27 +34,16 @@ use crate::extension_host::extension_lifecycle::{
     ActiveExtensionPublisher, RebornLocalExtensionManagementPort, restore_extension_lifecycle_state,
 };
 use crate::extension_host::registered_extension_store::{
-    HostedMcpExtensionId, migrate_legacy_owner_layout, resolve_registered_for_scope,
+    migrate_legacy_owner_layout, resolve_registered_for_scope,
 };
 use crate::extension_host::registered_test_support::{
-    fresh_boot_fixture, mounted_local_filesystem, seed_registered_installation,
+    fresh_boot_fixture, minted_extension_id, mounted_local_filesystem, seed_registered_installation,
 };
 
 const HEALTHY_OWNER_USER_ID: &str = "c3333333-7fe5-474c-965a-67cb69df3d06";
 const BROKEN_OWNER_USER_ID: &str = "d4444444-7fe5-474c-965a-67cb69df3d07";
 const HEALTHY_EXTENSION_ID: &str = "healthy-mcp";
-
-fn minted_id(tenant: &TenantId, owner: &UserId, manifest_toml: &str) -> ExtensionId {
-    let value = toml::from_str::<toml::Value>(manifest_toml).expect("manifest TOML"); // safety: test-only fixture parsing.
-    let url = value
-        .get("runtime")
-        .and_then(|runtime| runtime.get("url"))
-        .and_then(toml::Value::as_str)
-        .expect("hosted MCP URL"); // safety: test-only fixture parsing.
-    HostedMcpExtensionId::mint(tenant, owner, url, "")
-        .expect("mint hosted MCP id") // safety: test-only fixture minting.
-        .into_extension_id()
-}
+const HEALTHY_MANIFEST_URL: &str = "http://127.0.0.1:9/mcp";
 
 const HEALTHY_MANIFEST_TOML: &str = r#"
 schema_version = "reborn.extension_manifest.v2"
@@ -187,10 +176,10 @@ url = "http://127.0.0.1:9/mcp"
         None,
     )
     .await;
-    let healthy_minted_id = minted_id(
+    let healthy_minted_id = minted_extension_id(
         &default_tenant,
         &UserId::new(HEALTHY_OWNER_USER_ID).expect("valid owner id"),
-        HEALTHY_MANIFEST_TOML,
+        HEALTHY_MANIFEST_URL,
     );
 
     let empty_catalog = AvailableExtensionCatalog::from_packages(Vec::new());
@@ -228,34 +217,8 @@ url = "http://127.0.0.1:9/mcp"
 
 const OWNER_A_USER_ID: &str = "e5555555-7fe5-474c-965a-67cb69df3d08";
 const OWNER_B_USER_ID: &str = "f6666666-7fe5-474c-965a-67cb69df3d09";
-
-const OWNER_A_MANIFEST_TOML: &str = r#"
-schema_version = "reborn.extension_manifest.v2"
-id = "shared-mcp"
-name = "Owner A's Shared MCP"
-version = "0.1.0"
-description = "Owner A's registration (row-owned)"
-trust = "third_party"
-
-[runtime]
-kind = "mcp"
-transport = "http"
-url = "http://owner-a.example/mcp"
-"#;
-
-const OWNER_B_MANIFEST_TOML: &str = r#"
-schema_version = "reborn.extension_manifest.v2"
-id = "shared-mcp"
-name = "Owner B's Shared MCP"
-version = "0.1.0"
-description = "Owner B's independent (non-row-owning) registration of the same id"
-trust = "third_party"
-
-[runtime]
-kind = "mcp"
-transport = "http"
-url = "http://owner-b.example/mcp"
-"#;
+const OWNER_A_MANIFEST_URL: &str = "http://owner-a.example/mcp";
+const OWNER_B_MANIFEST_URL: &str = "http://owner-b.example/mcp";
 
 /// The old restore collision cannot be constructed after id minting: owner
 /// identity and endpoint are both encoded into the id.
@@ -263,15 +226,15 @@ url = "http://owner-b.example/mcp"
 fn restore_collision_ids_are_distinct_by_construction() {
     let default_tenant =
         TenantId::from_trusted(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string());
-    let owner_a = minted_id(
+    let owner_a = minted_extension_id(
         &default_tenant,
         &UserId::new(OWNER_A_USER_ID).expect("valid owner id"),
-        OWNER_A_MANIFEST_TOML,
+        OWNER_A_MANIFEST_URL,
     );
-    let owner_b = minted_id(
+    let owner_b = minted_extension_id(
         &default_tenant,
         &UserId::new(OWNER_B_USER_ID).expect("valid owner id"),
-        OWNER_B_MANIFEST_TOML,
+        OWNER_B_MANIFEST_URL,
     );
     assert_ne!(owner_a, owner_b);
 }
@@ -807,8 +770,9 @@ url = "http://127.0.0.1:9/second-mcp"
         None,
     )
     .await;
-    let first_minted_id = minted_id(&default_tenant, &owner, FIRST_MANIFEST_TOML);
-    let second_minted_id = minted_id(&default_tenant, &owner, SECOND_MANIFEST_TOML);
+    let first_minted_id = minted_extension_id(&default_tenant, &owner, "http://127.0.0.1:9/mcp");
+    let second_minted_id =
+        minted_extension_id(&default_tenant, &owner, "http://127.0.0.1:9/second-mcp");
 
     let empty_catalog = AvailableExtensionCatalog::from_packages(Vec::new());
     let boot = fresh_boot_fixture();
@@ -1082,7 +1046,8 @@ async fn migration_continues_after_one_owner_io_failure() {
     let default_tenant =
         TenantId::from_trusted(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string());
     let good_owner = UserId::new(MIGRATION_GOOD_OWNER_USER_ID).expect("valid owner id");
-    let good_minted_id = minted_id(&default_tenant, &good_owner, MIGRATION_GOOD_MANIFEST_TOML);
+    let good_minted_id =
+        minted_extension_id(&default_tenant, &good_owner, "http://127.0.0.1:9/mcp");
 
     let migrated_good_manifest = storage_root
         .join("system/extensions/registered")
