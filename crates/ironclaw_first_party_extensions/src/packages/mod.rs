@@ -18,7 +18,9 @@ use ironclaw_host_api::{EffectKind, VirtualPath};
 mod github;
 mod gmail;
 mod gsuite;
+mod notion;
 mod telegram;
+mod web_access;
 
 /// One inventory entry: a package's id paired with its bundle builder.
 type PackageEntry = (&'static str, fn() -> PackageBundle);
@@ -36,7 +38,9 @@ const PACKAGES: &[PackageEntry] = &[
     (gsuite::DRIVE_ID, gsuite::google_drive_bundle),
     (gsuite::SHEETS_ID, gsuite::google_sheets_bundle),
     (gsuite::SLIDES_ID, gsuite::google_slides_bundle),
+    (notion::ID, notion::bundle),
     (telegram::ID, telegram::bundle),
+    (web_access::ID, web_access::bundle),
 ];
 
 /// Byte or filesystem content of one asset shipped inside a package, addressed

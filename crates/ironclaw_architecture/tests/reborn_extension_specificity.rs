@@ -1030,27 +1030,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     (
         "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
-        "notion",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
-        "notion-mcp",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
-        "notion_mcp",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
         "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
-        "web-access",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
-        "web_access",
     ),
     (
         "crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs",
@@ -1076,15 +1056,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_reborn_composition/src/factory.rs",
         "notion",
     ),
-    (
-        "crates/ironclaw_reborn_composition/src/factory.rs",
-        "notion_mcp",
-    ),
     ("crates/ironclaw_reborn_composition/src/factory.rs", "slack"),
-    (
-        "crates/ironclaw_reborn_composition/src/factory.rs",
-        "web-access",
-    ),
     (
         "crates/ironclaw_reborn_composition/src/factory.rs",
         "web_access",

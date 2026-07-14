@@ -139,9 +139,7 @@ use crate::extension_host::lifecycle::{
 };
 use crate::extension_host::mcp::hosted_http_mcp_runtime;
 use crate::extension_host::{
-    available_extensions::{
-        AvailableExtensionCatalog, notion_mcp_manifest_digest, web_access_manifest_digest,
-    },
+    available_extensions::AvailableExtensionCatalog,
     extension_installation_store::FilesystemExtensionInstallationStore,
     extension_lifecycle::{
         ActiveExtensionPublisher, ExtensionCredentialCleanup, RebornLocalExtensionManagementPort,
@@ -4017,40 +4015,18 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
         local_dev_capability_policy().map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("local-dev capability policy is invalid: {error}"),
         })?;
-    let mut entries = vec![
-        AdminEntry::for_local_manifest(
-            policy.provider.id,
-            policy.provider.manifest_path,
-            None,
-            HostTrustAssignment::first_party(),
-            // Sourced from local_dev_capability_policy.toml `[provider]
-            // authority_effects`, which includes `external_write` — required by
-            // builtin.trace_commons.onboard (operator-invite enrollment posts to
-            // an external onboarding server).
-            policy.provider.authority_effects,
-            None,
-        ),
-        AdminEntry::for_local_manifest(
-            PackageId::new("web-access").map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("Web Access first-party package id is invalid: {error}"),
-            })?,
-            "/system/extensions/web-access/manifest.toml".to_string(),
-            Some(web_access_manifest_digest()),
-            HostTrustAssignment::first_party(),
-            web_access_allowed_effects(),
-            None,
-        ),
-        AdminEntry::for_local_manifest(
-            PackageId::new("notion").map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("Notion MCP first-party package id is invalid: {error}"),
-            })?,
-            "/system/extensions/notion/manifest.toml".to_string(),
-            Some(notion_mcp_manifest_digest()),
-            HostTrustAssignment::first_party(),
-            notion_mcp_allowed_effects(),
-            None,
-        ),
-    ];
+    let mut entries = vec![AdminEntry::for_local_manifest(
+        policy.provider.id,
+        policy.provider.manifest_path,
+        None,
+        HostTrustAssignment::first_party(),
+        // Sourced from local_dev_capability_policy.toml `[provider]
+        // authority_effects`, which includes `external_write` — required by
+        // builtin.trace_commons.onboard (operator-invite enrollment posts to
+        // an external onboarding server).
+        policy.provider.authority_effects,
+        None,
+    )];
     entries.push(AdminEntry::for_local_manifest(
         PackageId::new("slack").map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("Slack personal first-party package id is invalid: {error}"),
@@ -4091,19 +4067,6 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
 }
 
 fn slack_user_allowed_effects() -> Vec<EffectKind> {
-    vec![
-        EffectKind::DispatchCapability,
-        EffectKind::Network,
-        EffectKind::UseSecret,
-        EffectKind::ExternalWrite,
-    ]
-}
-
-fn web_access_allowed_effects() -> Vec<EffectKind> {
-    vec![EffectKind::DispatchCapability, EffectKind::Network]
-}
-
-fn notion_mcp_allowed_effects() -> Vec<EffectKind> {
     vec![
         EffectKind::DispatchCapability,
         EffectKind::Network,
@@ -7664,7 +7627,7 @@ mod tests {
                     grantee: Principal::Extension(extension_id),
                     issued_by: Principal::HostRuntime,
                     constraints: GrantConstraints {
-                        allowed_effects: web_access_allowed_effects(),
+                        allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
                         mounts: MountView::new(Vec::new()).expect("valid empty mount view"),
                         network: web_access_network_policy(),
                         secrets: Vec::new(),

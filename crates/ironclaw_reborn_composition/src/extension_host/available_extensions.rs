@@ -31,10 +31,6 @@ const SLACK_MANIFEST: &str =
 const SLACK_WASM_MODULE: &[u8] = include_bytes!(
     "../../../ironclaw_first_party_extensions/assets/slack/wasm/slack_user_tool.wasm"
 );
-const NOTION_MCP_MANIFEST: &str =
-    include_str!("../../../ironclaw_first_party_extensions/assets/notion-mcp/manifest.toml");
-const WEB_ACCESS_MANIFEST: &str =
-    include_str!("../../../ironclaw_first_party_extensions/assets/web-access/manifest.toml");
 const NEARAI_MCP_MANIFEST: &str =
     include_str!("../../../ironclaw_first_party_extensions/assets/nearai-mcp/manifest.toml");
 const NEARAI_EXTENSION_ID: &str = HostManagedCredentialExtension::NearAi.id();
@@ -207,18 +203,6 @@ fn onboarding(package: &AvailableExtensionPackage) -> Option<LifecycleExtensionO
             None,
             "After authorization completes, DM the Slack bot directly or use the Slack tools from any chat.",
         )),
-        "notion" => Some(onboarding_message(
-            "Notion needs OAuth authorization before MCP tools can run.",
-            Some("Authorize the Notion workspace that IronClaw should access."),
-            None,
-            "After authorization completes, activate Notion to publish its MCP tools.",
-        )),
-        "web-access" => Some(onboarding_message(
-            "Web Access does not need credentials. Activate it to make web search and page-content retrieval tools available.",
-            Some("No credentials are required for Web Access."),
-            None,
-            "Activate Web Access to publish its tools.",
-        )),
         _ => None,
     }
 }
@@ -361,11 +345,7 @@ impl AvailableExtensionCatalog {
     pub(crate) fn from_first_party_assets_with_nearai_mcp_config(
         nearai_mcp_config: Option<&NearAiMcpBootstrapConfig>,
     ) -> Result<Self, ProductWorkflowError> {
-        let mut packages = vec![
-            notion_mcp_package()?,
-            web_access_package()?,
-            nearai_mcp_package(nearai_mcp_config)?,
-        ];
+        let mut packages = vec![nearai_mcp_package(nearai_mcp_config)?];
         packages.push(slack_package()?);
         // Packages migrated to the self-contained inventory
         // (`ironclaw_first_party_extensions::packages`) are consumed here as
@@ -513,24 +493,6 @@ fn push_search_term(terms: &mut Vec<String>, term: impl AsRef<str>) {
     }
 }
 
-fn notion_mcp_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package(
-        "notion",
-        "Notion MCP",
-        NOTION_MCP_MANIFEST,
-        notion_mcp_assets(),
-    )
-}
-
-fn web_access_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package(
-        "web-access",
-        "Web Access",
-        WEB_ACCESS_MANIFEST,
-        web_access_assets(),
-    )
-}
-
 fn nearai_mcp_package(
     config: Option<&NearAiMcpBootstrapConfig>,
 ) -> Result<AvailableExtensionPackage, ProductWorkflowError> {
@@ -549,14 +511,6 @@ pub(crate) fn slack_package() -> Result<AvailableExtensionPackage, ProductWorkfl
 
 pub(crate) fn slack_manifest_digest() -> String {
     sha256_digest_token(SLACK_MANIFEST.as_bytes())
-}
-
-pub(crate) fn notion_mcp_manifest_digest() -> String {
-    sha256_digest_token(NOTION_MCP_MANIFEST.as_bytes())
-}
-
-pub(crate) fn web_access_manifest_digest() -> String {
-    sha256_digest_token(WEB_ACCESS_MANIFEST.as_bytes())
 }
 
 /// The bundled Slack channel manifest — the MIG-5 legacy alias mount
@@ -766,131 +720,6 @@ fn channel_presentation_from_manifest_record(
         .channel
         .as_ref()
         .map(|channel| channel.presentation.clone())
-}
-
-fn notion_mcp_assets() -> Vec<AvailableExtensionAsset> {
-    macro_rules! notion_schema_asset {
-        ($path:literal) => {
-            bytes_asset(
-                concat!("schemas/notion/", $path),
-                include_bytes!(concat!(
-                    "../../../ironclaw_first_party_extensions/assets/notion-mcp/schemas/notion/",
-                    $path
-                )),
-            )
-        };
-    }
-    macro_rules! notion_prompt_asset {
-        ($path:literal) => {
-            bytes_asset(
-                concat!("prompts/notion/", $path),
-                include_bytes!(concat!(
-                    "../../../ironclaw_first_party_extensions/assets/notion-mcp/prompts/notion/",
-                    $path
-                )),
-            )
-        };
-    }
-
-    vec![
-        bytes_asset("manifest.toml", NOTION_MCP_MANIFEST.as_bytes()),
-        notion_schema_asset!("notion-search.input.v1.json"),
-        notion_schema_asset!("notion-search.output.v1.json"),
-        notion_schema_asset!("notion-fetch.input.v1.json"),
-        notion_schema_asset!("notion-fetch.output.v1.json"),
-        notion_schema_asset!("notion-create-pages.input.v1.json"),
-        notion_schema_asset!("notion-create-pages.output.v1.json"),
-        notion_schema_asset!("notion-update-page.input.v1.json"),
-        notion_schema_asset!("notion-update-page.output.v1.json"),
-        notion_schema_asset!("notion-move-pages.input.v1.json"),
-        notion_schema_asset!("notion-move-pages.output.v1.json"),
-        notion_schema_asset!("notion-duplicate-page.input.v1.json"),
-        notion_schema_asset!("notion-duplicate-page.output.v1.json"),
-        notion_schema_asset!("notion-create-database.input.v1.json"),
-        notion_schema_asset!("notion-create-database.output.v1.json"),
-        notion_schema_asset!("notion-update-data-source.input.v1.json"),
-        notion_schema_asset!("notion-update-data-source.output.v1.json"),
-        notion_schema_asset!("notion-create-view.input.v1.json"),
-        notion_schema_asset!("notion-create-view.output.v1.json"),
-        notion_schema_asset!("notion-update-view.input.v1.json"),
-        notion_schema_asset!("notion-update-view.output.v1.json"),
-        notion_schema_asset!("notion-query-data-sources.input.v1.json"),
-        notion_schema_asset!("notion-query-data-sources.output.v1.json"),
-        notion_schema_asset!("notion-query-database-view.input.v1.json"),
-        notion_schema_asset!("notion-query-database-view.output.v1.json"),
-        notion_schema_asset!("notion-create-comment.input.v1.json"),
-        notion_schema_asset!("notion-create-comment.output.v1.json"),
-        notion_schema_asset!("notion-get-comments.input.v1.json"),
-        notion_schema_asset!("notion-get-comments.output.v1.json"),
-        notion_schema_asset!("notion-get-teams.input.v1.json"),
-        notion_schema_asset!("notion-get-teams.output.v1.json"),
-        notion_schema_asset!("notion-get-users.input.v1.json"),
-        notion_schema_asset!("notion-get-users.output.v1.json"),
-        notion_schema_asset!("notion-get-user.input.v1.json"),
-        notion_schema_asset!("notion-get-user.output.v1.json"),
-        notion_schema_asset!("notion-get-self.input.v1.json"),
-        notion_schema_asset!("notion-get-self.output.v1.json"),
-        notion_prompt_asset!("notion-search.md"),
-        notion_prompt_asset!("notion-fetch.md"),
-        notion_prompt_asset!("notion-create-pages.md"),
-        notion_prompt_asset!("notion-update-page.md"),
-        notion_prompt_asset!("notion-move-pages.md"),
-        notion_prompt_asset!("notion-duplicate-page.md"),
-        notion_prompt_asset!("notion-create-database.md"),
-        notion_prompt_asset!("notion-update-data-source.md"),
-        notion_prompt_asset!("notion-create-view.md"),
-        notion_prompt_asset!("notion-update-view.md"),
-        notion_prompt_asset!("notion-query-data-sources.md"),
-        notion_prompt_asset!("notion-query-database-view.md"),
-        notion_prompt_asset!("notion-create-comment.md"),
-        notion_prompt_asset!("notion-get-comments.md"),
-        notion_prompt_asset!("notion-get-teams.md"),
-        notion_prompt_asset!("notion-get-users.md"),
-        notion_prompt_asset!("notion-get-user.md"),
-        notion_prompt_asset!("notion-get-self.md"),
-    ]
-}
-
-fn web_access_assets() -> Vec<AvailableExtensionAsset> {
-    vec![
-        bytes_asset("manifest.toml", WEB_ACCESS_MANIFEST.as_bytes()),
-        bytes_asset(
-            "schemas/web-access/search.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/web-access/schemas/web-access/search.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/web-access/search.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/web-access/schemas/web-access/search.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/web-access/get_content.input.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/web-access/schemas/web-access/get_content.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/web-access/get_content.output.v1.json",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/web-access/schemas/web-access/get_content.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "prompts/web-access/search.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/web-access/prompts/web-access/search.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/web-access/get_content.md",
-            include_bytes!(
-                "../../../ironclaw_first_party_extensions/assets/web-access/prompts/web-access/get_content.md"
-            ),
-        ),
-    ]
 }
 
 fn nearai_mcp_assets(manifest: &str) -> Vec<AvailableExtensionAsset> {
@@ -1151,10 +980,7 @@ fn reserved_host_bundled_extension_id(extension_id: &ExtensionId) -> bool {
     ironclaw_first_party_extensions::packages::bundled_package_ids()
         .iter()
         .any(|id| *id == extension_id.as_str())
-        || matches!(
-            extension_id.as_str(),
-            "notion" | "web-access" | "slack" | NEARAI_EXTENSION_ID
-        )
+        || matches!(extension_id.as_str(), "slack" | NEARAI_EXTENSION_ID)
         || is_gsuite_extension_id(extension_id)
 }
 
@@ -2090,7 +1916,6 @@ handle = "web_token"
 
     #[test]
     fn bundled_manifest_digests_are_sha256_tokens() {
-        assert!(notion_mcp_manifest_digest().starts_with("sha256:"));
         assert!(slack_manifest_digest().starts_with("sha256:"));
         // gmail migrated to the inventory; its digest (still sha256-token) is
         // asserted through the trust policy in
