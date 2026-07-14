@@ -504,4 +504,104 @@ mod tests {
         .await;
         assert!(holds.is_empty());
     }
+
+    /// The batch path zips `requested_records` against the lookup's returned
+    /// states positionally, trusting `active_run_states`'s "same order as
+    /// input" contract. This pins that a reordering-safe backend still
+    /// attributes each state to the correct trigger, not swapped (#5886).
+    #[tokio::test]
+    async fn active_holds_for_records_maps_batch_results_by_position_not_identity() {
+        struct PositionalLookup;
+
+        #[async_trait]
+        impl TriggerActiveRunLookup for PositionalLookup {
+            async fn active_run_state(
+                &self,
+                _request: TriggerActiveRunStateRequest,
+            ) -> Result<TriggerActiveRunState, TriggerError> {
+                panic!("batch caller must use active_run_states, not per-request active_run_state");
+            }
+
+            async fn active_run_states(
+                &self,
+                requests: Vec<TriggerActiveRunStateRequest>,
+            ) -> Vec<Result<TriggerActiveRunState, TriggerError>> {
+                requests
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, _)| {
+                        Ok(if index == 0 {
+                            TriggerActiveRunState::Blocked {
+                                kind: BlockedActiveRunKind::Approval,
+                            }
+                        } else {
+                            TriggerActiveRunState::Nonterminal
+                        })
+                    })
+                    .collect()
+            }
+        }
+
+        let now = Utc::now();
+        let record_a = test_record(
+            Some(now - chrono::Duration::days(1)),
+            Some(TurnRunId::new()),
+        );
+        let record_b = test_record(
+            Some(now - chrono::Duration::hours(2)),
+            Some(TurnRunId::new()),
+        );
+
+        let holds = active_holds_for_records(
+            &PositionalLookup,
+            &[record_a.clone(), record_b.clone()],
+            now,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        assert_eq!(
+            holds.get(&record_a.trigger_id).map(|hold| hold.reason),
+            Some(ActiveHoldReason::Approval),
+            "first record in the batch must map to the first returned state"
+        );
+        assert_eq!(
+            holds.get(&record_b.trigger_id).map(|hold| hold.reason),
+            Some(ActiveHoldReason::InProgress),
+            "second record in the batch must map to the second returned state, not swapped"
+        );
+    }
+
+    /// `active_holds_for_records` wraps the lookup in a `tokio::time::timeout`
+    /// so a slow snapshot source degrades to "no hold" instead of hanging or
+    /// failing the caller. This exercises the deadline-exceeded branch
+    /// specifically, mirroring the already-tested lookup-error degrade (#5886).
+    #[tokio::test]
+    async fn active_holds_for_records_degrades_on_timeout() {
+        struct SlowLookup;
+
+        #[async_trait]
+        impl TriggerActiveRunLookup for SlowLookup {
+            async fn active_run_state(
+                &self,
+                _request: TriggerActiveRunStateRequest,
+            ) -> Result<TriggerActiveRunState, TriggerError> {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                Ok(TriggerActiveRunState::Blocked {
+                    kind: BlockedActiveRunKind::Approval,
+                })
+            }
+        }
+
+        let now = Utc::now();
+        let record = test_record(Some(now), Some(TurnRunId::new()));
+        let holds = active_holds_for_records(
+            &SlowLookup,
+            std::slice::from_ref(&record),
+            now,
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(holds.is_empty(), "timed-out lookup must degrade to no hold");
+    }
 }
