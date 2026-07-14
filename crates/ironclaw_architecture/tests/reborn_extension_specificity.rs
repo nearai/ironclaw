@@ -381,6 +381,13 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "vendor token-format leak detection (telegram_bot_token pattern)",
     ),
     (
+        "crates/ironclaw_webui_v2/frontend/src/i18n/",
+        "google",
+        "Google named only as a NEAR AI browser-login SSO provider in localized \
+         onboarding copy (onboarding.nearaiLocalSso: \"GitHub, Google, NEAR Wallet\"), \
+         not the extensions vendor — localized UI copy must name the login providers",
+    ),
+    (
         "crates/ironclaw_webui_v2/frontend/src/pages/chat/lib/gates.ts",
         "github",
         "WebUI browser-login SSO provider button/route, not the extensions vendor",
@@ -1190,38 +1197,21 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/ironclaw_skills/src/types.rs", "google"),
     ("crates/ironclaw_skills/src/types.rs", "slack"),
     ("crates/ironclaw_webui_v2/frontend/src/i18n/ar.ts", "github"),
-    ("crates/ironclaw_webui_v2/frontend/src/i18n/ar.ts", "google"),
     ("crates/ironclaw_webui_v2/frontend/src/i18n/de.ts", "github"),
-    ("crates/ironclaw_webui_v2/frontend/src/i18n/de.ts", "google"),
     ("crates/ironclaw_webui_v2/frontend/src/i18n/en.ts", "github"),
-    ("crates/ironclaw_webui_v2/frontend/src/i18n/en.ts", "google"),
     ("crates/ironclaw_webui_v2/frontend/src/i18n/es.ts", "github"),
-    ("crates/ironclaw_webui_v2/frontend/src/i18n/es.ts", "google"),
     ("crates/ironclaw_webui_v2/frontend/src/i18n/fr.ts", "github"),
-    ("crates/ironclaw_webui_v2/frontend/src/i18n/fr.ts", "google"),
     ("crates/ironclaw_webui_v2/frontend/src/i18n/hi.ts", "github"),
-    ("crates/ironclaw_webui_v2/frontend/src/i18n/hi.ts", "google"),
     ("crates/ironclaw_webui_v2/frontend/src/i18n/ja.ts", "github"),
-    ("crates/ironclaw_webui_v2/frontend/src/i18n/ja.ts", "google"),
     ("crates/ironclaw_webui_v2/frontend/src/i18n/ko.ts", "github"),
-    ("crates/ironclaw_webui_v2/frontend/src/i18n/ko.ts", "google"),
     (
         "crates/ironclaw_webui_v2/frontend/src/i18n/pt-BR.ts",
         "github",
-    ),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/i18n/pt-BR.ts",
-        "google",
     ),
     ("crates/ironclaw_webui_v2/frontend/src/i18n/uk.ts", "github"),
-    ("crates/ironclaw_webui_v2/frontend/src/i18n/uk.ts", "google"),
     (
         "crates/ironclaw_webui_v2/frontend/src/i18n/zh-CN.ts",
         "github",
-    ),
-    (
-        "crates/ironclaw_webui_v2/frontend/src/i18n/zh-CN.ts",
-        "google",
     ),
 ];
 
