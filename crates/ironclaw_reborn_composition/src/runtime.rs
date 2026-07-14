@@ -1501,6 +1501,23 @@ impl RebornRuntime {
         ))
     }
 
+    /// Read-only reader exposing the live active/default model id so the WebUI
+    /// facade can price a default-model run (one with no `resolved_model_route`)
+    /// against the model that actually ran. Backed by the same hot-swappable
+    /// primary provider the model gateway drives, so it tracks operator model
+    /// swaps. `None` when no LLM provider was wired at boot.
+    #[cfg(feature = "root-llm-provider")]
+    pub(crate) fn webui_active_model_reader(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_product_workflow::ActiveModelReader>> {
+        let parts = self.llm_reload.as_ref()?;
+        Some(Arc::new(
+            crate::llm_admin::active_model::ProviderActiveModelReader::new(
+                parts.reload_handle.primary_provider(),
+            ),
+        ))
+    }
+
     /// Diagnostic id for the no-profile run profile selected by this runtime.
     pub fn default_run_profile_id(&self) -> &str {
         &self.default_run_profile_id

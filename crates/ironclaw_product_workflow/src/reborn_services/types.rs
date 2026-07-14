@@ -1,3 +1,4 @@
+// arch-exempt: large_file, WebUI facade DTOs live with their contract awaiting the RebornServicesApi domain-port split, plan #5985
 use chrono::{DateTime, Utc};
 use ironclaw_common::llm_costs::RunCost;
 use ironclaw_host_api::ThreadId;
@@ -528,14 +529,31 @@ pub struct RebornGetRunStateResponse {
     pub cost: Option<RunCost>,
 }
 
-impl From<TurnRunState> for RebornGetRunStateResponse {
-    fn from(value: TurnRunState) -> Self {
-        // Price cost only when the run reported usage AND a concrete model was
-        // resolved (the model id feeds the cost table). `resolved_model_route`
-        // itself stays internal — only its model id crosses to the priced cost.
-        let cost = match (value.model_usage, value.resolved_model_route.as_ref()) {
-            (Some(usage), Some(route)) => Some(RunCost::from_usage(
-                route.model_id.as_str(),
+impl RebornGetRunStateResponse {
+    /// Build the WebUI run-state projection from canonical run state, pricing
+    /// USD `cost` from the run's `model_usage`.
+    ///
+    /// The model that feeds the cost table is chosen in this order:
+    /// 1. the run's `resolved_model_route` model id, when the caller explicitly
+    ///    selected/routed a model (only its id crosses; the route stays
+    ///    internal);
+    /// 2. otherwise `active_model_id` — the runtime's live default model, which
+    ///    for a default (unrouted) run is the model that actually ran.
+    ///
+    /// `cost` stays `None` only when no usage was reported or neither source
+    /// yields a concrete model id (the `"default"` alias and empty strings are
+    /// treated as non-concrete so a run is never mispriced against a sentinel).
+    pub fn from_run_state(value: TurnRunState, active_model_id: Option<&str>) -> Self {
+        let priced_model = value
+            .resolved_model_route
+            .as_ref()
+            .map(|route| route.model_id.as_str())
+            .or(active_model_id)
+            .map(str::trim)
+            .filter(|model| !model.is_empty() && !model.eq_ignore_ascii_case("default"));
+        let cost = match (value.model_usage, priced_model) {
+            (Some(usage), Some(model_id)) => Some(RunCost::from_usage(
+                model_id,
                 usage.input_tokens,
                 usage.output_tokens,
                 usage.cache_read_input_tokens,
@@ -565,6 +583,16 @@ impl From<TurnRunState> for RebornGetRunStateResponse {
             usage: value.model_usage,
             cost,
         }
+    }
+}
+
+impl From<TurnRunState> for RebornGetRunStateResponse {
+    /// Convenience conversion with no default-model fallback: a default-model
+    /// run (no `resolved_model_route`) reports usage without cost. Callers that
+    /// can supply the live active model — the facade's `get_run_state` — use
+    /// [`RebornGetRunStateResponse::from_run_state`] so those runs are priced.
+    fn from(value: TurnRunState) -> Self {
+        Self::from_run_state(value, None)
     }
 }
 
