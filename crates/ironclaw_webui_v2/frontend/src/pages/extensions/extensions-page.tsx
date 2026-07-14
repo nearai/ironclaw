@@ -32,12 +32,6 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     invalidate,
   } = useExtensions();
 
-  // The registry response already contains every catalog entry plus its
-  // installed flag. Render that snapshot as soon as it arrives; the slower
-  // installed-extension request can progressively replace installed registry
-  // cards with their full management controls when enrichment finishes.
-  const isLoading = isRegistryLoading || (tab !== "registry" && isExtensionsLoading);
-
   const handleConfigure = React.useCallback((extension) => setConfiguring(extension), []);
   const handleInstall = React.useCallback(
     (payload) => install({ ...payload, onNeedsSetup: handleConfigure }),
@@ -54,6 +48,16 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     },
     [activate]
   );
+
+  if (!["channels", "mcp", "registry"].includes(tab)) {
+    return (<Navigate to="/extensions/registry" replace />);
+  }
+
+  // The registry response already contains every catalog entry plus its
+  // installed flag. Render that snapshot as soon as it arrives; the slower
+  // installed-extension request can progressively replace installed registry
+  // cards with their full management controls when enrichment finishes.
+  const isLoading = isRegistryLoading || (tab !== "registry" && isExtensionsLoading);
 
   if (isLoading) {
     return (
@@ -78,10 +82,6 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
         </div>
       </div>
     );
-  }
-
-  if (tab === "installed") {
-    return (<Navigate to="/extensions/registry" replace />);
   }
 
   const tabContent = {
@@ -117,10 +117,6 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
       isBusy={isBusy}
     />),
   };
-
-  if (!tabContent[tab]) {
-    return (<Navigate to="/extensions/registry" replace />);
-  }
 
   return (
     <div className="flex h-full flex-col overflow-y-auto">

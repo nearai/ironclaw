@@ -265,6 +265,9 @@ SEL_V2 = {
         "[data-strategy='{strategy}']"
     ),
     "channel_connect_dismiss": "[data-testid='channel-connect-dismiss']",
+    "extension_card_for": (
+        "[data-testid='extension-card'][data-extension-id='{id}']"
+    ),
     "pairing_section": "[data-testid='pairing-section']",
     "pairing_code_input": "[data-testid='pairing-code-input']",
     "pairing_submit": "[data-testid='pairing-submit']",

@@ -6,7 +6,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from playwright.async_api import expect
 
-from helpers import REBORN_V2_AUTH_TOKEN
+from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2
 from reborn_webui_harness import (
     reborn_v2_browser,  # noqa: F401 - imported fixture
     reborn_v2_server,  # noqa: F401 - imported fixture
@@ -516,9 +516,9 @@ async def test_reborn_v2_extension_registry_renders_while_installed_list_is_pend
         await _wait_for_request_count(harness["extension_list_requests"], 0)
         assert harness["extension_list_requests"], "installed list request must be pending"
         assert not harness["extension_list_gate"].is_set()
-        await expect(harness["page"].get_by_text("Registry Tool")).to_be_visible(
-            timeout=3000
-        )
+        await harness["page"].locator(
+            SEL_V2["extension_card_for"].format(id="registry-tool")
+        ).wait_for(state="visible", timeout=3000)
     finally:
         harness["extension_list_gate"].set()
         await harness["context"].close()

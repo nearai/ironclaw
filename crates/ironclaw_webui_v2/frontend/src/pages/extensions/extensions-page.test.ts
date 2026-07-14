@@ -74,8 +74,11 @@ test("ExtensionsPage renders registry data while installed extensions are still 
 });
 
 for (const tab of ["installed", "unknown"]) {
-  test(`ExtensionsPage redirects ${tab} tab to registry`, () => {
-    const { Navigate, rendered } = renderExtensionsPage(tab);
+  test(`ExtensionsPage redirects ${tab} tab before waiting for data`, () => {
+    const { Navigate, rendered } = renderExtensionsPage(tab, {
+      isExtensionsLoading: true,
+      isRegistryLoading: true,
+    });
 
     assert.equal(rendered.values[0], Navigate);
     assert.match(rendered.strings.join(""), /to="\/extensions\/registry"/);
