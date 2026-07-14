@@ -24,7 +24,7 @@ use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef};
 use crate::extension_host::available_extensions::{AssetLoading, AvailableExtensionCatalog};
 use crate::extension_host::extension_lifecycle::restore_extension_lifecycle_state;
 use crate::extension_host::registered_extension_store::{
-    RegisteredExtensionStore, migrate_legacy_owner_layout,
+    HostedMcpExtensionId, RegisteredExtensionStore, migrate_legacy_owner_layout,
 };
 use crate::extension_host::registered_test_support::{
     fresh_boot_fixture, mounted_local_filesystem, seed_registered_installation,
@@ -49,6 +49,66 @@ kind = "mcp"
 transport = "http"
 url = "http://127.0.0.1:9/mcp"
 "#;
+
+fn minted_id(
+    tenant: &TenantId,
+    owner: &UserId,
+    manifest_toml: &str,
+) -> ironclaw_host_api::ExtensionId {
+    let value = toml::from_str::<toml::Value>(manifest_toml).expect("manifest TOML"); // safety: test-only fixture parsing.
+    let url = value["runtime"]["url"].as_str().expect("hosted MCP URL"); // safety: test-only fixture parsing.
+    HostedMcpExtensionId::mint(tenant, owner, url, "")
+        .expect("mint hosted MCP id") // safety: test-only fixture minting.
+        .into_extension_id()
+}
+
+#[test]
+fn hosted_mcp_ids_are_deterministic_and_account_scoped() {
+    let tenant = TenantId::from_trusted("tenant-a".to_string());
+    let owner = UserId::new(OWNER_USER_ID).expect("valid owner id");
+    let first = HostedMcpExtensionId::mint(&tenant, &owner, "https://EXAMPLE.com/mcp/", "")
+        .expect("mint hosted MCP id");
+    let second = HostedMcpExtensionId::mint(&tenant, &owner, "https://example.com/mcp", "")
+        .expect("mint hosted MCP id");
+    let labeled = HostedMcpExtensionId::mint(&tenant, &owner, "https://example.com/mcp", "work")
+        .expect("mint labeled hosted MCP id");
+
+    assert_eq!(first, second);
+    assert_ne!(first, labeled);
+}
+
+#[test]
+fn hosted_mcp_id_parse_rejects_foreign_shape() {
+    let foreign = ironclaw_host_api::ExtensionId::new("catalog-extension")
+        .expect("valid foreign extension id");
+    assert!(HostedMcpExtensionId::parse(&foreign).is_err());
+}
+
+#[tokio::test]
+async fn registered_load_rejects_valid_shaped_id_with_wrong_digest() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let filesystem = mounted_local_filesystem(temp.path());
+    let owner = UserId::new(OWNER_USER_ID).expect("valid owner id");
+    let scope = ResourceScope::local_default(owner, InvocationId::new()).expect("owner scope");
+    let wrong_id = "mcp-0000000000000000";
+    let manifest = REGISTERED_MANIFEST_TOML.replace(REGISTERED_EXTENSION_ID, wrong_id);
+    let path = VirtualPath::new(format!(
+        "/system/extensions/registered/{}/{}/{wrong_id}/manifest.toml",
+        scope.tenant_id.as_str(),
+        scope.user_id.as_str()
+    ))
+    .expect("registered manifest path");
+    filesystem
+        .write_file(&path, manifest.as_bytes())
+        .await
+        .expect("write registered manifest");
+
+    let packages =
+        RegisteredExtensionStore::list_for_scope(&filesystem, &scope, AssetLoading::Skip)
+            .await
+            .expect("list registered packages");
+    assert!(packages.is_empty());
+}
 
 /// Boot-order restore: an owner-registered extension's installation must
 /// survive a reboot (fresh in-memory `ExtensionLifecycleService` +
@@ -299,6 +359,11 @@ async fn corrupt_manifest_under_one_owner_does_not_break_other_owners_listing_or
 
     let owner_a = UserId::new(OWNER_USER_ID).expect("valid owner id");
     let owner_b = UserId::new(OTHER_OWNER_USER_ID).expect("valid owner id");
+    let default_tenant =
+        TenantId::from_trusted(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string());
+    let owner_a_good_id = minted_id(&default_tenant, &owner_a, OWNER_A_GOOD_MANIFEST_TOML);
+    let owner_a_good_manifest =
+        OWNER_A_GOOD_MANIFEST_TOML.replace(OWNER_A_GOOD_EXTENSION_ID, owner_a_good_id.as_str());
 
     // Seed owner A: one healthy descriptor + one corrupt descriptor sitting
     // right next to it in the same owner-scoped directory scan.
@@ -306,11 +371,11 @@ async fn corrupt_manifest_under_one_owner_does_not_break_other_owners_listing_or
         .join("system/extensions/registered")
         .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
         .join(OWNER_USER_ID)
-        .join(OWNER_A_GOOD_EXTENSION_ID);
+        .join(owner_a_good_id.as_str());
     std::fs::create_dir_all(&owner_a_good_dir).expect("owner A good manifest dir");
     std::fs::write(
         owner_a_good_dir.join("manifest.toml"),
-        OWNER_A_GOOD_MANIFEST_TOML,
+        owner_a_good_manifest,
     )
     .expect("write owner A good manifest");
 
@@ -356,7 +421,7 @@ async fn corrupt_manifest_under_one_owner_does_not_break_other_owners_listing_or
     );
     assert_eq!(
         owner_a_packages[0].package_ref,
-        LifecyclePackageRef::new(LifecyclePackageKind::Extension, OWNER_A_GOOD_EXTENSION_ID)
+        LifecyclePackageRef::new(LifecyclePackageKind::Extension, owner_a_good_id.as_str())
             .expect("valid package ref"),
         "owner A's surviving entry must be the healthy one"
     );
@@ -367,7 +432,7 @@ async fn corrupt_manifest_under_one_owner_does_not_break_other_owners_listing_or
     let (owner_b_extension_id, _) = seed_registered_installation(
         &installation_store,
         OWNER_B_MANIFEST_TOML,
-        &TenantId::from_trusted(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string()),
+        &default_tenant,
         &owner_b,
         OWNER_B_EXTENSION_ID,
         None,
@@ -468,7 +533,7 @@ async fn restore_migrates_legacy_owner_only_layout_into_default_tenant() {
         .join("system/extensions/registered")
         .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
         .join(OWNER_USER_ID)
-        .join(REGISTERED_EXTENSION_ID)
+        .join(extension_id.as_str())
         .join("manifest.toml");
     assert!(
         migrated_manifest.is_file(),
@@ -584,7 +649,14 @@ async fn restore_migrates_nested_legacy_registered_assets() {
         .join("system/extensions/registered")
         .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
         .join(NESTED_ASSETS_OWNER_USER_ID)
-        .join(NESTED_ASSETS_EXTENSION_ID);
+        .join(
+            minted_id(
+                &TenantId::from_trusted(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string()),
+                &UserId::new(NESTED_ASSETS_OWNER_USER_ID).expect("valid owner id"),
+                NESTED_ASSETS_MANIFEST_TOML,
+            )
+            .as_str(),
+        );
     assert!(
         migrated_dir.join("manifest.toml").is_file(),
         "legacy manifest must be moved under the local default tenant"
@@ -641,11 +713,8 @@ transport = "http"
 url = "http://tenant-scoped.example/mcp"
 "#;
 
-/// Migration collision: a tenant-scoped descriptor already exists for an id
-/// AND a divergent legacy (pre-tenant) copy of the same id also exists on
-/// disk. `migrate_legacy_owner_dir` must never clobber the existing
-/// tenant-scoped file, and per its documented stance must leave the
-/// divergent legacy copy in place (untested until now).
+/// Legacy and tenant-scoped descriptors that shared an old caller-supplied id
+/// no longer collide after the legacy descriptor is minted.
 #[tokio::test]
 async fn migration_preserves_existing_tenant_scoped_descriptor_and_leaves_divergent_legacy_copy() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -688,11 +757,22 @@ async fn migration_preserves_existing_tenant_scoped_descriptor_and_leaves_diverg
         COLLISION_TENANT_SCOPED_MANIFEST_TOML,
         "the existing tenant-scoped descriptor must be byte-unchanged after migration"
     );
-    assert_eq!(
-        std::fs::read_to_string(legacy_dir.join("manifest.toml"))
-            .expect("read legacy manifest after migration"),
+    assert!(
+        !legacy_dir.exists(),
+        "the legacy descriptor must move into its owner-unique minted path"
+    );
+    let minted_legacy_id = minted_id(
+        &TenantId::from_trusted(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string()),
+        &UserId::new(COLLISION_OWNER_USER_ID).expect("valid owner id"),
         COLLISION_LEGACY_MANIFEST_TOML,
-        "the divergent legacy copy must remain on disk after migration, not be deleted or merged"
+    );
+    assert!(
+        tenant_scoped_dir
+            .parent()
+            .expect("owner directory")
+            .join(minted_legacy_id.as_str())
+            .join("manifest.toml")
+            .is_file()
     );
 }
 

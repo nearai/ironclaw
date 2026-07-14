@@ -1702,6 +1702,17 @@ where
         let Ok(extension_id) = ExtensionId::new(entry.name.clone()) else {
             continue;
         };
+        if !matches!(source, ManifestSource::UserRegistered { .. })
+            && crate::extension_host::registered_extension_store::is_hosted_mcp_id_namespace(
+                &extension_id,
+            )
+        {
+            tracing::debug!(
+                extension_id = extension_id.as_str(),
+                "skipping shared-catalog package in the hosted MCP id namespace"
+            );
+            continue;
+        }
         if reserved_host_bundled_extension_id(&extension_id) {
             continue;
         }

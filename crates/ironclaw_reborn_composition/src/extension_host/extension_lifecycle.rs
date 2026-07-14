@@ -93,7 +93,8 @@ use crate::extension_host::mcp_discovery::{
 };
 use crate::extension_host::registered_extension_store::{
     available_extension_not_found, is_owner_registered, migrate_legacy_owner_layout,
-    resolve_registered_for_scope, search_with_owner_overlay_for_scope,
+    migrate_unminted_registered_ids, resolve_registered_for_scope,
+    search_with_owner_overlay_for_scope,
 };
 
 pub(crate) use active_publication::ActiveExtensionPublisher;
@@ -218,6 +219,7 @@ pub(crate) async fn restore_extension_lifecycle_state(
     // before the tenant-scoped walkers below run, or those registrations
     // silently vanish from restore and listing.
     migrate_legacy_owner_layout(filesystem.as_ref()).await?;
+    migrate_unminted_registered_ids(filesystem.as_ref(), installation_store).await?;
     // Per-boot batching (no cross-boot caching): a catalog-miss installation
     // falls back to its row's owner-scoped registered set, and multiple
     // installations can share the same (tenant, owner). Load each owner's

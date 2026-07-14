@@ -100,6 +100,14 @@ pub(crate) async fn seed_registered_installation(
     )
     .expect("registered manifest record"); // safety: test-only fixture setup.
     let extension_id = ExtensionId::new(extension_id_str).expect("valid extension id"); // safety: test-only fixture setup.
+    let value = toml::from_str::<toml::Value>(manifest_toml).expect("manifest TOML"); // safety: test-only fixture setup.
+    let url = value["runtime"]["url"].as_str().expect("hosted MCP URL"); // safety: test-only fixture setup.
+    let expected_extension_id =
+        crate::extension_host::registered_extension_store::HostedMcpExtensionId::mint(
+            tenant_id, owner, url, "",
+        )
+        .expect("mint hosted MCP id") // safety: test-only fixture setup.
+        .into_extension_id();
     let installation = ExtensionInstallation::new(
         ExtensionInstallationId::new(extension_id_str).expect("valid installation id"), // safety: test-only fixture setup.
         extension_id.clone(),
@@ -118,5 +126,5 @@ pub(crate) async fn seed_registered_installation(
         .upsert_installation(installation)
         .await
         .expect("seed registered installation"); // safety: test-only fixture setup.
-    (extension_id, manifest_hash)
+    (expected_extension_id, manifest_hash)
 }

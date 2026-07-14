@@ -16,9 +16,17 @@
 //!
 //! The write side (`put`/`delete`) lands with the register verb in T3.
 
-use ironclaw_extensions::ManifestSource;
+use std::sync::Arc;
+
+use ironclaw_extensions::{
+    ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationPersistedParts,
+    ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef, ExtensionRuntime,
+    ExtensionRuntimeV2, ManifestHash, ManifestSource,
+};
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
-use ironclaw_host_api::{InvocationId, ResourceScope, TenantId, UserId, VirtualPath};
+use ironclaw_host_api::{
+    ExtensionId, InvocationId, ResourceScope, TenantId, UserId, VirtualPath, sha256_digest_token,
+};
 use ironclaw_product_workflow::{LifecyclePackageRef, ProductWorkflowError};
 
 use crate::extension_host::available_extensions::{
@@ -27,6 +35,87 @@ use crate::extension_host::available_extensions::{
 };
 
 const REGISTERED_ROOT: &str = "/system/extensions/registered";
+const HOSTED_MCP_ID_PREFIX: &str = "mcp-";
+const HOSTED_MCP_DIGEST_LEN: usize = 16;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct HostedMcpExtensionId(ExtensionId);
+
+#[derive(Debug, thiserror::Error)]
+#[error("extension id is not a minted hosted MCP id")]
+pub(crate) struct NotHostedMcp;
+
+impl HostedMcpExtensionId {
+    pub(crate) fn mint(
+        tenant_id: &TenantId,
+        owner: &UserId,
+        url: &str,
+        account_label: &str,
+    ) -> Result<Self, ProductWorkflowError> {
+        let normalized_url = normalized_hosted_mcp_url(url)?;
+        let mut input = Vec::new();
+        for field in [
+            tenant_id.as_str().as_bytes(),
+            owner.as_str().as_bytes(),
+            normalized_url.as_bytes(),
+            account_label.as_bytes(),
+        ] {
+            input.extend_from_slice(&(field.len() as u64).to_le_bytes());
+            input.extend_from_slice(field);
+        }
+        let digest = sha256_digest_token(&input);
+        let suffix = digest
+            .strip_prefix("sha256:")
+            .unwrap_or(digest.as_str())
+            .chars()
+            .take(HOSTED_MCP_DIGEST_LEN)
+            .collect::<String>();
+        ExtensionId::new(format!("{HOSTED_MCP_ID_PREFIX}{suffix}"))
+            .map(Self)
+            .map_err(map_binding_error)
+    }
+
+    pub(crate) fn parse(extension_id: &ExtensionId) -> Result<Self, NotHostedMcp> {
+        let Some(suffix) = extension_id.as_str().strip_prefix(HOSTED_MCP_ID_PREFIX) else {
+            return Err(NotHostedMcp);
+        };
+        if suffix.len() != HOSTED_MCP_DIGEST_LEN
+            || !suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(NotHostedMcp);
+        }
+        Ok(Self(extension_id.clone()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn into_extension_id(self) -> ExtensionId {
+        self.0
+    }
+}
+
+pub(crate) fn is_hosted_mcp_id_namespace(extension_id: &ExtensionId) -> bool {
+    extension_id.as_str().starts_with(HOSTED_MCP_ID_PREFIX)
+}
+
+fn normalized_hosted_mcp_url(url: &str) -> Result<String, ProductWorkflowError> {
+    let parsed = url::Url::parse(url).map_err(map_binding_error)?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| ProductWorkflowError::InvalidBindingRequest {
+            reason: "registered MCP URL must include a host".to_string(),
+        })?
+        .to_ascii_lowercase();
+    let path = parsed.path().trim_end_matches('/');
+    let normalized_path = if path.is_empty() { "/" } else { path };
+    let port = parsed
+        .port()
+        .map(|port| format!(":{port}"))
+        .unwrap_or_default();
+    Ok(format!(
+        "{}://{host}{port}{normalized_path}",
+        parsed.scheme().to_ascii_lowercase()
+    ))
+}
 
 /// True for a package owned by a user's registered store. Such a package must
 /// never be materialized under the shared `/system/extensions/<id>/` directory:
@@ -70,7 +159,7 @@ impl RegisteredExtensionStore {
         F: RootFilesystem + ?Sized,
     {
         let root = Self::owner_root_for_tenant(&scope.tenant_id, &scope.user_id)?;
-        load_filesystem_packages(
+        let packages = load_filesystem_packages(
             fs,
             &root,
             ManifestSource::UserRegistered {
@@ -79,7 +168,37 @@ impl RegisteredExtensionStore {
             },
             asset_loading,
         )
-        .await
+        .await?;
+        Ok(packages
+            .into_iter()
+            .filter(|package| registered_package_has_minted_id(package, scope))
+            .collect())
+    }
+}
+
+fn registered_package_has_minted_id(
+    package: &AvailableExtensionPackage,
+    scope: &ResourceScope,
+) -> bool {
+    let ExtensionRuntime::Mcp { url: Some(url), .. } = &package.package.manifest.runtime else {
+        return false;
+    };
+    let Ok(parsed) = HostedMcpExtensionId::parse(&package.package.id) else {
+        tracing::debug!(
+            extension_id = package.package.id.as_str(),
+            "skipping registered descriptor with an unminted id"
+        );
+        return false;
+    };
+    match HostedMcpExtensionId::mint(&scope.tenant_id, &scope.user_id, url, "") {
+        Ok(expected) if expected == parsed => true,
+        Ok(_) | Err(_) => {
+            tracing::debug!(
+                extension_id = package.package.id.as_str(),
+                "skipping registered descriptor whose id does not match its owner and endpoint"
+            );
+            false
+        }
     }
 }
 
@@ -135,6 +254,168 @@ where
     Ok(())
 }
 
+/// Re-key descriptors and installed rows created before hosted MCP ids were
+/// minted. New state is written before old state is removed so interruption
+/// leaves a retryable duplicate instead of an orphaned installation.
+pub(crate) async fn migrate_unminted_registered_ids<F>(
+    fs: &F,
+    installation_store: &Arc<dyn ExtensionInstallationStore>,
+) -> Result<(), ProductWorkflowError>
+where
+    F: RootFilesystem + ?Sized,
+{
+    let manifests = installation_store
+        .list_manifests()
+        .await
+        .map_err(map_transient)?;
+    for manifest_record in manifests {
+        let ManifestSource::UserRegistered { tenant_id, owner } =
+            &manifest_record.manifest().source
+        else {
+            continue;
+        };
+        let ExtensionRuntimeV2::Mcp { url: Some(url), .. } = &manifest_record.manifest().runtime
+        else {
+            continue;
+        };
+        let minted = HostedMcpExtensionId::mint(tenant_id, owner, url, "")?;
+        if HostedMcpExtensionId::parse(manifest_record.extension_id())
+            .is_ok_and(|parsed| parsed == minted)
+        {
+            continue;
+        }
+        if let Err(error) = migrate_registered_id(
+            fs,
+            installation_store,
+            tenant_id,
+            owner,
+            &manifest_record,
+            &minted.0,
+        )
+        .await
+        {
+            tracing::debug!(
+                extension_id = manifest_record.extension_id().as_str(),
+                %error,
+                "skipping registered extension id migration"
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn migrate_registered_id<F>(
+    fs: &F,
+    installation_store: &Arc<dyn ExtensionInstallationStore>,
+    tenant_id: &TenantId,
+    owner: &UserId,
+    old_manifest: &ExtensionManifestRecord,
+    new_id: &ExtensionId,
+) -> Result<(), ProductWorkflowError>
+where
+    F: RootFilesystem + ?Sized,
+{
+    let old_id = old_manifest.extension_id();
+    let mut value =
+        toml::from_str::<toml::Value>(old_manifest.raw_toml()).map_err(map_binding_error)?;
+    value["id"] = toml::Value::String(new_id.as_str().to_string());
+    let new_toml = toml::to_string(&value).map_err(map_binding_error)?;
+    let new_hash =
+        ManifestHash::new(sha256_digest_token(new_toml.as_bytes())).map_err(map_binding_error)?;
+    let host_ports =
+        ironclaw_host_runtime::default_host_port_catalog().map_err(map_binding_error)?;
+    let contracts =
+        ironclaw_host_runtime::default_host_api_contract_registry().map_err(map_binding_error)?;
+    let new_manifest = ExtensionManifestRecord::from_toml_with_contracts(
+        new_toml.clone(),
+        ManifestSource::UserRegistered {
+            tenant_id: tenant_id.clone(),
+            owner: owner.clone(),
+        },
+        &host_ports,
+        Some(new_hash.clone()),
+        &contracts,
+    )
+    .map_err(map_binding_error)?;
+
+    let old_installation_id =
+        ExtensionInstallationId::new(old_id.as_str()).map_err(map_binding_error)?;
+    let old_installation = installation_store
+        .get_installation(&old_installation_id)
+        .await
+        .map_err(map_transient)?;
+    let new_installation = old_installation
+        .as_ref()
+        .map(|installation| {
+            ExtensionInstallation::from_persisted_parts(ExtensionInstallationPersistedParts {
+                installation_id: ExtensionInstallationId::new(new_id.as_str())?,
+                extension_id: new_id.clone(),
+                activation_state: installation.activation_state(),
+                manifest_ref: ExtensionManifestRef::new(new_id.clone(), Some(new_hash)),
+                credential_bindings: installation.credential_bindings().to_vec(),
+                health: installation.health().clone(),
+                updated_at: installation.updated_at(),
+                owner: installation.owner().clone(),
+            })
+        })
+        .transpose()
+        .map_err(map_binding_error)?;
+
+    let source = descriptor_root(tenant_id, owner, old_id)?;
+    let destination = descriptor_root(tenant_id, owner, new_id)?;
+    let destination_manifest = VirtualPath::new(format!("{}/manifest.toml", destination.as_str()))
+        .map_err(map_binding_error)?;
+    match fs.stat(&destination_manifest).await {
+        Ok(_) => {}
+        Err(FilesystemError::NotFound { .. }) => {
+            copy_tree(fs, &source, &destination).await?;
+            fs.write_file(&destination_manifest, new_toml.as_bytes())
+                .await
+                .map_err(map_transient)?;
+        }
+        Err(error) => return Err(map_transient(error)),
+    }
+    match new_installation {
+        Some(installation) => installation_store
+            .upsert_manifest_and_installation(new_manifest, installation)
+            .await
+            .map_err(map_transient)?,
+        None => installation_store
+            .upsert_manifest(new_manifest)
+            .await
+            .map_err(map_transient)?,
+    }
+    if old_installation.is_some() {
+        installation_store
+            .delete_installation(&old_installation_id)
+            .await
+            .map_err(map_transient)?;
+    }
+    installation_store
+        .delete_manifest(old_id)
+        .await
+        .map_err(map_transient)?;
+    match fs.delete(&source).await {
+        Ok(()) | Err(FilesystemError::NotFound { .. }) => {}
+        Err(error) => return Err(map_transient(error)),
+    }
+    Ok(())
+}
+
+fn descriptor_root(
+    tenant_id: &TenantId,
+    owner: &UserId,
+    extension_id: &ExtensionId,
+) -> Result<VirtualPath, ProductWorkflowError> {
+    VirtualPath::new(format!(
+        "{REGISTERED_ROOT}/{}/{}/{}",
+        tenant_id.as_str(),
+        owner.as_str(),
+        extension_id.as_str()
+    ))
+    .map_err(map_binding_error)
+}
+
 /// Migrates one candidate legacy owner directory. No-op when the directory
 /// turns out to be a tenant dir (no child holds `manifest.toml` directly).
 async fn migrate_legacy_owner_dir<F>(fs: &F, owner: &UserId) -> Result<(), ProductWorkflowError>
@@ -167,6 +448,8 @@ where
             Err(error) => return Err(map_transient(error)),
         }
         found_descriptor = true;
+        let manifest_bytes = fs.read_file(&manifest).await.map_err(map_transient)?;
+        let (minted_id, minted_manifest) = minted_manifest_for_legacy(&manifest_bytes, owner)?;
         let source = VirtualPath::new(format!(
             "{REGISTERED_ROOT}/{}/{}",
             owner.as_str(),
@@ -177,7 +460,7 @@ where
             "{REGISTERED_ROOT}/{}/{}/{}",
             ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID,
             owner.as_str(),
-            child.name
+            minted_id.as_str()
         ))
         .map_err(map_binding_error)?;
         let destination_manifest =
@@ -200,6 +483,9 @@ where
             Err(error) => return Err(map_transient(error)),
         }
         copy_tree(fs, &source, &destination).await?;
+        fs.write_file(&destination_manifest, minted_manifest.as_bytes())
+            .await
+            .map_err(map_transient)?;
         fs.delete(&source).await.map_err(map_transient)?;
     }
     // Only remove the legacy owner dir once everything in it was a migrated
@@ -208,6 +494,26 @@ where
         fs.delete(&legacy_root).await.map_err(map_transient)?;
     }
     Ok(())
+}
+
+fn minted_manifest_for_legacy(
+    bytes: &[u8],
+    owner: &UserId,
+) -> Result<(ExtensionId, String), ProductWorkflowError> {
+    let raw = std::str::from_utf8(bytes).map_err(map_binding_error)?;
+    let mut value = toml::from_str::<toml::Value>(raw).map_err(map_binding_error)?;
+    let url = value
+        .get("runtime")
+        .and_then(|runtime| runtime.get("url"))
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| ProductWorkflowError::InvalidBindingRequest {
+            reason: "legacy registered manifest has no hosted MCP URL".to_string(),
+        })?;
+    let tenant = TenantId::from_trusted(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string());
+    let minted = HostedMcpExtensionId::mint(&tenant, owner, url, "")?.0;
+    value["id"] = toml::Value::String(minted.as_str().to_string());
+    let manifest = toml::to_string(&value).map_err(map_binding_error)?;
+    Ok((minted, manifest))
 }
 
 /// Copies every file under `source` to the same relative path under
