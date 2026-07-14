@@ -233,41 +233,29 @@ impl RebornLocalExtensionManagementPort {
     /// The caller's registered packages, read once and keyed by extension id
     /// — the batched replacement for calling `resolve_registered_for_scope`
     /// (which internally lists the caller's entire registered directory) once
-    /// per catalog-miss in a listing loop. A read failure is logged and
-    /// treated as an empty registered set for this request (list-shaped
-    /// callers stay resilient, matching `resolve_registered_for_scope`'s
-    /// per-entry blast-radius stance).
+    /// per catalog-miss in a listing loop. Unlike an individual corrupt
+    /// manifest (skip-and-logged one level deeper in `load_filesystem_package`),
+    /// an `Err` here is a genuine top-level `fs.list_dir` failure for the
+    /// CALLER's OWN registered directory — the blast-radius/skip-log policy
+    /// doesn't apply, so it propagates, matching the sibling
+    /// `resolve_available_for_scope`'s identical failure mode.
     pub(super) async fn registered_packages_by_id(
         &self,
         scope: &ResourceScope,
-    ) -> HashMap<ExtensionId, Arc<AvailableExtensionPackage>> {
+    ) -> Result<HashMap<ExtensionId, Arc<AvailableExtensionPackage>>, ProductWorkflowError> {
         // Item 6: `installed_summaries` (this method's only caller) reads
         // only summary fields, never `.assets` — skip the per-entry
         // directory-asset read.
-        match self
+        Ok(self
             .registered_store
             .list_for_scope(
                 scope,
                 crate::extension_host::available_extensions::AssetLoading::Skip,
             )
-            .await
-        {
-            Ok(packages) => packages
-                .into_iter()
-                .map(|package| (package.package.id.clone(), Arc::new(package)))
-                .collect(),
-            Err(error) => {
-                // silent-ok: a read failure here only degrades one request's
-                // listing to catalog-only entries (registered rows silently
-                // absent from `installed_summaries`); it never mutates state
-                // or masks an ownership decision, so failing open is safe.
-                tracing::debug!(
-                    %error,
-                    "skipping registered extension listing for installed summaries: batched read failed"
-                );
-                HashMap::new()
-            }
-        }
+            .await?
+            .into_iter()
+            .map(|package| (package.package.id.clone(), Arc::new(package)))
+            .collect())
     }
 
     /// `Ok(Some(_))` only when an installation row exists for `package_ref`'s

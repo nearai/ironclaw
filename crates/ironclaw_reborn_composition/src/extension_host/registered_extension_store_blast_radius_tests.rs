@@ -21,9 +21,7 @@ use ironclaw_filesystem::{
 use ironclaw_host_api::{
     ExtensionId, InvocationId, ResourceScope, TenantId, UserId, VirtualPath, sha256_digest_token,
 };
-use ironclaw_product_workflow::{
-    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload,
-};
+use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError};
 use ironclaw_trust::{AdminConfig, HostTrustPolicy, InvalidationBus};
 use tokio::sync::Mutex;
 
@@ -505,12 +503,17 @@ async fn resolve_registered_for_scope_distinguishes_missing_from_read_failure() 
     .expect_err("a storage failure on the owner's registered root must surface as Err");
 }
 
-/// Pins the installed-summaries blast radius (T2 review item): one entry
-/// whose registered-store resolution ERRORS (not merely misses) must be
-/// logged-and-skipped, leaving every other installed summary intact — the
-/// old `let Ok(...) else continue` swallowed the error indistinguishably.
+/// Fix C (#5970 review): a genuine top-level `fs.list_dir` failure on the
+/// CALLER's OWN registered directory is not "one corrupt entry among many" —
+/// individual corrupt manifests are already skip-and-logged one level deeper
+/// in `load_filesystem_package`, so the blast-radius/skip-log policy doesn't
+/// apply here. `registered_packages_by_id` now propagates this failure
+/// (matching its sibling `resolve_available_for_scope`) instead of silently
+/// collapsing to an empty registered set, so `list_installed` must fail
+/// closed rather than quietly dropping the caller's registered installs from
+/// their own listing.
 #[tokio::test]
-async fn list_installed_survives_one_entry_whose_registered_resolution_errors() {
+async fn list_installed_fails_closed_when_callers_own_registered_directory_read_errors() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage_root = dir.path().join("local-dev");
     seed_registered_manifest(&storage_root, HEALTHY_OWNER_USER_ID, HEALTHY_EXTENSION_ID);
@@ -617,18 +620,14 @@ async fn list_installed_survives_one_entry_whose_registered_resolution_errors() 
         caller.clone(),
     );
 
-    let response = port
+    let error = port
         .list_installed(&owner_scope(HEALTHY_OWNER_USER_ID))
         .await
-        .expect(
-            "one entry's registered-store read error must not kill the whole installed listing",
+        .expect_err(
+            "a genuine failure reading the caller's own registered directory must fail the \
+             whole listing closed, not silently drop their registered installs",
         );
-    let Some(LifecycleProductPayload::ExtensionList { extensions, count }) = response.payload
-    else {
-        panic!("expected extension list payload");
-    };
-    assert_eq!(count, 1, "the catalog-backed summary must survive");
-    assert_eq!(extensions[0].summary.package_ref.id.as_str(), "catalog-mcp");
+    assert!(matches!(error, ProductWorkflowError::Transient { .. }));
 }
 
 /// Wraps a real `LocalFilesystem`, counting `list_dir` calls against exactly

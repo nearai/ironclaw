@@ -694,7 +694,7 @@ impl RebornLocalExtensionManagementPort {
         // deferred): load the caller's registered set ONCE up front instead
         // of letting every catalog-miss below re-scan and re-parse the
         // caller's entire registered directory via `list_for_scope`.
-        let registered_by_id = self.registered_packages_by_id(scope).await;
+        let registered_by_id = self.registered_packages_by_id(scope).await?;
         // Item 5: batch every stored manifest ONCE instead of letting the
         // tenant-match check below issue a `get_manifest` per row — the
         // store already exposes a single-pass `list_manifests` for this.
