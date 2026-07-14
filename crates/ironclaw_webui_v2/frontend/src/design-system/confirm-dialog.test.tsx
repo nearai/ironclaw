@@ -26,6 +26,7 @@ test("ConfirmDialog renders an accessible destructive confirmation surface", () 
   assert.match(html, /data-testid="confirm-dialog-confirm"/);
   assert.match(html, /aria-busy="true"/);
   assert.equal((html.match(/disabled=""/g) || []).length, 2);
+  assert.doesNotMatch(html, /aria-label="Cancel"/);
 });
 
 test("ConfirmDialog renders nothing while closed", () => {

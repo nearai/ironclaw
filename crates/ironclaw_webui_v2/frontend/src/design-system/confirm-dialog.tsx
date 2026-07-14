@@ -33,7 +33,7 @@ export function ConfirmDialog({
   return (
     <Modal
       open={open}
-      onClose={handleCancel}
+      onClose={isConfirming ? undefined : handleCancel}
       title={title}
       closeLabel={resolvedCancelLabel}
       size="sm"
