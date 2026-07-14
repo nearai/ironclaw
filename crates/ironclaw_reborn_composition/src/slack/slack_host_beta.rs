@@ -26,10 +26,10 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::RebornFilesystemIdempotencyLedger;
 use ironclaw_product_workflow::{
     ApprovalInteractionService, AuthInteractionService, ConversationBindingService,
-    DefaultInboundTurnService, DefaultProductWorkflow, ProductActorUserResolutionRequest,
-    ProductActorUserResolver, ProductConversationBindingService, ProductConversationRouteKey,
+    DefaultInboundTurnService, DefaultProductWorkflow, ProductActorUserResolver,
+    ProductConversationBindingService, ProductConversationRouteKey,
     ProductConversationSubjectRouteResolver, ProductInstallationKey, ProductInstallationScope,
-    ProductWorkflowError, ResolveBindingRequest, ResolvedBinding, ResolvedProductActorUser,
+    ProductWorkflowError, ResolveBindingRequest, ResolvedBinding,
     StaticProductInstallationResolver,
 };
 use ironclaw_slack_v2_adapter::{
@@ -183,17 +183,6 @@ pub struct SlackHostBetaRuntimeConfig {
     pub agent_id: AgentId,
     pub project_id: Option<ProjectId>,
     pub operator_user_id: UserId,
-    pub legacy_setup: Option<SlackHostBetaLegacySetup>,
-}
-
-#[derive(Debug, Clone)]
-pub struct SlackHostBetaLegacySetup {
-    pub installation_id: String,
-    pub team_id: String,
-    pub api_app_id: String,
-    pub user_id: UserId,
-    pub shared_subject_user_id: Option<UserId>,
-    pub channel_routes: Vec<SlackHostBetaChannelRoute>,
 }
 
 impl SlackHostBetaRuntimeConfig {
@@ -208,13 +197,7 @@ impl SlackHostBetaRuntimeConfig {
             agent_id,
             project_id,
             operator_user_id,
-            legacy_setup: None,
         }
-    }
-
-    pub fn with_legacy_setup(mut self, legacy_setup: SlackHostBetaLegacySetup) -> Self {
-        self.legacy_setup = Some(legacy_setup);
-        self
     }
 }
 
@@ -840,11 +823,11 @@ pub fn build_slack_host_beta_mounts(
     let personal_oauth_binder: Arc<dyn SlackPersonalUserBinder> = Arc::new(
         ProvisioningSlackPersonalUserBinder::new(Arc::clone(&binding_service), dm_provisioner),
     );
-    let actor_user_resolver = Arc::new(SlackHostBetaActorUserResolver::new(Arc::new(
+    let actor_user_resolver = Arc::new(
         crate::slack::slack_host_beta::runtime_setup::slack_provider_identity_actor_resolver(
             state.clone(),
         ),
-    )));
+    );
     let channel_route_store: Arc<dyn SlackChannelRouteStore> = state.clone();
     let personal_dm_target_store: Arc<dyn SlackPersonalDmTargetStore> = state.clone();
     let subject_route_resolver: Arc<dyn ProductConversationSubjectRouteResolver> =
@@ -1285,50 +1268,6 @@ fn slack_declared_egress_targets(
     Ok(vec![DeclaredEgressTarget::new(host, Some(token_handle))])
 }
 
-#[derive(Clone)]
-struct SlackHostBetaActorUserResolver {
-    cached_identity: Arc<dyn ProductActorUserResolver>,
-}
-
-impl SlackHostBetaActorUserResolver {
-    fn new(cached_identity: Arc<dyn ProductActorUserResolver>) -> Self {
-        Self { cached_identity }
-    }
-}
-
-impl std::fmt::Debug for SlackHostBetaActorUserResolver {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("SlackHostBetaActorUserResolver(..)")
-    }
-}
-
-#[async_trait::async_trait]
-impl ProductActorUserResolver for SlackHostBetaActorUserResolver {
-    async fn resolve_product_actor_user(
-        &self,
-        request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
-        if let Some(resolved_actor) = self
-            .cached_identity
-            .resolve_product_actor_user(request.clone())
-            .await?
-        {
-            return Ok(Some(resolved_actor));
-        }
-        Ok(None)
-    }
-
-    async fn resolved_product_actor_user_is_current(
-        &self,
-        request: &ProductActorUserResolutionRequest,
-        expected: &ResolvedProductActorUser,
-    ) -> Result<bool, ProductWorkflowError> {
-        self.cached_identity
-            .resolved_product_actor_user_is_current(request, expected)
-            .await
-    }
-}
-
 fn invalid_config(field: &'static str, reason: String) -> SlackHostBetaBuildError {
     SlackHostBetaBuildError::InvalidConfig { field, reason }
 }
@@ -1361,7 +1300,7 @@ mod tests {
         LifecyclePackageKind, LifecyclePackageRef, ProductActorUserResolutionRequest,
         ProductWorkflowError, RebornExtensionOnboardingState, RebornOutboundDeliveryTargetId,
         RebornOutboundDeliveryTargetStatus, RebornServicesErrorCode, RebornServicesErrorKind,
-        RebornSetOutboundPreferencesRequest, WebUiAuthenticatedCaller,
+        RebornSetOutboundPreferencesRequest, ResolvedProductActorUser, WebUiAuthenticatedCaller,
     };
     use ironclaw_resources::InMemoryResourceGovernor;
     use ironclaw_secrets::InMemorySecretStore;
@@ -1807,16 +1746,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_slack_host_beta_runtime_mounts_exposes_events_and_oauth_binding_only() {
+    async fn build_slack_host_beta_runtime_mounts_do_not_seed_hidden_setup() {
         let (runtime, _root) = runtime().await;
 
-        let mounts = build_slack_host_beta_runtime_mounts(
-            &runtime,
-            dynamic_runtime_config_without_legacy_actor(),
-        )
-        .await
-        .expect("dynamic mounts build");
+        let mounts = build_slack_host_beta_runtime_mounts(&runtime, dynamic_runtime_config())
+            .await
+            .expect("dynamic mounts build");
         let _oauth_binding = mounts.personal_oauth_binding_config();
+
+        assert_eq!(
+            mounts
+                .setup_service
+                .as_ref()
+                .expect("dynamic mounts expose setup service")
+                .current_setup()
+                .await
+                .expect("read current setup"),
+            None,
+            "plain runtime composition must wait for authenticated operator setup"
+        );
 
         assert_eq!(mounts.events.descriptors.len(), 1);
         assert!(
@@ -1832,7 +1780,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_slack_host_beta_mounts_routes_oauth_bound_dm_event() {
+    async fn build_slack_host_beta_mounts_routes_oauth_bound_dm_through_generic_resolver() {
         let egress = Arc::new(RecordingRuntimeHttpEgress::default());
         let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
             host_egress_port_for_test(Arc::clone(&egress)),
@@ -2406,12 +2354,9 @@ mod tests {
     #[tokio::test]
     async fn dynamic_slack_setup_save_succeeds_and_unified_extension_stays_listed() {
         let (runtime, _root) = runtime().await;
-        let mounts = build_slack_host_beta_runtime_mounts(
-            &runtime,
-            dynamic_runtime_config_without_legacy_actor(),
-        )
-        .await
-        .expect("dynamic mounts");
+        let mounts = build_slack_host_beta_runtime_mounts(&runtime, dynamic_runtime_config())
+            .await
+            .expect("dynamic mounts");
         let bundle =
             build_webui_services_with_slack_host_beta_mounts(&runtime, None, Some(&mounts))
                 .expect("webui bundle");
@@ -3057,12 +3002,9 @@ mod tests {
             host_egress_port_for_test(Arc::clone(&egress)),
         )))
         .await;
-        let mounts = build_slack_host_beta_runtime_mounts(
-            &runtime,
-            dynamic_runtime_config_without_legacy_actor(),
-        )
-        .await
-        .expect("dynamic mounts");
+        let mounts = build_slack_host_beta_runtime_mounts(&runtime, dynamic_runtime_config())
+            .await
+            .expect("dynamic mounts");
         assert!(
             mounts.outbound_delivery_target_provider_registered,
             "dynamic Slack setup must register its target provider with the runtime"
@@ -3729,12 +3671,10 @@ mod tests {
         .expect("valid config")
     }
 
-    fn dynamic_runtime_config_without_legacy_actor() -> SlackHostBetaRuntimeConfig {
-        // Production resolves the Slack host-beta runtime config with
-        // `legacy_setup: None` (serve_slack.rs asserts this). Slack secrets now
-        // arrive only through the WebUI dynamic setup save; static legacy
-        // seeding fails closed without a bot token by design. Mirror production:
-        // build with no legacy setup and drive setup through the dynamic path.
+    fn dynamic_runtime_config() -> SlackHostBetaRuntimeConfig {
+        // Production carries only host identity here. Slack installation data
+        // and secrets arrive later through the authenticated operator setup
+        // route, never as a boot-time mutation hidden in runtime composition.
         SlackHostBetaRuntimeConfig::new(
             TenantId::new(TENANT).expect("tenant"),
             AgentId::new(AGENT).expect("agent"),
@@ -4562,12 +4502,9 @@ mod tests {
 
         // Wire the delivery hook by calling the dynamic production mount builder
         // used by WebUI-managed Slack setup.
-        let mounts = build_slack_host_beta_runtime_mounts(
-            &runtime,
-            dynamic_runtime_config_without_legacy_actor(),
-        )
-        .await
-        .expect("dynamic mounts should build");
+        let mounts = build_slack_host_beta_runtime_mounts(&runtime, dynamic_runtime_config())
+            .await
+            .expect("dynamic mounts should build");
 
         // The dynamic delivery hook resolves its driver from the current Slack
         // setup (skips silently when unconfigured). Provide the WebUI-managed
