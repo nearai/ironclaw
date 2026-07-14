@@ -273,7 +273,7 @@ async def test_reborn_legacy_approval_buttons_resolve_gate(
         assert f"/threads/{THREAD_ID}/runs/{RUN_ID}/gates/gate-deny/resolve" in (
             resolve_requests[2]["url"]
         )
-        assert resolve_requests[2]["body"]["resolution"] == "denied"
+        assert resolve_requests[2]["body"]["resolution"] == "declined"
         assert resolve_requests[2]["body"]["always"] is False
     finally:
         await context.close()
@@ -310,7 +310,7 @@ async def test_reborn_legacy_approval_deny_shows_declined_activity(
         assert f"/threads/{THREAD_ID}/runs/{RUN_ID}/gates/gate-denied-visible/resolve" in (
             resolve_requests[0]["url"]
         )
-        assert resolve_requests[0]["body"]["resolution"] == "denied"
+        assert resolve_requests[0]["body"]["resolution"] == "declined"
         assert resolve_requests[0]["body"]["always"] is False
     finally:
         await context.close()
