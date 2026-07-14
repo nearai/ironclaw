@@ -782,25 +782,37 @@ Rules — kept short on purpose:
   survives). The remaining `slack` allowlist term entries for
   `extension_lifecycle.rs` cover other (non-DEL-4) slack references and retire
   with the P7b allowlist→0 sweep.
-- [ ] DEL-5 The old `ProductAdapter` metadata getters and the unused registry
-  runtime projection are deleted. — PARTIAL: both projection halves are
-  gone (P2 deleted `ProductAdapterRuntimeEntry` /
-  `list_enabled_product_adapter_entries` from
-  `crates/ironclaw_product_adapter_registry`; P6 deleted the unused
-  registry runtime projection, `59893460e`). The `ProductAdapter`
-  metadata getters (`adapter_id` / `installation_id` / `surface_kind` /
-  `capabilities`, `crates/ironclaw_product_adapters/src/adapter.rs`)
-  still stand. OWNER-FLAGGED (P7a → P7b): the whole `ProductAdapter` trait +
-  its outbound path is production-dead — `prepare_and_render_product_outbound`
-  has zero production callers (only `outbound_delivery_contract.rs` tests +
-  the lib re-export, verified workspace-wide), and the live outbound path is
-  `ChannelAdapter` (`SlackChannelAdapter`/`TelegramChannelAdapter` in
-  `channel.rs`), which does not reference `SlackV2Adapter`/`TelegramV2Adapter`
-  or `ProductAdapter`. Retiring the getters therefore means deleting the dead
-  trait + `outbound_delivery.rs` + the `adapter.rs` `ProductAdapter` impls (a
-  ~2000-line multi-crate deletion in the SAME crates DEL-2 renames), so it
-  lands with DEL-2 in P7b as one coherent "adapter retirement" change rather
-  than bloating the P7a wire+legs PR.
+- [x] DEL-5 The `ProductAdapter` contract is fully retired (owner decision:
+  full retirement executed AS CONSOLIDATION, coverage ported not deleted). —
+  P2/P6 removed both registry-projection halves (`ProductAdapterRuntimeEntry` /
+  `list_enabled_product_adapter_entries`; `59893460e`). P7b deletes the
+  remainder: the `ProductAdapter` trait + `ProductAdapterHealth` +
+  metadata getters (`crates/ironclaw_product_adapters/src/adapter.rs`); the
+  production-dead `prepare_and_render_product_outbound` + its
+  request/outcome/error types (`ironclaw_product_workflow/src/outbound_delivery.rs`,
+  keeping the LIVE `VerifiedProductOutboundTargetMetadata` +
+  `ProductOutboundTargetResolver` + `delivery_failure_kind_for_workflow_error`
+  the coordinator uses); the concrete `SlackV2Adapter`/`TelegramV2Adapter`
+  impls + their egress/auth/capability helpers (`slack|telegram`
+  `src/adapter.rs`, keeping the LIVE `SlackChannelAdapter`/`TelegramChannelAdapter`
+  in `channel.rs`); and the whole `ironclaw_wasm_product_adapters` crate
+  (workspace member, arch-test rules + guardrail/WIT tests, CI buckets, doc
+  refs). **Revisit trigger (owner):** WASM channel adapters return when a WASM
+  channel exists (overview §4.0), rebuilt on `ChannelAdapter` via a
+  loader-synthesized entrypoint; the WIT-based ProductAdapter runner was
+  superseded by the NEA-25 contract — see git history at this commit. Its ~9
+  specificity allowlist entries retire with it (DEL-8 progress). **Coverage
+  ported, not deleted:** the live test double `RebornTestProductAdapter` → the
+  trait-free `RebornTestIngress` (builds `ParsedProductInbound` directly on the
+  LIVE `TrustedInboundContext`/`ProductInboundEnvelope` path the production
+  `extension_ingress` bridge uses); the retired `ProductAdapter::parse_inbound`/
+  `render_outbound` fidelity suites move to the `ChannelAdapter` conformance
+  (`run_channel_adapter_conformance`); the 18 `prepare_and_render_product_outbound`
+  contract tests each carry a per-test disposition (PR body), with the two
+  **#4953 fix-born** DM-requirement pins PORTED onto the coordinator
+  (`coordinator_require_direct_message_rejects_non_dm_target_without_egress`)
+  plus a ported policy-rejection fail-closed pin
+  (`coordinator_rejected_policy_decision_does_not_reach_the_adapter`).
 - [x] DEL-6 Composition constructs no concrete extension and mounts no
   concrete route (architecture gate). — The lane deletion removed the last
   concrete construction and route mount from composition (`serve_slack`

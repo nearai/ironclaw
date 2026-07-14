@@ -123,7 +123,7 @@ use super::scripted_provider::{
     ErrLlm, ParkingModelGate, SCRIPTED_MODEL_NAME, parking_trace_llm, scripted_trace_llm,
 };
 use super::session_thread::RebornThreadHarness;
-use super::test_adapter::{RebornTestIngress, RebornTestProductAdapter};
+use super::test_adapter::RebornTestIngress;
 use crate::support::trace_llm::TraceLlm;
 
 /// Per-capability preset constructors layered on `build_base`/`into_group`
@@ -592,8 +592,7 @@ impl RebornIntegrationGroupBuilder {
         // drift. The probe persists one deterministic, inert binding for
         // `conv-canonical-probe` (no thread submits turns against it); group
         // tests assert on cross-thread persistence, not binding counts.
-        let adapter = RebornTestProductAdapter::new("reborn-itest", "itest-install")?;
-        let ingress = RebornTestIngress::new(adapter);
+        let ingress = RebornTestIngress::new("reborn-itest", "itest-install")?;
         let probe = ingress.verified_text_envelope_with_trigger(
             "group-canonical-probe",
             HARNESS_ACTOR_ID,
@@ -1083,8 +1082,7 @@ impl<'g> RebornThreadBuilder<'g> {
         // service is backed by `shared.product_harness`, which is shared; the
         // idempotency ledger is also shared (per-binding idempotency).
         let actor_id = self.actor_id.as_deref().unwrap_or(HARNESS_ACTOR_ID);
-        let adapter = RebornTestProductAdapter::new("reborn-itest", "itest-install")?;
-        let ingress = RebornTestIngress::new(adapter);
+        let ingress = RebornTestIngress::new("reborn-itest", "itest-install")?;
         let probe = ingress.verified_text_envelope_with_trigger(
             "binding-probe",
             actor_id,

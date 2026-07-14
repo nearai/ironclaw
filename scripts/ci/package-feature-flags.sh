@@ -99,8 +99,7 @@ case "${package}" in
   ironclaw_reborn_identity | \
   ironclaw_reborn_traces | \
   ironclaw_slack_v2_adapter | \
-  ironclaw_telegram_v2_adapter | \
-  ironclaw_wasm_product_adapters)
+  ironclaw_telegram_v2_adapter)
     # Already on the allowlist with no feature flags; keep them flag-free now
     # that the default branch derives fallback features for closure crates.
     ;;

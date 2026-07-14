@@ -1140,22 +1140,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     ("crates/ironclaw_safety/src/leak_detector.rs", "telegram"),
     (
-        "crates/ironclaw_wasm_product_adapters/src/auth_verifier.rs",
-        "telegram",
-    ),
-    (
-        "crates/ironclaw_wasm_product_adapters/src/egress_policy.rs",
-        "api.telegram.org",
-    ),
-    (
-        "crates/ironclaw_wasm_product_adapters/src/egress_policy.rs",
-        "telegram",
-    ),
-    (
-        "crates/ironclaw_wasm_product_adapters/src/lib.rs",
-        "telegram",
-    ),
-    (
         "crates/ironclaw_webui_v2/frontend/src/pages/chat/hooks/useChannelOnboarding.ts",
         "telegram",
     ),
@@ -1168,26 +1152,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/ironclaw_skills/src/types.rs", "github"),
     ("crates/ironclaw_skills/src/types.rs", "google"),
     ("crates/ironclaw_skills/src/types.rs", "slack"),
-    (
-        "crates/ironclaw_wasm_product_adapters/src/auth_verifier.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_wasm_product_adapters/src/egress_policy.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_wasm_product_adapters/src/egress_policy.rs",
-        "slack.com",
-    ),
-    (
-        "crates/ironclaw_wasm_product_adapters/src/runner.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_wasm_product_adapters/src/runner_immediate_ack.rs",
-        "slack",
-    ),
     ("crates/ironclaw_webui_v2/frontend/src/i18n/ar.ts", "github"),
     ("crates/ironclaw_webui_v2/frontend/src/i18n/ar.ts", "google"),
     ("crates/ironclaw_webui_v2/frontend/src/i18n/de.ts", "github"),

@@ -64,7 +64,6 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_first_party_extensions: "wasm-sandbox",
       ironclaw_wasm: "wasm-sandbox",
       ironclaw_wasm_limiter: "wasm-sandbox",
-      ironclaw_wasm_product_adapters: "wasm-sandbox",
       ironclaw_wasm_sandbox_core: "wasm-sandbox",
 
       ironclaw_filesystem: "llm-mcp",

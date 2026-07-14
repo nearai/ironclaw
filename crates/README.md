@@ -55,7 +55,6 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 | `ironclaw_wasm` | `ironclaw_wasm` | Reborn WASM component runtime lane. Owns component-model/WIT runtime surface and sandboxed WASM execution details. |
 | `ironclaw_wasm_limiter` | `ironclaw_wasm_limiter` | Shared `wasmtime::ResourceLimiter` used by WASM tool and hook runtimes so memory/table/instance limits do not drift. |
 | `ironclaw_wasm_sandbox_core` | `ironclaw_wasm_sandbox_core` | Shared WASM sandbox primitives used below product adapters and runtime lanes. |
-| `ironclaw_wasm_product_adapters` | `ironclaw_wasm_product_adapters` | WASM-side adapters that bridge guest components into product-facing shapes. Keeps host-only authority out of the guest. |
 | `ironclaw_extensions` | `ironclaw_extensions` | Extension manifest, lifecycle, and registration contracts. Owns install/activate/remove semantics; runtime crates consume validated descriptors from here. |
 | `ironclaw_host_runtime` | `ironclaw_host_runtime` | Narrow facade upper Reborn services depend on. Provides `HostRuntime` plus production composition around capability hosting. |
 

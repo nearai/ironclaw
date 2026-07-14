@@ -5562,29 +5562,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_wasm_product_adapters"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "hex",
- "hmac 0.13.0",
- "http 1.4.2",
- "ironclaw_product_adapters",
- "ironclaw_wasm_sandbox_core",
- "serde_json",
- "sha2 0.11.0",
- "subtle",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "wasmtime",
- "wat",
- "wit-component 0.245.1",
- "wit-parser 0.245.1",
-]
-
-[[package]]
 name = "ironclaw_wasm_sandbox_core"
 version = "0.1.0"
 dependencies = [

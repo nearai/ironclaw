@@ -88,7 +88,7 @@ use crate::reborn_support::harness::{
 };
 use crate::reborn_support::product_workflow::RebornProductWorkflowHarness;
 use crate::reborn_support::session_thread::RebornThreadHarness;
-use crate::reborn_support::test_adapter::{RebornTestIngress, RebornTestProductAdapter};
+use crate::reborn_support::test_adapter::RebornTestIngress;
 
 pub type HarnessWaitConfig = WaitConfig;
 
@@ -657,8 +657,7 @@ impl RebornBinaryE2EHarness {
         installation_id: &str,
         initial_actor_id: &str,
     ) -> HarnessResult<Self> {
-        let adapter = RebornTestProductAdapter::new(adapter_id, installation_id)?;
-        let ingress = RebornTestIngress::new(adapter);
+        let ingress = RebornTestIngress::new(adapter_id, installation_id)?;
         let product_harness = if let Some(storage) = shared_storage.as_ref() {
             RebornProductWorkflowHarness::filesystem_shared_backend(
                 product_scope.clone(),

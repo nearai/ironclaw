@@ -1,34 +1,23 @@
-//! Telegram WASM v2 ProductAdapter (issue #3285 tracer-bullet).
+//! Telegram channel extension for Reborn (issue #3285).
 //!
-//! This crate implements the Telegram side of the Reborn ProductAdapter
-//! contract defined in `ironclaw_product_adapters`. It is a clean rewrite
-//! that does **not** depend on legacy v1 channel types.
+//! This crate implements the Telegram side of the Reborn generic-ingress
+//! `ChannelAdapter` contract defined in `ironclaw_product_adapters`. It is a
+//! clean rewrite that does **not** depend on legacy v1 channel types.
 //!
 //! Layering:
 //!
 //! * [`payload`] — Telegram Bot API payload normalization (private/group
 //!   gating, attachment descriptors, idempotency from `update_id`).
-//! * [`adapter`] — `ProductAdapter` impl (`parse_inbound`, `render_outbound`).
-//! * [`channel`] — the generic-ingress `ChannelAdapter` (inbound + webhook
-//!   registration hooks, extension-runtime P4).
+//! * [`channel`] — the generic-ingress `ChannelAdapter` (live inbound/outbound
+//!   + webhook registration hooks, extension-runtime P4).
 //! * [`render`] — `FinalReplyView` -> `sendMessage` body shaping.
-//!
-//! The crate ships as a native Rust ProductAdapter so the contract can be
-//! exercised end-to-end against fakes today; the wasmtime component-model
-//! binary build lands in a follow-up landing alongside the
-//! `crates/ironclaw_wasm_product_adapters` runtime glue.
 
 #![forbid(unsafe_code)]
 
-mod adapter;
 mod channel;
 mod payload;
 mod render;
 
-pub use adapter::{
-    TelegramV2Adapter, TelegramV2AdapterConfig, telegram_declared_egress_hosts,
-    telegram_default_capabilities,
-};
 pub use channel::{
     TELEGRAM_BOT_TOKEN_HANDLE, TELEGRAM_WEBHOOK_SECRET_HANDLE, TELEGRAM_WEBHOOK_URL_CONFIG,
     TelegramChannelAdapter,

@@ -2,7 +2,6 @@
 
 #![forbid(unsafe_code)]
 
-mod adapter;
 pub mod auth;
 pub mod capabilities;
 mod channel_adapter;
@@ -20,7 +19,6 @@ pub mod redaction;
 pub mod test_support;
 mod workflow;
 
-pub use adapter::{ProductAdapter, ProductAdapterHealth};
 pub use auth::{AuthRequirement, ProtocolAuthEvidence, ProtocolAuthFailure, VerifiedAuthClaim};
 #[cfg(feature = "host-auth-mint")]
 pub use auth::{

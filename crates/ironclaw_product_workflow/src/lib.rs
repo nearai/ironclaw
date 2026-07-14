@@ -141,11 +141,7 @@ pub use delivery_coordinator::{
     CoordinatedDeliveryRequest, DeliveryCoordinator, DeliveryIntent, DeliveryReplyContextSource,
     DeliveryRetryPolicy, NoReplyContext, NoticeDeliveryRequest, ResolvedChannelDelivery,
 };
-pub use outbound_delivery::{
-    ProductOutboundDeliveryError, ProductOutboundDeliveryOutcome, ProductOutboundDeliveryRequest,
-    ProductOutboundStatusUpdateFailure, ProductOutboundTargetResolver,
-    VerifiedProductOutboundTargetMetadata, prepare_and_render_product_outbound,
-};
+pub use outbound_delivery::{ProductOutboundTargetResolver, VerifiedProductOutboundTargetMetadata};
 // The generic run-delivery components (§5.4): channel hosts wire these over
 // the coordinator; vendor residue enters only through the ports.
 pub use policy::{

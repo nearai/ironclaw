@@ -9,7 +9,6 @@
   - `render.rs` — Slack outbound rendering.
 - Read upstream contracts before changing adapter behavior:
   - `crates/ironclaw_product_adapters/AGENTS.md`
-  - `crates/ironclaw_wasm_product_adapters/CLAUDE.md`
 
 ## What This Crate Owns
 

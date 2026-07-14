@@ -384,12 +384,10 @@ mod reborn_support_tests {
         PolicyNetworkHttpEgress,
     };
     use ironclaw_product_adapters::{
-        AuthRequirement, DeliveryStatus, ExternalConversationRef, FakeProjectionStream,
-        FakeProtocolHttpEgress, FinalReplyView, OutboundDeliverySink, ProductAdapter,
+        DeliveryStatus, ExternalConversationRef, FakeProjectionStream, OutboundDeliverySink,
         ProductAdapterError, ProductInboundAck, ProductOutboundEnvelope, ProductOutboundPayload,
         ProductOutboundTarget, ProductProjectionItem, ProductProjectionState,
-        ProductProjectionSubscribeInput, ProductRenderOutcome, ProductWorkflow, ProjectionCursor,
-        ProjectionStream, ProtocolAuthEvidence,
+        ProductProjectionSubscribeInput, ProductWorkflow, ProjectionCursor, ProjectionStream,
     };
     use ironclaw_product_workflow::{
         ActionDispatchKind, ActionFingerprintKey, ConversationBindingService,
@@ -431,7 +429,7 @@ mod reborn_support_tests {
     use crate::reborn_support::reply::RebornScriptedReply;
     use crate::reborn_support::scripted_provider::scripted_trace_llm;
     use crate::reborn_support::session_thread::{RebornThreadHarness, RebornThreadHarnessError};
-    use crate::reborn_support::test_adapter::{RebornTestIngress, RebornTestProductAdapter};
+    use crate::reborn_support::test_adapter::RebornTestIngress;
     use crate::support::trace_llm::{
         ExpectedToolResult, LlmTrace, TraceExpects, TraceResponse, TraceStep, TraceToolCall,
         TraceTurn,
@@ -1841,51 +1839,17 @@ mod reborn_support_tests {
         );
     }
 
-    #[test]
-    fn test_adapter_parses_payload_without_minting_trusted_context() {
-        let adapter = RebornTestProductAdapter::new("reborn-test", "install-1").expect("adapter");
-        let evidence = ProtocolAuthEvidence::test_verified(AuthRequirement::BearerToken, "alice");
-        let raw = RebornTestProductAdapter::text_payload("event-1", "alice", "thread-1", "hi")
-            .expect("payload");
-        let parsed = adapter
-            .parse_inbound(&raw, &evidence)
-            .expect("parsed inbound");
-        assert_eq!(parsed.external_event_id.as_str(), "event-1");
-
-        let failed =
-            ProtocolAuthEvidence::failed(ironclaw_product_adapters::ProtocolAuthFailure::Missing);
-        assert!(adapter.parse_inbound(&raw, &failed).is_err());
-    }
-
-    #[test]
-    fn test_adapter_rejects_actor_spoofing_against_verified_subject() {
-        let adapter = RebornTestProductAdapter::new("reborn-test", "install-1").expect("adapter");
-        let evidence = ProtocolAuthEvidence::test_verified(AuthRequirement::BearerToken, "alice");
-        let raw = RebornTestProductAdapter::text_payload("event-1", "bob", "thread-1", "hi")
-            .expect("payload");
-        let error = adapter
-            .parse_inbound(&raw, &evidence)
-            .expect_err("actor mismatch should reject");
-        assert!(matches!(error, ProductAdapterError::Authentication(_)));
-    }
-
-    #[test]
-    fn test_adapter_rejects_subscription_actor_spoofing_against_verified_subject() {
-        let adapter = RebornTestProductAdapter::new("reborn-test", "install-1").expect("adapter");
-        let evidence = ProtocolAuthEvidence::test_verified(AuthRequirement::BearerToken, "alice");
-        let raw = RebornTestProductAdapter::subscription_payload(
-            "event-sub-1",
-            "bob",
-            "thread-1",
-            None,
-            None,
-        )
-        .expect("subscription payload");
-        let error = adapter
-            .parse_inbound(&raw, &evidence)
-            .expect_err("subscription actor mismatch should reject");
-        assert!(matches!(error, ProductAdapterError::Authentication(_)));
-    }
+    // Removed in P7b (DEL-5): three retired `ProductAdapter::parse_inbound`
+    // tests. Valid-parse + host-side auth gating are covered on the live
+    // `ChannelAdapter` contract (`run_channel_adapter_conformance` inbound
+    // section; the host verifies protocol auth in `extension_ingress` before
+    // the adapter is invoked, so a failed-evidence parse cannot occur live).
+    // The two actor-spoofing tests (verified subject must equal the inbound
+    // actor) were retired-lane-only: that check is the bearer-token
+    // ProductAdapter auth model. The `ChannelAdapter` lane verifies webhook
+    // authenticity host-side (shared-secret header) and derives the actor from
+    // the vendor-attested payload — there is no separate verified-subject to
+    // compare, so the check has no live equivalent (owner-flagged legacy).
 
     #[tokio::test]
     async fn projection_subscription_resolution_and_stream_are_scope_isolated() {
@@ -1906,9 +1870,7 @@ mod reborn_support_tests {
         let product_b = product_a
             .with_scope(scope_b)
             .expect("tenant B product harness");
-        let ingress = RebornTestIngress::new(
-            RebornTestProductAdapter::new("reborn-test", "install-1").expect("adapter"),
-        );
+        let ingress = RebornTestIngress::new("reborn-test", "install-1").expect("ingress");
 
         let binding_a = product_a
             .binding_service()
@@ -2055,9 +2017,7 @@ mod reborn_support_tests {
             .await
             .expect("tenant B binding");
         let workflow_a = projection_workflow(&product_a, "projection-hint-a");
-        let ingress = RebornTestIngress::new(
-            RebornTestProductAdapter::new("reborn-test", "install-1").expect("adapter"),
-        );
+        let ingress = RebornTestIngress::new("reborn-test", "install-1").expect("ingress");
         let cross_hint = ingress
             .verified_subscription_envelope(
                 "event-sub-cross-hint",
@@ -2082,115 +2042,30 @@ mod reborn_support_tests {
         assert_ne!(binding_a.thread_id, binding_b.thread_id);
     }
 
-    #[test]
-    fn test_adapter_rejects_malformed_inbound_payload() {
-        let adapter = RebornTestProductAdapter::new("reborn-test", "install-1").expect("adapter");
-        let evidence = ProtocolAuthEvidence::test_verified(AuthRequirement::BearerToken, "alice");
-        let error = adapter
-            .parse_inbound(b"not valid json", &evidence)
-            .expect_err("malformed payload");
-        assert!(matches!(
-            error,
-            ProductAdapterError::MalformedInboundPayload { .. }
-        ));
-    }
-
-    #[test]
-    fn test_adapter_rejects_semantically_invalid_inbound_payload() {
-        let adapter = RebornTestProductAdapter::new("reborn-test", "install-1").expect("adapter");
-        let evidence = ProtocolAuthEvidence::test_verified(AuthRequirement::BearerToken, "alice");
-        let invalid_payloads = [
-            serde_json::json!({
-                "event_id": "",
-                "user_id": "alice",
-                "thread_id": "thread-1",
-                "text": "hi",
-            }),
-            serde_json::json!({
-                "event_id": "event-1",
-                "user_id": "bad\u{0000}user",
-                "thread_id": "thread-1",
-                "text": "hi",
-            }),
-            serde_json::json!({
-                "event_id": "event-1",
-                "user_id": "alice",
-                "thread_id": "",
-                "text": "hi",
-            }),
-            serde_json::json!({
-                "event_id": "event-1",
-                "user_id": "alice",
-                "thread_id": "thread-1",
-                "text": "bad\u{0000}text",
-            }),
-        ];
-
-        for payload in invalid_payloads {
-            let raw = serde_json::to_vec(&payload).expect("valid json payload");
-            assert!(
-                adapter.parse_inbound(&raw, &evidence).is_err(),
-                "payload should be rejected: {payload}"
-            );
-        }
-    }
+    // Removed in P7b (DEL-5): the retired `ProductAdapter::parse_inbound`
+    // malformed / semantically-invalid rejection tests. Inbound parsing —
+    // including "garbage bodies never panic and fail cleanly" — is covered on
+    // the live `ChannelAdapter` contract by
+    // `ironclaw_product_adapters::test_support::run_channel_adapter_conformance`
+    // (its inbound section drives five malformed/truncated bodies).
 
     #[test]
     fn test_ingress_stamps_trusted_context_outside_adapter() {
-        let adapter = RebornTestProductAdapter::new("reborn-test", "install-1").expect("adapter");
-        let ingress = RebornTestIngress::new(adapter);
-        assert_eq!(ingress.adapter().adapter_id().as_str(), "reborn-test");
+        let ingress = RebornTestIngress::new("reborn-test", "install-1").expect("ingress");
+        assert_eq!(ingress.adapter_id().as_str(), "reborn-test");
         let envelope = ingress
             .verified_text_envelope("event-1", "alice", "thread-1", "hi")
             .expect("trusted envelope");
         assert_eq!(envelope.external_event_id().as_str(), "event-1");
         assert_eq!(envelope.adapter_id().as_str(), "reborn-test");
-
-        let raw = RebornTestProductAdapter::text_payload("event-2", "alice", "thread-1", "hi")
-            .expect("payload");
-        assert!(ingress.failed_auth_payload(&raw).is_err());
     }
 
-    #[tokio::test]
-    async fn test_adapter_render_outbound_records_delivery() {
-        let adapter = RebornTestProductAdapter::new("reborn-test", "install-1").expect("adapter");
-        let target_ref = ReplyTargetBindingRef::new("reply-target").expect("reply target");
-        let envelope = ProductOutboundEnvelope::new(
-            adapter.adapter_id().clone(),
-            adapter.installation_id().clone(),
-            ProductOutboundTarget::new(
-                target_ref.clone(),
-                ExternalConversationRef::new(None, "room-1", None, None).expect("conversation ref"),
-                None,
-            ),
-            ProjectionCursor::new("cursor:1").expect("projection cursor"),
-            ProductOutboundPayload::FinalReply(FinalReplyView {
-                turn_run_id: TurnRunId::new(),
-                text: "hello".to_string(),
-                generated_at: chrono::Utc::now(),
-            }),
-        );
-        let attempt_id = envelope.delivery_attempt_id;
-        let sink = RecordingOutboundDeliverySink::new();
-        let egress = FakeProtocolHttpEgress::new(["api.example.test".to_string()]);
-
-        let outcome = adapter
-            .render_outbound(envelope, &egress, &sink)
-            .await
-            .expect("render outbound");
-
-        assert_eq!(outcome, ProductRenderOutcome::DeliveryRecorded);
-        let statuses = sink.statuses();
-        assert_eq!(statuses.len(), 1);
-        assert!(matches!(
-            &statuses[0],
-            DeliveryStatus::Delivered {
-                attempt_id: actual_attempt,
-                target,
-                run_id: None,
-            } if *actual_attempt == attempt_id && target == &target_ref
-        ));
-    }
+    // Removed in P7b (DEL-5): the retired `ProductAdapter::render_outbound`
+    // delivery test. Live outbound-delivery coverage is the `ChannelAdapter`
+    // contract — `run_channel_adapter_conformance` (deliver drives the vendor
+    // server, every part Sent) plus the `DeliveryCoordinator` suite in
+    // `crates/ironclaw_product_workflow/tests/outbound_delivery_contract.rs`
+    // (per-installation source routing + delivery-status persistence).
 
     fn model_request(messages: Vec<HostManagedModelMessage>) -> HostManagedModelRequest {
         HostManagedModelRequest {
@@ -2417,8 +2292,8 @@ mod reborn_support_tests {
         body: &str,
     ) -> ProductOutboundEnvelope {
         ProductOutboundEnvelope::new(
-            ingress.adapter().adapter_id().clone(),
-            ingress.adapter().installation_id().clone(),
+            ingress.adapter_id().clone(),
+            ingress.installation_id().clone(),
             ProductOutboundTarget::new(
                 target_ref,
                 ExternalConversationRef::new(None, "room-projection", None, None)
@@ -2462,8 +2337,8 @@ mod reborn_support_tests {
         thread_id: &str,
         text: &str,
     ) -> ironclaw_product_adapters::ProductInboundEnvelope {
-        let adapter = RebornTestProductAdapter::new("reborn-test", "install-1").expect("adapter");
-        RebornTestIngress::new(adapter)
+        RebornTestIngress::new("reborn-test", "install-1")
+            .expect("ingress")
             .verified_text_envelope(event_id, user_id, thread_id, text)
             .expect("trusted envelope")
     }
