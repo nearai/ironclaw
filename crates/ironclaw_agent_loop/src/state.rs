@@ -85,6 +85,17 @@ pub struct LoopExecutionState {
     #[serde(default)]
     pub final_answer_nudges_used: u32,
 
+    /// Count of self-verification passes issued this run (driver-specific
+    /// nudge, gated by the same `SteeringPolicy.allow_driver_specific_nudges`
+    /// flag as `final_answer_nudges_used`). Fires at most once per run, only
+    /// when the loop is about to gracefully complete a turn AND the run made
+    /// at least one capability call earlier (see `recent_call_signatures`) —
+    /// i.e. only for answers that followed real tool-based work, not idle
+    /// chat. Capped so the loop can't issue unbounded extra model calls.
+    /// `#[serde(default)]` keeps older checkpoints decodable.
+    #[serde(default)]
+    pub self_verification_used: u32,
+
     // strategy slots — one per strategy that mutates state.
     pub context_state: ContextStrategyState,
     pub capability_state: CapabilityStrategyState,
@@ -287,6 +298,7 @@ impl LoopExecutionState {
             recent_output_token_counts: BoundedRing::new(),
             cumulative_model_usage: None,
             final_answer_nudges_used: 0,
+            self_verification_used: 0,
             context_state: ContextStrategyState::default(),
             capability_state: CapabilityStrategyState::default(),
             model_state: ModelStrategyState::default(),
@@ -1121,6 +1133,36 @@ mod tests {
         assert_eq!(
             from_legacy.final_answer_nudges_used, 0,
             "legacy checkpoint missing final_answer_nudges_used must decode to 0"
+        );
+    }
+
+    #[test]
+    fn checkpoint_payload_without_self_verification_slot_decodes_to_zero() {
+        // A checkpoint produced before `self_verification_used` was added would
+        // lack the field entirely. The `#[serde(default)]` contract must decode it
+        // to 0 rather than failing, so a resumed run still has its one-shot budget.
+        let context = test_run_context();
+        let state = LoopExecutionState::initial_for_run(&context);
+        assert_eq!(
+            state.self_verification_used, 0,
+            "initial state must start with zero self-verification passes used"
+        );
+
+        let payload = encode_payload(&state);
+        let mut value: serde_json::Value = serde_json::from_slice(&payload).expect("parse");
+        value
+            .as_object_mut()
+            .expect("state serializes as object")
+            .remove("self_verification_used");
+        let stripped_payload = serde_json::to_vec(&value).expect("re-encode");
+        let from_legacy = LoopExecutionState::from_checkpoint_payload(
+            &stripped_payload,
+            CheckpointKind::BeforeBlock,
+        )
+        .expect("decode legacy checkpoint payload without self_verification_used");
+        assert_eq!(
+            from_legacy.self_verification_used, 0,
+            "legacy checkpoint missing self_verification_used must decode to 0"
         );
     }
 

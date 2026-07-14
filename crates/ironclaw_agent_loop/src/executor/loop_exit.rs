@@ -24,6 +24,13 @@ use super::{
 /// stays reviewable and versioned with the rest of the prompt surface.
 pub(super) const FINAL_ANSWER_NUDGE: &str = include_str!("../../prompts/final_answer_nudge.md");
 
+/// Instruction injected by the self-verification pass — ask the model to
+/// independently re-derive its just-given answer before the loop finalizes it.
+/// Template lives in a prompt file so it stays reviewable and versioned with
+/// the rest of the prompt surface.
+pub(super) const SELF_VERIFICATION_NUDGE: &str =
+    include_str!("../../prompts/self_verification_nudge.md");
+
 /// Driver-specific "final-answer" nudge: when the loop would otherwise end a turn
 /// with no real assistant answer (empty/trailed-off reply, model-call budget
 /// exhausted, or no-progress detected), issue ONE extra **tool-free** model call
@@ -78,7 +85,7 @@ pub(super) async fn try_final_answer_nudge(
     state.final_answer_nudges_used += 1;
     let bundle = match ctx.host.build_prompt_bundle(request).await {
         Ok(bundle) => bundle,
-        Err(error) => return nudge_bail("prompt", error),
+        Err(error) => return nudge_bail("final_answer", "prompt", error),
     };
 
     let model_preference = model_preference_to_host(ctx.planner.model().preference(state).await)?;
@@ -99,7 +106,7 @@ pub(super) async fn try_final_answer_nudge(
     };
     let response = match ctx.host.stream_model(model_request).await {
         Ok(response) => response,
-        Err(error) => return nudge_bail("model", error),
+        Err(error) => return nudge_bail("final_answer", "model", error),
     };
 
     let usage = response.usage;
@@ -129,7 +136,7 @@ pub(super) async fn try_final_answer_nudge(
                         .await
                     {
                         Ok(reply_ref) => reply_ref,
-                        Err(error) => return nudge_bail("transcript", error),
+                        Err(error) => return nudge_bail("final_answer", "transcript", error),
                     };
                     state.recent_output_token_counts.push(output_tokens);
                     state.accumulate_model_usage(usage);
@@ -146,13 +153,125 @@ pub(super) async fn try_final_answer_nudge(
     }
 }
 
+/// Driver-specific self-verification pass: when the loop is about to complete
+/// a turn gracefully AND this run has made at least one capability call
+/// (`state.recent_call_signatures` non-empty — i.e. the answer followed real
+/// tool-based work, not idle chat), issue ONE extra **tool-free** model call
+/// asking the model to independently re-derive its just-given answer before
+/// it's finalized. If the model reconsiders and gives a different answer, the
+/// new one supersedes the original; if it reconfirms, the restated answer
+/// still supersedes it (so the accounting/token bookkeeping is uniform).
+///
+/// Gated by the same `SteeringPolicy.allow_driver_specific_nudges` flag as
+/// `try_final_answer_nudge` (off in production) and capped at one pass per
+/// run via `state.self_verification_used`. Returns `Ok(None)` when disabled,
+/// capped, no prior tool activity, or the model declines to give a clean
+/// reply — callers then keep the original, already-finalized answer as-is.
+pub(super) async fn try_self_verification_pass(
+    ctx: StageContext<'_>,
+    state: &mut LoopExecutionState,
+) -> Result<Option<LoopMessageRef>, AgentLoopExecutorError> {
+    if !ctx
+        .host
+        .run_context()
+        .resolved_run_profile
+        .steering_policy
+        .allow_driver_specific_nudges
+    {
+        return Ok(None);
+    }
+    if state.self_verification_used >= 1 {
+        return Ok(None);
+    }
+    // Only verify answers that followed real tool-based work — cheap chit-chat
+    // replies don't benefit from a forced re-derivation and shouldn't pay for
+    // an extra model call.
+    if state.recent_call_signatures.is_empty() {
+        return Ok(None);
+    }
+
+    let context_plan = ctx.planner.context().plan_context_request(state).await;
+    let mut request = context_plan.request;
+    request.surface_version = None;
+    request.capability_view = None;
+    let safe_body = LoopInlineMessageBody::new(SELF_VERIFICATION_NUDGE.trim().to_string())
+        .map_err(|_| AgentLoopExecutorError::PlannerContract {
+            detail: "self-verification nudge body was invalid",
+        })?;
+    request.inline_messages.push(LoopInlineMessage {
+        role: LoopInlineMessageRole::User,
+        safe_body,
+    });
+    // Count the attempt before any host call so a failure can't be retried into
+    // a loop, and so the best-effort pass is bounded even when its own
+    // infrastructure is the thing failing.
+    state.self_verification_used += 1;
+    let bundle = match ctx.host.build_prompt_bundle(request).await {
+        Ok(bundle) => bundle,
+        Err(error) => return nudge_bail("self_verification", "prompt", error),
+    };
+
+    let model_preference = model_preference_to_host(ctx.planner.model().preference(state).await)?;
+    // Same empty-capability-view mechanism `try_final_answer_nudge` uses: this
+    // is what actually forces a tool-free provider call, not `surface_version`.
+    let model_request = LoopModelRequest {
+        inline_messages: Vec::new(),
+        messages: bundle.messages,
+        surface_version: None,
+        model_preference,
+        capability_view: Some(LoopModelCapabilityView {
+            visible_capability_ids: Vec::new(),
+        }),
+    };
+    let response = match ctx.host.stream_model(model_request).await {
+        Ok(response) => response,
+        Err(error) => return nudge_bail("self_verification", "model", error),
+    };
+
+    let usage = response.usage;
+    match response.output {
+        ParentLoopOutput::AssistantReply(reply) => {
+            match ctx
+                .planner
+                .reply_admission()
+                .admit_reply(state, &reply)
+                .await
+            {
+                ReplyAdmissionOutcome::AcceptFinal => {
+                    let output_tokens = usage
+                        .map(|u| u.output_tokens)
+                        .unwrap_or_else(|| estimate_output_tokens(&reply.content));
+                    let reply_ref = match ctx
+                        .host
+                        .finalize_assistant_message(FinalizeAssistantMessage { reply })
+                        .await
+                    {
+                        Ok(reply_ref) => reply_ref,
+                        Err(error) => return nudge_bail("self_verification", "transcript", error),
+                    };
+                    state.recent_output_token_counts.push(output_tokens);
+                    state.accumulate_model_usage(usage);
+                    Ok(Some(reply_ref))
+                }
+                ReplyAdmissionOutcome::RejectFinal { .. } => Ok(None),
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
 /// Best-effort nudge host-call failures must NOT bork the run: the nudge exists
 /// to rescue an otherwise-empty turn ending, so when its own prompt/model/
 /// transcript host call fails we fall back (`Ok(None)`) and let the caller keep
 /// its normal exit. Only explicit cancellation is propagated. The underlying
 /// cause is logged (never erased) — this is the fail-open counterpart to the
 /// `map_err(|_| ...)?` pattern the executor otherwise forbids.
+///
+/// `nudge_name` identifies which nudge is bailing (there is more than one
+/// driver-specific nudge sharing this fallback path) so the log line is
+/// actionable rather than generic.
 fn nudge_bail(
+    nudge_name: &'static str,
     stage: &'static str,
     error: AgentLoopHostError,
 ) -> Result<Option<LoopMessageRef>, AgentLoopExecutorError> {
@@ -160,10 +279,11 @@ fn nudge_bail(
         return Err(AgentLoopExecutorError::Cancelled);
     }
     tracing::debug!(
+        nudge_name,
         nudge_stage = stage,
         error_kind = ?error.kind,
         detail = %error.safe_summary,
-        "final-answer nudge host call failed; falling back to normal exit"
+        "nudge host call failed; falling back to normal exit"
     );
     Ok(None)
 }
@@ -208,6 +328,19 @@ impl ExitStage {
     ) -> Result<LoopExit, AgentLoopExecutorError> {
         match kind {
             StopKind::GracefulStop => {
+                let mut state = state;
+                // Best-effort: if this answer followed real tool-based work,
+                // give the model one gated chance to catch its own mistake
+                // before the loop commits to it. On any non-success path
+                // (disabled, capped, no prior tool use, or the model declines
+                // a clean reply) this is a no-op and the original,
+                // already-finalized reply stands unchanged.
+                if let Some(reply_ref) = try_self_verification_pass(ctx, &mut state).await? {
+                    // Supersede the just-finalized reply with the verified one
+                    // rather than appending both to the completion result.
+                    state.assistant_refs.pop();
+                    state.assistant_refs.push(reply_ref);
+                }
                 let checked = CheckpointStage
                     .write(ctx, state, CheckpointKind::Final)
                     .await?;
