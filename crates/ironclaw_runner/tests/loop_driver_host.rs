@@ -4583,6 +4583,39 @@ async fn text_only_host_factory_rejects_persisted_model_route_snapshot_without_r
 }
 
 #[tokio::test]
+async fn text_only_host_factory_passes_advisory_model_route_snapshot_without_resolver() {
+    // A caller-requested model reaches the default (resolver-less) product
+    // runtime as an *advisory* snapshot. Unlike an operator route, it must pass
+    // through unvalidated so the non-routed gateway can honor the requested
+    // model id, rather than failing closed the way an operator route does.
+    let fixture = HostFixture::new("thread-host-advisory-no-resolver", "hello routed host").await;
+    let advisory_snapshot =
+        LoopModelRouteSnapshot::advisory("gpt-4o").expect("valid advisory model");
+    let context = fixture
+        .context
+        .clone()
+        .with_resolved_model_route(advisory_snapshot.clone());
+    let mut claimed = fixture.claimed.clone();
+    claimed.state.resolved_model_route = Some(advisory_snapshot.clone());
+
+    let host = fixture
+        .factory()
+        .build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: claimed,
+            loop_run_context: context,
+        })
+        .await
+        .expect("advisory snapshot passes through a resolver-less host");
+
+    let host_dyn: &(dyn AgentLoopDriverHost + Send + Sync) = &host;
+    assert_eq!(
+        host_dyn.run_context().resolved_model_route,
+        Some(advisory_snapshot),
+        "the advisory model id must survive on the run context for the gateway to honor it"
+    );
+}
+
+#[tokio::test]
 async fn text_only_host_factory_rejects_persisted_model_route_snapshot_denied_by_policy() {
     let fixture = HostFixture::new("thread-host-model-route-denied", "hello routed host").await;
     let allowed_route = ModelRoute::new("nearai", "qwen3-coder").unwrap();
