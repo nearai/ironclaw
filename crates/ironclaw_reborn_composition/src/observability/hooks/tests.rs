@@ -285,7 +285,7 @@ fn projection_with(packages: &[(&str, ManifestSource, String)]) -> HookProjectio
     for (id, source, hooks_block) in packages {
         let manifest = ExtensionManifest::parse(
             &manifest_toml(id, hooks_block),
-            *source,
+            source.clone(),
             &HostPortCatalog::empty(),
         )
         .expect("manifest parses");
@@ -581,7 +581,7 @@ fn surplus_extensions_beyond_consider_cap_are_quarantined() {
     }
     let refs: Vec<(&str, ManifestSource, String)> = packages
         .iter()
-        .map(|(id, src, hooks)| (id.as_str(), *src, hooks.clone()))
+        .map(|(id, src, hooks)| (id.as_str(), src.clone(), hooks.clone()))
         .collect();
     let registry = projection_with(&refs);
 

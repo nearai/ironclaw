@@ -11,7 +11,7 @@ use ironclaw_host_api::{
     CapabilityProfileId, ExtensionId, HostPortCatalog, HostPortCatalogEntry, HostPortId,
     NetworkScheme, NetworkTargetPattern, PermissionMode, RequestedTrustClass,
     RuntimeCredentialAccountProviderId, RuntimeCredentialRequirementSource,
-    RuntimeCredentialTarget, RuntimeKind, SecretHandle, TrustClass,
+    RuntimeCredentialTarget, RuntimeKind, SecretHandle, TenantId, TrustClass, UserId,
 };
 
 const TELEGRAM_TOKEN_PORT: &str = "host.secrets.telegram_bot_token";
@@ -911,6 +911,80 @@ trust = "third_party"
             "runtime should be rejected:\n{runtime}\n got {err:?}"
         );
     }
+}
+
+#[test]
+fn zero_capability_mcp_manifest_is_provenance_gated_to_user_registered() {
+    // The zero-capability carve-out (`is_zero_content_registered_mcp` in
+    // v2.rs) is gated on `ManifestSource::UserRegistered` specifically, never
+    // on "runtime is MCP" alone — `InstalledLocal`/`RegistryInstalled` drop-ins
+    // must still declare at least one capability or host_api contract.
+    let toml = format!(
+        r#"
+schema_version = "{schema}"
+id = "acme-mcp"
+name = "x"
+version = "0.1"
+description = "x"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "https://example.com/mcp"
+"#,
+        schema = MANIFEST_SCHEMA_VERSION,
+    );
+
+    for source in [
+        ManifestSource::InstalledLocal,
+        ManifestSource::RegistryInstalled,
+    ] {
+        let err = ExtensionManifestV2::parse(&toml, source.clone(), &catalog()).unwrap_err();
+        assert!(
+            matches!(err, ManifestV2Error::Invalid { .. }),
+            "zero-capability MCP manifest must be rejected for {source:?}, got {err:?}"
+        );
+    }
+
+    let tenant_id = TenantId::new("acme-mcp-tenant").expect("valid tenant id");
+    let owner = UserId::new("acme-mcp-owner").expect("valid owner id");
+    ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::UserRegistered { tenant_id, owner },
+        &catalog(),
+    )
+    .expect("zero-capability MCP manifest is accepted for UserRegistered");
+}
+
+#[test]
+fn user_registered_manifest_rejects_non_mcp_runtime() {
+    // Review item 2: a `UserRegistered` descriptor is server-synthesized by
+    // the register verb and never resolves under an owner-scoped filesystem
+    // path, so any runtime other than `mcp` — a wasm module in particular —
+    // must be rejected at manifest validation, not left to downstream
+    // zero-capability gating.
+    let toml = third_party_wasm_manifest("acme-mcp-registered", "acme-mcp-registered.echo");
+    let tenant_id = TenantId::new("acme-mcp-tenant").expect("valid tenant id");
+    let owner = UserId::new("acme-mcp-owner").expect("valid owner id");
+
+    let err = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::UserRegistered { tenant_id, owner },
+        &catalog(),
+    )
+    .expect_err("wasm runtime must be rejected for a UserRegistered manifest");
+
+    assert!(
+        matches!(
+            err,
+            ManifestV2Error::RuntimeKindForbiddenForRegisteredSource {
+                kind: RuntimeKind::Wasm,
+                ..
+            }
+        ),
+        "expected RuntimeKindForbiddenForRegisteredSource for a wasm runtime, got {err:?}"
+    );
 }
 
 #[test]

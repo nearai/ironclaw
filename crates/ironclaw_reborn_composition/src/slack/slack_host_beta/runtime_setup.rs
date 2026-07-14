@@ -248,9 +248,14 @@ impl SlackChannelSetupActivation for DynamicSlackChannelSetupActivation {
         // Slack is a tenant-shared channel; host setup activates it as the
         // tenant operator so it operates the shared install (#5459 P1).
         let caller = self.extension_management.tenant_operator_user_id().clone();
+        let caller_scope = ironclaw_host_api::ResourceScope::local_default(
+            caller.clone(),
+            ironclaw_host_api::InvocationId::new(),
+        )
+        .map_err(slack_setup_activation_error)?;
         let projection = self
             .extension_management
-            .project(package_ref.clone(), &caller)
+            .project(package_ref.clone(), &caller_scope)
             .await
             .map_err(slack_setup_activation_error)?;
         if projection.phase == LifecyclePhase::Discovered {
@@ -263,7 +268,7 @@ impl SlackChannelSetupActivation for DynamicSlackChannelSetupActivation {
         // activate path (WebUI activateExtension after the connect flow),
         // which routes through activate_with_credential_gate.
         self.extension_management
-            .activate(package_ref, ExtensionActivationMode::Static, &caller)
+            .activate(package_ref, ExtensionActivationMode::Static, &caller_scope)
             .await
             .map_err(slack_setup_activation_error)?;
         Ok(())

@@ -193,6 +193,17 @@ pub(crate) fn imported_extension_package(
             extension_id.as_str()
         )));
     }
+    // Uploads are always `InstalledLocal` (never `UserRegistered`), so the
+    // hosted MCP namespace is never legitimately theirs — mirrors
+    // `load_filesystem_packages`'s identical rejection, closing the same gap
+    // for the interactive upload ingress.
+    if crate::extension_host::registered_extension_store::is_hosted_mcp_id_namespace(&extension_id)
+    {
+        return Err(map_binding_error(format!(
+            "extension id `{}` is reserved for hosted MCP registrations and cannot be imported",
+            extension_id.as_str()
+        )));
+    }
     let id = extension_id.as_str();
     let root = VirtualPath::new(format!("/system/extensions/{id}")).map_err(map_binding_error)?;
     let surface_kinds = surface_kinds_from_manifest_record(&record, id)?;
@@ -663,6 +674,20 @@ prompt_doc_ref = "prompts/run.md"
         let error = imported_extension_package(importable_tool_bundle_files("github"))
             .expect_err("reserved ids must be rejected");
         assert!(format!("{error}").contains("reserved"));
+    }
+
+    /// R1's stated boot-leak defense ("the shared catalog cannot contain a
+    /// package whose id collides with a minted hosted-MCP id") only holds if
+    /// every catalog-writing ingress rejects the `mcp-` namespace, not just
+    /// filesystem discovery (`load_filesystem_packages`). An uploaded bundle
+    /// claiming a minted-looking id must be rejected here, the single
+    /// chokepoint `import_bundle` calls before extending the catalog.
+    #[test]
+    fn imported_extension_package_rejects_hosted_mcp_id_namespace() {
+        let error =
+            imported_extension_package(importable_tool_bundle_files("mcp-0123456789abcdef"))
+                .expect_err("hosted MCP namespace ids must be rejected on upload");
+        assert!(format!("{error}").contains("hosted MCP"));
     }
 
     #[test]

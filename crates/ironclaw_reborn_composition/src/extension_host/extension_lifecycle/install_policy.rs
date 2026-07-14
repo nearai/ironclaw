@@ -17,8 +17,20 @@
 use std::collections::BTreeSet;
 
 use ironclaw_extensions::{ExtensionInstallation, InstallationOwner};
-use ironclaw_host_api::UserId;
+use ironclaw_host_api::{ExtensionId, TenantId, UserId};
 use ironclaw_product_workflow::{LifecycleInstallScope, ProductWorkflowError};
+
+/// The masked "is not installed" denial every registered-row ownership check
+/// returns on a mismatch — identical shape whether the row belongs to a
+/// different user or (#5459 P1 cross-tenant follow-up) the same user id in a
+/// different tenant, so neither leaks which is true to a non-owner caller.
+/// `pub(super)` so `install()`'s catalog-collision guard (#5970 review) can
+/// return the identical denial shape without a second definition.
+pub(super) fn masked_not_installed(extension_id: &ExtensionId) -> ProductWorkflowError {
+    ProductWorkflowError::InvalidBindingRequest {
+        reason: format!("extension {} is not installed", extension_id.as_str()),
+    }
+}
 
 /// Derive who a NEW install belongs to (#5459 P1): the tenant operator
 /// installs for the whole tenant; anyone else installs for themselves.
@@ -43,12 +55,7 @@ pub(super) fn ensure_caller_may_operate(
     if installation.owner().visible_to(caller) {
         return Ok(());
     }
-    Err(ProductWorkflowError::InvalidBindingRequest {
-        reason: format!(
-            "extension {} is not installed",
-            installation.extension_id().as_str()
-        ),
-    })
+    Err(masked_not_installed(installation.extension_id()))
 }
 
 /// Membership rules for an extension id whose installation row already
@@ -130,6 +137,27 @@ pub(super) fn decide_remove(
     }
 }
 
+/// Tenant-axis companion to [`ensure_caller_may_operate`] for activate/remove
+/// on a registered row (T2 cross-tenant follow-up): `ensure_caller_may_operate`
+/// only checks the row's `InstallationOwner` user-id membership, which the
+/// SAME `UserId` valid in two tenant scopes can satisfy for a row it does not
+/// actually own. `existing_effective_scope` is `None` for a non-registered or
+/// non-singleton row — nothing extra to check there, `ensure_caller_may_operate`
+/// already gates it. For a registered row, the caller's tenant must match the
+/// row's manifest-provenance tenant or the mutation is denied with the same
+/// masked "is not installed" shape.
+pub(super) fn ensure_registered_row_tenant_match(
+    extension_id: &ExtensionId,
+    existing_effective_scope: Option<super::registered_lifecycle::OwnerScope>,
+    caller_tenant_id: &TenantId,
+) -> Result<(), ProductWorkflowError> {
+    match existing_effective_scope {
+        Some(scope) if scope.matches_tenant(caller_tenant_id) => Ok(()),
+        Some(_) => Err(masked_not_installed(extension_id)),
+        None => Ok(()),
+    }
+}
+
 /// Settings/list projection of an installation owner (#5459 P1). Rows are
 /// caller-filtered before projection, so a member-held row shown to a
 /// viewer is by construction one they hold — "mine".
@@ -143,6 +171,7 @@ pub(super) fn install_scope_for_owner(owner: &InstallationOwner) -> LifecycleIns
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::extension_host::extension_lifecycle::registered_lifecycle::OwnerScope;
     use chrono::Utc;
     use ironclaw_extensions::{
         ExtensionActivationState, ExtensionInstallationId, ExtensionManifestRef,
@@ -169,6 +198,38 @@ mod tests {
             owner,
         )
         .expect("installation")
+    }
+
+    fn tenant(id: &str) -> TenantId {
+        TenantId::new(id).expect("valid tenant")
+    }
+
+    /// T2 cross-tenant follow-up: `ensure_caller_may_operate` alone only
+    /// checks the row's `InstallationOwner` user-id membership, so the SAME
+    /// user id valid in a different tenant scope would pass it for a row it
+    /// does not actually own. `ensure_registered_row_tenant_match` is the
+    /// companion check activate/remove must also run for a registered row.
+    #[test]
+    fn ensure_registered_row_tenant_match_rejects_same_user_different_tenant() {
+        let ext_id = ExtensionId::new("acme-mcp-registered").expect("extension id");
+        let tenant_a = tenant("tenant-a");
+        let row_scope = Some(OwnerScope::new(tenant_a.clone(), user("owner-a")));
+
+        ensure_registered_row_tenant_match(&ext_id, row_scope.clone(), &tenant_a)
+            .expect("the row's own tenant must be allowed to operate it");
+
+        let error = ensure_registered_row_tenant_match(&ext_id, row_scope, &tenant("tenant-b"))
+            .expect_err("the same user id in a different tenant must be denied");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("is not installed") && !rendered.contains("tenant-a"),
+            "denial must mask the row's tenant: {rendered}"
+        );
+
+        // Non-registered/non-singleton rows have nothing extra to check —
+        // `ensure_caller_may_operate` already gated them.
+        ensure_registered_row_tenant_match(&ext_id, None, &tenant_a)
+            .expect("a non-registered row has no tenant axis to enforce");
     }
 
     #[test]

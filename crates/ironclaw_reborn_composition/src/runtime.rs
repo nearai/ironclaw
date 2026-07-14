@@ -5113,6 +5113,8 @@ output_schema_ref = "schemas/write.output.json"
         RebornCompositionProfile, RebornReadiness, RebornReadinessState, RebornRuntimeError,
     };
 
+    use crate::scope_test_support::test_scope;
+
     use super::{
         RebornSkillSourceKind, TRUSTED_LAPTOP_ACCESS_AUDIT_KIND,
         TRUSTED_LAPTOP_ACCESS_AUDIT_STATUS, TRUSTED_LAPTOP_ACCESS_AUDIT_TARGET,
@@ -6433,7 +6435,11 @@ output_schema_ref = "schemas/write.output.json"
         let projection = extension_management
             .project(
                 nearai_ref,
-                extension_management.tenant_operator_user_id_for_test(),
+                &test_scope(
+                    extension_management
+                        .tenant_operator_user_id_for_test()
+                        .clone(),
+                ),
             )
             .await
             .expect("NEAR AI MCP projected");
@@ -6541,7 +6547,11 @@ output_schema_ref = "schemas/write.output.json"
         let projection = extension_management
             .project(
                 nearai_ref,
-                extension_management.tenant_operator_user_id_for_test(),
+                &test_scope(
+                    extension_management
+                        .tenant_operator_user_id_for_test()
+                        .clone(),
+                ),
             )
             .await
             .expect("NEAR AI MCP projected");
@@ -8076,7 +8086,11 @@ output_schema_ref = "schemas/write.output.json"
         extension_management
             .install(
                 notion_ref.clone(),
-                extension_management.tenant_operator_user_id_for_test(),
+                &test_scope(
+                    extension_management
+                        .tenant_operator_user_id_for_test()
+                        .clone(),
+                ),
             )
             .await
             .expect("install Notion MCP");

@@ -157,7 +157,7 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     Arc::clone(&self.credential_accounts),
                 );
                 self.extension_management
-                    .search(&input.query, Some(&credential_gate), &request.scope.user_id)
+                    .search(&input.query, Some(&credential_gate), &request.scope)
                     .await
                     .map_err(lifecycle_error)
             }
@@ -167,10 +167,7 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                 // install derives the same owner the WebUI path would (#5459
                 // P1): operator → tenant-shared, member → private.
                 self.extension_management
-                    .install(
-                        extension_package_ref(input.extension_id)?,
-                        &request.scope.user_id,
-                    )
+                    .install(extension_package_ref(input.extension_id)?, &request.scope)
                     .await
                     .map_err(lifecycle_error)
             }
@@ -179,7 +176,11 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                 let package_ref = extension_package_ref(input.extension_id)?;
                 let requirements = self
                     .extension_management
-                    .activation_credential_requirements(&package_ref, &request.scope.user_id)
+                    .activation_credential_requirements(
+                        &package_ref,
+                        &request.scope.user_id,
+                        &request.scope.tenant_id,
+                    )
                     .await
                     .map_err(lifecycle_error)?;
                 let credential_gate = RuntimeExtensionActivationCredentialGate::new(
@@ -205,7 +206,7 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                         package_ref,
                         mode,
                         credential_gate,
-                        &request.scope.user_id,
+                        &request.scope,
                     )
                     .await
                     .map_err(lifecycle_error)

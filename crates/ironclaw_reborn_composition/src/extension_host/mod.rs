@@ -7,9 +7,11 @@
 //! installation store and lifecycle command/capability stack
 //! (`extension_installation_store`, `extension_lifecycle`,
 //! `extension_lifecycle_capabilities`, `extension_lifecycle_command`,
-//! `lifecycle`, `skill_learning`, `skill_listing`), and MCP discovery
-//! (`mcp`, `mcp_discovery`) behind one internal module. The crate root re-exports
-//! the same public items from here so the crate's public API is unchanged.
+//! `lifecycle`, `skill_learning`, `skill_listing`), owner-scoped
+//! user-registered extension storage (`registered_extension_store`), and MCP
+//! discovery (`mcp`, `mcp_discovery`) behind one internal module. The crate
+//! root re-exports the same public items from here so the crate's public API
+//! is unchanged.
 
 pub(crate) mod available_extension_import;
 pub(crate) mod available_extensions;
@@ -23,12 +25,19 @@ pub(crate) mod extension_lifecycle_capabilities;
 #[cfg(test)]
 pub(crate) mod extension_lifecycle_capabilities_auth_tests;
 pub(crate) mod extension_lifecycle_command;
+#[cfg(test)]
+pub(crate) mod extension_lifecycle_registered_store_tests;
 pub(crate) mod extension_removal_cleanup;
 pub(crate) mod gsuite;
 pub(crate) mod host_api_contracts;
 pub(crate) mod lifecycle;
 pub(crate) mod mcp;
 pub(crate) mod mcp_discovery;
+pub(crate) mod registered_extension_store;
+#[cfg(test)]
+pub(crate) mod registered_extension_store_blast_radius_tests;
+#[cfg(test)]
+pub(crate) mod registered_test_support;
 pub(crate) mod skill_learning;
 pub(crate) mod skill_listing;
 pub(crate) mod webui_extension_credentials;

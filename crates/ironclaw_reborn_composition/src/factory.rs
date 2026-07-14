@@ -1885,6 +1885,14 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             },
         )?,
     );
+    // SINGLE-TENANT INVARIANT: this is the only wiring site that constructs
+    // `RebornLocalExtensionManagementPort` — one instance per tenant scope
+    // (`build_local_runtime`, LocalDev/HostedSingleTenant profiles only).
+    // `build_production_shaped` never sets `extension_management` (stays
+    // `None`), which is why its `UserId`-only read paths (grants,
+    // provider_trust, active capabilities, `list_operator_tools`) are safe
+    // without a tenant check today. If a multi-tenant profile ever wires
+    // this port, those read paths need an explicit tenant match added.
     let extension_management = Arc::new(
         RebornLocalExtensionManagementPort::new(
             extension_filesystem,
@@ -5284,6 +5292,8 @@ mod tests {
         RebornReadinessDiagnostic, RebornReadinessState, runtime::SKILL_ACTIVATE_CAPABILITY_ID,
     };
 
+    use crate::scope_test_support::test_scope;
+
     #[cfg(feature = "libsql")]
     #[test]
     fn libsql_build_resource_governor_guard_requires_singleton_authority() {
@@ -6323,7 +6333,11 @@ mod tests {
         extension_management
             .install(
                 gmail_ref.clone(),
-                extension_management.tenant_operator_user_id_for_test(),
+                &test_scope(
+                    extension_management
+                        .tenant_operator_user_id_for_test()
+                        .clone(),
+                ),
             )
             .await
             .expect("install Gmail");
@@ -6337,7 +6351,11 @@ mod tests {
         extension_management
             .install(
                 calendar_ref.clone(),
-                extension_management.tenant_operator_user_id_for_test(),
+                &test_scope(
+                    extension_management
+                        .tenant_operator_user_id_for_test()
+                        .clone(),
+                ),
             )
             .await
             .expect("install Google Calendar");
@@ -6467,7 +6485,11 @@ mod tests {
         extension_management
             .install(
                 notion_ref.clone(),
-                extension_management.tenant_operator_user_id_for_test(),
+                &test_scope(
+                    extension_management
+                        .tenant_operator_user_id_for_test()
+                        .clone(),
+                ),
             )
             .await
             .expect("install Notion MCP");
@@ -6526,7 +6548,11 @@ mod tests {
         extension_management
             .install(
                 web_access_ref.clone(),
-                extension_management.tenant_operator_user_id_for_test(),
+                &test_scope(
+                    extension_management
+                        .tenant_operator_user_id_for_test()
+                        .clone(),
+                ),
             )
             .await
             .expect("install Web Access");
@@ -6765,6 +6791,61 @@ mod tests {
         );
     }
 
+    /// Pins the single-tenant invariant `RebornLocalExtensionManagementPort`'s
+    /// `UserId`-only read paths (grants/provider_trust/active
+    /// capabilities/`list_operator_tools`) rely on: exactly one wiring site
+    /// (`build_local_runtime`) ever constructs the port. Production-shaped
+    /// composition must never set `extension_management` — if a future
+    /// multi-tenant profile change starts wiring it here, this test fails
+    /// loudly instead of silently reopening a cross-tenant read.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn production_libsql_never_wires_extension_management() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Arc::new(
+            libsql::Builder::new_local(dir.path().join("reborn.db").display().to_string())
+                .build()
+                .await
+                .expect("build libsql database"),
+        );
+        let owner = UserId::new("configured-owner").expect("owner");
+        let services = build_reborn_services(
+            RebornBuildInput::libsql(
+                RebornCompositionProfile::Production,
+                owner.as_str(),
+                db,
+                dir.path().join("events.db").display().to_string(),
+                None,
+                ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
+            )
+            .with_production_trust_policy(Arc::new(
+                builtin_first_party_trust_policy().expect("builtin trust policy"),
+            ))
+            .with_runtime_policy(EffectiveRuntimePolicy {
+                deployment: ironclaw_host_api::DeploymentMode::HostedMultiTenant,
+                requested_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+                resolved_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+                filesystem_backend: FilesystemBackendKind::TenantWorkspace,
+                process_backend: ProcessBackendKind::None,
+                network_mode: ironclaw_host_api::NetworkMode::Brokered,
+                secret_mode: SecretMode::TenantBroker,
+                approval_policy: ironclaw_host_api::runtime_policy::ApprovalPolicy::AskAlways,
+                audit_mode: ironclaw_host_api::AuditMode::Standard,
+            }),
+        )
+        .await
+        .expect("production libsql services build");
+
+        assert!(
+            services
+                .local_runtime
+                .as_ref()
+                .and_then(|runtime| runtime.extension_management.as_ref())
+                .is_none(),
+            "production-shaped composition must never wire extension_management"
+        );
+    }
+
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfigured() {
@@ -6963,7 +7044,11 @@ mod tests {
         let projection = extension_management
             .project(
                 nearai_ref,
-                extension_management.tenant_operator_user_id_for_test(),
+                &test_scope(
+                    extension_management
+                        .tenant_operator_user_id_for_test()
+                        .clone(),
+                ),
             )
             .await
             .expect("NEAR AI MCP projected");
@@ -7081,7 +7166,11 @@ mod tests {
         let projection = extension_management
             .project(
                 nearai_ref,
-                extension_management.tenant_operator_user_id_for_test(),
+                &test_scope(
+                    extension_management
+                        .tenant_operator_user_id_for_test()
+                        .clone(),
+                ),
             )
             .await
             .expect("NEAR AI MCP projected");
@@ -7251,7 +7340,11 @@ mod tests {
         let projection = extension_management
             .project(
                 nearai_ref,
-                extension_management.tenant_operator_user_id_for_test(),
+                &test_scope(
+                    extension_management
+                        .tenant_operator_user_id_for_test()
+                        .clone(),
+                ),
             )
             .await
             .expect("NEAR AI MCP projected");

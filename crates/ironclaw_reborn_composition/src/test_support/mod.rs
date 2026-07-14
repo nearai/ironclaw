@@ -52,6 +52,9 @@
 //! 14. [`result_read`] — `wrap_result_read_capability_for_test`, the
 //!     production `result_read` synthetic-capability wrap, for the same
 //!     durable tool-result projection coverage (issue #5838).
+//! 15. [`registered_extension`] — `mint_registered_mcp_extension_id_for_test`,
+//!     the `HostedMcpExtensionId::mint` wrapper cross-crate fixtures need to
+//!     seed a registered MCP descriptor that survives the R1 mint-gate on read.
 
 mod automation;
 mod budget_gateway;
@@ -63,6 +66,7 @@ mod outbound_delivery;
 mod project_create;
 mod projection;
 mod refreshing_capability_port;
+mod registered_extension;
 mod result_read;
 mod skill_activation;
 mod trace_capture;
@@ -111,6 +115,8 @@ pub use refreshing_capability_port::{
     build_local_dev_extension_management_for_test,
     create_refreshing_local_dev_capability_port_for_test,
 };
+#[cfg(feature = "test-support")]
+pub use registered_extension::mint_registered_mcp_extension_id_for_test;
 #[cfg(feature = "test-support")]
 pub use result_read::{RESULT_READ_CAPABILITY_ID, wrap_result_read_capability_for_test};
 #[cfg(feature = "test-support")]

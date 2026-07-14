@@ -335,45 +335,46 @@ impl RebornLocalLifecycleFacade {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(None);
                 };
-                let caller = lifecycle_caller(&context)?;
+                let scope = lifecycle_resource_scope(&context)?;
                 let credential_gate = if matches!(&context, LifecycleProductContext::Surface(_)) {
-                    if let Some(credential_accounts) = &self.credential_accounts {
-                        Some(RuntimeExtensionActivationCredentialGate::new(
-                            lifecycle_resource_scope(&context)?,
-                            credential_accounts.clone(),
-                        ))
-                    } else {
-                        None
-                    }
+                    self.credential_accounts
+                        .as_ref()
+                        .map(|credential_accounts| {
+                            RuntimeExtensionActivationCredentialGate::new(
+                                scope.clone(),
+                                credential_accounts.clone(),
+                            )
+                        })
                 } else {
                     None
                 };
                 extension_management
-                    .search(&query, credential_gate.as_ref(), &caller)
+                    .search(&query, credential_gate.as_ref(), &scope)
                     .await
             }
             LifecycleProductAction::ExtensionList => {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(None);
                 };
-                let caller = lifecycle_caller(&context)?;
-                extension_management.list_installed(&caller).await
+                let scope = lifecycle_resource_scope(&context)?;
+                extension_management.list_installed(&scope).await
             }
             LifecycleProductAction::ExtensionInstall { package_ref } => {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(Some(package_ref));
                 };
-                let caller = lifecycle_caller(&context)?;
-                extension_management.install(package_ref, &caller).await
+                let scope = lifecycle_resource_scope(&context)?;
+                extension_management.install(package_ref, &scope).await
             }
             LifecycleProductAction::ExtensionActivate { package_ref } => {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(Some(package_ref));
                 };
                 let caller = lifecycle_caller(&context)?;
+                let scope = lifecycle_resource_scope(&context)?;
                 let credential_gate = self
                     .extension_activation_credential_gate(
-                        &context,
+                        &scope,
                         extension_management,
                         &package_ref,
                         &caller,
@@ -391,10 +392,9 @@ impl RebornLocalLifecycleFacade {
                             ),
                         });
                     };
-                    let scope = lifecycle_resource_scope(&context)?;
                     let mode =
                         crate::extension_host::extension_lifecycle::ExtensionActivationMode::HostedMcpDiscovery {
-                            scope,
+                            scope: scope.clone(),
                             runtime_http_egress,
                         };
                     return match credential_gate {
@@ -404,13 +404,13 @@ impl RebornLocalLifecycleFacade {
                                     package_ref,
                                     mode,
                                     credential_gate,
-                                    &caller,
+                                    &scope,
                                 )
                                 .await
                         }
                         None => {
                             extension_management
-                                .activate(package_ref, mode, &caller)
+                                .activate(package_ref, mode, &scope)
                                 .await
                         }
                     };
@@ -424,13 +424,13 @@ impl RebornLocalLifecycleFacade {
                                 package_ref,
                                 mode,
                                 credential_gate,
-                                &caller,
+                                &scope,
                             )
                             .await
                     }
                     None => {
                         extension_management
-                            .activate(package_ref, mode, &caller)
+                            .activate(package_ref, mode, &scope)
                             .await
                     }
                 }
@@ -456,16 +456,17 @@ impl RebornLocalLifecycleFacade {
 
     async fn extension_activation_credential_gate(
         &self,
-        context: &LifecycleProductContext,
+        scope: &ResourceScope,
         extension_management: &RebornLocalExtensionManagementPort,
         package_ref: &LifecyclePackageRef,
         caller: &UserId,
     ) -> Result<Option<RuntimeExtensionActivationCredentialGate>, ProductWorkflowError> {
-        // The requirements preflight checks ownership first, so a non-owner
-        // exits here with the masked "is not installed" denial before any
-        // credential or hosted-MCP probing can leak the install's existence.
+        // The requirements preflight checks ownership AND tenant first (Item
+        // B), so a non-owner or foreign-tenant caller exits here with the
+        // masked "is not installed" denial before any credential or
+        // hosted-MCP probing can leak the install's existence.
         let requirements = extension_management
-            .activation_credential_requirements(package_ref, caller)
+            .activation_credential_requirements(package_ref, caller, &scope.tenant_id)
             .await?;
         if requirements.is_empty() {
             return Ok(None);
@@ -478,7 +479,7 @@ impl RebornLocalLifecycleFacade {
             return Ok(None);
         };
         Ok(Some(RuntimeExtensionActivationCredentialGate::new(
-            lifecycle_resource_scope(context)?,
+            scope.clone(),
             Arc::clone(credential_accounts),
         )))
     }
@@ -503,8 +504,8 @@ impl LifecycleProductFacade for RebornLocalLifecycleFacade {
             let Some(extension_management) = &self.extension_management else {
                 return unsupported_projection(Some(package_ref));
             };
-            let caller = lifecycle_caller(&context)?;
-            return extension_management.project(package_ref, &caller).await;
+            let scope = lifecycle_resource_scope(&context)?;
+            return extension_management.project(package_ref, &scope).await;
         }
         unsupported_projection(Some(package_ref))
     }

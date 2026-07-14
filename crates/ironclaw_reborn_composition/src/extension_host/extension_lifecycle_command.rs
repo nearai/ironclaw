@@ -176,6 +176,7 @@ fn phase_label(phase: LifecyclePhase) -> &'static str {
 fn extension_source_label(source: LifecycleExtensionSource) -> &'static str {
     match source {
         LifecycleExtensionSource::HostBundled => "host_bundled",
+        LifecycleExtensionSource::UserRegistered => "user_registered",
     }
 }
 
@@ -313,6 +314,42 @@ mod tests {
         );
     }
 
+    /// #5970 review (Low): malformed lifecycle ids only had coverage at the
+    /// facade/`into_action` unit level, not through the public command
+    /// handler. Uses real local-dev services (so `local_runtime` is present)
+    /// to prove the error is `into_action()`'s `Product` variant specifically
+    /// — not `LocalRuntimeUnavailable` — for all three id-bearing variants.
+    #[tokio::test]
+    async fn invalid_extension_id_returns_product_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let owner = "extension-lifecycle-command-invalid-id-owner";
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            owner,
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+
+        for command in [
+            RebornExtensionLifecycleCommand::Install { id: String::new() },
+            RebornExtensionLifecycleCommand::Activate { id: String::new() },
+            RebornExtensionLifecycleCommand::Remove { id: String::new() },
+        ] {
+            let error = execute_reborn_extension_lifecycle_command(&services, command)
+                .await
+                .expect_err("malformed lifecycle id must be rejected before reaching the facade");
+            assert!(
+                matches!(
+                    error,
+                    RebornExtensionLifecycleCommandError::Product(
+                        ProductWorkflowError::InvalidBindingRequest { .. }
+                    )
+                ),
+                "expected the command's into_action() product error, got: {error:?}"
+            );
+        }
+    }
+
     #[test]
     fn human_renderer_escapes_terminal_control_characters() {
         let response = LifecycleProductResponse {
@@ -352,5 +389,48 @@ mod tests {
         assert!(!output.contains('\r'), "output: {output:?}");
         assert!(output.contains("\\u{1b}"));
         assert!(output.contains("\\r"));
+    }
+
+    /// Sibling to `human_renderer_escapes_terminal_control_characters`
+    /// (which only covers `HostBundled`): a `UserRegistered` search result
+    /// must render the `user_registered` source label, not silently reuse
+    /// `host_bundled` or omit the source entirely.
+    #[test]
+    fn human_renderer_renders_user_registered_source_label() {
+        let response = LifecycleProductResponse {
+            package_ref: None,
+            phase: LifecyclePhase::Discovered,
+            blockers: Vec::new(),
+            message: None,
+            payload: Some(LifecycleProductPayload::ExtensionSearch {
+                count: 1,
+                extensions: vec![LifecycleSearchExtensionSummary {
+                    summary: LifecycleExtensionSummary {
+                        package_ref: LifecyclePackageRef::new(
+                            LifecyclePackageKind::Extension,
+                            "acme-mcp-registered",
+                        )
+                        .expect("package ref"),
+                        name: "Acme Registered MCP".to_string(),
+                        version: "0.1.0".to_string(),
+                        description: "User-registered hosted MCP server".to_string(),
+                        source: LifecycleExtensionSource::UserRegistered,
+                        runtime_kind:
+                            ironclaw_product_workflow::LifecycleExtensionRuntimeKind::WasmTool,
+                        surface_kinds: Vec::new(),
+                        visible_capability_ids: Vec::new(),
+                        visible_read_only_capability_ids: Vec::new(),
+                        credential_requirements: Vec::new(),
+                        onboarding: None,
+                    },
+                    installation_phase: None,
+                }],
+            }),
+        };
+
+        let output = render_reborn_extension_lifecycle_response("search", &response);
+
+        assert!(output.contains("(user_registered)"), "output: {output:?}");
+        assert!(!output.contains("(host_bundled)"), "output: {output:?}");
     }
 }

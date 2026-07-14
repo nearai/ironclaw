@@ -152,7 +152,7 @@ impl HostManagedCredentialExtension {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AvailableExtensionAsset {
     pub(crate) path: String,
     pub(crate) content: AvailableExtensionAssetContent,
@@ -162,12 +162,17 @@ pub(crate) struct AvailableExtensionAsset {
 /// remove -> reinstall re-materializes from the entry alone (a `Filesystem`
 /// path-pointer variant existed before that invariant and dangled after
 /// `remove` deleted the extension dir).
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AvailableExtensionAssetContent {
     Bytes(Vec<u8>),
 }
 
-#[derive(Debug)]
+/// Cloneable so an owner-registered package resolved from
+/// [`crate::extension_host::registered_extension_store`] (freshly loaded from
+/// disk, never borrowed from the shared first-party catalog) and a
+/// first-party catalog hit can flow through the same owned
+/// `AvailableExtensionPackage` return type in `resolve_with_owner_overlay_for_scope`.
+#[derive(Debug, Clone)]
 pub(crate) struct AvailableExtensionPackage {
     pub(crate) package_ref: LifecyclePackageRef,
     pub(crate) manifest_toml: String,
@@ -205,7 +210,7 @@ impl AvailableExtensionPackage {
             name: self.package.manifest.name.clone(),
             version: self.package.manifest.version.clone(),
             description: self.package.manifest.description.clone(),
-            source: LifecycleExtensionSource::HostBundled,
+            source: lifecycle_extension_source(&self.package.manifest.source),
             runtime_kind: runtime_kind(&self.package.manifest.runtime),
             surface_kinds: self.surface_kinds.clone(),
             visible_capability_ids,
@@ -213,6 +218,19 @@ impl AvailableExtensionPackage {
             credential_requirements: credential_requirements(self),
             onboarding: onboarding(&self.package_ref),
         }
+    }
+}
+
+/// Wire source label for a resolved manifest's [`ManifestSource`]. Only
+/// `UserRegistered` is distinguished on the wire; the bundled/imported tiers
+/// (`HostBundled`/`InstalledLocal`/`RegistryInstalled`) all present as
+/// `HostBundled`, the pre-existing single label for host-side packages.
+fn lifecycle_extension_source(source: &ManifestSource) -> LifecycleExtensionSource {
+    match source {
+        ManifestSource::UserRegistered { .. } => LifecycleExtensionSource::UserRegistered,
+        ManifestSource::HostBundled
+        | ManifestSource::InstalledLocal
+        | ManifestSource::RegistryInstalled => LifecycleExtensionSource::HostBundled,
     }
 }
 
@@ -456,7 +474,13 @@ impl AvailableExtensionCatalog {
         F: RootFilesystem + ?Sized,
     {
         Ok(Self::from_packages(
-            load_filesystem_packages(fs, root).await?,
+            load_filesystem_packages(
+                fs,
+                root,
+                ManifestSource::InstalledLocal,
+                AssetLoading::Inline,
+            )
+            .await?,
         ))
     }
 
@@ -487,7 +511,10 @@ impl AvailableExtensionCatalog {
     }
 }
 
-fn package_matches_search(package: &AvailableExtensionPackage, normalized_query: &str) -> bool {
+pub(crate) fn package_matches_search(
+    package: &AvailableExtensionPackage,
+    normalized_query: &str,
+) -> bool {
     normalized_query.is_empty()
         || package_search_terms(package)
             .iter()
@@ -1607,9 +1634,38 @@ pub(crate) fn bytes_asset(path: &str, bytes: &[u8]) -> AvailableExtensionAsset {
     }
 }
 
-async fn load_filesystem_packages<F>(
+/// Whether [`load_filesystem_packages`]/[`load_filesystem_package`] should
+/// read and inline every asset file under an extension's directory (item 6).
+/// Search and list callers only ever read a package's manifest-derived
+/// summary fields — never `.assets` — so making them pay for
+/// `inline_extension_dir_assets`'s full-directory read on every entry, on
+/// every search/list call, is pure waste. Callers that resolve a package for
+/// install/restore (where `.assets` gets materialized) still need `Inline`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AssetLoading {
+    /// Read and inline every asset file under the extension directory.
+    Inline,
+    /// Skip asset reads entirely; `.assets` is `Vec::new()`.
+    Skip,
+}
+
+/// Load extension packages from every immediate child directory of `root`
+/// that has a `manifest.toml`, tagging each with `source`. Reused for both
+/// the shared first-party catalog root (`/system/extensions`, `source =
+/// InstalledLocal`) and an owner's registered-extension subtree
+/// (`/system/extensions/registered/<tenant>/<owner>`, `source =
+/// UserRegistered`) — see
+/// [`crate::extension_host::registered_extension_store`]. The resulting
+/// package's `root` is always the canonical `/system/extensions/<id>` path
+/// (see [`canonical_extension_root`]), never `root` itself, so a package
+/// loaded from a nested owner subtree still satisfies `ExtensionPackage`'s
+/// own root/id matching invariant. Asset bytes are still read from the real
+/// `entry.path` location, subject to `asset_loading` (item 6).
+pub(crate) async fn load_filesystem_packages<F>(
     fs: &F,
     root: &VirtualPath,
+    source: ManifestSource,
+    asset_loading: AssetLoading,
 ) -> Result<Vec<AvailableExtensionPackage>, ProductWorkflowError>
 where
     F: RootFilesystem + ?Sized,
@@ -1646,10 +1702,31 @@ where
         let Ok(extension_id) = ExtensionId::new(entry.name.clone()) else {
             continue;
         };
+        if !matches!(source, ManifestSource::UserRegistered { .. })
+            && crate::extension_host::registered_extension_store::is_hosted_mcp_id_namespace(
+                &extension_id,
+            )
+        {
+            tracing::debug!(
+                extension_id = extension_id.as_str(),
+                "skipping shared-catalog package in the hosted MCP id namespace"
+            );
+            continue;
+        }
         if reserved_host_bundled_extension_id(&extension_id) {
             continue;
         }
-        match load_filesystem_package(fs, entry, &host_ports, &contracts).await {
+        match load_filesystem_package(
+            fs,
+            entry,
+            extension_id.clone(),
+            source.clone(),
+            &host_ports,
+            &contracts,
+            asset_loading,
+        )
+        .await
+        {
             Ok(Some(package)) => packages.push(package),
             Ok(None) => {}
             // Per-entry validation failure is fail-open: a stale materialized
@@ -1659,12 +1736,31 @@ where
             // merge supersedes first-party ids afterwards. Infrastructure
             // errors (`Transient`) stay fail-closed so a flaky volume does not
             // silently drop installed extensions.
+            //
+            // Log level is source-conditional: this loop is shared by every
+            // owner's registered-store listing
+            // (`RegisteredExtensionStore::list_for_scope`, reached from both
+            // the live search path and the boot-time row-owner-keyed
+            // `resolve_registered_for_owner` fallback) as well as the boot-time
+            // shared catalog scan. `warn!` on a live/foreground search path
+            // corrupts the REPL/TUI (CLAUDE.md); `UserRegistered` sources use
+            // `debug!` instead so one owner's corrupt `manifest.toml` stays a
+            // quiet skip rather than a REPL-visible warning or a cross-tenant
+            // DoS of every other owner's listing.
             Err(ProductWorkflowError::InvalidBindingRequest { reason }) => {
-                tracing::warn!(
-                    extension_id = %extension_id,
-                    %reason,
-                    "skipping invalid available extension manifest"
-                );
+                if matches!(source, ManifestSource::UserRegistered { .. }) {
+                    tracing::debug!(
+                        extension_id = %extension_id,
+                        %reason,
+                        "skipping unparseable registered extension manifest"
+                    );
+                } else {
+                    tracing::warn!(
+                        extension_id = %extension_id,
+                        %reason,
+                        "skipping invalid available extension manifest"
+                    );
+                }
             }
             Err(error) => return Err(error),
         }
@@ -1675,8 +1771,11 @@ where
 async fn load_filesystem_package<F>(
     fs: &F,
     entry: DirEntry,
+    extension_id: ExtensionId,
+    source: ManifestSource,
     host_ports: &HostPortCatalog,
     contracts: &HostApiContractRegistry,
+    asset_loading: AssetLoading,
 ) -> Result<Option<AvailableExtensionPackage>, ProductWorkflowError>
 where
     F: RootFilesystem + ?Sized,
@@ -1704,7 +1803,7 @@ where
     })?;
     let record = ExtensionManifestRecord::from_toml_with_contracts(
         manifest_toml,
-        ManifestSource::InstalledLocal,
+        source.clone(),
         host_ports,
         None,
         contracts,
@@ -1716,8 +1815,6 @@ where
         .clone()
         .try_into()
         .map_err(map_binding_error)?;
-    let package = ExtensionPackage::from_manifest_toml(manifest, entry.path, record.raw_toml())
-        .map_err(map_binding_error)?;
     // Catalog EVERY file in the extension dir as inline bytes, exactly
     // like a fresh import. Assets stored as `Filesystem(path)` pointers
     // into the extension's own materialized dir dangle after `remove`
@@ -1725,28 +1822,52 @@ where
     // remove -> available -> reinstall flow with
     // "failed to read available extension asset"; and cataloging only
     // manifest + wasm module would lose schemas/prompt docs on reinstall.
-    let assets = inline_extension_dir_assets(fs, &package.root).await?;
+    // Search/list callers never read `.assets` (item 6): `Skip` avoids
+    // paying for this full-directory read on every search/list entry.
+    let assets = match asset_loading {
+        AssetLoading::Inline => inline_extension_dir_assets(fs, &entry.path).await?,
+        AssetLoading::Skip => Vec::new(),
+    };
+    let package_root = canonical_extension_root(&extension_id)?;
+    let package = ExtensionPackage::from_manifest_toml(manifest, package_root, record.raw_toml())
+        .map_err(map_binding_error)?;
     Ok(Some(AvailableExtensionPackage {
         package_ref: LifecyclePackageRef::new(
             LifecyclePackageKind::Extension,
             package.id.as_str(),
         )?,
         manifest_toml: record.raw_toml().to_string(),
-        // Everything discovered on the filesystem is `InstalledLocal`, per
-        // the `ManifestSource` contract ("Locally installed extension under
-        // `/system/extensions/`"). `HostBundled` — the only tier eligible
-        // for first-party/system trust — is reserved for extensions
-        // compiled into the host binary (`from_first_party_assets`), whose
-        // reserved ids the scan skips above. Uploaded tool bundles
-        // materialize under this root, so stamping discovery `HostBundled`
+        // Carries the `source` this loader call was asked to tag: the
+        // shared first-party catalog root stamps `InstalledLocal` (see
+        // the `ManifestSource` contract — "Locally installed extension
+        // under `/system/extensions/`"; `HostBundled` is reserved for
+        // extensions compiled into the host binary and never reaches
+        // this loader), and an owner's registered-extension subtree
+        // stamps `UserRegistered`. Uploaded tool bundles materialize
+        // under the shared root, so stamping discovery `HostBundled`
         // would let a process restart launder an untrusted upload into
         // first-party trust (#5459 review: import → restart → install).
-        source: ManifestSource::InstalledLocal,
+        source,
         package,
         cleanup_requirements: Vec::new(),
         surface_kinds,
         assets,
     }))
+}
+
+/// The canonical `/system/extensions/<id>` root every `ExtensionPackage` must
+/// carry (`ensure_extension_root_matches` in `ironclaw_extensions` requires
+/// it). Used both for the shared first-party catalog (where it is also the
+/// package's real on-disk location) and, via [`load_filesystem_packages`],
+/// for packages loaded from a nested owner-scoped subtree — those are never
+/// materialized under this synthetic root (the registered store never writes
+/// into `/system/extensions/<id>/` directly), so the mismatch between this
+/// synthetic root and the real read location is inert.
+pub(crate) fn canonical_extension_root(
+    extension_id: &ExtensionId,
+) -> Result<VirtualPath, ProductWorkflowError> {
+    VirtualPath::new(format!("/system/extensions/{}", extension_id.as_str()))
+        .map_err(map_binding_error)
 }
 
 pub(crate) fn reserved_host_bundled_extension_id(extension_id: &ExtensionId) -> bool {
@@ -1803,7 +1924,7 @@ mod tests {
     };
     use ironclaw_host_api::{
         EffectKind, HostPortCatalog, PermissionMode, RuntimeCredentialAccountSetup,
-        RuntimeCredentialRequirementSource,
+        RuntimeCredentialRequirementSource, TenantId, UserId,
     };
 
     use super::*;
@@ -2172,6 +2293,207 @@ mod tests {
         assert!(!is_host_managed_credential_extension(&nearai_ref));
         assert!(!is_host_managed_credential_extension(&notion_ref));
         assert!(!is_host_managed_credential_extension(&mcp_ref));
+    }
+
+    #[test]
+    fn registered_package_summary_reports_user_registered_source() {
+        // Owner-registered hosted-MCP manifests declare zero static
+        // `[[capabilities]]` (discovered at runtime), the only shape
+        // `ManifestSource::UserRegistered` is allowed to parse.
+        static MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "acme-mcp"
+name = "Acme MCP"
+version = "0.1.0"
+description = "user-registered hosted MCP server"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "http://127.0.0.1:9/mcp"
+"#;
+        let tenant_id = TenantId::new("summary-tenant").unwrap();
+        let owner = UserId::new("summary-owner").unwrap();
+        let source = ManifestSource::UserRegistered { tenant_id, owner };
+        let manifest =
+            ExtensionManifest::parse(MANIFEST, source.clone(), &HostPortCatalog::empty())
+                .expect("registered manifest");
+        let package = ExtensionPackage::from_manifest_toml(
+            manifest,
+            VirtualPath::new("/system/extensions/acme-mcp").unwrap(),
+            MANIFEST,
+        )
+        .expect("package");
+        let available = AvailableExtensionPackage {
+            package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "acme-mcp")
+                .unwrap(),
+            manifest_toml: MANIFEST.to_string(),
+            source,
+            package,
+            cleanup_requirements: Vec::new(),
+            surface_kinds: Vec::new(),
+            assets: Vec::new(),
+        };
+
+        assert_eq!(
+            available.summary().source,
+            LifecycleExtensionSource::UserRegistered,
+            "a UserRegistered manifest must report the wire UserRegistered source, not HostBundled"
+        );
+    }
+
+    const REGISTERED_LOADER_HEALTHY_MANIFEST_TOML: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "healthy-registered-loader"
+name = "Healthy Registered Loader Fixture"
+version = "0.1.0"
+description = "User-registered hosted MCP server (loader-tier fixture)"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "http://127.0.0.1:9/mcp"
+"#;
+
+    fn registered_loader_test_source() -> ManifestSource {
+        ManifestSource::UserRegistered {
+            tenant_id: TenantId::new("loader-tenant").expect("valid tenant id"),
+            owner: UserId::new("loader-owner").expect("valid owner id"),
+        }
+    }
+
+    /// Review item 4: pins the corrupt-manifest skip-and-log directly at the
+    /// `load_filesystem_packages` (catalog loader) tier, distinct from the
+    /// higher-level `RegisteredExtensionStore`/boot-restore coverage in
+    /// `extension_lifecycle_registered_store_tests.rs`. A TOML-invalid
+    /// `UserRegistered` sibling must be skipped, not abort the healthy
+    /// sibling's load.
+    #[tokio::test]
+    async fn filesystem_catalog_skips_corrupt_user_registered_manifest_without_aborting_siblings() {
+        let fs = InMemoryBackend::default();
+        fs.write_file(
+            &VirtualPath::new(
+                "/system/extensions/registered/healthy-registered-loader/manifest.toml",
+            )
+            .unwrap(),
+            REGISTERED_LOADER_HEALTHY_MANIFEST_TOML.as_bytes(),
+        )
+        .await
+        .unwrap();
+        fs.write_file(
+            &VirtualPath::new(
+                "/system/extensions/registered/corrupt-registered-loader/manifest.toml",
+            )
+            .unwrap(),
+            b"[runtime\nkind = \"mcp\"\n",
+        )
+        .await
+        .unwrap();
+
+        let packages = load_filesystem_packages(
+            &fs,
+            &VirtualPath::new("/system/extensions/registered").unwrap(),
+            registered_loader_test_source(),
+            AssetLoading::Inline,
+        )
+        .await
+        .expect(
+            "load_filesystem_packages must skip the corrupt UserRegistered sibling, not abort \
+             the whole directory scan",
+        );
+
+        assert_eq!(
+            packages.len(),
+            1,
+            "only the healthy sibling must survive the corrupt-manifest skip"
+        );
+        assert_eq!(
+            packages[0].package_ref,
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "healthy-registered-loader")
+                .unwrap()
+        );
+    }
+
+    /// Review item 3: the UTF-8 decode step (`String::from_utf8`) must join
+    /// the same skip-and-log carve-out as the TOML-parse-error arm right
+    /// below it — a non-UTF-8 `manifest.toml` for one `UserRegistered` owner
+    /// must not abort a healthy sibling's load either.
+    #[tokio::test]
+    async fn filesystem_catalog_skips_non_utf8_user_registered_manifest_without_aborting_siblings()
+    {
+        let fs = InMemoryBackend::default();
+        fs.write_file(
+            &VirtualPath::new(
+                "/system/extensions/registered/healthy-registered-loader/manifest.toml",
+            )
+            .unwrap(),
+            REGISTERED_LOADER_HEALTHY_MANIFEST_TOML.as_bytes(),
+        )
+        .await
+        .unwrap();
+        fs.write_file(
+            &VirtualPath::new(
+                "/system/extensions/registered/non-utf8-registered-loader/manifest.toml",
+            )
+            .unwrap(),
+            &[0xff, 0xfe, 0x00, 0x01],
+        )
+        .await
+        .unwrap();
+
+        let packages = load_filesystem_packages(
+            &fs,
+            &VirtualPath::new("/system/extensions/registered").unwrap(),
+            registered_loader_test_source(),
+            AssetLoading::Inline,
+        )
+        .await
+        .expect(
+            "load_filesystem_packages must skip the non-UTF-8 UserRegistered sibling, not abort \
+             the whole directory scan",
+        );
+
+        assert_eq!(
+            packages.len(),
+            1,
+            "only the healthy sibling must survive the non-UTF-8 skip"
+        );
+        assert_eq!(
+            packages[0].package_ref,
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "healthy-registered-loader")
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_catalog_skips_malformed_shared_manifest_without_aborting_boot() {
+        // #5966/#5967 generalized the skip-and-log carve-out to every
+        // `load_filesystem_packages` source, including the shared
+        // `/system/extensions` catalog: a corrupt shared manifest (e.g. a
+        // stale pre-#5499 first-party copy) must not crash-loop boot.
+        // `UserRegistered` keeps its own quieter `debug!`-level carve-out
+        // (see `filesystem_catalog_skips_corrupt_user_registered_manifest_without_aborting_siblings`);
+        // this test only pins that the shared catalog no longer hard-fails.
+        let fs = InMemoryBackend::default();
+        fs.write_file(
+            &VirtualPath::new("/system/extensions/broken/manifest.toml").unwrap(),
+            b"not = [valid toml",
+        )
+        .await
+        .unwrap();
+
+        let catalog = AvailableExtensionCatalog::from_filesystem_root(
+            &fs,
+            &VirtualPath::new("/system/extensions").unwrap(),
+        )
+        .await
+        .expect("malformed shared manifest must be skipped, not abort catalog load");
+        assert!(
+            catalog.packages.is_empty(),
+            "the broken manifest's entry must be skipped, not surfaced as a package"
+        );
     }
 
     #[test]

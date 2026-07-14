@@ -545,12 +545,16 @@ async fn active_capabilities_carry_installation_owner() {
     let bob = UserId::new("bob").expect("valid user");
     let package_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture").expect("fixture ref");
-    port.install(package_ref.clone(), &alice)
+    port.install(package_ref.clone(), &hosted_mcp_scope("alice"))
         .await
         .expect("alice installs for herself");
-    port.activate(package_ref, ExtensionActivationMode::Static, &alice)
-        .await
-        .expect("alice activates");
+    port.activate(
+        package_ref,
+        ExtensionActivationMode::Static,
+        &hosted_mcp_scope("alice"),
+    )
+    .await
+    .expect("alice activates");
 
     let capabilities = port
         .active_model_visible_capabilities()

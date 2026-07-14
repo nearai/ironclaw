@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(reborn)* MCP registration framework (not yet user-facing): an owner-scoped registered-extension store (tenant + user path sharding) with row-authoritative install/search/list/remove/restore resolution, isolated from the shared extension catalog, plus minted owner-unique registration ids and collision-defense lifecycle chokepoints. No register verb, UI, CLI, or live discovery exists yet — this lands the storage and identity groundwork that upcoming egress, verb/discovery/UI, and credential work will build on.
+
 ### Fixed
 
 - *(reborn)* recover the filesystem resource governor after transient libSQL writer contention without bypassing durable accounting, reject stale authority writes during recovery, and distinguish accounting outages from provider budget failures.

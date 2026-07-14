@@ -226,7 +226,7 @@ pub(crate) async fn bootstrap_nearai_mcp(
             }
         })?;
     let phase = extension_management
-        .project(package_ref.clone(), &owner_scope.user_id)
+        .project(package_ref.clone(), &owner_scope)
         .await
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("NEAR AI MCP extension projection failed: {error}"),
@@ -325,10 +325,10 @@ pub(crate) async fn bootstrap_nearai_mcp(
     // Bootstrap acts as the base owner (the tenant operator), so the install
     // derives a tenant-shared owner — the NEAR AI MCP extension is for the
     // whole tenant, matching pre-#5459 behavior.
-    let bootstrap_caller = resource_scope.user_id.clone();
+    let bootstrap_scope = resource_scope.clone();
     if phase == LifecyclePhase::Discovered {
         extension_management
-            .install(package_ref.clone(), &bootstrap_caller)
+            .install(package_ref.clone(), &resource_scope)
             .await
             .map_err(|error| RebornBuildError::InvalidConfig {
                 reason: format!("NEAR AI MCP extension install failed: {error}"),
@@ -344,7 +344,7 @@ pub(crate) async fn bootstrap_nearai_mcp(
                         resource_scope,
                         product_auth.runtime_credential_account_selection_service(),
                     ),
-                    &bootstrap_caller,
+                    &bootstrap_scope,
                 )
                 .await
                 .map_err(|error| RebornBuildError::InvalidConfig {

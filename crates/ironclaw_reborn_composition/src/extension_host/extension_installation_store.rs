@@ -7,7 +7,7 @@ use ironclaw_extensions::{
     canonicalize_installation_rows,
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
-use ironclaw_host_api::{ExtensionId, VirtualPath};
+use ironclaw_host_api::{ExtensionId, LOCAL_DEFAULT_TENANT_ID, TenantId, UserId, VirtualPath};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -281,19 +281,32 @@ impl From<ExtensionManifestRecord> for WireManifestRecord {
     fn from(record: ExtensionManifestRecord) -> Self {
         Self {
             raw_toml: record.raw_toml().to_string(),
-            source: WireManifestSource::from_manifest_source(record.manifest().source),
+            source: WireManifestSource::from_manifest_source(record.manifest().source.clone()),
             manifest_hash: record.manifest_hash().cloned(),
             removal_cleanup_requirements: record.removal_cleanup_requirements().to_vec(),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum WireManifestSource {
     HostBundled,
     InstalledLocal,
     RegistryInstalled,
+    UserRegistered {
+        #[serde(default = "default_registered_tenant_id")]
+        tenant_id: String,
+        owner: String,
+    },
+}
+
+fn default_registered_tenant_id() -> String {
+    // Legacy local-dev state pre-dates tenant-aware registrations. It is
+    // intentionally migrated into the local default tenant only; production
+    // callers never infer a tenant from a user id or scan another tenant's
+    // descriptor path as a fallback.
+    LOCAL_DEFAULT_TENANT_ID.to_string()
 }
 
 impl WireManifestSource {
@@ -302,6 +315,10 @@ impl WireManifestSource {
             ManifestSource::HostBundled => Self::HostBundled,
             ManifestSource::InstalledLocal => Self::InstalledLocal,
             ManifestSource::RegistryInstalled => Self::RegistryInstalled,
+            ManifestSource::UserRegistered { tenant_id, owner } => Self::UserRegistered {
+                tenant_id: tenant_id.into_string(),
+                owner: owner.into_string(),
+            },
         }
     }
 
@@ -310,6 +327,10 @@ impl WireManifestSource {
             Self::HostBundled => ManifestSource::HostBundled,
             Self::InstalledLocal => ManifestSource::InstalledLocal,
             Self::RegistryInstalled => ManifestSource::RegistryInstalled,
+            Self::UserRegistered { tenant_id, owner } => ManifestSource::UserRegistered {
+                tenant_id: TenantId::from_trusted(tenant_id),
+                owner: UserId::from_trusted(owner),
+            },
         }
     }
 }
