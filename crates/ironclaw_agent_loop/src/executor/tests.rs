@@ -2393,6 +2393,228 @@ async fn nudge_model_cancellation_propagates() {
     );
 }
 
+fn state_with_prior_reply_and_tool_activity(host: &MockHost) -> LoopExecutionState {
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.assistant_refs.push(message_ref("msg:original-reply"));
+    let signature = CapabilityCallSignature::from_call(
+        ironclaw_host_api::CapabilityId::new("demo.echo").expect("valid"),
+        &serde_json::json!({"x": 1}),
+    )
+    .expect("valid call signature");
+    state.recent_call_signatures.push(signature);
+    state
+}
+
+#[tokio::test]
+async fn graceful_stop_self_verify_supersedes_reply_when_gate_enabled_and_tool_activity() {
+    // Gate ON + prior tool activity this run + a model reply queued for the
+    // verification call: graceful completion should issue ONE tool-free
+    // verification call and finalize the verified reply INSTEAD OF the
+    // original — not alongside it.
+    let host = MockHost::new(vec![reply_response_with_text("Verified: 42.")])
+        .with_driver_nudges_enabled();
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = state_with_prior_reply_and_tool_activity(&host);
+
+    let exit = ExitStage
+        .process(
+            ctx,
+            ExitInput {
+                state,
+                kind: StopKind::GracefulStop,
+            },
+        )
+        .await
+        .expect("exit stage");
+
+    let requests = host.model_requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "self-verification pass should issue exactly one model call"
+    );
+    assert_eq!(
+        requests[0]
+            .capability_view
+            .as_ref()
+            .map(|v| v.visible_capability_ids.len()),
+        Some(0),
+        "self-verification model call must be tool-free (empty capability view)"
+    );
+    assert_eq!(
+        host.finalized_assistant_messages(),
+        vec!["Verified: 42.".to_string()],
+        "the verification turn's reply must be finalized"
+    );
+    match exit {
+        LoopExit::Completed(completed) => {
+            assert_eq!(
+                completed.reply_message_refs,
+                vec![message_ref("msg:assistant")],
+                "the verified reply must supersede the original, not append to it"
+            );
+        }
+        other => panic!("expected completed exit with verified reply, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn graceful_stop_skips_self_verify_when_gate_disabled() {
+    // Gate OFF: even with prior tool activity and a reply queued, no
+    // verification call is issued and the original reply stands unchanged.
+    let host = MockHost::new(vec![reply_response_with_text("unused")]);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = state_with_prior_reply_and_tool_activity(&host);
+
+    let exit = ExitStage
+        .process(
+            ctx,
+            ExitInput {
+                state,
+                kind: StopKind::GracefulStop,
+            },
+        )
+        .await
+        .expect("exit stage");
+
+    assert!(
+        host.model_requests().is_empty(),
+        "no verification call when gate disabled"
+    );
+    match exit {
+        LoopExit::Completed(completed) => {
+            assert_eq!(completed.reply_message_refs, vec![message_ref("msg:original-reply")]);
+        }
+        other => panic!("expected completed exit with original reply, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn graceful_stop_skips_self_verify_when_no_prior_tool_activity() {
+    // Gate ON but this run made no capability calls (idle chat) — the
+    // heuristic must not spend an extra model call on answers that never
+    // touched a tool.
+    let host = MockHost::new(vec![reply_response_with_text("unused")])
+        .with_driver_nudges_enabled();
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.assistant_refs.push(message_ref("msg:original-reply"));
+
+    let exit = ExitStage
+        .process(
+            ctx,
+            ExitInput {
+                state,
+                kind: StopKind::GracefulStop,
+            },
+        )
+        .await
+        .expect("exit stage");
+
+    assert!(
+        host.model_requests().is_empty(),
+        "no verification call when no prior capability activity this run"
+    );
+    match exit {
+        LoopExit::Completed(completed) => {
+            assert_eq!(completed.reply_message_refs, vec![message_ref("msg:original-reply")]);
+        }
+        other => panic!("expected completed exit with original reply, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn self_verify_respects_one_shot_cap() {
+    // With the cap already spent, graceful completion must not issue another
+    // verification call and the original reply stands.
+    let host = MockHost::new(vec![reply_response_with_text("unused")])
+        .with_driver_nudges_enabled();
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = state_with_prior_reply_and_tool_activity(&host);
+    state.self_verification_used = 1;
+
+    let exit = ExitStage
+        .process(
+            ctx,
+            ExitInput {
+                state,
+                kind: StopKind::GracefulStop,
+            },
+        )
+        .await
+        .expect("exit stage");
+
+    assert!(
+        host.model_requests().is_empty(),
+        "capped self-verification must not issue another model call"
+    );
+    match exit {
+        LoopExit::Completed(completed) => {
+            assert_eq!(completed.reply_message_refs, vec![message_ref("msg:original-reply")]);
+        }
+        other => panic!("expected completed exit with original reply, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn self_verify_model_failure_falls_back_to_original_reply() {
+    // Gate ON, prior tool activity, but the verification's OWN model call
+    // fails (non-cancel host error). Best-effort: must NOT bork the run —
+    // graceful completion falls back to the original, already-finalized
+    // reply instead of propagating the failure.
+    let host = MockHost::new(Vec::new())
+        .with_driver_nudges_enabled()
+        .with_model_errors(vec![AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "verification model call failed",
+        )]);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = state_with_prior_reply_and_tool_activity(&host);
+
+    let exit = ExitStage
+        .process(
+            ctx,
+            ExitInput {
+                state,
+                kind: StopKind::GracefulStop,
+            },
+        )
+        .await
+        .expect("verification model failure must not propagate out of the exit stage");
+
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "verification attempted exactly one model call before failing open"
+    );
+    match exit {
+        LoopExit::Completed(completed) => {
+            assert_eq!(completed.reply_message_refs, vec![message_ref("msg:original-reply")]);
+        }
+        other => panic!("expected completed exit with original reply, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn exit_stage_aborted_exits_with_requested_failure_kind() {
     let host = MockHost::new(Vec::new());
