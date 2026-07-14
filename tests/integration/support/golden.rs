@@ -105,7 +105,7 @@ impl RebornIntegrationHarness {
 
     /// The exact finalized assistant reply text on this thread (last finalized
     /// `Assistant` message). Errors if none is present.
-    pub async fn final_reply_text(&self) -> HarnessResult<String> {
+    async fn final_reply_text(&self) -> HarnessResult<String> {
         let history = self
             .thread_harness
             .history(self.binding.thread_id.clone())
