@@ -934,55 +934,52 @@ async def test_reborn_v2_thread_list_and_delete(reborn_v2_server):
 
 
 async def test_reborn_v2_thread_delete_uses_shared_confirmation_dialog(
-    reborn_v2_server, reborn_v2_browser
+    reborn_v2_server, reborn_v2_page
 ):
     """The sidebar uses the in-app dialog and deletes only after confirmation."""
     headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
     async with httpx.AsyncClient(headers=headers) as client:
         thread_id = await _create_thread(client, reborn_v2_server)
 
-    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
-    page = await context.new_page()
     native_dialogs: list[str] = []
 
     async def dismiss_native_dialog(dialog) -> None:
         native_dialogs.append(dialog.type)
         await dialog.dismiss()
 
-    page.on("dialog", dismiss_native_dialog)
-    try:
-        await page.goto(f"{reborn_v2_server}/v2/chat?token={REBORN_V2_AUTH_TOKEN}")
-        delete_button = page.locator(
-            SEL_V2["thread_delete_for"].format(id=thread_id)
+    reborn_v2_page.on("dialog", dismiss_native_dialog)
+    await reborn_v2_page.goto(
+        f"{reborn_v2_server}/v2/chat?token={REBORN_V2_AUTH_TOKEN}"
+    )
+    delete_button = reborn_v2_page.locator(
+        SEL_V2["thread_delete_for"].format(id=thread_id)
+    )
+    await expect(delete_button).to_be_visible(timeout=15000)
+
+    await delete_button.click()
+    confirmation = reborn_v2_page.get_by_role("dialog", name="Delete chat")
+    await expect(confirmation).to_be_visible()
+    await confirmation.locator(SEL_V2["confirm_dialog_cancel"]).click()
+    await expect(confirmation).to_have_count(0)
+
+    async with httpx.AsyncClient(headers=headers) as client:
+        timeline = await client.get(
+            f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}/timeline",
+            timeout=15,
         )
-        await expect(delete_button).to_be_visible(timeout=15000)
+        assert timeline.status_code == 200, timeline.text
 
-        await delete_button.click()
-        confirmation = page.get_by_role("dialog", name="Delete chat")
-        await expect(confirmation).to_be_visible()
-        await confirmation.locator(SEL_V2["confirm_dialog_cancel"]).click()
-        await expect(confirmation).to_have_count(0)
+    await delete_button.click()
+    await expect(confirmation).to_be_visible()
+    async with reborn_v2_page.expect_response(
+        lambda response: response.request.method == "DELETE"
+        and response.url.endswith(f"/api/webchat/v2/threads/{thread_id}")
+    ) as response_info:
+        await confirmation.locator(SEL_V2["confirm_dialog_confirm"]).click()
+    assert (await response_info.value).status == 200
 
-        async with httpx.AsyncClient(headers=headers) as client:
-            timeline = await client.get(
-                f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}/timeline",
-                timeout=15,
-            )
-            assert timeline.status_code == 200, timeline.text
-
-        await delete_button.click()
-        await expect(confirmation).to_be_visible()
-        async with page.expect_response(
-            lambda response: response.request.method == "DELETE"
-            and response.url.endswith(f"/api/webchat/v2/threads/{thread_id}")
-        ) as response_info:
-            await confirmation.locator(SEL_V2["confirm_dialog_confirm"]).click()
-        assert (await response_info.value).status == 200
-
-        await expect(delete_button).to_have_count(0, timeout=15000)
-        assert native_dialogs == []
-    finally:
-        await context.close()
+    await expect(delete_button).to_have_count(0, timeout=15000)
+    assert native_dialogs == []
 
 
 async def test_reborn_v2_timeline_pagination(reborn_v2_server):
