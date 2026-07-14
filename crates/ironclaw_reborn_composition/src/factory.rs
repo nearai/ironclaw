@@ -2,8 +2,8 @@
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
-    sync::Arc,
     sync::atomic::AtomicBool,
+    sync::{Arc, OnceLock},
 };
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -97,9 +97,10 @@ use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRu
 ))]
 use ironclaw_outbound::{InMemoryDeliveredGateRouteStore, InMemoryTriggeredRunDeliveryStore};
 use ironclaw_processes::ProcessServices;
+#[cfg(any(feature = "slack-v2-host-beta", test))]
+use ironclaw_product_workflow::ChannelConnectionFacade;
 use ironclaw_product_workflow::{
-    ChannelConnectionFacade, LifecycleProductSurfaceContext, ProductAuthTurnGateResumeDispatcher,
-    ProjectService,
+    LifecycleProductSurfaceContext, ProductAuthTurnGateResumeDispatcher, ProjectService,
 };
 use ironclaw_projects::ProjectRepository;
 use ironclaw_resources::InMemoryResourceGovernor;
@@ -155,8 +156,10 @@ use crate::RebornProductAuthServicePorts;
 use crate::extension_host::available_extensions::{
     slack_bot_manifest_digest, slack_manifest_digest,
 };
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::extension_host::extension_removal_cleanup::SlackPersonalConnectionCleanupAdapter;
 use crate::extension_host::lifecycle::{
-    RebornLocalSkillManagementPort, build_local_skill_management_port,
+    RebornLocalLifecycleFacade, RebornLocalSkillManagementPort, build_local_skill_management_port,
 };
 use crate::extension_host::mcp::hosted_http_mcp_runtime;
 use crate::extension_host::{
@@ -173,11 +176,15 @@ use crate::extension_host::{
     extension_lifecycle_capabilities::{
         extend_builtin_first_party_package, insert_handlers as insert_extension_lifecycle_handlers,
     },
+    extension_removal_cleanup::{ExtensionRemovalCleanupAdapter, ExtensionRemovalCleanupRegistry},
     gsuite::{
         ProductAuthRuntimeGsuiteCredentialStager, register_bundled_gsuite_first_party_handlers,
     },
 };
 use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput};
+use crate::lifecycle_auth_continuation::{
+    LifecycleAuthContinuationDispatcher, LifecycleProductFacadeSlot,
+};
 use crate::local_dev_authorization::{StoreApprovalSettingsProvider, local_dev_authorizer};
 use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
 use crate::local_dev_mounts::{
@@ -1059,6 +1066,7 @@ pub(crate) struct RebornLocalRuntimeServices {
     /// deployments without a connectable channel, in which case the handler
     /// fails closed (blocks) for any channel that declares a connection
     /// requirement. Mirrors the `post_submit_hook_slot` deferred-wiring pattern.
+    #[cfg(any(feature = "slack-v2-host-beta", test))]
     pub(crate) channel_connection_facade_slot:
         Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionFacade>>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
@@ -1247,11 +1255,12 @@ fn auth_continuation_dispatcher(
     blocked_auth_snapshot_source: Option<
         Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>,
     >,
+    lifecycle: LifecycleProductFacadeSlot,
 ) -> Arc<dyn RebornAuthContinuationDispatcher> {
     let single_run: Arc<dyn RebornAuthContinuationDispatcher> = Arc::new(
         ProductAuthTurnGateResumeDispatcher::new(Arc::clone(&turn_coordinator)),
     );
-    match blocked_auth_snapshot_source {
+    let turn_dispatcher = match blocked_auth_snapshot_source {
         // Local paths fan a completed flow out to the caller's other
         // provider-blocked runs (pair/authorize once, all waiting chats
         // continue). Production-shaped builders pass None until their
@@ -1264,26 +1273,44 @@ fn auth_continuation_dispatcher(
             ))
         }
         None => single_run,
-    }
+    };
+    Arc::new(LifecycleAuthContinuationDispatcher::new(
+        turn_dispatcher,
+        lifecycle,
+    ))
 }
 
-fn compose_product_auth_services(
+struct ProductAuthServicesCompositionInput {
     ports: RebornProductAuthServicePorts,
     turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
-    blocked_auth_snapshot_source: Option<
-        Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>,
-    >,
+    blocked_auth_snapshot_source:
+        Option<Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>>,
+    lifecycle: LifecycleProductFacadeSlot,
     provider_composition: OAuthProviderComposition,
     security_audit_sink: Option<Arc<dyn ironclaw_events::SecurityAuditSink>>,
     secret_store: Arc<dyn SecretStore>,
     nearai_mcp_host_managed_scope: Option<AuthProductScope>,
+}
+
+fn compose_product_auth_services(
+    input: ProductAuthServicesCompositionInput,
 ) -> Result<Arc<RebornProductAuthServices>, RebornBuildError> {
+    let ProductAuthServicesCompositionInput {
+        ports,
+        turn_coordinator,
+        blocked_auth_snapshot_source,
+        lifecycle,
+        provider_composition,
+        security_audit_sink,
+        secret_store,
+        nearai_mcp_host_managed_scope,
+    } = input;
     let ports = match provider_composition.client {
         Some(provider_client) => ports.with_provider_client(provider_client),
         None => ports,
     };
     let mut services = ports.into_services(
-        auth_continuation_dispatcher(turn_coordinator, blocked_auth_snapshot_source),
+        auth_continuation_dispatcher(turn_coordinator, blocked_auth_snapshot_source, lifecycle),
         secret_store,
     );
     if let Some(sink) = security_audit_sink {
@@ -1681,19 +1708,19 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     let security_audit_sink = services.security_audit_sink();
     let nearai_mcp_host_managed_scope =
         AuthProductScope::new(nearai_mcp_owner_scope.clone(), AuthSurface::Api);
+    let lifecycle_auth_continuation_slot: LifecycleProductFacadeSlot = Arc::new(OnceLock::new());
     let product_auth = match product_auth_ports {
-        Some(ports) => compose_product_auth_services(
+        Some(ports) => compose_product_auth_services(ProductAuthServicesCompositionInput {
             ports,
-            turn_coordinator.clone(),
-            Some(Arc::clone(&store_graph.turn_state)
-                as Arc<
-                    dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource,
-                >),
+            turn_coordinator: turn_coordinator.clone(),
+            blocked_auth_snapshot_source: Some(Arc::clone(&store_graph.turn_state)
+                as Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>),
+            lifecycle: Arc::clone(&lifecycle_auth_continuation_slot),
             provider_composition,
-            security_audit_sink.clone(),
-            Arc::clone(&secret_store),
-            Some(nearai_mcp_host_managed_scope.clone()),
-        )?,
+            security_audit_sink: security_audit_sink.clone(),
+            secret_store: Arc::clone(&secret_store),
+            nearai_mcp_host_managed_scope: Some(nearai_mcp_host_managed_scope.clone()),
+        })?,
         None => {
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             {
@@ -1726,6 +1753,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                             as Arc<
                                 dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource,
                             >),
+                        Arc::clone(&lifecycle_auth_continuation_slot),
                     ),
                     Arc::clone(&secret_store),
                 )
@@ -1756,6 +1784,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                             as Arc<
                                 dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource,
                             >),
+                        Arc::clone(&lifecycle_auth_continuation_slot),
                     ));
                 let services = match provider_composition.client.clone() {
                     Some(provider_client) => services.with_provider_client(provider_client),
@@ -1838,6 +1867,24 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("extension lifecycle state could not be restored: {error}"),
     })?;
+    #[cfg(feature = "slack-v2-host-beta")]
+    let removal_cleanup_adapters: Vec<Arc<dyn ExtensionRemovalCleanupAdapter>> = vec![Arc::new(
+        SlackPersonalConnectionCleanupAdapter::new(Arc::clone(
+            &store_graph.local_runtime.channel_connection_facade_slot,
+        ))
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("Slack extension removal cleanup could not be built: {error}"),
+        })?,
+    )];
+    #[cfg(not(feature = "slack-v2-host-beta"))]
+    let removal_cleanup_adapters: Vec<Arc<dyn ExtensionRemovalCleanupAdapter>> = Vec::new();
+    let removal_cleanup = Arc::new(
+        ExtensionRemovalCleanupRegistry::try_from_adapters(removal_cleanup_adapters).map_err(
+            |error| RebornBuildError::InvalidConfig {
+                reason: format!("extension removal cleanup registry could not be built: {error}"),
+            },
+        )?,
+    );
     let extension_management = Arc::new(
         RebornLocalExtensionManagementPort::new(
             extension_filesystem,
@@ -1850,10 +1897,22 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             // their installs are tenant-shared, everyone else's are private.
             nearai_mcp_owner_scope.user_id.clone(),
         )
-        .with_channel_connection_facade_slot(Arc::clone(
-            &store_graph.local_runtime.channel_connection_facade_slot,
-        )),
+        .with_removal_cleanup_registry(removal_cleanup),
     );
+    let lifecycle_facade =
+        RebornLocalLifecycleFacade::new(store_graph.local_runtime.skill_management.clone())
+            .with_extension_management(Arc::clone(&extension_management))
+            .with_runtime_http_egress(product_auth_runtime_ports.runtime_http_egress())
+            .with_runtime_credential_accounts(
+                product_auth.runtime_credential_account_selection_service(),
+            );
+    let lifecycle_facade: Arc<dyn ironclaw_product_workflow::LifecycleProductFacade> =
+        Arc::new(lifecycle_facade);
+    lifecycle_auth_continuation_slot
+        .set(lifecycle_facade)
+        .map_err(|_| RebornBuildError::InvalidConfig {
+            reason: "extension lifecycle auth continuation facade was already attached".to_string(),
+        })?;
     let nearai_mcp_bootstrap_outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
         nearai_mcp_bootstrap_config,
         &product_auth,
@@ -2420,6 +2479,7 @@ async fn build_local_dev_store_graph(
         budget_gate_store,
         skill_management,
         extension_management: None,
+        #[cfg(any(feature = "slack-v2-host-beta", test))]
         channel_connection_facade_slot: Arc::new(std::sync::OnceLock::new()),
         runtime_http_egress: None,
         host_runtime_http_egress: None,
@@ -2576,6 +2636,7 @@ async fn build_local_dev_store_graph(
         budget_gate_store,
         skill_management,
         extension_management: None,
+        #[cfg(any(feature = "slack-v2-host-beta", test))]
         channel_connection_facade_slot: Arc::new(std::sync::OnceLock::new()),
         runtime_http_egress: None,
         host_runtime_http_egress: None,
@@ -3068,8 +3129,9 @@ pub(crate) async fn open_local_dev_extension_installation_store_for_test(
 }
 
 /// Migration seam: open the extension installation store over a caller-supplied
-/// [`RootFilesystem`] at the default installation state path, returning the
-/// boxed trait object so the migration tool never touches the concrete
+/// [`RootFilesystem`] at either the legacy default path or a hosted
+/// tenant-qualified path, returning the boxed trait object so the migration
+/// tool never touches the concrete
 /// `pub(crate)` `FilesystemExtensionInstallationStore`. Mirrors the production
 /// binding in [`build_reborn_services`] (the `extension_installation_store`
 /// construction via `FilesystemExtensionInstallationStore::load_at`); gated
@@ -3083,13 +3145,22 @@ pub(crate) async fn open_local_dev_extension_installation_store_for_test(
 #[cfg(feature = "migration-support")]
 pub async fn extension_installation_store_for_migration(
     filesystem: Arc<dyn RootFilesystem>,
+    tenant_id: Option<&ironclaw_host_api::TenantId>,
 ) -> Result<Arc<dyn ExtensionInstallationStore>, RebornBuildError> {
-    let state_path =
-        FilesystemExtensionInstallationStore::default_state_path().map_err(|error| {
+    let state_path = match tenant_id {
+        Some(tenant_id) => VirtualPath::new(format!(
+            "/tenants/{}/system/extensions/.installations/state.json",
+            tenant_id.as_str()
+        ))
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("extension installation state path invalid: {error}"),
+        })?,
+        None => FilesystemExtensionInstallationStore::default_state_path().map_err(|error| {
             RebornBuildError::InvalidConfig {
                 reason: format!("extension installation state path invalid: {error}"),
             }
-        })?;
+        })?,
+    };
     let store = FilesystemExtensionInstallationStore::load_at(filesystem, state_path)
         .await
         .map_err(|error| RebornBuildError::InvalidConfig {
@@ -4952,21 +5023,21 @@ where
             )
         }
     };
-    let product_auth_services = compose_product_auth_services(
-        product_auth_ports,
-        turn_coordinator.clone(),
-        Some(Arc::clone(&turn_state)
-            as Arc<
-                dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource,
-            >),
-        provider_composition,
-        security_audit_sink,
-        Arc::clone(&secret_store),
-        // Host-managed NEAR AI MCP fallback is wired only by
-        // `build_local_runtime`'s local-dev/hosted-single-tenant path today;
-        // preserves this builder's prior behavior of never attaching it.
-        None,
-    )?;
+    let product_auth_services =
+        compose_product_auth_services(ProductAuthServicesCompositionInput {
+            ports: product_auth_ports,
+            turn_coordinator: turn_coordinator.clone(),
+            blocked_auth_snapshot_source: Some(Arc::clone(&turn_state)
+                as Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>),
+            lifecycle: Arc::new(OnceLock::new()),
+            provider_composition,
+            security_audit_sink,
+            secret_store: Arc::clone(&secret_store),
+            // Host-managed NEAR AI MCP fallback is wired only by
+            // `build_local_runtime`'s local-dev/hosted-single-tenant path today;
+            // preserves this builder's prior behavior of never attaching it.
+            nearai_mcp_host_managed_scope: None,
+        })?;
     // Bundle the keepalive worker deps so they are wired all-or-nothing. The
     // candidate source is present only when this path built a durable instance
     // (no caller-supplied product_auth_ports); the leader lock and refresh port
@@ -5624,6 +5695,7 @@ mod tests {
             budget_gate_store: Arc::clone(&base_runtime.budget_gate_store),
             skill_management: Arc::clone(&base_runtime.skill_management),
             extension_management: base_runtime.extension_management.clone(),
+            #[cfg(any(feature = "slack-v2-host-beta", test))]
             channel_connection_facade_slot: Arc::clone(
                 &base_runtime.channel_connection_facade_slot,
             ),

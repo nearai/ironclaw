@@ -163,7 +163,7 @@ fn completed_final_reply(
         reply_message_refs: vec![reply_ref],
         result_refs: Vec::new(),
         final_checkpoint_id: None,
-        usage_summary_ref: None,
+        model_usage: None,
         exit_id,
     })
 }

@@ -1,8 +1,9 @@
+// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
-import { productAuthOAuthEventsSource } from "../../../lib/product-auth-oauth-events.vm-inline.mjs";
+import { productAuthOAuthEventsSource } from "../../../lib/product-auth-oauth-events.vm-inline";
 
 // The origin-independent flow-status poll is fire-and-forget: the interval
 // callback kicks off `fetchOauthFlowStatus(...)` without awaiting it, so the
@@ -1058,7 +1059,7 @@ test("useOauthSetup completes reconnect from the origin-independent flow-status 
   ]);
 });
 
-test("useOauthSetup surfaces a failed flow-status poll as a retryable error when no browser signal arrives", async () => {
+test("useOauthSetup surfaces an expired flow-status poll as a retryable error when no browser signal arrives", async () => {
   const stateUpdates = [];
   const intervals = [];
   const storage = new Map();
@@ -1088,7 +1089,7 @@ test("useOauthSetup surfaces a failed flow-status poll as a retryable error when
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
-    fetchOauthFlowStatus: () => Promise.resolve({ status: "failed" }),
+    fetchOauthFlowStatus: () => Promise.resolve({ status: "expired" }),
     fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
@@ -1167,18 +1168,254 @@ test("useOauthSetup surfaces a failed flow-status poll as a retryable error when
   intervals[0]();
   await flushAsyncWork();
 
-  assert.equal(configuredCount, 0, "a failed flow must not report configured");
+  assert.equal(configuredCount, 0, "an expired flow must not report configured");
   assert.ok(
     stateUpdates.some((update) => update.index === 0 && update.value === false),
-    "the watcher must stop on a failed flow-status poll",
+    "the watcher must stop on an expired flow-status poll",
   );
   assert.ok(
     stateUpdates.some(
       (update) =>
         update.index === 1 &&
         typeof update.value === "string" &&
-        /authorization failed/i.test(update.value),
+        /authorization expired/i.test(update.value),
     ),
-    "a failed flow-status poll must surface a retryable error",
+    "an expired flow-status poll must surface a retryable error",
+  );
+});
+
+test("useOauthSetup ignores flow A status after flow B becomes current", async () => {
+  const stateUpdates = [];
+  const intervals = [];
+  const storage = new Map();
+  const starts = [];
+  let mutationConfig = null;
+  let stateIndex = 0;
+  let configuredCount = 0;
+  let resolveFlowAStatus;
+  const flowAStatus = new Promise((resolve) => {
+    resolveFlowAStatus = resolve;
+  });
+  const popupA = {
+    closed: false,
+    close() {
+      this.closed = true;
+    },
+    location: { href: "about:blank" },
+  };
+  const popupB = {
+    closed: false,
+    close() {
+      this.closed = true;
+    },
+    location: { href: "about:blank" },
+  };
+  const context = {
+    Date,
+    Error,
+    Promise,
+    React: {
+      useCallback: (fn) => fn,
+      useEffect: () => {},
+      useRef: (initial) => ({ current: initial }),
+      useState: (initial) => {
+        const index = stateIndex++;
+        return [
+          typeof initial === "function" ? initial() : initial,
+          (value) => stateUpdates.push({ index, value }),
+        ];
+      },
+    },
+    URL,
+    activateExtension: () => {},
+    approvePairingCode: () => {},
+    fetchExtensionRegistry: () => {},
+    fetchExtensionSetup: () => {},
+    fetchExtensions: () => {},
+    fetchOauthFlowStatus: (flowId) =>
+      flowId === "flow-a" ? flowAStatus : Promise.resolve({ status: "completed" }),
+    fetchPairingRequests: () => {},
+    gatewayStatus: () => {},
+    globalThis: {},
+    installExtension: () => {},
+    isChannelExtensionKind: () => false,
+    listConnectableChannels: () => {},
+    removeExtension: () => {},
+    startExtensionOauth: () =>
+      new Promise((resolve) => {
+        starts.push(resolve);
+      }),
+    submitExtensionSetup: () => {},
+    useMutation: (config) => {
+      mutationConfig = config;
+      return { isPending: false, mutate: () => {}, error: null };
+    },
+    useQuery: () => ({ data: {}, isLoading: false }),
+    useQueryClient: () => ({
+      getQueryData: () => null,
+      invalidateQueries: () => {},
+    }),
+    useT: () => (key) => key,
+    window: {
+      clearInterval: () => {},
+      localStorage: {
+        getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+        setItem: (key, value) => storage.set(key, String(value)),
+      },
+      open: () => popupA,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      setInterval: (callback) => {
+        intervals.push(callback);
+        return intervals.length;
+      },
+    },
+  };
+  vm.runInNewContext(useExtensionsOauthSourceForTest(), context);
+  context.globalThis.__testExports.useOauthSetup(
+    { id: "slack" },
+    {
+      onConfigured: () => {
+        configuredCount += 1;
+      },
+    },
+  );
+
+  const variablesA = { secret: { provided: true }, popup: popupA };
+  const startA = mutationConfig.mutationFn(variablesA);
+  starts.shift()({
+    authorization_url: "https://slack.com/oauth/v2/authorize",
+    flow_id: "flow-a",
+  });
+  mutationConfig.onSuccess(await startA, variablesA);
+  intervals[0]();
+
+  const variablesB = { secret: { provided: true }, popup: popupB };
+  const startB = mutationConfig.mutationFn(variablesB);
+  starts.shift()({
+    authorization_url: "https://slack.com/oauth/v2/authorize",
+    flow_id: "flow-b",
+  });
+  mutationConfig.onSuccess(await startB, variablesB);
+
+  resolveFlowAStatus({ status: "completed" });
+  await flushAsyncWork();
+  assert.equal(configuredCount, 0, "flow A must not complete flow B's watcher");
+  assert.equal(popupB.closed, false, "flow A must not close flow B's popup");
+
+  intervals[1]();
+  await flushAsyncWork();
+  assert.equal(configuredCount, 1, "flow B can still complete normally");
+  assert.ok(
+    !stateUpdates.some(
+      (update) => update.index === 1 && typeof update.value === "string",
+    ),
+    "flow A must not stamp an error onto flow B",
+  );
+});
+
+test("useOauthSetup still times out when a matched failure signal cannot reach durable status", async () => {
+  const stateUpdates = [];
+  const intervals = [];
+  const storage = new Map();
+  let mutationConfig = null;
+  let stateIndex = 0;
+  let now = 0;
+  const popup = { closed: false, location: { href: "about:blank" } };
+  const context = {
+    Date: { now: () => now },
+    Error,
+    Promise,
+    React: {
+      useCallback: (fn) => fn,
+      useEffect: () => {},
+      useRef: (initial) => ({ current: initial }),
+      useState: (initial) => {
+        const index = stateIndex++;
+        return [
+          typeof initial === "function" ? initial() : initial,
+          (value) => stateUpdates.push({ index, value }),
+        ];
+      },
+    },
+    URL,
+    activateExtension: () => {},
+    approvePairingCode: () => {},
+    fetchExtensionRegistry: () => {},
+    fetchExtensionSetup: () => {},
+    fetchExtensions: () => {},
+    fetchOauthFlowStatus: () => Promise.reject(new Error("status unavailable")),
+    fetchPairingRequests: () => {},
+    gatewayStatus: () => {},
+    globalThis: {},
+    installExtension: () => {},
+    isChannelExtensionKind: () => false,
+    listConnectableChannels: () => {},
+    removeExtension: () => {},
+    startExtensionOauth: () => {},
+    submitExtensionSetup: () => {},
+    useMutation: (config) => {
+      mutationConfig = config;
+      return { isPending: false, mutate: () => {}, error: null };
+    },
+    useQuery: () => ({ data: {}, isLoading: false }),
+    useQueryClient: () => ({
+      getQueryData: () => null,
+      invalidateQueries: () => {},
+    }),
+    useT: () => (key) => key,
+    window: {
+      clearInterval: () => {},
+      localStorage: {
+        getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+        setItem: (key, value) => storage.set(key, String(value)),
+      },
+      open: () => popup,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      setInterval: (callback) => {
+        intervals.push(callback);
+        return intervals.length;
+      },
+    },
+  };
+  vm.runInNewContext(useExtensionsOauthSourceForTest(), context);
+  context.globalThis.__testExports.useOauthSetup({ id: "slack" });
+  mutationConfig.onSuccess(
+    {
+      res: {
+        authorization_url: "https://slack.com/oauth/v2/authorize",
+        flow_id: "flow-pending-cleanup",
+        callback_scope: { invocation_id: "invocation-pending-cleanup" },
+      },
+      popup,
+    },
+    {},
+  );
+  storage.set(
+    "ironclaw:product-auth:oauth-complete",
+    JSON.stringify({
+      type: "ironclaw:product-auth:oauth-complete",
+      status: "failed",
+      flowId: "flow-pending-cleanup",
+    }),
+  );
+
+  now = 10 * 60 * 1000 + 1;
+  intervals[0]();
+  await flushAsyncWork();
+
+  assert.ok(
+    stateUpdates.some((update) => update.index === 0 && update.value === false),
+    "the watcher must stop after its bounded timeout",
+  );
+  assert.ok(
+    stateUpdates.some(
+      (update) =>
+        update.index === 1 &&
+        typeof update.value === "string" &&
+        /timed out/i.test(update.value),
+    ),
+    "a persistent status outage must surface a retryable timeout",
   );
 });

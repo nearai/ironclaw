@@ -351,6 +351,7 @@ async fn running_counter_decrements_via_apply_validated_loop_exit_completed() {
 
     store
         .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            model_usage: None,
             run_id,
             runner_id,
             lease_token,
@@ -389,6 +390,7 @@ async fn running_counter_decrements_via_apply_validated_loop_exit_cancelled() {
     // which calls cancel_claimed_record (CancelRequested → Cancelled).
     store
         .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            model_usage: None,
             run_id,
             runner_id,
             lease_token,

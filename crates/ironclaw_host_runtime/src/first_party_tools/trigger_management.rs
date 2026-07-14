@@ -858,6 +858,12 @@ mod tests {
     #[test]
     fn trigger_create_description_teaches_task_only_prompt_and_host_owned_delivery() {
         assert!(
+            TRIGGER_CREATE_DESCRIPTION.contains(
+                "If delivery_target_id is set, never put a send, post, or deliver-results step"
+            ),
+            "trigger_create description must front-load the no-duplicate-delivery rule: {TRIGGER_CREATE_DESCRIPTION}"
+        );
+        assert!(
             TRIGGER_CREATE_DESCRIPTION.contains("delivered automatically"),
             "trigger_create description must state host-owned result delivery: {TRIGGER_CREATE_DESCRIPTION}"
         );

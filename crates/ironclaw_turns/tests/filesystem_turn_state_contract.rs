@@ -2572,6 +2572,7 @@ async fn filesystem_turn_state_row_store_validated_loop_exit_completion_remains_
         .unwrap();
     store
         .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            model_usage: None,
             run_id: first_run_id,
             runner_id: first_runner_id,
             lease_token: first_lease_token,
@@ -2603,6 +2604,7 @@ async fn filesystem_turn_state_row_store_validated_loop_exit_completion_remains_
         .unwrap();
     store
         .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            model_usage: None,
             run_id: second_run_id,
             runner_id: second_runner_id,
             lease_token: second_lease_token,

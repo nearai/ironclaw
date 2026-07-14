@@ -487,6 +487,12 @@ pub struct TurnRunState {
     pub resolved_run_profile_version: RunProfileVersion,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_model_route: Option<LoopModelRouteSnapshot>,
+    /// Cumulative provider-reported token usage for this run's model calls,
+    /// captured at loop exit. `None` for runs that reported no usage (replay
+    /// stubs) or that pre-date usage capture. Read by the OpenAI-compatible
+    /// Responses/Chat surfaces to report `usage` and cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_usage: Option<crate::run_profile::LoopModelUsage>,
     pub received_at: TurnTimestamp,
     pub checkpoint_id: Option<TurnCheckpointId>,
     pub gate_ref: Option<GateRef>,

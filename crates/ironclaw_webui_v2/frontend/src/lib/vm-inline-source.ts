@@ -2,7 +2,7 @@
 // stripped, so it can be prepended into a `vm.runInNewContext` script alongside
 // another module that imports from it.
 //
-// The hook test harnesses (`useChat-send.test.mjs`, `useExtensions-*.test.mjs`)
+// The hook test harnesses (`useChat-send.test.ts`, `useExtensions-*.test.ts`)
 // load a hook's source, strip its imports, and run it in a fresh vm context with
 // dependencies injected as globals. When a hook imports helpers that must be
 // *compiled inside* the vm — window-dependent primitives (e.g. `openAuthPopup`)

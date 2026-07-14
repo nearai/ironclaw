@@ -318,6 +318,15 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Harness-port-seam Change 4: same as `.with_builtin_http_tools()` plus a
+    /// confirmed `/host` mount grant, so `wrap_local_dev_surface_disclosure`'s
+    /// scoped-roots note is observable on `read_file`'s captured tool
+    /// definition (the layer is disabled without a confirmed host-home mount).
+    pub fn with_confirmed_host_mount(mut self) -> Self {
+        self.capability = RebornCapabilityBackend::BuiltinHttpToolsConfirmedHostMount;
+        self
+    }
+
     /// Opt-in to real shell execution for this harness. By default the
     /// `BuiltinHttpTools` backend injects an inert `RecordingProcessPort` so that
     /// `builtin.shell` turns record the command without spawning any OS process.
@@ -1805,6 +1814,11 @@ pub(crate) fn apply_hermetic_env() {
             std::env::set_var("IRONCLAW_DISABLE_OS_KEYCHAIN", "1");
             std::env::set_var("TZ", "UTC");
             std::env::set_var("LLM_MAX_RETRIES", "0");
+            // Loop-level counterpart of LLM_MAX_RETRIES=0: production rides
+            // out provider outages for minutes (deep availability retries with
+            // long backoff), which would stall any scenario that deliberately
+            // scripts a model failure. One attempt keeps failure paths fast.
+            std::env::set_var("IRONCLAW_REBORN_MODEL_AVAILABILITY_RETRY_ATTEMPTS", "1");
             std::env::remove_var("NEARAI_CHEAP_MODEL");
             std::env::remove_var("NEARAI_FALLBACK_MODEL");
             std::env::remove_var("LLM_CHEAP_MODEL");

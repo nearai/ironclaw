@@ -1450,6 +1450,8 @@ async fn tool_response_to_host(
             .with_usage(LoopModelUsage {
                 input_tokens: response.input_tokens,
                 output_tokens: response.output_tokens,
+                cache_read_input_tokens: response.cache_read_input_tokens,
+                cache_creation_input_tokens: response.cache_creation_input_tokens,
             }));
         }
         let advertised_tool_names = capabilities
@@ -1533,6 +1535,8 @@ async fn tool_response_to_host(
         .with_usage(LoopModelUsage {
             input_tokens: response.input_tokens,
             output_tokens: response.output_tokens,
+            cache_read_input_tokens: response.cache_read_input_tokens,
+            cache_creation_input_tokens: response.cache_creation_input_tokens,
         }));
     }
 
@@ -1556,6 +1560,8 @@ async fn tool_response_to_host(
             .with_usage(LoopModelUsage {
                 input_tokens: response.input_tokens,
                 output_tokens: response.output_tokens,
+                cache_read_input_tokens: response.cache_read_input_tokens,
+                cache_creation_input_tokens: response.cache_creation_input_tokens,
             }))
         }
         FinishReason::Length => Err(HostManagedModelError::safe(
@@ -1874,6 +1880,8 @@ fn response_to_host_reply(
     let usage = LoopModelUsage {
         input_tokens: response.input_tokens,
         output_tokens: response.output_tokens,
+        cache_read_input_tokens: response.cache_read_input_tokens,
+        cache_creation_input_tokens: response.cache_creation_input_tokens,
     };
     match response.finish_reason {
         FinishReason::Stop => {
@@ -2362,6 +2370,18 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
     // (api_key=…, sk-…, access_token=…) before the text is stored; the safe
     // summary stays a fixed host-authored category string.
     let provider_detail = error.to_string();
+    if is_unconfigured_provider_error(&error) {
+        // No provider is configured at all: a configuration fault, not an
+        // availability fault. CredentialUnavailable is unclassified in the
+        // loop's recovery mapping, so the run fails fast with the setup hint
+        // on the detail channel instead of riding the multi-minute
+        // availability backoff that exists for real provider outages.
+        return HostManagedModelError::safe(
+            HostManagedModelErrorKind::CredentialUnavailable,
+            "no model provider is configured",
+        )
+        .safe_with_detail(provider_detail);
+    }
     if is_credit_exhaustion_error(&error) {
         return HostManagedModelError::safe(
             HostManagedModelErrorKind::CredentialUnavailable,
@@ -2391,6 +2411,14 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
         ),
     }
     .safe_with_detail(provider_detail)
+}
+
+fn is_unconfigured_provider_error(error: &LlmError) -> bool {
+    matches!(
+        error,
+        LlmError::RequestFailed { provider, .. }
+            if provider == ironclaw_llm::UNCONFIGURED_PROVIDER_ID
+    )
 }
 
 fn is_credit_exhaustion_error(error: &LlmError) -> bool {
@@ -2495,6 +2523,41 @@ mod tests {
             "backticked known-namespace capability must still fire"
         );
         assert_eq!(guard.unwrap().capability_id.as_str(), "builtin.echo");
+    }
+
+    #[test]
+    fn unconfigured_provider_error_maps_to_credential_unavailable_not_availability() {
+        // A placeholder "no LLM configured" failure must not be classified as
+        // an availability-class error: availability errors ride a deep retry
+        // backoff (~minutes), while an unconfigured provider can never
+        // recover by retrying. CredentialUnavailable fails the run fast.
+        let error = LlmError::RequestFailed {
+            provider: ironclaw_llm::UNCONFIGURED_PROVIDER_ID.to_string(),
+            reason: "no LLM provider is configured yet; choose one in Settings → Inference"
+                .to_string(),
+        };
+        assert!(is_unconfigured_provider_error(&error));
+
+        let mapped = map_provider_error(error);
+        assert_eq!(
+            mapped.kind,
+            HostManagedModelErrorKind::CredentialUnavailable
+        );
+        let detail = mapped.detail.expect("setup hint travels on detail");
+        assert!(detail.contains("no LLM provider is configured"));
+    }
+
+    #[test]
+    fn unconfigured_provider_detection_requires_the_placeholder_provider_id() {
+        // A real provider whose *message* mentions configuration must keep
+        // availability-class mapping; only the placeholder provider id
+        // signals the config fault.
+        let err = request_failed("backend not configured correctly");
+        assert!(!is_unconfigured_provider_error(&err));
+        assert_eq!(
+            map_provider_error(err).kind,
+            HostManagedModelErrorKind::Unavailable
+        );
     }
 
     #[test]

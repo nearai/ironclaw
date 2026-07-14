@@ -314,8 +314,20 @@ impl RebornBinaryE2EHarness {
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
     ) -> HarnessResult<Self> {
+        // The production capability port resolves the dispatch scope
+        // owner-first from the turn's real binding subject (this harness
+        // submits as the fixed `"alice"` actor, not the profile's default
+        // `"reborn-e2e-builtin-user"`), so the disabled global auto-approve
+        // setting must be seeded under that SAME resolved subject or the
+        // gate never raises -- mirrors
+        // `with_host_runtime_extension_lifecycle_capabilities`.
+        let subject_user = Self::resolve_default_binding_subject_user(conversation_id).await?;
         let host_runtime = Arc::new(
-            crate::reborn_support::harness::profiles::file::file_tools_requiring_approval().await?,
+            crate::reborn_support::harness::profiles::file::file_tools_requiring_approval_profile_for_user(
+                subject_user.as_str(),
+            )?
+            .build()
+            .await?,
         );
         Self::with_model_gateway_capability_mode(
             conversation_id,
@@ -789,6 +801,12 @@ impl RebornBinaryE2EHarness {
             // process. Keep each harness deterministic; scheduler worker-pool
             // concurrency is covered by lower-level runtime tests.
             worker_count: Some(std::num::NonZeroUsize::MIN),
+            // Scripted replay gateways fail deliberately (exhausted steps,
+            // mismatched requests) and must reach Failed in seconds; the
+            // production availability budget would ride those errors through
+            // minutes of backoff. Mirrors the integration group harness's
+            // IRONCLAW_REBORN_MODEL_AVAILABILITY_RETRY_ATTEMPTS=1 pin.
+            planned_model_availability_retry_attempts: std::num::NonZeroU32::new(1),
             ..DefaultPlannedRuntimeConfig::default()
         };
         if exposes_spawn_subagent {

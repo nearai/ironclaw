@@ -15,6 +15,27 @@ use ironclaw_host_api::{HostPortCatalog, SecretHandle};
 
 use super::*;
 
+#[test]
+fn persisted_removal_cleanup_metadata_rejects_invalid_identifiers() {
+    for (adapter_id, channel) in [("", "slack"), ("slack.connection", "bad channel")] {
+        let wire = serde_json::json!({
+            "manifests": [{
+                "raw_toml": "",
+                "source": "host_bundled",
+                "removal_cleanup_requirements": [{
+                    "adapter_id": adapter_id,
+                    "binding": { "kind": "channel_connection", "channel": channel }
+                }]
+            }],
+            "installations": []
+        });
+        assert!(
+            serde_json::from_value::<WireState>(wire).is_err(),
+            "invalid durable cleanup metadata must fail closed"
+        );
+    }
+}
+
 #[tokio::test]
 async fn load_at_treats_not_found_as_empty_state() {
     let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());

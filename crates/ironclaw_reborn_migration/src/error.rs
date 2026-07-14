@@ -20,6 +20,9 @@ pub enum MigrationError {
     #[error("failed to write Reborn state ({domain}): {reason}")]
     WriteTarget { domain: String, reason: String },
 
+    #[error("failed to read Reborn state ({domain}): {reason}")]
+    ReadTarget { domain: String, reason: String },
+
     #[error("secrets master key required to migrate secrets but none was provided")]
     MissingSecretKey,
 

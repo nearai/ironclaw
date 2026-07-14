@@ -307,6 +307,7 @@ struct RunRecord {
     status: RunStatusCell,
     profile: TurnRunProfile,
     resolved_model_route: Option<crate::run_profile::LoopModelRouteSnapshot>,
+    model_usage: Option<crate::run_profile::LoopModelUsage>,
     accepted_message_ref: AcceptedMessageRef,
     source_binding_ref: SourceBindingRef,
     reply_target_binding_ref: ReplyTargetBindingRef,
@@ -1184,6 +1185,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
             status: RunStatusCell::new(TurnStatus::Queued),
             profile: profile.clone(),
             resolved_model_route: None,
+            model_usage: None,
             accepted_message_ref: request.accepted_message_ref.clone(),
             source_binding_ref: request.source_binding_ref.clone(),
             reply_target_binding_ref: request.reply_target_binding_ref.clone(),
@@ -1632,6 +1634,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
             status: RunStatusCell::new(TurnStatus::Queued),
             profile: profile.clone(),
             resolved_model_route: None,
+            model_usage: None,
             accepted_message_ref: request.accepted_message_ref.clone(),
             source_binding_ref: request.source_binding_ref.clone(),
             reply_target_binding_ref: request.reply_target_binding_ref.clone(),
@@ -2133,6 +2136,7 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
                 request.runner_id,
                 request.lease_token,
                 request.mapping,
+                request.model_usage,
             )
         };
         // A validated loop exit can either park a run on a gate or terminate one
@@ -2197,6 +2201,7 @@ impl Inner {
                     status: RunStatusCell::new(run.status),
                     profile: run.profile,
                     resolved_model_route: run.resolved_model_route,
+                    model_usage: run.model_usage,
                     accepted_message_ref: run.accepted_message_ref,
                     source_binding_ref: run.source_binding_ref,
                     reply_target_binding_ref: run.reply_target_binding_ref,
@@ -2925,6 +2930,7 @@ impl Inner {
             status: RunStatusCell::new(TurnStatus::Queued),
             profile,
             resolved_model_route: None,
+            model_usage: None,
             accepted_message_ref,
             source_binding_ref: request.source_binding_ref.clone(),
             reply_target_binding_ref: request.reply_target_binding_ref.clone(),
@@ -3146,14 +3152,23 @@ impl Inner {
         runner_id: crate::TurnRunnerId,
         lease_token: crate::TurnLeaseToken,
         mapping: LoopExitMapping,
+        model_usage: Option<crate::run_profile::LoopModelUsage>,
     ) -> Result<TurnRunState, TurnError> {
-        let record = self.take_record(run_id)?;
+        let mut record = self.take_record(run_id)?;
         let result = (|| {
             if let Err(error) = ensure_active_lease(&record, runner_id, lease_token, Utc::now()) {
                 return AppliedLoopTransition::Rejected {
                     record: Box::new(record),
                     error,
                 };
+            }
+            // The loop reports its cumulative per-run usage at every exit (the
+            // execution state carries the running total across block/resume
+            // legs), so replace rather than accumulate — a block→resume→complete
+            // sequence would otherwise double-count the pre-block legs. A run
+            // that reported no usage leaves the prior total intact.
+            if let Some(usage) = model_usage {
+                record.model_usage = Some(usage);
             }
             match mapping {
                 LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Completed) => {
@@ -3739,6 +3754,7 @@ impl RunRecord {
             status: self.status.get(),
             profile: self.profile.clone(),
             resolved_model_route: self.resolved_model_route.clone(),
+            model_usage: self.model_usage,
             checkpoint_id: self.checkpoint_id,
             gate_ref: self.gate_ref.clone(),
             blocked_activity_id: self.blocked_activity_id,
@@ -3772,6 +3788,7 @@ impl RunRecord {
             resolved_run_profile_id: self.profile.id.clone(),
             resolved_run_profile_version: self.profile.version,
             resolved_model_route: self.resolved_model_route.clone(),
+            model_usage: self.model_usage,
             received_at: self.received_at,
             checkpoint_id: self.checkpoint_id,
             gate_ref: self.gate_ref.clone(),

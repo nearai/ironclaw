@@ -33,7 +33,7 @@ activation:
   tags:
     - "development"
     - "coding"
-  max_context_tokens: 1500
+  max_context_tokens: 1900
 ---
 
 # Coding Best Practices
@@ -60,3 +60,13 @@ activation:
 - Preserve existing code style and conventions. Match the indentation, naming, and patterns of surrounding code.
 - Test after changes when test infrastructure exists. Use `shell` to run the project's test command.
 - Don't add error handling, fallbacks, or validation for scenarios that can't happen. Trust internal code and framework guarantees.
+
+## Verify Before You Finish
+
+A fix is not done when the code looks right — it is done when you have watched it work and watched everything around it keep working.
+
+- **Reproduce first.** Before changing code, reproduce the reported problem (a failing test, a minimal script, a command) and confirm it fails the way the issue describes. If you can't reproduce it, say so instead of fixing blind.
+- **Re-run the reproduction after the fix** and confirm the behavior actually changed.
+- **Run the existing tests for every file you modified** — the sibling/module test suite, not just your reproduction. Fixes that hardcode the new behavior often break the old one (e.g. forcing a flag unconditionally when the correct fix is conditional on context).
+- **A test you broke is your bug.** If a previously-passing test fails after your change, the fix is wrong or too broad — narrow it until both the new and old behavior pass. Never rationalize a newly-failing test as "unrelated" without proving it fails before your change too.
+- **Re-read the final diff before finishing.** Every hunk must be necessary for the fix; revert stray edits, leftover debug output, and drive-by "improvements". Delete any reproduction scripts you created outside the repo's test layout.

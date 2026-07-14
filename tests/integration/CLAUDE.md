@@ -117,11 +117,12 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
 - `doubles/` — one file per production-port test double substituted into the
   harness (`RecordingTestCapabilityPort`, `RecordingHostRuntime`,
   `RecordingRuntimeHttpEgress`, `RecordingNetworkHttpEgress`,
-  `RecordingApprovalRequestStore`, `RecordingCapabilityResultWriter`,
+  `RecordingCapabilityResultWriter`, `UnavailableProjectService`,
   `GithubHarnessAuthorizer`, `StaticSecretStore`,
   `StaticCapabilitySurfaceProfileResolver`,
   `FixedRuntimeCredentialAccountResolver`, `EmptyIdentityContextSource`,
   `HarnessCapabilityPortFactory`, `HostRuntimeHarnessCapabilityPortFactory`,
+  `RecordingApprovalRequestStore`,
   `ParkingCapabilityGate`/`ParkingHostRuntime` — the tool-path analog of
   `ParkingModelGate`/`ParkingLlm`; parks a `HostRuntime` capability dispatch
   until released, used by `lease_wedge.rs`), re-exported from

@@ -1,10 +1,11 @@
+// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
 
 function authOauthCardSourceForTest() {
-  const source = readFileSync(new URL("./auth-oauth-card.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("./auth-oauth-card.tsx", import.meta.url), "utf8");
   const lines = [];
   let skippingImport = false;
   for (const line of source.split("\n")) {

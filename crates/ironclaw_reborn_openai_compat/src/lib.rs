@@ -16,6 +16,7 @@ mod chat;
 mod chat_workflow;
 #[cfg(feature = "openai-compat-beta")]
 mod content_parts;
+mod cost;
 mod descriptors;
 mod error;
 #[cfg(feature = "openai-compat-beta")]
@@ -49,7 +50,7 @@ pub use chat::{
     OpenAiChatCompletionResponse, OpenAiChatDelta, OpenAiChatFinishReason, OpenAiChatFunction,
     OpenAiChatMessage, OpenAiChatMessageRole, OpenAiChatStreamChoice, OpenAiChatTool,
     OpenAiChatToolCall, OpenAiChatToolCallDelta, OpenAiChatToolCallFunction,
-    OpenAiChatToolCallFunctionDelta, OpenAiChatToolKind, OpenAiUsage,
+    OpenAiChatToolCallFunctionDelta, OpenAiChatToolKind, OpenAiPromptTokensDetails, OpenAiUsage,
 };
 #[cfg(feature = "openai-compat-beta")]
 pub use chat_workflow::{
@@ -58,6 +59,7 @@ pub use chat_workflow::{
     OpenAiChatCompletionsWorkflow, OpenAiChatModelOnlyTools, OpenAiCompatAuthenticatedCaller,
     OpenAiCompatInboundAttachmentSubmit,
 };
+pub use cost::OpenAiCompatCost;
 pub use descriptors::{
     OPENAI_COMPAT_PATTERN_CHAT_COMPLETIONS, OPENAI_COMPAT_PATTERN_MODELS_API_LIST,
     OPENAI_COMPAT_PATTERN_MODELS_LIST, OPENAI_COMPAT_PATTERN_RESPONSES_API_CREATE,
@@ -109,10 +111,10 @@ pub use refs_storage::RebornLibSqlOpenAiCompatRefStore;
 #[cfg(feature = "postgres")]
 pub use refs_storage::RebornPostgresOpenAiCompatRefStore;
 pub use responses::{
-    OpenAiResponseErrorObject, OpenAiResponseObject, OpenAiResponseOutputItem,
-    OpenAiResponseOutputItemStatus, OpenAiResponseStatus, OpenAiResponseUsage,
-    OpenAiResponsesCreateRequest, OpenAiResponsesInput, OpenAiResponsesInputItem,
-    OpenAiResponsesMessageRole,
+    OpenAiResponseErrorObject, OpenAiResponseInputTokensDetails, OpenAiResponseObject,
+    OpenAiResponseOutputItem, OpenAiResponseOutputItemStatus, OpenAiResponseStatus,
+    OpenAiResponseUsage, OpenAiResponsesCreateRequest, OpenAiResponsesInput,
+    OpenAiResponsesInputItem, OpenAiResponsesMessageRole,
 };
 #[cfg(feature = "openai-compat-beta")]
 pub use responses_workflow::{

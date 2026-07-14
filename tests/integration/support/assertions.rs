@@ -329,6 +329,62 @@ impl RebornIntegrationHarness {
         Ok(())
     }
 
+    /// Harness-port-seam Change 4: assert the LATEST captured `tools` argument
+    /// carries a definition named `name` whose `description` contains
+    /// `needle` — pins `wrap_local_dev_surface_disclosure`'s scoped-roots note
+    /// mutation (`LocalDevSurfaceDisclosure::apply_to_surface_fields`), which
+    /// mutates `ProviderToolDefinition::description`/`parameters`, not tool
+    /// presence/absence.
+    pub async fn assert_model_tool_description_contains(
+        &self,
+        name: &str,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        let definitions = self.scripted_llm.captured_tool_definitions();
+        let Some(latest) = definitions.last() else {
+            return Err("no tool definitions captured for any request".into());
+        };
+        let Some(definition) = latest.iter().find(|definition| definition.name == name) else {
+            let seen: Vec<&str> = latest.iter().map(|d| d.name.as_str()).collect();
+            return Err(format!("no captured tool definition named {name:?}; saw {seen:?}").into());
+        };
+        if !definition.description.contains(needle) {
+            return Err(format!(
+                "tool {name:?} description did not contain {needle:?}: {:?}",
+                definition.description
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    /// Inverse of [`assert_model_tool_description_contains`]: the definition
+    /// exists but its description does NOT contain `needle` — the negative
+    /// control proving the note is conditional on a confirmed host mount,
+    /// not always appended.
+    pub async fn assert_model_tool_description_excludes(
+        &self,
+        name: &str,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        let definitions = self.scripted_llm.captured_tool_definitions();
+        let Some(latest) = definitions.last() else {
+            return Err("no tool definitions captured for any request".into());
+        };
+        let Some(definition) = latest.iter().find(|definition| definition.name == name) else {
+            let seen: Vec<&str> = latest.iter().map(|d| d.name.as_str()).collect();
+            return Err(format!("no captured tool definition named {name:?}; saw {seen:?}").into());
+        };
+        if definition.description.contains(needle) {
+            return Err(format!(
+                "tool {name:?} description unexpectedly contained {needle:?}: {:?}",
+                definition.description
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     /// Collects the persisted `safe_summary` field of every `ToolResultReference`
     /// message on this thread's FULL history (not baseline-sliced — safe only
     /// for single-turn harnesses today). Shared collector for

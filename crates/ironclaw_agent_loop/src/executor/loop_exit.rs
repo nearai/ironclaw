@@ -132,6 +132,7 @@ pub(super) async fn try_final_answer_nudge(
                         Err(error) => return nudge_bail("transcript", error),
                     };
                     state.recent_output_token_counts.push(output_tokens);
+                    state.accumulate_model_usage(usage);
                     Ok(Some(reply_ref))
                 }
                 // Admission rejected it (empty / artifact) — give up; the caller

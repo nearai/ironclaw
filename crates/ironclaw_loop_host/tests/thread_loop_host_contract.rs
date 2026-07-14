@@ -2598,6 +2598,7 @@ async fn transcript_port_degrades_control_char_result_reference_preview_without_
             preview: Some("bad\u{0}null and \u{7}bell".to_string()),
             total_bytes: Some(16),
             next_offset: None,
+            item_count: None,
         },
         artifacts: Vec::new(),
         recovery: None,
@@ -2641,6 +2642,77 @@ async fn transcript_port_degrades_control_char_result_reference_preview_without_
     assert!(
         observation["detail"].get("preview").is_none(),
         "the unsafe preview must be stripped, not merely truncated"
+    );
+}
+
+/// A `ResultReference` observation carrying `item_count` (truncated
+/// top-level-array preview) must persist intact through the real
+/// `append_capability_result_ref` gate — a persistence-side allowlist that
+/// rejects the field silently drops the WHOLE observation, not just the
+/// count.
+#[tokio::test]
+async fn transcript_port_persists_result_reference_item_count() {
+    let fixture = ThreadFixture::new().await;
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    );
+    let result_ref = LoopResultRef::new("result:array-item-count-tool").unwrap();
+    let observation = ModelVisibleToolObservation {
+        schema_version: 1,
+        status: ToolObservationStatus::Success,
+        summary: "Tool completed; preview truncated. Full result is a JSON array of 600 items."
+            .to_string(),
+        detail: ToolObservationDetail::ResultReference {
+            result_ref: result_ref.as_str().to_string(),
+            byte_len: 8_192,
+            preview: Some("[\"item-0000\",\"item-0001\"".to_string()),
+            total_bytes: Some(8_192),
+            next_offset: Some(2_048),
+            item_count: Some(600),
+        },
+        artifacts: Vec::new(),
+        recovery: None,
+        trust: ObservationTrust::UntrustedToolOutput,
+    };
+
+    adapter
+        .append_capability_result_ref(AppendCapabilityResultRef {
+            result_ref: result_ref.clone(),
+            safe_summary: "tool completed".to_string(),
+            provider_call: None,
+            model_observation: Some(observation),
+        })
+        .await
+        .expect("item_count observation should not fail append");
+
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    let record = history
+        .messages
+        .iter()
+        .find(|message| message.tool_result_ref.as_deref() == Some(result_ref.as_str()))
+        .expect("tool result reference message");
+    let envelope = ToolResultReferenceEnvelope::from_json_str(record.content.as_deref().unwrap())
+        .expect("valid tool result reference envelope");
+
+    let observation = envelope
+        .model_observation
+        .expect("item_count observation is retained, not silently dropped");
+    assert_eq!(
+        observation["detail"]["item_count"], 600,
+        "the structured array count must survive persistence"
+    );
+    assert_eq!(
+        observation["detail"]["next_offset"], 2_048,
+        "continuation metadata must survive alongside item_count"
     );
 }
 

@@ -72,7 +72,7 @@ async fn no_reply_completion_requires_profile_permission() {
         reply_message_refs: vec![],
         result_refs: vec![],
         final_checkpoint_id: None,
-        usage_summary_ref: None,
+        model_usage: None,
         exit_id: test_exit_id(),
     });
 
@@ -98,7 +98,7 @@ async fn result_only_completion_uses_verified_result_refs_without_no_reply_permi
         reply_message_refs: vec![],
         result_refs: vec![LoopResultRef::new("result:tool-output").expect("valid")],
         final_checkpoint_id: None,
-        usage_summary_ref: None,
+        model_usage: None,
         exit_id: test_exit_id(),
     });
 
@@ -320,7 +320,7 @@ async fn loop_exit_events_hide_raw_diagnostics() {
     let exit = LoopExit::Failed(LoopFailed {
         reason_kind: LoopFailureKind::ModelError,
         checkpoint_id: None,
-        usage_summary_ref: None,
+        model_usage: None,
         diagnostic_ref: None,
         exit_id: test_exit_id(),
         explanation_message_refs: Vec::new(),
@@ -1352,7 +1352,7 @@ async fn thread_checkpoint_evidence_fails_closed_for_failure_evidence() {
     let failed = LoopFailed {
         reason_kind: LoopFailureKind::ModelError,
         checkpoint_id: None,
-        usage_summary_ref: None,
+        model_usage: None,
         diagnostic_ref: None,
         exit_id: test_exit_id(),
         explanation_message_refs: Vec::new(),
@@ -1413,7 +1413,7 @@ async fn thread_checkpoint_evidence_verifies_failure_from_final_checkpoint_state
     let failed = LoopFailed {
         reason_kind: LoopFailureKind::ModelError,
         checkpoint_id: Some(checkpoint.checkpoint_id),
-        usage_summary_ref: None,
+        model_usage: None,
         diagnostic_ref: None,
         exit_id: test_exit_id(),
         explanation_message_refs: Vec::new(),
@@ -1505,7 +1505,7 @@ async fn thread_checkpoint_evidence_rejects_unverified_failure_explanation_ref()
     let failed = LoopFailed {
         reason_kind: LoopFailureKind::ModelError,
         checkpoint_id: Some(checkpoint.checkpoint_id),
-        usage_summary_ref: None,
+        model_usage: None,
         diagnostic_ref: None,
         exit_id: test_exit_id(),
         explanation_message_refs: vec![
@@ -1571,7 +1571,7 @@ async fn loop_exit_applier_accepts_thread_checkpoint_failure_evidence() {
     let exit = LoopExit::Failed(LoopFailed {
         reason_kind: LoopFailureKind::ModelError,
         checkpoint_id: Some(checkpoint.checkpoint_id),
-        usage_summary_ref: None,
+        model_usage: None,
         diagnostic_ref: None,
         exit_id: test_exit_id(),
         explanation_message_refs: Vec::new(),
@@ -1657,7 +1657,7 @@ async fn loop_exit_applier_accepts_run_scoped_failure_checkpoint_ref_and_rejects
             LoopExit::Failed(LoopFailed {
                 reason_kind: LoopFailureKind::ModelError,
                 checkpoint_id: Some(accepted_checkpoint.checkpoint_id),
-                usage_summary_ref: None,
+                model_usage: None,
                 diagnostic_ref: None,
                 exit_id: test_exit_id(),
                 explanation_message_refs: Vec::new(),
@@ -1680,7 +1680,7 @@ async fn loop_exit_applier_accepts_run_scoped_failure_checkpoint_ref_and_rejects
             LoopExit::Failed(LoopFailed {
                 reason_kind: LoopFailureKind::ModelError,
                 checkpoint_id: Some(rejected_checkpoint.checkpoint_id),
-                usage_summary_ref: None,
+                model_usage: None,
                 diagnostic_ref: None,
                 exit_id: test_exit_id(),
                 explanation_message_refs: Vec::new(),
@@ -1739,7 +1739,7 @@ async fn thread_checkpoint_evidence_rejects_mismatched_failure_checkpoint_state(
     let failed = LoopFailed {
         reason_kind: LoopFailureKind::ModelError,
         checkpoint_id: Some(checkpoint.checkpoint_id),
-        usage_summary_ref: None,
+        model_usage: None,
         diagnostic_ref: None,
         exit_id: test_exit_id(),
         explanation_message_refs: Vec::new(),

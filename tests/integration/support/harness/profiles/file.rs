@@ -2,8 +2,10 @@
 //! / `write_only()`, sharing `file_tools_with_runtime_policy` as their
 //! internal tail. See `harness/options.rs` for the `ToolsProfile` pattern.
 
-use ironclaw_host_api::{CapabilityId, EffectKind, MountPermissions};
-use ironclaw_host_runtime::{READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID};
+use ironclaw_host_api::{CapabilityId, EffectKind, MountPermissions, UserId};
+use ironclaw_host_runtime::{
+    JSON_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
+};
 
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
 use super::super::{HarnessResult, HostRuntimeCapabilityHarness, workspace_mounts};
@@ -37,9 +39,28 @@ pub(crate) async fn file_tools() -> HarnessResult<HostRuntimeCapabilityHarness> 
 }
 
 pub(crate) fn file_tools_requiring_approval_profile() -> HarnessResult<ToolsProfile> {
+    file_tools_requiring_approval_profile_for_user("reborn-e2e-builtin-user")
+}
+
+/// Same profile as [`file_tools_requiring_approval_profile`], but disables
+/// global auto-approve under a caller-supplied `user_id` instead of the fixed
+/// test constant. The production capability port resolves the dispatch scope
+/// owner-first from the turn's real binding subject, not from this harness's
+/// `user_id` field alone -- a caller whose turn runs as a different actor
+/// (e.g. `RebornBinaryE2EHarness::with_host_runtime_file_capabilities_requiring_approval`,
+/// which submits as a fixed `"alice"` actor) must build under that SAME
+/// resolved subject, mirroring `extension_lifecycle_tools_profile_for_user`,
+/// or `disable_global_auto_approve_for_product_and_harness_users` disables
+/// the wrong `(tenant, user)` scope and global auto-approve's default-ON
+/// value silently lets the gate through.
+pub(crate) fn file_tools_requiring_approval_profile_for_user(
+    user_id: &str,
+) -> HarnessResult<ToolsProfile> {
     // Global auto-approve now defaults ON, so disable it explicitly to keep
     // this constructor's per-tool approval gate behavior.
-    Ok(file_tools_with_runtime_policy(None)?.with_auto_approve_default(false))
+    Ok(file_tools_with_runtime_policy(None)?
+        .with_user_id(UserId::new(user_id)?)
+        .with_auto_approve_default(false))
 }
 
 pub(crate) async fn file_tools_requiring_approval() -> HarnessResult<HostRuntimeCapabilityHarness> {
@@ -64,6 +85,13 @@ pub(crate) fn file_tools_with_durable_capability_io_profile() -> HarnessResult<T
     profile.capability_ids.push(CapabilityId::new(
         ironclaw_reborn_composition::test_support::RESULT_READ_CAPABILITY_ID,
     )?);
+    // `builtin.json` (`parse`) is the minimal granted capability whose output
+    // is a top-level JSON array, needed to drive the truncated-array
+    // `item_count` observation through this durable-io seam.
+    profile
+        .capability_ids
+        .push(CapabilityId::new(JSON_CAPABILITY_ID)?);
+    profile.effect_kinds.push(EffectKind::DispatchCapability);
     Ok(profile)
 }
 

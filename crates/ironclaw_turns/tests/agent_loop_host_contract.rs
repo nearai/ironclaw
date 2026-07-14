@@ -2295,6 +2295,7 @@ async fn loop_prompt_bundle_public_serialization_hides_raw_content() {
         resolved_run_profile_id: host.context.resolved_run_profile.profile_id.clone(),
         resolved_run_profile_version: host.context.resolved_run_profile.profile_version,
         resolved_model_route: None,
+        model_usage: None,
         received_at: Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap(),
         checkpoint_id: None,
         gate_ref: None,
@@ -2641,7 +2642,7 @@ impl AgentLoopDriver for ReplyDriver {
             reply_message_refs: vec![message_ref],
             result_refs: Vec::new(),
             final_checkpoint_id: None,
-            usage_summary_ref: None,
+            model_usage: None,
             exit_id: LoopExitId::new("exit:reply-driver").unwrap(),
         }))
     }
@@ -4029,6 +4030,7 @@ async fn turn_run_state_product_context_defaults_to_none_when_missing_from_json(
         resolved_run_profile_id: context.resolved_run_profile.profile_id.clone(),
         resolved_run_profile_version: context.resolved_run_profile.profile_version,
         resolved_model_route: None,
+        model_usage: None,
         received_at: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
         checkpoint_id: None,
         gate_ref: None,
@@ -4090,6 +4092,7 @@ async fn turn_run_state_resume_disposition_defaults_to_none_when_missing_from_js
         resolved_run_profile_id: context.resolved_run_profile.profile_id.clone(),
         resolved_run_profile_version: context.resolved_run_profile.profile_version,
         resolved_model_route: None,
+        model_usage: None,
         received_at: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
         checkpoint_id: None,
         gate_ref: None,
