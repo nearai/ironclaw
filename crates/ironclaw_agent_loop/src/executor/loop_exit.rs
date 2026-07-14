@@ -2,9 +2,9 @@ use async_trait::async_trait;
 use ironclaw_turns::{
     LoopExit, LoopFailureKind, LoopMessageRef,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, FinalizeAssistantMessage, LoopInlineMessage,
-        LoopInlineMessageBody, LoopInlineMessageRole, LoopModelCapabilityView, LoopModelRequest,
-        ParentLoopOutput,
+        AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, FinalizeAssistantMessage,
+        LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessageRole, LoopModelCapabilityView,
+        LoopModelRequest, ParentLoopOutput,
     },
 };
 
@@ -35,6 +35,39 @@ pub(super) const COMPLETION_NUDGE: &str = include_str!("../../prompts/completion
 /// loop for at least one more model call (plus any tool calls the model makes),
 /// so this bounds the extra work a stuck run can generate.
 pub(super) const COMPLETION_NUDGE_LIMIT: u32 = 2;
+
+/// Decide whether a stop should be converted into one more tools-capable
+/// completion-nudge iteration instead of terminating the run.
+///
+/// Gated by `SteeringPolicy.allow_driver_specific_nudges` (off in production
+/// unless the run profile opts in) and capped at [`COMPLETION_NUDGE_LIMIT`]
+/// nudges per run. A `NoProgressDetected` stop is already a failure terminal, so
+/// a tools-capable retry can only help; a `GracefulStop` is nudged only when the
+/// closing reply trailed off (the model announced a next step but never carried
+/// it out) — leaving genuinely complete replies untouched. Aborts are never
+/// nudged.
+pub(super) fn completion_nudge_should_fire(
+    host: &(dyn AgentLoopDriverHost + Send + Sync),
+    state: &LoopExecutionState,
+    kind: &StopKind,
+) -> bool {
+    if !host
+        .run_context()
+        .resolved_run_profile
+        .steering_policy
+        .allow_driver_specific_nudges
+    {
+        return false;
+    }
+    if state.completion_nudges_used >= COMPLETION_NUDGE_LIMIT {
+        return false;
+    }
+    match kind {
+        StopKind::NoProgressDetected => true,
+        StopKind::GracefulStop => state.last_reply_trailed_off,
+        StopKind::Aborted(_) => false,
+    }
+}
 
 /// Whether an admitted assistant reply "trailed off" without a real closing
 /// answer: empty after trimming, or ending in a colon (the model narrated a next

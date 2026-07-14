@@ -2406,6 +2406,84 @@ async fn completion_nudge_skipped_on_clean_reply() {
     );
 }
 
+/// `StopStage::decide` (used by canonical.rs's ResumeApproval/ResumeAuth/
+/// ResumeExternalTool/SkipModel paths) must never apply the completion nudge,
+/// even when the stop kind is unconditionally nudge-eligible
+/// (`NoProgressDetected`). Only `decide_with_completion_nudge` (the main
+/// per-iteration path) may nudge — this is the explicit contract that
+/// replaced the old implicit main-path-only behavior.
+#[tokio::test]
+async fn plain_decide_never_nudges_while_decide_with_completion_nudge_does() {
+    let host = MockHost::new(Vec::new()).with_driver_nudges_enabled();
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    // Pre-seed the typed no-progress escape threshold (default 3) so
+    // should_stop_after_observed_turn returns Stop{NoProgressDetected}
+    // deterministically without needing to drive a real capability batch.
+    state.stop_state.trailing_no_progress_results = 3;
+    let summary = TurnSummary::after_capability_batch(
+        Vec::new(),
+        CapabilityBatchTurnSummary {
+            invocation_count: 1,
+            terminate_hint_count: 0,
+            no_progress_count: 1,
+            observed_signatures: Vec::new(),
+            made_progress_signatures: Vec::new(),
+            no_change_signatures: Vec::new(),
+        },
+    );
+
+    let plain = StopStage
+        .decide(
+            ctx,
+            StopInput {
+                state: state.clone(),
+                summary: summary.clone(),
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("decide");
+    assert!(
+        matches!(
+            plain,
+            StopStep::Stop {
+                kind: StopKind::NoProgressDetected,
+                ..
+            }
+        ),
+        "plain decide must stop on NoProgressDetected without ever nudging"
+    );
+
+    let nudged = StopStage
+        .decide_with_completion_nudge(
+            ctx,
+            StopInput {
+                state,
+                summary,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("decide_with_completion_nudge");
+    match nudged {
+        StopStep::Continue { state, .. } => {
+            assert_eq!(
+                state.completion_nudges_used, 1,
+                "decide_with_completion_nudge must apply the nudge under the same conditions"
+            );
+        }
+        StopStep::Stop { .. } => {
+            panic!("expected decide_with_completion_nudge to nudge (Continue)")
+        }
+        StopStep::Exit(_) => panic!("expected Continue, got Exit"),
+    }
+}
+
 #[tokio::test]
 async fn no_progress_nudge_model_failure_falls_back_to_failed_exit() {
     // Gate ON but the nudge's OWN model call fails (non-cancel host error). The

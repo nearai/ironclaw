@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use ironclaw_turns::LoopExit;
+use tracing::debug;
 
 use crate::{
     state::LoopExecutionState,
@@ -8,7 +9,7 @@ use crate::{
 
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, PendingInputAck,
-    StageContext,
+    StageContext, loop_exit::completion_nudge_should_fire,
 };
 
 /// Stop-stage helper for callers that can observe and decide back-to-back.
@@ -144,6 +145,48 @@ impl StopStage {
                     pending_input_ack,
                 })
             }
+        }
+    }
+
+    /// `decide`, plus the tools-capable completion-nudge check. Only the main
+    /// per-iteration executor path calls this; the `ResumeApproval`/
+    /// `ResumeAuth`/`ResumeExternalTool`/`SkipModel` paths call plain
+    /// `decide` and never nudge — expressed here by which method canonical.rs
+    /// calls, not by a flag threaded through every caller.
+    pub(super) async fn decide_with_completion_nudge(
+        &self,
+        ctx: StageContext<'_>,
+        input: StopInput,
+    ) -> Result<StopStep, AgentLoopExecutorError> {
+        match self.decide(ctx, input).await? {
+            StopStep::Stop {
+                state: stop_state,
+                kind,
+                pending_input_ack,
+            } if completion_nudge_should_fire(ctx.host, &stop_state, &kind) => {
+                // Instead of terminating, re-enter the loop for one more
+                // iteration with the full tool surface and a completion-nudge
+                // directive, so the model can finish the task (e.g. write a
+                // required output file) before answering. Mirrors the
+                // drained-follow-up continue (defer the ack returned by
+                // stop.decide to the next iteration) rather than the
+                // terminal, tool-free final-answer nudge.
+                let mut stop_state = stop_state;
+                stop_state.completion_nudges_used += 1;
+                stop_state.completion_nudge_pending = true;
+                stop_state.last_reply_trailed_off = false;
+                debug!(
+                    iteration = stop_state.iteration,
+                    ?kind,
+                    completion_nudges_used = stop_state.completion_nudges_used,
+                    "agent loop issuing tools-capable completion nudge instead of stopping"
+                );
+                Ok(StopStep::Continue {
+                    state: stop_state,
+                    pending_input_ack,
+                })
+            }
+            other => Ok(other),
         }
     }
 }
