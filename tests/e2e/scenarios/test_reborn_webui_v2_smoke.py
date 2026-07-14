@@ -123,7 +123,7 @@ async def test_reborn_v2_text_turn_persists(reborn_v2_server):
 
 
 async def test_reborn_v2_ui_enter_submits_initial_and_follow_up_messages(
-    reborn_v2_page, reborn_v2_server
+    reborn_v2_page,
 ):
     """Enter submits both an initial message and a follow-up after success."""
     composer = reborn_v2_page.locator(SEL_V2["chat_composer"])
