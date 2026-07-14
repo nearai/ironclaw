@@ -22,10 +22,13 @@ import uuid
 
 import httpx
 import pytest
+from playwright.async_api import expect
 
 from helpers import REBORN_V2_AUTH_TOKEN
 from reborn_webui_harness import (
     reborn_bearer_headers,
+    reborn_v2_browser,  # noqa: F401 - imported fixture
+    reborn_v2_page,  # noqa: F401 - imported fixture
     reborn_v2_server,  # noqa: F401 - imported fixture
 )
 
@@ -130,6 +133,30 @@ async def test_get_user_detail(admin_client, test_user):
     user = r.json()["user"]
     assert user["user_id"] == test_user["id"]
     assert user["display_name"] == "E2E Test User"
+
+
+async def test_existing_user_detail_hides_unsupported_token_reissue(
+    reborn_v2_page, reborn_v2_server, test_user
+):
+    """Existing users expose only backend-supported actions in the admin UI."""
+    await reborn_v2_page.goto(
+        f"{reborn_v2_server}/v2/admin/users?token={REBORN_V2_AUTH_TOKEN}"
+    )
+    await reborn_v2_page.get_by_role(
+        "button", name="E2E Test User", exact=True
+    ).click()
+
+    await expect(
+        reborn_v2_page.get_by_role("heading", name="E2E Test User", exact=True)
+    ).to_be_visible(timeout=15000)
+    await expect(
+        reborn_v2_page.get_by_role("button", name="Create token", exact=True)
+    ).to_have_count(0)
+    await expect(
+        reborn_v2_page.get_by_text(
+            "Copy this now — it will not be shown again.", exact=True
+        )
+    ).to_have_count(0)
 
 
 async def test_update_user_profile(admin_client, test_user):
