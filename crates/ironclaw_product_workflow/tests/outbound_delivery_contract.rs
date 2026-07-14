@@ -544,7 +544,9 @@ async fn coordinator_require_direct_message_rejects_non_dm_target_without_egress
     assert!(
         matches!(
             error,
-            CoordinatedDeliveryError::Workflow(ProductWorkflowError::OutboundTargetNotDirectMessage)
+            CoordinatedDeliveryError::Workflow(
+                ProductWorkflowError::OutboundTargetNotDirectMessage
+            )
         ),
         "unexpected error: {error:?}"
     );

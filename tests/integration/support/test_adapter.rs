@@ -133,12 +133,11 @@ impl RebornTestIngress {
         thread_id_hint: Option<&str>,
         after_cursor: Option<ProjectionCursor>,
     ) -> Result<ProductInboundEnvelope, ProductAdapterError> {
-        let payload = ProductInboundPayload::SubscriptionRequest(
-            ProjectionSubscriptionPayload::new(
+        let payload =
+            ProductInboundPayload::SubscriptionRequest(ProjectionSubscriptionPayload::new(
                 thread_id_hint.map(|hint| hint.to_string()),
                 after_cursor,
-            )?,
-        );
+            )?);
         let parsed = Self::parsed_inbound(event_id, user_id, thread_id, payload)?;
         self.envelope_from_parsed(user_id, parsed)
     }
