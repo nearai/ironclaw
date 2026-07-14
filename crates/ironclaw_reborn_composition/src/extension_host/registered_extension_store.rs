@@ -608,9 +608,14 @@ fn minted_manifest_for_legacy(
     Ok((minted, manifest))
 }
 
-/// Copies every file under `source` to the same relative path under
-/// `destination` (descriptor trees are tiny: a manifest plus at most a few
-/// referenced docs/schemas).
+/// Copies every SIBLING ASSET file under `source` to the same relative path
+/// under `destination` (descriptor trees are tiny: a manifest plus at most a
+/// few referenced docs/schemas). `manifest.toml` at the top level is
+/// deliberately excluded: both callers write it themselves, last, with
+/// fully-rewritten/re-minted content, and rely on `destination_manifest`'s
+/// absence as a trustworthy one-shot completion sentinel — if this function
+/// copied it too, a later asset-file failure could leave a stale manifest
+/// behind that falsely signals "already migrated" on retry.
 async fn copy_tree<F>(
     fs: &F,
     source: &VirtualPath,
@@ -622,6 +627,9 @@ where
     let mut pending = vec![(source.clone(), destination.clone())];
     while let Some((source_dir, destination_dir)) = pending.pop() {
         for entry in fs.list_dir(&source_dir).await.map_err(map_transient)? {
+            if entry.file_type == FileType::File && entry.name == "manifest.toml" {
+                continue;
+            }
             let source_path = VirtualPath::new(format!("{}/{}", source_dir.as_str(), entry.name))
                 .map_err(map_binding_error)?;
             let destination_path =

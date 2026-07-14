@@ -32,7 +32,7 @@ use crate::extension_host::extension_lifecycle::{
     ActiveExtensionPublisher, RebornLocalExtensionManagementPort, restore_extension_lifecycle_state,
 };
 use crate::extension_host::registered_extension_store::{
-    migrate_legacy_owner_layout, resolve_registered_for_scope,
+    migrate_legacy_owner_layout, migrate_unminted_registered_ids, resolve_registered_for_scope,
 };
 use crate::extension_host::registered_test_support::{
     fresh_boot_fixture, minted_extension_id, mounted_local_filesystem, seed_registered_installation,
@@ -1183,5 +1183,226 @@ async fn legacy_owner_migration_skips_one_minting_failure_and_migrates_healthy_s
             .exists(),
         "the legacy owner directory must not be deleted while the broken sibling's descriptor \
          remains unmigrated inside it"
+    );
+}
+
+/// Wraps a real `LocalFilesystem`, injecting a non-`NotFound` `write_file`
+/// error for exactly one destination path — the counting-free counterpart of
+/// `FailListDirFilesystem` targeting `copy_tree`'s asset writes instead of a
+/// directory listing, to simulate a partial `copy_tree` failure.
+struct FailWriteFileFilesystem {
+    inner: LocalFilesystem,
+    fail_path: VirtualPath,
+}
+
+#[async_trait]
+impl RootFilesystem for FailWriteFileFilesystem {
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        self.inner.read_file(path).await
+    }
+
+    async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        if path == &self.fail_path {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: ironclaw_filesystem::FilesystemOperation::WriteFile,
+                reason: "injected transient backend failure".to_string(),
+            });
+        }
+        self.inner.write_file(path, bytes).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+}
+
+const COPY_TREE_MIGRATION_OWNER_USER_ID: &str = "a3333333-7fe5-474c-965a-67cb69df3d15";
+const COPY_TREE_MIGRATION_OLD_EXTENSION_ID: &str = "acme-mcp-unminted-copytree";
+const COPY_TREE_MIGRATION_MANIFEST_TOML: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "acme-mcp-unminted-copytree"
+name = "Acme Unminted Copytree MCP"
+version = "0.1.0"
+description = "Unminted registered MCP with a nested asset (copy_tree partial-failure fixture)"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "http://127.0.0.1:9/mcp-unminted-copytree"
+"#;
+
+/// #5970 review: `copy_tree` used to copy `manifest.toml` itself as an
+/// incidental side effect of its recursive walk, with no rollback on partial
+/// failure. If a later sibling asset file failed to copy, the destination
+/// `manifest.toml` (written first, since it sits at the top level and is
+/// visited before the nested asset directory) was left behind with STALE
+/// (pre-remint) content — corrupting `destination_manifest`'s role as a
+/// trustworthy one-shot completion sentinel in `migrate_registered_id`. A
+/// caller retrying later would see `fs.stat(&destination_manifest)` succeed,
+/// skip `copy_tree` entirely, and finish "migrating" onto an incomplete,
+/// wrongly-keyed destination tree while deleting the original — real data
+/// loss (more severe than `migrate_legacy_owner_dir`'s orphaned-but-intact
+/// consequence).
+///
+/// RED before the fix: assertion (b) below (`destination_manifest` absent
+/// after the failed attempt) failed, because `copy_tree` wrote it before
+/// reaching the nested asset file that fails.
+#[tokio::test]
+async fn migrate_registered_id_does_not_leave_stale_destination_manifest_on_partial_copy_failure()
+ {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage_root = dir.path().join("local-dev");
+    std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
+
+    let default_tenant =
+        TenantId::from_trusted(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string());
+    let owner = UserId::new(COPY_TREE_MIGRATION_OWNER_USER_ID).expect("valid owner id");
+
+    // Already tenant-scoped (not pre-tenant), so `migrate_legacy_owner_layout`
+    // never touches it — only the unminted-id path (`migrate_registered_id`)
+    // is exercised.
+    let old_dir = storage_root
+        .join("system/extensions/registered")
+        .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
+        .join(COPY_TREE_MIGRATION_OWNER_USER_ID)
+        .join(COPY_TREE_MIGRATION_OLD_EXTENSION_ID);
+    std::fs::create_dir_all(old_dir.join("schemas")).expect("old descriptor schemas dir");
+    std::fs::write(
+        old_dir.join("manifest.toml"),
+        COPY_TREE_MIGRATION_MANIFEST_TOML,
+    )
+    .expect("write old manifest");
+    std::fs::write(
+        old_dir.join("schemas").join("tool.input.json"),
+        "{\"type\":\"object\"}",
+    )
+    .expect("write old nested asset");
+
+    let installation_store: Arc<dyn ExtensionInstallationStore> =
+        Arc::new(InMemoryExtensionInstallationStore::default());
+    let (new_id, _) = seed_registered_installation(
+        &installation_store,
+        COPY_TREE_MIGRATION_MANIFEST_TOML,
+        &default_tenant,
+        &owner,
+        COPY_TREE_MIGRATION_OLD_EXTENSION_ID,
+        None,
+    )
+    .await;
+    let old_installation_id = ExtensionInstallationId::new(COPY_TREE_MIGRATION_OLD_EXTENSION_ID)
+        .expect("valid installation id");
+    let old_extension_id =
+        ExtensionId::new(COPY_TREE_MIGRATION_OLD_EXTENSION_ID).expect("valid extension id");
+
+    let destination_manifest = storage_root
+        .join("system/extensions/registered")
+        .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
+        .join(COPY_TREE_MIGRATION_OWNER_USER_ID)
+        .join(new_id.as_str())
+        .join("manifest.toml");
+    let destination_asset_virtual_path = VirtualPath::new(format!(
+        "/system/extensions/registered/{}/{COPY_TREE_MIGRATION_OWNER_USER_ID}/{}/schemas/tool.input.json",
+        ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID,
+        new_id.as_str()
+    ))
+    .expect("valid virtual path");
+
+    // ── First attempt: the sibling asset write fails partway through. ──────
+    let failing_filesystem = FailWriteFileFilesystem {
+        inner: mounted_local_filesystem(&storage_root),
+        fail_path: destination_asset_virtual_path,
+    };
+    migrate_unminted_registered_ids(&failing_filesystem, &installation_store)
+        .await
+        .expect("a per-record migration failure is skip-and-logged, never propagated");
+
+    assert!(
+        !destination_manifest.is_file(),
+        "(b) destination_manifest must never be written with stale content while the copy is \
+         incomplete (RED before the fix: copy_tree wrote manifest.toml before reaching the \
+         failing nested asset)"
+    );
+    assert!(
+        old_dir.join("manifest.toml").is_file(),
+        "(a) the original source manifest must survive an incomplete copy"
+    );
+    assert_eq!(
+        std::fs::read_to_string(old_dir.join("schemas").join("tool.input.json"))
+            .expect("read old nested asset"),
+        "{\"type\":\"object\"}",
+        "(a) the original source asset must be left byte-unchanged"
+    );
+    assert!(
+        installation_store
+            .get_installation(&old_installation_id)
+            .await
+            .expect("store read")
+            .is_some(),
+        "(a) the original installation row must survive an incomplete copy"
+    );
+    assert!(
+        installation_store
+            .get_manifest(&old_extension_id)
+            .await
+            .expect("store read")
+            .is_some(),
+        "(a) the original manifest record must survive an incomplete copy"
+    );
+
+    // ── Retry: same storage root, no injected failure. ──────────────────────
+    let healthy_filesystem = mounted_local_filesystem(&storage_root);
+    migrate_unminted_registered_ids(&healthy_filesystem, &installation_store)
+        .await
+        .expect("retry must succeed once the injected failure is gone");
+
+    assert!(
+        destination_manifest.is_file(),
+        "(c) retry must complete migration: destination_manifest now exists"
+    );
+    let migrated_toml =
+        std::fs::read_to_string(&destination_manifest).expect("read migrated manifest");
+    assert!(
+        migrated_toml.contains(new_id.as_str()),
+        "(c) the migrated manifest must carry the newly minted id, not stale old-id content"
+    );
+    assert_eq!(
+        std::fs::read_to_string(
+            storage_root
+                .join("system/extensions/registered")
+                .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
+                .join(COPY_TREE_MIGRATION_OWNER_USER_ID)
+                .join(new_id.as_str())
+                .join("schemas")
+                .join("tool.input.json")
+        )
+        .expect("read migrated nested asset"),
+        "{\"type\":\"object\"}",
+        "(c) the nested asset must be copied on the successful retry"
+    );
+    assert!(
+        !old_dir.exists(),
+        "(c) the original source directory must be removed once migration completes"
+    );
+    assert!(
+        installation_store
+            .get_installation(&old_installation_id)
+            .await
+            .expect("store read")
+            .is_none(),
+        "(c) the old installation row must be removed once migration completes"
     );
 }
