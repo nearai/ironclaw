@@ -796,7 +796,9 @@ fn chat_user_message_and_attachments(
         })
         .collect();
     let payload = UserMessagePayload::new(text, vec![], ProductTriggerReason::DirectChat)?
-        .with_requested_model(Some(request.model.clone()));
+        .with_requested_model(crate::model_validation::requested_model_hint(
+            &request.model,
+        ));
     Ok((payload, attachments))
 }
 
