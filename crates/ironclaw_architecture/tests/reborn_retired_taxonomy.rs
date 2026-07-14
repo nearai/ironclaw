@@ -12,8 +12,9 @@
 //! - `crates/ironclaw_reborn_migration/` reads v1 domain vocabulary by design;
 //! - the two one-time forward data migrations legitimately name the retired
 //!   identities they fold forward
-//!   (`extension_host/extension_installation_store.rs`,
-//!   `product_auth/durable/`);
+//!   (`extension_host/extension_installation_store.rs`, its adjacent test
+//!   module, `product_auth/durable/`, and the dedicated factory migration
+//!   integration module);
 //! - this test names every term on purpose.
 //!
 //! v1 (`src/`, root `tests/*.rs`) is out of scope: it is being strangled
@@ -94,7 +95,9 @@ const SANCTIONED_PATHS: &[&str] = &[
     "crates/ironclaw_gateway/",
     // One-time forward data migrations name what they fold forward.
     "extension_host/extension_installation_store.rs",
+    "extension_host/extension_installation_store/",
     "product_auth/durable/",
+    "tests/facade_factory/product_auth_migration.rs",
     // This gate names every term on purpose.
     "reborn_retired_taxonomy.rs",
 ];
