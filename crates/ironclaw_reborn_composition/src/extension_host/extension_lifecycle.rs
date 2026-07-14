@@ -2804,6 +2804,7 @@ mod tests {
         ExtensionRemovalCleanupContext, ExtensionRemovalCleanupRegistry,
         ExtensionRemovalCleanupRequirement,
     };
+    use crate::extension_host::registered_test_support::minted_extension_id;
     use async_trait::async_trait;
     use ironclaw_extensions::{
         ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,
@@ -2833,7 +2834,9 @@ mod tests {
     // Shared by earlier tests in this module (defined ahead of the
     // registered-lifecycle test slice below in file order) that also need
     // the owner-registered manifest fixture and scope-builder.
-    use registered_lifecycle_tests::{REGISTERED_ISOLATION_MANIFEST_TOML, resource_scope_for};
+    use registered_lifecycle_tests::{
+        REGISTERED_ISOLATION_URL, registered_isolation_manifest_toml, resource_scope_for,
+    };
 
     #[tokio::test]
     async fn lifecycle_owner_projections_reject_duplicate_extension_ids() {
@@ -4992,6 +4995,13 @@ output_schema_ref = "schemas/run.output.json"
         // tenant-match check.
         let foreign_tenant_scope = resource_scope_for("default", "owner-a");
         let extension_id = ExtensionId::new("acme-mcp-registered").expect("valid extension id");
+        // This test never reads through the filesystem registered-store
+        // overlay (the manifest read failure it injects short-circuits
+        // `remove_locked` before any resolution), so the id below need not
+        // be minted — it only has to be consistent across the store/
+        // lifecycle-registry seeds.
+        let registered_manifest_toml =
+            registered_isolation_manifest_toml(&extension_id, REGISTERED_ISOLATION_URL);
         let source = ManifestSource::UserRegistered {
             tenant_id: real_owner_scope.tenant_id.clone(),
             owner: real_owner_scope.user_id.clone(),
@@ -5001,7 +5011,7 @@ output_schema_ref = "schemas/run.output.json"
         failing_store
             .inner
             .upsert_manifest(fixture_manifest_record_with_source(
-                REGISTERED_ISOLATION_MANIFEST_TOML,
+                &registered_manifest_toml,
                 source.clone(),
                 None,
             ))
@@ -5034,20 +5044,14 @@ output_schema_ref = "schemas/run.output.json"
         // `remove_locked`'s ownership-scope check instead of failing
         // earlier on "extension is not installed" in the lifecycle package
         // lookup (`removed_extension_providers`).
-        let manifest = ExtensionManifest::parse(
-            REGISTERED_ISOLATION_MANIFEST_TOML,
-            source,
-            &HostPortCatalog::empty(),
-        )
-        .expect("registered manifest");
+        let manifest =
+            ExtensionManifest::parse(&registered_manifest_toml, source, &HostPortCatalog::empty())
+                .expect("registered manifest");
         let root =
             VirtualPath::new("/system/extensions/acme-mcp-registered").expect("extension root");
-        let package = ExtensionPackage::from_manifest_toml(
-            manifest,
-            root,
-            REGISTERED_ISOLATION_MANIFEST_TOML,
-        )
-        .expect("registered package");
+        let package =
+            ExtensionPackage::from_manifest_toml(manifest, root, &registered_manifest_toml)
+                .expect("registered package");
         let mut lifecycle_registry = ExtensionRegistry::new();
         lifecycle_registry
             .insert(package)
@@ -5634,10 +5638,19 @@ output_schema_ref = "schemas/run.output.json"
 
         let tenant = TenantId::new("default").expect("valid tenant");
         let owner = UserId::new("registered-owner").expect("valid user");
+        // Minted from creation (rather than a bare literal): this test pins
+        // hash-drift skip-and-preserve behavior specifically, not boot
+        // restore's separate unminted-id rekey migration, so the row/
+        // descriptor must already satisfy R1's minted-id gate or restore
+        // would rekey it out from under `registered_installation_id` before
+        // the hash check this test targets ever runs.
         let registered_extension_id =
-            ExtensionId::new("acme-mcp-registered").expect("valid extension id");
+            minted_extension_id(&tenant, &owner, REGISTERED_ISOLATION_URL);
         let registered_installation_id =
-            ExtensionInstallationId::new("acme-mcp-registered").expect("valid installation");
+            ExtensionInstallationId::new(registered_extension_id.as_str())
+                .expect("valid installation");
+        let registered_manifest_toml =
+            registered_isolation_manifest_toml(&registered_extension_id, REGISTERED_ISOLATION_URL);
         let source = ManifestSource::UserRegistered {
             tenant_id: tenant.clone(),
             owner: owner.clone(),
@@ -5646,20 +5659,19 @@ output_schema_ref = "schemas/run.output.json"
             .join("system/extensions/registered")
             .join(tenant.as_str())
             .join(owner.as_str())
-            .join("acme-mcp-registered");
+            .join(registered_extension_id.as_str());
         std::fs::create_dir_all(&descriptor_dir).expect("registered descriptor dir");
         std::fs::write(
             descriptor_dir.join("manifest.toml"),
-            REGISTERED_ISOLATION_MANIFEST_TOML,
+            &registered_manifest_toml,
         )
         .expect("write registered descriptor");
-        let original_hash = ManifestHash::new(sha256_digest_token(
-            REGISTERED_ISOLATION_MANIFEST_TOML.as_bytes(),
-        ))
-        .expect("valid manifest hash");
+        let original_hash =
+            ManifestHash::new(sha256_digest_token(registered_manifest_toml.as_bytes()))
+                .expect("valid manifest hash");
         installation_store
             .upsert_manifest(fixture_manifest_record_with_source(
-                REGISTERED_ISOLATION_MANIFEST_TOML,
+                &registered_manifest_toml,
                 source,
                 Some(original_hash.as_str().to_string()),
             ))
@@ -5685,7 +5697,7 @@ output_schema_ref = "schemas/run.output.json"
         // original hash, so restore's re-parse no longer matches.
         std::fs::write(
             descriptor_dir.join("manifest.toml"),
-            REGISTERED_ISOLATION_MANIFEST_TOML
+            registered_manifest_toml
                 .replace("Acme Registered MCP", "Acme Registered MCP (drifted)"),
         )
         .expect("drift registered descriptor");

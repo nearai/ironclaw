@@ -128,3 +128,18 @@ pub(crate) async fn seed_registered_installation(
         .expect("seed registered installation"); // safety: test-only fixture setup.
     (expected_extension_id, manifest_hash)
 }
+
+/// Mint a hosted MCP id directly from `(tenant, owner, url)`, for fixtures
+/// that must know the id BEFORE writing manifest content (the reverse of
+/// `seed_registered_installation`, which reads a URL back out of an
+/// already-written manifest). R1 gates every registered-store read on
+/// `HostedMcpExtensionId::parse` succeeding and matching this mint, so a live
+/// (non-restore) fixture's on-disk descriptor, directory name, and
+/// installation row must all be keyed by this id, not a bare literal.
+pub(crate) fn minted_extension_id(tenant: &TenantId, owner: &UserId, url: &str) -> ExtensionId {
+    crate::extension_host::registered_extension_store::HostedMcpExtensionId::mint(
+        tenant, owner, url, "",
+    )
+    .expect("mint hosted MCP id") // safety: test-only fixture minting.
+    .into_extension_id()
+}

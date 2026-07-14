@@ -6,6 +6,8 @@
 //! owner/tenant isolation across list/project/activate/remove, and the
 //! per-owner-batched boot-restore fallback's registered arm.
 
+use crate::extension_host::registered_test_support::minted_extension_id;
+
 use super::*;
 
 /// The effective owner scope is ROW-authoritative on the user axis: a
@@ -35,7 +37,7 @@ fn effective_owner_scope_prefers_row_owner_over_stale_manifest_owner() {
 
     assert_eq!(
         effective_owner_scope(&installation, &source),
-        Some((tenant, row_owner)),
+        Some(OwnerScope::new(tenant, row_owner)),
         "row owner must win over the stale manifest owner"
     );
     assert_eq!(
@@ -45,9 +47,19 @@ fn effective_owner_scope_prefers_row_owner_over_stale_manifest_owner() {
     );
 }
 
-pub(super) const REGISTERED_ISOLATION_MANIFEST_TOML: &str = r#"
+/// The isolation fixture's fixed hosted-MCP endpoint. R1 gates every
+/// registered-store filesystem read on `HostedMcpExtensionId::parse`
+/// matching the mint of `(tenant, owner, url)`, so a live (non-restore)
+/// fixture must mint its id from this URL up front rather than using a bare
+/// literal — a bare id is silently filtered out by
+/// `registered_package_has_minted_id` on every read.
+pub(super) const REGISTERED_ISOLATION_URL: &str = "http://127.0.0.1:9/mcp";
+
+pub(super) fn registered_isolation_manifest_toml(id: &ExtensionId, url: &str) -> String {
+    format!(
+        r#"
 schema_version = "reborn.extension_manifest.v2"
-id = "acme-mcp-registered"
+id = "{id}"
 name = "Acme Registered MCP"
 version = "0.1.0"
 description = "User-registered hosted MCP server (owner isolation fixture)"
@@ -56,8 +68,11 @@ trust = "third_party"
 [runtime]
 kind = "mcp"
 transport = "http"
-url = "http://127.0.0.1:9/mcp"
-"#;
+url = "{url}"
+"#,
+        id = id.as_str(),
+    )
+}
 
 /// Owner-isolation harness for registered packages: writes the descriptor
 /// at the tenant-scoped registered-store path (the overlay's filesystem
@@ -65,7 +80,9 @@ url = "http://127.0.0.1:9/mcp"
 /// wired as the tenant operator — the worst case for the row-stamping
 /// rule, since `derive_owner` would map the operator to `Tenant`.
 /// `pre_install: true` also seeds the installed row + lifecycle/active
-/// registries the way an owner install would.
+/// registries the way an owner install would. The extension id is minted
+/// from `owner_scope`'s own `(tenant, owner)` plus the fixed fixture URL, so
+/// every returned/seeded id already satisfies R1's minted-id gate.
 async fn user_registered_isolation_fixture(
     owner_scope: &ResourceScope,
     pre_install: bool,
@@ -76,7 +93,12 @@ async fn user_registered_isolation_fixture(
     Arc<SharedExtensionRegistry>,
     Arc<InMemoryExtensionInstallationStore>,
 ) {
-    let extension_id = ExtensionId::new("acme-mcp-registered").expect("valid extension id");
+    let extension_id = minted_extension_id(
+        &owner_scope.tenant_id,
+        &owner_scope.user_id,
+        REGISTERED_ISOLATION_URL,
+    );
+    let manifest_toml = registered_isolation_manifest_toml(&extension_id, REGISTERED_ISOLATION_URL);
     let source = ManifestSource::UserRegistered {
         tenant_id: owner_scope.tenant_id.clone(),
         owner: owner_scope.user_id.clone(),
@@ -88,13 +110,10 @@ async fn user_registered_isolation_fixture(
         .join("system/extensions/registered")
         .join(owner_scope.tenant_id.as_str())
         .join(owner_scope.user_id.as_str())
-        .join("acme-mcp-registered");
+        .join(extension_id.as_str());
     std::fs::create_dir_all(&descriptor_dir).expect("registered descriptor dir");
-    std::fs::write(
-        descriptor_dir.join("manifest.toml"),
-        REGISTERED_ISOLATION_MANIFEST_TOML,
-    )
-    .expect("write registered descriptor");
+    std::fs::write(descriptor_dir.join("manifest.toml"), &manifest_toml)
+        .expect("write registered descriptor");
     let mut local_filesystem = LocalFilesystem::new();
     local_filesystem
         .mount_local(
@@ -107,40 +126,30 @@ async fn user_registered_isolation_fixture(
     let mut active_registry_initial = ExtensionRegistry::new();
     let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
     if pre_install {
-        let manifest = ExtensionManifest::parse(
-            REGISTERED_ISOLATION_MANIFEST_TOML,
-            source.clone(),
-            &HostPortCatalog::empty(),
-        )
-        .expect("registered manifest");
-        let root =
-            VirtualPath::new("/system/extensions/acme-mcp-registered").expect("extension root");
-        let package = ExtensionPackage::from_manifest_toml(
-            manifest,
-            root,
-            REGISTERED_ISOLATION_MANIFEST_TOML,
-        )
-        .expect("registered package");
+        let manifest =
+            ExtensionManifest::parse(&manifest_toml, source.clone(), &HostPortCatalog::empty())
+                .expect("registered manifest");
+        let root = VirtualPath::new(format!("/system/extensions/{}", extension_id.as_str()))
+            .expect("extension root");
+        let package = ExtensionPackage::from_manifest_toml(manifest, root, &manifest_toml)
+            .expect("registered package");
         lifecycle_registry
             .insert(package.clone())
             .expect("lifecycle package");
         active_registry_initial
             .insert(package)
             .expect("active package");
-        let manifest_record = fixture_manifest_record_with_source(
-            REGISTERED_ISOLATION_MANIFEST_TOML,
-            source.clone(),
-            None,
-        );
+        let manifest_record =
+            fixture_manifest_record_with_source(&manifest_toml, source.clone(), None);
         installation_store
             .upsert_manifest(manifest_record)
             .await
             .expect("seed registered manifest record");
         let installation = ExtensionInstallation::new(
-            ExtensionInstallationId::new("acme-mcp-registered").expect("valid installation id"),
+            ExtensionInstallationId::new(extension_id.as_str()).expect("valid installation id"),
             extension_id.clone(),
             ExtensionActivationState::Enabled,
-            ExtensionManifestRef::new(extension_id, None),
+            ExtensionManifestRef::new(extension_id.clone(), None),
             Vec::new(),
             chrono::Utc::now(),
             InstallationOwner::user(owner_scope.user_id.clone()),
@@ -170,7 +179,7 @@ async fn user_registered_isolation_fixture(
         owner_scope.user_id.clone(),
     ));
     let package_ref =
-        LifecyclePackageRef::new(LifecyclePackageKind::Extension, "acme-mcp-registered")
+        LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id.as_str())
             .expect("valid ref");
     (dir, port, package_ref, active_registry, installation_store)
 }
@@ -178,7 +187,12 @@ async fn user_registered_isolation_fixture(
 /// Item B fixture: a registered manifest that declares a required runtime
 /// credential, so `activation_credential_requirements` returns a non-empty,
 /// real requirement list instead of an empty one — the shape the masked
-/// "is not installed" denial must never be distinguishable from.
+/// "is not installed" denial must never be distinguishable from. Its own
+/// live path (`remove_credential_preflight_masks_foreign_tenant_caller_before_authenticated_actor_check`,
+/// below) never reads the filesystem registered-store overlay (the row is
+/// seeded directly into the installation store and the masked tenant
+/// mismatch is caught before any resolution), so this fixture is unaffected
+/// by R1's minted-id gate and is left as a bare literal id.
 const REGISTERED_CREDENTIALED_MANIFEST_TOML: &str = r#"
 schema_version = "reborn.extension_manifest.v2"
 id = "acme-mcp-credentialed"
@@ -383,7 +397,7 @@ pub(super) fn resource_scope_for(tenant: &str, user: &str) -> ResourceScope {
 async fn extension_list_shows_owner_registered_install_only_to_owner() {
     let owner_scope = resource_scope_for("default", "owner-a");
     let other_scope = resource_scope_for("default", "owner-b");
-    let (_dir, port, _package_ref, _active_registry, installation_store) =
+    let (_dir, port, package_ref, _active_registry, installation_store) =
         user_registered_isolation_fixture(&owner_scope, true).await;
 
     let list = port.list_installed(&owner_scope).await.expect("owner list");
@@ -393,7 +407,7 @@ async fn extension_list_shows_owner_registered_install_only_to_owner() {
     assert_eq!(count, 1, "owner must see their registered install");
     assert_eq!(
         extensions[0].summary.package_ref.id.as_str(),
-        "acme-mcp-registered"
+        package_ref.id.as_str()
     );
     assert_eq!(
         extensions[0].summary.source,
@@ -403,8 +417,9 @@ async fn extension_list_shows_owner_registered_install_only_to_owner() {
 
     // The installed row itself carries the singleton owner — the single
     // predicate every ownership-aware reader keys on.
+    let installation_id = ExtensionInstallationId::new(package_ref.id.as_str()).expect("valid id");
     let row = installation_store
-        .get_installation(&ExtensionInstallationId::new("acme-mcp-registered").expect("valid id"))
+        .get_installation(&installation_id)
         .await
         .expect("store read")
         .expect("registered row present");
@@ -429,21 +444,26 @@ async fn extension_list_shows_owner_registered_install_only_to_owner() {
         "another owner must not see the owner's registered installation"
     );
 
-    // Second registered install for the SAME owner: the listing loop's
+    // Second registered install for the SAME owner, at a DIFFERENT endpoint
+    // (minted ids are owner+endpoint-scoped, so a distinct URL is what
+    // produces a distinct id post-minting): the listing loop's
     // registered-store fallback must resolve both entries from the ONE
     // batched read of the owner's registered set (installed_summaries),
-    // not a per-entry rescan — a second, distinctly-ided registration
-    // exercises the map lookup rather than a lucky single-entry pass.
-    let second_extension_id =
-        ExtensionId::new("acme-mcp-registered-two").expect("valid extension id");
-    let second_manifest_toml = REGISTERED_ISOLATION_MANIFEST_TOML
-        .replace("acme-mcp-registered", "acme-mcp-registered-two");
+    // not a per-entry rescan.
+    const SECOND_REGISTERED_ISOLATION_URL: &str = "http://127.0.0.1:9/mcp-two";
+    let second_extension_id = minted_extension_id(
+        &owner_scope.tenant_id,
+        &owner_scope.user_id,
+        SECOND_REGISTERED_ISOLATION_URL,
+    );
+    let second_manifest_toml =
+        registered_isolation_manifest_toml(&second_extension_id, SECOND_REGISTERED_ISOLATION_URL);
     let second_descriptor_dir = _dir
         .path()
         .join("local-dev/system/extensions/registered")
         .join(owner_scope.tenant_id.as_str())
         .join(owner_scope.user_id.as_str())
-        .join("acme-mcp-registered-two");
+        .join(second_extension_id.as_str());
     std::fs::create_dir_all(&second_descriptor_dir).expect("second registered descriptor dir");
     std::fs::write(
         second_descriptor_dir.join("manifest.toml"),
@@ -465,7 +485,7 @@ async fn extension_list_shows_owner_registered_install_only_to_owner() {
     installation_store
         .upsert_installation(
             ExtensionInstallation::new(
-                ExtensionInstallationId::new("acme-mcp-registered-two")
+                ExtensionInstallationId::new(second_extension_id.as_str())
                     .expect("valid installation id"),
                 second_extension_id.clone(),
                 ExtensionActivationState::Enabled,
@@ -488,12 +508,17 @@ async fn extension_list_shows_owner_registered_install_only_to_owner() {
         panic!("expected extension list payload");
     };
     assert_eq!(count, 2, "both registered installs must be listed");
-    let mut ids: Vec<&str> = extensions
+    let mut ids: Vec<String> = extensions
         .iter()
-        .map(|entry| entry.summary.package_ref.id.as_str())
+        .map(|entry| entry.summary.package_ref.id.as_str().to_string())
         .collect();
     ids.sort_unstable();
-    assert_eq!(ids, vec!["acme-mcp-registered", "acme-mcp-registered-two"]);
+    let mut expected_ids = vec![
+        package_ref.id.as_str().to_string(),
+        second_extension_id.as_str().to_string(),
+    ];
+    expected_ids.sort_unstable();
+    assert_eq!(ids, expected_ids);
 }
 
 /// Review item 5 (list/project coverage): `project()` — the single-
@@ -525,7 +550,7 @@ async fn project_of_registered_package_masks_foreign_owner() {
     assert_eq!(count, 1, "owner A must see their registered install");
     assert_eq!(
         extensions[0].summary.package_ref.id.as_str(),
-        "acme-mcp-registered"
+        package_ref.id.as_str()
     );
 
     let error = port
@@ -562,6 +587,7 @@ async fn extension_remove_rejects_caller_outside_owning_scope() {
     let other_scope = resource_scope_for("default", "owner-b");
     let (_dir, port, package_ref, active_registry, _installation_store) =
         user_registered_isolation_fixture(&owner_scope, true).await;
+    let extension_id = ExtensionId::new(package_ref.id.as_str()).expect("valid id");
 
     let error = port
         .remove(package_ref, &other_scope, Some(&other_scope.user_id))
@@ -575,7 +601,7 @@ async fn extension_remove_rejects_caller_outside_owning_scope() {
     assert!(
         active_registry
             .snapshot()
-            .get_extension(&ExtensionId::new("acme-mcp-registered").expect("valid id"))
+            .get_extension(&extension_id)
             .is_some(),
         "extension must remain published after a rejected foreign remove"
     );
@@ -595,11 +621,13 @@ async fn registered_mutations_reject_same_user_in_foreign_tenant_scope() {
     let cross_tenant_scope = resource_scope_for("default", "owner-a");
     let (_dir, port, package_ref, active_registry, installation_store) =
         user_registered_isolation_fixture(&owner_scope, true).await;
+    let extension_id = ExtensionId::new(package_ref.id.as_str()).expect("valid id");
+    let installation_id = ExtensionInstallationId::new(package_ref.id.as_str()).expect("valid id");
 
     // Search first: the overlay is path-sharded by (tenant, owner), so the
     // same user id under another tenant must not even see the descriptor.
     let search = port
-        .search("acme-mcp-registered", None, &cross_tenant_scope)
+        .search("acme", None, &cross_tenant_scope)
         .await
         .expect("cross-tenant search runs (and finds nothing)");
     let Some(LifecycleProductPayload::ExtensionSearch { count, .. }) = search.payload else {
@@ -640,12 +668,12 @@ async fn registered_mutations_reject_same_user_in_foreign_tenant_scope() {
     assert!(
         active_registry
             .snapshot()
-            .get_extension(&ExtensionId::new("acme-mcp-registered").expect("valid id"))
+            .get_extension(&extension_id)
             .is_some(),
         "extension must remain published for its real tenant-owner"
     );
     let row = installation_store
-        .get_installation(&ExtensionInstallationId::new("acme-mcp-registered").expect("valid id"))
+        .get_installation(&installation_id)
         .await
         .expect("store read")
         .expect("registered row present");
@@ -668,16 +696,18 @@ async fn project_prefers_registered_row_over_same_id_catalog_package() {
     let (_dir, port, package_ref, _active_registry, _installation_store) =
         user_registered_isolation_fixture(&owner_scope, true).await;
 
-    // A shared-catalog package colliding on the SAME id but a wholly
-    // different descriptor (name/description diverge from the registered
-    // one, so a wrong resolution is trivially observable). A HostBundled
-    // package must be wasm + declare capabilities (the bare-MCP shape is
-    // only valid for `UserRegistered`), so this borrows the legacy
-    // `[[capabilities]]` shape from `fixture_extension_manifest` with the
-    // colliding id.
-    let colliding_manifest = r#"
+    // A shared-catalog package colliding on the SAME (now minted) id but a
+    // wholly different descriptor (name/description diverge from the
+    // registered one, so a wrong resolution is trivially observable). A
+    // HostBundled package must be wasm + declare capabilities (the
+    // bare-MCP shape is only valid for `UserRegistered`), so this borrows
+    // the legacy `[[capabilities]]` shape from `fixture_extension_manifest`
+    // with the colliding id.
+    let colliding_id = package_ref.id.as_str();
+    let colliding_manifest = format!(
+        r#"
 schema_version = "reborn.extension_manifest.v2"
-id = "acme-mcp-registered"
+id = "{colliding_id}"
 name = "Colliding Shared Package"
 version = "0.1.0"
 description = "Shared catalog package colliding on the same id"
@@ -688,18 +718,17 @@ kind = "wasm"
 module = "wasm/colliding.wasm"
 
 [[capabilities]]
-id = "acme-mcp-registered.search"
+id = "{colliding_id}.search"
 description = "Search colliding data"
 effects = ["network"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/search.input.json"
 output_schema_ref = "schemas/search.output.json"
-"#;
-    let colliding_package = fixture_extension_package_from_manifest_with_root(
-        colliding_manifest,
-        "acme-mcp-registered",
+"#
     );
+    let colliding_package =
+        fixture_extension_package_from_manifest_with_root(&colliding_manifest, colliding_id);
     {
         let mut catalog = port.catalog.write().await;
         catalog.extend(AvailableExtensionCatalog::from_packages(vec![
@@ -774,7 +803,7 @@ async fn search_overlay_skips_assets_while_resolve_still_inlines_them() {
         .join("local-dev/system/extensions/registered")
         .join(owner_scope.tenant_id.as_str())
         .join(owner_scope.user_id.as_str())
-        .join("acme-mcp-registered");
+        .join(package_ref.id.as_str());
     std::fs::write(descriptor_dir.join("extra.txt"), b"asset bytes")
         .expect("write extra asset file");
 
@@ -802,38 +831,48 @@ async fn search_overlay_skips_assets_while_resolve_still_inlines_them() {
 
 /// Regression: the installation row is a single flat map keyed only by
 /// extension id (no tenant axis), so the SAME user registering the SAME
-/// extension id under two different tenants must not let an install row
-/// from tenant B leak its phase onto tenant A's (never-installed)
-/// descriptor. `search_summary` must require the row's own effective
-/// registered tenant to match the caller's search scope tenant.
+/// extension id under two different tenants could otherwise let an install
+/// row from tenant B leak its phase onto tenant A's (never-installed)
+/// descriptor. `search_summary` requires the row's own effective registered
+/// tenant to match the caller's search scope tenant; minted ids additionally
+/// bake the tenant into the id itself, so the two registrations below mint
+/// to DIFFERENT ids and the leak is doubly foreclosed — both by the tenant
+/// guard and by there being no id collision to guard in the first place.
 #[tokio::test]
 async fn search_does_not_report_foreign_tenants_installation_phase() {
     let installed_scope = resource_scope_for("tenant-b", "owner-a");
-    // Same user id, but registers (never installs) the same extension id
-    // under a different tenant.
+    // Same user id, but registers (never installs) a descriptor under a
+    // different tenant.
     let uninstalled_scope = resource_scope_for("default", "owner-a");
     let (dir, port, _package_ref, _active_registry, _installation_store) =
         user_registered_isolation_fixture(&installed_scope, true).await;
 
-    // Register (not install) the same extension id under the caller's
-    // OWN tenant — a legitimate, distinct registration that has never
-    // been installed anywhere.
+    // Register (not install) under the caller's OWN tenant — a legitimate,
+    // distinct registration that has never been installed anywhere. Minted
+    // under (default, owner-a), so its id is unrelated to the tenant-b row.
+    let uninstalled_extension_id = minted_extension_id(
+        &uninstalled_scope.tenant_id,
+        &uninstalled_scope.user_id,
+        REGISTERED_ISOLATION_URL,
+    );
+    let uninstalled_manifest_toml =
+        registered_isolation_manifest_toml(&uninstalled_extension_id, REGISTERED_ISOLATION_URL);
     let uninstalled_descriptor_dir = dir
         .path()
         .join("local-dev/system/extensions/registered")
         .join(uninstalled_scope.tenant_id.as_str())
         .join(uninstalled_scope.user_id.as_str())
-        .join("acme-mcp-registered");
+        .join(uninstalled_extension_id.as_str());
     std::fs::create_dir_all(&uninstalled_descriptor_dir)
         .expect("uninstalled registered descriptor dir");
     std::fs::write(
         uninstalled_descriptor_dir.join("manifest.toml"),
-        REGISTERED_ISOLATION_MANIFEST_TOML,
+        &uninstalled_manifest_toml,
     )
     .expect("write uninstalled registered descriptor");
 
     let search = port
-        .search("acme-mcp-registered", None, &uninstalled_scope)
+        .search("acme", None, &uninstalled_scope)
         .await
         .expect("search under the uninstalled tenant runs");
     let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) = search.payload else {
@@ -855,7 +894,7 @@ async fn search_does_not_report_foreign_tenants_installation_phase() {
 /// `UserId` only, so the same user's OWN registration under their own
 /// tenant gets paired with a foreign-tenant install row of the same
 /// extension id and reported as installed. Must apply the same
-/// row-authoritative tenant check `search_summary` does. RED until fixed.
+/// row-authoritative tenant check `search_summary` does.
 #[tokio::test]
 async fn list_installed_does_not_report_foreign_tenants_installation_as_installed() {
     let installed_scope = resource_scope_for("tenant-b", "owner-a");
@@ -863,19 +902,28 @@ async fn list_installed_does_not_report_foreign_tenants_installation_as_installe
     let (dir, port, _package_ref, _active_registry, _installation_store) =
         user_registered_isolation_fixture(&installed_scope, true).await;
 
-    // Register (not install) the same extension id under the caller's OWN
-    // tenant — a distinct registration that has never been installed.
+    // Register (not install) under the caller's OWN tenant — a distinct
+    // registration that has never been installed. Minted id differs from
+    // the tenant-b row's for the same reason as the search-tier sibling
+    // above.
+    let uninstalled_extension_id = minted_extension_id(
+        &uninstalled_scope.tenant_id,
+        &uninstalled_scope.user_id,
+        REGISTERED_ISOLATION_URL,
+    );
+    let uninstalled_manifest_toml =
+        registered_isolation_manifest_toml(&uninstalled_extension_id, REGISTERED_ISOLATION_URL);
     let uninstalled_descriptor_dir = dir
         .path()
         .join("local-dev/system/extensions/registered")
         .join(uninstalled_scope.tenant_id.as_str())
         .join(uninstalled_scope.user_id.as_str())
-        .join("acme-mcp-registered");
+        .join(uninstalled_extension_id.as_str());
     std::fs::create_dir_all(&uninstalled_descriptor_dir)
         .expect("uninstalled registered descriptor dir");
     std::fs::write(
         uninstalled_descriptor_dir.join("manifest.toml"),
-        REGISTERED_ISOLATION_MANIFEST_TOML,
+        &uninstalled_manifest_toml,
     )
     .expect("write uninstalled registered descriptor");
 
@@ -895,30 +943,42 @@ async fn list_installed_does_not_report_foreign_tenants_installation_as_installe
 /// Regression sibling of `search_does_not_report_foreign_tenants_installation_phase`
 /// for the PROJECT surface: `project()` must apply the same
 /// row-authoritative tenant check before returning phase/install_scope
-/// derived from a foreign-tenant install row. RED until fixed.
+/// derived from a foreign-tenant install row.
 #[tokio::test]
 async fn project_does_not_report_foreign_tenants_installation_as_installed() {
     let installed_scope = resource_scope_for("tenant-b", "owner-a");
     let uninstalled_scope = resource_scope_for("default", "owner-a");
-    let (dir, port, package_ref, _active_registry, _installation_store) =
+    let (dir, port, _package_ref, _active_registry, _installation_store) =
         user_registered_isolation_fixture(&installed_scope, true).await;
 
+    let uninstalled_extension_id = minted_extension_id(
+        &uninstalled_scope.tenant_id,
+        &uninstalled_scope.user_id,
+        REGISTERED_ISOLATION_URL,
+    );
+    let uninstalled_manifest_toml =
+        registered_isolation_manifest_toml(&uninstalled_extension_id, REGISTERED_ISOLATION_URL);
     let uninstalled_descriptor_dir = dir
         .path()
         .join("local-dev/system/extensions/registered")
         .join(uninstalled_scope.tenant_id.as_str())
         .join(uninstalled_scope.user_id.as_str())
-        .join("acme-mcp-registered");
+        .join(uninstalled_extension_id.as_str());
     std::fs::create_dir_all(&uninstalled_descriptor_dir)
         .expect("uninstalled registered descriptor dir");
     std::fs::write(
         uninstalled_descriptor_dir.join("manifest.toml"),
-        REGISTERED_ISOLATION_MANIFEST_TOML,
+        &uninstalled_manifest_toml,
     )
     .expect("write uninstalled registered descriptor");
+    let uninstalled_package_ref = LifecyclePackageRef::new(
+        LifecyclePackageKind::Extension,
+        uninstalled_extension_id.as_str(),
+    )
+    .expect("valid ref");
 
     let projection = port
-        .project(package_ref, &uninstalled_scope)
+        .project(uninstalled_package_ref, &uninstalled_scope)
         .await
         .expect("project under the uninstalled tenant runs");
     assert_eq!(
@@ -947,6 +1007,7 @@ async fn foreign_and_operator_install_of_registered_package_is_not_found() {
     let other_scope = resource_scope_for("default", "owner-b");
     let (dir, port, package_ref, _active_registry, installation_store) =
         user_registered_isolation_fixture(&owner_scope, true).await;
+    let installation_id = ExtensionInstallationId::new(package_ref.id.as_str()).expect("valid id");
     // The fixture wires owner-a as the tenant operator, but a distinct
     // operator identity must ALSO fail to resolve a foreign registration;
     // other_scope covers the plain-member probe.
@@ -959,7 +1020,7 @@ async fn foreign_and_operator_install_of_registered_package_is_not_found() {
         ProductWorkflowError::InvalidBindingRequest { .. }
     ));
     let row = installation_store
-        .get_installation(&ExtensionInstallationId::new("acme-mcp-registered").expect("valid id"))
+        .get_installation(&installation_id)
         .await
         .expect("store read")
         .expect("registered row present");
@@ -1005,7 +1066,7 @@ async fn foreign_and_operator_install_of_registered_package_is_not_found() {
         ProductWorkflowError::InvalidBindingRequest { .. }
     ));
     let row_after_operator_attempt = installation_store
-        .get_installation(&ExtensionInstallationId::new("acme-mcp-registered").expect("valid id"))
+        .get_installation(&installation_id)
         .await
         .expect("store read")
         .expect("registered row present");
@@ -1030,15 +1091,14 @@ async fn owner_install_of_registered_package_stamps_manifest_owner_row() {
     let other_scope = resource_scope_for("default", "owner-b");
     let (_dir, port, package_ref, _active_registry, installation_store) =
         user_registered_isolation_fixture(&owner_scope, false).await;
+    let installation_id = ExtensionInstallationId::new(package_ref.id.as_str()).expect("valid id");
 
     for pass in ["fresh install", "re-install"] {
         port.install(package_ref.clone(), &owner_scope)
             .await
             .expect("owner installs their registered package");
         let row = installation_store
-            .get_installation(
-                &ExtensionInstallationId::new("acme-mcp-registered").expect("valid id"),
-            )
+            .get_installation(&installation_id)
             .await
             .expect("store read")
             .expect("registered row present");
@@ -1051,52 +1111,90 @@ async fn owner_install_of_registered_package_stamps_manifest_owner_row() {
     }
 }
 
-/// Review item 1 (row-takeover guard): rows are keyed by bare
-/// `ExtensionId` while registered descriptors are owner-scoped, so
-/// before owner-unique id minting a second owner can write their own
-/// registered descriptor under the SAME id. Installing it as owner B
-/// must not re-stamp owner A's existing row to B — it must be masked
-/// exactly like a foreign non-member install, and A's row must survive
-/// untouched.
+/// Design point 5 pin, updated for owner-unique minted ids: before ids were
+/// minted from `(tenant, owner, url)`, two owners writing a descriptor at
+/// the same bare `ExtensionId` could collide on the SAME installation row —
+/// the takeover this test used to construct and reject via
+/// `ensure_registered_row_owner_match`'s mismatch arm (still covered at the
+/// unit tier by `install_policy::ensure_registered_row_owner_match_rejects_takeover_and_allows_same_owner`).
+/// Minting makes that collision unconstructible for a fresh registration
+/// (owner is hashed into the id), so this now pins the new invariant
+/// directly at the live install path: two owners registering the SAME URL
+/// mint to two DIFFERENT ids and install independently, with neither row
+/// ever touching the other's.
 #[tokio::test]
-async fn install_of_same_id_by_different_registered_owner_does_not_take_over_row() {
+async fn install_of_same_url_by_different_registered_owners_does_not_collide() {
     let owner_a = resource_scope_for("default", "owner-a");
     let owner_b = resource_scope_for("default", "owner-b");
-    let (dir, port, package_ref, _active_registry, installation_store) =
+    let (dir, port_a, package_ref_a, _active_registry_a, installation_store) =
         user_registered_isolation_fixture(&owner_a, true).await;
 
-    // Owner B registers their own descriptor under the same bare id.
-    let descriptor_dir = dir
+    assert_ne!(
+        package_ref_a.id.as_str(),
+        minted_extension_id(
+            &owner_b.tenant_id,
+            &owner_b.user_id,
+            REGISTERED_ISOLATION_URL
+        )
+        .as_str(),
+        "the same URL registered by two different owners must mint to different ids"
+    );
+
+    // Owner B independently registers the SAME URL under their own
+    // owner-scoped path and shares the same port/installation store as
+    // owner A (mirroring a single-process multi-user deployment).
+    let owner_b_extension_id = minted_extension_id(
+        &owner_b.tenant_id,
+        &owner_b.user_id,
+        REGISTERED_ISOLATION_URL,
+    );
+    let owner_b_manifest_toml =
+        registered_isolation_manifest_toml(&owner_b_extension_id, REGISTERED_ISOLATION_URL);
+    let owner_b_descriptor_dir = dir
         .path()
         .join("local-dev/system/extensions/registered")
         .join(owner_b.tenant_id.as_str())
         .join(owner_b.user_id.as_str())
-        .join("acme-mcp-registered");
-    std::fs::create_dir_all(&descriptor_dir).expect("registered descriptor dir for owner b");
+        .join(owner_b_extension_id.as_str());
+    std::fs::create_dir_all(&owner_b_descriptor_dir)
+        .expect("registered descriptor dir for owner b");
     std::fs::write(
-        descriptor_dir.join("manifest.toml"),
-        REGISTERED_ISOLATION_MANIFEST_TOML,
+        owner_b_descriptor_dir.join("manifest.toml"),
+        &owner_b_manifest_toml,
     )
     .expect("write owner b registered descriptor");
+    let owner_b_package_ref = LifecyclePackageRef::new(
+        LifecyclePackageKind::Extension,
+        owner_b_extension_id.as_str(),
+    )
+    .expect("valid ref");
 
-    let error = port
-        .install(package_ref, &owner_b)
+    port_a
+        .install(owner_b_package_ref, &owner_b)
         .await
-        .expect_err("owner B must not take over owner A's registered row");
-    assert!(
-        matches!(error, ProductWorkflowError::InvalidBindingRequest { .. })
-            && error.to_string().contains("is not installed"),
-        "takeover attempt must be masked like a foreign install: {error}"
-    );
+        .expect("owner B installs their own distinctly-minted registration");
 
-    let row = installation_store
-        .get_installation(&ExtensionInstallationId::new("acme-mcp-registered").expect("valid id"))
+    let row_a = installation_store
+        .get_installation(
+            &ExtensionInstallationId::new(package_ref_a.id.as_str()).expect("valid id"),
+        )
         .await
         .expect("store read")
-        .expect("registered row present");
+        .expect("owner a's row present");
+    let row_b = installation_store
+        .get_installation(
+            &ExtensionInstallationId::new(owner_b_extension_id.as_str()).expect("valid id"),
+        )
+        .await
+        .expect("store read")
+        .expect("owner b's row present");
     assert!(
-        row.owner().visible_to(&owner_a.user_id) && !row.owner().visible_to(&owner_b.user_id),
-        "owner A's row must be unchanged after the rejected takeover"
+        row_a.owner().visible_to(&owner_a.user_id) && !row_a.owner().visible_to(&owner_b.user_id),
+        "owner a's row must remain owner a's alone"
+    );
+    assert!(
+        row_b.owner().visible_to(&owner_b.user_id) && !row_b.owner().visible_to(&owner_a.user_id),
+        "owner b's independently-minted row must belong to owner b alone"
     );
 }
 
@@ -1108,6 +1206,8 @@ async fn owner_remove_of_registered_install_tears_down_without_residue() {
     let owner_scope = resource_scope_for("default", "owner-a");
     let (_dir, port, package_ref, active_registry, installation_store) =
         user_registered_isolation_fixture(&owner_scope, true).await;
+    let installation_id = ExtensionInstallationId::new(package_ref.id.as_str()).expect("valid id");
+    let extension_id = ExtensionId::new(package_ref.id.as_str()).expect("valid id");
 
     port.remove(
         package_ref.clone(),
@@ -1119,9 +1219,7 @@ async fn owner_remove_of_registered_install_tears_down_without_residue() {
 
     assert!(
         installation_store
-            .get_installation(
-                &ExtensionInstallationId::new("acme-mcp-registered").expect("valid id"),
-            )
+            .get_installation(&installation_id)
             .await
             .expect("store read")
             .is_none(),
@@ -1130,7 +1228,7 @@ async fn owner_remove_of_registered_install_tears_down_without_residue() {
     assert!(
         active_registry
             .snapshot()
-            .get_extension(&ExtensionId::new("acme-mcp-registered").expect("valid id"))
+            .get_extension(&extension_id)
             .is_none(),
         "registered extension must be unpublished after the owner's remove"
     );
@@ -1154,7 +1252,8 @@ async fn remove_of_orphaned_registered_row_rejects_foreign_tenant_same_user_id()
     // installation row and its stored manifest in place, matching the
     // `installation.is_some() && !lifecycle_package_present` branch in
     // `remove`.
-    let extension_id = ExtensionId::new("acme-mcp-registered").expect("valid extension id");
+    let extension_id = ExtensionId::new(package_ref.id.as_str()).expect("valid extension id");
+    let installation_id = ExtensionInstallationId::new(package_ref.id.as_str()).expect("valid id");
     port.lifecycle_service
         .lock()
         .await
@@ -1179,7 +1278,7 @@ async fn remove_of_orphaned_registered_row_rejects_foreign_tenant_same_user_id()
     );
 
     let row = installation_store
-        .get_installation(&ExtensionInstallationId::new("acme-mcp-registered").expect("valid id"))
+        .get_installation(&installation_id)
         .await
         .expect("store read")
         .expect("orphaned registered row must survive the rejected foreign-tenant remove");
@@ -1198,6 +1297,12 @@ async fn remove_of_orphaned_registered_row_rejects_foreign_tenant_same_user_id()
 #[tokio::test]
 async fn failed_registered_install_persist_does_not_delete_preexisting_extension_files() {
     let owner_scope = resource_scope_for("default", "owner-a");
+    let extension_id = minted_extension_id(
+        &owner_scope.tenant_id,
+        &owner_scope.user_id,
+        REGISTERED_ISOLATION_URL,
+    );
+    let manifest_toml = registered_isolation_manifest_toml(&extension_id, REGISTERED_ISOLATION_URL);
 
     let dir = tempfile::tempdir().expect("tempdir");
     let storage_root = dir.path().join("local-dev");
@@ -1205,19 +1310,16 @@ async fn failed_registered_install_persist_does_not_delete_preexisting_extension
         .join("system/extensions/registered")
         .join(owner_scope.tenant_id.as_str())
         .join(owner_scope.user_id.as_str())
-        .join("acme-mcp-registered");
+        .join(extension_id.as_str());
     std::fs::create_dir_all(&descriptor_dir).expect("registered descriptor dir");
-    std::fs::write(
-        descriptor_dir.join("manifest.toml"),
-        REGISTERED_ISOLATION_MANIFEST_TOML,
-    )
-    .expect("write registered descriptor");
+    std::fs::write(descriptor_dir.join("manifest.toml"), &manifest_toml)
+        .expect("write registered descriptor");
 
     // Pre-existing content at the shared materialization path this
     // operation must never touch for a registered install.
     let preexisting_dir = storage_root
         .join("system/extensions")
-        .join("acme-mcp-registered");
+        .join(extension_id.as_str());
     std::fs::create_dir_all(&preexisting_dir).expect("preexisting extension dir");
     std::fs::write(preexisting_dir.join("leftover.txt"), b"do not delete")
         .expect("seed preexisting extension file");
@@ -1253,7 +1355,7 @@ async fn failed_registered_install_persist_does_not_delete_preexisting_extension
         owner_scope.user_id.clone(),
     );
     let package_ref =
-        LifecyclePackageRef::new(LifecyclePackageKind::Extension, "acme-mcp-registered")
+        LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id.as_str())
             .expect("valid ref");
 
     port.install(package_ref, &owner_scope)
