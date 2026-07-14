@@ -109,8 +109,11 @@ channel is a separate surface. On that footing:
 1. **A standard, host-defined messaging tool set**, expressed as
    **capability-profile contracts** (`CapabilityProfileContract`,
    `ironclaw_host_api/src/capability_profile.rs:206`) — one per standard tool,
-   each with a normalized input/output schema. One is **core**
-   (`send_message`); the rest are **optional** and platform-declared.
+   each with a normalized input/output schema. The **core** four —
+   `send_message`, `read_history`, `list_conversations`, `get_user` (converse +
+   observe + identify) — are supported by every real chat platform; the rest are
+   **optional** and platform-declared. "Core" is a baseline/genericity signal,
+   not a mandate — the manifest declares any subset.
 2. **The manifest declares the subset** via a compact `[messaging]` recipe
    (sibling to `[channel]`/`[auth.*]`) listing which profiles the extension
    implements. A resolve-time **expander** turns each into an ordinary
@@ -147,26 +150,29 @@ the operation (§Context, "the two-identity model").
 | Standard tool | Purpose (abstract) | Slack (OAuth user) | Telegram (paired user) | Discord (bot) | Tier |
 | --- | --- | --- | --- | --- | --- |
 | `send_message` | Post a message to a conversation | ✅ | ✅ | ✅ | **core** |
-| `read_history` | Read recent messages of a conversation | ✅ | ✅ (own chats) | ✅ (perms) | optional |
-| `list_conversations` | Enumerate conversations the identity sees | ✅ | ✅ (dialogs) | ✅ | optional |
-| `get_user` | Resolve a user reference to profile info | ✅ | ✅ | ✅ | optional |
+| `read_history` | Read recent messages of a conversation | ✅ | ✅ (own chats) | ✅ (perms) | **core** |
+| `list_conversations` | Enumerate conversations the identity sees | ✅ | ✅ (dialogs) | ✅ | **core** |
+| `get_user` | Resolve a user reference to profile info | ✅ | ✅ | ✅ | **core** |
 | `search_messages` | Full-text search across messages | ✅ | ✅ | ❌ *no bot search API* | optional |
 | `edit_message` | Edit a previously sent message | ✅ | ✅ | ✅ (own) | optional |
 | `delete_message` | Delete a message | ✅ | ✅ | ✅ | optional |
 | `add_reaction` | React to a message | ✅ | ✅ | ✅ | optional |
 
-**`send_message` is the only capability every platform and identity
-guarantees.** The rest vary along two real axes: **(a) which identity the tool
-acts as** — a *user-acquired* identity (Slack OAuth, Telegram pairing) gets the
-full read/search family because it acts as the actual user, whereas a platform
-that sanctions only a *bot* identity (Discord) exposes only what a bot can do (a
-Discord bot reads history and reacts but cannot search); and **(b) genuine
-feature gaps** (threads, reactions, search APIs). This is why the manifest
-declares the subset — and why the *identity* a tool acts as is the extension's
-credential decision, not a framework constant. So a Slack extension and a
-*paired* Telegram extension both declare the read-rich subset `{send_message,
-read_history, list_conversations, get_user, search_messages, …}` acting as the
-user; a Discord extension declares what its bot supports.
+**The core is the baseline of a messaging integration — send, read, list,
+identify — and all four hold across every real chat platform** (Slack-user,
+Telegram-paired, *and* a Discord bot). What varies, and therefore stays optional
+and manifest-declared, is: **search** (genuinely spotty — Slack ✅, Telegram ✅,
+Discord-bot ❌, no bot search API); **mutations** (`edit_message`/`delete_message`)
+and **reactions**, which are widely supported on chat platforms but are
+higher-stakes writes (`external_write`) and the first to disappear on simpler
+surfaces; plus **threads** (a gated param). Two things also drive the subset
+independently of the tool itself: the **identity** (a user-acquired identity gets
+the full surface; a bot-only platform like Discord is narrower), and the
+extension's own choice (a deliberately read-only or send-only integration).
+**"Core" is a baseline plus a genericity signal, not a mandate** — the manifest
+declares any subset. So a Slack extension and a *paired* Telegram extension both
+declare the full read-rich set; a Discord extension declares everything its bot
+supports (all but `search_messages`).
 
 **Reply-in-thread is a parameter, not a tool.** Slack already expresses it as
 `thread_ts` on `send_message`, Telegram as `message_thread_id`, Discord via a

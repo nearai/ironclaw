@@ -136,17 +136,24 @@ resolved human context.
 ## 4. The standard tools
 
 Each tool is a host-defined **capability profile** `ironclaw.messaging.<tool>.v1`
-carrying an input and output schema. `send_message` is **core** (every messaging
-platform and identity can send); the rest are **optional** and only appear when
-the extension declares them.
+carrying an input and output schema. The **core** tools are the baseline of a
+messaging integration — converse (`send_message`), observe (`read_history`,
+`list_conversations`), and identify (`get_user`) — and every real chat platform
+supports them, whether acting as the user (Slack, Telegram-paired) or as a bot
+(Discord). The **optional** tools are richer or spottier and appear only when the
+extension declares them. **"Core" does not mean mandatory** — the manifest
+declares any subset, so a read-only or send-only integration is valid; core is
+the standard baseline plus a genericity signal. (Scope is chat platforms; an
+SMS/email-style surface, which lacks a conversation list and reactions, would
+revisit the tiers.)
 
 | Tool | Profile id | Tier | `effects` | `default_permission` |
 | --- | --- | --- | --- | --- |
 | `send_message` | `ironclaw.messaging.send_message.v1` | **core** | `network`, `use_secret`, `external_write` | `ask` |
-| `read_history` | `ironclaw.messaging.read_history.v1` | optional | `network`, `use_secret` | `ask` |
-| `list_conversations` | `ironclaw.messaging.list_conversations.v1` | optional | `network`, `use_secret` | `ask` |
-| `get_user` | `ironclaw.messaging.get_user.v1` | optional | `network`, `use_secret` | `ask` |
-| `search_messages` | `ironclaw.messaging.search_messages.v1` | optional | `network`, `use_secret` | `ask` |
+| `read_history` | `ironclaw.messaging.read_history.v1` | **core** | `network`, `use_secret` | `ask` |
+| `list_conversations` | `ironclaw.messaging.list_conversations.v1` | **core** | `network`, `use_secret` | `ask` |
+| `get_user` | `ironclaw.messaging.get_user.v1` | **core** | `network`, `use_secret` | `ask` |
+| `search_messages` | `ironclaw.messaging.search_messages.v1` | optional — spotty (no Discord-bot search API) | `network`, `use_secret` | `ask` |
 | `edit_message` | `ironclaw.messaging.edit_message.v1` | optional | `network`, `use_secret`, `external_write` | `ask` |
 | `delete_message` | `ironclaw.messaging.delete_message.v1` | optional | `network`, `use_secret`, `external_write` | `ask` |
 | `add_reaction` | `ironclaw.messaging.add_reaction.v1` | optional | `network`, `use_secret`, `external_write` | `ask` |
