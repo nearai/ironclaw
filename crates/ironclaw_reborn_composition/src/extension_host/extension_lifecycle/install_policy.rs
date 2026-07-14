@@ -151,10 +151,13 @@ pub(super) fn decide_remove(
 /// cannot enumerate who holds the id.
 pub(super) fn ensure_registered_row_owner_match(
     extension_id: &ExtensionId,
-    existing_effective_scope: Option<(TenantId, UserId)>,
+    existing_effective_scope: Option<super::registered_lifecycle::OwnerScope>,
     new_scope: (TenantId, UserId),
 ) -> Result<(), ProductWorkflowError> {
-    if existing_effective_scope.as_ref() == Some(&new_scope) {
+    if existing_effective_scope
+        .as_ref()
+        .is_some_and(|scope| scope.matches_parts(&new_scope.0, &new_scope.1))
+    {
         return Ok(());
     }
     Err(masked_not_installed(extension_id))
@@ -171,11 +174,11 @@ pub(super) fn ensure_registered_row_owner_match(
 /// masked "is not installed" shape.
 pub(super) fn ensure_registered_row_tenant_match(
     extension_id: &ExtensionId,
-    existing_effective_scope: Option<(TenantId, UserId)>,
+    existing_effective_scope: Option<super::registered_lifecycle::OwnerScope>,
     caller_tenant_id: &TenantId,
 ) -> Result<(), ProductWorkflowError> {
     match existing_effective_scope {
-        Some((tenant_id, _)) if &tenant_id == caller_tenant_id => Ok(()),
+        Some(scope) if scope.matches_tenant(caller_tenant_id) => Ok(()),
         Some(_) => Err(masked_not_installed(extension_id)),
         None => Ok(()),
     }
@@ -194,6 +197,7 @@ pub(super) fn install_scope_for_owner(owner: &InstallationOwner) -> LifecycleIns
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::extension_host::extension_lifecycle::registered_lifecycle::OwnerScope;
     use chrono::Utc;
     use ironclaw_extensions::{
         ExtensionActivationState, ExtensionInstallationId, ExtensionManifestRef,
@@ -230,7 +234,7 @@ mod tests {
     fn ensure_registered_row_owner_match_rejects_takeover_and_allows_same_owner() {
         let ext_id = ExtensionId::new("acme-mcp-registered").expect("extension id");
         let tenant_a = tenant("tenant-a");
-        let a_scope = Some((tenant_a.clone(), user("owner-a")));
+        let a_scope = Some(OwnerScope::new(tenant_a.clone(), user("owner-a")));
 
         ensure_registered_row_owner_match(
             &ext_id,
@@ -279,7 +283,7 @@ mod tests {
     fn ensure_registered_row_tenant_match_rejects_same_user_different_tenant() {
         let ext_id = ExtensionId::new("acme-mcp-registered").expect("extension id");
         let tenant_a = tenant("tenant-a");
-        let row_scope = Some((tenant_a.clone(), user("owner-a")));
+        let row_scope = Some(OwnerScope::new(tenant_a.clone(), user("owner-a")));
 
         ensure_registered_row_tenant_match(&ext_id, row_scope.clone(), &tenant_a)
             .expect("the row's own tenant must be allowed to operate it");

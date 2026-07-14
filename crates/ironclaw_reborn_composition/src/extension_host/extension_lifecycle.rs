@@ -106,7 +106,7 @@ use install_policy::{
     ensure_registered_row_tenant_match, install_scope_for_owner,
 };
 #[cfg(test)]
-use registered_lifecycle::effective_owner_scope;
+use registered_lifecycle::{OwnerScope, effective_owner_scope};
 use registered_lifecycle::{
     RegisteredOwnerLookup, installation_effective_owner_scope,
     resolve_registered_installation_for_restore,
@@ -259,12 +259,12 @@ pub(crate) async fn restore_extension_lifecycle_state(
         let available = match installation_effective_owner_scope(installation_store, &installation)
             .await
         {
-            Ok(Some((tenant_id, owner))) => {
+            Ok(Some(owner_scope)) => {
                 match resolve_registered_installation_for_restore(
                     filesystem,
                     &mut registered_by_owner,
-                    &tenant_id,
-                    &owner,
+                    owner_scope.tenant_id(),
+                    owner_scope.owner(),
                     &installation,
                 )
                 .await?

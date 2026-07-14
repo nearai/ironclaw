@@ -26,6 +26,39 @@ use super::{
     map_extension_installation_error,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct OwnerScope {
+    tenant_id: TenantId,
+    owner: UserId,
+}
+
+impl OwnerScope {
+    #[cfg(test)]
+    pub(super) fn new(tenant_id: TenantId, owner: UserId) -> Self {
+        Self { tenant_id, owner }
+    }
+
+    pub(super) fn matches(&self, scope: &ResourceScope) -> bool {
+        self.tenant_id == scope.tenant_id && self.owner == scope.user_id
+    }
+
+    pub(super) fn matches_parts(&self, tenant_id: &TenantId, owner: &UserId) -> bool {
+        &self.tenant_id == tenant_id && &self.owner == owner
+    }
+
+    pub(super) fn matches_tenant(&self, tenant_id: &TenantId) -> bool {
+        &self.tenant_id == tenant_id
+    }
+
+    pub(super) fn tenant_id(&self) -> &TenantId {
+        &self.tenant_id
+    }
+
+    pub(super) fn owner(&self) -> &UserId {
+        &self.owner
+    }
+}
+
 /// Effective owner scope (tenant + user) of a registered installation,
 /// ROW-AUTHORITATIVE on the user axis: the row's `InstallationOwner`
 /// singleton member wins over a disagreeing `UserRegistered.owner` (a stale
@@ -35,7 +68,7 @@ use super::{
 pub(super) fn effective_owner_scope(
     installation: &ExtensionInstallation,
     source: &ManifestSource,
-) -> Option<(TenantId, UserId)> {
+) -> Option<OwnerScope> {
     let ManifestSource::UserRegistered { tenant_id, .. } = source else {
         return None;
     };
@@ -45,7 +78,10 @@ pub(super) fn effective_owner_scope(
     if members.next().is_some() {
         return None;
     }
-    Some((tenant_id.clone(), row_owner.clone()))
+    Some(OwnerScope {
+        tenant_id: tenant_id.clone(),
+        owner: row_owner.clone(),
+    })
 }
 
 /// The row-authoritative registered-store owner scope for an installation.
@@ -57,7 +93,7 @@ pub(super) fn effective_owner_scope(
 pub(super) async fn installation_effective_owner_scope(
     installation_store: &Arc<dyn ExtensionInstallationStore>,
     installation: &ExtensionInstallation,
-) -> Result<Option<(TenantId, UserId)>, ProductWorkflowError> {
+) -> Result<Option<OwnerScope>, ProductWorkflowError> {
     let stored_manifest = match installation_store
         .get_manifest(installation.extension_id())
         .await
@@ -173,8 +209,8 @@ impl RebornLocalExtensionManagementPort {
         let effective_tenant =
             installation_effective_owner_scope(&self.installation_store, installation)
                 .await?
-                .map(|(tenant_id, _)| tenant_id);
-        Ok(effective_tenant.as_ref() == Some(&scope.tenant_id))
+                .map(|owner_scope| owner_scope.matches(scope));
+        Ok(effective_tenant == Some(true))
     }
 
     /// Pure (no I/O) sibling of [`Self::registered_row_matches_scope_tenant`]
@@ -195,8 +231,8 @@ impl RebornLocalExtensionManagementPort {
         }
         let effective_tenant = stored_source
             .and_then(|stored_source| effective_owner_scope(installation, stored_source))
-            .map(|(tenant_id, _)| tenant_id);
-        effective_tenant.as_ref() == Some(&scope.tenant_id)
+            .map(|owner_scope| owner_scope.matches(scope));
+        effective_tenant == Some(true)
     }
 
     /// The caller's registered packages, read once and keyed by extension id
@@ -271,24 +307,22 @@ impl RebornLocalExtensionManagementPort {
         else {
             return Ok(None);
         };
-        if !installation.owner().visible_to(&scope.user_id) {
-            return Ok(None);
-        }
-        let Some((tenant_id, owner)) =
+        let Some(owner_scope) =
             installation_effective_owner_scope(&self.installation_store, &installation).await?
         else {
             return Ok(None);
         };
-        if tenant_id != scope.tenant_id {
-            // T2 cross-tenant follow-up: the row's owner user id matched, but
-            // its own registered tenant does not match this scope's tenant —
-            // never resolve across tenants.
+        if !owner_scope.matches(scope) {
             return Ok(None);
         }
-        Ok(list_for_owner(self.filesystem.as_ref(), &tenant_id, &owner)
-            .await?
-            .into_iter()
-            .find(|package| &package.package_ref == package_ref)
-            .map(Arc::new))
+        Ok(list_for_owner(
+            self.filesystem.as_ref(),
+            owner_scope.tenant_id(),
+            owner_scope.owner(),
+        )
+        .await?
+        .into_iter()
+        .find(|package| &package.package_ref == package_ref)
+        .map(Arc::new))
     }
 }
