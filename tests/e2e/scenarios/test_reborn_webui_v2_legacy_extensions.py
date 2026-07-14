@@ -611,6 +611,48 @@ async def test_reborn_legacy_extensions_catalog_failure_shows_retry(
         await context.close()
 
 
+async def test_reborn_legacy_extensions_offline_attempts_catalog_requests(
+    reborn_v2_server, reborn_v2_browser
+):
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+    catalog_requests: list[str] = []
+
+    def record_catalog_request(request):
+        path = urlparse(request.url).path
+        if path in {
+            "/api/webchat/v2/extensions",
+            "/api/webchat/v2/extensions/registry",
+        }:
+            catalog_requests.append(path)
+
+    page.on("request", record_catalog_request)
+
+    try:
+        await page.goto(f"{reborn_v2_server}/v2/settings?token={REBORN_V2_AUTH_TOKEN}")
+        await expect(page.get_by_role("link", name="Extensions").first).to_be_visible(
+            timeout=15000
+        )
+
+        await context.set_offline(True)
+        await page.get_by_role("link", name="Extensions").first.click()
+
+        error_banner = page.get_by_role("alert")
+        await expect(error_banner).to_contain_text(
+            "Extension catalog unavailable", timeout=15000
+        )
+        assert "/api/webchat/v2/extensions" in catalog_requests
+        assert "/api/webchat/v2/extensions/registry" in catalog_requests
+        await expect(page.get_by_text("Registry is empty")).to_have_count(0)
+
+        await context.set_offline(False)
+        await error_banner.get_by_role("button", name="Retry").click()
+        await expect(error_banner).to_have_count(0, timeout=10000)
+    finally:
+        await context.set_offline(False)
+        await context.close()
+
+
 async def test_reborn_legacy_extensions_registry_search_no_match(
     reborn_v2_server, reborn_v2_browser
 ):
