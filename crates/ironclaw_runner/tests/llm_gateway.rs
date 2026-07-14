@@ -101,6 +101,56 @@ async fn gateway_calls_llm_provider_for_allowed_model_profile() {
 }
 
 #[tokio::test]
+async fn gateway_honors_caller_requested_model_route_over_profile_default() {
+    let provider = Arc::new(RecordingLlmProvider::reply("assistant response"));
+    // Profile default resolves to "profile-default-model"; the caller's per-run
+    // requested-model route must take precedence.
+    let policy = LlmModelProfilePolicy::new().allow_model_profile(
+        interactive_model(),
+        Some("profile-default-model".to_string()),
+    );
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        policy,
+    );
+
+    let request = model_request_with_route(interactive_model(), "requested", "caller-picked-model");
+    gateway.stream_model(request).await.unwrap();
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].model.as_deref(),
+        Some("caller-picked-model"),
+        "the per-run requested model must override the profile default"
+    );
+}
+
+#[tokio::test]
+async fn gateway_falls_back_to_profile_default_when_no_requested_route() {
+    let provider = Arc::new(RecordingLlmProvider::reply("assistant response"));
+    let policy = LlmModelProfilePolicy::new().allow_model_profile(
+        interactive_model(),
+        Some("profile-default-model".to_string()),
+    );
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        policy,
+    );
+
+    // No resolved_model_route on the request → the profile default is used.
+    gateway
+        .stream_model(model_request(interactive_model()))
+        .await
+        .unwrap();
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests[0].model.as_deref(), Some("profile-default-model"));
+}
+
+#[tokio::test]
 async fn gateway_stream_model_with_progress_uses_provider_streaming_and_sanitizes_updates() {
     let provider = Arc::new(StreamingRecordingLlmProvider::new(
         vec!["Done.".to_string(), " sk-live-secret".to_string()],

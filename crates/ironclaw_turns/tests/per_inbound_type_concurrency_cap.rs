@@ -96,6 +96,7 @@ fn submit_request(
 ) -> SubmitTurnRequest {
     let owner = scope.explicit_owner_user_id().unwrap().clone();
     SubmitTurnRequest {
+        requested_model: None,
         actor: actor_for(&owner),
         accepted_message_ref: AcceptedMessageRef::new(format!("message-{key}")).unwrap(),
         source_binding_ref: SourceBindingRef::new("source-web").unwrap(),

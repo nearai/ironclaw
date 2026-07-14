@@ -194,6 +194,7 @@ async fn submit_run_on_thread(
     let submit = turn_store
         .submit_turn(
             SubmitTurnRequest {
+                requested_model: None,
                 scope: turn_scope,
                 actor: TurnActor::new(user_id.clone()),
                 accepted_message_ref: AcceptedMessageRef::new(format!(
@@ -311,6 +312,7 @@ async fn submit_owned_run_on_thread(
     let submit = turn_store
         .submit_turn(
             SubmitTurnRequest {
+                requested_model: None,
                 scope: turn_scope,
                 actor: TurnActor::new(user_id.clone()),
                 accepted_message_ref: AcceptedMessageRef::new(format!(
