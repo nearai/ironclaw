@@ -528,9 +528,10 @@ pub enum CapabilitySurfaceDeclV2 {
         inbound: bool,
         outbound: bool,
     },
-    /// A surface projected by a host API contract section, stamped with the
-    /// owning contract id and section path (e.g. a `channel` surface from an
-    /// `ironclaw.product_adapter/v1` external-channel section).
+    /// A coarse surface projected by a host API contract section, stamped with
+    /// the owning contract id and section path. Only kinds without a dedicated
+    /// typed declaration are valid here; tool, auth, and channel are excluded
+    /// and fail closed during manifest projection.
     HostApiSection {
         kind: CapabilitySurfaceKind,
         host_api: HostApiId,
