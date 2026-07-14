@@ -4,7 +4,8 @@ use ironclaw_extensions::{
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationPersistedParts,
     ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef,
     ExtensionRemovalCleanupRequirement, InMemoryExtensionInstallationStore,
-    MANIFEST_SCHEMA_VERSION, ManifestHash, ManifestSource, canonicalize_installation_rows,
+    MANIFEST_SCHEMA_VERSION, MAX_MANIFEST_BYTES, ManifestHash, ManifestSource, ManifestV2Error,
+    canonicalize_installation_rows,
 };
 use ironclaw_filesystem::{
     CasApply, CasUpdateError, Entry, FilesystemError, RootFilesystem, cas_update_root,
@@ -18,6 +19,12 @@ use crate::extension_host::host_api_contracts::product_extension_host_api_contra
 const DEFAULT_INSTALLATION_STATE_PATH: &str = "/system/extensions/.installations/state.json";
 const INSTALLATION_STATE_IO_ERROR: &str = "failed to load extension installation state";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NonCasLoadPolicy {
+    RequireCas,
+    AllowReadOnlyLocalDev,
+}
+
 pub(crate) struct FilesystemExtensionInstallationStore {
     filesystem: std::sync::Arc<dyn RootFilesystem>,
     state_path: VirtualPath,
@@ -30,12 +37,24 @@ impl FilesystemExtensionInstallationStore {
         filesystem: std::sync::Arc<dyn RootFilesystem>,
         state_path: VirtualPath,
     ) -> Result<Self, ExtensionInstallationError> {
+        Self::load_at_with_policy(filesystem, state_path, NonCasLoadPolicy::RequireCas).await
+    }
+
+    pub(crate) async fn load_at_with_policy(
+        filesystem: std::sync::Arc<dyn RootFilesystem>,
+        state_path: VirtualPath,
+        non_cas_policy: NonCasLoadPolicy,
+    ) -> Result<Self, ExtensionInstallationError> {
         let inner = InMemoryExtensionInstallationStore::default();
         let state = match load_normalized_snapshot(filesystem.as_ref(), &state_path).await {
             Ok(state) => state,
             Err(CasUpdateError::Apply(error)) => return Err(error),
-            Err(CasUpdateError::CasUnsupported) => {
-                load_normalized_snapshot_without_cas(filesystem.as_ref(), &state_path).await?
+            Err(error @ CasUpdateError::CasUnsupported) => {
+                if non_cas_policy == NonCasLoadPolicy::AllowReadOnlyLocalDev {
+                    load_normalized_snapshot_without_cas(filesystem.as_ref(), &state_path).await?
+                } else {
+                    return Err(map_load_backend_error(&state_path, &error));
+                }
             }
             Err(error) => {
                 return Err(map_load_backend_error(&state_path, &error));
@@ -298,8 +317,7 @@ fn normalize_persisted_legacy_manifest(
     if !matches!(record.source, WireManifestSource::HostBundled) {
         return Ok(());
     }
-    let mut document: toml::Value =
-        toml::from_str(&record.raw_toml).map_err(invalid_installation_error)?;
+    let mut document = parse_persisted_manifest_toml(&record.raw_toml)?;
     let Some(root) = document.as_table_mut() else {
         return Err(invalid_installation_error(
             "persisted extension manifest root must be a TOML table",
@@ -471,13 +489,31 @@ fn rebuild_installation(
 }
 
 fn persisted_manifest_id(raw_toml: &str) -> Result<String, ExtensionInstallationError> {
-    let document: toml::Value = toml::from_str(raw_toml).map_err(invalid_installation_error)?;
+    let document = parse_persisted_manifest_toml(raw_toml)?;
     document
         .as_table()
         .and_then(|root| root.get("id"))
         .and_then(toml::Value::as_str)
         .map(ToOwned::to_owned)
         .ok_or_else(|| invalid_installation_error("persisted extension manifest is missing id"))
+}
+
+fn parse_persisted_manifest_toml(
+    raw_toml: &str,
+) -> Result<toml::Value, ExtensionInstallationError> {
+    if raw_toml.len() > MAX_MANIFEST_BYTES {
+        return Err(ManifestV2Error::ManifestTooLarge {
+            bytes: raw_toml.len(),
+            max: MAX_MANIFEST_BYTES,
+        }
+        .into());
+    }
+    toml::from_str(raw_toml).map_err(|error| {
+        ManifestV2Error::Parse {
+            reason: error.to_string(),
+        }
+        .into()
+    })
 }
 
 #[cfg(feature = "slack-v2-host-beta")]

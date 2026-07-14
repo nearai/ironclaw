@@ -166,7 +166,7 @@ use crate::extension_host::{
         google_docs_manifest_digest, google_drive_manifest_digest, google_sheets_manifest_digest,
         google_slides_manifest_digest, notion_mcp_manifest_digest, web_access_manifest_digest,
     },
-    extension_installation_store::FilesystemExtensionInstallationStore,
+    extension_installation_store::{FilesystemExtensionInstallationStore, NonCasLoadPolicy},
     extension_lifecycle::{
         ActiveExtensionPublisher, ExtensionCredentialCleanup, RebornLocalExtensionManagementPort,
         restore_extension_lifecycle_state,
@@ -1835,16 +1835,29 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         })?,
     );
     let extension_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
-    let extension_installation_store: Arc<dyn ExtensionInstallationStore> = Arc::new(
+    let loaded_extension_installation_store = if matches!(
+        profile,
+        RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo
+    ) {
+        FilesystemExtensionInstallationStore::load_at_with_policy(
+            extension_filesystem.clone(),
+            extension_installation_state_path,
+            NonCasLoadPolicy::AllowReadOnlyLocalDev,
+        )
+        .await
+    } else {
         FilesystemExtensionInstallationStore::load_at(
             extension_filesystem.clone(),
             extension_installation_state_path,
         )
         .await
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("extension installation state could not be loaded: {error}"),
-        })?,
-    );
+    };
+    let extension_installation_store: Arc<dyn ExtensionInstallationStore> =
+        Arc::new(loaded_extension_installation_store.map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: format!("extension installation state could not be loaded: {error}"),
+            }
+        })?);
     let extension_lifecycle_service = Arc::new(tokio::sync::Mutex::new(
         ExtensionLifecycleService::new(services.shared_extension_registry().snapshot_owned()),
     ));
@@ -3118,11 +3131,15 @@ pub(crate) async fn open_local_dev_extension_installation_store_for_test(
                 reason: format!("extension installation state path invalid: {error}"),
             }
         })?;
-    let store = FilesystemExtensionInstallationStore::load_at(filesystem, state_path)
-        .await
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("extension installation state could not be reopened: {error}"),
-        })?;
+    let store = FilesystemExtensionInstallationStore::load_at_with_policy(
+        filesystem,
+        state_path,
+        NonCasLoadPolicy::AllowReadOnlyLocalDev,
+    )
+    .await
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("extension installation state could not be reopened: {error}"),
+    })?;
     Ok(Arc::new(store))
 }
 

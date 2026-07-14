@@ -13,6 +13,7 @@ use ironclaw_extensions::{
     ExtensionInstallationId, ExtensionInstallationPersistedParts, ExtensionManifestRecord,
     ExtensionManifestRef, ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapterId,
     ExtensionRemovalCleanupRequirement, InstallationOwner, MANIFEST_SCHEMA_VERSION,
+    MAX_MANIFEST_BYTES, ManifestV2Error,
 };
 use ironclaw_filesystem::{
     BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemOperation,
@@ -285,6 +286,73 @@ async fn load_at_rejects_non_exact_legacy_manifest_shapes_without_changes() {
         assert_eq!(after.version, seeded.version, "{case}");
         assert_eq!(after.entry.body, seeded.entry.body, "{case}");
     }
+}
+
+#[tokio::test]
+async fn load_at_rejects_oversized_persisted_manifest_before_toml_parsing() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let state_path = test_state_path();
+    let oversized_manifest = format!("invalid = [\n{}", "x".repeat(MAX_MANIFEST_BYTES));
+    assert!(oversized_manifest.len() > MAX_MANIFEST_BYTES);
+    let state = WireState {
+        manifests: vec![WireManifestRecord {
+            raw_toml: oversized_manifest.clone(),
+            source: WireManifestSource::HostBundled,
+            manifest_hash: None,
+            removal_cleanup_requirements: Vec::new(),
+        }],
+        installations: Vec::new(),
+    };
+    let seeded = seed_wire_state(&backend, &state_path, &state).await;
+    let filesystem: Arc<dyn RootFilesystem> = backend.clone();
+
+    let error =
+        match FilesystemExtensionInstallationStore::load_at(filesystem, state_path.clone()).await {
+            Ok(_) => panic!("oversized persisted manifest must fail before TOML parsing"),
+            Err(error) => error,
+        };
+
+    assert_eq!(
+        error,
+        ExtensionInstallationError::Manifest(ManifestV2Error::ManifestTooLarge {
+            bytes: oversized_manifest.len(),
+            max: MAX_MANIFEST_BYTES,
+        })
+    );
+    let after = backend.get(&state_path).await.unwrap().unwrap();
+    assert_eq!(after.version, seeded.version);
+    assert_eq!(after.entry.body, seeded.entry.body);
+}
+
+#[tokio::test]
+async fn load_at_maps_malformed_persisted_manifest_to_manifest_parse_error() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let state_path = test_state_path();
+    let state = WireState {
+        manifests: vec![WireManifestRecord {
+            raw_toml: "id = [unterminated".to_string(),
+            source: WireManifestSource::HostBundled,
+            manifest_hash: None,
+            removal_cleanup_requirements: Vec::new(),
+        }],
+        installations: Vec::new(),
+    };
+    let seeded = seed_wire_state(&backend, &state_path, &state).await;
+    let filesystem: Arc<dyn RootFilesystem> = backend.clone();
+
+    let error =
+        match FilesystemExtensionInstallationStore::load_at(filesystem, state_path.clone()).await {
+            Ok(_) => panic!("malformed persisted manifest must fail as a manifest parse error"),
+            Err(error) => error,
+        };
+
+    assert!(matches!(
+        error,
+        ExtensionInstallationError::Manifest(ManifestV2Error::Parse { .. })
+    ));
+    let after = backend.get(&state_path).await.unwrap().unwrap();
+    assert_eq!(after.version, seeded.version);
+    assert_eq!(after.entry.body, seeded.entry.body);
 }
 
 #[tokio::test]
@@ -680,9 +748,13 @@ async fn load_at_non_cas_backend_normalizes_in_memory_without_putting() {
     let non_cas = Arc::new(NonCasFilesystem::new(backend.clone()));
     let filesystem: Arc<dyn RootFilesystem> = non_cas.clone();
 
-    let store = FilesystemExtensionInstallationStore::load_at(filesystem, state_path.clone())
-        .await
-        .expect("non-CAS backend uses the normalized snapshot in memory");
+    let store = FilesystemExtensionInstallationStore::load_at_with_policy(
+        filesystem,
+        state_path.clone(),
+        NonCasLoadPolicy::AllowReadOnlyLocalDev,
+    )
+    .await
+    .expect("non-CAS backend uses the normalized snapshot in memory");
 
     assert_eq!(non_cas.puts.load(Ordering::SeqCst), 0);
     assert!(
@@ -692,6 +764,41 @@ async fn load_at_non_cas_backend_normalizes_in_memory_without_putting() {
             .unwrap()
             .is_some()
     );
+    let after = backend.get(&state_path).await.unwrap().unwrap();
+    assert_eq!(after.version, seeded.version);
+    assert_eq!(after.entry.body, seeded.entry.body);
+}
+
+#[tokio::test]
+async fn load_at_non_cas_backend_fails_closed_without_explicit_compatibility() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let state_path = test_state_path();
+    let state = WireState {
+        manifests: vec![WireManifestRecord {
+            raw_toml: legacy_manifest_toml("legacy-tools"),
+            source: WireManifestSource::HostBundled,
+            manifest_hash: None,
+            removal_cleanup_requirements: Vec::new(),
+        }],
+        installations: Vec::new(),
+    };
+    let seeded = seed_wire_state(&backend, &state_path, &state).await;
+    let non_cas = Arc::new(NonCasFilesystem::new(backend.clone()));
+    let filesystem: Arc<dyn RootFilesystem> = non_cas.clone();
+
+    let error =
+        match FilesystemExtensionInstallationStore::load_at(filesystem, state_path.clone()).await {
+            Ok(_) => panic!("non-CAS storage must fail closed unless the caller opts in"),
+            Err(error) => error,
+        };
+
+    assert_eq!(
+        error,
+        ExtensionInstallationError::InvalidInstallation {
+            reason: INSTALLATION_STATE_IO_ERROR.to_string(),
+        }
+    );
+    assert_eq!(non_cas.puts.load(Ordering::SeqCst), 0);
     let after = backend.get(&state_path).await.unwrap().unwrap();
     assert_eq!(after.version, seeded.version);
     assert_eq!(after.entry.body, seeded.entry.body);
