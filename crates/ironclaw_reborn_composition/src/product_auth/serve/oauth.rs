@@ -2836,6 +2836,106 @@ mod tests {
         assert_eq!(stored_identity.app_id.as_deref(), Some("A123"));
     }
 
+    /// The user's real scenario: click Connect on the Slack card, close the
+    /// popup without authorizing, click Connect again. Supersede-on-start
+    /// cancels the prior auth FLOW, but the Slack connection EPOCH lives in the
+    /// lifecycle store, and `begin_connection` rejects a second live epoch with
+    /// `ConnectionInProgress` (409) until the first one's TTL lapses.
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[tokio::test]
+    async fn slack_personal_reopen_after_closing_popup_is_not_blocked_by_prior_epoch() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let provider_identity = OAuthProviderIdentity::new(
+            "U123",
+            Some("T123".to_string()),
+            None,
+            Some("A123".to_string()),
+        )
+        .expect("provider identity");
+        let provider_client = Arc::new(SlackIdentityProviderClient::new(provider_identity));
+        let product_auth = Arc::new(
+            RebornProductAuthServices::from_shared(
+                shared.clone(),
+                Arc::new(RecordingDispatcher::default()),
+            )
+            .with_flow_record_source(shared)
+            .with_provider_client(provider_client),
+        );
+        let tenant_id = TenantId::new("tenant-alpha").expect("tenant");
+        let user_id = UserId::new("user-alpha").expect("user");
+        let installation_id = AdapterInstallationId::new("install-alpha").expect("installation");
+        let binding_store = Arc::new(RecordingBindingStore::default());
+        let binding_service = Arc::new(SlackPersonalUserBindingService::new(
+            [SlackPersonalBindingInstallation {
+                tenant_id: tenant_id.clone(),
+                installation_id: installation_id.clone(),
+                selector: SlackInstallationSelector::app_team("A123", "T123"),
+            }],
+            binding_store.clone(),
+        ));
+        let lifecycle_store = Arc::new(TestSlackLifecycleStore::default());
+        let state = ProductAuthRouteState::new(product_auth.clone(), tenant_id.clone(), None, None)
+            .with_test_installed_extension_lookup()
+            .with_slack_personal_oauth(slack_personal_oauth_test_slot().await)
+            .with_slack_personal_oauth_binding(SlackPersonalOAuthBindingConfig::new(
+                binding_service,
+                Arc::new(StaticSlackPersonalConnectionScopeResolver::new(Some(
+                    SlackPersonalConnectionScope { installation_id },
+                ))),
+                binding_store,
+                lifecycle_store.clone(),
+            ));
+        let caller = WebUiAuthenticatedCaller::new(tenant_id.clone(), user_id.clone(), None, None);
+
+        let start_request = || ExtensionOAuthStartRequest {
+            provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+            account_label: "personal slack".to_string(),
+            scopes: vec![],
+            expires_at: Utc::now() + ChronoDuration::minutes(5),
+            invocation_id: Some(InvocationId::new().to_string()),
+        };
+
+        // Click Connect. Popup opens.
+        let Json(first_start) = extension_oauth_start_handler(
+            State(state.clone()),
+            Extension(caller.clone()),
+            Path("slack".to_string()),
+            Json(start_request()),
+        )
+        .await
+        .expect("first Slack connect starts");
+
+        // User closes the popup without authorizing. Nothing calls back.
+        // Click Connect again.
+        let Json(second_start) = extension_oauth_start_handler(
+            State(state.clone()),
+            Extension(caller.clone()),
+            Path("slack".to_string()),
+            Json(start_request()),
+        )
+        .await
+        .expect("re-opening the Slack connect popup must not be blocked by the abandoned attempt");
+
+        assert_ne!(second_start.flow_id, first_start.flow_id);
+        let first_state_value = Url::parse(first_start.authorization_url.as_str())
+            .expect("authorization url")
+            .query_pairs()
+            .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
+            .expect("oauth state");
+        let first_callback_state =
+            OAuthCallbackState::decode(OAuthCallbackStateKind::SLACK_PERSONAL, &first_state_value)
+                .expect("decode first callback state");
+        assert_eq!(
+            product_auth
+                .flow_record_for_status(first_callback_state.scope(), first_start.flow_id)
+                .await
+                .expect("load superseded flow")
+                .status,
+            AuthFlowStatus::Canceled,
+            "the abandoned first attempt must be superseded, not left live"
+        );
+    }
+
     #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_personal_terminal_callback_failures_allow_immediate_retry() {

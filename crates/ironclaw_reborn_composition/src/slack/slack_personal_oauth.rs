@@ -208,6 +208,30 @@ pub(crate) async fn start_extension_oauth_flow(
     );
     let connection_epoch = SlackConnectionEpoch::new(flow_id);
 
+    // Supersede-on-start cancels the prior setup FLOW, but this provider's
+    // connection epoch is separate lifecycle state keyed by that flow's id, and
+    // `begin_connection` rejects a second live epoch with `ConnectionInProgress`
+    // until the first one's TTL lapses. Without this, closing the connect popup
+    // and re-opening it is a 409 for the rest of the flow TTL. Drive the same
+    // generic supersede seam `start_setup_oauth_flow` uses (idempotent — its own
+    // call below then finds nothing left) so the abandoned attempts' epochs are
+    // released before this one begins.
+    let superseded = run_with_backend_timeout(
+        state
+            .product_auth_services()
+            .flow_manager()
+            .cancel_superseded_setup_flows(&scope, &provider),
+    )
+    .await?;
+    for superseded_flow_id in superseded {
+        abandon_slack_connection_epoch(
+            binding_config.lifecycle_store.as_ref(),
+            &scope,
+            superseded_flow_id,
+        )
+        .await?;
+    }
+
     let flow = match run_with_backend_timeout(
         state
             .product_auth_services()
