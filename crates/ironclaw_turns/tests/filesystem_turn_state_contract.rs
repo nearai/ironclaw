@@ -1181,6 +1181,7 @@ fn turn_actor() -> TurnActor {
 
 fn submit_request_for(scope: TurnScope, idempotency_key: &str) -> SubmitTurnRequest {
     SubmitTurnRequest {
+        requested_model: None,
         scope,
         actor: turn_actor(),
         accepted_message_ref: AcceptedMessageRef::new(format!("message-{idempotency_key}"))
@@ -2572,6 +2573,7 @@ async fn filesystem_turn_state_row_store_validated_loop_exit_completion_remains_
         .unwrap();
     store
         .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            model_usage: None,
             run_id: first_run_id,
             runner_id: first_runner_id,
             lease_token: first_lease_token,
@@ -2603,6 +2605,7 @@ async fn filesystem_turn_state_row_store_validated_loop_exit_completion_remains_
         .unwrap();
     store
         .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            model_usage: None,
             run_id: second_run_id,
             runner_id: second_runner_id,
             lease_token: second_lease_token,

@@ -49,14 +49,17 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let facade =
         ironclaw_reborn_composition::test_support::local_dev_automation_product_facade_for_test(
             trigger_repository,
+            Arc::clone(&g.shared.turn_store),
         );
 
     let services = RebornServices::new(h.thread_harness.service.clone(), h.coordinator.clone())
         .with_automation_product_facade(facade);
-    // The trigger creator is the capability-harness constructor user; match
-    // that caller so the scoped automation facade can see and mutate it.
-    let mut caller = webui_caller_for(&h.binding);
-    caller.user_id = capability_harness.user_id().clone();
+    // The production capability port resolves the execution user from the
+    // run's binding owner, so the trigger creator is the binding subject —
+    // the default caller already matches it for the scoped automation facade.
+    // (The pre-port harness dispatched under a fixed constructor user and
+    // needed a caller override here.)
+    let caller = webui_caller_for(&h.binding);
     let router = mount_webui_v2_router(Arc::new(services), caller);
 
     let rename_path = format!("/api/webchat/v2/automations/{trigger_id}");

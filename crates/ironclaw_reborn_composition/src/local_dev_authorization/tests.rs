@@ -349,6 +349,7 @@ fn local_dev_shell_authorization_inputs(
         effects: effects.clone(),
         default_permission: PermissionMode::Allow,
         runtime_credentials: Vec::new(),
+        network_targets: Vec::new(),
         resource_profile: None,
     };
     let policy = local_dev_capability_policy().expect("capability policy");
@@ -399,6 +400,7 @@ async fn trace_commons_authorize_decision(
         effects: effects.clone(),
         default_permission: PermissionMode::Allow,
         runtime_credentials: Vec::new(),
+        network_targets: Vec::new(),
         resource_profile: None,
     };
     let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));

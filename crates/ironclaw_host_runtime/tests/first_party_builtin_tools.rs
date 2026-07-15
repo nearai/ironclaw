@@ -56,8 +56,9 @@ use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
 use ironclaw_secrets::InMemorySecretStore;
 use ironclaw_triggers::{
     ClaimDueFireRequest, ClearActiveFireRequest, FireAcceptedRequest, InMemoryTriggerRepository,
-    MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, TriggerError, TriggerRecord,
-    TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerSchedule, TriggerState,
+    MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, MissingTriggerActiveRunLookup, TriggerError,
+    TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerSchedule,
+    TriggerState,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -585,6 +586,125 @@ async fn builtin_trigger_create_stamps_caller_scope_and_persists_record() {
     assert_eq!(records[0].creator_user_id, context.resource_scope.user_id);
     assert_eq!(records[0].agent_id, context.resource_scope.agent_id);
     assert_eq!(records[0].project_id, context.resource_scope.project_id);
+}
+
+/// Per-trigger delivery routing: a model-supplied `delivery_target_id` is
+/// shape-validated, host-validated through the create hook, persisted on the
+/// record, and echoed in the model-facing output — so one automation's
+/// routing no longer depends on the mutable user-global preference.
+#[tokio::test]
+async fn builtin_trigger_create_with_delivery_target_persists_it_when_host_validates() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let hook = Arc::new(DeliveryTargetValidatingTriggerCreateHook::accepting(
+        "slack:personal-dm:T123:user-a",
+    ));
+    let runtime = runtime_with_trigger_repository_and_create_hook(repository.clone(), hook.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let output = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Routed summary",
+            "prompt": "Summarize yesterday",
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" },
+            "delivery_target_id": "slack:personal-dm:T123:user-a"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        output["trigger"]["delivery_target_id"],
+        json!("slack:personal-dm:T123:user-a")
+    );
+    assert_eq!(
+        hook.validated(),
+        vec!["slack:personal-dm:T123:user-a".to_string()],
+        "the host validation hook must see the model-supplied target"
+    );
+
+    let records = repository
+        .list_triggers(context.resource_scope.tenant_id)
+        .await
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0]
+            .delivery_target
+            .as_ref()
+            .map(|target| target.as_str()),
+        Some("slack:personal-dm:T123:user-a")
+    );
+}
+
+/// Fail closed: without host wiring that can resolve outbound delivery
+/// targets (the default no-op hook), a supplied `delivery_target_id` must be
+/// rejected as invalid input instead of being persisted unvalidated.
+#[tokio::test]
+async fn builtin_trigger_create_rejects_delivery_target_without_host_validation() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let error = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Routed summary",
+            "prompt": "Summarize yesterday",
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" },
+            "delivery_target_id": "slack:personal-dm:T123:user-a"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// A target the host rejects (unknown id, foreign owner, disconnected
+/// product) is invalid input and nothing persists.
+#[tokio::test]
+async fn builtin_trigger_create_rejects_delivery_target_the_host_rejects() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let hook = Arc::new(DeliveryTargetValidatingTriggerCreateHook::accepting(
+        "slack:personal-dm:T123:user-a",
+    ));
+    let runtime = runtime_with_trigger_repository_and_create_hook(repository.clone(), hook);
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let error = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Routed summary",
+            "prompt": "Summarize yesterday",
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" },
+            "delivery_target_id": "slack:shared-channel:T123:C_SOMEONE_ELSES"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -3228,6 +3348,43 @@ async fn builtin_shell_returns_stderr_and_nonzero_exit_without_dispatch_failure(
 }
 
 #[tokio::test]
+async fn builtin_shell_path_bearing_failure_reason_rides_the_diagnostic_detail() {
+    // Loop-boundary pin for the "model-visible tool-failure reasons" feature:
+    // a shell rejection reason that names a concrete path (here the sensitive
+    // credential path guard) fails the strict loop safe-summary validator, so
+    // the message degrades to the fixed category sentence — but the raw
+    // reason must NOT be dropped: it rides the diagnostic detail that the
+    // loop layer scrubs and carries to the model.
+    let runtime = runtime();
+    let failure = invoke_failure_with_context(
+        &runtime,
+        SHELL_CAPABILITY_ID,
+        json!({"command": "cat /etc/shadow"}),
+        execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy()),
+    )
+    .await;
+
+    let message = failure
+        .message
+        .as_deref()
+        .expect("failure carries a message");
+    assert!(
+        !message.contains("/etc/shadow"),
+        "the raw path must not leak into the strict summary channel: {message}"
+    );
+    let Some(DispatchFailureDetail::Diagnostic { text }) = &failure.detail else {
+        panic!(
+            "expected the raw reason on the diagnostic detail, got {:?}",
+            failure.detail
+        );
+    };
+    assert!(
+        text.contains("/etc/shadow"),
+        "the model-visible diagnostic must carry the concrete path: {text}"
+    );
+}
+
+#[tokio::test]
 async fn builtin_shell_uses_configured_tenant_sandbox_process_port() {
     let local_process = Arc::new(RecordingProcessPort::default());
     let sandbox_transport = Arc::new(RecordingSandboxTransport::default());
@@ -3284,7 +3441,7 @@ async fn builtin_shell_reuses_v1_shell_validation() {
     ] {
         let err = invoke_shell(input).await.unwrap_err();
 
-        assert_eq!(err, RuntimeFailureKind::Backend);
+        assert_eq!(err, RuntimeFailureKind::PolicyDenied);
     }
 }
 
@@ -3301,6 +3458,30 @@ async fn builtin_shell_rejects_invalid_inputs_before_spawn() {
 
         assert_eq!(err, RuntimeFailureKind::InvalidInput);
     }
+}
+
+#[tokio::test]
+async fn builtin_shell_invalid_input_failure_carries_the_reason_through_the_runtime() {
+    // Test-through-the-caller for the shell_error mapping: the failure the
+    // loop (and ultimately the model) receives must say WHAT was wrong with
+    // the call, not just an input-encode category.
+    let runtime = runtime();
+    let failure = invoke_failure_with_context(
+        &runtime,
+        SHELL_CAPABILITY_ID,
+        json!({}),
+        execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy()),
+    )
+    .await;
+
+    assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+    let summary = failure
+        .safe_summary()
+        .expect("shell invalid-input failure must carry a reason");
+    assert!(
+        summary.contains("missing 'command' parameter"),
+        "failure should carry the parameter reason, got: {summary}"
+    );
 }
 
 #[tokio::test]
@@ -3480,6 +3661,124 @@ async fn builtin_time_parse_convert_and_diff_are_deterministic() {
             "operation": "diff",
             "input": "2026-05-12T13:00:00Z",
             "timestamp2": "2026-05-12T15:30:00Z"
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(diff["minutes"], json!(150));
+}
+
+#[tokio::test]
+async fn builtin_time_accepts_unix_seconds_millis_and_slack_fractional_timestamps() {
+    let parsed_seconds = invoke(
+        TIME_CAPABILITY_ID,
+        json!({"operation": "parse", "input": 1778590800}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(parsed_seconds["iso"], json!("2026-05-12T13:00:00+00:00"));
+
+    let parsed_millis = invoke(
+        TIME_CAPABILITY_ID,
+        json!({"operation": "parse", "timestamp": 1778590800123_i64}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(parsed_millis["unix_millis"], json!(1778590800123_i64));
+
+    let parsed_float_millis = invoke(
+        TIME_CAPABILITY_ID,
+        json!({"operation": "parse", "input": 1778590800123.0}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(parsed_float_millis["unix_millis"], json!(1778590800123_i64));
+
+    let exponent_millis_input =
+        serde_json::from_str(r#"{"operation":"parse","input":1.778590800123e12}"#).unwrap();
+    let parsed_exponent_millis = invoke(TIME_CAPABILITY_ID, exponent_millis_input)
+        .await
+        .unwrap();
+    assert_eq!(
+        parsed_exponent_millis["unix_millis"],
+        json!(1778590800123_i64)
+    );
+
+    let parsed_string_float_millis = invoke(
+        TIME_CAPABILITY_ID,
+        json!({"operation": "parse", "input": "1778590800123.0"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        parsed_string_float_millis["unix_millis"],
+        json!(1778590800123_i64)
+    );
+
+    let fractional_exponent_input =
+        serde_json::from_str(r#"{"operation":"parse","input":1e-9}"#).unwrap();
+    let parsed_fractional_exponent = invoke(TIME_CAPABILITY_ID, fractional_exponent_input)
+        .await
+        .unwrap();
+    assert_eq!(
+        parsed_fractional_exponent["iso"],
+        json!("1970-01-01T00:00:00.000000001+00:00")
+    );
+
+    let parsed_negative_fraction = invoke(
+        TIME_CAPABILITY_ID,
+        json!({"operation": "parse", "input": "-0.25"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        parsed_negative_fraction["iso"],
+        json!("1969-12-31T23:59:59.750+00:00")
+    );
+
+    let parsed_slack_timestamp = invoke(
+        TIME_CAPABILITY_ID,
+        json!({"operation": "parse", "input": "1783634967.123456"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(parsed_slack_timestamp["unix"], json!(1783634967));
+    assert_eq!(
+        parsed_slack_timestamp["iso"],
+        json!("2026-07-09T22:09:27.123456+00:00")
+    );
+
+    let converted = invoke(
+        TIME_CAPABILITY_ID,
+        json!({
+            "operation": "convert",
+            "input": 1778590800,
+            "to_timezone": "America/New_York"
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(converted["output"], json!("2026-05-12T09:00:00-04:00"));
+
+    let formatted = invoke(
+        TIME_CAPABILITY_ID,
+        json!({
+            "operation": "format",
+            "input": 1778590800,
+            "timezone": "America/New_York",
+            "format": "%Y-%m-%d %H:%M:%S %Z"
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(formatted["formatted"], json!("2026-05-12 09:00:00 EDT"));
+
+    let diff = invoke(
+        TIME_CAPABILITY_ID,
+        json!({
+            "operation": "diff",
+            "input": 1778590800,
+            "timestamp2": 1778599800
         }),
     )
     .await
@@ -7829,6 +8128,10 @@ fn runtime_with_trigger_repository_and_create_hook(
         builtin_first_party_handlers_with_trigger_create_hook(
             trigger_repository,
             trigger_create_hook,
+            // Test-only wiring (#5886): this helper isn't a production call
+            // site, so it defaults the same `Missing`-resolving lookup the
+            // bare `insert_handlers` wrapper uses.
+            Arc::new(MissingTriggerActiveRunLookup),
         )
         .unwrap(),
     ))
@@ -7932,6 +8235,49 @@ impl TriggerCreateHook for FailingTriggerCreateHook {
         Err(TriggerError::Backend {
             reason: "hook unavailable".to_string(),
         })
+    }
+}
+
+/// Test hook standing in for host composition's outbound-target resolution:
+/// accepts exactly one target id, records every validation request.
+struct DeliveryTargetValidatingTriggerCreateHook {
+    accepted: String,
+    validated: std::sync::Mutex<Vec<String>>,
+}
+
+impl DeliveryTargetValidatingTriggerCreateHook {
+    fn accepting(target: &str) -> Self {
+        Self {
+            accepted: target.to_string(),
+            validated: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn validated(&self) -> Vec<String> {
+        self.validated.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl TriggerCreateHook for DeliveryTargetValidatingTriggerCreateHook {
+    async fn validate_delivery_target(
+        &self,
+        _scope: &ironclaw_host_api::ResourceScope,
+        target: &ironclaw_triggers::TriggerDeliveryTargetId,
+    ) -> Result<(), TriggerError> {
+        self.validated.lock().unwrap().push(target.to_string());
+        if target.as_str() == self.accepted {
+            Ok(())
+        } else {
+            Err(TriggerError::InvalidRecord {
+                kind: ironclaw_triggers::TriggerRecordValidationKind::DeliveryTargetInvalid,
+                reason: "delivery target is not available to this caller".to_string(),
+            })
+        }
+    }
+
+    async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
+        Ok(())
     }
 }
 

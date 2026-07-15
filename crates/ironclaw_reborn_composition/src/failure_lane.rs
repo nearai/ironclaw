@@ -19,6 +19,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use ironclaw_runner::failure_categories::BUDGET_ACCOUNTING_FAILED_CATEGORY;
+
 /// The lane a terminal run failure (or ingress refusal) belongs to.
 ///
 /// Wire-stable, snake_case. Adding a variant is a wire contract change.
@@ -69,7 +71,7 @@ pub fn failure_lane(category: &str, retryable: bool) -> FailureLane {
 ///
 /// `unknown_failure` is deliberately excluded — it IS the generic fallback.
 pub const ALL_RUN_FAILURE_CATEGORIES: &[&str] = &[
-    // Driver / scheduler / lifecycle (ironclaw_reborn planned_driver/turn_runner)
+    // Driver / scheduler / lifecycle (ironclaw_runner planned_driver/turn_runner)
     "driver_not_found",
     "driver_unavailable",
     "driver_failed",
@@ -128,6 +130,7 @@ pub const ALL_RUN_FAILURE_CATEGORIES: &[&str] = &[
     // Pinned provider categories (failure_categories.rs)
     "model_credits_exhausted",
     "model_credentials_unavailable",
+    BUDGET_ACCOUNTING_FAILED_CATEGORY,
 ];
 
 #[cfg(test)]

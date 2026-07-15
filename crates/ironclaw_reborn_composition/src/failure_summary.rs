@@ -1,6 +1,8 @@
-use ironclaw_reborn::failure_categories::{
-    MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
+use ironclaw_runner::failure_categories::{
+    BUDGET_ACCOUNTING_FAILED_CATEGORY, MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
+    MODEL_CREDITS_EXHAUSTED_CATEGORY,
 };
+use ironclaw_turns::ModelInvalidOutputDetailReason;
 
 pub fn reborn_failure_summary_for_category(category: Option<&str>) -> &'static str {
     let Some(category) = category else {
@@ -158,6 +160,62 @@ pub fn reborn_failure_summary_for_category(category: Option<&str>) -> &'static s
     }
 }
 
+pub(crate) fn reborn_failure_summary_for_category_and_detail(
+    category: Option<&str>,
+    detail: Option<ModelInvalidOutputDetailReason>,
+) -> &'static str {
+    let Some(category) = category else {
+        return unknown_failure_summary();
+    };
+
+    if let Some(summary) = pinned_failure_summary_for_category(category) {
+        return summary;
+    }
+
+    if matches!(category, "model_invalid_output" | "invalid_model_output")
+        && let Some(detail) = detail
+    {
+        return detail.failure_summary();
+    }
+
+    reborn_failure_summary_for_category(Some(category))
+}
+
+trait ModelInvalidOutputFailureSummary {
+    fn failure_summary(self) -> &'static str;
+}
+
+impl ModelInvalidOutputFailureSummary for ModelInvalidOutputDetailReason {
+    fn failure_summary(self) -> &'static str {
+        match self {
+            Self::EmptyAssistantResponse => {
+                "The run failed because the model returned an empty assistant response. Retry the run or choose a different model."
+            }
+            Self::TextualToolCallSyntax => {
+                "The run failed because the model returned a tool call as text instead of structured tool-call data. Retry the run or choose a different model."
+            }
+            Self::OutsideCapabilitySurface => {
+                "The run failed because the model tried to call a tool that was not available in this turn. Retry with a narrower request or choose a different model."
+            }
+            Self::ToolUseFinishWithoutToolCalls => {
+                "The run failed because the model requested tool use without providing structured tool calls. Retry the run or choose a different model."
+            }
+            Self::UnsupportedToolCallsForTextOnlyLoop => {
+                "The run failed because the model tried to call a tool when this turn required a text answer. Retry with a clearer request or choose a different model."
+            }
+            Self::InvalidReturnedToolName => {
+                "The run failed because the model returned an invalid tool name. Retry the run or choose a different model."
+            }
+            Self::InvalidToolCallArguments => {
+                "The run failed because the model returned invalid tool-call arguments. Retry with a clearer or narrower request."
+            }
+            Self::MalformedToolCallArguments => {
+                "The run failed because the model returned malformed tool-call arguments. Retry with a clearer or narrower request."
+            }
+        }
+    }
+}
+
 pub(crate) fn pinned_failure_summary_for_category(category: &str) -> Option<&'static str> {
     match category {
         MODEL_CREDITS_EXHAUSTED_CATEGORY => Some(
@@ -165,6 +223,9 @@ pub(crate) fn pinned_failure_summary_for_category(category: &str) -> Option<&'st
         ),
         MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY => Some(
             "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL, then try again.",
+        ),
+        BUDGET_ACCOUNTING_FAILED_CATEGORY => Some(
+            "The run failed because resource accounting was temporarily unavailable. Retry the run, and contact support if it keeps happening.",
         ),
         _ => None,
     }
@@ -176,7 +237,10 @@ fn unknown_failure_summary() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::reborn_failure_summary_for_category;
+    use super::{
+        reborn_failure_summary_for_category, reborn_failure_summary_for_category_and_detail,
+    };
+    use ironclaw_turns::ModelInvalidOutputDetailReason;
 
     #[test]
     fn reborn_failure_summary_describes_known_category() {
@@ -202,8 +266,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn invalid_model_output_detail_summary_uses_shared_reason() {
+        assert_eq!(
+            reborn_failure_summary_for_category_and_detail(
+                Some("model_invalid_output"),
+                Some(ModelInvalidOutputDetailReason::EmptyAssistantResponse),
+            ),
+            "The run failed because the model returned an empty assistant response. Retry the run or choose a different model."
+        );
+    }
+
     // The scheduler emits `scheduler_heartbeat_failed` / `scheduler_executor_panic`
-    // (see `ironclaw_host_runtime::turn_scheduler`), not the previously-matched
+    // (see `ironclaw_runner::turn_scheduler`), not the previously-matched
     // `heartbeat_failed` / `driver_panic`. These two assertions pin the live
     // mapping to the real producer strings.
     #[test]

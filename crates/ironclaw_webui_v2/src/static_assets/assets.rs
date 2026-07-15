@@ -279,15 +279,14 @@ mod tests {
         let message_bubble = source_text("pages/chat/components/message-bubble.tsx");
         assert!(message_bubble.contains("group flex w-full min-w-0 flex-col"));
         assert!(message_bubble.contains("const bubbleWidthClass = isUser"));
+        assert!(message_bubble.contains("const isNotice = role === CHAT_MESSAGE_ROLES.SYSTEM;"));
+        assert!(message_bubble.contains("const isError = role === CHAT_MESSAGE_ROLES.ERROR;"));
         assert!(message_bubble.contains("\"v2-chat-readable-width\""));
         assert!(message_bubble.contains("\"mx-auto v2-chat-readable-width\""));
+        assert!(message_bubble.contains("\"mr-auto v2-chat-readable-width\""));
         assert!(message_bubble.contains("\"w-full v2-chat-readable-width\""));
         assert!(!message_bubble.contains("sm:max-w-["));
-        assert!(
-            message_bubble.contains(
-                "const contentWidthClass = isUser ? \"min-w-0 max-w-full\" : \"w-full min-w-0 max-w-full\";"
-            )
-        );
+        assert!(message_bubble.contains("isUser || isError ? \"min-w-0 max-w-full\""));
         assert!(message_bubble.contains("contentWidthClass,"));
     }
 
@@ -498,6 +497,31 @@ mod tests {
 
         assert!(sidebar_nav.contains("<span className=\"text-[13px] font-medium\""));
         assert!(sidebar_nav.contains("t(\"chat.newThread\")"));
+    }
+
+    #[test]
+    fn sidebar_thread_delete_assets_are_wired() {
+        let sidebar = source_text("components/sidebar.tsx");
+        assert!(sidebar.contains("onDeleteThread"));
+        assert!(sidebar.contains("onDelete={onDeleteThread}"));
+
+        let sidebar_threads = source_text("components/sidebar-threads.tsx");
+        assert!(sidebar_threads.contains("data-testid=\"thread-delete\""));
+        assert!(sidebar_threads.contains("data-thread-id={thread.id}"));
+        assert!(sidebar_threads.contains("t(\"common.deleteChat\")"));
+        assert!(sidebar_threads.contains("t(\"thread.deleteConfirm\")"));
+        assert!(sidebar_threads.contains("deleteThreadErrorMessage"));
+        assert!(sidebar_threads.contains("window.alert"));
+
+        let api = source_text("lib/api.ts");
+        assert!(api.contains("export function deleteThread"));
+        assert!(api.contains("/threads/${encodeURIComponent(threadId)}"));
+        assert!(api.contains("method: \"DELETE\""));
+
+        let bundle = bundled_javascript();
+        assert!(bundle.contains("thread-delete"));
+        assert!(bundle.contains("common.deleteChat"));
+        assert!(bundle.contains("thread.deleteConfirm"));
     }
 
     #[test]

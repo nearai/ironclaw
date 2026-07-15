@@ -4,6 +4,7 @@ import { useT } from "../../../lib/i18n";
 import { Panel, StatusPill, EmptyPanel } from "../../../design-system/primitives";
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
+import { SelectMenu } from "../../../design-system/select-menu";
 import { useAdminUsers } from "../hooks/useAdminUsers";
 import {
   formatRelativeTime,
@@ -11,7 +12,10 @@ import {
   truncateId,
   statusTone,
   roleTone,
+  formatUserRole,
+  formatUserStatus,
   filterUsers,
+  buildRoleOptions,
 } from "../lib/admin-presenters";
 
 function buildFilters(t) {
@@ -64,6 +68,7 @@ function CreateUserForm({ onCreate, isCreating, error }) {
   const [email, setEmail] = React.useState("");
   const [role, setRole] = React.useState("member");
   const [isOpen, setIsOpen] = React.useState(false);
+  const roleOptions = React.useMemo(() => buildRoleOptions(t), [t]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -111,14 +116,14 @@ function CreateUserForm({ onCreate, isCreating, error }) {
           </div>
           <div>
             <label className="mb-1 block text-xs text-iron-300">{t("admin.users.role")}</label>
-            <select
+            <SelectMenu
               value={role}
-              onChange={(e) => setRole(e.currentTarget.value)}
-              className="v2-select h-9 w-full rounded-md border border-iron-700 bg-iron-800/70 px-3 text-sm text-iron-100 outline-none focus:border-signal/45"
-            >
-              <option value="member">{t("admin.users.member")}</option>
-              <option value="admin">{t("admin.users.admin")}</option>
-            </select>
+              options={roleOptions}
+              onChange={setRole}
+              ariaLabel={t("admin.users.role")}
+              className="w-full"
+              buttonClassName="h-9 rounded-md border-iron-700 bg-iron-800/70 px-3 font-sans text-sm text-iron-100"
+            />
           </div>
         </div>
         {error && (<p className="text-sm text-[var(--v2-danger-text)]">{error.message}</p>)}
@@ -166,8 +171,8 @@ function UserRow({ user, onSelect, onSuspend, onActivate, onChangeRole }) {
           >
             {user.display_name || user.id}
           </button>
-          <StatusPill tone={roleTone(user.role)} label={user.role || "member"} />
-          <StatusPill tone={statusTone(user.status)} label={user.status || "active"} />
+          <StatusPill tone={roleTone(user.role)} label={formatUserRole(user.role, t)} />
+          <StatusPill tone={statusTone(user.status)} label={formatUserStatus(user.status, t)} />
         </div>
         <div className="mt-0.5 flex flex-wrap gap-x-4 gap-y-0.5">
           {user.email && (<span className="font-mono text-xs text-iron-300">{user.email}</span>)}
@@ -179,7 +184,7 @@ function UserRow({ user, onSelect, onSuspend, onActivate, onChangeRole }) {
           {user.job_count != null ? t("admin.users.jobsCount", { count: user.job_count }) : ""}
           {user.total_cost != null ? ` · ${formatCost(user.total_cost)}` : ""}
         </span>
-        <span className="hidden text-xs text-iron-700 lg:inline">{formatRelativeTime(user.last_active_at)}</span>
+        <span className="hidden text-xs text-iron-700 lg:inline">{formatRelativeTime(user.last_active_at, t)}</span>
         <div className="flex gap-1">
           {user.status === "active"
             ? (<button onClick={() => onSuspend(user.id)} className="rounded-md border border-iron-700 px-2.5 py-1.5 text-[11px] font-medium text-iron-300 hover:border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] hover:text-[var(--v2-danger-text)]">{t("admin.users.suspend")}</button>)

@@ -62,6 +62,7 @@ fn sample_record(
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::cron("0 8 * * *").expect("valid cron"),
         prompt: "summarize unread mail".to_string(),
+        delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at,
         last_run_at: None,
@@ -730,7 +731,9 @@ async fn tick_keeps_blocked_active_run_locked_until_terminal() {
         Arc::new(RecordingMaterializer::success("content:trigger-fire")),
         Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
         Arc::new(RecordingActiveRunLookup::with_state(
-            TriggerActiveRunState::Blocked,
+            TriggerActiveRunState::Blocked {
+                kind: BlockedActiveRunKind::Approval,
+            },
         )),
     );
 
@@ -2274,7 +2277,9 @@ async fn tick_fire_once_blocked_active_run_is_left_pending() {
         Arc::new(RecordingMaterializer::success("content:fire-once")),
         Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
         Arc::new(RecordingActiveRunLookup::with_state(
-            TriggerActiveRunState::Blocked,
+            TriggerActiveRunState::Blocked {
+                kind: BlockedActiveRunKind::Approval,
+            },
         )),
     );
 
@@ -2433,7 +2438,9 @@ async fn tick_recurring_blocked_active_run_stays_active() {
         Arc::new(RecordingMaterializer::success("content:trigger-fire")),
         Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
         Arc::new(RecordingActiveRunLookup::with_state(
-            TriggerActiveRunState::Blocked,
+            TriggerActiveRunState::Blocked {
+                kind: BlockedActiveRunKind::Approval,
+            },
         )),
     );
 
@@ -4445,6 +4452,7 @@ async fn timezone_aware_firing_harness() {
         source: TriggerSourceKind::Schedule,
         schedule: schedule.clone(),
         prompt: "run daily summary".to_string(),
+        delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at: computed_seed,
         last_run_at: None,

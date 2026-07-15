@@ -34,29 +34,31 @@ use ironclaw_product_workflow::{
     ApprovalInteractionDecision, ApprovalInteractionScope, ApprovalInteractionService,
     AuthInteractionDecision, AuthInteractionService, AutomationListRequest, AutomationName,
     AutomationProductFacade, CodexLoginStart, ExtensionCredentialSetupService,
-    ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, InboundAttachmentLander,
-    InboundAttachmentReader, LifecycleExtensionCredentialRequirement,
-    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
-    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
-    LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductAction,
-    LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
-    LifecycleProductResponse, LifecycleReadinessBlocker, ListPendingApprovalsRequest,
-    ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
-    ListPendingAuthInteractionsResponse, LlmActiveSelection, LlmConfigService,
-    LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
-    LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
-    NearAiWalletLoginResult, OperatorLogsService, OperatorServiceLifecycleService,
-    OperatorStatusService, OutboundPreferencesProductFacade, PendingApprovalInteractionView,
-    ProductAgentBoundCaller, ProductWorkflowError, ProjectCaller, ProjectService,
+    ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, FilesystemBrowseReader,
+    FsMount, InboundAttachmentLander, InboundAttachmentReader,
+    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
+    LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
+    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
+    LifecyclePackageRef, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
+    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleReadinessBlocker, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
+    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse, LlmActiveSelection,
+    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
+    LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, OperatorLogsService,
+    OperatorServiceLifecycleService, OperatorStatusService, OutboundPreferencesProductFacade,
+    PendingApprovalInteractionView, ProductAgentBoundCaller, ProductWorkflowError, ProjectCaller,
+    ProjectFsEntry, ProjectFsError, ProjectFsFile, ProjectFsStat, ProjectService,
     ProjectServiceError, RebornAddMemberRequest, RebornAttachmentRequest, RebornAutomationInfo,
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornChannelConnectAction, RebornChannelConnectStrategy,
     RebornConnectableChannelInfo, RebornCreateProjectRequest, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornExtensionOnboardingState, RebornGetProjectRequest,
-    RebornGetRunStateRequest, RebornListMembersRequest, RebornListMembersResponse,
-    RebornListProjectsRequest, RebornListProjectsResponse, RebornLogLevel, RebornLogQueryRequest,
-    RebornLogQueryResponse, RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigSetRequest,
+    RebornDeleteThreadRequest, RebornExtensionOnboardingState, RebornFsListRequest,
+    RebornGetProjectRequest, RebornGetRunStateRequest, RebornListMembersRequest,
+    RebornListMembersResponse, RebornListProjectsRequest, RebornListProjectsResponse,
+    RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigSetRequest,
     RebornOperatorLogsQuery, RebornOperatorSetupRequest, RebornOperatorSetupStatus,
     RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
     RebornOperatorStatusState, RebornOperatorSurfaceStatus, RebornOperatorToolCatalog,
@@ -537,6 +539,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             resolved_model_route: None,
+            model_usage: None,
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref,
@@ -641,6 +644,7 @@ impl TurnCoordinator for BlockingSubmitCoordinator {
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             resolved_model_route: None,
+            model_usage: None,
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
@@ -908,6 +912,7 @@ impl RecordingLifecycleFacade {
             extensions: vec![LifecycleInstalledExtensionSummary {
                 summary,
                 phase: LifecyclePhase::Configured,
+                install_scope: None,
             }],
             count: 1,
         })
@@ -1442,6 +1447,7 @@ fn automation_info(
         }],
         is_active: true,
         created_at: Some("2026-06-02T18:00:00Z".parse().expect("created at")),
+        active_hold: None,
     }
 }
 
@@ -2279,6 +2285,79 @@ impl ProjectService for AuthorizingProjectService {
     ) -> Result<(), ProjectServiceError> {
         Err(ProjectServiceError::Internal)
     }
+}
+
+struct EmptyFilesystemBrowser;
+
+#[async_trait]
+impl FilesystemBrowseReader for EmptyFilesystemBrowser {
+    fn available_mounts(&self) -> Vec<FsMount> {
+        vec![FsMount::Memory]
+    }
+
+    async fn list_dir(
+        &self,
+        _scope: &ResourceScope,
+        _mount: FsMount,
+        _path: &str,
+    ) -> Result<Vec<ProjectFsEntry>, ProjectFsError> {
+        Ok(Vec::new())
+    }
+
+    async fn read_file(
+        &self,
+        _scope: &ResourceScope,
+        _mount: FsMount,
+        _path: &str,
+    ) -> Result<ProjectFsFile, ProjectFsError> {
+        Err(ProjectFsError::NotFound)
+    }
+
+    async fn stat(
+        &self,
+        _scope: &ResourceScope,
+        _mount: FsMount,
+        _path: &str,
+    ) -> Result<ProjectFsStat, ProjectFsError> {
+        Err(ProjectFsError::NotFound)
+    }
+}
+
+#[tokio::test]
+async fn browse_fs_authorizes_project_selector_and_fails_closed() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_filesystem_browser(Arc::new(EmptyFilesystemBrowser))
+    .with_project_service(Arc::new(AuthorizingProjectService {
+        allowed_project_id: "project-scoped".to_string(),
+    }));
+
+    let response = services
+        .browse_fs_dir(
+            caller_with_project(Some("project-alpha")),
+            RebornFsListRequest {
+                mount: FsMount::Memory,
+                path: String::new(),
+                project_id: Some(ProjectId::new("project-scoped").expect("project id")),
+            },
+        )
+        .await;
+    assert!(response.is_ok(), "authorized project selector must browse");
+
+    let error = services
+        .browse_fs_dir(
+            caller_with_project(Some("project-alpha")),
+            RebornFsListRequest {
+                mount: FsMount::Memory,
+                path: String::new(),
+                project_id: Some(ProjectId::new("project-denied").expect("project id")),
+            },
+        )
+        .await
+        .expect_err("unauthorized project selector must fail closed");
+    assert_eq!(error.code, RebornServicesErrorCode::NotFound);
 }
 
 #[tokio::test]
@@ -5063,6 +5142,7 @@ async fn list_extensions_projects_onboarding_payload_through_reborn_services() {
                 Some(onboarding_fixture()),
             ),
             phase: LifecyclePhase::Installed,
+            install_scope: None,
         },
     }));
 
@@ -6716,6 +6796,7 @@ async fn get_timeline_succeeds_for_own_automation_trigger_thread() {
             }],
             is_active: true,
             created_at: None,
+            active_hold: None,
         }])
         .with_resolve_scope_for_thread(
             trigger_thread_id.clone(),
@@ -6830,6 +6911,7 @@ async fn read_attachment_reads_trigger_thread_bytes_under_creator_scope() {
             }],
             is_active: true,
             created_at: None,
+            active_hold: None,
         }])
         .with_resolve_scope_for_thread(
             trigger_thread_id.clone(),
@@ -7286,6 +7368,7 @@ fn automation_facade_with_trigger_thread(
             }],
             is_active: true,
             created_at: None,
+            active_hold: None,
         }])
         .with_resolve_scope_for_thread(
             trigger_thread_id.clone(),
@@ -7768,6 +7851,7 @@ async fn get_timeline_rejects_thread_id_absent_from_callers_automations() {
             }],
             is_active: true,
             created_at: None,
+            active_hold: None,
         }]), // resolve_scope is None — the facade does not recognise the requested thread.
     );
 
@@ -8247,8 +8331,14 @@ struct StaticOperatorToolCatalogForTest {
     tools: Vec<RebornOperatorToolInfo>,
 }
 
+#[async_trait]
 impl RebornOperatorToolCatalog for StaticOperatorToolCatalogForTest {
-    fn list_operator_tools(&self) -> Vec<RebornOperatorToolInfo> {
+    async fn list_operator_tools(
+        &self,
+        _caller: &ironclaw_host_api::UserId,
+    ) -> Vec<RebornOperatorToolInfo> {
+        // Ownership filtering is exercised by the composition-tier catalog
+        // test; this static catalog is caller-agnostic on purpose.
         self.tools.clone()
     }
 }

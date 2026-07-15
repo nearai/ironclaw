@@ -906,6 +906,18 @@ registerPack("en", {
   "automations.runs.showingOf": "Showing {shown} of {total} recent runs",
   "automations.status.running": "Running",
   "automations.status.needsReview": "Needs review",
+  "automations.hold.approval": "Waiting for your approval",
+  "automations.hold.auth": "Waiting for you to reconnect an account",
+  "automations.hold.inProgress": "Previous run still in progress",
+  "automations.hold.other": "Previous run hasn't finished",
+  "automations.hold.meta.paused":
+    "Paused since {since} · {count} scheduled occurrences elapsed while held",
+  "automations.hold.meta.pausedUnknownCount":
+    "Paused since {since} · scheduled occurrence count unavailable",
+  "automations.hold.meta.inProgress":
+    "Started {since} · next run starts after it finishes · {count} scheduled occurrences elapsed while held",
+  "automations.hold.meta.inProgressUnknownCount":
+    "Started {since} · next run starts after it finishes · scheduled occurrence count unavailable",
   "automations.detail.emptyTitle": "Select an automation",
   "automations.detail.emptyDescription":
     "Choose a schedule to inspect recent runs.",
@@ -940,6 +952,10 @@ registerPack("en", {
     "All available extensions are already installed, or no registry is configured.",
   "ext.registry.availableTitle": "Available extensions",
   "ext.registry.noMatch": "No extensions match the filter.",
+  "ext.registry.import": "Import",
+  "ext.registry.importing": "Importing…",
+  "ext.registry.importSuccess": "Tool imported — install it from the registry.",
+  "ext.registry.importFailed": "Import failed",
 
   // Chat — history
   "chat.history.loading": "Loading...",
@@ -1164,6 +1180,13 @@ registerPack("en", {
   "admin.dashboard.jobs": "Jobs",
   "admin.dashboard.lastActive": "Last active",
 
+  // Admin — relative time
+  "admin.relative.never": "Never",
+  "admin.relative.justNow": "Just now",
+  "admin.relative.minutesAgo": "{count}m ago",
+  "admin.relative.hoursAgo": "{count}h ago",
+  "admin.relative.daysAgo": "{count}d ago",
+
   // Admin — users list
   "admin.users.user": "user",
   "admin.users.userFallback": "user",
@@ -1174,6 +1197,8 @@ registerPack("en", {
   "admin.users.filter.active": "Active",
   "admin.users.filter.suspended": "Suspended",
   "admin.users.filter.admins": "Admins",
+  "admin.users.status.active": "Active",
+  "admin.users.status.suspended": "Suspended",
   "admin.users.newUser": "New user",
   "admin.users.createUser": "Create user",
   "admin.users.creating": "Creating…",
@@ -1290,6 +1315,8 @@ registerPack("en", {
   "extensions.connect": "Connect",
   "extensions.configureName": "Configure {name}",
   "extensions.allInstalled": "All installed extensions",
+  "extensions.scope.shared": "shared",
+  "extensions.scope.private": "mine",
   "mcp.installed": "Installed MCP servers",
   "extensions.oneCapability": "1 capability",
   "extensions.pluralCapabilities": "{count} capabilities",

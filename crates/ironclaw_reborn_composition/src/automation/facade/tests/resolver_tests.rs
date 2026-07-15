@@ -20,6 +20,7 @@ use ironclaw_triggers::{
 };
 use ironclaw_turns::TurnRunId;
 
+use super::facade_over;
 use crate::automation::facade::RebornAutomationProductFacade;
 
 // ---------------------------------------------------------------------------
@@ -57,6 +58,7 @@ fn make_record(trigger_id: TriggerId, caller: &ProductAgentBoundCaller) -> Trigg
             timezone: "UTC".to_string(),
         },
         prompt: "run the daily task".to_string(),
+        delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at: now(),
         last_run_at: None,
@@ -290,7 +292,7 @@ async fn resolve_run_thread_scope_returns_matching_trigger_scope_via_direct_look
     let thread_id = ThreadId::new("01890f0f-test-7000-8000-000000000001").expect("valid thread id");
     seed_accepted_run(&repo, trigger_id, &c, thread_id.clone()).await;
 
-    let facade = RebornAutomationProductFacade::new(repo);
+    let facade = facade_over(repo);
     let resolved = facade
         .resolve_run_thread_scope(c.clone(), &thread_id)
         .await
@@ -323,7 +325,7 @@ async fn resolve_run_thread_scope_returns_none_for_run_belonging_to_different_cr
 
     // The caller (user-alpha) asks about a thread that belongs to user-beta's
     // trigger.  Must get None, not the scope of user-beta's trigger.
-    let facade = RebornAutomationProductFacade::new(repo);
+    let facade = facade_over(repo);
     let result = facade
         .resolve_run_thread_scope(c, &thread_id)
         .await
@@ -341,7 +343,7 @@ async fn resolve_run_thread_scope_returns_none_for_unknown_thread_id() {
     let c = caller();
     let unknown_thread =
         ThreadId::new("01890f0f-test-7000-8000-000000009999").expect("valid thread id");
-    let facade = RebornAutomationProductFacade::new(repo);
+    let facade = facade_over(repo);
     let result = facade
         .resolve_run_thread_scope(c, &unknown_thread)
         .await
@@ -351,9 +353,7 @@ async fn resolve_run_thread_scope_returns_none_for_unknown_thread_id() {
 
 #[tokio::test]
 async fn resolve_run_thread_scope_backend_error_maps_to_unavailable() {
-    let facade = RebornAutomationProductFacade::new(Arc::new(FailingThreadLookupRepository(
-        HangOrFail::Fail,
-    )));
+    let facade = facade_over(Arc::new(FailingThreadLookupRepository(HangOrFail::Fail)));
     let thread_id = ThreadId::new("01890f0f-test-7000-8000-000000000001").expect("valid thread id");
     let error = facade
         .resolve_run_thread_scope(caller(), &thread_id)
@@ -415,7 +415,7 @@ async fn resolve_run_thread_scope_returns_none_for_trigger_with_no_agent_id() {
     // The resolver must return None: even though the run row exists and the
     // caller's tenant/user/project match, the NULL trigger agent_id does not
     // equal Some(caller.agent_id), so the visibility predicate rejects it.
-    let facade = RebornAutomationProductFacade::new(repo);
+    let facade = facade_over(repo);
     let result = facade
         .resolve_run_thread_scope(c, &thread_id)
         .await
@@ -431,6 +431,7 @@ async fn resolve_run_thread_scope_returns_none_for_trigger_with_no_agent_id() {
 async fn resolve_run_thread_scope_timeout_maps_to_unavailable() {
     let facade = RebornAutomationProductFacade::with_backend_timeout(
         Arc::new(FailingThreadLookupRepository(HangOrFail::Hang)),
+        super::missing_lookup(),
         Duration::from_millis(10),
     );
     let thread_id = ThreadId::new("01890f0f-test-7000-8000-000000000001").expect("valid thread id");

@@ -862,6 +862,10 @@ registerPack("ko", {
   "ext.registry.emptyDesc": "사용 가능한 확장이 이미 모두 설치되어 있거나, 레지스트리가 구성되어 있지 않습니다.",
   "ext.registry.availableTitle": "사용 가능한 확장",
   "ext.registry.noMatch": "필터와 일치하는 확장이 없습니다.",
+  "ext.registry.import": "가져오기",
+  "ext.registry.importing": "가져오는 중…",
+  "ext.registry.importSuccess": "도구를 가져왔습니다 — 레지스트리에서 설치하세요.",
+  "ext.registry.importFailed": "가져오기 실패",
 
   // Chat — history
   "chat.history.loading": "로딩 중...",
@@ -1075,6 +1079,13 @@ registerPack("ko", {
   "admin.dashboard.jobs": "작업",
   "admin.dashboard.lastActive": "마지막 활동",
 
+  // Admin — relative time
+  "admin.relative.never": "없음",
+  "admin.relative.justNow": "방금 전",
+  "admin.relative.minutesAgo": "{count}분 전",
+  "admin.relative.hoursAgo": "{count}시간 전",
+  "admin.relative.daysAgo": "{count}일 전",
+
   // Admin — users list
   "admin.users.user": "사용자",
   "admin.users.userFallback": "사용자",
@@ -1085,6 +1096,8 @@ registerPack("ko", {
   "admin.users.filter.active": "활성",
   "admin.users.filter.suspended": "정지",
   "admin.users.filter.admins": "관리자",
+  "admin.users.status.active": "활성",
+  "admin.users.status.suspended": "정지",
   "admin.users.newUser": "새 사용자",
   "admin.users.createUser": "사용자 생성",
   "admin.users.creating": "생성 중…",
@@ -1199,6 +1212,8 @@ registerPack("ko", {
   "extensions.reconfigure": "재구성",
   "extensions.configureName": "{name} 구성",
   "extensions.allInstalled": "설치된 모든 확장 프로그램",
+  "extensions.scope.shared": "공유",
+  "extensions.scope.private": "내 것",
   "mcp.installed": "설치된 MCP 서버",
   "extensions.oneCapability": "1개 기능",
   "extensions.pluralCapabilities": "{count} 기능",
@@ -1271,6 +1286,18 @@ registerPack("ko", {
   "automations.detail.thread": "스레드",
   "automations.filter.failures": "실패",
   "automations.filter.running": "실행 중",
+  "automations.hold.approval": "승인을 기다리는 중입니다",
+  "automations.hold.auth": "계정 재연결을 기다리는 중입니다",
+  "automations.hold.inProgress": "이전 실행이 아직 진행 중입니다",
+  "automations.hold.meta.inProgress":
+    "{since}에 시작됨 · 완료 후 다음 실행이 시작됩니다 · 실행 중 예정된 발생 시점 {count}개 경과",
+  "automations.hold.meta.inProgressUnknownCount":
+    "{since}에 시작됨 · 완료 후 다음 실행이 시작됩니다 · 예정된 발생 시점 경과 수를 알 수 없음",
+  "automations.hold.meta.paused":
+    "{since}부터 일시 중지됨 · 보류 중 예정된 발생 시점 {count}개 경과",
+  "automations.hold.meta.pausedUnknownCount":
+    "{since}부터 일시 중지됨 · 예정된 발생 시점 경과 수를 알 수 없음",
+  "automations.hold.other": "이전 실행이 아직 끝나지 않았습니다",
   "automations.status.needsReview": "검토 필요",
   "automations.status.running": "실행 중",
   "automations.summary.failures": "실패",

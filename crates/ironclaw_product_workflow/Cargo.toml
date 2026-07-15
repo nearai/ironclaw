@@ -61,13 +61,13 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 [dev-dependencies]
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
-ironclaw_loop_support = { path = "../ironclaw_loop_support" }
+ironclaw_loop_host = { path = "../ironclaw_loop_host" }
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", features = ["test-support"] }
 # `filesystem-goal-store` needed for test-only construction of
-# `ironclaw_reborn::subagent::await_edge`'s CAS-backed test fixtures
+# `ironclaw_runner::subagent::await_edge`'s CAS-backed test fixtures
 # (in-memory `FilesystemAwaitEdgeStore`) in this crate's own test harnesses.
-ironclaw_reborn = { path = "../ironclaw_reborn", features = ["filesystem-goal-store"] }
+ironclaw_runner = { path = "../ironclaw_runner", features = ["filesystem-goal-store"] }
 ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_product_workflow = { path = ".", features = ["test-support", "storage"] }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters", features = ["test-support", "host-auth-mint"] }

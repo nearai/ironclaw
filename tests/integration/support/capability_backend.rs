@@ -49,6 +49,18 @@ pub(super) enum RebornCapabilityBackend {
     /// recorded. Distinct from `BuiltinHttpTools`, whose
     /// `RecordingRuntimeHttpEgress` bypasses that whole pipeline.
     BuiltinHttpToolsRealEgress,
+    /// `write_file`/`read_file` (same as `file_tools()`), but backed by the
+    /// REAL `LocalDevCapabilityIo` (durable tool-result projection seam,
+    /// issue #5838) instead of the ephemeral `ProductLiveCapabilityIo` test
+    /// double -- so a large `read_file` result is persisted durably and
+    /// `result_read` can page through it.
+    FileToolsDurableIo,
+    /// Harness-port-seam Change 4: the same `BuiltinHttpTools` backend with an
+    /// additional confirmed `/host` mount grant, so
+    /// `wrap_local_dev_surface_disclosure`'s scoped-roots note (a no-op
+    /// without a confirmed host-home mount) is observable at the
+    /// integration tier.
+    BuiltinHttpToolsConfirmedHostMount,
 }
 
 /// Which process port the built `BuiltinHttpTools` runtime installs for
@@ -183,6 +195,17 @@ impl RebornCapabilityBackend {
                 )
                 .await?;
                 host_runtime.install_real_egress_response_bodies(real_egress_response_bodies)?;
+                GroupCapability::HostRuntime(Arc::new(host_runtime))
+            }
+            RebornCapabilityBackend::FileToolsDurableIo => {
+                let host_runtime =
+                    super::harness::profiles::file::file_tools_with_durable_capability_io().await?;
+                GroupCapability::HostRuntime(Arc::new(host_runtime))
+            }
+            RebornCapabilityBackend::BuiltinHttpToolsConfirmedHostMount => {
+                let host_runtime =
+                    core_builtin::core_builtin_tools_with_confirmed_host_mount().await?;
+                host_runtime.install_http_responses(keyed_http_responses)?;
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
         })

@@ -38,14 +38,12 @@ use ironclaw_llm::{
         ReplayingHttpInterceptor,
     },
 };
-use ironclaw_loop_support::HostManagedModelGateway;
+use ironclaw_loop_host::HostManagedModelGateway;
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
     PolicyNetworkHttpEgress, ReqwestNetworkTransport,
 };
 use ironclaw_product_workflow::RebornOutboundDeliveryTargetId;
-use ironclaw_reborn::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
-use ironclaw_reborn::runtime::ToolDisclosureMode;
 use ironclaw_reborn_composition::{
     AssistantReply, RebornCompositionProfile, RebornLocalRuntimeProfileOptions,
     RebornProductAuthServices, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
@@ -53,6 +51,8 @@ use ironclaw_reborn_composition::{
     local_runtime_build_input_with_options,
 };
 use ironclaw_reborn_config::{RebornConfigFile, RebornHome};
+use ironclaw_runner::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
+use ironclaw_runner::runtime::ToolDisclosureMode;
 use ironclaw_triggers::TriggerPollerWorkerConfig;
 use ironclaw_turns::{ReplyTargetBindingRef, TurnStatus, run_profile::ModelProfileId};
 use secrecy::{ExposeSecret, SecretString};
@@ -1753,7 +1753,7 @@ mod tests {
     use ironclaw_host_api::{
         AgentId, InvocationId, NetworkMethod, NetworkPolicy, ResourceScope, TenantId, UserId,
     };
-    use ironclaw_loop_support::{
+    use ironclaw_loop_host::{
         HostManagedModelError, HostManagedModelErrorKind, HostManagedModelRequest,
         HostManagedModelResponse,
     };

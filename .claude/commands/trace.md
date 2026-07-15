@@ -22,9 +22,9 @@ New features and almost all current work are **Reborn** (`crates/`). Trace v1 (`
 | Facade | `RebornServicesApi` in `crates/ironclaw_product_workflow/src/reborn_services.rs` | `grep -n "async fn <name>" crates/ironclaw_product_workflow/src/reborn_services.rs` |
 | Port impl | `crates/ironclaw_reborn_composition/src/<feature>*.rs` | `grep -rn "impl <PortTrait>" crates/ironclaw_reborn_composition/src` |
 | Turn accept | `SessionThreadService::accept_inbound_message` (`crates/ironclaw_threads`) → `TurnCoordinator::submit_turn` (`crates/ironclaw_turns/src/coordinator.rs`) | `grep -rn --include='*.rs' "submit_turn(" crates/` |
-| Claim + execute | `TurnRunScheduler` (`crates/ironclaw_host_runtime/src/turn_scheduler.rs`) → `RebornTurnRunExecutor` (`crates/ironclaw_reborn/src/turn_run_executor.rs`) | `grep -n "claim_next_run\|invoke_driver" crates/ironclaw_host_runtime/src/turn_scheduler.rs crates/ironclaw_reborn/src/turn_run_executor.rs` |
-| Loop | `PlannedDriver` (`crates/ironclaw_reborn/src/planned_driver.rs`) → `CanonicalAgentLoopExecutor` (`crates/ironclaw_agent_loop/src/executor.rs`) → host ports (`crates/ironclaw_loop_support`) | `grep -rn "invoke_capability\|stream_model" crates/ironclaw_agent_loop/src/executor` |
-| Model call | `crates/ironclaw_reborn/src/model_gateway.rs` → `ironclaw_llm` provider chain | `grep -n "complete_model_request\|CompletionRequest" crates/ironclaw_reborn/src/model_gateway.rs` |
+| Claim + execute | `TurnRunScheduler` → `RebornTurnRunExecutor` (`crates/ironclaw_runner/src/`) | `grep -n "claim_next_run\|invoke_driver" crates/ironclaw_runner/src/turn_scheduler.rs crates/ironclaw_runner/src/turn_run_executor.rs` |
+| Loop | `PlannedDriver` (`crates/ironclaw_runner/src/planned_driver.rs`) → `CanonicalAgentLoopExecutor` (`crates/ironclaw_agent_loop/src/executor.rs`) → host ports (`crates/ironclaw_loop_host`) | `grep -rn "invoke_capability\|stream_model" crates/ironclaw_agent_loop/src/executor` |
+| Model call | `crates/ironclaw_runner/src/model_gateway.rs` → `ironclaw_llm` provider chain | `grep -n "complete_model_request\|CompletionRequest" crates/ironclaw_runner/src/model_gateway.rs` |
 | Effects | `CapabilityHost::invoke_json` (`crates/ironclaw_capabilities/src/host.rs`) → dispatcher → wasm/scripts/mcp/first-party lanes | `grep -n "invoke_json" crates/ironclaw_capabilities/src/host.rs` |
 | Reply to browser | SSE projection drain: `stream_events` (`crates/ironclaw_webui_v2/src/handlers.rs`) over `ProjectionStream` | `grep -n "stream_events" crates/ironclaw_webui_v2/src/handlers.rs` |
 

@@ -23,16 +23,16 @@ use ironclaw_host_runtime::{
     RuntimeCapabilityOutcome, RuntimeCapabilityRequest, TRIGGER_CREATE_CAPABILITY_ID,
     TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse,
 };
-use ironclaw_reborn::runtime::ToolDisclosureMode;
 use ironclaw_reborn_composition::{
     RebornCompositionProfile, RebornLocalRuntimeProfileOptions, RebornRuntime,
     RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerSettings, build_reborn_runtime,
     local_runtime_build_input_with_options,
 };
+use ironclaw_runner::runtime::ToolDisclosureMode;
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerId, TriggerPollerWorkerConfig, TriggerRecord,
@@ -55,7 +55,7 @@ const TRIGGER_PROMPT: &str = "trigger-e2e-prompt-marker-do-not-rephrase";
 /// the trigger repository after the fire settles.
 const SELF_CREATE_MARKER_TRIGGER_NAME: &str = "self-created-by-fire-should-not-exist";
 /// Mirrors the production capability-id -> provider-tool-name transform
-/// (`provider_tool_name_base` in `ironclaw_loop_support::capability_port`,
+/// (`provider_tool_name_base` in `ironclaw_loop_host::capability_port`,
 /// private to that crate) so this test tracks the `TRIGGER_*_CAPABILITY_ID`
 /// constants automatically instead of hardcoding their mapped results. Only
 /// the `.` -> `__` replacement is needed for these capability ids (all of the
@@ -610,6 +610,7 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
         schedule: TriggerSchedule::once(Utc::now() - chrono::Duration::seconds(120), "UTC")
             .expect("valid once schedule"),
         prompt: TRIGGER_PROMPT.to_string(),
+        delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at: Utc::now() - chrono::Duration::seconds(120),
         last_run_at: None,
@@ -1007,6 +1008,7 @@ async fn trigger_poller_does_not_fire_trigger_with_future_next_run_at() {
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::cron("* * * * *").expect("valid cron expression"),
         prompt: TRIGGER_PROMPT.to_string(),
+        delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at: Utc::now() + chrono::Duration::seconds(3600),
         last_run_at: None,
@@ -1114,6 +1116,7 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::once(fire_at, "UTC").expect("valid once schedule"),
         prompt: TRIGGER_PROMPT.to_string(),
+        delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at: fire_at,
         last_run_at: None,
@@ -1235,6 +1238,7 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
         // Every minute — recurring cron stays Scheduled after each fire.
         schedule: TriggerSchedule::cron("* * * * *").expect("valid cron expression"),
         prompt: TRIGGER_PROMPT.to_string(),
+        delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at: original_next_run_at,
         last_run_at: None,

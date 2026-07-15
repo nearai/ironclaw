@@ -52,6 +52,7 @@ export function GatewayLayout({
     onNewChat: () => threadsState.setActiveThreadId(null),
   });
   const status = statusQuery.data;
+  const [headerStatus, setHeaderStatus] = React.useState(null);
 
   // First-run gate: with no LLM provider configured yet, route to the welcome
   // screen so the user picks one before hitting a dead chat. Settings stays
@@ -148,6 +149,7 @@ export function GatewayLayout({
         <PageHeader
           threadsState={routeThreadsState}
           notificationsState={notificationsState}
+          status={headerStatus}
           onToggleSidebar={sidebar.toggle}
           sidebarOpen={sidebar.currentOpen}
         />
@@ -173,6 +175,7 @@ export function GatewayLayout({
               isAdmin,
               globalAutoApproveEnabled,
               threadsState: routeThreadsState,
+              setHeaderStatus,
             }}
           />
         </main>

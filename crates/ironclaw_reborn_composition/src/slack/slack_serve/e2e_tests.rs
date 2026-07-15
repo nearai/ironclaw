@@ -1095,6 +1095,7 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
         agent_id: None,
         project_id: None,
         prompt: "triggered approval prompt".to_string(),
+        delivery_target: None,
     };
     driver
         .on_trigger_submitted(fire, blocked_run_id, foreign_scope)
@@ -1350,6 +1351,7 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
         agent_id: None,
         project_id: None,
         prompt: "triggered auth prompt".to_string(),
+        delivery_target: None,
     };
     driver
         .on_trigger_submitted(fire, run_id, foreign_scope)
@@ -1485,6 +1487,7 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
         agent_id: None,
         project_id: None,
         prompt: "triggered auth prompt not dm".to_string(),
+        delivery_target: None,
     };
     driver
         .on_trigger_submitted(fire, run_id, foreign_scope)
@@ -2653,6 +2656,7 @@ fn turn_state(
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
         resolved_model_route: None,
+        model_usage: None,
         received_at: chrono::Utc::now(),
         checkpoint_id: None,
         gate_ref,

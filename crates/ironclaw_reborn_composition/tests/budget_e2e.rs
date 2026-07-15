@@ -39,7 +39,7 @@ use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
-use ironclaw_loop_support::{ModelCost, ModelCostTable, StaticModelCostTable};
+use ironclaw_loop_host::{ModelCost, ModelCostTable, StaticModelCostTable};
 use ironclaw_reborn_composition::test_support::{BudgetTestGateway, ScriptedReply};
 use ironclaw_reborn_composition::{
     BudgetEventObserver, PollSettings, RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput,
@@ -322,6 +322,8 @@ async fn f6_hard_cap_denied_before_provider_call() {
             .any(|e| matches!(e, BudgetEvent::Denied { .. })),
         "hard cap must emit Denied — got {events:?}"
     );
+    #[allow(clippy::let_underscore_must_use)]
+    // outcome intentionally unused; the assertions above check the side effects
     let _ = outcome;
 
     runtime.shutdown().await.expect("shutdown");
@@ -605,6 +607,8 @@ async fn d1_agent_deny_preserves_user_warn_event() {
     sink.drain();
 
     let conversation = runtime.new_conversation().await.expect("conversation");
+    #[allow(clippy::let_underscore_must_use)]
+    // send outcome intentionally unused; the assertion below checks the side effect
     let _ = tokio::time::timeout(
         SEND_GUARD_TIMEOUT,
         runtime.send_user_message(&conversation, "ping"),

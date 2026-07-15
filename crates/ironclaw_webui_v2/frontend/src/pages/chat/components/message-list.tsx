@@ -7,11 +7,16 @@ import { Icon } from "../../../design-system/icons";
 import { groupMessages } from "../lib/message-groups";
 
 export const BOTTOM_FOLLOW_THRESHOLD_PX = 100;
+// Show the jump pill only after scrollback is clearly intentional: 240px is
+// about 2.4x the auto-follow threshold, so small near-bottom drift pauses
+// following without adding a floating control. The paired 8px bottom offset
+// keeps that rare pill tucked into the transcript padding near the composer.
+export const JUMP_TO_LATEST_THRESHOLD_PX = 240;
 const TOP_LOAD_THRESHOLD_PX = 100;
 // The scroll area already keeps bottom padding for transcript-floating
 // controls. Keep them inside that padding instead of adding an in-flow spacer
 // after the final message.
-const FLOATING_CONTROL_BOTTOM_OFFSET_PX = 16;
+const FLOATING_CONTROL_BOTTOM_OFFSET_PX = 8;
 const FLOATING_CONTROL_STYLE = { bottom: FLOATING_CONTROL_BOTTOM_OFFSET_PX };
 const FLOATING_LOGS_BUTTON_CLASS =
   "group absolute right-5 z-10 hidden size-9 items-center justify-center gap-0 overflow-hidden rounded-full border border-[color-mix(in_srgb,var(--v2-accent)_28%,var(--v2-panel-border))] bg-[color-mix(in_srgb,var(--v2-surface)_88%,var(--v2-accent)_12%)] text-xs font-semibold text-[var(--v2-text-base)] shadow-[0_14px_34px_-18px_rgba(0,0,0,0.95),0_0_0_1px_rgba(255,255,255,0.04)] backdrop-blur-md transition-all hover:border-[color-mix(in_srgb,var(--v2-accent)_50%,var(--v2-panel-border))] hover:bg-[color-mix(in_srgb,var(--v2-surface-muted)_82%,var(--v2-accent)_18%)] hover:text-[var(--v2-text-strong)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--v2-accent)_42%,transparent)] sm:inline-flex";
@@ -25,6 +30,13 @@ export function distanceFromBottom(el) {
 
 export function isNearBottom(el, threshold = BOTTOM_FOLLOW_THRESHOLD_PX) {
   return distanceFromBottom(el) <= threshold;
+}
+
+export function shouldShowJumpToLatest(
+  el,
+  threshold = JUMP_TO_LATEST_THRESHOLD_PX,
+) {
+  return Boolean(el) && distanceFromBottom(el) > threshold;
 }
 
 export function scrollToBottom(el) {
@@ -67,7 +79,7 @@ export function MessageList({
   const scrollRafRef = React.useRef(null);
   const previousScrollTopRef = React.useRef(0);
   const userScrollIntentRef = React.useRef(false);
-  const [atBottom, setAtBottom] = React.useState(true);
+  const [showJumpToLatest, setShowJumpToLatest] = React.useState(false);
 
   const cancelFollow = React.useCallback(() => {
     if (rafRef.current === null) return;
@@ -82,7 +94,10 @@ export function MessageList({
       shouldScrollRef.current = true;
       userScrollIntentRef.current = false;
     }
-    if (!shouldScrollRef.current) return;
+    if (!shouldScrollRef.current) {
+      setShowJumpToLatest(shouldShowJumpToLatest(el));
+      return;
+    }
 
     cancelFollow();
     rafRef.current = window.requestAnimationFrame(() => {
@@ -92,7 +107,7 @@ export function MessageList({
       scrollToBottom(node);
       previousScrollTopRef.current = node.scrollTop;
       userScrollIntentRef.current = false;
-      setAtBottom(true);
+      setShowJumpToLatest(false);
     });
   }, [cancelFollow]);
 
@@ -137,17 +152,18 @@ export function MessageList({
     const el = containerRef.current;
     if (!el) return;
     const nearBottom = isNearBottom(el);
+    const showJump = shouldShowJumpToLatest(el);
     previousScrollTopRef.current = el.scrollTop;
     if (nearBottom) {
       shouldScrollRef.current = true;
       userScrollIntentRef.current = false;
-      setAtBottom(true);
+      setShowJumpToLatest(false);
     } else if (userScrollIntentRef.current) {
       shouldScrollRef.current = false;
-      setAtBottom(false);
+      setShowJumpToLatest(showJump);
     } else {
       shouldScrollRef.current = true;
-      setAtBottom(true);
+      setShowJumpToLatest(false);
       followLatest();
     }
 
@@ -205,7 +221,7 @@ export function MessageList({
     previousScrollTopRef.current = el.scrollTop;
     shouldScrollRef.current = true;
     userScrollIntentRef.current = false;
-    setAtBottom(true);
+    setShowJumpToLatest(false);
   }, []);
 
   const onCopy = React.useCallback((event) => {
@@ -277,7 +293,7 @@ export function MessageList({
         <Icon name="logs" className="size-5" />
       </Link>
     )}
-    {!atBottom &&
+    {showJumpToLatest &&
     (
       <button
         type="button"

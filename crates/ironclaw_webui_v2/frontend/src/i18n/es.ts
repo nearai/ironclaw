@@ -862,6 +862,10 @@ registerPack("es", {
   "ext.registry.emptyDesc": "Todas las extensiones disponibles ya están instaladas, o no hay un registro configurado.",
   "ext.registry.availableTitle": "Extensiones disponibles",
   "ext.registry.noMatch": "Ninguna extensión coincide con el filtro.",
+  "ext.registry.import": "Importar",
+  "ext.registry.importing": "Importando…",
+  "ext.registry.importSuccess": "Herramienta importada — instálala desde el registro.",
+  "ext.registry.importFailed": "Error al importar",
 
   // Chat — history
   "chat.history.loading": "Cargando...",
@@ -1075,6 +1079,13 @@ registerPack("es", {
   "admin.dashboard.jobs": "Trabajos",
   "admin.dashboard.lastActive": "Última actividad",
 
+  // Admin — relative time
+  "admin.relative.never": "Nunca",
+  "admin.relative.justNow": "ahora mismo",
+  "admin.relative.minutesAgo": "hace {count} min",
+  "admin.relative.hoursAgo": "hace {count} h",
+  "admin.relative.daysAgo": "hace {count} d",
+
   // Admin — users list
   "admin.users.user": "usuario",
   "admin.users.userFallback": "usuario",
@@ -1085,6 +1096,8 @@ registerPack("es", {
   "admin.users.filter.active": "Activos",
   "admin.users.filter.suspended": "Suspendidos",
   "admin.users.filter.admins": "Administradores",
+  "admin.users.status.active": "Activo",
+  "admin.users.status.suspended": "Suspendido",
   "admin.users.newUser": "Nuevo usuario",
   "admin.users.createUser": "Crear usuario",
   "admin.users.creating": "Creando…",
@@ -1200,6 +1213,8 @@ registerPack("es", {
   "extensions.reconfigure": "Reconfigurar",
   "extensions.configureName": "Configurar {name}",
   "extensions.allInstalled": "Todas las extensiones instaladas",
+  "extensions.scope.shared": "compartidas",
+  "extensions.scope.private": "mías",
   "mcp.installed": "Servidores MCP instalados",
   "extensions.oneCapability": "1 capacidad",
   "extensions.pluralCapabilities": "Capacidades {count}",
@@ -1272,6 +1287,18 @@ registerPack("es", {
   "automations.detail.thread": "conversación",
   "automations.filter.failures": "Fallos",
   "automations.filter.running": "En ejecución",
+  "automations.hold.approval": "Esperando tu aprobación",
+  "automations.hold.auth": "Esperando que vuelvas a conectar una cuenta",
+  "automations.hold.inProgress": "La ejecución anterior sigue en curso",
+  "automations.hold.meta.inProgress":
+    "Iniciado {since} · la próxima ejecución comenzará cuando esta termine · {count} ocurrencias programadas transcurridas mientras el bloqueo estuvo activo",
+  "automations.hold.meta.inProgressUnknownCount":
+    "Iniciado {since} · la próxima ejecución comenzará cuando esta termine · recuento de ocurrencias programadas transcurridas no disponible",
+  "automations.hold.meta.paused":
+    "Pausado desde {since} · {count} ocurrencias programadas transcurridas mientras estaba en pausa",
+  "automations.hold.meta.pausedUnknownCount":
+    "Pausado desde {since} · recuento de ocurrencias programadas transcurridas no disponible",
+  "automations.hold.other": "La ejecución anterior no ha terminado",
   "automations.status.needsReview": "Requiere revisión",
   "automations.status.running": "En ejecución",
   "automations.summary.failures": "Fallos",

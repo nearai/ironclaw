@@ -3,12 +3,12 @@
 // `first_party_tools/` (per crate CLAUDE.md, runtime services get their own module).
 //
 // Note: `MemoryBackedUserProfileSource` does NOT implement `HostUserProfileSource`
-// here because `ironclaw_loop_support` (which owns the trait) already depends on
+// here because `ironclaw_loop_host` (which owns the trait) already depends on
 // `ironclaw_host_runtime`, so a reverse dependency would be circular. The
 // `impl HostUserProfileSource for MemoryBackedUserProfileSource` is added by the
 // composition layer (`ironclaw_reborn_composition`) that can see both crates. This
 // matches how `WorkspaceIdentityContextSource` implements `HostIdentityContextSource`:
-// the struct lives in `src/workspace/` while the trait lives in `ironclaw_loop_support`.
+// the struct lives in `src/workspace/` while the trait lives in `ironclaw_loop_host`.
 
 use std::{
     collections::HashMap,
@@ -54,7 +54,7 @@ pub(crate) fn profile_scope_and_path(
 
 /// Reads `context/profile.json` for the run owner and resolves it into a
 /// validated `UserProfileContext`. Owns the `ironclaw_memory` dependency so the
-/// loop driver and `ironclaw_reborn` never import it.
+/// loop driver and `ironclaw_runner` never import it.
 pub struct MemoryBackedUserProfileSource {
     filesystem: Arc<dyn RootFilesystem>,
     cache: Mutex<UserProfileCache>,

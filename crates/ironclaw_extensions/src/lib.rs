@@ -407,6 +407,7 @@ fn descriptors_match_except_schema(
         })
 }
 
+mod canonicalization;
 pub mod host_api;
 mod hosted_mcp_discovery;
 mod installations;
@@ -431,11 +432,14 @@ pub use v2::{
 
 pub type CapabilityManifest = CapabilityDeclV2;
 
+pub use canonicalization::canonicalize_installation_rows;
 pub use installations::{
     ExtensionActivationState, ExtensionCredentialBinding, ExtensionCredentialHandle,
     ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
-    ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
-    ExtensionManifestRecord, ExtensionManifestRef, InMemoryExtensionInstallationStore,
+    ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationPersistedParts,
+    ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef,
+    ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapterId, ExtensionRemovalCleanupBinding,
+    ExtensionRemovalCleanupRequirement, InMemoryExtensionInstallationStore, InstallationOwner,
     ManifestHash,
 };
 pub use lifecycle::{
@@ -755,6 +759,7 @@ fn capability_descriptors_from_manifest(
                 effects: capability.effects.clone(),
                 default_permission: capability.default_permission,
                 runtime_credentials: capability.runtime_credentials.clone(),
+                network_targets: capability.network_targets.clone(),
                 resource_profile: capability.resource_profile.clone(),
             })
         })

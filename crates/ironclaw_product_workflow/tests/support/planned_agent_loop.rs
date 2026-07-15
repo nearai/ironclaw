@@ -14,7 +14,7 @@ use ironclaw_host_api::{
     TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{CapabilitySurfacePolicy, SurfaceKind};
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     EmptyLoopCapabilityPort, EmptyUserProfileSource, HostIdentityContextBuildError,
     HostIdentityContextCandidate, HostIdentityContextSource, HostInputBatch, HostInputQueue,
@@ -33,7 +33,13 @@ use ironclaw_product_workflow::{
     DefaultInboundTurnService, FakeConversationBindingService, InboundTurnOutcome,
     InboundTurnService, ResolvedBinding,
 };
-use ironclaw_reborn::{
+use ironclaw_reborn_composition::{
+    ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
+    ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
+    ProductLivePlannedRuntimeAdapters, ProductLiveVisibleCapabilityRequestConfig, RebornBuildInput,
+    RebornServices, build_reborn_services, capability_allowlist,
+};
+use ironclaw_runner::{
     loop_exit_applier::ThreadCheckpointLoopExitEvidencePort,
     model_routes::{
         ModelRoute, ModelRoutePolicy, ModelSelectionMode, ModelSlot, StaticModelRouteResolver,
@@ -46,12 +52,6 @@ use ironclaw_reborn::{
         boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
         store::FilesystemAwaitEdgeStore,
     },
-};
-use ironclaw_reborn_composition::{
-    ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
-    ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
-    ProductLivePlannedRuntimeAdapters, ProductLiveVisibleCapabilityRequestConfig, RebornBuildInput,
-    RebornServices, build_reborn_services, capability_allowlist,
 };
 use ironclaw_threads::{
     InMemorySessionThreadService, SessionThreadService, ThreadHistoryRequest, ThreadMessageRecord,
@@ -342,11 +342,11 @@ impl ProductLiveAgentLoopHarness {
             ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), await_edge_mounts),
         )));
         let await_edge_goal_store = Arc::new(
-            ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new(),
+            ironclaw_runner::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new(),
         );
         let await_edge_resolver = Arc::new(AwaitEdgeResolver::new_unbound(
             Arc::clone(&await_edge_store),
-            await_edge_goal_store.clone() as Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore>,
+            await_edge_goal_store.clone() as Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
             turn_store.clone() as Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore>,
             capability_result_writer.clone(),
             Arc::new(thread_service.clone()),
@@ -369,18 +369,18 @@ impl ProductLiveAgentLoopHarness {
             capability_result_writer,
             subagent_goal_store: await_edge_goal_store,
             subagent_await_edge_writer: await_edge_driver
-                as Arc<dyn ironclaw_loop_support::AwaitEdgeWriter>,
+                as Arc<dyn ironclaw_loop_host::AwaitEdgeWriter>,
             subagent_await_edge_settler: await_edge_resolver
-                as Arc<dyn ironclaw_loop_support::AwaitEdgeSettler>,
+                as Arc<dyn ironclaw_loop_host::AwaitEdgeSettler>,
             subagent_await_edge_evidence: Arc::clone(&await_edge_store)
-                as Arc<dyn ironclaw_reborn::loop_exit_applier::AwaitDependentRunEvidenceStore>,
+                as Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
             subagent_definition_resolver: Arc::new(
-                ironclaw_reborn::subagent::flavors::StaticSubagentDefinitionResolver,
+                ironclaw_runner::subagent::flavors::StaticSubagentDefinitionResolver,
             ),
             subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(Arc::new(
                 ProductLiveCapabilityIo::default(),
             ))),
-            subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+            subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
             loop_exit_evidence: Arc::new(
                 ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
                     Arc::new(thread_service.clone()),
@@ -388,7 +388,7 @@ impl ProductLiveAgentLoopHarness {
                     checkpoint_store,
                     await_edge_store
                         as Arc<
-                            dyn ironclaw_reborn::loop_exit_applier::AwaitDependentRunEvidenceStore,
+                            dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore,
                         >,
                     thread_scope.clone(),
                 )
@@ -915,6 +915,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             terminate_hint: self.capability.terminate_hint,
             byte_len: 0,
             output_digest: None,
+            model_observation: None,
         }))
     }
 

@@ -116,7 +116,7 @@ export function useProviderDialogForm({
         setMessage({ tone: "error", text: result.message || t("llm.modelsFetchFailed") });
       } else {
         setModels(result.models);
-        // Commit a valid model so the controlled <Select> shows what will save
+        // Commit a valid model so the controlled SelectMenu shows what will save
         // (see nextModelAfterFetch for the empty/stale-selection rationale).
         const pick = nextModelAfterFetch(form.model, result.models);
         if (pick !== null) update("model", pick);

@@ -72,7 +72,8 @@ use ironclaw_turns::{
     EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion, TurnRunId, TurnStatus,
 };
 use ironclaw_webui_v2::{
-    DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State, webui_v2_router,
+    DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2RouteOptions, WebUiV2State,
+    webui_v2_router, webui_v2_router_with_options,
 };
 use serde_json::Value;
 use tokio::sync::{Notify, mpsc};
@@ -244,6 +245,7 @@ struct StubServices {
     delete_thread_calls: Mutex<Vec<RebornDeleteThreadRequest>>,
     submit_turn_calls: Mutex<Vec<WebUiSendMessageRequest>>,
     get_timeline_calls: Mutex<Vec<RebornTimelineRequest>>,
+    browse_fs_calls: Mutex<Vec<RebornFsListRequest>>,
     global_auto_approve_enabled: Mutex<bool>,
     global_auto_approve_calls: Mutex<usize>,
     stall_global_auto_approve: Mutex<bool>,
@@ -291,6 +293,9 @@ struct StubServices {
     list_extensions_calls: Mutex<usize>,
     list_extension_registry_calls: Mutex<usize>,
     install_extension_calls: Mutex<Vec<String>>,
+    /// Raw zip bytes each `import_extension` call forwards, so the route test
+    /// can assert the uploaded body reaches the facade intact.
+    import_extension_calls: Mutex<Vec<Vec<u8>>>,
     activate_extension_calls: Mutex<Vec<String>>,
     remove_extension_calls: Mutex<Vec<String>>,
     get_llm_config_calls: Mutex<usize>,
@@ -636,6 +641,10 @@ impl RebornServicesApi for StubServices {
         _caller: WebUiAuthenticatedCaller,
         request: RebornFsListRequest,
     ) -> Result<RebornFsListResponse, RebornServicesError> {
+        self.browse_fs_calls
+            .lock()
+            .expect("lock")
+            .push(request.clone());
         Ok(RebornFsListResponse {
             mount: request.mount,
             path: request.path,
@@ -1338,6 +1347,18 @@ impl RebornServicesApi for StubServices {
         Ok(extension_action_response("installed"))
     }
 
+    async fn import_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        bundle: Vec<u8>,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        self.import_extension_calls
+            .lock()
+            .expect("lock")
+            .push(bundle);
+        Ok(extension_action_response("discovered"))
+    }
+
     async fn activate_extension(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -1578,6 +1599,7 @@ fn automation_info(automation_id: &str, name: &str, cron: &str) -> RebornAutomat
         }],
         is_active: true,
         created_at: None,
+        active_hold: None,
     }
 }
 
@@ -4345,6 +4367,130 @@ async fn install_extension_rejects_non_extension_package_kind_with_400() {
     );
 }
 
+/// #5499 review finding #4: the admin-only import route must reject a caller
+/// whose bearer token lacks `operator_webui_config` BEFORE the facade is
+/// reached. Lower-level lifecycle tests cannot catch this route dropping its
+/// `require_operator_webui_config` gate.
+#[tokio::test]
+async fn import_extension_requires_operator_webui_config() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/import")
+                .header("content-type", "application/zip")
+                .body(Body::from(b"PK\x03\x04not-really-a-zip".to_vec()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "forbidden");
+    assert!(
+        services
+            .import_extension_calls
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "a non-operator caller must never reach the import facade"
+    );
+}
+
+/// #5499 review finding #4: an operator upload must forward the raw zip bytes
+/// to the facade unmodified — a route regression that drops or re-encodes the
+/// body would pass every lifecycle-tier test.
+#[tokio::test]
+async fn import_extension_forwards_zip_bytes_to_facade_call() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(
+        services.clone(),
+        WebUiV2Capabilities {
+            operator_webui_config: true,
+        },
+    );
+    // Deliberately non-UTF-8 so byte fidelity (not just string round-trip) is
+    // what the assertion proves.
+    let bundle: Vec<u8> = b"PK\x03\x04\x00\xff\xfe binary zip bytes".to_vec();
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/import")
+                .header("content-type", "application/zip")
+                .body(Body::from(bundle.clone()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        services
+            .import_extension_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        [bundle]
+    );
+}
+
+/// #5499 review finding #1: the import route is operator-only, so a router
+/// built `without_operator_routes()` (the shape composition serves to
+/// deployments with no operator surface) must not mount it at all — exactly
+/// like its operator siblings. Before the fix the route was mounted
+/// unconditionally and answered 403 here instead of 404.
+#[tokio::test]
+async fn import_extension_is_stripped_alongside_operator_routes() {
+    let services = Arc::new(StubServices::default());
+    let router = webui_v2_router_with_options(
+        WebUiV2State::new(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER),
+        WebUiV2RouteOptions::without_operator_routes(),
+    )
+    .layer(axum::Extension(caller()))
+    .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+    let import_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/import")
+                .header("content-type", "application/zip")
+                .body(Body::from(b"PK\x03\x04".to_vec()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    // Parity check: an undisputed operator sibling on the same stripped router.
+    let operator_status_response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/operator/status")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(
+        operator_status_response.status(),
+        StatusCode::NOT_FOUND,
+        "operator sibling is stripped from a without_operator_routes router"
+    );
+    assert_eq!(
+        import_response.status(),
+        StatusCode::NOT_FOUND,
+        "the admin-only import route must be stripped exactly like its operator siblings"
+    );
+}
+
 #[tokio::test]
 async fn activate_and_remove_extension_decode_path_package_id_to_facade_call() {
     let services = Arc::new(StubServices::default());
@@ -6210,6 +6356,31 @@ async fn browse_fs_dir_lists_mount_relative_entries() {
     assert_eq!(body["mount"], "memory");
     assert_eq!(body["entries"][0]["name"], "today.md");
     assert_eq!(body["entries"][0]["path"], "daily/today.md");
+}
+
+#[tokio::test]
+async fn browse_fs_dir_forwards_optional_project_selector() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/list?mount=memory&path=daily&project_id=project-beta")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services.browse_fs_calls.lock().expect("lock");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].project_id.as_ref().map(ProjectId::as_str),
+        Some("project-beta")
+    );
 }
 
 #[tokio::test]

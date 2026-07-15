@@ -862,6 +862,10 @@ registerPack("uk", {
   "ext.registry.emptyDesc": "Усі доступні розширення вже встановлені або реєстр не налаштований.",
   "ext.registry.availableTitle": "Доступні розширення",
   "ext.registry.noMatch": "Немає розширень, що відповідають фільтру.",
+  "ext.registry.import": "Імпортувати",
+  "ext.registry.importing": "Імпортування…",
+  "ext.registry.importSuccess": "Інструмент імпортовано — встановіть його з реєстру.",
+  "ext.registry.importFailed": "Не вдалося імпортувати",
 
   // Chat — history
   "chat.history.loading": "Завантаження...",
@@ -1075,6 +1079,13 @@ registerPack("uk", {
   "admin.dashboard.jobs": "Завдання",
   "admin.dashboard.lastActive": "Остання активність",
 
+  // Admin — relative time
+  "admin.relative.never": "Ніколи",
+  "admin.relative.justNow": "щойно",
+  "admin.relative.minutesAgo": "{count} хв тому",
+  "admin.relative.hoursAgo": "{count} год тому",
+  "admin.relative.daysAgo": "{count} дн тому",
+
   // Admin — users list
   "admin.users.user": "користувач",
   "admin.users.userFallback": "користувача",
@@ -1085,6 +1096,8 @@ registerPack("uk", {
   "admin.users.filter.active": "Активні",
   "admin.users.filter.suspended": "Призупинені",
   "admin.users.filter.admins": "Адміни",
+  "admin.users.status.active": "Активний",
+  "admin.users.status.suspended": "Призупинений",
   "admin.users.newUser": "Новий користувач",
   "admin.users.createUser": "Створити користувача",
   "admin.users.creating": "Створення…",
@@ -1199,6 +1212,8 @@ registerPack("uk", {
   "extensions.reconfigure": "Повторно налаштувати",
   "extensions.configureName": "Налаштувати {name}",
   "extensions.allInstalled": "Усі встановлені розширення",
+  "extensions.scope.shared": "спільні",
+  "extensions.scope.private": "мої",
   "mcp.installed": "Встановлені сервери MCP",
   "extensions.oneCapability": "1 можливість",
   "extensions.pluralCapabilities": "Можливості {count}",
@@ -1271,6 +1286,18 @@ registerPack("uk", {
   "automations.detail.thread": "гілка",
   "automations.filter.failures": "Збої",
   "automations.filter.running": "Виконується",
+  "automations.hold.approval": "Очікує на ваше схвалення",
+  "automations.hold.auth": "Очікує повторного підключення облікового запису",
+  "automations.hold.inProgress": "Попередній запуск ще триває",
+  "automations.hold.meta.inProgress":
+    "Розпочато {since} · наступний запуск почнеться після завершення цього · поки виконання тривало, минуло {count} запланованих моментів запуску",
+  "automations.hold.meta.inProgressUnknownCount":
+    "Розпочато {since} · наступний запуск почнеться після завершення цього · кількість минулих запланованих моментів запуску недоступна",
+  "automations.hold.meta.paused":
+    "Призупинено з {since} · під час утримання минуло {count} запланованих моментів запуску",
+  "automations.hold.meta.pausedUnknownCount":
+    "Призупинено з {since} · кількість минулих запланованих моментів запуску недоступна",
+  "automations.hold.other": "Попередній запуск ще не завершено",
   "automations.status.needsReview": "Потребує перевірки",
   "automations.status.running": "Виконується",
   "automations.summary.failures": "Збої",

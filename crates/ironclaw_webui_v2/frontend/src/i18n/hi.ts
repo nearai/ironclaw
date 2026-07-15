@@ -862,6 +862,10 @@ registerPack("hi", {
   "ext.registry.emptyDesc": "सभी उपलब्ध एक्सटेंशन पहले से इंस्टॉल हैं, या कोई रजिस्ट्री कॉन्फ़िगर नहीं है।",
   "ext.registry.availableTitle": "उपलब्ध एक्सटेंशन",
   "ext.registry.noMatch": "फ़िल्टर से मेल खाने वाला कोई एक्सटेंशन नहीं।",
+  "ext.registry.import": "आयात करें",
+  "ext.registry.importing": "आयात हो रहा है…",
+  "ext.registry.importSuccess": "टूल आयात हो गया — इसे रजिस्ट्री से इंस्टॉल करें।",
+  "ext.registry.importFailed": "आयात विफल",
 
   // Chat — history
   "chat.history.loading": "लोड हो रहा है...",
@@ -1075,6 +1079,13 @@ registerPack("hi", {
   "admin.dashboard.jobs": "नौकरियाँ",
   "admin.dashboard.lastActive": "अंतिम सक्रिय",
 
+  // Admin — relative time
+  "admin.relative.never": "कभी नहीं",
+  "admin.relative.justNow": "अभी-अभी",
+  "admin.relative.minutesAgo": "{count} मिनट पहले",
+  "admin.relative.hoursAgo": "{count} घंटे पहले",
+  "admin.relative.daysAgo": "{count} दिन पहले",
+
   // Admin — users list
   "admin.users.user": "उपयोगकर्ता",
   "admin.users.userFallback": "उपयोगकर्ता",
@@ -1085,6 +1096,8 @@ registerPack("hi", {
   "admin.users.filter.active": "सक्रिय",
   "admin.users.filter.suspended": "निलंबित",
   "admin.users.filter.admins": "व्यवस्थापक",
+  "admin.users.status.active": "सक्रिय",
+  "admin.users.status.suspended": "निलंबित",
   "admin.users.newUser": "नया उपयोगकर्ता",
   "admin.users.createUser": "उपयोगकर्ता बनाएं",
   "admin.users.creating": "बनाया जा रहा है…",
@@ -1199,6 +1212,8 @@ registerPack("hi", {
   "extensions.reconfigure": "पुन: कॉन्फ़िगर करें",
   "extensions.configureName": "{name} कॉन्फ़िगर करें",
   "extensions.allInstalled": "सभी स्थापित एक्सटेंशन",
+  "extensions.scope.shared": "साझा",
+  "extensions.scope.private": "मेरे",
   "mcp.installed": "स्थापित MCP सर्वर",
   "extensions.oneCapability": "1 क्षमता",
   "extensions.pluralCapabilities": "{count} क्षमताएं",
@@ -1271,6 +1286,18 @@ registerPack("hi", {
   "automations.detail.thread": "थ्रेड",
   "automations.filter.failures": "विफलताएं",
   "automations.filter.running": "चल रहा है",
+  "automations.hold.approval": "आपकी स्वीकृति की प्रतीक्षा है",
+  "automations.hold.auth": "आपके किसी खाते को फिर से कनेक्ट करने की प्रतीक्षा है",
+  "automations.hold.inProgress": "पिछला रन अभी भी चल रहा है",
+  "automations.hold.meta.inProgress":
+    "{since} को शुरू हुआ · अगला रन इसके पूरा होने के बाद शुरू होगा · इसके चलते रहने के दौरान {count} निर्धारित अवसर बीत गए",
+  "automations.hold.meta.inProgressUnknownCount":
+    "{since} को शुरू हुआ · अगला रन इसके पूरा होने के बाद शुरू होगा · बीते हुए निर्धारित अवसरों की संख्या उपलब्ध नहीं है",
+  "automations.hold.meta.paused":
+    "{since} से रुका हुआ · रुके रहने के दौरान {count} निर्धारित अवसर बीत गए",
+  "automations.hold.meta.pausedUnknownCount":
+    "{since} से रुका हुआ · बीते हुए निर्धारित अवसरों की संख्या उपलब्ध नहीं है",
+  "automations.hold.other": "पिछला रन अभी पूरा नहीं हुआ है",
   "automations.status.needsReview": "समीक्षा चाहिए",
   "automations.status.running": "चल रहा है",
   "automations.summary.failures": "विफलताएं",

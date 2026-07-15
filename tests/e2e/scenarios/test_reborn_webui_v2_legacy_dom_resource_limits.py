@@ -504,6 +504,9 @@ async def test_reborn_sse_reconnect_timer_clears_when_tab_hidden(
             const stream = streams[streams.length - 1];
             if (!stream) throw new Error("no EventSource stream is open");
             window.__sseFailCalls = (window.__sseFailCalls || 0) + 1;
+            // A closed stream takes useSSE's explicit 2-second fallback path;
+            // an open stream instead uses the native reconnect watchdog.
+            stream.readyState = 2;
             if (typeof stream.onerror === "function") stream.onerror(new Event("error"));
           };
         })();
