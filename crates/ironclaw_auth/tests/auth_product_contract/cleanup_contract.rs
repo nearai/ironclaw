@@ -497,3 +497,196 @@ async fn cleanup_matches_owner_granularity_and_provider_selected_oauth_accounts(
         "an unrelated provider's account must survive extension-keyed cleanup"
     );
 }
+
+/// A credential-owner scope carrying the `Callback` surface, no session, and a
+/// fresh invocation — the shape a removal/disconnect cleanup actually arrives
+/// on (`revoke_exclusive_credentials` / `personal_credential_cleanup_request`
+/// build it via `AuthProductScope::credential_owner(.., AuthSurface::Callback)`).
+/// It deliberately differs in surface/session/invocation from the `Web`-surface
+/// scope [`scope`] mints a pending flow under, so a test that cleans up with it
+/// proves cleanup matches flows at credential-owner granularity, not by the
+/// surface/session the connect popup happened to use.
+fn callback_cleanup_scope(user: &str) -> AuthProductScope {
+    let mut cleanup = scope(user);
+    cleanup.surface = AuthSurface::Callback;
+    cleanup.session_id = None;
+    cleanup.resource.invocation_id = InvocationId::new();
+    cleanup
+}
+
+/// A3 · Removal cancels pending OAuth flows (RFC 9700 §4.7.1 + RFC 7009 §1).
+///
+/// When an extension is uninstalled mid-handshake, its pending setup flow is
+/// canceled even though the removal cleanup arrives on a *different* surface
+/// (`Callback`) than the `Web` connect popup that minted the flow; a late
+/// provider callback is then rejected, and no credential is minted from the
+/// abandoned flow. Re-expressed from `nea25/auth-oauth-parity`'s
+/// `uninstall_cancels_pending_flow_and_rejects_late_callback` onto this branch's
+/// reconciled auth structure.
+#[tokio::test]
+async fn uninstall_cancels_pending_flow_and_rejects_late_callback() {
+    let services = InMemoryAuthProductServices::new();
+    let flow_scope = scope("alice");
+    let expires_at = Utc::now() + Duration::minutes(5);
+
+    // A pending setup flow, mid-handshake (AwaitingUser), awaiting the callback,
+    // minted under the connect popup's `Web` surface + session.
+    let flow = services
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: flow_scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: provider(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: authorization_url("https://provider.example/oauth"),
+                expires_at,
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: Some(state_hash("state")),
+            pkce_verifier_hash: Some(pkce_hash("pkce")),
+            expires_at,
+        })
+        .await
+        .expect("pending flow");
+    assert_eq!(flow.status, AuthFlowStatus::AwaitingUser);
+
+    // The extension is uninstalled while the flow is still in flight. Cleanup
+    // arrives on the `Callback`-surface credential-owner scope, exactly as
+    // `revoke_exclusive_credentials` builds it.
+    services
+        .cleanup_for_lifecycle(SecretCleanupRequest {
+            scope: callback_cleanup_scope("alice"),
+            extension_id: ExtensionId::new("github").expect("extension"),
+            provider: Some(provider()),
+            action: SecretCleanupAction::Uninstall,
+        })
+        .await
+        .expect("cleanup");
+
+    // The pending flow is now canceled and never bound a credential.
+    let after = services
+        .get_flow(&flow_scope, flow.id)
+        .await
+        .expect("lookup")
+        .expect("record");
+    assert_eq!(after.status, AuthFlowStatus::Canceled);
+    assert!(after.credential_account_id.is_none());
+
+    // A late provider callback for the removed extension is rejected outright,
+    // so no token exchange (and no credential mint) can proceed.
+    let late = services
+        .claim_oauth_callback(
+            &flow_scope,
+            ironclaw_auth::OAuthCallbackClaimRequest {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash("state"),
+                provider: provider(),
+                pkce_verifier_hash: pkce_hash("pkce"),
+            },
+        )
+        .await
+        .expect_err("late callback after uninstall must be rejected");
+    assert_eq!(late, AuthProductError::Canceled);
+
+    // No credential account exists for the owner+provider.
+    let accounts = services
+        .list_accounts(CredentialAccountListRequest::new(flow_scope, provider()))
+        .await
+        .expect("list accounts");
+    assert!(accounts.accounts.is_empty());
+}
+
+/// A3 breadth (owner decision 2026-07-15): cleanup cancels EVERY non-terminal
+/// flow kind for the owner+provider — connect (`SetupOnly`) *and* a blocked-tool
+/// auth gate (`TurnGateResume`) — on BOTH `Deactivate` and `Uninstall`, while a
+/// different provider's flow and an already-terminal flow are untouched. Any
+/// non-terminal flow can otherwise mint a credential on a late callback.
+#[tokio::test]
+async fn cleanup_cancels_all_pending_flow_kinds_for_provider_on_deactivate() {
+    let services = InMemoryAuthProductServices::new();
+    let flow_scope = scope("alice");
+    let expires_at = Utc::now() + Duration::minutes(5);
+    let other_provider = AuthProviderId::new("notion").expect("provider");
+
+    let make_flow = |provider: AuthProviderId, continuation: AuthContinuationRef| {
+        let services = &services;
+        let flow_scope = flow_scope.clone();
+        async move {
+            services
+                .create_flow(NewAuthFlow {
+                    id: None,
+                    scope: flow_scope,
+                    kind: AuthFlowKind::IntegrationCredential,
+                    provider,
+                    challenge: AuthChallenge::OAuthUrl {
+                        authorization_url: authorization_url("https://provider.example/oauth"),
+                        expires_at,
+                    },
+                    continuation,
+                    update_binding: None,
+                    opaque_state_hash: Some(state_hash("state")),
+                    pkce_verifier_hash: Some(pkce_hash("pkce")),
+                    expires_at,
+                })
+                .await
+                .expect("flow")
+        }
+    };
+
+    let setup = make_flow(provider(), AuthContinuationRef::SetupOnly).await;
+    let gate = make_flow(
+        provider(),
+        AuthContinuationRef::TurnGateResume {
+            turn_run_ref: TurnRunRef::new("run-a3").expect("run ref"),
+            gate_ref: AuthGateRef::new("gate:a3").expect("gate ref"),
+        },
+    )
+    .await;
+    // A different provider's pending flow must survive a provider-scoped cleanup.
+    let bystander = make_flow(other_provider, AuthContinuationRef::SetupOnly).await;
+
+    // Deactivate (owner call: same as uninstall for flow cancellation), provider
+    // selected, arriving on the callback-surface owner scope.
+    services
+        .cleanup_for_lifecycle(SecretCleanupRequest {
+            scope: callback_cleanup_scope("alice"),
+            extension_id: ExtensionId::new("github").expect("extension"),
+            provider: Some(provider()),
+            action: SecretCleanupAction::Deactivate,
+        })
+        .await
+        .expect("cleanup");
+
+    let status = |id| {
+        let services = &services;
+        let flow_scope = flow_scope.clone();
+        async move {
+            services
+                .get_flow(&flow_scope, id)
+                .await
+                .expect("lookup")
+                .expect("record")
+                .status
+        }
+    };
+    assert_eq!(status(setup.id).await, AuthFlowStatus::Canceled);
+    assert_eq!(status(gate.id).await, AuthFlowStatus::Canceled);
+    assert_eq!(
+        status(bystander.id).await,
+        AuthFlowStatus::AwaitingUser,
+        "a different provider's pending flow must survive provider-scoped cleanup"
+    );
+
+    // Idempotent: a second cleanup finds nothing live to cancel and still succeeds.
+    services
+        .cleanup_for_lifecycle(SecretCleanupRequest {
+            scope: callback_cleanup_scope("alice"),
+            extension_id: ExtensionId::new("github").expect("extension"),
+            provider: Some(provider()),
+            action: SecretCleanupAction::Uninstall,
+        })
+        .await
+        .expect("idempotent cleanup");
+    assert_eq!(status(setup.id).await, AuthFlowStatus::Canceled);
+}

@@ -33,7 +33,7 @@ provenance — they are NOT live pointers on this branch. The structural map:
    `reborn_retired_taxonomy.rs` exist here, so §0.5.1 is enforceable — but the folded
    changes are generic (no vendor literals in the engine), so nothing new trips it.
 
-**What was folded here (A1, A2a, A6, A14 — DONE; A3 — FLAGGED):** see the corrected
+**What was folded here (A1, A2a, A3, A6, A14 — DONE):** see the corrected
 §S entries below. Items outside {A1, A2a, A3, A6, A14} are carried over from main's
 audit unchanged (their status on this rollup was not re-verified in this pass — treat
 them as main-provenance, not this-branch claims).
@@ -50,7 +50,7 @@ them as main-provenance, not this-branch claims).
 | **GitHub** 🟢 (manual token) | ⚪ (no OAuth) | ✅ | via §S | via §S | ⏳ pending §S |
 | **NEAR AI** 🟢 (manual token) | ⚪ (no OAuth) | ✅ | via §S | via §S | ⏳ pending §S |
 | **Telegram / web-access / acme** ⚪ | ⚪ | ⚪ | ⚪ | ⚪ | ⚪ N/A |
-| **§S shared engine + flow controls** | ✅ (main-provenance) | ✅ (main-provenance) | ✅ A1, A2a · ⚠️ A3 FLAGGED (missing here) · A2b backlog | ✅ A6, A14 (rollup) · A13/A15 main-provenance (A7/A10/A12/A16 backlog; A9 moot) | mostly ✅ |
+| **§S shared engine + flow controls** | ✅ (main-provenance) | ✅ (main-provenance) | ✅ A1, A2a, A3 · A2b backlog | ✅ A6, A14 (rollup) · A13/A15 main-provenance (A7/A10/A12/A16 backlog; A9 moot) | mostly ✅ |
 
 Legend: ✅ all boxes ticked · ⏳ in progress · ⚪ N/A · 🔴 known-broken · ⚠️ divergence on this branch.
 
@@ -202,20 +202,34 @@ have no manifest in this tree. Nothing to verify.
   makes the read path correct and durable write/claim paths expire lazily, so no live flow ever
   mis-reads. The remaining gap (abandoned flows lingering as non-terminal rows) needs a periodic
   global driver. Not started; A1 supersede + A2a + lazy expiry cover the user-facing cases.
-- [ ] ⚠️ **A3 · Removal cancels pending flows — FLAGGED: NOT PRESENT ON THIS ROLLUP (follow-up).**
-  On main this was pre-existing behavior (`cleanup_for_lifecycle` cancels non-terminal flows on
-  `Uninstall`, `durable/cleanup.rs`) and the diff only ADDED a proving test. **On this rollup the
-  behavior is genuinely absent:** `cleanup_for_lifecycle` (both `FilesystemAuthProductServices`
-  `durable/cleanup.rs` and the `InMemoryAuthProductServices` fake) revokes/deactivates **accounts
-  only** — it does not enumerate or cancel pending flows; and no removal-path caller
-  (`extension_lifecycle.rs`, `serve/lifecycle.rs`, `channel_connection.rs`) cancels flows either.
-  Consequence: after uninstall the pending OAuth flow stays `AwaitingUser`, so a late callback could
-  still `claim_oauth_callback` → `complete_oauth_callback` → mint a fresh credential. The main
-  acceptance test (`uninstall_cancels_pending_flow_and_rejects_late_callback`) was **NOT ported**
-  because it would fail. Adding the behavior is a security-sensitive change to the ownership-aware,
-  idempotent cleanup contract (which flows to cancel — SetupOnly? LifecycleActivation? which
-  actions — Uninstall only? Deactivate? reusable/shared-credential handling?) and was intentionally
-  **not guessed** per the "auth security — do not guess" mandate. RFC 9700 §4.7.1 + RFC 7009 §1.
+- [x] **A3 · Removal/disconnect cancels pending OAuth flows.** BUILT + TESTED. A provider-selected
+  `cleanup_for_lifecycle` now cancels EVERY non-terminal flow for the credential-owner + provider, in
+  both `FilesystemAuthProductServices` (`durable/cleanup.rs`, via the new cross-surface
+  `lifecycle_flows_for_owner_provider` walk that enumerates every surface/session flow root — extracted
+  alongside `flow_records_for_owner` into the shared `flow_records_for_resource_filtered`) and the
+  `InMemoryAuthProductServices` fake (`fakes.rs`, `flow_matches_credential_owner`). **Owner decisions
+  (2026-07-15):** cancel on **both** `Deactivate` and `Uninstall` (any provider-selected cleanup — the
+  flow scope requires a provider anyway); cancel **all** non-terminal flow kinds — `SetupOnly` connect
+  flows AND blocked-tool `TurnGateResume` gates — since any non-terminal flow can mint on a late
+  callback (predicate = `&flow.provider == provider && !is_terminal_status(flow.status)`). **Shared-
+  vendor safe by construction** (no shared-vendor logic added here): the production removal caller
+  `revoke_exclusive_credentials` (`extension_lifecycle.rs`) only calls cleanup with a provider
+  EXCLUSIVE to the removed extension (a provider still used by another installed extension is skipped);
+  disconnect (`personal_credential_cleanup_request`) and post-activation-failure compensation likewise
+  pass `provider: Some(..)` + `Uninstall`. Idempotent (a concurrently terminal flow is skipped, never
+  an error). Consequence closed: after uninstall the pending flow is `Canceled`, so a late callback is
+  rejected (`claim_oauth_callback` → `AuthProductError::Canceled`) and mints nothing. RFC 9700 §4.7.1 +
+  RFC 7009 §1. **Proven:** fake-tier
+  `cleanup_contract::uninstall_cancels_pending_flow_and_rejects_late_callback` +
+  `cleanup_contract::cleanup_cancels_all_pending_flow_kinds_for_provider_on_deactivate`; durable-tier
+  `product_auth::durable::tests::filesystem_cleanup_cancels_pending_flow_across_surfaces` (real FS path
+  — a `Callback`-surface cleanup cancels a `Web`-surface popup flow, proving cross-surface enumeration;
+  a different provider's flow survives; second cleanup idempotent). **Deliberately omitted:** main's
+  `canceled_turn_gate_continuations` report field + parked-turn *notification* pipeline (the completed-
+  but-unacked `TurnGateResume` re-enumeration main adds via `flow_requires_lifecycle_cleanup`) — this
+  branch's `SecretCleanupReport` has no such field, removal already drains in-flight work before auth
+  cleanup, and it is a separate turn-UX feature owned by the concurrent main-delta reconciliation. The
+  predicate here is `!is_terminal_status` only.
 - [x] **A6 · Scope downgrade/over-claim on the echoed-scope path.** BUILT + TESTED (folded onto the
   rollup engine). `extract_token_response` (`crates/ironclaw_auth/src/engine/exchange.rs`) now stores
   `granted ∩ requested` on the echoed-scope arm — dropping any scope the vendor granted beyond the
@@ -264,6 +278,8 @@ have no manifest in this tree. Nothing to verify.
    backend; the durable store tests run the real production code path over `InMemoryBackend`. The
    folded A1 durable test exercises the real `FilesystemAuthProductServices` path. A DB-backed auth
    harness (Postgres/libSQL `RootFilesystem`) remains a feasible follow-up, unchanged from main.
-3. **Flagged on this rollup:** **A3** (removal-cancels-flows behavior is absent here — see the §S
-   entry; test not ported, behavior not added, security-sensitive design decision left to the owner).
+3. **Fixed on this rollup:** **A3** (removal/disconnect now cancels pending flows — see the §S entry;
+   behavior added + tested at fake and durable tiers per the 2026-07-15 owner decisions, cross-surface
+   enumeration proven; the `canceled_turn_gate_continuations` parked-turn notification is deliberately
+   omitted, owned by the main-delta reconciliation).
    **Deferred:** A5 (`⏸`), A2b, A7, A10, A12, A16. **Waived/moot:** A9, A13, A15, A17. **Optional:** A8.

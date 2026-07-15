@@ -595,6 +595,25 @@ fn flow_shares_setup_owner_root(
         && flow_scope.session_id == scope.session_id
 }
 
+/// Credential-owner match for lifecycle/disconnect cleanup: two auth scopes
+/// share a credential owner iff they carry the same tenant/user/agent/project.
+/// Surface, session, thread, mission, and invocation are excluded — a removal or
+/// channel disconnect arrives on the `Callback` surface with a fresh invocation
+/// and no session/thread, yet must still reach the pending flow the connect
+/// popup created under its own surface/session. Mirrors the account-cleanup
+/// owner granularity.
+fn flow_matches_credential_owner(
+    flow_scope: &crate::AuthProductScope,
+    request_scope: &crate::AuthProductScope,
+) -> bool {
+    let flow = &flow_scope.resource;
+    let request = &request_scope.resource;
+    flow.tenant_id == request.tenant_id
+        && flow.user_id == request.user_id
+        && flow.agent_id == request.agent_id
+        && flow.project_id == request.project_id
+}
+
 #[async_trait]
 impl CredentialAccountService for InMemoryAuthProductServices {
     async fn create_account(
@@ -1165,6 +1184,24 @@ impl SecretCleanupService for InMemoryAuthProductServices {
                 }
             } else if had_grant {
                 report.retained_accounts.push(account.id);
+            }
+        }
+        // A3 · Removal/disconnect cancels pending flows (RFC 9700 §4.7.1 +
+        // RFC 7009 §1): a provider-selected cleanup cancels EVERY non-terminal
+        // flow for the credential-owner + provider so a late provider callback
+        // can no longer mint a credential for a torn-down extension. Owner
+        // decision 2026-07-15: cancel on both Deactivate and Uninstall (any
+        // provider-selected cleanup). Idempotent.
+        if let Some(provider) = request.provider.as_ref() {
+            for record in state.flows.values_mut() {
+                if !crate::is_terminal_status(record.status)
+                    && &record.provider == provider
+                    && flow_matches_credential_owner(&record.scope, &request.scope)
+                {
+                    record.status = AuthFlowStatus::Canceled;
+                    record.error = Some(crate::AuthErrorCode::Canceled);
+                    record.updated_at = Utc::now();
+                }
             }
         }
         Ok(report)

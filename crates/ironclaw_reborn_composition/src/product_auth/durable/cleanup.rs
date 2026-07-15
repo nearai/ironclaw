@@ -4,8 +4,9 @@ use ironclaw_filesystem::{CasExpectation, RootFilesystem};
 
 use super::FilesystemAuthProductServices;
 use ironclaw_auth::{
-    AuthProductError, CredentialAccountOwnerScope, CredentialAccountStatus, CredentialOwnership,
-    SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
+    AuthFlowManager, AuthProductError, CredentialAccountOwnerScope, CredentialAccountStatus,
+    CredentialOwnership, SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest,
+    SecretCleanupService,
 };
 
 #[async_trait]
@@ -86,6 +87,28 @@ where
             }
             if let Some(h) = &purge_refresh {
                 let _ = self.secret_store.delete(&current.scope.resource, h).await;
+            }
+        }
+        // A3 · Removal/disconnect cancels pending flows (RFC 9700 §4.7.1 +
+        // RFC 7009 §1). A provider-selected cleanup cancels EVERY non-terminal
+        // flow for the credential-owner + provider so a late provider callback
+        // can no longer mint a credential for a torn-down extension. Owner
+        // decision 2026-07-15: cancel on both Deactivate and Uninstall. Shared-
+        // vendor safe by construction — the removal caller only selects a
+        // provider exclusive to the removed extension. Idempotent: a concurrently
+        // terminal flow is skipped, never an error.
+        if let Some(provider) = request.provider.as_ref() {
+            for flow in self
+                .lifecycle_flows_for_owner_provider(&request.scope.resource, provider)
+                .await?
+            {
+                match self.cancel_flow(&flow.scope, flow.id).await {
+                    Ok(_) => {}
+                    Err(AuthProductError::Canceled)
+                    | Err(AuthProductError::FlowAlreadyTerminal)
+                    | Err(AuthProductError::UnknownOrExpiredFlow) => {}
+                    Err(error) => return Err(error),
+                }
             }
         }
         Ok(report)

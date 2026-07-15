@@ -4457,3 +4457,103 @@ async fn filesystem_cancel_superseded_setup_flows_supersedes_only_matching_setup
     assert!(again.is_empty());
     assert_eq!(status(first.id).await, AuthFlowStatus::Canceled);
 }
+
+/// A3 · A removal/disconnect cleanup that arrives on a *different* surface
+/// (`Callback`) than the `Web` connect popup still cancels the popup's pending
+/// `SetupOnly` flow — proving the durable lifecycle path enumerates flows across
+/// every surface, not just the caller's, before a late provider callback can
+/// mint a credential for a torn-down extension (RFC 9700 §4.7.1 + RFC 7009 §1).
+/// A different provider's pending flow survives the provider-scoped cleanup, and
+/// a second cleanup is idempotent. Durable analogue of the fake-tier
+/// `uninstall_cancels_pending_flow_and_rejects_late_callback`.
+#[tokio::test]
+async fn filesystem_cleanup_cancels_pending_flow_across_surfaces() {
+    use ironclaw_auth::{SecretCleanupAction, SecretCleanupRequest, SecretCleanupService};
+    use ironclaw_host_api::ExtensionId;
+
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let flow_scope = test_scope();
+    let service = test_service(filesystem, secret_store);
+    let github = AuthProviderId::new("github").unwrap();
+
+    let setup_flow = |provider: AuthProviderId| {
+        let scope = flow_scope.clone();
+        let service = &service;
+        async move {
+            service
+                .create_flow(NewAuthFlow {
+                    id: None,
+                    scope,
+                    kind: AuthFlowKind::IntegrationCredential,
+                    provider,
+                    challenge: AuthChallenge::OAuthUrl {
+                        authorization_url: OAuthAuthorizationUrl::new(
+                            "https://provider.example/oauth",
+                        )
+                        .unwrap(),
+                        expires_at: Utc::now() + Duration::minutes(5),
+                    },
+                    continuation: AuthContinuationRef::SetupOnly,
+                    update_binding: None,
+                    opaque_state_hash: Some(state_hash("state")),
+                    pkce_verifier_hash: Some(pkce_hash("pkce")),
+                    expires_at: Utc::now() + Duration::minutes(5),
+                })
+                .await
+                .unwrap()
+        }
+    };
+
+    // Pending github connect popup, minted under the `Web` surface.
+    let pending = setup_flow(github.clone()).await;
+    // A different provider's pending flow must survive a github-scoped cleanup.
+    let bystander = setup_flow(google_provider()).await;
+
+    // The extension is uninstalled. Cleanup arrives on the `Callback`-surface
+    // credential-owner scope with a fresh invocation id — a different surface
+    // than the `Web` popup that minted the flow.
+    let mut cleanup_scope = test_scope();
+    cleanup_scope.surface = AuthSurface::Callback;
+    cleanup_scope.session_id = None;
+    assert_ne!(
+        cleanup_scope.surface, flow_scope.surface,
+        "fixture must model a cleanup arriving on a different surface than the popup"
+    );
+    assert_ne!(
+        cleanup_scope.resource.invocation_id, flow_scope.resource.invocation_id,
+        "fixture must model the cross-invocation caller"
+    );
+
+    service
+        .cleanup_for_lifecycle(SecretCleanupRequest {
+            scope: cleanup_scope.clone(),
+            extension_id: ExtensionId::new("github").unwrap(),
+            provider: Some(github.clone()),
+            action: SecretCleanupAction::Uninstall,
+        })
+        .await
+        .unwrap();
+
+    let status = |id| {
+        let scope = flow_scope.clone();
+        let service = &service;
+        async move { service.get_flow(&scope, id).await.unwrap().unwrap().status }
+    };
+    // The cross-surface enumeration found and canceled the pending flow…
+    assert_eq!(status(pending.id).await, AuthFlowStatus::Canceled);
+    // …and the unrelated provider's flow was left live.
+    assert_eq!(status(bystander.id).await, AuthFlowStatus::AwaitingUser);
+
+    // Idempotent: a second cleanup finds nothing live to cancel and still succeeds.
+    service
+        .cleanup_for_lifecycle(SecretCleanupRequest {
+            scope: cleanup_scope,
+            extension_id: ExtensionId::new("github").unwrap(),
+            provider: Some(github),
+            action: SecretCleanupAction::Uninstall,
+        })
+        .await
+        .unwrap();
+    assert_eq!(status(pending.id).await, AuthFlowStatus::Canceled);
+}

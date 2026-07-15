@@ -263,6 +263,28 @@ where
             thread_id: Some(owner.thread_id.clone()),
             invocation_id: ironclaw_host_api::InvocationId::new(),
         };
+        self.flow_records_for_resource_filtered(&resource, |flow| owner.matches(flow))
+            .await
+    }
+
+    /// Walks every auth-flow record for a credential owner across all surfaces
+    /// and their session sub-roots, returning the ones matching `predicate`.
+    ///
+    /// Flow storage is keyed by agent/project/surface/session (see `flow_root`),
+    /// so an owner-granularity read must enumerate each surface's flow root and
+    /// each bounded session sub-root. Extracted so both the owner-scoped read
+    /// (`flow_records_for_owner`) and the provider-scoped lifecycle read
+    /// (`lifecycle_flows_for_owner_provider`) share one enumeration and differ
+    /// only in the predicate — the walk is the security-critical part (a missed
+    /// surface/session leaves a pending flow that can mint on a late callback).
+    async fn flow_records_for_resource_filtered<P>(
+        &self,
+        resource: &ResourceScope,
+        predicate: P,
+    ) -> Result<Vec<AuthFlowRecord>, AuthProductError>
+    where
+        P: Fn(&AuthFlowRecord) -> bool + Sync,
+    {
         let mut flows = Vec::new();
         for surface in AuthSurface::ALL {
             let scope = ironclaw_auth::AuthProductScope::new(resource.clone(), surface);
@@ -271,13 +293,13 @@ where
                     .await?
                     .into_iter()
                     .map(|(flow, _)| flow)
-                    .filter(|flow| owner.matches(flow)),
+                    .filter(|flow| predicate(flow)),
             );
-            let sessions_root = surface_sessions_root(&resource, surface)?;
+            let sessions_root = surface_sessions_root(resource, surface)?;
             let mut entries = match self
                 .filesystem
                 .list_dir_bounded(
-                    &resource,
+                    resource,
                     &sessions_root,
                     MAX_OWNER_SESSION_ROOTS_PER_SURFACE.saturating_add(1),
                 )
@@ -296,6 +318,7 @@ where
                     continue;
                 }
                 let Ok(session_id) = AuthSessionId::new(entry.name) else {
+                    // silent-ok: ignore an unexpected non-session directory under the bounded root.
                     continue;
                 };
                 let mut session_scope =
@@ -306,13 +329,51 @@ where
                         .await?
                         .into_iter()
                         .map(|(flow, _)| flow)
-                        .filter(|flow| owner.matches(flow)),
+                        .filter(|flow| predicate(flow)),
                 );
             }
         }
         flows.sort_by_key(|flow| flow.id);
         flows.dedup_by_key(|flow| flow.id);
         Ok(flows)
+    }
+
+    /// Non-terminal auth-flow records for a credential owner + provider, walked
+    /// across surfaces/sessions but not one thread (A3).
+    ///
+    /// The lifecycle/disconnect analogue of [`Self::account_records_for_owner`]:
+    /// flow storage is keyed by agent/project/surface/session (see `flow_root`)
+    /// and never by thread, so a removal or channel disconnect — which arrives on
+    /// the `Callback` surface with no thread — can still reach every pending flow
+    /// a connect created, including thread-less setup flows and thread-scoped
+    /// turn-gate flows. Used by lifecycle cleanup to cancel the removed
+    /// provider's non-terminal flows so a late provider callback cannot mint a
+    /// credential for a torn-down extension. Provider-agnostic by construction.
+    ///
+    /// The predicate is deliberately the non-terminal test only
+    /// (`!is_terminal_status`). Main additionally re-enumerates completed-but-
+    /// unacked `TurnGateResume` flows here (via `flow_requires_lifecycle_cleanup`)
+    /// to drive a parked-turn notification; this branch's `SecretCleanupReport`
+    /// has no such field, so that arm is omitted and owned by the concurrent
+    /// main-delta reconciliation.
+    async fn lifecycle_flows_for_owner_provider(
+        &self,
+        resource: &ResourceScope,
+        provider: &ironclaw_auth::AuthProviderId,
+    ) -> Result<Vec<AuthFlowRecord>, AuthProductError> {
+        let resource = ResourceScope {
+            tenant_id: resource.tenant_id.clone(),
+            user_id: resource.user_id.clone(),
+            agent_id: resource.agent_id.clone(),
+            project_id: resource.project_id.clone(),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: ironclaw_host_api::InvocationId::new(),
+        };
+        self.flow_records_for_resource_filtered(&resource, |flow| {
+            &flow.provider == provider && !ironclaw_auth::is_terminal_status(flow.status)
+        })
+        .await
     }
 
     async fn read_account(
