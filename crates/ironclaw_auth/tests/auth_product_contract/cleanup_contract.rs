@@ -781,6 +781,15 @@ async fn completed_unacknowledged_turn_gate_cleanup_emits_once_then_converges() 
     assert_eq!(report.canceled_turn_gate_continuations.len(), 1);
     let event = &report.canceled_turn_gate_continuations[0];
     assert_eq!(event.flow_id, flow.id);
+    // Callback-wins invariant (removal/callback race): a credential minted by
+    // a flow that completed before — or raced ahead of — the removal must not
+    // survive the cleanup. The account scan runs AFTER flow cancellation, so
+    // a mint that beat the cancellation is still swept here.
+    assert_eq!(
+        report.revoked_accounts,
+        vec![account.id],
+        "the completed flow's credential is revoked by the same cleanup"
+    );
 
     services
         .mark_continuation_dispatched(&owner, flow.id, event.emitted_at)
