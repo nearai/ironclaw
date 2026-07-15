@@ -385,7 +385,7 @@ impl SkillContextSource for SkillContextService {
             } else {
                 entry.safe_description.clone()
             };
-            let safe_summary = entry.safe_description.clone();
+            let safe_summary = skill_snippet_safe_summary(&entry.name, &entry.safe_description);
 
             if model_content.len() > self.budget.max_snippet_bytes {
                 return Err(SkillContextError::ContextBudgetExceeded);
@@ -442,15 +442,23 @@ impl SkillContextSource for NoopSkillContextSource {
 /// Build the model-message ref for a skill snippet.
 ///
 /// Prompt construction and model-message resolution both use this exact helper
-/// so source/ordering drift fails closed instead of producing mismatched refs.
+/// so source/ordering/content drift fails closed instead of producing
+/// mismatched refs. The hash covers the FULL `model_content`, not just the
+/// bounded `safe_summary`: the summary is first-line-only (e.g. the constant
+/// available-skills listing header), so without the content field a changed
+/// listing body would silently resolve under the old ref. Refs are per-run
+/// ephemeral — built at prompt time and resolved live in the same run — so
+/// rotating the hash layout is safe.
 pub fn skill_snippet_model_message_ref(
     snippet_ref: &str,
     safe_summary: &str,
+    model_content: &str,
     ordinal: usize,
 ) -> Result<LoopMessageRef, AgentLoopHostError> {
     let slug = sanitize_ref_suffix(snippet_ref);
     let ordinal = ordinal.to_string();
-    let hash = stable_skill_snippet_display_hash([snippet_ref, safe_summary, &ordinal]);
+    let hash =
+        stable_skill_snippet_display_hash([snippet_ref, safe_summary, model_content, &ordinal]);
     LoopMessageRef::new(format!("msg:snippet.{slug}.{ordinal}.{hash:016x}")).map_err(|_| {
         AgentLoopHostError::new(
             AgentLoopHostErrorKind::Internal,
@@ -467,15 +475,101 @@ pub fn is_skill_snippet_model_message_ref(content_ref: &LoopMessageRef) -> bool 
 mod snippet_ref_tests {
     use super::*;
 
+    /// Pins the ref layout so accidental rotation fails loudly. The hash was
+    /// deliberately rotated once when `model_content` joined the hashed fields
+    /// (stale-ref detection must cover the full content, not just the
+    /// first-line summary); any further change here must be equally deliberate.
     #[test]
-    fn skill_snippet_model_message_ref_preserves_existing_hash() {
-        let content_ref =
-            skill_snippet_model_message_ref("skill:alpha", "summary", 0).expect("valid ref");
+    fn skill_snippet_model_message_ref_pins_current_hash_layout() {
+        let content_ref = skill_snippet_model_message_ref("skill:alpha", "summary", "summary", 0)
+            .expect("valid ref");
         assert_eq!(
             content_ref.as_str(),
-            "msg:snippet.skill.alpha.0.6e54cb74d742607c"
+            "msg:snippet.skill.alpha.0.754017343901aa5b"
         );
     }
+
+    #[test]
+    fn skill_snippet_model_message_ref_is_deterministic_for_identical_content() {
+        let first = skill_snippet_model_message_ref(
+            "skill:listing",
+            "Header line",
+            "Header line\n\n- alpha: a\n- bravo: b",
+            0,
+        )
+        .expect("valid ref");
+        let second = skill_snippet_model_message_ref(
+            "skill:listing",
+            "Header line",
+            "Header line\n\n- alpha: a\n- bravo: b",
+            0,
+        )
+        .expect("valid ref");
+        assert_eq!(first, second, "unchanged content must produce the same ref");
+    }
+
+    /// Stale-ref regression: the available-skills listing's first line (and
+    /// therefore its safe summary) is a constant header, so two listings that
+    /// differ only AFTER the first line — a skill added, removed, or reordered
+    /// — must still produce different refs. If the ref hash covered only the
+    /// summary, a changed listing would resolve under the old ref instead of
+    /// failing closed.
+    #[test]
+    fn skill_snippet_model_message_ref_differs_when_content_changes_after_first_line() {
+        let header = "Header line";
+        let original = skill_snippet_model_message_ref(
+            "skill:listing",
+            header,
+            "Header line\n\n- alpha: a\n- bravo: b",
+            0,
+        )
+        .expect("valid ref");
+        let changed = skill_snippet_model_message_ref(
+            "skill:listing",
+            header,
+            "Header line\n\n- alpha: a\n- bravo: b\n- charlie: c",
+            0,
+        )
+        .expect("valid ref");
+        let reordered = skill_snippet_model_message_ref(
+            "skill:listing",
+            header,
+            "Header line\n\n- bravo: b\n- alpha: a",
+            0,
+        )
+        .expect("valid ref");
+        assert_ne!(
+            original, changed,
+            "adding a listing entry must rotate the ref"
+        );
+        assert_ne!(
+            original, reordered,
+            "reordering listing entries must rotate the ref"
+        );
+    }
+}
+
+/// Character bound for skill snippet safe summaries. Summaries are diagnostic
+/// strings capped at 4 KiB by the prompt layer (`MODEL_SAFE_SUMMARY_MAX_BYTES`
+/// in `prompt_text.rs`); 256 chars is at most 1 KiB of UTF-8, leaving headroom.
+const MAX_SKILL_SNIPPET_SAFE_SUMMARY_CHARS: usize = 256;
+
+/// Derive the bounded safe summary for a skill snippet.
+///
+/// The full description (which may be long or multi-line, e.g. the
+/// discoverable available-skills listing) belongs to `model_content`; the
+/// summary is the first line, character-bounded, so it always fits the
+/// prompt layer's safe-summary budget. Falls back to the (already validated)
+/// skill name when the description has no leading text.
+fn skill_snippet_safe_summary(name: &str, safe_description: &str) -> String {
+    let first_line = safe_description.lines().next().unwrap_or("").trim();
+    if first_line.is_empty() {
+        return name.to_string();
+    }
+    first_line
+        .chars()
+        .take(MAX_SKILL_SNIPPET_SAFE_SUMMARY_CHARS)
+        .collect()
 }
 
 fn sanitize_ref_suffix(value: &str) -> String {

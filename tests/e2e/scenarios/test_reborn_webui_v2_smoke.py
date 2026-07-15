@@ -26,6 +26,7 @@ Wiring confirmed manually before this test existed:
 
 import asyncio
 import json
+import re
 import uuid
 from urllib.parse import parse_qs, urlparse
 
@@ -43,6 +44,64 @@ from reborn_webui_harness import (
     send_message as _send_message,
     wait_for_assistant_message as _wait_for_assistant_message,
 )
+
+
+def _relative_luminance(rgb: list[float]) -> float:
+    channels = [
+        value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+        for value in (channel / 255 for channel in rgb)
+    ]
+    return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+
+
+def _contrast_ratio(foreground: list[float], background: list[float]) -> float:
+    foreground_luminance = _relative_luminance(foreground)
+    background_luminance = _relative_luminance(background)
+    lighter = max(foreground_luminance, background_luminance)
+    darker = min(foreground_luminance, background_luminance)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+async def _effective_colors(locator) -> dict[str, list[float]]:
+    return await locator.evaluate(
+        """element => {
+          const parse = (value) => {
+            const channels = value.match(/[\\d.]+/g)?.map(Number) || [];
+            const scale = value.trim().startsWith("color(srgb ") ? 255 : 1;
+            return [(channels[0] || 0) * scale, (channels[1] || 0) * scale,
+              (channels[2] || 0) * scale,
+              channels.length > 3 ? channels[3] : 1];
+          };
+          const over = (front, back) => {
+            const alpha = front[3] + back[3] * (1 - front[3]);
+            if (alpha === 0) return [0, 0, 0, 0];
+            return [
+              (front[0] * front[3] + back[0] * back[3] * (1 - front[3])) / alpha,
+              (front[1] * front[3] + back[1] * back[3] * (1 - front[3])) / alpha,
+              (front[2] * front[3] + back[2] * back[3] * (1 - front[3])) / alpha,
+              alpha,
+            ];
+          };
+
+          const foreground = parse(getComputedStyle(element).color);
+          let background = [0, 0, 0, 0];
+          for (let node = element; node && background[3] < 1; node = node.parentElement) {
+            background = over(background, parse(getComputedStyle(node).backgroundColor));
+          }
+          background = over(background, [255, 255, 255, 1]);
+          return {
+            foreground: foreground.slice(0, 3),
+            background: background.slice(0, 3),
+          };
+        }"""
+    )
+
+
+async def _assert_readable(locator, label: str) -> dict[str, list[float]]:
+    colors = await _effective_colors(locator)
+    ratio = _contrast_ratio(colors["foreground"], colors["background"])
+    assert ratio >= 4.5, f"{label} contrast was {ratio:.2f}:1 with colors {colors}"
+    return colors
 
 
 async def _wait_for_automation_named(
@@ -112,10 +171,10 @@ async def _install_fake_v2_event_source(page) -> None:
             });
             stream.dispatchEvent(event);
           };
-          window.__failLatestV2Sse = () => {
+          window.__failLatestV2Sse = (readyState = 2) => {
             const stream = currentStream();
-            stream.readyState = 2;
-            if (activeStream === stream) activeStream = null;
+            stream.readyState = readyState;
+            if (readyState === 2 && activeStream === stream) activeStream = null;
             if (typeof stream.onerror !== "function") {
               throw new Error("EventSource has no error handler");
             }
@@ -145,6 +204,103 @@ async def test_reborn_v2_serves_shell_and_gates_auth(reborn_v2_server, reborn_v2
         await expect(anon_page.locator(SEL_V2["login_token"])).to_be_visible(timeout=15000)
     finally:
         await anon_ctx.close()
+
+
+async def test_reborn_v2_light_theme_semantic_colors_have_readable_contrast(
+    reborn_v2_page,
+):
+    """Theme-aware controls, success states, and secondary text meet WCAG AA."""
+    await reborn_v2_page.evaluate(
+        """() => {
+          localStorage.setItem("ironclaw:v2-theme", "light");
+          document.documentElement.dataset.theme = "light";
+        }"""
+    )
+    await reborn_v2_page.reload()
+    await expect(reborn_v2_page.locator(SEL_V2["chat_composer"])).to_be_visible(
+        timeout=15000
+    )
+    assert await reborn_v2_page.locator("html").get_attribute("data-theme") == "light"
+
+    # A slow turn exposes the real danger Button used to cancel an active run.
+    composer = reborn_v2_page.locator(SEL_V2["chat_composer"])
+    await composer.fill("editable composer slow response")
+    await composer.press("Enter")
+    user_message = reborn_v2_page.locator(SEL_V2["msg_user"]).last
+    await expect(user_message).to_contain_text("editable composer slow response", timeout=15000)
+    cancel_button = reborn_v2_page.get_by_role("button", name="Cancel").first
+    await expect(cancel_button).to_be_visible(timeout=10000)
+    await _assert_readable(cancel_button, "light-theme danger button")
+
+    # The message timestamp previously used undefined text-iron-500 and had no
+    # emitted color rule. Its replacement must remain readable on the canvas.
+    await user_message.hover()
+    timestamp = user_message.locator("time")
+    await expect(timestamp).to_be_visible()
+    await _assert_readable(timestamp, "light-theme secondary timestamp")
+    await cancel_button.click()
+    await expect(cancel_button).to_have_count(0, timeout=15000)
+
+    origin = await reborn_v2_page.evaluate("location.origin")
+    await reborn_v2_page.goto(
+        f"{origin}/v2/extensions/registry?token={REBORN_V2_AUTH_TOKEN}"
+    )
+    install_button = reborn_v2_page.get_by_role("button", name="Install").first
+    await expect(install_button).to_be_visible(timeout=15000)
+    idle_colors = await _assert_readable(install_button, "light-theme outline button")
+
+    await install_button.hover()
+    hover_colors = await _assert_readable(
+        install_button, "light-theme outline button on hover"
+    )
+    assert hover_colors["background"] != idle_colors["background"], (
+        "outline button hover state did not change its effective background"
+    )
+
+    await reborn_v2_page.mouse.down()
+    try:
+        pressed_colors = await _assert_readable(
+            install_button, "light-theme outline button while pressed"
+        )
+        assert pressed_colors["background"] != hover_colors["background"], (
+            "outline button pressed state did not change its effective background"
+        )
+    finally:
+        await reborn_v2_page.mouse.move(0, 0)
+        await reborn_v2_page.mouse.up()
+
+    # The same semantic outline token must remain readable after switching the
+    # browser to dark mode; then restore light mode for the success-state check.
+    await reborn_v2_page.evaluate(
+        "document.documentElement.dataset.theme = 'dark'"
+    )
+    await _assert_readable(install_button, "dark-theme outline button")
+    await reborn_v2_page.evaluate(
+        "document.documentElement.dataset.theme = 'light'"
+    )
+
+    await reborn_v2_page.goto(
+        f"{origin}/v2/settings/skills?token={REBORN_V2_AUTH_TOKEN}"
+    )
+    toggle_name = re.compile(r"^Default: (On|Off)$")
+    toggle = reborn_v2_page.get_by_role("button", name=toggle_name).first
+    await expect(toggle).to_be_visible(timeout=15000)
+    original_label = await toggle.inner_text()
+    restore_label = "Default: Off" if original_label == "Default: On" else "Default: On"
+    await toggle.click()
+    try:
+        restore_toggle = reborn_v2_page.get_by_role("button", name=restore_label).first
+        await expect(restore_toggle).to_be_visible(timeout=15000)
+        success_banner = reborn_v2_page.locator(SEL_V2["skill_action_result"])
+        await expect(success_banner).to_be_visible(timeout=15000)
+        await _assert_readable(success_banner, "light-theme success banner")
+    finally:
+        restore_toggle = reborn_v2_page.get_by_role("button", name=restore_label).first
+        if await restore_toggle.count():
+            await restore_toggle.click()
+            await expect(
+                reborn_v2_page.get_by_role("button", name=original_label).first
+            ).to_be_visible(timeout=15000)
 
 
 async def test_reborn_v2_text_turn_persists(reborn_v2_server):
@@ -432,10 +588,10 @@ async def test_reborn_v2_composer_accepts_draft_while_run_is_processing(reborn_v
     await expect(reborn_v2_page.locator(SEL_V2["msg_user"])).to_have_count(1, timeout=1000)
 
 
-async def test_reborn_v2_disconnected_run_stops_typing_and_shows_connection_error(
+async def test_reborn_v2_disconnected_run_shows_status_and_stops_typing(
     reborn_v2_server, reborn_v2_browser
 ) -> None:
-    """A disconnected active run shows connection-loss copy instead of spinning forever."""
+    """A disconnected active run shows transport status and stops spinning."""
     thread_id = "thread-disconnected-run"
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
@@ -504,12 +660,49 @@ async def test_reborn_v2_disconnected_run_stops_typing_and_shows_connection_erro
         await page.goto(f"{reborn_v2_server}/v2/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}")
         composer = page.locator(SEL_V2["chat_composer"])
         await expect(composer).to_be_visible(timeout=15000)
+        connection_status = page.locator(SEL_V2["connection_status"])
+
+        await context.set_offline(True)
+        await expect(connection_status).to_have_text("Reconnecting...", timeout=5000)
+        await expect(connection_status).to_have_css("position", "static")
+        assert await connection_status.evaluate("node => Boolean(node.closest('header'))")
+        await expect(connection_status).to_be_in_viewport()
+
+        await page.set_viewport_size({"width": 390, "height": 844})
+        connection_status_toggle = page.locator(SEL_V2["connection_status_toggle"])
+        connection_status_label = page.locator(SEL_V2["connection_status_label"])
+        disclosure_id = await connection_status_label.get_attribute("id")
+        assert disclosure_id
+        await expect(connection_status_label).to_be_hidden()
+        await expect(connection_status_label).to_have_attribute("aria-hidden", "true")
+        await expect(connection_status_toggle).to_have_attribute("aria-expanded", "false")
+        await expect(connection_status_toggle).to_have_attribute("aria-controls", disclosure_id)
+        await expect(connection_status_toggle).to_be_in_viewport()
+
+        await connection_status_toggle.click()
+        await expect(connection_status_toggle).to_have_attribute("aria-expanded", "true")
+        await expect(connection_status_label).to_have_attribute("aria-hidden", "false")
+        await expect(connection_status_label).to_be_visible()
+        await expect(connection_status_label).to_have_text("Reconnecting...")
+        await expect(connection_status_label).to_have_css("position", "absolute")
+        await expect(connection_status_toggle).to_be_in_viewport()
+        await expect(connection_status_label).to_be_in_viewport()
+        await expect(page.locator(SEL_V2["header_logs_link"])).to_be_visible()
+        await expect(page.locator(SEL_V2["header_docs_link"])).to_be_visible()
+
+        await page.set_viewport_size({"width": 1280, "height": 720})
+        await context.set_offline(False)
+        await expect(connection_status).to_have_count(0, timeout=5000)
 
         await composer.fill("summarize 3 X/Twitter posts")
         await composer.press("Enter")
         await expect(page.locator(SEL_V2["typing_indicator"])).to_be_visible(timeout=5000)
 
-        await page.evaluate("() => window.__failLatestV2Sse()")
+        await page.evaluate("() => window.__failLatestV2Sse(0)")
+        await expect(connection_status).to_have_text("Reconnecting...", timeout=5000)
+
+        await page.evaluate("() => window.__failLatestV2Sse(2)")
+        await expect(connection_status).to_have_text("Disconnected", timeout=5000)
 
         await expect(page.locator(SEL_V2["typing_indicator"])).to_have_count(0, timeout=5000)
         await expect(page.locator(SEL_V2["msg_error"]).last).to_contain_text(
