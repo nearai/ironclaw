@@ -92,6 +92,12 @@ Rules — kept short on purpose (same discipline as `checklist.md`):
   `deliver` within the extension crate — no duplicated rendering.
 - [ ] ADP-6 The adapter holds no delivery store and cannot mark anything
   delivered (reliability stays coordinator-only).
+- [ ] ADP-7 A channel-bearing vendor implements its messaging tools as a **native
+  `first_party` `ToolAdapter`** in the extension crate (not WASM), sharing one
+  `messaging_core` module with the channel adapter's `deliver` (design §7.1,
+  §7.4); wired via the binary's native factory registry + `ExtensionEntrypoint::bind`
+  (§7.5). Slack's WASM tool module is retired; a tools-only/untrusted extension may
+  still use WASM.
 
 ## 5. Relay/act boundary — CRITICAL safety (SAFE) — M1
 

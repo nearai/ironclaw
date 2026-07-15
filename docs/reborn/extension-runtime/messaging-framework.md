@@ -593,6 +593,153 @@ Convergent with mautrix's optional-capability composition and NullClaw's nullabl
 channel methods (§2): capability lives in the declared surface, behavior in the
 adapter.
 
+### 7.1 Runtime kind — native `first_party`, not WASM (for a vendor with a channel)
+
+Slack's tools today are a **WASM** module (`assets/slack/wasm-src/`,
+`runtime.kind = "wasm"`). For the messaging framework, Slack's tools become a
+**native `first_party` `ToolAdapter`** in `ironclaw_slack_extension`
+(`runtime.kind = "first_party"`, `service = "slack.extension/v1"`), replacing the
+WASM module. The deciding factor is the shared-core requirement, not capability:
+
+- **Shared messaging core (§6.2, §7.4).** The tool `invoke` and the channel
+  `deliver` must share vendor rendering / splitting / target-resolution / error
+  mapping. WASM is a separate compilation unit and cannot call the native channel
+  crate's functions, so a WASM tool would **re-implement** rendering — exactly the
+  duplication this framework exists to remove. Native lets both adapters call one
+  `messaging_core` module.
+- **Normalization is multi-call orchestration.** Resolving author ids → names
+  (§7.3) means fanning out extra calls and caching them — natural in native Rust
+  over `ScopedToolState`.
+- **Trust.** The WASM sandbox mainly protects against *untrusted* code; Slack is
+  first-party (ships in the binary), so trading the sandbox for code-sharing is
+  acceptable here.
+
+WASM stays the right choice for a **pure-tool** extension (no channel, nothing to
+share) or a third-party tool that must be sandboxed; the loader wraps it in a
+generic `WasmToolAdapter` and the tool contract is byte-identical either way. So
+the rule is: *a vendor that has both a channel and messaging tools implements them
+natively in one crate; a tools-only or untrusted extension may stay WASM.*
+
+### 7.2 The Slack adapter, worked
+
+One adapter per extension, routing by capability id (sketch — illustrative, not
+literal):
+
+```rust
+// crates/ironclaw_slack_extension/src/messaging.rs
+pub struct SlackMessagingAdapter { cfg: SlackNonSecretConfig } // from bind(): team id, bot user id…
+
+#[async_trait]
+impl ToolAdapter for SlackMessagingAdapter {
+    async fn invoke(&self, call: ToolCall, ports: &ToolPorts<'_>) -> Result<ToolResult, ToolError> {
+        let egress = ports.egress.ok_or_else(|| internal("egress not granted"))?;
+        match call.capability_id.as_str() {
+            "slack.send_message"       => self.send_message(call.input, egress).await,
+            "slack.read_history"       => self.read_history(call.input, egress, ports.state).await,
+            "slack.list_conversations" => self.list_conversations(call.input, egress).await,
+            "slack.get_user"           => self.get_user(call.input, egress, ports.state).await,
+            "slack.search_messages"    => self.search_messages(call.input, egress, ports.state).await,
+            "slack.edit_message" | "slack.delete_message"
+            | "slack.add_reaction" | "slack.remove_reaction" => self.mutate(&call, egress).await,
+            other => Err(internal(&format!("unrouted capability {other}"))),
+        }
+    }
+}
+```
+
+Each per-op function is the same five-step shape (parse → build → egress → parse →
+normalize). `send_message`:
+
+```rust
+async fn send_message(&self, input: Value, egress: &dyn RestrictedEgress) -> Result<ToolResult, ToolError> {
+    let req: SendInput = serde_json::from_value(input)                       // host already schema-validated
+        .map_err(|e| ToolError::InvalidInput { reason: e.to_string() })?;
+    let channel = messaging_core::resolve_target(&req.conversation, egress).await?;  // #name → id if needed
+    let text    = messaging_core::render_mrkdwn(&req.text);                          // shared with deliver()
+    let body = json!({ "channel": channel, "text": text, "thread_ts": req.thread });
+    let resp = egress.send(RestrictedEgressRequest {
+        method: NetworkMethod::Post,
+        url: "https://slack.com/api/chat.postMessage".into(),
+        headers: vec![("content-type".into(), "application/json".into())],
+        body: Some(body.to_string().into_bytes()),
+        credential: Some(SecretHandle::new("slack_user_token")?),   // host injects the bytes
+    }).await.map_err(messaging_core::map_egress_error)?;
+    let parsed = messaging_core::parse_slack_ok(&resp.body)?;        // ok:false → ToolError::Failed
+    Ok(ToolResult::json(json!({ "message": { "id": parsed.ts, "conversation": parsed.channel } })))
+}
+```
+
+The adapter **never holds the token** — it names the `slack_user_token` handle and
+the host injects it during restricted egress (`tool_adapter.rs` `RestrictedEgress`).
+
+### 7.3 Normalization — resolving ids to names
+
+`read_history` is where the one real behavior addition lives. Slack returns
+messages with `user: "U0123"`; the profile requires `Message.author: UserRef{id,
+display_name}`. So the function:
+
+1. `conversations.history` → raw messages.
+2. Collect the **distinct** author ids.
+3. Resolve each to a display name: check the `ScopedToolState` cache
+   (`user:<id>` → name) first; for misses, `users.info` (concurrent), then write
+   the cache. Mapping rule per `messaging-framework-tools.md` §5.
+4. Build `Message`s with resolved authors; validate host-side (§11).
+
+The cache amortizes the extra calls across the turn/conversation; a resolution
+miss degrades gracefully (id as `display_name`) rather than failing the call. For
+Telegram the same shape holds — the entities come back inline from `getDialogs`/
+`getHistory`, so often *no* extra call is needed.
+
+### 7.4 The shared vendor "messaging core"
+
+A `messaging_core` module inside `ironclaw_slack_extension` holds the pure,
+credential-agnostic vendor mechanics, called by **both** `SlackMessagingAdapter`
+and `SlackChannelAdapter::deliver`:
+
+| Function | Used by tool | Used by channel |
+| --- | --- | --- |
+| `render_mrkdwn(md) -> String` | send/edit | deliver |
+| `parse_mrkdwn(s) -> String` (→ normalized Markdown) | read/search | inbound |
+| `split(text, max) -> Vec<String>` | send | deliver |
+| `resolve_target(ref, egress)` (name→id, `conversations.open` for DMs) | send | deliver target |
+| `map_egress_error` / `parse_slack_ok` | all | deliver |
+
+Today these are `pub(crate)` in the channel crate (`mrkdwn.rs`,
+`preference_targets.rs`, `delivery.rs`); the migration **promotes them into
+`messaging_core`** and points both adapters at it (`adr/0002` §6.2). Reliability
+(retry / attempt persistence / dedupe / sole-writer) stays in the delivery
+coordinator and is **not** in the core — the tool path is a one-shot dispatch.
+
+### 7.5 Wiring — how the adapter reaches the runtime
+
+No generic crate names Slack; the binary assembles it:
+
+1. `ironclaw_reborn_cli` registers a **native factory** mapping
+   `runtime.service = "slack.extension/v1"` → a factory that builds the Slack
+   `ExtensionEntrypoint` (the only generic-side crate allowed to link the concrete
+   extension crate — `implementation.md` dependency rule).
+2. At activation, `ExtensionEntrypoint::bind(ctx)` returns
+   `ExtensionBindings { tools: Some(Arc<SlackMessagingAdapter>),
+   channel: Some(Arc<SlackChannelAdapter>) }` — both sharing `messaging_core`.
+   `bind` receives only installation context + **non-secret** config; no ports.
+3. The binding rule checks declared↔bound (manifest has `[messaging]` ⇒ `tools`
+   must be `Some`; `[channel]` ⇒ `channel` must be `Some`).
+4. The host prebinds the adapter into the active snapshot; a call resolves via
+   `ToolResolver::resolve("slack.read_history")` → the prebound adapter (no
+   per-invocation construction), then runs the dispatcher pipeline (§ overview
+   5.2) and `invoke`.
+
+### 7.6 Telegram — same structure, different transport
+
+Telegram's `TelegramMessagingAdapter::invoke` has the **identical** match-and-
+normalize shape, but its per-op functions call the **host-side MTProto client
+port** (§8) instead of `RestrictedEgress`, because MTProto is not HTTP:
+`read_history` → the client's `get_history` → normalize peer ids to `UserRef`
+(from the getDialogs/access-hash cache). Its `messaging_core` is Telegram's own
+crate module (Bot-API/MTProto rendering). Same profiles, same output schemas,
+different transport and session handling — which is the whole point: the model
+sees one contract regardless.
+
 ---
 
 ## 8. Transport — HTTP vendors vs. Telegram (MTProto)
@@ -729,7 +876,7 @@ identically. Pinned by the cross-channel conformance test (§15).
 | `ironclaw_capabilities` | Wire `evaluate_profile_conformance` into activation | evaluator exists, unwired |
 | `ironclaw_dispatcher` | Host-side **output-schema validation** on `ToolResult`; **constraint-A policy step** on messaging write tools | new steps in existing pipeline |
 | `ironclaw_product_workflow` | **Constraint-B** owner-only target enforcement in the delivery coordinator; automation-denial for act-as-user | coordinator exists |
-| `ironclaw_slack_extension` | Migrate 5 tools → `[messaging]`; `invoke` normalizes output; extract shared "messaging core" from `pub(crate)` helpers | crate exists |
+| `ironclaw_slack_extension` | Migrate 5 tools → `[messaging]`; **native `ToolAdapter`** replacing the WASM module (§7.1); `invoke` normalizes output; extract shared `messaging_core` from `pub(crate)` helpers (§7.4) | crate exists |
 | `ironclaw_telegram_extension` | New `ToolAdapter`; `[messaging]`; MTProto behavior via the host client port | channel crate exists, tool adapter new |
 | `ironclaw_host_runtime` (or a new `ironclaw_telegram_user` host crate) | **Host-side Telegram-user (MTProto/TDLib) client** + session store; the adapter-facing port | new — the largest new component |
 | connect/auth path | Step-based connect covering OAuth + pairing uniformly | OAuth engine + pairing modality exist; generalization new |
