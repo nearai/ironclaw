@@ -23,6 +23,7 @@ mod scenario_activate_then_active_cross_thread;
 mod scenario_install_then_visible_cross_thread;
 mod scenario_install_unknown_extension_id_fails_safely;
 mod scenario_remove_then_absent_cross_thread;
+mod scenario_slack_channel_lifecycle_state_machine;
 mod scenario_uninstalled_tool_call_denied_until_activated;
 
 use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
@@ -70,6 +71,16 @@ async fn extensions_group_e2e() {
     report.record(
         "uninstalled_tool_call_denied_until_activated",
         scenario_uninstalled_tool_call_denied_until_activated::run(&g).await,
+    );
+
+    // Scenario 6 (issue #6105): the Slack channel lifecycle state machine —
+    // install → activate → connect → use → remove (real personal-connection
+    // cleanup) → reconnect → reinstall → use again, asserting connection
+    // state, durable bindings, lifecycle phase, and tool dispatchability stay
+    // consistent at every transition. Uses "slack" (untouched by 1-5).
+    report.record(
+        "slack_channel_lifecycle_state_machine",
+        scenario_slack_channel_lifecycle_state_machine::run(&g).await,
     );
 
     report.assert_all_passed();

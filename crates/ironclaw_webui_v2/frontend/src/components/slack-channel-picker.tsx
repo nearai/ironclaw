@@ -112,7 +112,7 @@ export function SlackChannelPicker({ action }) {
           </p>
         </div>
         {channelsQuery.data?.team_id &&
-        (<span className="shrink-0 rounded-md border border-white/[0.08] px-2 py-1 font-mono text-[10px] text-iron-500">
+        (<span className="shrink-0 rounded-md border border-white/[0.08] px-2 py-1 font-mono text-[10px] text-[var(--v2-text-muted)]">
           {channelsQuery.data.team_id}
         </span>)}
       </div>
@@ -152,7 +152,7 @@ export function SlackChannelPicker({ action }) {
         (<div className="px-3 py-2 text-xs text-iron-400">{copy.loadingMessage}</div>)}
         {!channelsQuery.isLoading &&
         channels.length === 0 &&
-        (<div className="px-3 py-2 text-xs text-iron-500">
+        (<div className="px-3 py-2 text-xs text-[var(--v2-text-muted)]">
           {copy.emptyMessage}
         </div>)}
         {channels.map(
@@ -178,7 +178,7 @@ export function SlackChannelPicker({ action }) {
                       buttonClassName="h-8 rounded-md border-white/10 bg-white/[0.04] px-2 font-sans text-xs text-iron-100"
                     />
                   )
-                  : (<span className="max-w-40 truncate text-xs text-iron-500">
+                  : (<span className="max-w-40 truncate text-xs text-[var(--v2-text-muted)]">
                     {channel.subject_user_id
                       ? channel.subject_display_name || channel.subject_user_id
                       : copy.autoSubjectLabel}
@@ -210,7 +210,7 @@ export function SlackChannelPicker({ action }) {
           {saveMutation.isPending ? copy.savingLabel : copy.submitLabel}
         </Button>
         {saveMutation.isSuccess &&
-        (<p className="text-xs text-emerald-300">
+        (<p className="text-xs text-[var(--v2-positive-text)]">
           {copy.successMessage}
         </p>)}
         {(channelsQuery.isError || subjectsQuery.isError || saveMutation.isError) &&

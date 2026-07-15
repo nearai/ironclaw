@@ -85,6 +85,31 @@ pub struct LoopExecutionState {
     #[serde(default)]
     pub final_answer_nudges_used: u32,
 
+    /// Count of tools-capable completion nudges issued this run (driver-specific
+    /// nudge, gated by `SteeringPolicy.allow_driver_specific_nudges`). Unlike the
+    /// tool-free `final_answer_nudges_used` rescue, this one re-enters the loop
+    /// with the full tool surface so the model can finish the task (e.g. write a
+    /// required output file) before answering. Capped so the loop can't issue
+    /// unbounded extra iterations. `#[serde(default)]` keeps older checkpoints
+    /// decodable.
+    #[serde(default)]
+    pub completion_nudges_used: u32,
+
+    /// Set when the executor decided to issue a tools-capable completion nudge
+    /// on the previous turn; consumed by the next prompt build, which injects the
+    /// completion-nudge control message and clears this flag. `#[serde(default)]`
+    /// keeps older checkpoints decodable.
+    #[serde(default)]
+    pub completion_nudge_pending: bool,
+
+    /// Whether the most recent admitted assistant reply "trailed off" without a
+    /// real closing answer (empty after trim, or ends with a colon — a narrated
+    /// next step with no follow-through). Populated by `AssistantReplyStage`; read
+    /// by the stop handling to decide whether a graceful stop warrants a
+    /// completion nudge. `#[serde(default)]` keeps older checkpoints decodable.
+    #[serde(default)]
+    pub last_reply_trailed_off: bool,
+
     // strategy slots — one per strategy that mutates state.
     pub context_state: ContextStrategyState,
     pub capability_state: CapabilityStrategyState,
@@ -287,6 +312,9 @@ impl LoopExecutionState {
             recent_output_token_counts: BoundedRing::new(),
             cumulative_model_usage: None,
             final_answer_nudges_used: 0,
+            completion_nudges_used: 0,
+            completion_nudge_pending: false,
+            last_reply_trailed_off: false,
             context_state: ContextStrategyState::default(),
             capability_state: CapabilityStrategyState::default(),
             model_state: ModelStrategyState::default(),

@@ -1286,6 +1286,18 @@ registerPack("ko", {
   "automations.detail.thread": "스레드",
   "automations.filter.failures": "실패",
   "automations.filter.running": "실행 중",
+  "automations.hold.approval": "승인을 기다리는 중입니다",
+  "automations.hold.auth": "계정 재연결을 기다리는 중입니다",
+  "automations.hold.inProgress": "이전 실행이 아직 진행 중입니다",
+  "automations.hold.meta.inProgress":
+    "{since}에 시작됨 · 완료 후 다음 실행이 시작됩니다 · 실행 중 예정된 발생 시점 {count}개 경과",
+  "automations.hold.meta.inProgressUnknownCount":
+    "{since}에 시작됨 · 완료 후 다음 실행이 시작됩니다 · 예정된 발생 시점 경과 수를 알 수 없음",
+  "automations.hold.meta.paused":
+    "{since}부터 일시 중지됨 · 보류 중 예정된 발생 시점 {count}개 경과",
+  "automations.hold.meta.pausedUnknownCount":
+    "{since}부터 일시 중지됨 · 예정된 발생 시점 경과 수를 알 수 없음",
+  "automations.hold.other": "이전 실행이 아직 끝나지 않았습니다",
   "automations.status.needsReview": "검토 필요",
   "automations.status.running": "실행 중",
   "automations.summary.failures": "실패",

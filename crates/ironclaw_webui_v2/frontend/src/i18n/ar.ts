@@ -1286,6 +1286,18 @@ registerPack("ar", {
   "automations.detail.thread": "محادثة",
   "automations.filter.failures": "الإخفاقات",
   "automations.filter.running": "قيد التشغيل",
+  "automations.hold.approval": "بانتظار موافقتك",
+  "automations.hold.auth": "بانتظار إعادة ربط حساب",
+  "automations.hold.inProgress": "التشغيل السابق لا يزال قيد التنفيذ",
+  "automations.hold.meta.inProgress":
+    "بدأ {since} · سيبدأ التشغيل التالي بعد انتهاء هذا · مرّت {count} من الأوقات المجدولة أثناء استمرار التشغيل",
+  "automations.hold.meta.inProgressUnknownCount":
+    "بدأ {since} · سيبدأ التشغيل التالي بعد انتهاء هذا · عدد الأوقات المجدولة المنقضية غير متوفر",
+  "automations.hold.meta.paused":
+    "متوقف مؤقتًا منذ {since} · مرّت {count} من الأوقات المجدولة أثناء التوقف",
+  "automations.hold.meta.pausedUnknownCount":
+    "متوقف مؤقتًا منذ {since} · عدد الأوقات المجدولة المنقضية غير متوفر",
+  "automations.hold.other": "التشغيل السابق لم ينتهِ بعد",
   "automations.status.needsReview": "بحاجة إلى مراجعة",
   "automations.status.running": "قيد التشغيل",
   "automations.summary.failures": "الإخفاقات",

@@ -1118,6 +1118,40 @@ pub struct RebornAutomationInfo {
     pub is_active: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
+    /// Present while this automation's active fire is held (gate-parked or
+    /// still running) and scheduled fires are being skipped (#5886). Derived
+    /// at read time from the active run's state; never persisted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_hold: Option<RebornAutomationActiveHold>,
+}
+
+/// Why an automation's schedule is currently held, plus elapsed-occurrence
+/// accounting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAutomationActiveHold {
+    pub reason: RebornAutomationHoldReason,
+    /// The held fire's claimed slot — when the pause effectively began.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<DateTime<Utc>>,
+    /// Scheduled occurrences elapsed while held; display-only, capped. Not a
+    /// count of runs the poller attempted — accrues from wall-clock cron
+    /// slots regardless of poller activity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_occurrences: Option<u32>,
+    /// True when `elapsed_occurrences` hit the cap — render as "N+".
+    #[serde(default)]
+    pub elapsed_occurrences_capped: bool,
+}
+
+/// Client-visible hold reason. `in_progress` = the previous run is still
+/// executing; the gate-parked reasons need the user to act.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornAutomationHoldReason {
+    Approval,
+    Auth,
+    InProgress,
+    Other,
 }
 
 /// Source discriminator for automation rows.

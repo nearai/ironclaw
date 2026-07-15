@@ -6,6 +6,10 @@ pub const MODEL_CREDITS_EXHAUSTED_CATEGORY: &str = "model_credits_exhausted";
 /// Exposed for cross-crate consumers that project this category to a user-facing message.
 pub const MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY: &str = "model_credentials_unavailable";
 
+/// Failure category for durable host-side resource accounting outages.
+/// This must not be presented as a provider balance or configured-budget outcome.
+pub const BUDGET_ACCOUNTING_FAILED_CATEGORY: &str = "budget_accounting_failed";
+
 pub const HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY: &str = "host_stage_unavailable_prompt";
 pub const HOST_STAGE_UNAVAILABLE_MODEL_CATEGORY: &str = "host_stage_unavailable_model";
 pub const HOST_STAGE_UNAVAILABLE_CAPABILITY_CATEGORY: &str = "host_stage_unavailable_capability";

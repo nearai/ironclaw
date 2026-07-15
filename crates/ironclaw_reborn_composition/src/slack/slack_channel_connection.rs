@@ -383,6 +383,48 @@ pub(crate) fn slack_channel_connection_facade(
     })
 }
 
+/// Stores for the test-support facade constructor below. Same shape the
+/// production constructor reads off [`SlackHostBetaMounts`]; grouped so the
+/// constructor stays within argument-count discipline.
+#[cfg(feature = "test-support")]
+pub(crate) struct SlackChannelConnectionFacadeTestParts {
+    pub(crate) tenant_id: TenantId,
+    pub(crate) personal_connection_scope: SlackPersonalConnectionScope,
+    pub(crate) user_identity_lookup: Arc<dyn RebornUserIdentityLookup>,
+    pub(crate) user_identity_delete_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
+    pub(crate) user_binding_lifecycle_store: Arc<dyn SlackUserBindingLifecycleStore>,
+    pub(crate) conversation_actor_pairings: Arc<dyn ConversationActorPairingService>,
+    pub(crate) personal_dm_target_store: Arc<dyn SlackPersonalDmTargetStore>,
+    pub(crate) personal_credential_cleanup: Option<Arc<dyn SlackPersonalCredentialCleanup>>,
+}
+
+/// Test-support constructor for the REAL per-user facade over caller-supplied
+/// stores. Mirrors [`slack_channel_connection_facade`] (the production
+/// constructor over [`SlackHostBetaMounts`], called from
+/// `build_webui_services_with_slack_host_beta_mounts`) so integration tests
+/// drive the identical `SlackChannelConnectionFacade` implementation — not a
+/// parallel test copy. For tests only; ships zero bytes in production builds.
+#[cfg(feature = "test-support")]
+pub(crate) fn slack_channel_connection_facade_from_test_parts(
+    parts: SlackChannelConnectionFacadeTestParts,
+) -> Arc<dyn ChannelConnectionFacade> {
+    use crate::slack::slack_host_beta::StaticSlackPersonalConnectionScopeResolver;
+
+    Arc::new(SlackChannelConnectionFacade {
+        tenant_id: parts.tenant_id,
+        personal_connection_scope: Some(parts.personal_connection_scope.clone()),
+        personal_connection_scope_resolver: Some(Arc::new(
+            StaticSlackPersonalConnectionScopeResolver::new(Some(parts.personal_connection_scope)),
+        )),
+        user_identity_lookup: parts.user_identity_lookup,
+        user_identity_delete_store: parts.user_identity_delete_store,
+        user_binding_lifecycle_store: parts.user_binding_lifecycle_store,
+        conversation_actor_pairings: parts.conversation_actor_pairings,
+        personal_dm_target_store: parts.personal_dm_target_store,
+        personal_credential_cleanup: parts.personal_credential_cleanup,
+    })
+}
+
 fn slack_identity_conversation_actor(
     binding: &RebornUserIdentityBinding,
 ) -> Result<
