@@ -14,6 +14,7 @@ use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
+use support::trace_llm::LlmTrace;
 
 const SLACK_PERSONAL_SCOPES: &[&str] = &[
     "search:read",
@@ -110,6 +111,79 @@ async fn runs_http_tool_call_through_recorded_egress() {
 }
 
 const HTTP_TOOL_URL: &str = "https://api.example.test/v1/items";
+
+/// Loads the `web_hn_search` tier-5 QA fixture (two parallel `builtin.http`
+/// tool calls, then a text reply) shared by the `script_from_trace` tests
+/// below, so neither test body carries the path-join/file-load boilerplate.
+fn web_hn_search_trace() -> LlmTrace {
+    let fixture_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/llm_traces/reborn_qa/web_hn_search.json");
+    LlmTrace::from_file(&fixture_path)
+        .unwrap_or_else(|error| panic!("QA fixture {} loads: {error}", fixture_path.display()))
+}
+
+/// The fixture's own recorded user turn — must match its
+/// `request_hint.last_user_message_contains` so the FIFO/hint-scan replay in
+/// `TraceLlm::next_step` plays steps back in the fixture's own recorded order.
+const WEB_HN_SEARCH_USER_TURN: &str =
+    "search Hacker News for any recent posts mentioning 'IronClaw' or 'NEAR AI'";
+
+/// Proves `RebornIntegrationHarnessBuilder::script_from_trace` — the
+/// fixture-sourced LLM seam. Replays a tier-5 QA fixture directly through the
+/// SAME vendor-SDK `TraceLlm` seam `.script(...)` uses, bypassing
+/// `RebornScriptedReply` entirely. Unlike the hand-written replies elsewhere
+/// in this file, this content came from a real recorded model exchange, so
+/// this is the proof the new entry point actually replays a realistic trace
+/// end to end (real coordinator, real dispatch, real recorded egress) — not
+/// just that it compiles. `http_exchanges`/`expected_tool_results` on the
+/// fixture have no consumer yet at this seam; this test only replays
+/// `steps` and asserts on the finalized reply and tool dispatch.
+#[tokio::test]
+async fn runs_qa_fixture_trace_through_builtin_http_tools() {
+    let h = RebornIntegrationHarness::test_default()
+        .with_builtin_http_tools()
+        .script_from_trace(web_hn_search_trace())
+        .build()
+        .await
+        .expect("harness builds from a fixture-sourced trace");
+
+    h.submit_turn(WEB_HN_SEARCH_USER_TURN)
+        .await
+        .expect("fixture-scripted turn completes");
+    h.assert_tool_invoked("builtin.http")
+        .await
+        .expect("fixture's builtin.http calls ran through the real recorded egress");
+    h.assert_reply_contains("Hacker News")
+        .await
+        .expect("fixture's final text reply is the turn's finalized output");
+}
+
+/// `ReplySource`'s documented "last call wins" contract: chaining
+/// `.script(...)` then `.script_from_trace(...)` on the same builder must
+/// replay the trace, not merge with or fall back to the earlier hand-written
+/// reply. Proven by asserting the fixture's `builtin.http` call actually ran
+/// — the hand-scripted reply below is text-only, so a tool invocation can
+/// only come from the trace having overridden it.
+#[tokio::test]
+async fn script_from_trace_after_script_overrides_scripted_replies() {
+    let h = RebornIntegrationHarness::test_default()
+        .with_builtin_http_tools()
+        .script([RebornScriptedReply::text(
+            "must not play back: overridden by script_from_trace",
+        )])
+        .script_from_trace(web_hn_search_trace())
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn(WEB_HN_SEARCH_USER_TURN)
+        .await
+        .expect("turn completes from the fixture trace, not the earlier .script(...) call");
+    h.assert_tool_invoked("builtin.http").await.expect(
+        "later .script_from_trace(...) call wins: the fixture's tool call ran, proving the \
+         earlier .script(...) reply was overridden, not merged",
+    );
+}
 
 /// A prior assistant refusal is conversation history, not capability truth.
 /// Once Slack is installed and activated, the refreshed tool definitions must

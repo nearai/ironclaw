@@ -56,7 +56,7 @@ use super::capability_backend::{
     CapabilityScriptingInputs, MOCK_MCP_PROVIDER_ID, RebornCapabilityBackend, ShellMode,
 };
 use super::doubles::ParkingCapabilityGate;
-use super::group::{GroupCapability, GroupSharedStorage, RebornIntegrationGroup};
+use super::group::{GroupCapability, GroupSharedStorage, RebornIntegrationGroup, ReplySource};
 use super::harness::{HarnessCapabilityRecorder, HarnessTurnBackend, RecordedCapabilityResult};
 use super::http_matcher::ScriptedHttpResponse;
 use super::planned_runtime_parts_shape::DefaultPlannedRuntimePartsShape;
@@ -65,7 +65,7 @@ use super::reply::RebornScriptedReply;
 use super::scripted_provider::ParkingModelGate;
 use super::session_thread::RebornThreadHarness;
 use super::test_adapter::RebornTestIngress;
-use crate::support::trace_llm::TraceLlm;
+use crate::support::trace_llm::{LlmTrace, TraceLlm};
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -99,7 +99,7 @@ pub enum StorageMode {
 /// queue.
 pub struct RebornIntegrationHarnessBuilder {
     conversation_id: String,
-    replies: Vec<RebornScriptedReply>,
+    reply_source: ReplySource,
     capability: RebornCapabilityBackend,
     keyed_http_responses: Vec<ScriptedHttpResponse>,
     web_access_response_bodies: Vec<Vec<u8>>,
@@ -159,9 +159,22 @@ pub struct RebornIntegrationHarnessBuilder {
 }
 
 impl RebornIntegrationHarnessBuilder {
-    /// Set the scripted model replies (consumed in order at the raw-provider seam).
+    /// Set the scripted model replies (consumed in order at the raw-provider
+    /// seam). Mutually exclusive with `.script_from_trace(...)`: the last
+    /// call wins (see `ReplySource`).
     pub fn script(mut self, replies: impl IntoIterator<Item = RebornScriptedReply>) -> Self {
-        self.replies = replies.into_iter().collect();
+        self.reply_source = ReplySource::Scripted(replies.into_iter().collect());
+        self
+    }
+
+    /// Script this harness's model replies from a raw `LlmTrace` (e.g. loaded
+    /// via `LlmTrace::from_file` from a tier-5 QA fixture under
+    /// `tests/fixtures/llm_traces/reborn_qa/`) instead of hand-written
+    /// `RebornScriptedReply`s — same vendor-SDK seam, realistic reply content.
+    /// Mutually exclusive with `.script(...)`: the last call wins (see
+    /// `ReplySource`).
+    pub fn script_from_trace(mut self, trace: LlmTrace) -> Self {
+        self.reply_source = ReplySource::Trace(Box::new(trace));
         self
     }
 
@@ -534,7 +547,7 @@ impl RebornIntegrationHarnessBuilder {
             .await?;
         group
             .thread(self.conversation_id)
-            .script(self.replies)
+            .with_reply_source(self.reply_source)
             .park_model_opt(self.park_gate)
             .fail_model_opt(self.fail_model)
             .build()
@@ -622,7 +635,7 @@ impl RebornIntegrationHarness {
     pub fn builder(conversation_id: impl Into<String>) -> RebornIntegrationHarnessBuilder {
         RebornIntegrationHarnessBuilder {
             conversation_id: conversation_id.into(),
-            replies: Vec::new(),
+            reply_source: ReplySource::default(),
             capability: RebornCapabilityBackend::Echo,
             keyed_http_responses: Vec::new(),
             web_access_response_bodies: Vec::new(),
