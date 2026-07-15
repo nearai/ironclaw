@@ -1,7 +1,6 @@
 ---
 paths:
   - "crates/**/*.rs"
-  - "src/**/*.rs"
 ---
 # Type Placement — One Definition, Owned by Its Contract
 

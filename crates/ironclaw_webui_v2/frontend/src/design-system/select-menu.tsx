@@ -276,6 +276,7 @@ export function SelectMenu({
     if (event.key === "Escape") {
       if (open) {
         event.preventDefault();
+        event.stopPropagation();
         closeMenu();
       }
       return;

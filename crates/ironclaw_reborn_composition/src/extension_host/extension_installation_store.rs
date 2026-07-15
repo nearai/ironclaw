@@ -2,7 +2,8 @@ use async_trait::async_trait;
 use ironclaw_extensions::{
     ExtensionActivationState, ExtensionHealthSnapshot, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
-    ExtensionManifestRecord, InMemoryExtensionInstallationStore, ManifestHash, ManifestSource,
+    ExtensionManifestRecord, ExtensionRemovalCleanupRequirement,
+    InMemoryExtensionInstallationStore, ManifestHash, ManifestSource,
     canonicalize_installation_rows,
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
@@ -255,6 +256,8 @@ struct WireManifestRecord {
     source: WireManifestSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     manifest_hash: Option<ManifestHash>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    removal_cleanup_requirements: Vec<ExtensionRemovalCleanupRequirement>,
 }
 
 impl WireManifestRecord {
@@ -270,6 +273,7 @@ impl WireManifestRecord {
             self.manifest_hash,
             &contracts,
         )
+        .map(|record| record.with_removal_cleanup_requirements(self.removal_cleanup_requirements))
     }
 }
 
@@ -279,6 +283,7 @@ impl From<ExtensionManifestRecord> for WireManifestRecord {
             raw_toml: record.raw_toml().to_string(),
             source: WireManifestSource::from_manifest_source(record.manifest().source),
             manifest_hash: record.manifest_hash().cloned(),
+            removal_cleanup_requirements: record.removal_cleanup_requirements().to_vec(),
         }
     }
 }

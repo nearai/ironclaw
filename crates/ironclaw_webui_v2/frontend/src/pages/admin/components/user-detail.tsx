@@ -3,7 +3,7 @@ import React from "react";
 import { useT } from "../../../lib/i18n";
 import { Panel, StatCard, StatusPill } from "../../../design-system/primitives";
 import { Button } from "../../../design-system/button";
-import { Icon } from "../../../design-system/icons";
+import { SelectMenu } from "../../../design-system/select-menu";
 import { useAdminUserDetail, useAdminUsers } from "../hooks/useAdminUsers";
 import { useUsage } from "../hooks/useAdminUsage";
 import {
@@ -15,6 +15,7 @@ import {
   roleTone,
   formatUserRole,
   formatUserStatus,
+  buildRoleOptions,
 } from "../lib/admin-presenters";
 
 function DetailRow({ label, children }) {
@@ -30,10 +31,11 @@ export function UserDetail({ userId, onBack }) {
   const t = useT();
   const userQuery = useAdminUserDetail(userId);
   const usageQuery = useUsage("month", userId);
-  const { suspendUser, activateUser, updateUser, deleteUser, createToken, newToken, clearToken } = useAdminUsers();
+  const { suspendUser, activateUser, updateUser, deleteUser } = useAdminUsers();
 
   const [role, setRole] = React.useState(null);
   const [confirmDelete, setConfirmDelete] = React.useState(false);
+  const roleOptions = React.useMemo(() => buildRoleOptions(t), [t]);
 
   const user = userQuery.data;
   const usageEntries = usageQuery.data?.usage || [];
@@ -74,12 +76,6 @@ export function UserDetail({ userId, onBack }) {
     onBack();
   };
 
-  const handleCreateToken = async () => {
-    const name = window.prompt(t("admin.users.tokenNamePrompt", { name: user.display_name || t("admin.users.userFallback") }));
-    if (!name) return;
-    await createToken(user.id, name);
-  };
-
   return (
     <div className="space-y-5">
       <button
@@ -99,37 +95,21 @@ export function UserDetail({ userId, onBack }) {
               <StatusPill tone={statusTone(user.status)} label={formatUserStatus(user.status, t)} />
             </div>
           </div>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap items-center gap-2 sm:justify-end">
             {user.status === "active"
-              ? (<Button variant="secondary" onClick={() => suspendUser(user.id)}>{t("admin.users.suspend")}</Button>)
-              : (<Button variant="secondary" onClick={() => activateUser(user.id)}>{t("admin.users.activate")}</Button>)}
-            <Button variant="secondary" onClick={handleCreateToken}>{t("admin.users.createToken")}</Button>
-            <button
+              ? (<Button variant="secondary" size="sm" className="min-w-24" onClick={() => suspendUser(user.id)}>{t("admin.users.suspend")}</Button>)
+              : (<Button variant="secondary" size="sm" className="min-w-24" onClick={() => activateUser(user.id)}>{t("admin.users.activate")}</Button>)}
+            <Button
+              variant="danger"
+              size="sm"
+              className="min-w-24"
               onClick={() => setConfirmDelete(true)}
-              className="v2-button inline-flex h-10 items-center justify-center rounded-md border border-red-400/30 bg-red-500/10 px-4 text-sm font-semibold text-red-200 hover:bg-red-500/20"
             >
               {t("admin.users.delete")}
-            </button>
+            </Button>
           </div>
         </div>
       </Panel>
-
-      {(newToken?.token || newToken?.plaintext_token) && (
-        <div className="rounded-xl border border-signal/30 bg-signal/10 p-4 sm:p-5">
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0 flex-1">
-              <p className="text-sm font-semibold text-white">{t("admin.users.tokenCreated")}</p>
-              <p className="mt-1 text-xs text-iron-300">{t("admin.users.tokenCreatedDesc")}</p>
-              <code className="mt-2 block truncate rounded-md border border-white/10 bg-white/[0.04] px-3 py-2 font-mono text-xs text-iron-100">
-                {newToken.token || newToken.plaintext_token}
-              </code>
-            </div>
-            <button onClick={clearToken} className="text-iron-300 hover:text-white">
-              <Icon name="close" className="h-4 w-4" />
-            </button>
-          </div>
-        </div>
-      )}
 
       <div className="grid gap-5 lg:grid-cols-2">
         <Panel className="p-5 sm:p-6">
@@ -160,14 +140,14 @@ export function UserDetail({ userId, onBack }) {
         <div className="flex items-end gap-3">
           <div>
             <label className="mb-1 block text-xs text-iron-300">{t("admin.user.currentRole")}</label>
-            <select
+            <SelectMenu
               value={role || user.role}
-              onChange={(e) => setRole(e.currentTarget.value)}
-              className="v2-select h-9 rounded-md border border-white/12 bg-white/[0.04] px-3 text-sm text-iron-100 outline-none focus:border-signal/45"
-            >
-              <option value="member">{t("admin.users.member")}</option>
-              <option value="admin">{t("admin.users.admin")}</option>
-            </select>
+              options={roleOptions}
+              onChange={setRole}
+              ariaLabel={t("admin.user.currentRole")}
+              className="!min-w-0 w-36"
+              buttonClassName="h-9 rounded-md border-white/12 bg-white/[0.04] px-3 font-sans text-sm text-iron-100"
+            />
           </div>
           <Button onClick={handleSaveRole} disabled={!role || role === user.role}>
             {t("admin.user.saveRole")}

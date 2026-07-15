@@ -222,6 +222,7 @@ macro_rules! matrix_row_test {
                 .spawn(|| {
                     tokio::runtime::Builder::new_current_thread()
                         .enable_all()
+                        .start_paused(true)
                         .build()
                         .expect("matrix row runtime")
                         .block_on(run_matrix_row(&ROWS[$row_index]))
@@ -255,11 +256,22 @@ async fn run_matrix_row(row: &MatrixRow) {
 async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
     match setup {
         FailureSetup::ModelError => {
-            let host = MockHost::new(Vec::new()).with_model_errors(vec![
-                AgentLoopHostError::new(AgentLoopHostErrorKind::Unavailable, "model unavailable"),
-                AgentLoopHostError::new(AgentLoopHostErrorKind::Unavailable, "model unavailable"),
-                AgentLoopHostError::new(AgentLoopHostErrorKind::Unavailable, "model unavailable"),
-            ]);
+            // One more error than the availability retry budget so the abort
+            // (and its category) is driven by the Unavailable class rather
+            // than the mock's script-exhausted Internal fallback.
+            let unavailable_error_count = crate::strategies::DefaultRecoveryStrategy::default()
+                .max_model_availability_attempts as usize
+                + 1;
+            let host = MockHost::new(Vec::new()).with_model_errors(
+                (0..unavailable_error_count)
+                    .map(|_| {
+                        AgentLoopHostError::new(
+                            AgentLoopHostErrorKind::Unavailable,
+                            "model unavailable",
+                        )
+                    })
+                    .collect(),
+            );
             run_local(crate::families::default(), host, None).await
         }
         FailureSetup::CapabilityProtocolError => {
@@ -601,5 +613,6 @@ fn no_change_result(result_ref: &str) -> CapabilityOutcome {
         terminate_hint: false,
         byte_len: 0,
         output_digest: None,
+        model_observation: None,
     })
 }

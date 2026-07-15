@@ -2,7 +2,7 @@
 
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
-    CredentialOwnership, NewCredentialAccount, ProviderScope,
+    CredentialOwnership, NewCredentialAccount, ProviderScope, SLACK_PERSONAL_PROVIDER_ID,
 };
 use ironclaw_host_api::{
     AgentId, InvocationId, MountView, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
@@ -46,7 +46,7 @@ pub(crate) fn extension_lifecycle_tools_profile_for_user(
     // bundled extension capability post-activation, which crosses HTTP.
     let network_egress: Arc<dyn NetworkHttpEgress> =
         Arc::new(RecordingNetworkHttpEgress::with_body(
-            br#"{"messages":[],"resultSizeEstimate":0}"#.to_vec(),
+            br#"{"ok":true,"channels":[],"messages":[],"resultSizeEstimate":0,"response_metadata":{"next_cursor":""}}"#.to_vec(),
         ));
     Ok(ToolsProfile {
         capability_ids,
@@ -260,6 +260,24 @@ fn extension_lifecycle_credential_seeds() -> &'static [ExtensionLifecycleCredent
             label: "qa notion",
             secret_handle: "qa_notion_access",
             scopes: &[],
+        },
+        ExtensionLifecycleCredentialSeed {
+            provider: SLACK_PERSONAL_PROVIDER_ID,
+            label: "qa slack",
+            secret_handle: "qa_slack_personal_access",
+            scopes: &[
+                "search:read",
+                "channels:history",
+                "groups:history",
+                "im:history",
+                "mpim:history",
+                "channels:read",
+                "groups:read",
+                "im:read",
+                "mpim:read",
+                "users:read",
+                "chat:write",
+            ],
         },
     ]
 }

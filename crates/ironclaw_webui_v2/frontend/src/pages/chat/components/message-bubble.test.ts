@@ -4,7 +4,10 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { test, vi } from "vitest";
 
-import { CHAT_MESSAGE_ROLES } from "../lib/message-types";
+import {
+  CHAT_MESSAGE_ROLES,
+  type ErrorChatMessage,
+} from "../lib/message-types";
 
 vi.mock("./markdown-renderer", async () => {
   const { createElement } = await import("react");
@@ -207,6 +210,31 @@ test("error messages render as inline chat bubbles, not centered notices", async
     "error role must not regress to the old centered banner styling",
   );
   assert.match(html, /Provider unavailable/);
+  assert.doesNotMatch(html, /data-failure-category=/);
+  assert.doesNotMatch(html, /data-failure-status=/);
+});
+
+test("error bubbles expose structural provider failure metadata", async () => {
+  const { MessageBubble } = await import("./message-bubble");
+  const message: ErrorChatMessage = {
+    id: "err-provider-unavailable",
+    role: CHAT_MESSAGE_ROLES.ERROR,
+    content: "Provider unavailable",
+    timestamp: "2026-07-12T00:00:00.000Z",
+    failureCategory: "model_unavailable",
+    failureStatus: "failed",
+  };
+
+  const html = renderToStaticMarkup(
+    React.createElement(MessageBubble, {
+      message,
+      onRetry: () => {},
+      threadId: "thread-1",
+    }),
+  );
+
+  assert.match(html, /data-failure-category="model_unavailable"/);
+  assert.match(html, /data-failure-status="failed"/);
 });
 
 test("message timestamp and actions share a hover-only meta row", () => {
@@ -217,7 +245,7 @@ test("message timestamp and actions share a hover-only meta row", () => {
   );
   assert.match(
     messageBubbleSource,
-    /<time dateTime=\{timestamp\} className="shrink-0 font-mono text-\[11px\] text-iron-500">\{timeLabel\}<\/time>/,
+    /<time dateTime=\{timestamp\} className="shrink-0 font-mono text-\[11px\] text-\[var\(--v2-text-muted\)\]">\{timeLabel\}<\/time>/,
     "timestamp should render in the hover meta row",
   );
   assert.match(
@@ -239,5 +267,35 @@ test("message timestamp and actions share a hover-only meta row", () => {
     actionRow,
     />\s*\$\{copied \? "Copied" : "Copy"\}\s*<|>Retry</,
     "hover controls should use fixed-size icons instead of text that competes with the timestamp",
+  );
+});
+
+test("optimistic message opacity does not fade attached image previews", () => {
+  assert.match(
+    messageBubbleSource,
+    /const contentOpacityClass = isOptimistic \? "opacity-70" : "";/,
+    "optimistic pending state should dim only textual message content",
+  );
+
+  const contentBubbleClassArrayStart = messageBubbleSource.indexOf('"text-base leading-7"');
+  const contentBubbleClassArray = messageBubbleSource.slice(
+    contentBubbleClassArrayStart,
+    messageBubbleSource.indexOf('].join(" ")}', contentBubbleClassArrayStart),
+  );
+  assert.doesNotMatch(
+    contentBubbleClassArray,
+    /isOptimistic|contentOpacityClass|opacity-70/,
+    "the whole bubble must not be opacity-wrapped because attachments inherit that fade",
+  );
+
+  assert.match(
+    messageBubbleSource,
+    /images && images\.length > 0 && \([\s\S]*<img key=\{i\} src=\{src\} className="max-h-48 rounded-lg border border-iron-700 object-cover"/,
+    "inline image previews should render outside the optimistic text opacity wrapper",
+  );
+  assert.match(
+    messageBubbleSource,
+    /attachments && attachments\.length > 0 && \([\s\S]*<AttachmentChip/,
+    "attachment chips and thumbnails should render outside the optimistic text opacity wrapper",
   );
 });

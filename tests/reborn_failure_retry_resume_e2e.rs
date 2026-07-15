@@ -16,7 +16,7 @@ mod reborn_support;
 mod support;
 
 use ironclaw_host_api::CapabilityId;
-use ironclaw_loop_support::{HostManagedModelErrorKind, HostManagedModelResponse};
+use ironclaw_loop_host::{HostManagedModelErrorKind, HostManagedModelResponse};
 use ironclaw_reborn_composition::{FailureLane, RetryDisposition, failure_lane, retry_disposition};
 use ironclaw_turns::{TurnRunState, TurnStatus, run_profile::LoopHostMilestoneKind};
 use parity_qa_support::{

@@ -64,6 +64,15 @@ export function upsertThreadList(data, thread) {
   };
 }
 
+export function removeThreadList(data, threadId) {
+  if (!data || !threadId || !Array.isArray(data.threads)) return data;
+
+  const threads = data.threads.filter((thread) => threadIdFor(thread) !== threadId);
+  if (threads.length === data.threads.length) return data;
+
+  return { ...data, threads };
+}
+
 export function touchThreadList(data, { threadId, messageContent, updatedAt }) {
   if (!threadId) return data;
 

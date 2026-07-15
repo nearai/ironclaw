@@ -13,7 +13,7 @@ import {
 } from "./automations-presenters";
 
 // Schedule labels are now localized: the presenter takes a translator + locale.
-// Mirror the en.js `automations.schedule.*` templates so these tests exercise
+// Mirror the en.ts `automations.schedule.*` templates so these tests exercise
 // the real key→template→interpolation path and assert human-readable English.
 const EN_SCHEDULE = {
   "automations.schedule.custom": "Custom schedule",
@@ -26,7 +26,7 @@ const EN_SCHEDULE = {
   "automations.schedule.monthlyAt": "Day {day} of each month at {time}",
   "automations.schedule.dateAt": "{date} at {time}",
   "automations.schedule.onceAt": "Once on {datetime}",
-  // Status / state / date-fallback labels are now localized too; mirror en.js
+  // Status / state / date-fallback labels are now localized too; mirror en.ts
   // so assertions read human English.
   "automations.state.active": "Active",
   "automations.state.scheduled": "Scheduled",
@@ -45,6 +45,17 @@ const EN_SCHEDULE = {
   "automations.runStatus.unknown": "Unknown",
   "automations.status.running": "Running",
   "automations.status.needsReview": "Needs review",
+  "automations.hold.approval": "Waiting for your approval",
+  "automations.hold.auth": "Waiting for you to reconnect an account",
+  "automations.hold.inProgress": "Previous run still in progress",
+  "automations.hold.other": "Previous run hasn't finished",
+  "automations.hold.meta.paused":
+    "Paused since {since} · {count} scheduled occurrences elapsed while held",
+  "automations.hold.meta.pausedUnknownCount": "Paused since {since} · run count unavailable",
+  "automations.hold.meta.inProgress":
+    "Started {since} · next run starts after it finishes · {count} scheduled occurrences elapsed while held",
+  "automations.hold.meta.inProgressUnknownCount":
+    "Started {since} · next run starts after it finishes · run count unavailable",
   "automations.date.unknown": "Unknown",
   "automations.date.notScheduled": "Not scheduled",
   "automations.date.noRuns": "No runs yet",
@@ -76,6 +87,7 @@ const normalizeAutomations = (response, locale = "en") =>
   normalizeAutomationsRaw(response, t, locale).map((automation) => ({
     ...automation,
     schedule_label: norm(automation.schedule_label),
+    hold_meta_label: norm(automation.hold_meta_label),
   }));
 
 test("normalizeAutomations keeps schedule and once rows, drops unknown", () => {
@@ -196,6 +208,74 @@ test("normalizeAutomations preserves legacy last_run_at when recent history is e
   assert.equal(automations.length, 1);
   assert.match(automations[0].last_run_label, /Jun 4/);
   assert.equal(automations[0].last_status_label, "Done");
+});
+
+test("normalizeAutomations does not treat a running fire timestamp as last completed", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "running-only",
+        name: "Running only",
+        source: { type: "schedule", cron: "* * * * *" },
+        state: "active",
+        last_run_at: "2026-06-05T16:00:01Z",
+        last_status: "ok",
+        recent_runs: [
+          {
+            status: "running",
+            fired_at: "2026-06-05T16:00:00Z",
+            submitted_at: "2026-06-05T16:00:01Z",
+            thread_id: "thread-running",
+            run_id: "run-running",
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(automations.length, 1);
+  assert.equal(automations[0].last_run_label, "No runs yet");
+  assert.equal(automations[0].success_rate_label, "No completed runs");
+  assert.equal(automations[0].current_run.run_id, "run-running");
+});
+
+test("normalizeAutomations uses a legacy terminal run timestamp beside an active run", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "missing-completed-at",
+        name: "Missing completed timestamp",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "active",
+        last_run_at: "2026-06-05T16:00:01Z",
+        last_status: "ok",
+        recent_runs: [
+          {
+            status: "running",
+            fired_at: "2026-06-05T16:00:00Z",
+            submitted_at: "2026-06-05T16:00:01Z",
+            thread_id: "thread-running",
+            run_id: "run-running",
+          },
+          {
+            status: "ok",
+            submitted_at: "2026-06-04T16:00:01Z",
+            thread_id: "thread-ok",
+            run_id: "run-ok",
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(automations.length, 1);
+  assert.match(automations[0].last_run_label, /Jun 4/);
+  assert.doesNotMatch(automations[0].last_run_label, /Jun 5/);
+  assert.equal(automations[0].last_status_label, "Done");
+  assert.equal(automations[0].success_rate_label, "100% visible runs");
+  assert.equal(automations[0].recent_runs[1].completed_label, "Not completed");
+  assert.equal(automations[0].recent_runs[1].timestamp_source, "2026-06-04T16:00:01Z");
+  assert.equal(automations[0].current_run.run_id, "run-running");
 });
 
 test("scheduleLabel presents common recurring schedules in friendly language", () => {
@@ -781,4 +861,174 @@ test("once label reflects source timezone wall-clock, not UTC", () => {
 
   // LA label must carry the LA tz parenthetical
   assert.match(laLabel, /\(America\/Los_Angeles\)/);
+});
+
+// #5886: an active_hold overrides the normal status pill so the UI explains
+// why a due trigger isn't running, plus a meta line with when/how-many
+// scheduled occurrences elapsed.
+test("normalizeAutomations overrides status pill and adds hold_meta_label when active_hold is present", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "held-approval",
+        name: "Held on approval",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "active",
+        next_run_at: "2026-07-14T09:00:00Z",
+        active_hold: {
+          reason: "approval",
+          since: "2026-07-14T00:51:00Z",
+          elapsed_occurrences: 3,
+        },
+      },
+    ],
+  });
+
+  assert.equal(automations[0].primary_status_label, "Waiting for your approval");
+  assert.equal(automations[0].primary_status_tone, "warning");
+  assert.match(automations[0].hold_meta_label, /^Paused since /);
+  assert.match(automations[0].hold_meta_label, /3 scheduled occurrences elapsed while held$/);
+});
+
+test("normalizeAutomations renders elapsed_occurrences_capped as 99+", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "held-capped",
+        name: "Held with capped elapsed occurrences",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "active",
+        active_hold: {
+          reason: "auth",
+          since: "2026-07-14T00:51:00Z",
+          elapsed_occurrences: 99,
+          elapsed_occurrences_capped: true,
+        },
+      },
+    ],
+  });
+
+  assert.equal(automations[0].primary_status_label, "Waiting for you to reconnect an account");
+  assert.match(automations[0].hold_meta_label, /99\+ scheduled occurrences elapsed/);
+});
+
+// #5886 follow-up: the backend sends elapsed_occurrences as null when it
+// can't derive a count (e.g. a malformed persisted schedule). The UI must
+// not coerce that to "0 occurrences elapsed" — a false exact count — and
+// instead renders an explicit "unavailable" variant.
+test("normalizeAutomations renders unavailable-count copy when elapsed_occurrences is null", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "held-unknown-count",
+        name: "Held with unknown elapsed count",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "active",
+        active_hold: {
+          reason: "approval",
+          since: "2026-07-14T00:51:00Z",
+          elapsed_occurrences: null,
+        },
+      },
+    ],
+  });
+
+  assert.equal(automations[0].primary_status_label, "Waiting for your approval");
+  assert.match(automations[0].hold_meta_label, /^Paused since /);
+  assert.match(automations[0].hold_meta_label, /run count unavailable$/);
+  assert.doesNotMatch(automations[0].hold_meta_label, /0 scheduled occurrences elapsed/);
+});
+
+// #6066 follow-up: active_hold_projection computes elapsed_occurrences for
+// EVERY active hold regardless of reason — in_progress holds must surface
+// the same capped/unknown/exact count states as approval/auth/other holds,
+// while keeping their distinct "previous run still executing" framing.
+test("normalizeAutomations uses the in-progress hold variant with an exact elapsed-occurrence count", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "held-in-progress-exact",
+        name: "Held on in-flight run",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "active",
+        active_hold: {
+          reason: "in_progress",
+          since: "2026-07-14T00:51:00Z",
+          elapsed_occurrences: 3,
+        },
+      },
+    ],
+  });
+
+  assert.equal(automations[0].primary_status_label, "Previous run still in progress");
+  assert.equal(automations[0].primary_status_tone, "info");
+  assert.match(automations[0].hold_meta_label, /^Started /);
+  assert.match(automations[0].hold_meta_label, /next run starts after it finishes/);
+  assert.match(automations[0].hold_meta_label, /3 scheduled occurrences elapsed while held$/);
+});
+
+test("normalizeAutomations renders in-progress elapsed_occurrences_capped as 99+", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "held-in-progress-capped",
+        name: "Held on in-flight run with capped elapsed occurrences",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "active",
+        active_hold: {
+          reason: "in_progress",
+          since: "2026-07-14T00:51:00Z",
+          elapsed_occurrences: 99,
+          elapsed_occurrences_capped: true,
+        },
+      },
+    ],
+  });
+
+  assert.equal(automations[0].primary_status_label, "Previous run still in progress");
+  assert.match(automations[0].hold_meta_label, /^Started /);
+  assert.match(automations[0].hold_meta_label, /next run starts after it finishes/);
+  assert.match(automations[0].hold_meta_label, /99\+ scheduled occurrences elapsed/);
+});
+
+test("normalizeAutomations renders in-progress unavailable-count copy when elapsed_occurrences is null", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "held-in-progress-unknown-count",
+        name: "Held on in-flight run with unknown elapsed count",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "active",
+        active_hold: {
+          reason: "in_progress",
+          since: "2026-07-14T00:51:00Z",
+          elapsed_occurrences: null,
+        },
+      },
+    ],
+  });
+
+  assert.equal(automations[0].primary_status_label, "Previous run still in progress");
+  assert.match(automations[0].hold_meta_label, /^Started /);
+  assert.match(automations[0].hold_meta_label, /next run starts after it finishes/);
+  assert.match(automations[0].hold_meta_label, /run count unavailable$/);
+  assert.doesNotMatch(automations[0].hold_meta_label, /0 scheduled occurrences elapsed/);
+});
+
+test("normalizeAutomations leaves status rendering unchanged when active_hold is absent", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "no-hold",
+        name: "Ordinary active automation",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "active",
+        next_run_at: "2026-07-14T09:00:00Z",
+      },
+    ],
+  });
+
+  assert.equal(automations[0].primary_status_label, "Active");
+  assert.equal(automations[0].primary_status_tone, "signal");
+  assert.equal(automations[0].hold_meta_label, null);
 });

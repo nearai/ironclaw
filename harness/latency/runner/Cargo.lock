@@ -2669,7 +2669,7 @@ dependencies = [
  "futures",
  "ironclaw_filesystem",
  "ironclaw_host_api",
- "ironclaw_loop_support",
+ "ironclaw_loop_host",
  "ironclaw_skills",
  "ironclaw_turns",
  "thiserror 2.0.18",
@@ -2871,7 +2871,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_loop_support"
+name = "ironclaw_loop_host"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -3123,7 +3123,7 @@ dependencies = [
  "ironclaw_hooks",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
- "ironclaw_loop_support",
+ "ironclaw_loop_host",
  "ironclaw_observability",
  "ironclaw_safety",
  "ironclaw_threads",
@@ -3168,7 +3168,7 @@ dependencies = [
  "ironclaw_hooks",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
- "ironclaw_loop_support",
+ "ironclaw_loop_host",
  "ironclaw_mcp",
  "ironclaw_network",
  "ironclaw_observability",

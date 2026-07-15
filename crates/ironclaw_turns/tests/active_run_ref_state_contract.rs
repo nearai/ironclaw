@@ -71,6 +71,7 @@ fn submit_request_for(
     idempotency_key: &str,
 ) -> ironclaw_turns::SubmitTurnRequest {
     ironclaw_turns::SubmitTurnRequest {
+        requested_model: None,
         scope,
         actor: turn_actor(),
         accepted_message_ref: AcceptedMessageRef::new(format!("message-{idempotency_key}"))

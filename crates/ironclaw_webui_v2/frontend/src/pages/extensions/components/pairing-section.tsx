@@ -110,7 +110,7 @@ export function PairingSection({
       </div>
 
       {result?.success &&
-      (<p data-testid="pairing-success" className="mb-3 text-xs text-emerald-300">
+      (<p data-testid="pairing-success" className="mb-3 text-xs text-[var(--v2-positive-text)]">
         {result.message || pairingCopy.success}
       </p>)}
       {result && !result.success &&

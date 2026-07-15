@@ -1,6 +1,6 @@
 // @ts-nocheck
 // Run with:
-//   pnpm test -- hooks/useNotifications.test.mts
+//   pnpm test -- hooks/useNotifications.test.ts
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";

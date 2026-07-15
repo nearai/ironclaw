@@ -54,7 +54,7 @@ jobs:
         run: |
           CHANGED_FILES="$(git diff --name-only "$BASE_SHA"..."$HEAD_SHA")"
 
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(src/|crates/|channels-src/|tools-src/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile$|build\.rs$|\.gitignore$|scripts/check_no_panics\.py$|scripts/check_gateway_boundaries\.py$|\.github/workflows/code_style\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(src/|crates/|channels-src/|tools-src/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile|build\.rs$|\.gitignore$|scripts/ci/|\.githooks/|scripts/check_no_panics\.py$|scripts/check_gateway_boundaries\.py$|\.github/workflows/code_style\.yml$)'; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_code=false" >> "$GITHUB_OUTPUT"
@@ -193,6 +193,40 @@ jobs:
             printf '%s\n' "$tracked_ignored"
             exit 1
           fi
+
+  static-checks:
+    name: Static checks (include_str, hermetic env)
+    needs: changes
+    if: needs.changes.outputs.has_code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      # Guards the #5603 Docker-outage class: every include_str! target must
+      # exist and be present in each Dockerfile build context. Whole-repo scan,
+      # no compile — safe on a shallow checkout.
+      - name: include_str! paths + Docker COPY coverage
+        run: scripts/ci/check-include-str-paths.sh
+      # Guards the #6015 coverage-flake class on the actual PR diff (not just
+      # the synthetic self-tests below): a newly-added unguarded env mutation
+      # fails here. The checker diffs the working tree against the PR base, so
+      # fetch that base tip first (a shallow checkout lacks origin/<base>).
+      - name: Hermetic env mutation guard (PR diff)
+        env:
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            git fetch --no-tags --depth=1 origin \
+              "+refs/heads/${GITHUB_BASE_REF}:refs/remotes/origin/${GITHUB_BASE_REF}"
+          fi
+          scripts/ci/check-hermetic-env.sh
+      # Lock in the checkers' own behaviour (they build hermetic temp repos).
+      - name: Static-check self-tests
+        run: |
+          scripts/ci/test-check-include-str-paths.sh
+          scripts/ci/test-check-hermetic-env.sh
 
   clippy:
     name: Clippy (${{ matrix.name }})
@@ -387,6 +421,7 @@ jobs:
       - clippy-windows
       - deny-check
       - tracked-ignored-files
+      - static-checks
       - reborn-cli-smoke
       - no-panics
       - gateway-boundaries
@@ -414,6 +449,7 @@ jobs:
             "clippy=${{ needs.clippy.result }}" \
             "deny-check=${{ needs.deny-check.result }}" \
             "tracked-ignored-files=${{ needs.tracked-ignored-files.result }}" \
+            "static-checks=${{ needs.static-checks.result }}" \
             "gateway-boundaries=${{ needs.gateway-boundaries.result }}" \
             "webui-v2-js-lint=${{ needs.webui-v2-js-lint.result }}"; do
             name="${job_result%%=*}"

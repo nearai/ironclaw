@@ -188,6 +188,30 @@ has_legacy_tests=true
 has_reborn_tests=true"
 
 assert_scope \
+  "Reborn Responses E2E manifest checker" \
+  "scripts/ci/check-reborn-responses-e2e-manifest.py" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "Reborn Responses E2E manifest" \
+  "tests/e2e/reborn_responses_e2e_tests.txt" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "Reborn coverage manifest" \
+  "tests/e2e/reborn_coverage_tests.txt" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
   "shared reborn tests workflow" \
   ".github/workflows/reborn-tests.yml" \
   "docs_only=false

@@ -421,6 +421,65 @@ async fn oversized_single_snippet_is_allowed_within_aggregate_budget() {
     assert!(snippets[0].model_content.contains(&prompt));
 }
 
+/// The snippet safe summary is a bounded diagnostic string with a hard 4 KiB
+/// prompt-layer cap (`MODEL_SAFE_SUMMARY_MAX_BYTES` in `prompt_text.rs`); a
+/// long or multi-line safe description (e.g. the discoverable available-skills
+/// listing, whose header line is fixed host-authored text and whose skill
+/// lines are content) must ride `model_content` in full while the summary
+/// stays the bounded first line. Regression: a multi-skill listing summary of
+/// 5.6 KB failed `validate_model_safe_text` and killed the whole run at the
+/// prompt stage.
+#[tokio::test]
+async fn long_multiline_description_keeps_summary_to_bounded_first_line() {
+    let header = "The following skills are available.";
+    let body = format!("- alpha: {}\n- bravo: does things", "d".repeat(6000));
+    let description = format!("{header}\n\n{body}");
+    let snapshot = SkillRunSnapshot::from_entries(vec![InstalledSkillSnapshot {
+        name: "available-skills".to_string(),
+        trust: SkillTrustLevel::Installed,
+        visibility: SkillVisibility::Visible,
+        activation_state: SkillActivationState::Discoverable,
+        prompt_content: None,
+        safe_description: description.clone(),
+        ordering_key: "available-skills".to_string(),
+    }]);
+    let service = SkillContextService::new(snapshot.clone());
+
+    let snippets = service.skill_snippets(&snapshot).await.unwrap();
+
+    assert_eq!(snippets.len(), 1);
+    assert_eq!(
+        snippets[0].model_content, description,
+        "full listing must reach the model content channel"
+    );
+    assert_eq!(
+        snippets[0].safe_summary, header,
+        "summary must be the first line only, not the whole listing"
+    );
+
+    // A single-line description longer than the summary bound is truncated on
+    // a character boundary rather than rejected downstream.
+    let long_single_line = "x".repeat(6000);
+    let snapshot = SkillRunSnapshot::from_entries(vec![InstalledSkillSnapshot {
+        name: "verbose".to_string(),
+        trust: SkillTrustLevel::Installed,
+        visibility: SkillVisibility::Visible,
+        activation_state: SkillActivationState::Discoverable,
+        prompt_content: None,
+        safe_description: long_single_line.clone(),
+        ordering_key: "verbose".to_string(),
+    }]);
+    let service = SkillContextService::new(snapshot.clone());
+    let snippets = service.skill_snippets(&snapshot).await.unwrap();
+    assert_eq!(snippets[0].model_content, long_single_line);
+    assert!(
+        snippets[0].safe_summary.chars().count() <= 256,
+        "summary must stay within the bounded length, got {}",
+        snippets[0].safe_summary.chars().count()
+    );
+    assert!(snippets[0].safe_summary.starts_with("xxx"));
+}
+
 #[tokio::test]
 async fn single_snippet_over_per_snippet_budget_fails_budget() {
     let prompt = "x".repeat(128);

@@ -23,7 +23,7 @@ function MetaItem({ label, value, tone = "muted" }) {
       <div
         className={cn(
           "mt-2 min-w-0 break-words text-sm text-iron-100",
-          tone === "success" && "text-emerald-200",
+          tone === "success" && "text-[var(--v2-positive-text)]",
           tone === "danger" && "text-red-200",
           tone === "info" && "text-sky-200"
         )}
@@ -198,6 +198,14 @@ export function AutomationDetailPanel({
             <div className="mt-2 truncate font-mono text-[11px] uppercase tracking-[0.12em] text-iron-400">
               {automation.automation_id}
             </div>
+            {automation.hold_meta_label && (
+              <div
+                data-testid="automation-hold-meta"
+                className="mt-1 text-xs text-iron-300"
+              >
+                {automation.hold_meta_label}
+              </div>
+            )}
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <StatusPill

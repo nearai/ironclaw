@@ -20,6 +20,7 @@ use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
     HostTrustPolicy, TrustDecision, TrustProvenance,
 };
+use ironclaw_turns::run_profile::LoopSafeSummary;
 use serde_json::{Value, json};
 
 #[tokio::test]
@@ -801,6 +802,95 @@ async fn builtin_read_file_failure_reports_missing_path() {
     assert_eq!(
         failure.message.as_deref(),
         Some("read_file failed for path workspace missing.py: file not found")
+    );
+}
+
+#[tokio::test]
+async fn builtin_read_file_out_of_scope_rejection_reaches_the_model_through_the_summary() {
+    // Loop-boundary pin for the "model-visible tool-failure reasons" feature:
+    // an out-of-scope absolute path (copied verbatim from a task description)
+    // must produce a failure whose message BOTH survives the strict loop
+    // safe-summary validator (FilesystemDenied surfaces as a Denied loop
+    // outcome, whose only model-visible channel is the summary) AND names the
+    // path and the available scoped roots so the model can correct course.
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/testbed/replacer.go"}),
+        context,
+    )
+    .await;
+
+    // FilesystemDenied maps to Authorization at the runtime boundary.
+    assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+    let message = failure
+        .message
+        .as_deref()
+        .expect("failure carries a reason");
+    assert!(
+        LoopSafeSummary::new(message.to_string()).is_ok(),
+        "the reason must survive the strict loop safe-summary validator \
+         instead of degrading to the generic category sentence: {message}"
+    );
+    assert!(
+        message.contains("testbed replacer.go"),
+        "the reason must name the offending path: {message}"
+    );
+    assert!(
+        message.contains("workspace"),
+        "the reason must name an available scoped root: {message}"
+    );
+    assert_eq!(
+        failure.detail, None,
+        "a validator-safe reason travels on the message; no diagnostic fallback needed"
+    );
+}
+
+#[tokio::test]
+async fn builtin_write_file_to_read_only_mount_reports_an_actionable_denial() {
+    // A write through a read-only scoped mount must fail as a filesystem
+    // denial AND tell the model which path hit the permission wall, through a
+    // summary that survives the strict loop validator (the Denied loop
+    // outcome has no diagnostic detail channel).
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/notes.txt", "content": "hello"}),
+        context,
+    )
+    .await;
+
+    // FilesystemDenied maps to Authorization at the runtime boundary.
+    assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+    let message = failure
+        .message
+        .as_deref()
+        .expect("failure carries a reason");
+    assert!(
+        LoopSafeSummary::new(message.to_string()).is_ok(),
+        "the reason must survive the strict loop safe-summary validator: {message}"
+    );
+    assert!(
+        message.contains("workspace notes.txt"),
+        "the reason must name the denied path: {message}"
+    );
+    assert!(
+        message.contains("does not permit"),
+        "the reason must say the mount refused the operation: {message}"
+    );
+    assert!(
+        !temp.path().join("notes.txt").exists(),
+        "the denied write must not touch the filesystem"
     );
 }
 

@@ -215,8 +215,11 @@ AUTH_TOKEN = "e2e-test-token"
 OWNER_SCOPE_ID = "e2e-owner-scope"
 HTTP_WEBHOOK_SECRET = "e2e-http-webhook-secret"
 EMULATE_GOOGLE_BEARER = "mock-refreshed-access-token"
+EMULATE_GOOGLE_SECONDARY_BEARER = "emulate-google-secondary-token"
 EMULATE_SLACK_BEARER = "emulate-slack-token"
+EMULATE_SLACK_LIMITED_BEARER = "emulate-slack-limited-token"
 EMULATE_GITHUB_BEARER = "ghp_emulate_github_token"
+EMULATE_GITHUB_SECONDARY_BEARER = "ghp_emulate_github_secondary_token"
 
 # Bearer token for the Reborn WebUI v2 surface (`ironclaw-reborn serve`).
 # Must be >= 32 bytes: `serve` also uses this value as the SSO session-signing
@@ -229,13 +232,28 @@ REBORN_V2_AUTH_TOKEN = "e2e-reborn-v2-bearer-token-0123456789abcdef"
 SEL_V2 = {
     "root":           "#v2-root",          # SPA mount point (index.html)
     "login_token":    "#v2-token",         # token input on the login/connect view
+    "admin_new_user_button_name": "New user",
+    "admin_create_form": "form",
+    "admin_display_name_input": 'input[type="text"]',
+    "admin_email_input": 'input[type="email"]',
+    "admin_create_user_button_name": "Create user",
+    "admin_token_created_text": "Token created",
+    "admin_token_value": "code",
+    "admin_token_description_text": "Copy this now — it will not be shown again.",
+    "admin_create_token_button_name": "Create token",
     "sidebar":        "#gateway-sidebar",  # app navigation sidebar
     "sidebar_button": "#gateway-sidebar button",
     "sidebar_toggle": "button[aria-label='Toggle sidebar']",
+    "thread_delete_for": (
+        "[data-testid='thread-delete'][data-thread-id='{id}']"
+    ),
     "sign_out_button": "button[title='Sign out']",
     "chat_composer":  "[data-testid='chat-composer']",  # message textarea on /chat
     "attachment_file_input": "input[type=file][multiple]",
     "typing_indicator": "[data-testid='typing-indicator']",
+    "connection_status": "[data-testid='connection-status']",
+    "connection_status_toggle": "[data-testid='connection-status-toggle']",
+    "connection_status_label": "[data-testid='connection-status-label']",
     "msg_user":       "[data-testid='msg-user']",       # user message bubble
     "msg_assistant":  "[data-testid='msg-assistant']",  # assistant message bubble
     "msg_system":     "[data-testid='msg-system']",     # system notice bubble
@@ -315,6 +333,7 @@ SEL_V2 = {
         "[data-testid='settings-tool-permission-select'] button[aria-haspopup='listbox']"
     ),
     "settings_tool_lock": "[data-testid='settings-tool-lock']",
+    "skill_action_result": "[data-testid='skill-action-result']",
     "llm_provider_card_for": (
         "[data-testid='llm-provider-card'][data-provider-id='{provider_id}']"
     ),

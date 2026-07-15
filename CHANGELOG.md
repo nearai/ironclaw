@@ -7,8 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(reborn)* automations and `trigger_list` now surface why a scheduled trigger is currently held (approval/auth/in-progress) and how many scheduled occurrences elapsed while held ([#5886](https://github.com/nearai/ironclaw/issues/5886)).
+
+### Fixed
+
+- *(webui-v2)* submit the latest composer value when Enter follows input before React rerenders, avoiding intermittently dropped follow-up messages ([#6044](https://github.com/nearai/ironclaw/issues/6044)).
+- *(reborn)* recover the filesystem resource governor after transient libSQL writer contention without bypassing durable accounting, reject stale authority writes during recovery, and distinguish accounting outages from provider budget failures.
+- *(reborn)* `builtin.result_read` input errors now carry a structured, model-visible `CapabilityInputIssue` (field path, issue code, expected/received) with model-controlled echoes secret-redacted, and truncated previews of top-level JSON-array results report the array's `item_count` — persisted end-to-end through the observation validator ([#6059](https://github.com/nearai/ironclaw/pull/6059)).
+- *(reborn)* ride out transient model-provider outages with cancellation-aware availability retries, fail fast when no provider is configured, and preserve actionable shell/coding failure reasons for the model ([#5959](https://github.com/nearai/ironclaw/pull/5959)).
+- *(slack)* resolve known DM conversation IDs through an exact Slack lookup before encoding mentions, avoiding wrong-target posts when conversation lists are long or display names are ambiguous.
+- *(reborn)* add an explicit tenant extension-ownership migration that assigns every installed extension to every existing user, and clean up the departing user's external connection and personal credentials without tearing down the package for remaining users.
+- *(reborn)* make extension-scoped OAuth and explicit extension removal restart-safe and fenced: malformed callbacks now terminalize durable flows, status reads are observational with an explicit reconciliation command, multi-credential activation waits without revoking completed credentials, Slack cleanup fences ingress before fallible identity deletion, and uninstall cleanup obligations survive catalog/package loss.
+- *(reborn)* allow `builtin.time` parse, convert, format, and diff operations to consume JSON numbers or numeric strings containing Unix seconds, integral Unix milliseconds, and fractional Slack timestamps in addition to ISO 8601 strings.
+
 ### Changed
 
+- *(reborn)* raise the default agent-loop runaway backstop from 256 to 1,024 iterations and the subagent ceiling from 16 to 256 ([#5959](https://github.com/nearai/ironclaw/pull/5959)).
 - *(reborn-cli)* document the standalone `config init` atomic-write dependency on `tempfile` and call out the default runner cadence change to 5s heartbeats / 200ms polling (down from 10s / 2s).
 - *(reborn)* expose runtime poll settings and document the standalone turn-runner cadence change for callers using `TurnRunnerSettings::default()`.
 - *(channels)* v1 Slack DM policy now defaults to `allowlist` (previously `pairing`); existing installs still configured with `dm_policy=pairing` fall through to `allowlist` as Slack relay pairing is retired ([#5604](https://github.com/nearai/ironclaw/pull/5604)).

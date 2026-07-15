@@ -1,5 +1,5 @@
 /**
- * primitives.js
+ * primitives.tsx
  *
  * Higher-level composites that build on Card, Badge, and Button.
  * All existing imports from pages continue to work — nothing was removed.

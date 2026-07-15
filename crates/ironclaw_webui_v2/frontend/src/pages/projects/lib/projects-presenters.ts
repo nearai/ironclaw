@@ -1,4 +1,4 @@
-import { interpolateParams } from "../../../lib/i18n-format.js";
+import { interpolateParams } from "../../../lib/i18n-format";
 
 function tx(t, key, params = {}, fallback = key) {
   return typeof t === "function" ? t(key, params) : interpolateParams(fallback, params);
