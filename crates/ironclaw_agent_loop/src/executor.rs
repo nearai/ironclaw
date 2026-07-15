@@ -55,9 +55,9 @@ use mapping::{
     model_error_failure_summary, model_preference_to_host, sanitized_strategy_summary,
 };
 use model::{ModelInput, ModelStage, ModelStep};
-use pipeline::{DefaultExecutorPipeline, ExecutorStage, StageContext};
+use pipeline::{DefaultExecutorPipeline, ExecutorStage, StageContext, timed};
 use post_capability::PostCapabilityStage;
-use prompt::{PromptInput, PromptStage, PromptStep};
+use prompt::{ApprovalResumePromptOutput, PromptInput, PromptOutput, PromptStage, PromptStep};
 use reply_admission::{ReplyAdmissionInput, ReplyAdmissionStage, ReplyAdmissionStep};
 use turn_stop::{StopInput, StopObservationInput, StopObservationStep, StopStage, StopStep};
 
@@ -240,6 +240,16 @@ impl PendingInputAck {
             .map_err(|_| AgentLoopExecutorError::HostUnavailable {
                 stage: HostStage::Input,
             })
+    }
+
+    /// Latency-instrumented sibling of [`Self::ack`].
+    async fn ack_timed(
+        &mut self,
+        operation: &'static str,
+        host: &(dyn AgentLoopDriverHost + Send + Sync),
+        iteration: u32,
+    ) -> Result<(), AgentLoopExecutorError> {
+        latency::stage!(operation, host.run_context(), iteration, self.ack(host))
     }
 }
 

@@ -1,43 +1,57 @@
 # Agent-Loop `canonical.rs` Slop Cleanup — Design
 
-## Implementation Outcome (2026-07-14)
+## Implementation Outcome (2026-07-14, updated)
 
-**Shipped: Section 1 only.** Section 1 (completion-nudge extraction) is
-implemented, tested (400/400 crate tests green, including a new regression
-test), and clippy-clean. Its final shape differs from the design below in
-one way: the thermo-nuclear plan review flagged the `allow_completion_nudge:
+**Shipped: Sections 1 and 2, both landed.**
+
+Section 1 (completion-nudge extraction) shipped as designed with one
+revision: the thermo-nuclear plan review flagged the `allow_completion_nudge:
 bool` on `StopInput` as a smell (2 of 3 call sites would always pass a
 constant `false`). It was replaced with a dedicated
 `StopStage::decide_with_completion_nudge()` wrapper — only the main path
 calls it; `ResumeApproval`/`ResumeAuth`/`ResumeExternalTool`/`SkipModel`
 call the plain, unchanged `decide()`. Zero diff at those three call sites.
 
-**Abandoned: Section 2 (latency-instrumentation extraction).** Implementing
-this exactly as designed (an `ExecutorStage::timed()` default trait method,
-or the free-function variant tried after ruling out `async_trait`
-default-method fragility) reproducibly caused a stack overflow in
-`executor::tests::policy_denied_capability_error_honors_retry_recovery` —
-confirmed via `RUST_MIN_STACK` (128 MB fixed it; default did not), a clean
-`cargo clean` rebuild (ruled out stale incremental-compilation artifacts),
-and per-line-print instrumentation that localized the crash to *inside*
-`CapabilityStage::process()` — code this section never touches, called via
-its exact original, unmodified invocation. Reverting that one call site
-back to the original `latency::stage!` macro form did **not** fix it;
-only reverting the entirety of `canonical.rs`'s call-site rewrite did.
-Static analysis of `capabilities.rs`'s retry loop (bounded at
-`MAX_CAPABILITY_RETRIES = 8`, ~2 levels of recursion for this test's
-scripted scenario) rules out legitimate deep recursion as the explanation.
-Root cause not found despite this bisection; the risk was judged too high
-to ship without understanding it. Follow-up: re-attempt Section 2 in
-isolation (its own branch/PR) with more debugging budget, ideally with a
-working native debugger (lldb was blocked by macOS entitlements in the
-sandboxed environment this was attempted in, even with the sandbox flag
-disabled — ptrace/task_for_pid needs a permission the harness doesn't
-grant).
+Section 2 (latency-instrumentation extraction) initially caused a
+reproducible stack overflow in
+`executor::tests::policy_denied_capability_error_honors_retry_recovery`.
+**Root cause found and fixed**, after it was first misdiagnosed as
+unexplainable and Section 2 was briefly abandoned: it was **not** a logic
+bug. `canonical.rs`'s `execute()` was one monolithic function covering all
+three branches (Prepared/ResumeApproval/SkipModel). In an unoptimized
+(`cargo test`) build, rustc does not tightly reuse stack slots across
+mutually-exclusive match arms, so adding the `timed()`/`_timed()` call
+sites (even to branches this specific test never executes) inflated
+`execute()`'s single stack frame enough that, combined with
+`capabilities.rs`'s own small, pre-existing, unrelated bounded recursion
+running nested inside it, the combined depth crossed the default 8 MB
+thread stack. Confirmed by stubbing the untaken branches with
+`unreachable!()`, which fixed the crash instantly with zero semantic
+changes — proving size, not logic, was the cause.
+
+**The fix, which is also the real Section 2 implementation:** decompose
+`execute()`'s three branches into their own methods
+(`execute_prepared_turn`, `execute_resume_turn`, `execute_skip_model_turn`
+on `DefaultExecutorPipeline`), each returning a shared `TurnStep` enum
+(`Continue{state, pending_input_ack}` | `Exit(LoopExit)`) so `execute()`'s
+own dispatcher becomes a single small `loop` calling one of the three and
+uniformly handling the result. This is exactly the "3x duplication" cleanup
+the original spec below explicitly deferred as a Non-Goal — it turned out
+to be the prerequisite for shipping Section 2 safely, not an unrelated
+nice-to-have. One more fix was needed on top: clippy's
+`large_enum_variant` lint caught `TurnStep::Continue`'s `state:
+LoopExecutionState` field at 2224 bytes inline — boxed it
+(`Box<LoopExecutionState>`), matching the existing `CancelCheck`/
+`BudgetStep` pattern elsewhere in this file.
+
+Result: 400/400 crate tests green (including 3 repeated runs of the
+previously-overflowing test), clippy clean with `-D warnings`,
+`cargo test -p ironclaw_architecture` green. `canonical.rs` is now four
+focused functions instead of one ~570-line one.
 
 **Not attempted: Section 3 (event-streaming cleanup) and Section 4
-(guardrail rule file).** Time was spent on the Section 2 investigation
-instead. Both remain valid, low-risk follow-ups — Section 3 in particular
+(guardrail rule file).** Time went to the Section 1/2 landing instead. Both
+remain valid, low-risk follow-ups — Section 3 in particular
 already has its ordering caveat documented below (the `PromptStage` move
 changes `BeforeModel` checkpoint semantics; a real test caught this — see
 Section 3's note).
@@ -117,7 +131,7 @@ originally written here):
   — identical shape across all three paths. `canonical.rs` shrank
   629 → 573 lines.
 
-## Section 2 — Latency-instrumentation extraction (ABANDONED — see outcome above)
+## Section 2 — Latency-instrumentation extraction (SHIPPED — see outcome above; required decomposing `execute()` first)
 
 Two kinds of call site, two extraction shapes:
 

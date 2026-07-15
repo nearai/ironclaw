@@ -9,7 +9,7 @@ use crate::{
 
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, PendingInputAck,
-    StageContext, loop_exit::completion_nudge_should_fire,
+    StageContext, latency, loop_exit::completion_nudge_should_fire,
 };
 
 /// Stop-stage helper for callers that can observe and decide back-to-back.
@@ -188,5 +188,53 @@ impl StopStage {
             }
             other => Ok(other),
         }
+    }
+
+    /// Latency-instrumented sibling of [`Self::observe`].
+    pub(super) async fn observe_timed(
+        &self,
+        operation: &'static str,
+        ctx: StageContext<'_>,
+        iteration: u32,
+        input: StopObservationInput,
+    ) -> Result<StopObservationStep, AgentLoopExecutorError> {
+        latency::stage!(
+            operation,
+            ctx.host.run_context(),
+            iteration,
+            self.observe(ctx, input)
+        )
+    }
+
+    /// Latency-instrumented sibling of [`Self::decide`].
+    pub(super) async fn decide_timed(
+        &self,
+        operation: &'static str,
+        ctx: StageContext<'_>,
+        iteration: u32,
+        input: StopInput,
+    ) -> Result<StopStep, AgentLoopExecutorError> {
+        latency::stage!(
+            operation,
+            ctx.host.run_context(),
+            iteration,
+            self.decide(ctx, input)
+        )
+    }
+
+    /// Latency-instrumented sibling of [`Self::decide_with_completion_nudge`].
+    pub(super) async fn decide_with_completion_nudge_timed(
+        &self,
+        operation: &'static str,
+        ctx: StageContext<'_>,
+        iteration: u32,
+        input: StopInput,
+    ) -> Result<StopStep, AgentLoopExecutorError> {
+        latency::stage!(
+            operation,
+            ctx.host.run_context(),
+            iteration,
+            self.decide_with_completion_nudge(ctx, input)
+        )
     }
 }
