@@ -2,14 +2,21 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
     EffectKind, MountAlias, MountGrant, MountPermissions, MountView, NetworkMethod, NetworkPolicy,
-    PermissionMode, ResourceCeiling, ResourceEstimate, ResourceProfile, ResourceUsage,
-    RuntimeDispatchErrorKind, RuntimeHttpEgressError, RuntimeHttpEgressReasonCode,
-    RuntimeHttpEgressRequest, RuntimeHttpSaveTarget, RuntimeKind, SandboxQuota, ScopedPath,
-    VirtualPath, valid_http_field_name,
+    PermissionMode, RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED, ResourceCeiling,
+    ResourceEstimate, ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
+    RuntimeHttpEgressError, RuntimeHttpEgressReasonCode, RuntimeHttpEgressRequest,
+    RuntimeHttpSaveTarget, RuntimeKind, SandboxQuota, ScopedPath, VirtualPath,
+    valid_http_field_name,
 };
 use serde_json::Value;
 
-use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
+use crate::{
+    FirstPartyCapabilityError, FirstPartyCapabilityRequest,
+    http_body::{
+        RESPONSE_BODY_STORE_FAILED_REASON, RESPONSE_BODY_STORE_UNAUTHORIZED_REASON,
+        RESPONSE_BODY_STORE_UNAVAILABLE_REASON,
+    },
+};
 
 use super::{
     first_party_capability_manifest,
@@ -33,6 +40,14 @@ const MAX_HTTP_HEADERS: usize = 64;
 const MAX_HTTP_HEADER_NAME_BYTES: usize = 512;
 const MAX_HTTP_HEADER_VALUE_BYTES: usize = 8 * 1024;
 const GITHUB_EXTENSION_PREFERENCE: &str = "Prefer GitHub extension capabilities for GitHub repository, issue, pull request, release, or workflow data when they are available.";
+const SAVE_RESPONSE_BODY_LIMIT_EXCEEDED_SUMMARY: &str =
+    "response body exceeded builtin.http.save response_body_limit; nothing was saved";
+const SAVE_BODY_STORE_UNAVAILABLE_SUMMARY: &str =
+    "response body store is unavailable for builtin.http.save";
+const SAVE_BODY_STORE_UNAUTHORIZED_SUMMARY: &str =
+    "response body store denied builtin.http.save write access";
+const SAVE_BODY_STORE_FAILED_SUMMARY: &str =
+    "response body store failed while saving builtin.http.save response";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HttpSaveMode {
@@ -221,7 +236,7 @@ pub(super) async fn dispatch(
         || FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend),
     )
     .await?
-    .map_err(http_error)?;
+    .map_err(|error| http_error(error, save_mode))?;
     Ok(shape_response(response, response_body_limit))
 }
 
@@ -445,19 +460,24 @@ fn ranged_u64(
     Ok(value)
 }
 
-fn http_error(error: RuntimeHttpEgressError) -> FirstPartyCapabilityError {
-    let kind = match error.reason_code() {
+fn http_error(error: RuntimeHttpEgressError, save_mode: HttpSaveMode) -> FirstPartyCapabilityError {
+    let save_error = save_error_kind_and_summary(&error, save_mode);
+    let kind = match save_error {
+        Some((kind, _summary)) => kind,
         // Host credential injection failures are backend/client integration faults;
         // production maps RuntimeDispatchErrorKind::Client to RuntimeFailureKind::Backend.
-        RuntimeHttpEgressReasonCode::CredentialUnavailable => RuntimeDispatchErrorKind::Client,
-        RuntimeHttpEgressReasonCode::RequestDenied => RuntimeDispatchErrorKind::InputEncode,
-        RuntimeHttpEgressReasonCode::PolicyDenied => RuntimeDispatchErrorKind::PolicyDenied,
-        RuntimeHttpEgressReasonCode::NetworkError => RuntimeDispatchErrorKind::NetworkDenied,
-        RuntimeHttpEgressReasonCode::ResponseError => RuntimeDispatchErrorKind::OperationFailed,
-        RuntimeHttpEgressReasonCode::ResponseBodyLimitExceeded => {
-            RuntimeDispatchErrorKind::OutputTooLarge
-        }
+        None => match error.reason_code() {
+            RuntimeHttpEgressReasonCode::CredentialUnavailable => RuntimeDispatchErrorKind::Client,
+            RuntimeHttpEgressReasonCode::RequestDenied => RuntimeDispatchErrorKind::InputEncode,
+            RuntimeHttpEgressReasonCode::PolicyDenied => RuntimeDispatchErrorKind::PolicyDenied,
+            RuntimeHttpEgressReasonCode::NetworkError => RuntimeDispatchErrorKind::NetworkDenied,
+            RuntimeHttpEgressReasonCode::ResponseError => RuntimeDispatchErrorKind::OperationFailed,
+            RuntimeHttpEgressReasonCode::ResponseBodyLimitExceeded => {
+                RuntimeDispatchErrorKind::OutputTooLarge
+            }
+        },
     };
+    let safe_summary = save_error.map(|(_kind, summary)| summary);
     tracing::debug!(
         runtime_http_reason = error.stable_runtime_reason(),
         dispatch_error_kind = kind.as_str(),
@@ -467,7 +487,56 @@ fn http_error(error: RuntimeHttpEgressError) -> FirstPartyCapabilityError {
     if !matches!(error, RuntimeHttpEgressError::Credential { .. }) {
         usage.network_egress_bytes = error.request_bytes();
     }
-    FirstPartyCapabilityError::new(kind).with_usage(usage)
+    match safe_summary {
+        Some(summary) => FirstPartyCapabilityError::with_safe_summary(kind, summary),
+        None => FirstPartyCapabilityError::new(kind),
+    }
+    .with_usage(usage)
+}
+
+fn save_error_kind_and_summary(
+    error: &RuntimeHttpEgressError,
+    save_mode: HttpSaveMode,
+) -> Option<(RuntimeDispatchErrorKind, &'static str)> {
+    if save_mode != HttpSaveMode::Required {
+        return None;
+    }
+    match error {
+        RuntimeHttpEgressError::Request { reason, .. }
+            if reason == RESPONSE_BODY_STORE_UNAVAILABLE_REASON =>
+        {
+            Some((
+                RuntimeDispatchErrorKind::Backend,
+                SAVE_BODY_STORE_UNAVAILABLE_SUMMARY,
+            ))
+        }
+        RuntimeHttpEgressError::Request { reason, .. }
+            if reason == RESPONSE_BODY_STORE_UNAUTHORIZED_REASON =>
+        {
+            Some((
+                RuntimeDispatchErrorKind::FilesystemDenied,
+                SAVE_BODY_STORE_UNAUTHORIZED_SUMMARY,
+            ))
+        }
+        RuntimeHttpEgressError::Response { reason, .. }
+            if reason == RESPONSE_BODY_STORE_FAILED_REASON =>
+        {
+            Some((
+                RuntimeDispatchErrorKind::OperationFailed,
+                SAVE_BODY_STORE_FAILED_SUMMARY,
+            ))
+        }
+        RuntimeHttpEgressError::Network { reason, .. }
+        | RuntimeHttpEgressError::Response { reason, .. }
+            if reason == RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED =>
+        {
+            Some((
+                RuntimeDispatchErrorKind::OperationFailed,
+                SAVE_RESPONSE_BODY_LIMIT_EXCEEDED_SUMMARY,
+            ))
+        }
+        _ => None,
+    }
 }
 
 fn log_raw_http_input_error_for_local_diagnostics(
@@ -489,6 +558,196 @@ fn log_raw_http_input_error_for_local_diagnostics(
         );
     }
     error
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use ironclaw_filesystem::InMemoryBackend;
+    use ironclaw_host_api::{
+        CapabilityId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
+        RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED, ResourceEstimate, ResourceScope,
+        RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeHttpEgressError,
+        RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeHttpSavedBody, TenantId,
+        UserId, VirtualPath,
+    };
+    use serde_json::json;
+
+    use crate::{
+        BuiltinFirstPartyTools, FirstPartyCapabilityHandler, FirstPartyCapabilityRequest,
+        InvocationServices, LocalHostProcessPort, ToolCallHttpEgress,
+    };
+
+    use super::{HTTP_SAVE_CAPABILITY_ID, SAVE_RESPONSE_BODY_LIMIT_EXCEEDED_SUMMARY};
+
+    #[tokio::test]
+    async fn save_dispatch_returns_compact_metadata_for_large_saved_body() {
+        let tools = BuiltinFirstPartyTools::default();
+        let request = save_request(
+            json!({
+                "url": "https://example.com/large.html",
+                "save_to": "/workspace/large.html",
+            }),
+            Arc::new(LargeSavedBodyEgress),
+        );
+
+        let result = tools
+            .dispatch(request)
+            .await
+            .expect("save should return compact metadata");
+
+        assert_eq!(result.output["status"], 200);
+        assert_eq!(
+            result.output["saved_body"],
+            json!({
+                "path": "/workspace/large.html",
+                "bytes_written": super::super::FIRST_PARTY_MAX_OUTPUT_BYTES + 1,
+            })
+        );
+        assert!(result.output.get("body_text").is_none());
+        assert!(result.output.get("body_base64").is_none());
+        assert!(result.output.get("body_base64_omitted").is_none());
+        assert!(
+            result.usage.output_bytes < super::super::FIRST_PARTY_MAX_OUTPUT_BYTES,
+            "saved body bytes must not be accounted as model-visible output"
+        );
+    }
+
+    #[tokio::test]
+    async fn save_dispatch_maps_response_limit_to_precise_save_error() {
+        let tools = BuiltinFirstPartyTools::default();
+        let request = save_request(
+            json!({
+                "url": "https://example.com/too-large.html",
+                "save_to": "/workspace/too-large.html",
+            }),
+            Arc::new(ResponseLimitEgress),
+        );
+
+        let error = tools
+            .dispatch(request)
+            .await
+            .expect_err("save limit breach should fail precisely");
+
+        assert_eq!(
+            error.kind(),
+            Some(RuntimeDispatchErrorKind::OperationFailed)
+        );
+        assert_eq!(
+            error.safe_summary(),
+            Some(SAVE_RESPONSE_BODY_LIMIT_EXCEEDED_SUMMARY)
+        );
+    }
+
+    fn save_request(
+        input: serde_json::Value,
+        runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
+    ) -> FirstPartyCapabilityRequest {
+        FirstPartyCapabilityRequest {
+            capability_id: CapabilityId::new(HTTP_SAVE_CAPABILITY_ID).unwrap(),
+            scope: sample_scope(),
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default(),
+            mounts: Some(workspace_mount()),
+            services: InvocationServices {
+                filesystem: Arc::new(InMemoryBackend::new()),
+                runtime_http_egress: Some(runtime_http_egress),
+                tool_call_http_egress: Some(Arc::new(PanickingToolCallHttpEgress)),
+                runtime_secret_material_stager: None,
+                process: Arc::new(LocalHostProcessPort::new()),
+                secret_store: None,
+                audit_sink: None,
+                unsafe_raw_diagnostics_allowed: false,
+            },
+            input,
+        }
+    }
+
+    fn workspace_mount() -> MountView {
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").unwrap(),
+            VirtualPath::new("/projects/project-a").unwrap(),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .unwrap()
+    }
+
+    fn sample_scope() -> ResourceScope {
+        ResourceScope {
+            tenant_id: TenantId::new("tenant-http-save").unwrap(),
+            user_id: UserId::new("user-http-save").unwrap(),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
+    }
+
+    #[derive(Debug)]
+    struct LargeSavedBodyEgress;
+
+    #[async_trait]
+    impl RuntimeHttpEgress for LargeSavedBodyEgress {
+        async fn execute(
+            &self,
+            mut request: RuntimeHttpEgressRequest,
+        ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+            let target = request
+                .save_body_to
+                .take()
+                .expect("builtin.http.save must pass a save target to strict egress");
+            let bytes_written = super::super::FIRST_PARTY_MAX_OUTPUT_BYTES + 1;
+            Ok(RuntimeHttpEgressResponse {
+                status: 200,
+                headers: vec![("content-type".to_string(), "text/html".to_string())],
+                body: vec![b'x'; bytes_written as usize],
+                saved_body: Some(RuntimeHttpSavedBody {
+                    path: target.path,
+                    bytes_written,
+                }),
+                request_bytes: 0,
+                response_bytes: bytes_written,
+                redaction_applied: false,
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct ResponseLimitEgress;
+
+    #[async_trait]
+    impl RuntimeHttpEgress for ResponseLimitEgress {
+        async fn execute(
+            &self,
+            request: RuntimeHttpEgressRequest,
+        ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+            assert!(
+                request.save_body_to.is_some(),
+                "builtin.http.save must pass a save target to strict egress"
+            );
+            Err(RuntimeHttpEgressError::Network {
+                reason: RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED.to_string(),
+                request_bytes: 0,
+                response_bytes: request.response_body_limit.unwrap_or_default() + 1,
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct PanickingToolCallHttpEgress;
+
+    #[async_trait]
+    impl ToolCallHttpEgress for PanickingToolCallHttpEgress {
+        async fn execute_for_model_visible_output(
+            &self,
+            _request: RuntimeHttpEgressRequest,
+        ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+            panic!("builtin.http.save must not use model-visible HTTP egress")
+        }
+    }
 }
 
 #[cfg(test)]

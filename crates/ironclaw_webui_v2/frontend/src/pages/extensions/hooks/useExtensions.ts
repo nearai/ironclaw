@@ -104,12 +104,17 @@ export function useExtensions() {
   const extensionsQuery = useQuery({
     queryKey: ["extensions"],
     queryFn: fetchExtensions,
+    // The page must distinguish an offline request from a successful empty
+    // catalog. TanStack's default online mode pauses without calling queryFn,
+    // leaving both data and error empty and reproducing the misleading state.
+    networkMode: "always",
     refetchOnMount: "always",
   });
 
   const registryQuery = useQuery({
     queryKey: ["extension-registry"],
     queryFn: fetchExtensionRegistry,
+    networkMode: "always",
     refetchOnMount: "always",
   });
 
@@ -118,6 +123,11 @@ export function useExtensions() {
     queryFn: listConnectableChannels,
     refetchOnMount: "always",
   });
+
+  const refetch = React.useCallback(
+    () => Promise.all([extensionsQuery.refetch(), registryQuery.refetch()]),
+    [extensionsQuery.refetch, registryQuery.refetch]
+  );
 
   const invalidate = React.useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ["extensions"] });
@@ -316,6 +326,7 @@ export function useExtensions() {
     },
   });
 
+  const isLoading = extensionsQuery.isLoading || registryQuery.isLoading;
   const isBusy = installMutation.isPending || activateMutation.isPending || removeMutation.isPending || importMutation.isPending;
   const remove = React.useCallback(
     (extension) => {
@@ -340,6 +351,12 @@ export function useExtensions() {
     connectableChannels,
     isExtensionsLoading: extensionsQuery.isLoading,
     isRegistryLoading: registryQuery.isLoading,
+    isLoading,
+    extensionsError: extensionsQuery.error || null,
+    registryError: registryQuery.error || null,
+    error: extensionsQuery.error || registryQuery.error || null,
+    refetch,
+    isRefetching: extensionsQuery.isRefetching || registryQuery.isRefetching,
     isBusy,
     actionResult,
     clearResult,
