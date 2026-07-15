@@ -118,7 +118,5 @@ explaining why, so a future reader doesn't "fix" it into a regression.
 ## References
 
 - Incidents: PR #6013 (completion nudge), PR #5487 (latency spans).
-- Design spec with the full incident writeup and fix:
-  `docs/superpowers/specs/2026-07-14-agent-loop-canonical-slop-cleanup-design.md`.
 - Sibling rule with the same shape (a class of drift that recurred until it
   got a named rule and a worked example): `agent-loop-capabilities.md`.

@@ -105,7 +105,7 @@ impl DefaultExecutorPipeline {
                 InputStep::Exit(exit) => return Ok(exit),
             }
 
-            match timed(
+            let turn_step = match timed(
                 &self.prompt,
                 "prompt",
                 ctx,
@@ -118,53 +118,27 @@ impl DefaultExecutorPipeline {
             .await?
             {
                 PromptStep::Exit(exit) => return Ok(exit),
-
-                PromptStep::Prepared(prompt) => {
-                    match self.execute_prepared_turn(ctx, *prompt).await? {
-                        TurnStep::Continue {
-                            state: next,
-                            pending_input_ack: ack,
-                        } => {
-                            state = *next;
-                            pending_input_ack = ack;
-                            continue;
-                        }
-                        TurnStep::Exit(exit) => return Ok(exit),
-                    }
-                }
-
+                PromptStep::Prepared(prompt) => self.execute_prepared_turn(ctx, *prompt).await?,
                 PromptStep::ResumeApproval(resume)
                 | PromptStep::ResumeAuth(resume)
                 | PromptStep::ResumeExternalTool(resume) => {
-                    match self.execute_resume_turn(ctx, *resume).await? {
-                        TurnStep::Continue {
-                            state: next,
-                            pending_input_ack: ack,
-                        } => {
-                            state = *next;
-                            pending_input_ack = ack;
-                            continue;
-                        }
-                        TurnStep::Exit(exit) => return Ok(exit),
-                    }
+                    self.execute_resume_turn(ctx, *resume).await?
                 }
-
                 PromptStep::SkipModel(skipped_state, ack) => {
-                    match self
-                        .execute_skip_model_turn(ctx, *skipped_state, ack)
+                    self.execute_skip_model_turn(ctx, *skipped_state, ack)
                         .await?
-                    {
-                        TurnStep::Continue {
-                            state: next,
-                            pending_input_ack: ack,
-                        } => {
-                            state = *next;
-                            pending_input_ack = ack;
-                            continue;
-                        }
-                        TurnStep::Exit(exit) => return Ok(exit),
-                    }
                 }
+            };
+
+            match turn_step {
+                TurnStep::Continue {
+                    state: next,
+                    pending_input_ack: ack,
+                } => {
+                    state = *next;
+                    pending_input_ack = ack;
+                }
+                TurnStep::Exit(exit) => return Ok(exit),
             }
         }
     }
