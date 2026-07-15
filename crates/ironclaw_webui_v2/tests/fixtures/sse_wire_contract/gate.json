@@ -1,0 +1,32 @@
+{
+  "cursor": "cursor:gate",
+  "prompt": {
+    "allow_always": true,
+    "approval_context": {
+      "action": {
+        "label": "Run a shell command"
+      },
+      "destination": {
+        "label": "Local sandbox"
+      },
+      "details": [
+        {
+          "label": "Command",
+          "value": "echo hello"
+        }
+      ],
+      "reason": "The assistant wants to run a command.",
+      "scope": {
+        "label": "This action only",
+        "reusable": false
+      },
+      "tool_name": "shell"
+    },
+    "body": "This action needs your approval.",
+    "gate_ref": "gate:approval-fixture",
+    "headline": "Approve the fixture action",
+    "invocation_id": "00000000-0000-0000-0000-000000000002",
+    "turn_run_id": "00000000-0000-0000-0000-000000000001"
+  },
+  "type": "gate"
+}

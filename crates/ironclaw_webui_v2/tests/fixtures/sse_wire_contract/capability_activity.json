@@ -1,0 +1,20 @@
+{
+  "activity": {
+    "activity_order": 1,
+    "capability_id": "script.echo",
+    "error_kind": null,
+    "input_summary": "path: src/main.rs",
+    "invocation_id": "00000000-0000-0000-0000-000000000002",
+    "output_bytes": null,
+    "process_id": null,
+    "provider": "script",
+    "runtime": "script",
+    "status": "running",
+    "subtitle": "src/main.rs",
+    "thread_id": "thread-fixture",
+    "turn_run_id": "00000000-0000-0000-0000-000000000001",
+    "updated_at": "2026-01-01T00:00:00Z"
+  },
+  "cursor": "cursor:capability_activity",
+  "type": "capability_activity"
+}

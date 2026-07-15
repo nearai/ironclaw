@@ -1,0 +1,23 @@
+{
+  "cursor": "cursor:capability_display_preview",
+  "preview": {
+    "activity_order": 2,
+    "capability_id": "builtin.read_file",
+    "input_summary": "path: src/main.rs",
+    "invocation_id": "00000000-0000-0000-0000-000000000002",
+    "output_bytes": 12,
+    "output_kind": "text",
+    "output_preview": "fn main() {}",
+    "output_summary": "Read 12 bytes.",
+    "result_ref": "result:tool-output",
+    "status": "completed",
+    "subtitle": "src/main.rs",
+    "thread_id": "thread-fixture",
+    "timeline_message_id": "timeline-message-1",
+    "title": "read_file",
+    "truncated": false,
+    "turn_run_id": "00000000-0000-0000-0000-000000000001",
+    "updated_at": "2026-01-01T00:00:00Z"
+  },
+  "type": "capability_display_preview"
+}

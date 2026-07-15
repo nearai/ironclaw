@@ -1,5 +1,10 @@
 use chrono::Utc;
 use ironclaw_host_api::{CapabilityId, ExtensionId, InvocationId, RuntimeKind, ThreadId};
+use ironclaw_product_adapters::{
+    ApprovalPromptActionView, ApprovalPromptContextView, ApprovalPromptDestinationView,
+    ApprovalPromptDetailView, ApprovalPromptScopeView, AuthPromptChallengeKind,
+    CapabilityDisplayPreviewViewInput, ConnectionPromptContext, ProductGateKind,
+};
 use ironclaw_product_workflow::{
     AuthPromptView, CapabilityActivityStatusView, CapabilityActivityView,
     CapabilityDisplayPreviewView, FinalReplyView, GatePromptView, ProductOutboundPayload,
@@ -13,6 +18,9 @@ use ironclaw_turns::{
 };
 use ironclaw_webui_v2::{WebChatV2Event, WebChatV2EventFrame};
 use serde_json::Value;
+
+#[path = "support/golden_json.rs"]
+mod golden_json;
 
 fn cursor() -> ProjectionCursor {
     ProjectionCursor::new("cursor:webchat:v2:1").expect("cursor")
@@ -377,6 +385,259 @@ fn outbound_payload_mapping_covers_every_browser_event_variant() {
         assert_eq!(json["cursor"], "cursor:webchat:v2:1");
         assert_eq!(json["type"], expected_type);
         assert_no_forbidden_metadata(&json);
+    }
+}
+
+// ===== SSE wire-contract fixtures (Rust emission <-> frontend parsing) =====
+//
+// `webchat_sse_event_from_envelope` (`src/handlers.rs`) does nothing to a
+// `WebChatV2EventFrame` beyond `serde_json::to_string(&frame)` before
+// putting it on the wire as the SSE `data:` field, so serializing a frame
+// directly here reproduces the exact browser payload without needing the
+// HTTP router or a stub `RebornServicesApi`.
+//
+// Scope is the 10 variants `outbound_payload_mapping_covers_every_browser_-
+// event_variant` above already proves are reachable via
+// `From<ProductOutboundPayload>` (including `keep_alive`:
+// `ProductOutboundPayload::KeepAlive` is genuinely emitted by
+// `ironclaw_reborn_composition::projection`, not merely a theoretical wire
+// shape). This test builds each `WebChatV2Event` directly instead of
+// round-tripping through that `From` impl again — the mapping is already
+// covered above; what's new here is dumping the exact serialized bytes as a
+// committed fixture. `accepted`, `cancelled`, and
+// `failed` are deliberately excluded: grepping
+// `WebChatV2Event::Accepted|Cancelled|Failed` across `crates/` turns up no
+// production constructor anywhere — `RebornSubmitTurnResponse` and
+// `RebornCancelRunResponse` reach the browser as plain JSON HTTP response
+// bodies (`send_message`/`cancel_run`), never through SSE. There is no real
+// wire shape to pin for those three today. The 11th fixture, `error`, is
+// not a `WebChatV2Event` at all (a standalone `SseErrorPayload`) and can
+// only be produced by driving the real facade-error path through the HTTP
+// handler — that fixture is dumped by
+// `webui_v2_handlers_contract.rs`'s `stream_events_facade_error_emits_-
+// error_fixture`, not here.
+//
+// Regenerate after an intentional schema change:
+//   UPDATE_SSE_FIXTURES=1 cargo test -p ironclaw_webui_v2 --test webui_v2_schema_contract sse_wire_contract
+// then review the diff under `tests/fixtures/sse_wire_contract/` and commit
+// it. The companion Vitest suite
+// (`frontend/src/pages/chat/lib/sse-wire-contract.test.ts`) reads the same
+// files and drives them through the real `useSSE`/`useChatEvents` parsing
+// code — this test only pins the Rust half of the contract.
+fn fixture_turn_run_id() -> TurnRunId {
+    TurnRunId::parse("00000000-0000-0000-0000-000000000001").expect("valid uuid")
+}
+
+fn fixture_invocation_id() -> InvocationId {
+    InvocationId::parse("00000000-0000-0000-0000-000000000002").expect("valid uuid")
+}
+
+fn fixture_timestamp() -> chrono::DateTime<Utc> {
+    "2026-01-01T00:00:00Z".parse().expect("valid timestamp")
+}
+
+fn fixture_thread_id() -> ThreadId {
+    ThreadId::new("thread-fixture").expect("thread id")
+}
+
+fn fixture_projection_state() -> ProductProjectionState {
+    ProductProjectionState::new(
+        "thread-fixture",
+        vec![
+            // `blocked_approval`, not `running`: a `Gate{Approval}` item only
+            // renders as `pendingGate` on the frontend when the batch's
+            // `run_status` is one of the gate-active statuses
+            // (`useChatEvents.ts`'s `isObsoleteProjectionGate`) — pairing it
+            // with `running` here would make the frontend correctly treat the
+            // gate as stale/obsolete, which is real behavior but not what
+            // this fixture is for.
+            ProductProjectionItem::RunStatus {
+                run_id: fixture_turn_run_id(),
+                status: "blocked_approval".to_string(),
+                failure_category: None,
+                failure_summary: None,
+                retryable: None,
+            },
+            ProductProjectionItem::Text {
+                id: "message-1".to_string(),
+                run_id: Some(fixture_turn_run_id()),
+                body: "Working on it...".to_string(),
+            },
+            ProductProjectionItem::Gate {
+                run_id: fixture_turn_run_id(),
+                gate_kind: ProductGateKind::Approval,
+                gate_ref: "gate:projection-fixture".to_string(),
+                invocation_id: Some(fixture_invocation_id()),
+                headline: "Approve the fixture action".to_string(),
+                body: Some("This action needs your approval.".to_string()),
+                allow_always: false,
+                auth_context: None,
+            },
+        ],
+    )
+    .expect("projection state")
+}
+
+#[test]
+fn sse_wire_contract_fixtures_match_committed_json() {
+    let cases: Vec<(&str, WebChatV2Event)> = vec![
+        (
+            "final_reply",
+            WebChatV2Event::FinalReply {
+                reply: FinalReplyView {
+                    turn_run_id: fixture_turn_run_id(),
+                    text: "This is the assistant's final reply.".to_string(),
+                    generated_at: fixture_timestamp(),
+                },
+            },
+        ),
+        (
+            "running",
+            WebChatV2Event::Running {
+                progress: ProgressUpdateView {
+                    turn_run_id: fixture_turn_run_id(),
+                    kind: ProgressKind::Typing,
+                    generated_at: fixture_timestamp(),
+                },
+            },
+        ),
+        (
+            "capability_progress",
+            WebChatV2Event::CapabilityProgress {
+                progress: ProgressUpdateView {
+                    turn_run_id: fixture_turn_run_id(),
+                    kind: ProgressKind::ToolRunning,
+                    generated_at: fixture_timestamp(),
+                },
+            },
+        ),
+        (
+            "capability_activity",
+            WebChatV2Event::CapabilityActivity {
+                activity: CapabilityActivityView {
+                    invocation_id: fixture_invocation_id(),
+                    turn_run_id: Some(fixture_turn_run_id()),
+                    thread_id: Some(fixture_thread_id()),
+                    capability_id: CapabilityId::new("script.echo").expect("capability id"),
+                    status: CapabilityActivityStatusView::Running,
+                    provider: Some(ExtensionId::new("script").expect("provider id")),
+                    runtime: Some(RuntimeKind::Script),
+                    process_id: None,
+                    output_bytes: None,
+                    error_kind: None,
+                    error_detail: None,
+                    subtitle: Some("src/main.rs".to_string()),
+                    input_summary: Some("path: src/main.rs".to_string()),
+                    updated_at: fixture_timestamp(),
+                    activity_order: Some(1),
+                },
+            },
+        ),
+        (
+            "capability_display_preview",
+            WebChatV2Event::CapabilityDisplayPreview {
+                preview: CapabilityDisplayPreviewView::new(CapabilityDisplayPreviewViewInput {
+                    timeline_message_id: Some("timeline-message-1".to_string()),
+                    invocation_id: fixture_invocation_id(),
+                    turn_run_id: Some(fixture_turn_run_id()),
+                    thread_id: Some(fixture_thread_id()),
+                    capability_id: CapabilityId::new("builtin.read_file").expect("capability id"),
+                    status: CapabilityActivityStatusView::Completed,
+                    error_kind: None,
+                    title: "read_file".to_string(),
+                    subtitle: Some("src/main.rs".to_string()),
+                    input_summary: Some("path: src/main.rs".to_string()),
+                    output_summary: Some("Read 12 bytes.".to_string()),
+                    output_preview: Some("fn main() {}".to_string()),
+                    output_kind: Some("text".to_string()),
+                    output_bytes: Some(12),
+                    result_ref: Some("result:tool-output".to_string()),
+                    truncated: false,
+                    updated_at: fixture_timestamp(),
+                    activity_order: Some(2),
+                })
+                .expect("capability display preview"),
+            },
+        ),
+        (
+            "gate",
+            WebChatV2Event::Gate {
+                prompt: GatePromptView {
+                    turn_run_id: fixture_turn_run_id(),
+                    gate_ref: "gate:approval-fixture".to_string(),
+                    invocation_id: Some(fixture_invocation_id()),
+                    headline: "Approve the fixture action".to_string(),
+                    body: "This action needs your approval.".to_string(),
+                    allow_always: true,
+                    approval_context: Some(
+                        ApprovalPromptContextView::new(
+                            "shell",
+                            ApprovalPromptActionView::new("Run a shell command", None)
+                                .expect("action"),
+                            ApprovalPromptScopeView::new("This action only", false).expect("scope"),
+                            Some("The assistant wants to run a command.".to_string()),
+                            Some(ApprovalPromptDestinationView {
+                                label: "Local sandbox".to_string(),
+                                url: None,
+                                domain: None,
+                            }),
+                            vec![ApprovalPromptDetailView {
+                                label: "Command".to_string(),
+                                value: "echo hello".to_string(),
+                            }],
+                        )
+                        .expect("approval context"),
+                    ),
+                },
+            },
+        ),
+        (
+            "auth_required",
+            WebChatV2Event::AuthRequired {
+                prompt: AuthPromptView {
+                    turn_run_id: fixture_turn_run_id(),
+                    auth_request_ref: "auth:fixture".to_string(),
+                    invocation_id: None,
+                    headline: "Connect your Google account".to_string(),
+                    body: "Paste the code from the connection screen.".to_string(),
+                    challenge_kind: Some(AuthPromptChallengeKind::ManualToken),
+                    provider: Some("google".to_string()),
+                    account_label: Some("user@example.test".to_string()),
+                    authorization_url: None,
+                    expires_at: Some(fixture_timestamp()),
+                    connection: Some(ConnectionPromptContext {
+                        channel: "telegram".to_string(),
+                        strategy: Some("inbound_proof_code".to_string()),
+                        instructions: Some("Open the Telegram bot and send /pair.".to_string()),
+                        input_placeholder: Some("Pairing code".to_string()),
+                        submit_label: Some("Connect".to_string()),
+                        error_message: Some("That code did not match.".to_string()),
+                    }),
+                },
+            },
+        ),
+        (
+            "projection_snapshot",
+            WebChatV2Event::ProjectionSnapshot {
+                state: fixture_projection_state(),
+            },
+        ),
+        (
+            "projection_update",
+            WebChatV2Event::ProjectionUpdate {
+                state: fixture_projection_state(),
+            },
+        ),
+        ("keep_alive", WebChatV2Event::KeepAlive),
+    ];
+
+    for (name, event) in cases {
+        let frame = WebChatV2EventFrame {
+            cursor: ProjectionCursor::new(format!("cursor:{name}")).expect("cursor"),
+            event,
+        };
+        let json = serde_json::to_value(&frame).expect("serialize frame");
+        golden_json::assert_or_update_json_fixture(name, &json);
     }
 }
 

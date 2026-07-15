@@ -24,7 +24,14 @@ function useSSESourceForTest() {
   return `${lines.join("\n")}\nglobalThis.__testExports = { useSSE };`;
 }
 
-function createHarness({ online = true, visibilityState = "visible" } = {}) {
+// Exported so the SSE wire-contract fixture round-trip test
+// (`sse-wire-contract.test.ts`) can drive the real `useSSE` parsing code
+// against committed fixtures without re-implementing this vm harness.
+export function createHarness({
+  online = true,
+  visibilityState = "visible",
+  onEvent = () => {},
+} = {}) {
   const statuses = [];
   const streams = [];
   const timers = [];
@@ -95,7 +102,7 @@ function createHarness({ online = true, visibilityState = "visible" } = {}) {
   const result = context.globalThis.__testExports.useSSE({
     threadId: "thread-1",
     enabled: true,
-    onEvent: () => {},
+    onEvent,
   });
 
   return {

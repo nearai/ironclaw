@@ -57,7 +57,10 @@ function useChatEventsSourceForTest() {
   return `${lines.join("\n")}\nglobalThis.__testExports = { useChatEvents };`;
 }
 
-function createUseChatEventsHarness({
+// Exported so the SSE wire-contract fixture round-trip test
+// (`sse-wire-contract.test.ts`) can drive the real `useChatEvents` parsing
+// code against committed fixtures without re-implementing this vm harness.
+export function createUseChatEventsHarness({
   DateImpl = Date,
   gateFromEvent = () => null,
   failureMessageForRunStatus = () => "run failed",
