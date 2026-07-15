@@ -2294,12 +2294,30 @@ mod tests {
             .load_skill_context_candidates(&run_context)
             .await
             .expect("selected skill context loads");
-        assert_eq!(selected.len(), 1);
+        // Default injection mode is `listing`: the activated skill's full body
+        // loads, and every other visible skill (the bundled system skills)
+        // collapses into one `available-skills` one-line listing candidate.
         assert!(
-            selected[0]
-                .loaded_skill_md()
-                .expect("skill context")
-                .contains("UNIT_ACTIVATE_SENTINEL")
+            selected.iter().any(|candidate| {
+                candidate
+                    .loaded_skill_md()
+                    .is_some_and(|skill_md| skill_md.contains("UNIT_ACTIVATE_SENTINEL"))
+            }),
+            "activated skill body must load into context"
+        );
+        let listing = selected
+            .iter()
+            .filter_map(|candidate| candidate.discoverable_metadata())
+            .find(|(name, _)| *name == "available-skills")
+            .map(|(_, listing)| listing.to_string())
+            .expect("available-skills listing candidate");
+        assert!(
+            !listing.contains("UNIT_ACTIVATE_SENTINEL"),
+            "non-activated listing must not carry skill bodies"
+        );
+        assert!(
+            listing.contains("builtin.skill_activate"),
+            "listing header must point at skill_activate"
         );
     }
 

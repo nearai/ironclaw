@@ -1286,6 +1286,18 @@ registerPack("uk", {
   "automations.detail.thread": "гілка",
   "automations.filter.failures": "Збої",
   "automations.filter.running": "Виконується",
+  "automations.hold.approval": "Очікує на ваше схвалення",
+  "automations.hold.auth": "Очікує повторного підключення облікового запису",
+  "automations.hold.inProgress": "Попередній запуск ще триває",
+  "automations.hold.meta.inProgress":
+    "Розпочато {since} · наступний запуск почнеться після завершення цього · поки виконання тривало, минуло {count} запланованих моментів запуску",
+  "automations.hold.meta.inProgressUnknownCount":
+    "Розпочато {since} · наступний запуск почнеться після завершення цього · кількість минулих запланованих моментів запуску недоступна",
+  "automations.hold.meta.paused":
+    "Призупинено з {since} · під час утримання минуло {count} запланованих моментів запуску",
+  "automations.hold.meta.pausedUnknownCount":
+    "Призупинено з {since} · кількість минулих запланованих моментів запуску недоступна",
+  "automations.hold.other": "Попередній запуск ще не завершено",
   "automations.status.needsReview": "Потребує перевірки",
   "automations.status.running": "Виконується",
   "automations.summary.failures": "Збої",

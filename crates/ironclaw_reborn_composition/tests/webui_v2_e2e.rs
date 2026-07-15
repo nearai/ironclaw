@@ -55,10 +55,13 @@ use tower::ServiceExt;
 // ─── identities ───────────────────────────────────────────────────────
 
 const VALID_TOKEN: &str = "valid-e2e-token";
+const USER_B_TOKEN: &str = "valid-e2e-token-b";
 const TENANT: &str = "e2e-tenant";
 const USER: &str = "e2e-owner";
+const USER_B: &str = "e2e-viewer-b";
 const AGENT: &str = "e2e-agent";
 const SENSITIVE_TOOL_SENTINEL: &str = "sk-e2e-progress-secret";
+const MEMORY_ISOLATION_MARKER: &str = "webui-memory-owner-a-secret-5460";
 
 // ─── auth stub ────────────────────────────────────────────────────────
 
@@ -81,6 +84,23 @@ impl WebuiAuthenticator for ValidTokenForUser {
             Some(WebuiAuthentication::user(self.user_id.clone()))
         } else {
             None
+        }
+    }
+}
+
+struct TwoUserTokens;
+
+#[async_trait]
+impl WebuiAuthenticator for TwoUserTokens {
+    async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
+        match token {
+            VALID_TOKEN => Some(WebuiAuthentication::user(
+                UserId::new(USER).expect("valid user id"),
+            )),
+            USER_B_TOKEN => Some(WebuiAuthentication::user(
+                UserId::new(USER_B).expect("valid user id"),
+            )),
+            _ => None,
         }
     }
 }
@@ -351,6 +371,11 @@ struct WriteFileGateway {
     call_count: StdMutex<usize>,
 }
 
+#[derive(Debug, Default)]
+struct MemoryWriteGateway {
+    call_count: StdMutex<usize>,
+}
+
 async fn register_write(
     capabilities: &Arc<dyn LoopCapabilityPort>,
     tool_name: ProviderToolName,
@@ -446,6 +471,87 @@ impl HostManagedModelGateway for WriteFileGateway {
         Ok(HostManagedModelResponse::assistant_reply(format!(
             "Saved {CSV_PATH} and {PDF_PATH} — both are ready to download."
         )))
+    }
+}
+
+#[async_trait]
+impl HostManagedModelGateway for MemoryWriteGateway {
+    async fn stream_model(
+        &self,
+        _request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidRequest,
+            "MemoryWriteGateway requires the capability-aware model path",
+        ))
+    }
+
+    async fn stream_model_with_capabilities(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let call_index = {
+            let mut count = self
+                .call_count
+                .lock()
+                .expect("memory gateway call lock poisoned");
+            let index = *count;
+            *count += 1;
+            index
+        };
+        if call_index > 0 {
+            let tool_result = request
+                .messages
+                .iter()
+                .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
+                .expect("follow-up model call must include memory_write result");
+            assert!(
+                tool_result.content.contains("written")
+                    && tool_result.content.contains("MEMORY.md"),
+                "memory_write must persist MEMORY.md before the browser isolation assertion, got: {}",
+                tool_result.content
+            );
+            return Ok(HostManagedModelResponse::assistant_reply("memory saved"));
+        }
+
+        let memory_write_id =
+            CapabilityId::new("builtin.memory_write").expect("memory_write capability id");
+        let memory_write_tool = capabilities
+            .tool_definitions()
+            .map_err(|err| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    format!("tool_definitions failed: {err}"),
+                )
+            })?
+            .into_iter()
+            .find(|def| def.capability_id == memory_write_id)
+            .expect("builtin.memory_write must be visible in local-dev capability surface");
+        let write = capabilities
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
+                provider_id: "e2e-provider".to_string(),
+                provider_model_id: "e2e-model".to_string(),
+                turn_id: Some("e2e-memory-turn".to_string()),
+                id: "e2e-memory-write".to_string(),
+                name: memory_write_tool.name,
+                arguments: json!({
+                    "target": "memory",
+                    "content": format!("owner A private memory: {MEMORY_ISOLATION_MARKER}"),
+                    "append": false
+                }),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            }))
+            .await
+            .map_err(|err| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    format!("register_provider_tool_call(memory_write) failed: {err}"),
+                )
+            })?;
+        Ok(HostManagedModelResponse::capability_calls(vec![write], ""))
     }
 }
 
@@ -572,6 +678,63 @@ async fn build_harness_at_with_runtime_owner_and_auth_user(
     }
 }
 
+async fn build_two_user_harness(
+    gateway: Arc<dyn HostManagedModelGateway>,
+    policy: EffectiveRuntimePolicy,
+) -> Harness {
+    let root = tempfile::tempdir().expect("tempdir");
+    let storage_root = root.path().join("local-dev");
+    let input = RebornRuntimeInput::from_services(
+        RebornBuildInput::local_dev(USER, storage_root).with_runtime_policy(policy),
+    )
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: TENANT.to_string(),
+        agent_id: AGENT.to_string(),
+        source_binding_id: "e2e-source".to_string(),
+        reply_target_binding_id: "e2e-reply".to_string(),
+    })
+    .with_poll_settings(PollSettings {
+        interval: Duration::from_millis(10),
+        max_total: Duration::from_secs(10),
+    })
+    .with_model_gateway_override(gateway);
+
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    runtime
+        .services()
+        .local_dev_auto_approve_settings_for_test()
+        .expect("local-dev exposes auto-approve settings for test")
+        .set(ironclaw_approvals::AutoApproveSettingInput {
+            updated_by: ironclaw_host_api::Principal::User(UserId::new(USER).expect("user")),
+            scope: ResourceScope {
+                tenant_id: TenantId::new(TENANT).expect("tenant"),
+                user_id: UserId::new(USER).expect("user"),
+                agent_id: Some(AgentId::new(AGENT).expect("agent")),
+                project_id: None,
+                mission_id: None,
+                thread_id: None,
+                invocation_id: InvocationId::new(),
+            },
+            enabled: true,
+        })
+        .await
+        .expect("enable global auto-approve for user A");
+    let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+    let config = WebuiServeConfig::new(
+        TenantId::new(TENANT).expect("tenant"),
+        Arc::new(TwoUserTokens),
+        vec![HeaderValue::from_static("http://localhost:0")],
+    )
+    .with_default_agent_id(AgentId::new(AGENT).expect("agent"));
+    let router = webui_v2_app(bundle, config).expect("webui v2 app");
+
+    Harness {
+        runtime,
+        router,
+        _root: Some(root),
+    }
+}
+
 async fn read_json(response: axum::response::Response) -> Value {
     let bytes = to_bytes(response.into_body(), 256 * 1024)
         .await
@@ -591,6 +754,15 @@ fn bearer_post(uri: &str, body: Value) -> Request<Body> {
 
 fn bearer_get(uri: &str) -> Request<Body> {
     bearer_get_with_last_event_id(uri, None)
+}
+
+fn bearer_get_with_token(uri: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .expect("bearer GET request")
 }
 
 fn bearer_get_with_last_event_id(uri: &str, last_event_id: Option<&str>) -> Request<Body> {
@@ -1776,6 +1948,124 @@ async fn wait_for_assistant_reply(router: &axum::Router, thread_id: &str, needle
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
     panic!("turn never produced an assistant reply containing {needle:?}; timeline={timeline:#?}");
+}
+
+#[tokio::test]
+async fn webui_filesystem_memory_mount_is_scoped_to_authenticated_user() {
+    let harness = build_two_user_harness(
+        Arc::new(MemoryWriteGateway::default()),
+        local_dev_effective_policy(),
+    )
+    .await;
+    let router = &harness.router;
+
+    let thread_id = create_thread(router, "e2e-memory-isolation-create").await;
+    send_message(router, &thread_id, "e2e-memory-isolation-save").await;
+    wait_for_assistant_reply(router, &thread_id, "memory saved").await;
+
+    let owner_raw_memory_path =
+        format!("tenants/{TENANT}/users/{USER}/agents/{AGENT}/projects/_none/MEMORY.md");
+    let response = router
+        .clone()
+        .oneshot(bearer_get_with_token(
+            &format!("/api/webchat/v2/fs/content?mount=memory&path={owner_raw_memory_path}"),
+            USER_B_TOKEN,
+        ))
+        .await
+        .expect("user B memory read oneshot");
+    let status = response.status();
+    let body = String::from_utf8_lossy(&read_body_bytes(response).await).to_string();
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "user B must not read user A's memory document through the WebUI filesystem browser; body={body}"
+    );
+    assert!(
+        !body.contains(MEMORY_ISOLATION_MARKER),
+        "user B response body leaked user A's memory marker: {body}"
+    );
+
+    let response = router
+        .clone()
+        .oneshot(bearer_get_with_token(
+            "/api/webchat/v2/fs/list?mount=memory",
+            USER_B_TOKEN,
+        ))
+        .await
+        .expect("user B memory list oneshot");
+    assert_eq!(response.status(), StatusCode::OK, "user B memory listing");
+    let listing = read_json(response).await;
+    let entries = listing["entries"]
+        .as_array()
+        .expect("memory list response carries entries");
+    assert!(
+        entries.iter().all(|entry| {
+            let name = entry["name"].as_str().unwrap_or_default();
+            let path = entry["path"].as_str().unwrap_or_default();
+            name != "tenants" && name != "MEMORY.md" && !path.contains(USER)
+        }),
+        "user B memory root must not expose user A's document or the raw memory tree: {listing:#?}"
+    );
+
+    let response = router
+        .clone()
+        .oneshot(bearer_get_with_token(
+            "/api/webchat/v2/fs/list?mount=memory",
+            VALID_TOKEN,
+        ))
+        .await
+        .expect("user A memory list oneshot");
+    assert_eq!(response.status(), StatusCode::OK, "user A memory listing");
+    let owner_listing = read_json(response).await;
+    assert!(
+        owner_listing["entries"].as_array().is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry["name"].as_str() == Some("MEMORY.md")
+                    && entry["path"].as_str() == Some("MEMORY.md")
+            })
+        }),
+        "user A should see her own memory document: {owner_listing:#?}"
+    );
+
+    let response = router
+        .clone()
+        .oneshot(bearer_get_with_token(
+            "/api/webchat/v2/fs/content?mount=memory&path=MEMORY.md",
+            VALID_TOKEN,
+        ))
+        .await
+        .expect("user A memory read oneshot");
+    assert_eq!(response.status(), StatusCode::OK, "user A memory read");
+    let body = String::from_utf8_lossy(&read_body_bytes(response).await).to_string();
+    assert!(
+        body.contains(MEMORY_ISOLATION_MARKER),
+        "user A should read her own memory marker through the WebUI filesystem browser: {body}"
+    );
+
+    let response = router
+        .clone()
+        .oneshot(bearer_get_with_token(
+            "/api/webchat/v2/fs/content?mount=memory&path=MEMORY.md",
+            USER_B_TOKEN,
+        ))
+        .await
+        .expect("user B canonical memory read oneshot");
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "user B must not read user A's canonical memory document"
+    );
+    let body = String::from_utf8_lossy(&read_body_bytes(response).await).to_string();
+    assert!(
+        !body.contains(MEMORY_ISOLATION_MARKER),
+        "user B canonical memory response body leaked user A's memory marker: {body}"
+    );
+
+    harness
+        .runtime
+        .shutdown()
+        .await
+        .expect("runtime shutdown clean");
 }
 
 /// End-to-end: the agent writes a CSV and a PDF into its project workspace via

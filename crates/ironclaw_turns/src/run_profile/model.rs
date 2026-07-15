@@ -99,10 +99,12 @@ pub trait LoopModelBudgetAccountant: Send + Sync {
         .await
     }
 
-    /// Best-effort synchronous release of any in-flight reservation for this
-    /// run. Invoked from cancellation paths (parent task drop, timeout)
-    /// where awaiting [`Self::post_model_call`] is impossible. Default impl
-    /// is a no-op for accountants that do not hold per-run state.
+    /// Best-effort synchronous finalization of any in-flight reservation for
+    /// this run. Invoked from cancellation and failed post-accounting paths
+    /// where awaiting [`Self::post_model_call`] is impossible. Implementations
+    /// may release a cancelled reservation or retry reconciliation when actual
+    /// provider usage is already known. Default impl is a no-op for
+    /// accountants that do not hold per-run state.
     ///
     /// This is *the* cancellation-safety hook: when the model future is
     /// dropped mid-await, the surrounding port's [`Drop`] runs synchronously
@@ -124,8 +126,9 @@ pub struct LoopModelGatewayRequest {
 /// `AgentLoopHostErrorKind::CredentialUnavailable` means the host could not
 /// provide a scoped, non-reusable credential for the selected provider/model;
 /// callers must treat it as a host-owned credential acquisition failure, not as
-/// provider output. `AgentLoopHostErrorKind::BudgetExceeded` can also surface
-/// after a provider failure when post-call accounting/release fails closed.
+/// provider output. `AgentLoopHostErrorKind::BudgetAccountingFailed` can
+/// surface after a provider failure when post-call accounting/release fails
+/// closed; it is distinct from a provider or configured-budget exhaustion.
 pub struct LoopModelGatewayError {
     pub kind: AgentLoopHostErrorKind,
     pub safe_summary: LoopSafeSummary,
@@ -433,12 +436,11 @@ where
             .accountant
             .post_model_call(&self.context, &request, outcome)
             .await;
-        // Disarm only AFTER post_model_call returns. If we're past this
-        // line the in-flight entry is either reconciled, released, or
-        // retained on a storage error — in any of those cases the
-        // guard's Drop call would be a no-op against the same entry.
-        release_guard.disarm();
         if let Err(post_error) = post_result {
+            // Keep the guard armed when post-call accounting fails. Its Drop
+            // retries the exact retained terminal action (reconcile with known
+            // usage or release), rather than abandoning the reservation.
+            drop(release_guard);
             let host_error = post_error.into_host_error();
             if let Err(milestone_error) = self.milestones.model_failed(host_error.kind).await {
                 tracing::debug!(
@@ -449,6 +451,7 @@ where
             }
             return Err(host_error);
         }
+        release_guard.disarm();
 
         let response = match gateway_result {
             Ok(response) => response,
@@ -564,10 +567,9 @@ where
 ///
 /// On Drop, when still armed, the guard calls
 /// [`LoopModelBudgetAccountant::release_in_flight`] — a synchronous
-/// best-effort path that the accountant uses to drop the per-run reservation
-/// id and call `governor.release` without awaiting. Callers MUST `disarm()`
-/// the guard before delegating cleanup to the async `post_model_call` path,
-/// otherwise the release would fire twice.
+/// best-effort path that the accountant uses to finalize the retained action
+/// without awaiting. Callers disarm the guard only after the async
+/// `post_model_call` path succeeds.
 struct ReservationReleaseGuard<'a> {
     accountant: &'a dyn LoopModelBudgetAccountant,
     context: &'a LoopRunContext,

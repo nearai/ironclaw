@@ -1286,6 +1286,18 @@ registerPack("zh-CN", {
   "automations.detail.thread": "会话",
   "automations.filter.failures": "失败",
   "automations.filter.running": "运行中",
+  "automations.hold.approval": "等待您的批准",
+  "automations.hold.auth": "等待您重新连接账户",
+  "automations.hold.inProgress": "上一次运行仍在进行中",
+  "automations.hold.meta.inProgress":
+    "于{since}开始 · 下一次运行将在此次完成后开始 · 运行期间已过去 {count} 次计划执行时刻",
+  "automations.hold.meta.inProgressUnknownCount":
+    "于{since}开始 · 下一次运行将在此次完成后开始 · 已过去的计划执行次数不可用",
+  "automations.hold.meta.paused":
+    "自{since}起已暂停 · 暂停期间已过去 {count} 次计划执行时刻",
+  "automations.hold.meta.pausedUnknownCount":
+    "自{since}起已暂停 · 已过去的计划执行次数不可用",
+  "automations.hold.other": "上一次运行尚未完成",
   "automations.status.needsReview": "需要审核",
   "automations.status.running": "运行中",
   "automations.summary.failures": "失败",

@@ -370,6 +370,12 @@ impl<'a> PromptPlanningPipeline<'a> {
         let rendered_repeated_call_warning = final_bundle.rendered_repeated_call_warning();
 
         let (messages, inline_messages) = final_bundle.into_model_parts();
+        // Consume the one-shot completion-nudge flag: when set, its directive was
+        // injected into this iteration's prompt bundle by
+        // `build_prompt_bundle_for_surface` (with the full tool surface still
+        // available). Clearing here bounds the nudge to exactly this iteration and
+        // keeps a later model-error retry from re-injecting it.
+        self.state.completion_nudge_pending = false;
 
         Ok(PromptStep::Prepared(Box::new(PromptOutput {
             state: self.state,
@@ -712,6 +718,15 @@ pub(super) async fn build_prompt_bundle_for_surface(
         context_request
             .inline_messages
             .push(invalid_model_output_repair_control_message());
+    }
+    // Tools-capable completion nudge scheduled by the stop handling on the prior
+    // turn: inject its directive so the model finishes the task (e.g. writes a
+    // required output file) this iteration. The flag is consumed by
+    // `PromptStage::run` after the bundle is built.
+    if state.completion_nudge_pending {
+        context_request
+            .inline_messages
+            .push(super::completion_nudge_control_message()?);
     }
     let inline_messages = context_request.inline_messages.clone();
     let prompt_mode = context_request.mode;

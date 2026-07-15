@@ -1286,6 +1286,18 @@ registerPack("pt-BR", {
   "automations.detail.thread": "conversa",
   "automations.filter.failures": "Falhas",
   "automations.filter.running": "Em execução",
+  "automations.hold.approval": "Aguardando sua aprovação",
+  "automations.hold.auth": "Aguardando você reconectar uma conta",
+  "automations.hold.inProgress": "A execução anterior ainda está em andamento",
+  "automations.hold.meta.inProgress":
+    "Iniciado {since} · a próxima execução começa após esta terminar · {count} ocorrências programadas transcorreram enquanto esta execução estava em andamento",
+  "automations.hold.meta.inProgressUnknownCount":
+    "Iniciado {since} · a próxima execução começa após esta terminar · contagem de ocorrências programadas transcorridas indisponível",
+  "automations.hold.meta.paused":
+    "Pausado desde {since} · {count} ocorrências programadas transcorreram enquanto pausado",
+  "automations.hold.meta.pausedUnknownCount":
+    "Pausado desde {since} · contagem de ocorrências programadas transcorridas indisponível",
+  "automations.hold.other": "A execução anterior ainda não terminou",
   "automations.status.needsReview": "Precisa de revisão",
   "automations.status.running": "Em execução",
   "automations.summary.failures": "Falhas",
