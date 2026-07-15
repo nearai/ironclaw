@@ -276,6 +276,36 @@ test("ChatInput blocks Enter send from current DOM disabled state", async () => 
   assert.equal(sendCalls, 0);
 });
 
+test("ChatInput sends the latest text when Enter follows input before rerender", async () => {
+  const sentContents = [];
+  const { tree } = renderChatInput({
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "",
+    onSend: async (content) => {
+      sentContents.push(content);
+    },
+  });
+
+  const textarea = findNode(tree, (node) =>
+    node.strings.some((part) => part.includes("<textarea")),
+  );
+  const textareaProps = templateProps(textarea);
+
+  // Browser input updates the live value before React commits the next render.
+  // Enter in that window must submit the live value, not the stale render state.
+  textareaProps.onChange({ currentTarget: { value: "follow-up right away" } });
+  textareaProps.onKeyDown({
+    key: "Enter",
+    shiftKey: false,
+    preventDefault: () => {},
+  });
+  await flushAsyncHandlers();
+
+  assert.deepEqual(sentContents, ["follow-up right away"]);
+});
+
 test("ChatInput preserves draft when caller refuses send", async () => {
   const setCalls = [];
   let sendCalls = 0;
