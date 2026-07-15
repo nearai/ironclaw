@@ -27,6 +27,7 @@ export function GatewayLayout({
   isChecking = false,
   isAdmin,
   rebornProjectsEnabled = false,
+  workspaceRequiresScopedProjection = true,
   globalAutoApproveEnabled = false,
   onSignOut,
 }) {
@@ -171,6 +172,7 @@ export function GatewayLayout({
               gatewayStatus: status,
               gatewayStatusQuery: statusQuery,
               currentUser: profile,
+              workspaceRequiresScopedProjection,
               isChecking,
               isAdmin,
               globalAutoApproveEnabled,

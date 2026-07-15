@@ -83,6 +83,7 @@ function AuthenticatedLayout({ auth }) {
         isChecking={auth.isChecking}
         isAdmin={auth.isAdmin}
         rebornProjectsEnabled={auth.rebornProjectsEnabled}
+        workspaceRequiresScopedProjection={auth.workspaceRequiresScopedProjection}
         globalAutoApproveEnabled={auth.globalAutoApproveEnabled}
         onSignOut={auth.signOut}
       />

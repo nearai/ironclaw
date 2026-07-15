@@ -92,6 +92,7 @@ pub struct WebUiV2State {
     services: Arc<dyn RebornServicesApi>,
     sse_capacity: Arc<SseCapacity>,
     reborn_projects_enabled: bool,
+    workspace_requires_scoped_projection: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -108,6 +109,7 @@ impl WebUiV2State {
             services,
             sse_capacity: Arc::new(SseCapacity::new(max_concurrent_streams_per_caller)),
             reborn_projects_enabled: false,
+            workspace_requires_scoped_projection: false,
         }
     }
 
@@ -123,6 +125,20 @@ impl WebUiV2State {
 
     pub fn reborn_projects_enabled(&self) -> bool {
         self.reborn_projects_enabled
+    }
+
+    /// Deployment gate for WebUI workspace fallback behavior. Hosted
+    /// deployments set this so the browser fails closed instead of showing a
+    /// raw shared workspace root when a caller-specific workspace subtree has
+    /// not been created yet. Local development leaves it off so `/workspace`
+    /// remains browseable without tenant-shaped storage.
+    pub fn with_workspace_requires_scoped_projection(mut self, enabled: bool) -> Self {
+        self.workspace_requires_scoped_projection = enabled;
+        self
+    }
+
+    pub fn workspace_requires_scoped_projection(&self) -> bool {
+        self.workspace_requires_scoped_projection
     }
 
     pub fn services(&self) -> &Arc<dyn RebornServicesApi> {
