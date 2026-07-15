@@ -131,16 +131,8 @@ has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
-  "legacy e2e scenario" \
-  "tests/e2e/scenarios/test_live_flow.py" \
-  "docs_only=false
-has_core_code=true
-has_legacy_tests=true
-has_reborn_tests=false"
-
-assert_scope \
-  "mixed legacy and reborn root tests" \
-  "tests/e2e_live.rs
+  "mixed platform and reborn root tests" \
+  "tests/trace_format.rs
 tests/reborn_trace_first_party_tool_coverage.rs" \
   "docs_only=false
 has_core_code=true
@@ -148,8 +140,8 @@ has_legacy_tests=true
 has_reborn_tests=true"
 
 assert_scope \
-  "legacy root runtime" \
-  "src/agent/session.rs" \
+  "standalone helper crate" \
+  "crates/ironclaw_silk_decoder/src/main.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
@@ -220,7 +212,7 @@ has_legacy_tests=true
 has_reborn_tests=true"
 
 assert_scope \
-  "legacy code style workflow" \
+  "code style workflow" \
   ".github/workflows/code_style.yml" \
   "docs_only=false
 has_core_code=true
@@ -258,8 +250,8 @@ has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
-  "mixed legacy and reborn" \
-  "src/agent/session.rs
+  "mixed helper and reborn" \
+  "crates/ironclaw_silk_decoder/src/main.rs
 crates/ironclaw_reborn_composition/src/lib.rs" \
   "docs_only=false
 has_core_code=true

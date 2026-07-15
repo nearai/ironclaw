@@ -120,11 +120,11 @@ ENV HOME=/home/ironclaw \
     IRONCLAW_REBORN_SERVE_HOST=127.0.0.1
 
 RUN useradd -m -d /home/ironclaw -u 1000 ironclaw \
-    && mkdir -p /data/ironclaw-reborn /workspace \
+    && mkdir -p /home/ironclaw/.ironclaw /data/ironclaw-reborn /workspace \
     && chown -R ironclaw:ironclaw /home/ironclaw /data/ironclaw-reborn /workspace \
     && chmod +x /usr/local/bin/ironclaw-reborn-entrypoint
 
-WORKDIR /workspace
+WORKDIR /home/ironclaw
 
 EXPOSE 3000
 

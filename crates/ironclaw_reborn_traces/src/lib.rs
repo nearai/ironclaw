@@ -3,8 +3,7 @@
 //! This crate holds the trace contribution pipeline (`contribution`), the
 //! host-facing trace client (`client`), the redaction helpers used to scrub
 //! sensitive JSON before submission (`redaction`), and the shared
-//! `ConversationMessage` type that the legacy monolith's `history` module now
-//! re-exports for backward compatibility.
+//! `ConversationMessage` type used by historical trace payloads.
 
 pub mod client;
 pub mod contribution;

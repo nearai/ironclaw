@@ -3,6 +3,8 @@ set -euo pipefail
 
 has_core_code=false
 docs_only=true
+# Historical output name retained for workflow compatibility. The value now
+# means platform/compatibility lanes are in scope; the v1 test suite is gone.
 has_legacy_tests=false
 has_reborn_tests=false
 
@@ -27,13 +29,13 @@ is_docs_only_path() {
 is_shared_test_path() {
   local path="$1"
   case "$path" in
-    Cargo.toml|Cargo.lock|build.rs|providers.json|Dockerfile)
+    Cargo.toml|Cargo.lock|providers.json|Dockerfile)
       return 0
       ;;
     scripts/ci/classify-test-scope.sh|scripts/ci/test-classify-test-scope.sh|scripts/ci/package-feature-flags.sh)
       return 0
       ;;
-    .github/workflows/test.yml|.github/workflows/reborn-tests.yml|.github/workflows/reborn-e2e.yml|.github/workflows/nightly-deep-ci.yml)
+    .github/workflows/platform-and-compat.yml|.github/workflows/reborn-tests.yml|.github/workflows/reborn-e2e.yml|.github/workflows/nightly-deep-ci.yml)
       return 0
       ;;
     crates/ironclaw_common/*|crates/ironclaw_host_api/*|crates/ironclaw_host_runtime/*|crates/ironclaw_loop_host/*)
@@ -54,7 +56,7 @@ is_shared_test_path() {
     crates/ironclaw_prompt_envelope/*|crates/ironclaw_hooks/*|crates/ironclaw_first_party_extensions/*|crates/ironclaw_llm/*)
       return 0
       ;;
-    crates/ironclaw_embeddings/*|crates/ironclaw_safety/*|crates/ironclaw_skills/*|crates/ironclaw_oauth/*)
+    crates/ironclaw_safety/*|crates/ironclaw_skills/*|crates/ironclaw_oauth/*)
       return 0
       ;;
     *)
@@ -96,13 +98,13 @@ is_reborn_test_path() {
 is_code_path() {
   local path="$1"
   case "$path" in
-    src/*|crates/*|channels-src/*|tools-src/*|tests/*|migrations/*)
+    crates/*|channels-src/*|tools-src/*|tests/*|migrations/*)
       return 0
       ;;
-    Cargo.toml|Cargo.lock|Dockerfile|build.rs|providers.json)
+    Cargo.toml|Cargo.lock|Dockerfile|providers.json)
       return 0
       ;;
-    scripts/check_no_panics.py|scripts/check_gateway_boundaries.py|scripts/build-wasm-extensions.sh|scripts/check-version-bumps.sh|scripts/reborn-e2e-rust.sh|scripts/ci/*)
+    scripts/check_no_panics.py|scripts/build-wasm-extensions.sh|scripts/check-version-bumps.sh|scripts/reborn-e2e-rust.sh|scripts/ci/*)
       return 0
       ;;
     .github/workflows/*.yml|.github/actions/install-cargo-component/*|.github/dependabot.yml|.github/labeler.yml)

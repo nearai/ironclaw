@@ -93,11 +93,8 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 | `ironclaw_product_adapter_registry` | `ironclaw_product_adapter_registry` | ProductAdapter host-api projection and installation registry. |
 | `ironclaw_product_workflow` | `ironclaw_product_workflow` | Product-facing workflow facade: inbound turn service, idempotency ledger, binding resolution. |
 | `ironclaw_product_workflow` | `ironclaw_product_workflow` | Product-facing workflow facade plus feature-gated durable filesystem/libSQL/PostgreSQL idempotency ledger adapters. |
-| `ironclaw_engine` | `ironclaw_engine` | Unified thread-capability-CodeAct execution engine. It is closer to product/agent orchestration than low-level host policy. |
 | `ironclaw_skills` | `ironclaw_skills` | Skill selection, scoring, and management. |
-| `ironclaw_gateway` | `ironclaw_gateway` | Browser gateway frontend assets, layout configuration, and widget extension system. |
 | `ironclaw_webui_v2` | `ironclaw_webui_v2` | Reborn WebChat v2 HTTP route surface and route descriptors. Off by default; enable with `webui-v2-beta`. |
-| `ironclaw_tui` | `ironclaw_tui` | Modular Ratatui-based terminal UI. |
 | `ironclaw_telegram_v2_adapter` | `ironclaw_telegram_v2_adapter` | Telegram v2 channel adapter for the Reborn product surface. Maps Telegram traffic into Reborn capability and turn contracts. |
 | `ironclaw_silk_decoder` | `ironclaw_silk_decoder` | Standalone WeChat `audio/silk` decoder helper. Excluded from the default workspace build; needs `libclang` and a C toolchain. |
 
@@ -111,14 +108,14 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 - **Hook behavior or prompt snippet trust labeling**: use `ironclaw_hooks` for hook contracts/dispatch and `ironclaw_prompt_envelope` for model-facing snippet wrapping.
 - **Extension lifecycle (install/activate/remove)**: use `ironclaw_extensions`; do not parse manifests or reimplement registration in runtime or UI crates.
 - **Reborn composition or boot config**: use `ironclaw_reborn_composition` and `ironclaw_reborn_config`; keep `main.rs`/CLI entry points thin.
-- **LLM provider routing**: use `ironclaw_llm`; do not wire provider clients directly into engine or gateway crates.
+- **LLM provider routing**: use `ironclaw_llm`; do not wire provider clients directly into product workflow or UI crates.
 - **Channel adapters (e.g., Telegram)**: use the channel adapter crate (`ironclaw_telegram_v2_adapter`); keep authority in lower host crates.
 - **Durable event history**: use `ironclaw_events` for contracts and `ironclaw_reborn_event_store` for backend adapters.
 - **Current invocation state**: use `ironclaw_run_state`, not event logs.
 - **User-visible read models and live projection streams**: prefer `ironclaw_event_projections`, `ironclaw_event_streams`, or `ironclaw_product_adapters` over parsing storage rows in UI code.
 - **Product workflow persistence**: keep orchestration and durable ledger adapters in `ironclaw_product_workflow`; concrete adapters stay behind the `storage`/`libsql`/`postgres` features and the `IdempotencyLedger` port.
-- **Agent loop/product orchestration**: use `ironclaw_agent_loop`, `ironclaw_loop_host`, `ironclaw_turns`, `ironclaw_engine`, or `ironclaw_runner` depending on layer.
-- **Web or terminal UI**: use `ironclaw_gateway`, `ironclaw_webui_v2`, `ironclaw_reborn_webui_ingress`, or `ironclaw_tui`; keep authority and persistence in lower crates.
+- **Agent loop/product orchestration**: use `ironclaw_agent_loop`, `ironclaw_loop_host`, `ironclaw_turns`, or `ironclaw_runner` depending on layer.
+- **Web UI**: use `ironclaw_webui_v2`, `ironclaw_webui_v2_static`, or `ironclaw_reborn_webui_ingress`; keep authority and persistence in lower crates.
 
 ## Boundary rules
 

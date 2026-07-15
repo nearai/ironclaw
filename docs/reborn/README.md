@@ -35,7 +35,7 @@ This repo exposes Reborn structure primarily through implementation crates, crat
 | Script runtime lane and host HTTP adapter | `crates/ironclaw_scripts/` |
 | MCP runtime lane and host-mediated HTTP/fail-closed process policy | `crates/ironclaw_mcp/` |
 | Replay fixtures | `tests/fixtures/llm_traces/README.md` |
-| Replay workflow | `.github/workflows/replay-gate.yml` |
+| Replay/trace validation | `reborn-tests.yml`, `reborn-e2e.yml`, and Reborn trace fixtures |
 | E2E test harness | `tests/e2e/README.md` |
 | Live/replay testing guide | `tests/support/LIVE_TESTING.md` |
 
@@ -76,11 +76,11 @@ Reborn should reuse the existing IronClaw harness where possible:
 - `scripts/replay-snap.sh`
 - `tests/fixtures/llm_traces/README.md`
 - `tests/support/LIVE_TESTING.md`
-- `.github/workflows/replay-gate.yml`
-- `.github/workflows/e2e.yml`
+- `.github/workflows/reborn-tests.yml`
+- `.github/workflows/reborn-e2e.yml`
+- `.github/workflows/reborn-playwright.yml`
 - `.github/workflows/live-canary.yml`
 - `scripts/check-boundaries.sh`
-- `scripts/check_gateway_boundaries.py`
 - `scripts/check_no_panics.py`
 
 ## Harness principles

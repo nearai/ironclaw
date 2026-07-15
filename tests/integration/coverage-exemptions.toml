@@ -18,20 +18,6 @@
 #   reason = "why this whole crate is out of scope for this report"
 #   issue  = "https://github.com/nearai/ironclaw/issues/5657"   # required: tracking issue
 
-# Three crates below are v1-only (consumed exclusively by root `ironclaw`, no
-# crates/*/Cargo.toml dependents); already covered by .github/workflows/test.yml ("Tests (Legacy)"). Tracked by #5657.
-
-[[exemption]]
-crate  = "ironclaw_embeddings"
-reason = "v1-only: consumed only by root `ironclaw` (src/app.rs, src/tools/builtin/memory.rs, src/workspace/mod.rs, src/config/{mod,embeddings}.rs); no crates/* dependents. Covered by \"Tests (Legacy)\"."
-issue  = "https://github.com/nearai/ironclaw/issues/5657"
-
-[[exemption]]
-crate  = "ironclaw_gateway"
-reason = "v1-only: consumed only by root `ironclaw` (src/channels/web/platform/static_files.rs, src/channels/web/handlers/frontend.rs); no crates/* dependents. Covered by \"Tests (Legacy)\"."
-issue  = "https://github.com/nearai/ironclaw/issues/5657"
-
-[[exemption]]
-crate  = "ironclaw_tui"
-reason = "v1-only: consumed only by root `ironclaw` (src/main.rs, src/channels/tui.rs); no crates/* dependents. Crate's own doc comment confirms it bridges INTO v1, not Reborn. Covered by \"Tests (Legacy)\"."
-issue  = "https://github.com/nearai/ironclaw/issues/5657"
+# No crate-wide exemptions are active. Retired v1-only crates were deleted
+# together with the root v1 package instead of remaining as coverage-exempt
+# workspace members.

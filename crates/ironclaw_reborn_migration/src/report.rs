@@ -9,9 +9,6 @@
 
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "full-migration")]
-use ironclaw_host_api::UserId;
-
 /// The domain a converted item or a loss belongs to. Keeps report entries
 /// grouped and greppable rather than free-text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,36 +108,6 @@ impl MigrationReport {
             reason,
             detail: detail.into(),
         });
-    }
-
-    /// Validate a source user id, returning the Reborn [`UserId`] or recording an
-    /// [`LossReason::Unparseable`] loss and returning `None` when it is invalid.
-    ///
-    /// Shared by every converter that scopes a record to a per-user `UserId`
-    /// (threads owner, secrets, memory docs, identities, routines, missions) so
-    /// the "validate → skip + record" shape has a single definition and cannot
-    /// drift between copies.
-    #[cfg(feature = "full-migration")]
-    pub(crate) fn valid_user_id(
-        &mut self,
-        domain: Domain,
-        source_id: impl Into<String>,
-        field: &'static str,
-        raw_user_id: &str,
-    ) -> Option<UserId> {
-        match UserId::new(raw_user_id) {
-            Ok(user) => Some(user),
-            Err(e) => {
-                self.record_loss(
-                    domain,
-                    source_id,
-                    field,
-                    LossReason::Unparseable,
-                    format!("source {field} is not a valid Reborn UserId (record skipped): {e}"),
-                );
-                None
-            }
-        }
     }
 
     /// Count of losses for a given domain — used by tests and summaries.

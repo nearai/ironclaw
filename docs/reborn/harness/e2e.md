@@ -138,7 +138,7 @@ pytest scenarios/test_reborn_gateway_smoke.py -v --timeout=120
 
 ## CI ownership
 
-`reborn-e2e.yml` is intentionally separate from `e2e.yml`:
+`reborn-e2e.yml` is intentionally focused on Reborn:
 
 - Reborn changes can run a focused architecture gate without destabilizing the main browser E2E matrix.
 - The workflow is advisory by default and intentionally does not run on `merge_group`; add a merge-queue trigger only after the gate proves stable and is deliberately promoted to branch protection.

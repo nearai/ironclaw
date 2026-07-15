@@ -13,7 +13,7 @@ Current branch-local harness assets include:
 - E2E scenarios under `tests/e2e/scenarios/`;
 - replay fixtures under `tests/fixtures/llm_traces/`;
 - live/replay test guide at `tests/support/LIVE_TESTING.md`;
-- replay workflow at `.github/workflows/replay-gate.yml`.
+- Reborn replay/trace coverage in `reborn-tests.yml` and `reborn-e2e.yml`.
 
 ## Goals
 
@@ -65,7 +65,7 @@ Rules:
 A complete Reborn local harness should be able to start or simulate:
 
 - Reborn host/runtime composition;
-- web gateway;
+- Reborn WebUI ingress;
 - fake or trace LLM provider;
 - fake embedding provider;
 - deterministic MCP fixture;

@@ -63,6 +63,9 @@ jobs:
       has_wasm_abi_risk: ${{ steps.non_diff.outputs.has_wasm_abi_risk || steps.diff.outputs.has_wasm_abi_risk }}
       has_telegram_risk: ${{ steps.non_diff.outputs.has_telegram_risk || steps.diff.outputs.has_telegram_risk }}
       has_slack_risk: ${{ steps.non_diff.outputs.has_slack_risk || steps.diff.outputs.has_slack_risk }}
+      # Historical output name retained for downstream workflow compatibility.
+      # It now means "platform/compatibility test lanes are in scope"; v1 tests
+      # and the root src/ tree have been retired.
       has_legacy_tests: ${{ steps.non_diff.outputs.has_legacy_tests || steps.diff.outputs.has_legacy_tests }}
       has_docker_risk: ${{ steps.non_diff.outputs.has_docker_risk || steps.diff.outputs.has_docker_risk }}
     steps:
@@ -108,20 +111,20 @@ jobs:
 
           printf '%s\n' "$CHANGED_FILES" | scripts/ci/classify-test-scope.sh >> "$GITHUB_OUTPUT"
 
-          if has_match '^(crates/ironclaw_(common|safety|skills)/|src/(agent|auth|bridge|config|context|db|extensions|gate|history|hooks|orchestrator|ownership|pairing|safety|sandbox|secrets|setup|skills|tools|webhooks|worker|workspace)/|src/channels/channel\.rs$|src/channels/manager\.rs$|src/channels/relay/|src/channels/wasm/|channels-src/telegram/|migrations/|src/app\.rs$|src/main\.rs$|src/lib\.rs$|tests/telegram_auth_integration\.rs$|tests/e2e_thread_scheduling\.rs$|\.github/workflows/(test|nightly-deep-ci)\.yml$)'; then
+          if has_match '^(crates/ironclaw_(common|safety|skills|host_runtime|loop_host|runner|agent_loop|turns|threads|capabilities|dispatcher|resources|authorization|approvals|run_state|runtime_policy|hooks|llm|reborn_|product_|webui_v2|webui_v2_static|reborn_webui_ingress)/|channels-src/|migrations/|tests/reborn_.*\.rs$|tests/integration/|tests/e2e/reborn_|tests/e2e/scenarios/test_(reborn|v2)_|\.github/workflows/(platform-and-compat|reborn-tests|reborn-e2e|nightly-deep-ci)\.yml$)'; then
             echo "has_runtime_heavy_risk=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_runtime_heavy_risk=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if has_match '^(src/(auth|bridge|extensions|ownership|pairing|secrets|webhooks|workspace)/|src/channels/web/|crates/ironclaw_gateway/|src/channels/attachments\.rs$|tests/e2e/|tests/fixtures/gateway_traces/|tests/test-pages/|scripts/check_gateway_boundaries\.py$|\.github/workflows/(e2e|test|nightly-deep-ci)\.yml$)'; then
+          if has_match '^(crates/ironclaw_(webui_v2|webui_v2_static|reborn_webui_ingress|reborn_composition|product_workflow)/|tests/e2e/|tests/fixtures/gateway_traces/|tests/test-pages/|\.github/workflows/(reborn-e2e|reborn-playwright|nightly-deep-ci)\.yml$)'; then
             echo "has_web_risk=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_web_risk=false" >> "$GITHUB_OUTPUT"
           fi
 
           has_direct_wasm_abi_risk=false
-          if has_match '^(wit/|crates/ironclaw_common/|crates/ironclaw_first_party_extensions/assets/.*/(manifest\.toml|wasm-src/)|src/(channels/wasm|extensions|registry|tools/mcp|tools/wasm)/|channels-src/|tools-src/|registry/|scripts/build-wasm-extensions\.sh$|scripts/check-version-bumps\.sh$|tests/wit_compat\.rs$|tests/wasm_channel_integration\.rs$|tests/e2e_wasm_.*|\.github/workflows/(platform-and-compat|test|nightly-deep-ci)\.yml$)'; then
+          if has_match '^(wit/|crates/ironclaw_common/|crates/ironclaw_(wasm|wasm_product_adapters|first_party_extensions|mcp|extensions)/|crates/ironclaw_first_party_extensions/assets/.*/(manifest\.toml|wasm-src/)|channels-src/|tools-src/|registry/|scripts/build-wasm-extensions\.sh$|scripts/check-version-bumps\.sh$|\.github/workflows/(platform-and-compat|nightly-deep-ci)\.yml$)'; then
             has_direct_wasm_abi_risk=true
           fi
           echo "has_direct_wasm_abi_risk=$has_direct_wasm_abi_risk" >> "$GITHUB_OUTPUT"
@@ -132,13 +135,13 @@ jobs:
             echo "has_wasm_abi_risk=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if has_match '^(channels-src/telegram/|src/channels/wasm/|tests/telegram_auth_integration\.rs$|tests/e2e_telegram_message_routing\.rs$|tests/e2e/scenarios/test_telegram_.*|\.github/workflows/(test|nightly-deep-ci)\.yml$)'; then
+          if has_match '^(channels-src/telegram/|crates/ironclaw_telegram_v2_adapter/|tests/e2e/scenarios/test_telegram_.*|\.github/workflows/(platform-and-compat|reborn-e2e|nightly-deep-ci)\.yml$)'; then
             echo "has_telegram_risk=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_telegram_risk=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if has_match '^(channels-src/slack/|src/channels/wasm/|tests/slack_auth_integration\.rs$|\.github/workflows/(test|nightly-deep-ci)\.yml$)'; then
+          if has_match '^(channels-src/slack/|crates/ironclaw_slack_v2_adapter/|tests/e2e/scenarios/test_slack_.*|\.github/workflows/(platform-and-compat|reborn-e2e|nightly-deep-ci)\.yml$)'; then
             echo "has_slack_risk=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_slack_risk=false" >> "$GITHUB_OUTPUT"
@@ -220,7 +223,7 @@ jobs:
         # event-conditional SLIM/FULL indirection.
         include:
           - name: all-features
-            flags: "--no-default-features --features postgres,libsql,html-to-markdown,bedrock,import"
+            flags: "--all-features"
           - name: default
             flags: ""
           - name: libsql-only
@@ -243,7 +246,7 @@ jobs:
   wasm-wit-compat:
     name: WASM WIT Compatibility
     needs: changes
-    # WIT and registry paths are outside the shared legacy-test classifier;
+    # WIT and registry paths are outside the shared platform-test classifier;
     # the event-specific WASM risk outputs are authoritative for this job.
     if: >
       needs.changes.outputs.docs_only != 'true' &&
@@ -298,7 +301,11 @@ jobs:
       - name: Instantiation test (host linker compatibility)
         run: |
           timeout --signal=INT --kill-after=30s 20m \
-            cargo test --all-features --test wit_compat -- --nocapture
+            cargo test -p ironclaw_wasm --all-features \
+              --test wit_tool_runtime_contract \
+              --test wasm_dispatch_integration \
+              --test wasm_http_adapter_contract \
+              -- --nocapture
 
   bench-compile:
     name: Benchmark Compilation

@@ -7,7 +7,6 @@ on:
       - Tests (Reborn)
       - Reborn E2E
       - Platform & Compat
-      - Replay Snapshot Gate
       - Code Coverage
       - nearai-bench dispatcher tests
       - Release-plz

@@ -18,9 +18,6 @@
 #  11. Architecture sprawl smoke alarms without arch-exempt tracking plan
 #  12. Unscoped SSE broadcast in multi-tenant-reachable code
 #
-# Also runs check-i18n-parity.sh when crates/ironclaw_gateway/static/i18n/*.js
-# files are staged, to ensure every language pack has the same key set.
-#
 # Suppress individual lines with an inline "// safety: <reason>" comment.
 # For check #7, use "// dispatch-exempt: <reason>" instead.
 # For check #8, use "// web-identity-exempt: <reason>" instead.
@@ -31,7 +28,6 @@
 set -euo pipefail
 
 TEST_BOUNDARIES_FILE=""
-GATEWAY_APP_JS_TMP=""
 
 # Determine a suitable base ref for standalone diffs.
 resolve_base_ref() {
@@ -56,82 +52,6 @@ resolve_base_ref() {
     exit 1
 }
 
-# i18n parity: when any language pack changes, all languages must stay in sync.
-# Run before the .rs-focused checks so it fires even when no .rs files change.
-if git diff --cached --quiet 2>/dev/null; then
-    HAS_STAGED_CHANGES=0
-    I18N_CHANGED=$(git diff --name-only -- 'crates/ironclaw_gateway/static/i18n/*.js' 2>/dev/null || true)
-    GATEWAY_APP_JS_CHANGED=$(git diff --name-only -- 'crates/ironclaw_gateway/static/js/' 2>/dev/null || true)
-else
-    HAS_STAGED_CHANGES=1
-    I18N_CHANGED=$(git diff --cached --name-only -- 'crates/ironclaw_gateway/static/i18n/*.js' 2>/dev/null || true)
-    GATEWAY_APP_JS_CHANGED=$(git diff --cached --name-only -- 'crates/ironclaw_gateway/static/js/' 2>/dev/null || true)
-fi
-if [ -n "$I18N_CHANGED" ]; then
-    # Resolve script location even when invoked via a symlink (the
-    # pre-commit hook is typically a symlink at .git/hooks/pre-commit
-    # pointing to this file in scripts/). Walk symlinks until we find the
-    # real path, then use its parent directory.
-    SOURCE="${BASH_SOURCE[0]:-$0}"
-    while [ -L "$SOURCE" ]; do
-        LINK_TARGET="$(readlink "$SOURCE")"
-        case "$LINK_TARGET" in
-            /*) SOURCE="$LINK_TARGET" ;;
-            *)  SOURCE="$(cd "$(dirname "$SOURCE")" && pwd)/$LINK_TARGET" ;;
-        esac
-    done
-    SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
-    if ! "$SCRIPT_DIR/check-i18n-parity.sh"; then
-        echo ""
-        echo "Commit blocked: i18n parity check failed."
-        echo "Every key added to en.js must also be added to all other language files (zh-CN.js, ko.js, ...)."
-        echo "Placeholder tokens like {name} must match across all languages."
-        echo "To bypass: git commit --no-verify"
-        exit 1
-    fi
-fi
-
-# Gateway frontend JS must parse cleanly; a syntax error in any split
-# module leaves the auth shell visible and prevents bootstrap from running.
-# The monolithic `app.js` was split into per-surface/per-concern modules
-# under `static/js/` that are concatenated at compile time into a single
-# `APP_JS` constant (see `crates/ironclaw_gateway/src/assets.rs`). Cuts
-# land on top-level symbol boundaries, so each file is self-parseable —
-# a per-file `node --check` is sufficient.
-if [ -n "$GATEWAY_APP_JS_CHANGED" ]; then
-    if ! command -v node >/dev/null 2>&1; then
-        echo ""
-        echo "Commit blocked: Node.js is required to validate gateway JS syntax."
-        echo "Install Node.js and rerun the commit, or bypass with git commit --no-verify"
-        exit 1
-    fi
-
-    GATEWAY_JS_TMP=$(mktemp "${TMPDIR:-/tmp}/gateway-js.XXXXXX.js")
-    trap 'rm -f "${TEST_BOUNDARIES_FILE:-}" "${GATEWAY_JS_TMP:-}"' EXIT
-    FAILED=0
-    while IFS= read -r f; do
-        [ -z "$f" ] && continue
-        # Only validate files still present (skip deletes).
-        if [ "$HAS_STAGED_CHANGES" -eq 1 ]; then
-            git show ":$f" > "$GATEWAY_JS_TMP" 2>/dev/null || continue
-        else
-            [ -f "$f" ] || continue
-            cp "$f" "$GATEWAY_JS_TMP"
-        fi
-        if ! node --check "$GATEWAY_JS_TMP" >/dev/null 2>&1; then
-            echo "  ✗ syntax error: $f"
-            FAILED=1
-        fi
-    done <<<"$GATEWAY_APP_JS_CHANGED"
-
-    if [ "$FAILED" -eq 1 ]; then
-        echo ""
-        echo "Commit blocked: one or more gateway JS modules failed syntax validation."
-        echo "Fix the parse error(s) above or bypass with git commit --no-verify"
-        exit 1
-    fi
-fi
-
 # Support both pre-commit hook (staged files) and standalone (all changed vs base)
 if git diff --cached --quiet 2>/dev/null; then
     # No staged changes -- compare working tree against a resolved base ref
@@ -154,7 +74,7 @@ fi
 # for tiny edits inside a known test fn — and never for brand-new files added
 # in a merge. Reading the file directly catches both cases.
 TEST_BOUNDARIES_FILE=$(mktemp)
-trap 'rm -f "${TEST_BOUNDARIES_FILE:-}" "${GATEWAY_APP_JS_TMP:-}"' EXIT
+    trap 'rm -f "${TEST_BOUNDARIES_FILE:-}"' EXIT
 for f in $CHANGED_FILES; do
     [ -f "$f" ] || continue
     test_line=$(awk '
@@ -235,6 +155,12 @@ strip_test_mod_lines() {
 DIFF_OUTPUT_NO_TESTS=$(printf '%s\n' "$DIFF_OUTPUT" | strip_test_mod_lines)
 
 WARNINGS=0
+
+if git diff --cached --quiet 2>/dev/null; then
+    HAS_STAGED_CHANGES=0
+else
+    HAS_STAGED_CHANGES=1
+fi
 
 warn() {
     if [ "$WARNINGS" -eq 0 ]; then
