@@ -211,6 +211,7 @@ fn retired_v1_runtime_stays_removed() {
     );
 
     for retired_dir in [
+        "crates/ironclaw_engine",
         "crates/ironclaw_gateway",
         "crates/ironclaw_tui",
         "crates/ironclaw_embeddings",
@@ -240,7 +241,11 @@ fn retired_v1_runtime_stays_removed() {
             };
             if matches!(
                 dependency_name,
-                "ironclaw" | "ironclaw_gateway" | "ironclaw_tui" | "ironclaw_embeddings"
+                "ironclaw"
+                    | "ironclaw_engine"
+                    | "ironclaw_gateway"
+                    | "ironclaw_tui"
+                    | "ironclaw_embeddings"
             ) {
                 forbidden_deps.push(format!("{name} -> {dependency_name}"));
             }
