@@ -559,6 +559,51 @@ fn google_oauth_route_config() -> GoogleOAuthRouteConfig {
     .expect("google oauth route config")
 }
 
+/// Build the app while KEEPING the backing auth services handle, so a test can
+/// inspect the durable flow records both start routes produced.
+fn build_app_with_shared_google_oauth(
+    installed_package_ids: &[&str],
+) -> (axum::Router, Arc<InMemoryAuthProductServices>) {
+    let shared = Arc::new(InMemoryAuthProductServices::new());
+    let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+        shared.clone(),
+        Arc::new(RecordingAuthDispatcher::default()),
+    ));
+    (
+        build_app_with_product_auth_service_config_and_extensions(
+            product_auth,
+            Some(google_oauth_route_config()),
+            installed_package_ids,
+        ),
+        shared,
+    )
+}
+
+fn live_flows_for_provider(
+    shared: &InMemoryAuthProductServices,
+    provider: &str,
+) -> Vec<ironclaw_auth::AuthFlowRecord> {
+    shared
+        .flow_records_snapshot()
+        .into_iter()
+        .filter(|flow| {
+            flow.provider.as_str() == provider && !ironclaw_auth::is_terminal_status(flow.status)
+        })
+        .collect()
+}
+
+fn flow_status_by_id(
+    shared: &InMemoryAuthProductServices,
+    flow_id: &str,
+) -> ironclaw_auth::AuthFlowStatus {
+    shared
+        .flow_records_snapshot()
+        .into_iter()
+        .find(|flow| flow.id.to_string() == flow_id)
+        .expect("flow record")
+        .status
+}
+
 fn build_app_with_google_oauth() -> (axum::Router, Arc<RecordingAuthDispatcher>) {
     let dispatcher = Arc::new(RecordingAuthDispatcher::default());
     let product_auth = Arc::new(RebornProductAuthServices::from_shared(
@@ -2325,4 +2370,95 @@ mod slack_personal_oauth_serve {
             "raw state must not be echoed: {body}"
         );
     }
+}
+
+/// Open → close → re-open. The user opens the "Connect" popup, closes it
+/// without authorizing, and clicks Connect again — three times. Each re-open
+/// must supersede the prior setup flow so exactly ONE live authorization
+/// request remains for the owner+provider; otherwise every abandoned popup
+/// leaves another live `AwaitingUser` flow racing to write the same credential
+/// (RFC 9700 §4.7.1).
+///
+/// Drives BOTH start routes through the composed router, because the fix lands
+/// at the seam they share (`start_setup_oauth_flow`) and both must benefit:
+/// the plain connect route (`SetupOnly`) and the extension-card connect route
+/// (`LifecycleActivation`). Supersede is per-provider, so neither disturbs the
+/// other's live flow.
+#[tokio::test]
+async fn open_close_reopen_supersedes_prior_setup_flow_across_both_start_routes() {
+    let (app, shared) = build_app_with_shared_google_oauth(&["google-calendar"]);
+
+    // --- Plain connect route: three opens for the same owner+provider. ---
+    let mut github_flow_ids = Vec::new();
+    for attempt in 0..3 {
+        let started = start_oauth_flow(
+            &app,
+            &format!("opaque-state-{attempt}"),
+            &format!("pkce-verifier-value-{attempt}"),
+            json!({ "session_id": "web-session-reopen", "thread_id": "thread-reopen" }),
+        )
+        .await;
+        github_flow_ids.push(started.flow_id);
+    }
+
+    let live_github = live_flows_for_provider(&shared, "github");
+    assert_eq!(
+        live_github.len(),
+        1,
+        "each re-opened connect popup must supersede the prior setup flow, leaving one live flow"
+    );
+    assert_eq!(
+        live_github[0].id.to_string(),
+        github_flow_ids[2],
+        "the surviving live flow must be the most recent start"
+    );
+    for superseded in &github_flow_ids[..2] {
+        assert_eq!(
+            flow_status_by_id(&shared, superseded),
+            ironclaw_auth::AuthFlowStatus::Canceled,
+            "an abandoned prior setup flow must be canceled, not left live"
+        );
+    }
+
+    // --- Extension-card connect route: three opens, LifecycleActivation. ---
+    let mut google_flow_ids = Vec::new();
+    for _ in 0..3 {
+        let response = post_extension_oauth_start(
+            &app,
+            "google-calendar",
+            json!({
+                "provider": "google",
+                "account_label": "work google",
+                "invocation_id": InvocationId::new().to_string(),
+                "scopes": [GOOGLE_CALENDAR_READONLY_SCOPE],
+                "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_body_string(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).expect("start json");
+        google_flow_ids.push(json["flow_id"].as_str().expect("flow id").to_string());
+    }
+
+    let live_google = live_flows_for_provider(&shared, "google");
+    assert_eq!(
+        live_google.len(),
+        1,
+        "the extension-card connect route mints LifecycleActivation and must supersede too"
+    );
+    assert_eq!(live_google[0].id.to_string(), google_flow_ids[2]);
+    for superseded in &google_flow_ids[..2] {
+        assert_eq!(
+            flow_status_by_id(&shared, superseded),
+            ironclaw_auth::AuthFlowStatus::Canceled
+        );
+    }
+
+    // Supersede is provider-scoped: the github flow survived the google starts.
+    assert_eq!(
+        live_flows_for_provider(&shared, "github").len(),
+        1,
+        "a start for one provider must not cancel another provider's live flow"
+    );
 }

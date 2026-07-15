@@ -520,6 +520,37 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         Ok(record.clone())
     }
 
+    async fn cancel_superseded_setup_flows(
+        &self,
+        scope: &crate::AuthProductScope,
+        provider: &crate::AuthProviderId,
+    ) -> Result<Vec<AuthFlowId>, AuthProductError> {
+        // Owner granularity (tenant/user/agent/project + surface + session):
+        // setup flows are thread-less and each re-opened connect popup mints a
+        // fresh invocation, so `flow_shares_setup_owner_root` — not full scope
+        // equality — is the correct predicate here, mirroring the durable
+        // store's per-owner+surface+session flow-root listing. Records are
+        // mutated in place rather than routed through `cancel_flow`, whose
+        // full-scope check would reject the prior invocation's scope.
+        let now = Utc::now();
+        let mut state = self.lock_state();
+        let mut superseded = Vec::new();
+        for record in state.flows.values_mut() {
+            if crate::flow_shares_setup_owner_root(&record.scope, scope)
+                && &record.provider == provider
+                && crate::is_setup_class_continuation(&record.continuation)
+                && !crate::is_terminal_status(record.status)
+            {
+                record.status = AuthFlowStatus::Canceled;
+                record.error = Some(crate::AuthErrorCode::Canceled);
+                record.updated_at = now;
+                superseded.push(record.id);
+            }
+        }
+        superseded.sort();
+        Ok(superseded)
+    }
+
     async fn mark_continuation_dispatched(
         &self,
         scope: &crate::AuthProductScope,
