@@ -117,6 +117,10 @@ const CONNECT_GMAIL: QaPhrase = QaPhrase {
     fixture: "connect_gmail",
     phrase: "connect to Gmail",
 };
+const FIX_CI_HOLONEAR: QaPhrase = QaPhrase {
+    fixture: "fix_ci_holonear",
+    phrase: "fix ci in https://github.com/nearai/holonear/pull/1636",
+};
 
 const SLACK_CHANNEL_MEMBERSHIP_FIXTURE: &str = "slack_channel_membership";
 const SLACK_RECENT_MESSAGE_FIXTURE: &str = "slack_recent_message";
@@ -144,6 +148,7 @@ recorder_test!(record_web_status_check, WEB_STATUS_CHECK);
 recorder_test!(record_web_release_summary, WEB_RELEASE_SUMMARY);
 recorder_test!(record_web_hn_search, WEB_HN_SEARCH);
 recorder_test!(record_connect_gmail, CONNECT_GMAIL);
+recorder_test!(record_fix_ci_holonear, FIX_CI_HOLONEAR);
 
 // --- Tier 2: fixture contracts (hermetic) -----------------------------------
 
