@@ -316,6 +316,7 @@ pub(crate) fn parse_v3(
     if let Some(mcp) = &mcp {
         let raw_capability = RawCapabilityV2 {
             id: format!("{id}.mcp_server"),
+            network_targets: Vec::new(),
             implements: Vec::new(),
             description: format!(
                 "Hosted MCP server connection for {} (discovery template; never model-visible)",
@@ -359,6 +360,7 @@ pub(crate) fn parse_v3(
     for tool in raw.tools {
         let raw_capability = RawCapabilityV2 {
             id: tool.id,
+            network_targets: Vec::new(),
             implements: Vec::new(),
             description: tool.description,
             effects: with_dispatch_effect(tool.effects.clone()),

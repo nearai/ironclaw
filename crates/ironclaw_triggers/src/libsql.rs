@@ -33,7 +33,7 @@ const TRIGGER_COLUMNS: &str = "\
     trigger_id, tenant_id, creator_user_id, agent_id, project_id, \
     name, source, schedule_expression, schedule_timezone, schedule_kind, prompt, \
     state, next_run_at, last_run_at, last_fired_slot, last_status, \
-    active_fire_slot, active_run_ref, created_at, schedule_at";
+    active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target";
 #[cfg(feature = "libsql")]
 const RENAME_SCOPED_TRIGGER_SQL: &str = "\
     UPDATE trigger_records
@@ -46,7 +46,7 @@ const RENAME_SCOPED_TRIGGER_SQL: &str = "\
      RETURNING trigger_id, tenant_id, creator_user_id, agent_id, project_id,
        name, source, schedule_expression, schedule_timezone, schedule_kind, prompt,
        state, next_run_at, last_run_at, last_fired_slot, last_status,
-       active_fire_slot, active_run_ref, created_at, schedule_at";
+       active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target";
 
 #[cfg(feature = "libsql")]
 const TRIGGER_ID_COL: usize = 0;
@@ -88,6 +88,8 @@ const ACTIVE_RUN_REF_COL: usize = 17;
 const CREATED_AT_COL: usize = 18;
 #[cfg(feature = "libsql")]
 const SCHEDULE_AT_COL: usize = 19;
+#[cfg(feature = "libsql")]
+const DELIVERY_TARGET_COL: usize = 20;
 
 #[cfg(feature = "libsql")]
 const TRIGGER_RUN_COLUMNS: &str = "\
@@ -282,6 +284,19 @@ impl LibSqlTriggerRepository {
                 let msg = error.to_string();
                 if !msg.contains("duplicate column") && !msg.contains("already exists") {
                     return Err(backend_error("add schedule_at column", error));
+                }
+            }
+            // Add delivery_target column if it doesn't already exist (idempotent migration).
+            if let Err(error) = conn
+                .execute(
+                    &format!("ALTER TABLE {TRIGGER_TABLE} ADD COLUMN delivery_target TEXT"),
+                    (),
+                )
+                .await
+            {
+                let msg = error.to_string();
+                if !msg.contains("duplicate column") && !msg.contains("already exists") {
+                    return Err(backend_error("add delivery_target column", error));
                 }
             }
             // Drop the legacy `completion_policy` column on tables created before the
@@ -1389,6 +1404,9 @@ fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
     let active_run_ref = optional_text(row, ACTIVE_RUN_REF_COL, "active_run_ref")?
         .map(|value| parse_turn_run_id(&value))
         .transpose()?;
+    let delivery_target = optional_text(row, DELIVERY_TARGET_COL, "delivery_target")?
+        .map(crate::TriggerDeliveryTargetId::new)
+        .transpose()?;
 
     let record = TriggerRecord {
         trigger_id,
@@ -1400,6 +1418,7 @@ fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
         source: crate::parse_source_kind_codec(&required_text(row, SOURCE_COL, "source")?)?,
         schedule,
         prompt: required_text(row, PROMPT_COL, "prompt")?,
+        delivery_target,
         state: crate::parse_state_codec(&required_text(row, STATE_COL, "state")?)?,
         next_run_at: parse_timestamp(
             &required_text(row, NEXT_RUN_AT_COL, "next_run_at")?,
@@ -1492,8 +1511,8 @@ async fn write_record(
                 trigger_id, tenant_id, creator_user_id, agent_id, project_id,
                 name, source, schedule_expression, schedule_timezone, schedule_kind, prompt,
                 state, next_run_at, last_run_at, last_fired_slot, last_status,
-                active_fire_slot, active_run_ref, created_at, schedule_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+                active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
             ON CONFLICT (tenant_id, trigger_id) DO UPDATE SET
                 creator_user_id = excluded.creator_user_id,
                 agent_id = excluded.agent_id,
@@ -1511,7 +1530,8 @@ async fn write_record(
                 last_status = excluded.last_status,
                 active_fire_slot = excluded.active_fire_slot,
                 active_run_ref = excluded.active_run_ref,
-                schedule_at = excluded.schedule_at"
+                schedule_at = excluded.schedule_at,
+                delivery_target = excluded.delivery_target"
         ),
         libsql::params_from_iter([
             libsql::Value::Text(record.trigger_id.to_string()),
@@ -1534,6 +1554,7 @@ async fn write_record(
             record.active_run_ref.as_ref().map_or(libsql::Value::Null, |v| libsql::Value::Text(v.to_string())),
             libsql::Value::Text(fmt_ts(&record.created_at)),
             schedule_at.map_or(libsql::Value::Null, libsql::Value::Text),
+            record.delivery_target.as_ref().map_or(libsql::Value::Null, |v| libsql::Value::Text(v.as_str().to_string())),
         ]),
     )
     .await

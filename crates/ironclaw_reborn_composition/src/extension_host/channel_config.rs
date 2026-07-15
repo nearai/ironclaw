@@ -438,6 +438,7 @@ mod tests {
     use ironclaw_secrets::InMemorySecretStore;
 
     use super::*;
+    use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 
     /// An invented pure-channel extension declaring two secret fields and
     /// one non-secret field — the fixture for every test here.
@@ -561,7 +562,7 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
             ManifestSource::HostBundled,
             &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
             None,
-            &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+            &product_extension_host_api_contract_registry().expect("contracts"),
         )
         .expect("fixture manifest parses");
         let extension_id = ExtensionId::new(id).expect("extension id");
@@ -575,6 +576,7 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
                     ExtensionManifestRef::new(extension_id, None),
                     Vec::new(),
                     chrono::Utc::now(),
+                    ironclaw_extensions::InstallationOwner::Tenant,
                 )
                 .expect("installation"),
             )

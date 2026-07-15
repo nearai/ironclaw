@@ -9,7 +9,7 @@ use futures_util::FutureExt;
 
 use ironclaw_extensions::ExtensionPackage;
 use ironclaw_host_api::{
-    CapabilityDescriptor, MountView, ResourceEstimate, ResourceReservation,
+    CapabilityDescriptor, MountView, ResourceEstimate, ResourceReservation, UserId,
     runtime_policy::EffectiveRuntimePolicy,
 };
 use serde_json::Value;
@@ -54,6 +54,11 @@ where
     pub runtime_policy: &'a EffectiveRuntimePolicy,
     pub capability_id: &'a CapabilityId,
     pub scope: ResourceScope,
+    /// The authenticated human actor who initiated this invocation, distinct
+    /// from the resource subject carried in `scope`. Threaded end-to-end
+    /// (`BoundCapabilityRequest` → here → `FirstPartyCapabilityRequest`) so a
+    /// first-party handler can attribute the action to the acting user.
+    pub authenticated_actor_user_id: Option<UserId>,
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
     pub resource_reservation: Option<ResourceReservation>,
@@ -552,6 +557,10 @@ where
         let result = match AssertUnwindSafe(handler.dispatch(FirstPartyCapabilityRequest {
             capability_id: request.capability_id.clone(),
             scope: request.scope.clone(),
+            // The authenticated human actor (distinct from the resource subject
+            // in `scope`), threaded through so a first-party handler can
+            // attribute the action to the acting user.
+            authenticated_actor_user_id: request.authenticated_actor_user_id.clone(),
             estimate: request.estimate,
             mounts: request.mounts,
             services,
@@ -789,6 +798,7 @@ impl WasmRuntimeAdapter {
     ) -> Result<MutexGuard<'_, HashMap<String, Arc<PreparedWitTool>>>, DispatchError> {
         self.prepared.lock().map_err(|_| DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Executor,
+            safe_summary: None,
         })
     }
 
@@ -831,6 +841,7 @@ where
                 .resolve_under(&request.package.root)
                 .map_err(|_| DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::Manifest,
+                    safe_summary: None,
                 })?,
             other => {
                 return Err(DispatchError::Wasm {
@@ -839,6 +850,7 @@ where
                     } else {
                         RuntimeDispatchErrorKind::ExtensionRuntimeMismatch
                     },
+                    safe_summary: None,
                 });
             }
         };
@@ -855,6 +867,7 @@ where
             .await
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::FilesystemDenied,
+                safe_summary: None,
             })?;
         let prepared = Arc::new(
             run_wasm_prepare_blocking(
@@ -865,6 +878,7 @@ where
             .await
             .map_err(|error| DispatchError::Wasm {
                 kind: wasm_error_kind(&error),
+                safe_summary: None,
             })?,
         );
         let prepared = {
@@ -928,7 +942,10 @@ fn dispatch_error_for_runtime(
     match runtime {
         RuntimeKind::Mcp => DispatchError::Mcp { kind },
         RuntimeKind::Script => DispatchError::Script { kind },
-        RuntimeKind::Wasm => DispatchError::Wasm { kind },
+        RuntimeKind::Wasm => DispatchError::Wasm {
+            kind,
+            safe_summary: None,
+        },
         RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::FirstParty {
             kind,
             safe_summary: None,

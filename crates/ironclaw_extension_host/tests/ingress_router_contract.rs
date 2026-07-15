@@ -331,9 +331,6 @@ async fn harness(options: HarnessOptions) -> Harness {
             loader: Arc::new(FixedLoader {
                 adapter: Arc::clone(&adapter),
             }),
-            removal_hooks: Arc::new(
-                ironclaw_extension_host::test_support::RecordingRemovalHooks::default(),
-            ),
             drain: Arc::new(ironclaw_extension_host::test_support::RecordingDrain::default()),
             egress: Arc::new(ironclaw_extension_host::test_support::FakeEgressFactory),
             reserved_capability_ids: Default::default(),

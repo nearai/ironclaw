@@ -79,6 +79,7 @@ pub struct ResolvedCapability {
 pub struct BoundCapabilityRequest {
     pub capability_id: CapabilityId,
     pub scope: ResourceScope,
+    pub authenticated_actor_user_id: Option<ironclaw_host_api::UserId>,
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
     pub resource_reservation: Option<ResourceReservation>,
@@ -223,6 +224,7 @@ where
             .dispatch_json(BoundCapabilityRequest {
                 capability_id: request.capability_id,
                 scope: request.scope,
+                authenticated_actor_user_id: request.authenticated_actor_user_id,
                 estimate: request.estimate,
                 mounts: request.mounts,
                 resource_reservation: reservation_guard.take(),

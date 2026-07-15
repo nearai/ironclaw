@@ -58,7 +58,7 @@ Not generic yet — the work:
 
 | Crate | Owns |
 | --- | --- |
-| `ironclaw_extension_host` | `ExtensionEntrypoint`, `ExtensionBindings`, binding check, loaders (native/wasm/mcp), immutable active snapshot + resolver views, installation state machine, activation/deactivation/removal/upgrade/restore, generic ingress router module, restricted-egress implementation |
+| `ironclaw_extension_host` | `ExtensionEntrypoint`, `ExtensionBindings`, binding check, loaders (native/wasm/mcp), immutable active snapshot + resolver views, installation state machine, activation/deactivation/removal/upgrade, generic ingress router module, restricted-egress implementation |
 | `ironclaw_slack_extension` | All Slack protocol behavior: tool adapters (wrapping the existing WASM artifact initially), channel adapter (parse, render, deliver, targets, activate/cleanup), fixtures. Absorbs `ironclaw_slack_extension` and everything Slack in composition |
 | `ironclaw_telegram_extension` | Telegram channel adapter (updates parsing, Bot API rendering, `setWebhook`/`deleteWebhook` hooks). Absorbs `ironclaw_telegram_extension` |
 
@@ -175,10 +175,14 @@ already exists.
     capability id or ingress route across active extensions → activation
     conflict (no scope-based disambiguation in this version).
   - `lifecycle.rs` — the installation state machine and pipeline exactly as
-    `overview.md` §6.1–6.2: persisted transient states, crash-resume at
-    startup, fixed removal order, `RemovalPending` retry. This is the **only**
-    writer of installation state and the active snapshot; a single async mutex
-    serializes lifecycle operations (single serving process assumption).
+    `overview.md` §6.1–6.2: the honest projection enum (persisted
+    `Installed | Active | Failed`; `Configured | Disabled | Unsupported`
+    derived at projection time), activation atomicity (publish-or-nothing on
+    failure), and the fixed, host-owned removal order with typed-quarantine
+    retry on failure — no persisted transient state, no `RemovalPending`. This
+    is the **only** writer of installation state and the active snapshot; a
+    single async mutex serializes lifecycle operations (single serving
+    process assumption).
     `BindContext`/`ChannelContext` carry installation identity, the resolved
     declaration, and non-secret config values (secrets only behind injection);
     adapter hooks run under bounded deadlines; editing `[channel.config]`
@@ -198,9 +202,11 @@ already exists.
 
 **Tests first:** `binding_contract.rs` (missing/extra/undeclared binding,
 declared-but-`None`, auth-never-binds); `lifecycle_contract.rs` (state machine:
-every legal transition, crash-resume from each transient state, removal order
-observed via scripted adapter + engine, `RemovalPending` retry, activation
-failure publishes nothing, upgrade drains old `Arc`); loader tests (unknown
+every legal transition, activation failure publishes nothing and records a
+typed redacted error, upgrade drains old `Arc`); the facade-owned removal
+order (unpublish → drain → vendor cleanup → auth cleanup → config/identity
+delete) with typed-quarantine retry on failure, observed via scripted
+adapter + engine at the composition tier; loader tests (unknown
 service, wasm lane invoke, mcp discovery ceiling violations); snapshot tests
 (no mixed generation under concurrent activate/resolve; readers never observe
 partial state). Integration tier: `tests/integration/extension_runtime.rs` —
@@ -243,8 +249,10 @@ branch anywhere in dispatch (`tests/integration/extension_runtime.rs`).
   durable product-auth stores (rows gain the standard state column if absent).
 - **Auth account state machine** (`overview.md` §6.3) is defined here and is
   the only connection-state representation: `disconnected | authenticating |
-  connected | expired | revoking` + typed `last_error`. Exactly one transition
-  consumes a callback; TTL expiry → `disconnected` with reason.
+  connected | expired` + typed `last_error`. Disconnect and removal delete the
+  account synchronously, so there is no transient `revoking` wire state.
+  Exactly one transition consumes a callback; TTL expiry → `disconnected` with
+  reason.
 - Routes: keep the mounted paths (`.../product-auth/start`, `status`,
   `revoke`, and `/api/reborn/product-auth/oauth/{provider}/callback`) so
   vendor-registered redirect URLs keep working; the `{provider}` path

@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { sendMessage } from "./api.js";
+import { sendMessage } from "./api";
 const CHANNEL_CONNECTION_BROADCAST = "ironclaw-channel-connection";
 const CHANNEL_CONNECTION_STORAGE_KEY = "ironclaw:channel-connection:connected";
 const CHANNEL_CONNECTION_MESSAGE_TYPE = "ironclaw:channel-connection:connected";

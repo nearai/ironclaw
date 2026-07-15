@@ -33,7 +33,7 @@ use ironclaw_extension_host::{
     BindError, DrainController, EgressFactory, ExtensionBindings, ExtensionEntrypoint,
     ExtensionHost, ExtensionHostDeps, ExtensionLoader, HookError, InMemoryInstallationRecordStore,
     InstallationRecord, InstallationState, LoadContext, LoadedExtension, NativeExtensionFactory,
-    RemovalContext, RemovalHooks, SnapshotToolResolver,
+    SnapshotToolResolver,
 };
 use ironclaw_extensions::{
     ExtensionActivationState, ExtensionInstallationStore, ExtensionManifest, ExtensionPackage,
@@ -114,7 +114,6 @@ pub(crate) async fn build_generic_extension_host(
             // durable records at every boot.
             store: Arc::new(InMemoryInstallationRecordStore::default()),
             loader,
-            removal_hooks: Arc::new(FacadeOwnedRemovalHooks),
             drain: Arc::new(GenerationDrain),
             egress,
             reserved_capability_ids,
@@ -125,8 +124,10 @@ pub(crate) async fn build_generic_extension_host(
     );
 
     // Hydrate: every Enabled installation the facade restored activates into
-    // the snapshot. A failure falls back to Installed inside the host and
-    // must not block boot (same skip-invalid rule as the facade restore).
+    // the snapshot. A failure records the host record's terminal Failed state
+    // (with a redacted last_error) and must not block boot; the durable
+    // installation stays Enabled, so the extension projects `Failed` until a
+    // successful (re)activation clears it.
     for installation in installation_store
         .list_installations()
         .await
@@ -431,31 +432,6 @@ impl ChannelAdapter for HostServedChannelBridge {
     }
 }
 
-/// Removal side effects (credential revoke, integration-state delete) stay
-/// facade-owned in P2b; the host's removal pipeline is not production-driven
-/// until the facade collapses (P6). The facade calls
-/// [`ExtensionHost::deactivate`] to unpublish.
-struct FacadeOwnedRemovalHooks;
-
-#[async_trait]
-impl RemovalHooks for FacadeOwnedRemovalHooks {
-    async fn revoke_and_delete_grants(&self, ctx: &RemovalContext<'_>) -> Result<(), HookError> {
-        tracing::debug!(
-            extension_id = ctx.extension_id,
-            "extension removal grants are facade-owned until the P6 extraction"
-        );
-        Ok(())
-    }
-
-    async fn delete_integration_state(&self, ctx: &RemovalContext<'_>) -> Result<(), HookError> {
-        tracing::debug!(
-            extension_id = ctx.extension_id,
-            "extension integration state is facade-owned until the P6 extraction"
-        );
-        Ok(())
-    }
-}
-
 /// In-flight work completes on the generation `Arc` it resolved; there is no
 /// additional drain source until the delivery coordinator (P5).
 struct GenerationDrain;
@@ -511,6 +487,7 @@ mod tests {
     use ironclaw_resources::InMemoryResourceGovernor;
 
     use super::*;
+    use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 
     const FIXTURE_SERVICE: &str = "h5_fixture_host";
 
@@ -579,7 +556,7 @@ input_schema_ref = "schemas/echo.input.json"
             ManifestSource::HostBundled,
             &ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
             None,
-            &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+            &product_extension_host_api_contract_registry().expect("contracts"),
         )
         .expect("fixture manifest resolves");
         let extension_id = ExtensionId::new(id).expect("extension id");
@@ -593,6 +570,7 @@ input_schema_ref = "schemas/echo.input.json"
                     ExtensionManifestRef::new(extension_id, None),
                     Vec::new(),
                     chrono::Utc::now(),
+                    ironclaw_extensions::InstallationOwner::Tenant,
                 )
                 .expect("installation record"),
             )

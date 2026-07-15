@@ -133,12 +133,10 @@ fn governor_with_default_limit(account: ResourceAccount) -> InMemoryResourceGove
     governor
         .set_limit(
             account,
-            ResourceLimits {
-                max_concurrency_slots: Some(10),
-                max_process_count: Some(10),
-                max_output_bytes: Some(100_000),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_concurrency_slots(10)
+                .set_max_process_count(10)
+                .set_max_output_bytes(100_000),
         )
         .unwrap();
     governor
@@ -151,12 +149,10 @@ fn script_request(input: serde_json::Value) -> ScriptExecutionRequest<'static> {
         package,
         capability_id,
         scope: sample_scope(),
-        estimate: ResourceEstimate {
-            concurrency_slots: Some(1),
-            process_count: Some(1),
-            output_bytes: Some(10_000),
-            ..ResourceEstimate::default()
-        },
+        estimate: ResourceEstimate::default()
+            .set_concurrency_slots(1)
+            .set_process_count(1)
+            .set_output_bytes(10_000),
         mounts: None,
         resource_reservation: None,
         invocation: ScriptInvocation { input },

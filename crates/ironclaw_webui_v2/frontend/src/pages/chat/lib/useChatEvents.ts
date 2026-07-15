@@ -6,7 +6,10 @@ import {
   toolCardFromActivity,
   toolCardFromPreview,
 } from "./history-messages";
-import { failureMessageForRunStatus } from "./failureMessages";
+import {
+  failureMessageForRunStatus,
+  failureMessageForStreamError,
+} from "./failureMessages";
 import {
   ensureGateToolActivity,
   upsertToolActivityMessage,
@@ -15,9 +18,19 @@ import {
   isFinalAssistantForRun,
   replaceAssistantReplyForRun,
 } from "./stream-order-memory";
+import {
+  createErrorChatMessage,
+  isErrorChatMessage,
+  isRunFailureMessageId,
+  RUN_FAILURE_ID_PREFIX,
+  STREAM_FAILURE_ID_PREFIX,
+  UNKNOWN_RUN_FAILURE_ID,
+} from "./message-types";
 
 const noop = () => {};
 const emptyConnectionContext = () => ({});
+const STREAM_FAILURE_COLLISION_SCAN_LIMIT = 32;
+const AMBIGUOUS_RUN_ID = Symbol("ambiguous-run-id");
 
 // Handler factory for v2 `WebChatV2EventFrame` events.
 //
@@ -51,6 +64,7 @@ export function useChatEvents({
   toolActivityStateRef,
   noteConnectionInterruptedRunId = noop,
   connectionContextForRunFailure = emptyConnectionContext,
+  onStreamError = noop,
   onRunSettled,
 }) {
   // Track which runIds we've already settled so that SSE replays
@@ -114,9 +128,19 @@ export function useChatEvents({
           // upgrade the same bubble in place.
           const activity = frame.activity;
           if (!activity || !activity.invocation_id) return;
+          const scopedActivity = withFallbackTurnRunId(
+            activity,
+            fallbackTurnRunIdForActivity({
+              explicitRunId: activity.turn_run_id,
+              activeRunId: null,
+              activeRunRef,
+              latestRunIdRef,
+              batchRunId: null,
+            }),
+          );
           upsertToolActivityMessage(
             setMessages,
-            toolCardFromActivity(activity),
+            toolCardFromActivity(scopedActivity),
             toolActivityStateRef,
           );
           return;
@@ -129,7 +153,17 @@ export function useChatEvents({
           // card for the same invocation_id.
           const preview = frame.preview;
           if (!preview || !preview.invocation_id) return;
-          const card = toolCardFromPreview(preview);
+          const scopedPreview = withFallbackTurnRunId(
+            preview,
+            fallbackTurnRunIdForActivity({
+              explicitRunId: preview.turn_run_id,
+              activeRunId: null,
+              activeRunRef,
+              latestRunIdRef,
+              batchRunId: null,
+            }),
+          );
+          const card = toolCardFromPreview(scopedPreview);
           upsertToolActivityMessage(setMessages, card, toolActivityStateRef);
           return;
         }
@@ -153,6 +187,9 @@ export function useChatEvents({
         case "final_reply": {
           const reply = frame.reply || {};
           const turnRunId = reply.turn_run_id || null;
+          if (turnRunId && latestRunIdRef) {
+            latestRunIdRef.current = turnRunId;
+          }
           const replyMessage = {
             id: `reply-${turnRunId || Date.now()}`,
             role: "assistant",
@@ -194,6 +231,23 @@ export function useChatEvents({
             connectionContextForRunFailure,
           });
           settleRun(settledRunsRef, onRunSettled, runId, false);
+          return;
+        }
+
+        case "error": {
+          setPendingGate(null);
+          setIsProcessing(false);
+          setActiveRun?.(null);
+          onStreamError({
+            error: frame.error,
+            kind: frame.kind,
+            retryable: frame.retryable === true,
+          });
+          appendStreamFailureMessage(setMessages, {
+            error: frame.error,
+            kind: frame.kind,
+            retryable: frame.retryable === true,
+          });
           return;
         }
 
@@ -350,6 +404,8 @@ function applyProjectionItems({
   // be filtered while a locally resolved gate is resuming a newer run.
   const batchRunStatusByRunId = new Map();
   const stalePromptRunIds = new Set();
+  let batchRunId = null;
+  let batchRunIdIsAmbiguous = false;
   const activeRunAtBatchStart = activeRunRef?.current || null;
   const protectedRunId =
     activeRunAtBatchStart?.runId || latestRunIdRef?.current || null;
@@ -357,6 +413,11 @@ function applyProjectionItems({
     const runStatus = item.run_status;
     if (runStatus?.run_id && runStatus.status) {
       batchRunStatusByRunId.set(runStatus.run_id, runStatus.status);
+      if (batchRunId === null) {
+        batchRunId = runStatus.run_id;
+      } else if (batchRunId !== runStatus.run_id) {
+        batchRunIdIsAmbiguous = true;
+      }
       if (
         protectedRunId &&
         protectedRunId !== runStatus.run_id &&
@@ -368,6 +429,7 @@ function applyProjectionItems({
       }
     }
   }
+  const unambiguousBatchRunId = batchRunIdIsAmbiguous ? null : batchRunId;
   let activeRunId = latestRunIdRef?.current ?? null;
   for (const item of items) {
     if (item.run_status) {
@@ -573,9 +635,19 @@ function applyProjectionItems({
     if (item.capability_activity) {
       const activity = item.capability_activity;
       if (activity.invocation_id) {
+        const scopedActivity = withFallbackTurnRunId(
+          activity,
+          fallbackTurnRunIdForActivity({
+            explicitRunId: activity.turn_run_id,
+            activeRunId,
+            activeRunRef,
+            latestRunIdRef,
+            batchRunId: unambiguousBatchRunId,
+          }),
+        );
         upsertToolActivityMessage(
           setMessages,
-          toolCardFromActivity(activity),
+          toolCardFromActivity(scopedActivity),
           toolActivityStateRef,
         );
       }
@@ -616,6 +688,39 @@ function applyProjectionItems({
   if (latestRunIdRef && activeRunId) {
     latestRunIdRef.current = activeRunId;
   }
+}
+
+function withFallbackTurnRunId(value, fallbackRunId) {
+  if (!value || value.turn_run_id || !fallbackRunId) return value;
+  return { ...value, turn_run_id: fallbackRunId };
+}
+
+// Some capability lifecycle frames are allowed to omit turn_run_id. Only infer
+// it when every available signal points at the same run; ambiguous frames stay
+// unscoped so they cannot be attached to the wrong turn.
+function fallbackTurnRunIdForActivity({
+  explicitRunId,
+  activeRunId = null,
+  activeRunRef = null,
+  latestRunIdRef = null,
+  batchRunId = null,
+}) {
+  if (explicitRunId) return explicitRunId;
+  let candidate = null;
+  candidate = mergeRunIdCandidate(candidate, activeRunId);
+  if (candidate === AMBIGUOUS_RUN_ID) return null;
+  candidate = mergeRunIdCandidate(candidate, activeRunRef?.current?.runId);
+  if (candidate === AMBIGUOUS_RUN_ID) return null;
+  candidate = mergeRunIdCandidate(candidate, latestRunIdRef?.current);
+  if (candidate === AMBIGUOUS_RUN_ID) return null;
+  candidate = mergeRunIdCandidate(candidate, batchRunId);
+  return candidate === AMBIGUOUS_RUN_ID ? null : candidate;
+}
+
+function mergeRunIdCandidate(current, runId) {
+  if (typeof runId !== "string" || runId.length === 0) return current;
+  if (current === null) return runId;
+  return current === runId ? current : AMBIGUOUS_RUN_ID;
 }
 
 function settleTerminalRunAfterResolvedPrompt({
@@ -683,7 +788,9 @@ function appendRunFailureMessage(
   // Dedup by `err-<runId>` so replays of the same projection
   // (SSE reconnect with `last-event-id`, or repeated updates carrying
   // the same terminal status) collapse to one bubble instead of stacking.
-  const messageId = `err-${runId || "unknown"}`;
+  const messageId = runId
+    ? `${RUN_FAILURE_ID_PREFIX}${runId}`
+    : UNKNOWN_RUN_FAILURE_ID;
   const connectionContext =
     typeof connectionContextForRunFailure === "function"
       ? connectionContextForRunFailure(runId) || {}
@@ -709,19 +816,103 @@ function appendRunFailureMessage(
       };
       return next;
     }
+    const lastMessage = prev[prev.length - 1];
+    if (isAdjacentDuplicateRunFailure(lastMessage, content)) {
+      const replacement = promotedRunFailureMessage(lastMessage, messageId);
+      if (replacement === lastMessage) return prev;
+      const next = [...prev];
+      next[next.length - 1] = replacement;
+      return next;
+    }
     return [
       ...prev,
-      {
+      createErrorChatMessage({
         id: messageId,
-        role: "error",
         content,
         timestamp: new Date().toISOString(),
         failureStatus: status,
         failureCategory,
         failureSummary,
-      },
+      }),
     ];
   });
+}
+
+// A projection can report an unknown run failure before the send response maps
+// the optimistic message to a concrete run id. Keep adjacent run failures
+// deduped, and promote `err-unknown` to `err-<runId>` once the id arrives.
+function isAdjacentDuplicateRunFailure(message, content) {
+  return (
+    isErrorChatMessage(message) &&
+    isRunFailureMessageId(message.id) &&
+    message.content === content
+  );
+}
+
+function promotedRunFailureMessage(message, messageId) {
+  return message?.id === UNKNOWN_RUN_FAILURE_ID &&
+    messageId !== UNKNOWN_RUN_FAILURE_ID
+    ? { ...message, id: messageId }
+    : message;
+}
+
+function appendStreamFailureMessage(setMessages, { error, kind, retryable }) {
+  const baseMessageId = streamFailureMessageId({ error, kind, retryable });
+  setMessages((prev) => {
+    const lastMessage = prev[prev.length - 1];
+    if (isSameStreamFailureMessage(lastMessage, baseMessageId)) return prev;
+    const messageId = uniqueStreamFailureMessageId(baseMessageId, prev);
+    return [
+      ...prev,
+      createErrorChatMessage({
+        id: messageId,
+        content: failureMessageForStreamError({ error, kind, retryable }),
+        timestamp: new Date().toISOString(),
+      }),
+    ];
+  });
+}
+
+function isSameStreamFailureMessage(message, baseMessageId) {
+  const id = typeof message?.id === "string" ? message.id : "";
+  return id === baseMessageId || id.startsWith(`${baseMessageId}-`);
+}
+
+function uniqueStreamFailureMessageId(baseMessageId, messages) {
+  const timestamp = Date.now();
+  const existingIds = new Set(
+    messages
+      .map((message) => message?.id)
+      .filter((id) => typeof id === "string"),
+  );
+  let messageId = `${baseMessageId}-${timestamp}`;
+  if (!existingIds.has(messageId)) return messageId;
+  for (
+    let suffix = 1;
+    suffix <= STREAM_FAILURE_COLLISION_SCAN_LIMIT;
+    suffix += 1
+  ) {
+    messageId = `${baseMessageId}-${timestamp}-${suffix}`;
+    if (!existingIds.has(messageId)) return messageId;
+  }
+  return `${baseMessageId}-${timestamp}-${randomIdSegment()}`;
+}
+
+function randomIdSegment() {
+  const randomUUID = globalThis.crypto?.randomUUID;
+  if (typeof randomUUID === "function") {
+    return randomUUID.call(globalThis.crypto);
+  }
+  return Math.random().toString(36).slice(2, 10);
+}
+
+function streamFailureMessageId({ error, kind, retryable }) {
+  const token = `${error || "unknown"}-${kind || "unknown"}-${
+    retryable ? "retryable" : "terminal"
+  }`;
+  return `${STREAM_FAILURE_ID_PREFIX}${token
+    .replace(/[^a-z0-9_-]+/gi, "-")
+    .slice(0, 96)}`;
 }
 
 function locallyResolvedStateForRun(locallyResolvedGatesRef, runId) {

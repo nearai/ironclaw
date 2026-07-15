@@ -19,6 +19,7 @@ mod fakes;
 mod flow;
 mod ids;
 mod interaction;
+pub mod loopback_oauth;
 mod oauth;
 mod provider;
 mod scope;

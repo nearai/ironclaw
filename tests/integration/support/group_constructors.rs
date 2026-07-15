@@ -267,10 +267,17 @@ impl RebornIntegrationGroupBuilder {
 
     /// Build an extension-lifecycle group. See [`RebornIntegrationGroup::extension_lifecycle`].
     pub async fn extension_lifecycle(self) -> HarnessResult<RebornIntegrationGroup> {
-        let host_runtime =
-            super::super::harness::profiles::extension::extension_lifecycle_tools().await?;
+        let base = self.build_base().await?;
+        // Lifecycle ownership is caller-derived. Align the shared capability
+        // harness with the group's canonical binding subject so install and
+        // remove execute under the same user scope as the turn.
+        let host_runtime = build_group_capability_with_base(
+            super::super::harness::profiles::extension::extension_lifecycle_tools_profile()?,
+            &base,
+        )
+        .await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
-        self.build_with_capability(capability).await
+        self.into_group(base, capability).await
     }
 
     /// Build the invented-vendor fixture group. See

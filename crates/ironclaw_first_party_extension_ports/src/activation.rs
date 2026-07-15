@@ -1,3 +1,8 @@
+// arch-exempt: large_file, activation owns coupled descriptor/cache selection tests, plan #5897
+// Skill activation still owns descriptor loading,
+// setup-marker suppression, selection cache, and regression fixtures together;
+// decomposition into activation/{candidate_cache,setup_markers,selection}.rs is
+// tracked by the plan above.
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
@@ -6,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt, stream};
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
     SkillBundleDescriptor, SkillBundleId, SkillBundleSource, SkillBundleSourceError,
     SkillSourceKind, sort_skill_bundle_descriptors,
@@ -86,6 +91,28 @@ impl Default for SkillActivationSelectorConfig {
             selection_mode: SkillActivationSelectionMode::ExplicitAndCriteria,
             regex_activation_enabled: true,
         }
+    }
+}
+
+impl SkillActivationSelectorConfig {
+    pub fn set_max_active_skills(mut self, max_active_skills: usize) -> Self {
+        self.max_active_skills = max_active_skills;
+        self
+    }
+
+    pub fn set_max_context_tokens(mut self, max_context_tokens: usize) -> Self {
+        self.max_context_tokens = max_context_tokens;
+        self
+    }
+
+    pub fn set_selection_mode(mut self, selection_mode: SkillActivationSelectionMode) -> Self {
+        self.selection_mode = selection_mode;
+        self
+    }
+
+    pub fn set_regex_activation_enabled(mut self, regex_activation_enabled: bool) -> Self {
+        self.regex_activation_enabled = regex_activation_enabled;
+        self
     }
 }
 
@@ -204,6 +231,8 @@ where
     activation_observer: Mutex<Option<Arc<dyn SkillActivationObserver>>>,
     messages_by_run: Mutex<HashMap<SkillActivationMessageKey, SkillActivationMessage>>,
     activation_cache: Mutex<HashMap<ActivationCandidateCacheKey, CachedActivationCandidate>>,
+    system_activation_cache:
+        Mutex<HashMap<SystemActivationCandidateCacheKey, CachedSystemActivationCandidate>>,
     active_plans_by_run: Mutex<ActivePlanCache>,
     plans_by_run: Mutex<HashMap<(TurnScope, TurnRunId), CapturedSkillActivationPlan>>,
 }
@@ -231,6 +260,7 @@ where
             activation_observer: Mutex::new(None),
             messages_by_run: Mutex::new(HashMap::new()),
             activation_cache: Mutex::new(HashMap::new()),
+            system_activation_cache: Mutex::new(HashMap::new()),
             active_plans_by_run: Mutex::new(ActivePlanCache::default()),
             plans_by_run: Mutex::new(HashMap::new()),
         }
@@ -479,25 +509,44 @@ where
             ));
         }
 
-        let candidate_set = self.load_activation_candidate_set(run_context).await?;
-        let selection = select_skill_activations(
-            message,
-            &candidate_set.candidates,
-            &self.config,
-            self.auto_activate_learned.load(Ordering::Relaxed),
-            &candidate_set.satisfied_setup_markers,
-        )?;
-        let plan = activation_plan_for_candidates(selection);
-        Ok((plan, candidate_set.candidates))
-    }
-
-    async fn load_activation_candidate_set(
-        &self,
-        run_context: &LoopRunContext,
-    ) -> Result<ActivationCandidateSet, SkillActivationSelectionError> {
         let descriptors = self.load_activation_descriptors(run_context).await?;
-        self.load_activation_candidate_set_for_descriptors(run_context, descriptors)
-            .await
+        let candidates = self
+            .load_activation_candidates(run_context, &descriptors)
+            .await?;
+        let mut checked_setup_markers = setup_markers_for_explicit_mentions(message, &candidates);
+        let mut satisfied_setup_markers = self
+            .satisfied_setup_markers_for_marker_set(run_context, &checked_setup_markers)
+            .await?;
+        let selection = loop {
+            let selection = select_skill_activations(
+                message,
+                &candidates,
+                &self.config,
+                self.auto_activate_learned.load(Ordering::Relaxed),
+                &satisfied_setup_markers,
+            )?;
+            let selected_setup_markers = setup_markers_for_selection(&selection, &candidates);
+            let unchecked_selected_setup_markers = selected_setup_markers
+                .difference(&checked_setup_markers)
+                .cloned()
+                .collect::<HashSet<_>>();
+            if unchecked_selected_setup_markers.is_empty() {
+                break selection;
+            }
+            let newly_satisfied_setup_markers = self
+                .satisfied_setup_markers_for_marker_set(
+                    run_context,
+                    &unchecked_selected_setup_markers,
+                )
+                .await?;
+            checked_setup_markers.extend(unchecked_selected_setup_markers);
+            if newly_satisfied_setup_markers.is_empty() {
+                break selection;
+            }
+            satisfied_setup_markers.extend(newly_satisfied_setup_markers);
+        };
+        let plan = activation_plan_for_candidates(selection);
+        Ok((plan, candidates))
     }
 
     async fn load_named_activation_candidate_set(
@@ -584,13 +633,22 @@ where
                     .cloned()
             })
             .collect::<HashSet<_>>();
+        self.satisfied_setup_markers_for_marker_set(run_context, &markers)
+            .await
+    }
+
+    async fn satisfied_setup_markers_for_marker_set(
+        &self,
+        run_context: &LoopRunContext,
+        markers: &HashSet<String>,
+    ) -> Result<HashSet<String>, SkillActivationSelectionError> {
         if markers.is_empty() {
             return Ok(HashSet::new());
         }
         let Some(source) = self.setup_marker_source.as_deref() else {
             return Ok(HashSet::new());
         };
-        source.satisfied_setup_markers(run_context, &markers).await
+        source.satisfied_setup_markers(run_context, markers).await
     }
 
     async fn load_activation_candidates(
@@ -605,6 +663,9 @@ where
                     return Ok(None);
                 }
                 let descriptor = descriptor.clone();
+                if let Some(candidate) = self.system_activation_candidate_from_cache(&descriptor)? {
+                    return Ok(Some(candidate));
+                }
                 let skill_md = self
                     .bundle_source
                     .read_skill_bundle_file(
@@ -614,8 +675,9 @@ where
                     )
                     .await
                     .map_err(skill_bundle_source_error_to_selection_error)?;
-                self.activation_candidate_from_skill_md(&descriptor, skill_md)
-                    .map(Some)
+                let candidate = self.activation_candidate_from_skill_md(&descriptor, skill_md)?;
+                self.cache_system_activation_candidate(&candidate)?;
+                Ok(Some(candidate))
             })
             .buffered(MAX_CONCURRENT_SKILL_ACTIVATION_LOADS)
             .try_filter_map(|candidate| async move { Ok(candidate) })
@@ -671,6 +733,52 @@ where
             loaded,
             skill_md,
         })
+    }
+
+    fn system_activation_candidate_from_cache(
+        &self,
+        descriptor: &SkillBundleDescriptor,
+    ) -> Result<Option<ActivationCandidate>, SkillActivationSelectionError> {
+        if descriptor.id().source_kind() != SkillSourceKind::System {
+            return Ok(None);
+        }
+        let key = SystemActivationCandidateCacheKey::new(descriptor);
+        let cached = self
+            .system_activation_cache
+            .lock()
+            .map_err(|_| SkillActivationSelectionError::Internal)?
+            .get(&key)
+            .cloned();
+        Ok(cached.map(|cached| ActivationCandidate {
+            descriptor: descriptor.clone(),
+            loaded: cached.loaded,
+            skill_md: cached.skill_md,
+        }))
+    }
+
+    fn cache_system_activation_candidate(
+        &self,
+        candidate: &ActivationCandidate,
+    ) -> Result<(), SkillActivationSelectionError> {
+        if candidate.descriptor.id().source_kind() != SkillSourceKind::System {
+            return Ok(());
+        }
+        let key = SystemActivationCandidateCacheKey::new(&candidate.descriptor);
+        let mut cache = self
+            .system_activation_cache
+            .lock()
+            .map_err(|_| SkillActivationSelectionError::Internal)?;
+        if cache.len() >= MAX_ACTIVATION_CACHE_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(
+            key,
+            CachedSystemActivationCandidate {
+                loaded: candidate.loaded.clone(),
+                skill_md: candidate.skill_md.clone(),
+            },
+        );
+        Ok(())
     }
 
     fn active_plan(
@@ -824,6 +932,12 @@ struct CachedActivationCandidate {
     loaded: LoadedSkill,
 }
 
+#[derive(Debug, Clone)]
+struct CachedSystemActivationCandidate {
+    loaded: LoadedSkill,
+    skill_md: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ActivationCandidateCacheKey {
     source_kind: SkillSourceKind,
@@ -845,6 +959,29 @@ impl ActivationCandidateCacheKey {
                 .content_hash
                 .clone()
                 .unwrap_or_else(|| content_hash(skill_md)),
+            trust: descriptor.trust().copied(),
+            visibility: descriptor.visibility().copied(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SystemActivationCandidateCacheKey {
+    source_kind: SkillSourceKind,
+    name: String,
+    skill_md_path: String,
+    content_hash: Option<String>,
+    trust: Option<SkillTrust>,
+    visibility: Option<SkillVisibility>,
+}
+
+impl SystemActivationCandidateCacheKey {
+    fn new(descriptor: &SkillBundleDescriptor) -> Self {
+        Self {
+            source_kind: descriptor.id().source_kind(),
+            name: descriptor.id().name().to_string(),
+            skill_md_path: descriptor.skill_md_path().as_str().to_string(),
+            content_hash: descriptor.provenance().content_hash.clone(),
             trust: descriptor.trust().copied(),
             visibility: descriptor.visibility().copied(),
         }
@@ -1110,6 +1247,54 @@ fn candidates_with_unsatisfied_setup_markers<'a>(
         .collect()
 }
 
+fn setup_markers_for_explicit_mentions(
+    message: &str,
+    candidates: &[ActivationCandidate],
+) -> HashSet<String> {
+    let explicit_names = extract_explicit_skill_names(message);
+    if explicit_names.is_empty() {
+        return HashSet::new();
+    }
+    candidates
+        .iter()
+        .filter(|candidate| {
+            explicit_names
+                .iter()
+                .any(|name| candidate.loaded.manifest.name.eq_ignore_ascii_case(name))
+        })
+        .filter_map(candidate_setup_marker)
+        .collect()
+}
+
+fn setup_markers_for_selection(
+    selection: &SkillActivationSelection,
+    candidates: &[ActivationCandidate],
+) -> HashSet<String> {
+    let activated_bundle_ids = selection
+        .activations
+        .iter()
+        .filter_map(|activation| activation.bundle_id.as_ref())
+        .collect::<HashSet<_>>();
+    if activated_bundle_ids.is_empty() {
+        return HashSet::new();
+    }
+    candidates
+        .iter()
+        .filter(|candidate| activated_bundle_ids.contains(candidate.descriptor.id()))
+        .filter_map(candidate_setup_marker)
+        .collect()
+}
+
+fn candidate_setup_marker(candidate: &ActivationCandidate) -> Option<String> {
+    candidate
+        .loaded
+        .manifest
+        .activation
+        .setup_marker
+        .as_ref()
+        .cloned()
+}
+
 fn candidate_for_loaded_skill<'a>(
     skill: &LoadedSkill,
     candidates: &'a [&ActivationCandidate],
@@ -1324,7 +1509,7 @@ fn content_hash(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use ironclaw_host_api::{AgentId, ProjectId, TenantId};
-    use ironclaw_loop_support::{SkillBundleId, SkillFilePath};
+    use ironclaw_loop_host::{SkillBundleId, SkillFilePath};
     use ironclaw_skills::SkillTrust;
     use ironclaw_turns::{
         TurnActor, TurnId, TurnRunId,
@@ -1357,6 +1542,12 @@ mod tests {
     #[derive(Debug)]
     struct StaticSetupMarkerSource {
         satisfied_markers: HashSet<String>,
+    }
+
+    #[derive(Debug)]
+    struct CountingSetupMarkerSource {
+        inner: StaticSetupMarkerSource,
+        calls: std::sync::atomic::AtomicUsize,
     }
 
     impl StaticSkillBundleSource {
@@ -1393,7 +1584,7 @@ mod tests {
                 format!("{name} description"),
             )
             .with_provenance(
-                ironclaw_loop_support::SkillBundleProvenance::new(SkillSourceKind::User)
+                ironclaw_loop_host::SkillBundleProvenance::new(SkillSourceKind::User)
                     .with_content_hash("stable-test-hash"),
             );
             Self {
@@ -1429,6 +1620,19 @@ mod tests {
                     .map(|marker| marker.to_string())
                     .collect(),
             }
+        }
+    }
+
+    impl CountingSetupMarkerSource {
+        fn new(satisfied_markers: &[&str]) -> Self {
+            Self {
+                inner: StaticSetupMarkerSource::new(satisfied_markers),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
         }
     }
 
@@ -1536,6 +1740,20 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl SetupMarkerSource for CountingSetupMarkerSource {
+        async fn satisfied_setup_markers(
+            &self,
+            run_context: &LoopRunContext,
+            markers: &HashSet<String>,
+        ) -> Result<HashSet<String>, SkillActivationSelectionError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.inner
+                .satisfied_setup_markers(run_context, markers)
+                .await
+        }
+    }
+
     fn skill_md(name: &str, description: &str, keywords: &[&str], prompt: &str) -> String {
         let keyword_list = keywords
             .iter()
@@ -1615,6 +1833,45 @@ mod tests {
             .expect("selection succeeds");
 
         assert!(selected.is_empty());
+    }
+
+    #[tokio::test]
+    async fn selector_skips_setup_marker_probe_without_matching_activation() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![(
+            SkillSourceKind::User,
+            "setup-helper",
+            &skill_md_with_activation(
+                "setup-helper",
+                "  keywords: [\"setup-helper\"]\n  setup_marker: \"markers/setup-helper.done\"",
+                "SETUP_HELPER_SENTINEL",
+            ),
+        )]));
+        let setup_markers = Arc::new(CountingSetupMarkerSource::new(&[
+            "markers/setup-helper.done",
+        ]));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default())
+                .with_setup_marker_source(Arc::clone(&setup_markers));
+        let context = run_context().await;
+        selectable
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "hello there",
+            )
+            .expect("record message");
+
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("selection succeeds");
+
+        assert!(selected.is_empty());
+        assert_eq!(
+            setup_markers.calls(),
+            0,
+            "non-matching chat should not stat setup markers"
+        );
     }
 
     #[tokio::test]
@@ -1757,10 +2014,7 @@ mod tests {
         ]));
         let selectable = SelectableSkillContextSource::new(
             source,
-            SkillActivationSelectorConfig {
-                regex_activation_enabled: false,
-                ..SkillActivationSelectorConfig::default()
-            },
+            SkillActivationSelectorConfig::default().set_regex_activation_enabled(false),
         );
         let context = run_context().await;
         selectable
@@ -1796,10 +2050,7 @@ mod tests {
         )]));
         let selectable = SelectableSkillContextSource::new(
             source,
-            SkillActivationSelectorConfig {
-                regex_activation_enabled: false,
-                ..SkillActivationSelectorConfig::default()
-            },
+            SkillActivationSelectorConfig::default().set_regex_activation_enabled(false),
         );
         let context = run_context().await;
         selectable
@@ -1838,10 +2089,8 @@ mod tests {
         )]));
         let selectable = SelectableSkillContextSource::new(
             source,
-            SkillActivationSelectorConfig {
-                selection_mode: SkillActivationSelectionMode::ExplicitOnly,
-                ..SkillActivationSelectorConfig::default()
-            },
+            SkillActivationSelectorConfig::default()
+                .set_selection_mode(SkillActivationSelectionMode::ExplicitOnly),
         );
         let context = run_context().await;
         selectable
@@ -1895,10 +2144,8 @@ mod tests {
         )]));
         let selectable = SelectableSkillContextSource::new(
             source,
-            SkillActivationSelectorConfig {
-                selection_mode: SkillActivationSelectionMode::ExplicitOnly,
-                ..SkillActivationSelectorConfig::default()
-            },
+            SkillActivationSelectorConfig::default()
+                .set_selection_mode(SkillActivationSelectionMode::ExplicitOnly),
         );
         let context = run_context().await;
 
@@ -1941,10 +2188,8 @@ mod tests {
         ]));
         let selectable = SelectableSkillContextSource::new(
             source.clone(),
-            SkillActivationSelectorConfig {
-                selection_mode: SkillActivationSelectionMode::ExplicitOnly,
-                ..SkillActivationSelectorConfig::default()
-            },
+            SkillActivationSelectorConfig::default()
+                .set_selection_mode(SkillActivationSelectionMode::ExplicitOnly),
         );
         let context = run_context().await;
 
@@ -1981,10 +2226,7 @@ mod tests {
         )]));
         let selectable = SelectableSkillContextSource::new(
             source,
-            SkillActivationSelectorConfig {
-                max_active_skills: 0,
-                ..SkillActivationSelectorConfig::default()
-            },
+            SkillActivationSelectorConfig::default().set_max_active_skills(0),
         );
         let context = run_context().await;
 
@@ -2193,10 +2435,7 @@ mod tests {
         ]));
         let selectable = SelectableSkillContextSource::new(
             source,
-            SkillActivationSelectorConfig {
-                max_active_skills: 1,
-                ..SkillActivationSelectorConfig::default()
-            },
+            SkillActivationSelectorConfig::default().set_max_active_skills(1),
         );
         let context = run_context().await;
 
@@ -2304,6 +2543,60 @@ mod tests {
         assert!(
             selected.is_empty(),
             "setup markers must suppress explicit and natural-language activation"
+        );
+    }
+
+    #[tokio::test]
+    async fn selector_suppresses_cascading_satisfied_setup_markers() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![
+            (
+                SkillSourceKind::User,
+                "setup-alpha",
+                &skill_md_with_activation(
+                    "setup-alpha",
+                    "  keywords: [\"setup\"]\n  setup_marker: \"markers/setup-alpha.done\"",
+                    "SETUP_ALPHA_SENTINEL",
+                ),
+            ),
+            (
+                SkillSourceKind::User,
+                "setup-beta",
+                &skill_md_with_activation(
+                    "setup-beta",
+                    "  keywords: [\"setup\"]\n  setup_marker: \"markers/setup-beta.done\"",
+                    "SETUP_BETA_SENTINEL",
+                ),
+            ),
+        ]));
+        let setup_markers = Arc::new(StaticSetupMarkerSource::new(&[
+            "markers/setup-alpha.done",
+            "markers/setup-beta.done",
+        ]));
+        let selectable = SelectableSkillContextSource::new(
+            source,
+            SkillActivationSelectorConfig {
+                max_active_skills: 1,
+                ..SkillActivationSelectorConfig::default()
+            },
+        )
+        .with_setup_marker_source(setup_markers);
+        let context = run_context().await;
+        selectable
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "please run setup",
+            )
+            .expect("record message");
+
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("selection succeeds");
+
+        assert!(
+            selected.is_empty(),
+            "all already-satisfied setup markers exposed by reselection must be suppressed"
         );
     }
 
@@ -2599,11 +2892,9 @@ mod tests {
         ]));
         let selectable = SelectableSkillContextSource::new(
             source,
-            SkillActivationSelectorConfig {
-                max_active_skills: 1,
-                max_context_tokens: 4,
-                ..SkillActivationSelectorConfig::default()
-            },
+            SkillActivationSelectorConfig::default()
+                .set_max_active_skills(1)
+                .set_max_context_tokens(4),
         );
         let context = run_context().await;
         selectable
@@ -2751,6 +3042,46 @@ mod tests {
             source.reads.load(std::sync::atomic::Ordering::SeqCst),
             2,
             "cache avoids reparsing but still reads the current bundle content"
+        );
+    }
+
+    #[tokio::test]
+    async fn selector_reuses_loaded_system_skill_without_rereading_skill_md() {
+        let source = Arc::new(ReadCountingSkillBundleSource::new(vec![(
+            SkillSourceKind::System,
+            "code-review",
+            &skill_md(
+                "code-review",
+                "Review code",
+                &["review"],
+                "CODE_REVIEW_SENTINEL",
+            ),
+        )]));
+        let selectable = SelectableSkillContextSource::new(
+            source.clone(),
+            SkillActivationSelectorConfig::default(),
+        );
+
+        for accepted_message in ["msg:first", "msg:second"] {
+            let context = run_context_for("thread-a", accepted_message).await;
+            selectable
+                .record_user_message(
+                    context.scope.clone(),
+                    accepted_message_ref(&context),
+                    "please review this",
+                )
+                .expect("record message");
+            let selected = selectable
+                .load_skill_context_candidates(&context)
+                .await
+                .expect("system skill selection succeeds");
+            assert_eq!(selected.len(), 1);
+        }
+
+        assert_eq!(
+            source.reads(),
+            vec!["code-review".to_string()],
+            "process-stable system skills should be reused without repeated SKILL.md reads"
         );
     }
 

@@ -1,3 +1,4 @@
+// arch-exempt: large_file, cross-surface auth interaction contract suite, plan #5905
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -227,6 +228,15 @@ impl AuthFlowManager for RecordingFlowManager {
         record.updated_at = emitted_at;
         Ok(record.clone())
     }
+
+    async fn fail_completed_continuation(
+        &self,
+        _scope: &AuthProductScope,
+        _flow_id: AuthFlowId,
+        _error: ironclaw_auth::AuthErrorCode,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        unreachable!("auth interaction contract tests do not fail completed continuations")
+    }
 }
 
 struct RecordingTurnCoordinator {
@@ -374,6 +384,7 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             resolved_model_route: None,
+            model_usage: None,
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: self.gate_ref.lock().expect("lock").clone(),

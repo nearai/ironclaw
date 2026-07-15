@@ -517,6 +517,34 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         record.updated_at = emitted_at;
         Ok(record.clone())
     }
+
+    async fn fail_completed_continuation(
+        &self,
+        scope: &crate::AuthProductScope,
+        flow_id: AuthFlowId,
+        error: crate::AuthErrorCode,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        let now = Utc::now();
+        let mut state = self.lock_state();
+        let record = state
+            .flows
+            .get_mut(&flow_id)
+            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        if !scope_matches(scope, &record.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        // Only a completed flow that has not yet acknowledged its continuation
+        // can be terminalized by a continuation-dispatch failure. Anything else
+        // (already dispatched, or already terminal in some other state) must not
+        // regress — this races safely against a concurrent completion/dispatch.
+        if record.status != AuthFlowStatus::Completed || record.continuation_emitted_at.is_some() {
+            return Err(AuthProductError::FlowAlreadyTerminal);
+        }
+        record.status = AuthFlowStatus::Failed;
+        record.error = Some(error);
+        record.updated_at = now;
+        Ok(record.clone())
+    }
 }
 
 #[async_trait]

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
-import { productAuthOAuthEventsSource } from "../../../lib/product-auth-oauth-events.vm-inline.mjs";
+import { productAuthOAuthEventsSource } from "../../../lib/product-auth-oauth-events.vm-inline";
 import { hasChannelSurface } from "../lib/extensions-schema";
 
 // Wire-shaped tool-surface fixture for the surfaces/runtime extension model.

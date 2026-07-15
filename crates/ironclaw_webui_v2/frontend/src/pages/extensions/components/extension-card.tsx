@@ -8,6 +8,9 @@ import {
   STATE_TONES,
   STATE_LABELS,
   hasChannelSurface,
+  primaryAuthAccount,
+  authAccountNeedsReconnect,
+  authAccountReasonLabelKey,
 } from "../lib/extensions-schema";
 import { extensionLifecycleState, primaryExtensionAction } from "../lib/extension-actions";
 
@@ -137,12 +140,23 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
     onboardingState: ext.onboarding_state,
   };
 
+  // The caller's primary vendor account (§6.3 state + typed last_error). An
+  // expired account, or a disconnected account carrying a typed last_error
+  // (revoked grant, missing credential, failed/expired prior attempt), needs
+  // re-authentication rather than a first-time Connect — so the affordance
+  // and the notice key off it.
+  const channelAccount = hasChannelSurface(ext) ? primaryAuthAccount(ext) : null;
+  const needsReconnect = hasChannelSurface(ext) && authAccountNeedsReconnect(ext);
+
   // Connectable channels are configured by pairing (Connect/Reconnect), not by
-  // an operator credential form (Configure/Reconfigure). Pick the label by kind.
+  // an operator credential form (Configure/Reconfigure). Pick the label by kind,
+  // and by whether a connected account has expired.
   const configureLabel = hasChannelSurface(ext)
-    ? ext.authenticated
-      ? t("extensions.reconnect")
-      : t("extensions.connect")
+    ? needsReconnect
+      ? t("extensions.reconnectExpired")
+      : ext.authenticated
+        ? t("extensions.reconnect")
+        : t("extensions.connect")
     : ext.authenticated
       ? t("extensions.reconfigure")
       : t("extensions.configure");
@@ -226,17 +240,34 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
 
       <div className={META}>
         <span>{kindLabel}</span>
+        {ext.install_scope && (
+          <span>· {t(`extensions.scope.${ext.install_scope}`) || ext.install_scope}</span>
+        )}
         {ext.version && (<span>· v{ext.version}</span>)}
       </div>
 
       {ext.description && (<p className={DESC}>{ext.description}</p>)}
 
+      {/* `activation_error` is present iff `installation_state === "failed"`
+          (a terminal, non-auth activation failure — §6.1); gating on the
+          field's own presence renders the redacted reason whenever the wire
+          sends one, independent of which axis wins the onboarding/
+          installation state-badge above. */}
       {ext.activation_error &&
       (
         <div
           className="mt-2 rounded-[10px] border border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-3 py-1.5 text-xs text-[var(--v2-danger-text)]"
         >
           {ext.activation_error}
+        </div>
+      )}
+
+      {needsReconnect &&
+      (
+        <div
+          className="mt-2 rounded-[10px] border border-[color-mix(in_srgb,var(--v2-warning-text)_36%,var(--v2-panel-border))] bg-[var(--v2-warning-soft)] px-3 py-1.5 text-xs text-[var(--v2-warning-text)]"
+        >
+          {t(authAccountReasonLabelKey(channelAccount))}
         </div>
       )}
 

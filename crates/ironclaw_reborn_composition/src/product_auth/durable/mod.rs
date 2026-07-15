@@ -812,44 +812,6 @@ where
             .collect()
     }
 
-    /// One-time forward migration (NEA-25 unified Slack extension): the Slack
-    /// user-OAuth credential authority was renamed from `slack_personal` to
-    /// `slack` when the Slack channel and tools unified under one extension
-    /// identity. Rewrites persisted credential-account records in place and
-    /// returns the number migrated. Idempotent: after the first run no record
-    /// matches, so subsequent boots rewrite nothing. This is a data
-    /// migration executed at composition build, not a runtime alias — no code
-    /// path resolves the retired provider id.
-    pub(crate) async fn migrate_retired_slack_personal_provider(&self) -> usize {
-        let retired: Vec<CredentialAccount> = self
-            .sweep_all_accounts()
-            .await
-            .into_iter()
-            .filter(|account| account.provider.as_str() == "slack_personal")
-            .collect();
-        let mut migrated = 0usize;
-        for mut account in retired {
-            match ironclaw_auth::AuthProviderId::new("slack") {
-                Ok(provider) => account.provider = provider,
-                Err(error) => {
-                    tracing::warn!(%error, "slack provider migration: unified provider id invalid");
-                    return migrated;
-                }
-            }
-            match self.write_account(&account, CasExpectation::Any).await {
-                Ok(_) => migrated += 1,
-                Err(error) => {
-                    tracing::warn!(
-                        account_id = %account.id,
-                        %error,
-                        "slack provider migration: failed to rewrite account record"
-                    );
-                }
-            }
-        }
-        migrated
-    }
-
     async fn create_account_with_id(
         &self,
         account_id: CredentialAccountId,

@@ -46,8 +46,9 @@ use ironclaw_product_workflow::{
     DefaultInboundTurnService, DefaultProductWorkflow, DeliveryCoordinator, IdempotencyLedger,
     PreferenceTargetCodec, ProductActorUserResolutionRequest, ProductActorUserResolver,
     ProductConversationSubjectRouteResolver, ProductInstallationKey, ProductInstallationScope,
-    ProductWorkflowError, RebornFilesystemIdempotencyLedger, RunDeliveryObserver,
-    RunDeliveryServices, RunDeliverySettings, StaticProductInstallationResolver,
+    ProductWorkflowError, RebornFilesystemIdempotencyLedger, ResolvedProductActorUser,
+    RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
+    StaticProductInstallationResolver,
 };
 use ironclaw_threads::SessionThreadService;
 use ironclaw_turns::{TurnCoordinator, TurnScope};
@@ -639,21 +640,7 @@ impl GenericChannelHostAssembly {
         let roots = match &extras.storage_roots {
             Some(roots) => roots.clone(),
             None => {
-                // Sanctioned data-compat surface: an extension whose durable
-                // trees predate the generic root scheme keeps its legacy
-                // roots permanently (H.4b) — everything else gets the
-                // extension-keyed default.
-                match crate::extension_host::channel_state_folds::
-                    sanctioned_legacy_channel_workflow_storage_roots(
-                        &identity.tenant_id,
-                        &active.extension_id,
-                    ) {
-                    Some(roots) => roots,
-                    None => default_channel_workflow_storage_roots(
-                        &identity.tenant_id,
-                        &active.extension_id,
-                    )?,
-                }
+                default_channel_workflow_storage_roots(&identity.tenant_id, &active.extension_id)?
             }
         };
         let ledger_scope = ResourceScope {
@@ -895,8 +882,10 @@ impl ProductActorUserResolver for OperatorActorUserResolver {
     async fn resolve_product_actor_user(
         &self,
         _request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<UserId>, ProductWorkflowError> {
-        Ok(Some(self.operator_user_id.clone()))
+    ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
+        Ok(Some(ResolvedProductActorUser::new(
+            self.operator_user_id.clone(),
+        )))
     }
 }
 

@@ -323,7 +323,13 @@ fn interactive_profile() -> RunProfileDefinition {
         steering_policy: SteeringPolicy {
             allow_steering: true,
             allow_interrupt: true,
-            allow_driver_specific_nudges: false,
+            // Interactive coding runs opt into driver-specific nudges: when a turn
+            // trails off without finishing (e.g. the model narrates writing an
+            // output file but never does), the loop issues a bounded, tools-capable
+            // completion nudge to re-enter with the full tool surface rather than
+            // ending mid-task. Best-effort and capped; see the completion-nudge
+            // path in `ironclaw_agent_loop`.
+            allow_driver_specific_nudges: true,
         },
         cancellation_policy: CancellationPolicy {
             allow_cancel: true,

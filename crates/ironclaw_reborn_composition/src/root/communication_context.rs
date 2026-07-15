@@ -1,8 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
-use ironclaw_host_api::CapabilitySurfaceKind;
+use ironclaw_host_api::{CapabilitySurfaceKind, InstallationState};
 use ironclaw_product_workflow::{
-    LifecyclePhase, LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
+    LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
     LifecycleProductPayload, LifecycleProductSurfaceContext, OutboundPreferencesProductFacade,
     RebornOutboundDeliveryTargetStatus, WebUiAuthenticatedCaller,
 };
@@ -183,7 +183,7 @@ async fn fetch_communication_context(
             let channels: Vec<ConnectedChannelSummary> = extensions
                 .into_iter()
                 .filter(|ext| {
-                    extension_is_channel_surface(ext) && ext.phase == LifecyclePhase::Active
+                    extension_is_channel_surface(ext) && ext.phase == InstallationState::Active
                 })
                 .map(|ext| ConnectedChannelSummary {
                     name: ext.summary.name.clone(),
@@ -230,11 +230,13 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use ironclaw_host_api::{AgentId, CapabilitySurfaceKind, ProjectId, TenantId, UserId};
+    use ironclaw_host_api::{
+        AgentId, CapabilitySurfaceKind, InstallationState, ProjectId, TenantId, UserId,
+    };
     use ironclaw_product_workflow::{
         LifecycleExtensionRuntimeKind, LifecycleExtensionSource, LifecycleExtensionSummary,
         LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
-        LifecyclePhase, LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
+        LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
         LifecycleProductPayload, LifecycleProductResponse, OutboundPreferencesProductFacade,
         ProductWorkflowError, RebornOutboundDeliveryTargetId,
         RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetStatus,
@@ -355,7 +357,7 @@ mod tests {
             _action: LifecycleProductAction,
         ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
             Ok(LifecycleProductResponse {
-                phase: LifecyclePhase::Active,
+                phase: InstallationState::Active,
                 package_ref: None,
                 blockers: Vec::new(),
                 message: None,
@@ -390,7 +392,7 @@ mod tests {
         ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
             let count = self.extensions.len();
             Ok(LifecycleProductResponse {
-                phase: LifecyclePhase::Active,
+                phase: InstallationState::Active,
                 package_ref: None,
                 blockers: Vec::new(),
                 message: None,
@@ -456,7 +458,8 @@ mod tests {
                 credential_requirements: Vec::new(),
                 onboarding: None,
             },
-            phase: LifecyclePhase::Active,
+            phase: InstallationState::Active,
+            install_scope: None,
         }
     }
 
@@ -479,13 +482,14 @@ mod tests {
                 credential_requirements: Vec::new(),
                 onboarding: None,
             },
-            phase: LifecyclePhase::Active,
+            phase: InstallationState::Active,
+            install_scope: None,
         }
     }
 
     fn inactive_channel_extension(name: &str) -> LifecycleInstalledExtensionSummary {
         let mut ext = channel_extension(name);
-        ext.phase = LifecyclePhase::Installed;
+        ext.phase = InstallationState::Installed;
         ext
     }
 

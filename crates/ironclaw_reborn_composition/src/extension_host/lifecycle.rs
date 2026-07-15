@@ -4,14 +4,14 @@ use crate::local_dev_mounts::scoped_skill_management_mount_view;
 use async_trait::async_trait;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::{
-    CredentialStageError, ExtensionId, HostApiError, HostPath, InvocationId, MountView,
-    ResourceScope, RuntimeHttpEgress, UserId, VirtualPath,
+    ExtensionId, HostApiError, HostPath, InstallationState, InvocationId, MountView, ResourceScope,
+    RuntimeHttpEgress, UserId, VirtualPath,
 };
 use ironclaw_product_workflow::{
-    LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
-    LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-    LifecycleProductPayload, LifecycleProductResponse, LifecycleReadinessBlocker,
-    LifecycleSkillSource, LifecycleSkillSummary, ProductWorkflowError,
+    LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction,
+    LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
+    LifecycleProductResponse, LifecycleReadinessBlocker, LifecycleSkillSource,
+    LifecycleSkillSummary, ProductWorkflowError,
 };
 use ironclaw_skills::{
     SkillInstallRequest, SkillInstallSource, SkillManagementContext, SkillManagementError,
@@ -289,7 +289,7 @@ impl RebornLocalLifecycleFacade {
                 let count = matched_skills.len();
                 Ok(response_with_payload(
                     None,
-                    LifecyclePhase::Discovered,
+                    InstallationState::Installed,
                     LifecycleProductPayload::SkillSearch {
                         skills: matched_skills,
                         count,
@@ -314,7 +314,7 @@ impl RebornLocalLifecycleFacade {
                     .map_err(map_local_skill_management_error)?;
                 Ok(response_with_payload(
                     Some(skill_package_ref(&installed.name)?),
-                    LifecyclePhase::Installed,
+                    InstallationState::Installed,
                     LifecycleProductPayload::SkillInstall {
                         installed: true,
                         name: LifecyclePackageId::new(installed.name)?,
@@ -334,7 +334,7 @@ impl RebornLocalLifecycleFacade {
                     .map_err(map_local_skill_management_error)?;
                 Ok(response_with_payload(
                     Some(skill_package_ref(&removed.name)?),
-                    LifecyclePhase::Removed,
+                    InstallationState::Removed,
                     LifecycleProductPayload::SkillRemove {
                         removed: true,
                         name: LifecyclePackageId::new(removed.name)?,
@@ -345,6 +345,7 @@ impl RebornLocalLifecycleFacade {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(None);
                 };
+                let caller = lifecycle_caller(&context)?;
                 let credential_gate = if matches!(&context, LifecycleProductContext::Surface(_)) {
                     if let Some(credential_accounts) = &self.credential_accounts {
                         Some(RuntimeExtensionActivationCredentialGate::new(
@@ -358,30 +359,34 @@ impl RebornLocalLifecycleFacade {
                     None
                 };
                 extension_management
-                    .search(&query, credential_gate.as_ref())
+                    .search(&query, credential_gate.as_ref(), &caller)
                     .await
             }
             LifecycleProductAction::ExtensionList => {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(None);
                 };
-                extension_management.list_installed().await
+                let caller = lifecycle_caller(&context)?;
+                extension_management.list_installed(&caller).await
             }
             LifecycleProductAction::ExtensionInstall { package_ref } => {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(Some(package_ref));
                 };
-                extension_management.install(package_ref).await
+                let caller = lifecycle_caller(&context)?;
+                extension_management.install(package_ref, &caller).await
             }
             LifecycleProductAction::ExtensionActivate { package_ref } => {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(Some(package_ref));
                 };
+                let caller = lifecycle_caller(&context)?;
                 let credential_gate = self
                     .extension_activation_credential_gate(
                         &context,
                         extension_management,
                         &package_ref,
+                        &caller,
                     )
                     .await?;
                 if extension_management
@@ -405,10 +410,19 @@ impl RebornLocalLifecycleFacade {
                     return match credential_gate {
                         Some(credential_gate) => {
                             extension_management
-                                .activate_with_credential_gate(package_ref, mode, credential_gate)
+                                .activate_with_credential_gate(
+                                    package_ref,
+                                    mode,
+                                    credential_gate,
+                                    &caller,
+                                )
                                 .await
                         }
-                        None => extension_management.activate(package_ref, mode).await,
+                        None => {
+                            extension_management
+                                .activate(package_ref, mode, &caller)
+                                .await
+                        }
                     };
                 }
                 let mode =
@@ -416,10 +430,19 @@ impl RebornLocalLifecycleFacade {
                 match credential_gate {
                     Some(credential_gate) => {
                         extension_management
-                            .activate_with_credential_gate(package_ref, mode, credential_gate)
+                            .activate_with_credential_gate(
+                                package_ref,
+                                mode,
+                                credential_gate,
+                                &caller,
+                            )
                             .await
                     }
-                    None => extension_management.activate(package_ref, mode).await,
+                    None => {
+                        extension_management
+                            .activate(package_ref, mode, &caller)
+                            .await
+                    }
                 }
             }
             LifecycleProductAction::ExtensionRemove { package_ref } => {
@@ -430,7 +453,9 @@ impl RebornLocalLifecycleFacade {
                 // extension's exclusive credential (the convergence point shared
                 // with the agent capability path).
                 let scope = lifecycle_resource_scope(&context)?;
-                extension_management.remove(package_ref, &scope).await
+                extension_management
+                    .remove(package_ref, &scope, Some(&scope.user_id))
+                    .await
             }
             LifecycleProductAction::ExtensionAuth { package_ref } => {
                 unsupported_extension_auth_configure_projection(Some(package_ref))
@@ -458,7 +483,8 @@ impl RebornLocalLifecycleFacade {
                     .save(&extension_id, values)
                     .await
                     .map_err(map_channel_config_error)?;
-                let mut response = extension_management.project(package_ref).await?;
+                let caller = lifecycle_caller(&context)?;
+                let mut response = extension_management.project(package_ref, &caller).await?;
                 response.message = Some("channel configuration saved".to_string());
                 Ok(response)
             }
@@ -470,37 +496,28 @@ impl RebornLocalLifecycleFacade {
         context: &LifecycleProductContext,
         extension_management: &RebornLocalExtensionManagementPort,
         package_ref: &LifecyclePackageRef,
+        caller: &UserId,
     ) -> Result<Option<RuntimeExtensionActivationCredentialGate>, ProductWorkflowError> {
+        // The requirements preflight checks ownership first, so a non-owner
+        // exits here with the masked "is not installed" denial before any
+        // credential or hosted-MCP probing can leak the install's existence.
         let requirements = extension_management
-            .activation_credential_requirements(package_ref)
+            .activation_credential_requirements(package_ref, caller)
             .await?;
         if requirements.is_empty() {
             return Ok(None);
         }
-        let Some(credential_accounts) = &self.credential_accounts else {
-            return Err(ProductWorkflowError::InvalidBindingRequest {
-                reason: format!(
-                    "extension {} requires product auth credentials before activation",
-                    package_ref.id
-                ),
-            });
+        // Credential readiness is evaluated exactly once inside activation,
+        // where missing requirements become typed lifecycle blockers. When
+        // product auth is not composed, the normal `activate` path uses the
+        // unavailable gate and reports every declared requirement as missing.
+        let Some(credential_accounts) = self.credential_accounts.as_ref() else {
+            return Ok(None);
         };
-        let scope = lifecycle_resource_scope(context)?;
-        let credential_gate =
-            RuntimeExtensionActivationCredentialGate::new(scope, Arc::clone(credential_accounts));
-        let missing_requirements = credential_gate
-            .missing_requirements(requirements)
-            .await
-            .map_err(map_lifecycle_credential_stage_error)?;
-        if missing_requirements.is_empty() {
-            return Ok(Some(credential_gate));
-        }
-        Err(ProductWorkflowError::InvalidBindingRequest {
-            reason: format!(
-                "extension {} requires product auth credentials before activation",
-                package_ref.id
-            ),
-        })
+        Ok(Some(RuntimeExtensionActivationCredentialGate::new(
+            lifecycle_resource_scope(context)?,
+            Arc::clone(credential_accounts),
+        )))
     }
 }
 
@@ -516,16 +533,47 @@ impl LifecycleProductFacade for RebornLocalLifecycleFacade {
 
     async fn project_package(
         &self,
-        _context: LifecycleProductContext,
+        context: LifecycleProductContext,
         package_ref: LifecyclePackageRef,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         if package_ref.kind == LifecyclePackageKind::Extension {
             let Some(extension_management) = &self.extension_management else {
                 return unsupported_projection(Some(package_ref));
             };
-            return extension_management.project(package_ref).await;
+            let caller = lifecycle_caller(&context)?;
+            return extension_management.project(package_ref, &caller).await;
         }
         unsupported_projection(Some(package_ref))
+    }
+
+    async fn import_extension_bundle(
+        &self,
+        _context: LifecycleProductContext,
+        bundle: Vec<u8>,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        let Some(extension_management) = &self.extension_management else {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: "extension management is not available in this runtime".to_string(),
+            });
+        };
+        extension_management.import_bundle(bundle).await
+    }
+
+    /// Project the durable installation records' redacted `last_error` so the
+    /// extensions wire's `activation_error` reports *why* a `Failed` extension
+    /// failed. Reads the generic host's working records through the extension
+    /// management port (the same source the installation-state projection uses
+    /// to surface `Failed`). Empty when extension management is not composed.
+    async fn installed_activation_errors(
+        &self,
+        _context: LifecycleProductContext,
+    ) -> Result<std::collections::HashMap<String, String>, ProductWorkflowError> {
+        match &self.extension_management {
+            Some(extension_management) => {
+                extension_management.installation_activation_errors().await
+            }
+            None => Ok(std::collections::HashMap::new()),
+        }
     }
 }
 
@@ -536,36 +584,58 @@ fn skill_package_ref(name: &str) -> Result<LifecyclePackageRef, ProductWorkflowE
 fn lifecycle_resource_scope(
     context: &LifecycleProductContext,
 ) -> Result<ResourceScope, ProductWorkflowError> {
-    let LifecycleProductContext::Surface(context) = context else {
-        return Err(ProductWorkflowError::InvalidBindingRequest {
-            reason: "extension lifecycle activation requires a surface caller".to_string(),
-        });
-    };
-    Ok(ResourceScope {
-        tenant_id: context.tenant_id.clone(),
-        user_id: context.user_id.clone(),
-        agent_id: context.agent_id.clone(),
-        project_id: context.project_id.clone(),
-        mission_id: None,
-        thread_id: None,
-        invocation_id: InvocationId::new(),
-    })
+    match context {
+        LifecycleProductContext::Surface(context) => Ok(ResourceScope {
+            tenant_id: context.tenant_id.clone(),
+            user_id: context.user_id.clone(),
+            agent_id: context.agent_id.clone(),
+            project_id: context.project_id.clone(),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }),
+        LifecycleProductContext::Command(command_context) => {
+            // Commands have no surface context of their own. Their verified
+            // auth claim is the authority-bearing source for the caller, and
+            // a host-minted tenant claim is the corresponding tenant scope.
+            // Claims without a tenant remain valid for local-dev commands,
+            // which use the local default scope just like the local command
+            // facade.
+            let caller = lifecycle_caller(context)?;
+            let mut scope =
+                ResourceScope::local_default(caller, InvocationId::new()).map_err(|error| {
+                    ProductWorkflowError::InvalidBindingRequest {
+                        reason: format!("command lifecycle scope is invalid: {error}"),
+                    }
+                })?;
+            if let Some(tenant_id) = command_context.auth_claim.tenant_id() {
+                scope.tenant_id = tenant_id.clone();
+            }
+            Ok(scope)
+        }
+    }
 }
 
-fn map_lifecycle_credential_stage_error(error: CredentialStageError) -> ProductWorkflowError {
-    match error {
-        CredentialStageError::AuthRequired => ProductWorkflowError::InvalidBindingRequest {
-            reason: "extension requires product auth credentials before activation".to_string(),
-        },
-        CredentialStageError::Backend => ProductWorkflowError::InvalidBindingRequest {
-            reason: "extension product auth credential state is invalid".to_string(),
-        },
+/// Owner-attributing caller identity for extension lifecycle actions.
+///
+/// Surface callers carry a typed [`UserId`]; command callers derive it from
+/// the verified auth claim minted by host authentication — commands must stay
+/// owner-attributed, not fall back to an ownerless path.
+fn lifecycle_caller(context: &LifecycleProductContext) -> Result<UserId, ProductWorkflowError> {
+    match context {
+        LifecycleProductContext::Surface(context) => Ok(context.user_id.clone()),
+        LifecycleProductContext::Command(context) => UserId::new(context.auth_claim.subject())
+            .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "command auth subject is not a valid lifecycle caller identity: {error}"
+                ),
+            }),
     }
 }
 
 pub(crate) fn response_with_payload(
     package_ref: Option<LifecyclePackageRef>,
-    phase: LifecyclePhase,
+    phase: InstallationState,
     payload: LifecycleProductPayload,
 ) -> LifecycleProductResponse {
     LifecycleProductResponse {
@@ -600,7 +670,7 @@ fn unsupported_projection(
 ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
     Ok(LifecycleProductResponse::projection(
         package_ref,
-        LifecyclePhase::Unsupported,
+        InstallationState::Unsupported,
         vec![LifecycleReadinessBlocker::runtime(Some(
             "extension_lifecycle_local_runtime_unwired".to_string(),
         ))?],
@@ -612,7 +682,7 @@ fn unsupported_extension_auth_configure_projection(
 ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
     Ok(LifecycleProductResponse::projection(
         package_ref,
-        LifecyclePhase::Unsupported,
+        InstallationState::Unsupported,
         vec![LifecycleReadinessBlocker::runtime(Some(
             "extension_auth_and_configure_not_yet_wired".to_string(),
         ))?],
@@ -711,7 +781,7 @@ mod tests {
             })
             .await
             .expect("install skill");
-        assert_eq!(install.phase, LifecyclePhase::Installed);
+        assert_eq!(install.phase, InstallationState::Installed);
         assert_eq!(
             install.package_ref,
             Some(
@@ -734,7 +804,7 @@ mod tests {
             )
             .await
             .expect("list skills");
-        assert_eq!(list.phase, LifecyclePhase::Discovered);
+        assert_eq!(list.phase, InstallationState::Installed);
         let Some(LifecycleProductPayload::SkillSearch { count, .. }) = list.payload.as_ref() else {
             panic!("expected skill search payload");
         };
@@ -814,7 +884,7 @@ mod tests {
             )
             .await
             .expect("remove skill");
-        assert_eq!(remove.phase, LifecyclePhase::Removed);
+        assert_eq!(remove.phase, InstallationState::Removed);
         assert!(
             !storage_root
                 .join("skills/lifecycle-skill/SKILL.md")

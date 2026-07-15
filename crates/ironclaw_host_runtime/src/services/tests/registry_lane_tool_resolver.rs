@@ -68,6 +68,7 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for EchoLane {
                 .reserve(request.scope, request.estimate)
                 .map_err(|_| DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::Resource,
+                    safe_summary: None,
                 })?,
         };
         let receipt = self
@@ -75,6 +76,7 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for EchoLane {
             .reconcile(reservation.id, usage.clone())
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
+                safe_summary: None,
             })?;
         Ok(RuntimeAdapterResult {
             output,
@@ -90,6 +92,7 @@ fn wasm_capability_request(input: Value) -> CapabilityDispatchRequest {
     CapabilityDispatchRequest {
         capability_id: CapabilityId::new("test-wasm.run").unwrap(),
         scope: sample_scope(),
+        authenticated_actor_user_id: None,
         estimate: ResourceEstimate {
             concurrency_slots: Some(1),
             output_bytes: Some(10_000),
@@ -185,6 +188,7 @@ async fn unconfigured_lane_fails_missing_backend_and_releases_prepared_reservati
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("test-wasm.run").unwrap(),
             scope,
+            authenticated_actor_user_id: None,
             estimate,
             mounts: None,
             resource_reservation: Some(reservation),
@@ -308,6 +312,7 @@ async fn resolved_binding_survives_registry_swap_mid_flight() {
             },
             mounts: None,
             resource_reservation: None,
+            authenticated_actor_user_id: None,
             input: json!({"in":"flight"}),
         })
         .await

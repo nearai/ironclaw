@@ -9,7 +9,6 @@
 //! of it can be reintroduced silently.
 //!
 //! Sanctioned exceptions are path-scoped, not term-scoped:
-//! - `crates/ironclaw_reborn_migration/` reads v1 domain vocabulary by design;
 //! - the two one-time forward data migrations legitimately name the retired
 //!   identities they fold forward
 //!   (`extension_host/extension_installation_store.rs`,
@@ -87,7 +86,6 @@ const RETIRED_IDENTITY_FORMS: &[&str] = &[
 /// Path fragments allowed to reference retired vocabulary.
 const SANCTIONED_PATHS: &[&str] = &[
     // v1 → Reborn converter reads v1 domain names by design.
-    "crates/ironclaw_reborn_migration/",
     // The v1 gateway is a legacy enclave being strangled wholesale — its
     // static JS still serves the v1 `kind` wire and is not policed
     // term-by-term (same footing as `src/`).

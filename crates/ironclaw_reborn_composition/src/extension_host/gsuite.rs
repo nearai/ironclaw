@@ -184,6 +184,9 @@ fn capability_manifest(
         ))?),
         required_host_ports: Vec::new(),
         runtime_credentials: runtime_credentials(capability, spec)?,
+        // gsuite egress is applied via the dedicated Google-API network policy
+        // special-case, not a manifest-declared allowlist.
+        network_targets: Vec::new(),
         resource_profile: Some(gsuite_resource_profile()),
     })
 }

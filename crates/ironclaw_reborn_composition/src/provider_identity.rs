@@ -19,6 +19,7 @@ use ironclaw_host_api::UserId;
 use ironclaw_product_adapters::AdapterInstallationId;
 use ironclaw_product_workflow::{
     ProductActorUserResolutionRequest, ProductActorUserResolver, ProductWorkflowError,
+    ResolvedProductActorUser,
 };
 use thiserror::Error;
 
@@ -283,7 +284,7 @@ impl ProductActorUserResolver for ProviderIdentityActorResolver {
     async fn resolve_product_actor_user(
         &self,
         request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<UserId>, ProductWorkflowError> {
+    ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
         if request.adapter_id.as_str() != self.adapter_id {
             return Ok(None);
         }
@@ -297,7 +298,7 @@ impl ProductActorUserResolver for ProviderIdentityActorResolver {
             request.external_actor_ref.id(),
         );
         if let Some(user_id) = self.cached_user(&provider_user_id)? {
-            return Ok(Some(user_id));
+            return Ok(Some(ResolvedProductActorUser::new(user_id)));
         }
         let resolved = self
             .lookup
@@ -309,7 +310,7 @@ impl ProductActorUserResolver for ProviderIdentityActorResolver {
         if let Some(user_id) = resolved.as_ref() {
             self.cache_user(provider_user_id, user_id.clone())?;
         }
-        Ok(resolved)
+        Ok(resolved.map(ResolvedProductActorUser::new))
     }
 }
 
@@ -346,7 +347,10 @@ mod tests {
             .await
             .expect("resolution succeeds");
 
-        assert_eq!(resolved, Some(user("user:alice")));
+        assert_eq!(
+            resolved,
+            Some(ResolvedProductActorUser::new(user("user:alice")))
+        );
         assert_eq!(
             lookup.calls(),
             vec![("slack".to_string(), "install-alpha:U123".to_string())]
@@ -448,8 +452,14 @@ mod tests {
             .await
             .expect("second resolution succeeds");
 
-        assert_eq!(first, Some(user("user:alice")));
-        assert_eq!(second, Some(user("user:alice")));
+        assert_eq!(
+            first,
+            Some(ResolvedProductActorUser::new(user("user:alice")))
+        );
+        assert_eq!(
+            second,
+            Some(ResolvedProductActorUser::new(user("user:alice")))
+        );
         assert_eq!(
             lookup.calls(),
             vec![("slack".to_string(), "install-alpha:U123".to_string())]
@@ -482,7 +492,11 @@ mod tests {
                 ))
                 .await
                 .expect("resolution succeeds");
-            assert_eq!(resolved, Some(user("user:alice")), "kind {kind} resolves");
+            assert_eq!(
+                resolved,
+                Some(ResolvedProductActorUser::new(user("user:alice"))),
+                "kind {kind} resolves"
+            );
         }
         // A foreign adapter still resolves to None so resolvers can stack.
         assert_eq!(

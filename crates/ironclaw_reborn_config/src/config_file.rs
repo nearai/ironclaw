@@ -38,7 +38,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::de::{self, Visitor};
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 use crate::secrets_guard::{InlineSecretError, reject_inline_secret};
@@ -53,7 +53,7 @@ pub const REBORN_CONFIG_API_VERSION: &str = "ironclaw.runtime/v1";
 /// Every section is optional so an operator can ship a sparse file that
 /// overrides only the fields they care about; the rest stays at the
 /// CLI-shaped defaults baked into composition.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RebornConfigFile {
     /// API version. When set, must be parseable as `ironclaw.runtime/vN.M`
@@ -93,7 +93,7 @@ pub struct RebornConfigFile {
     pub trigger_poller: Option<TriggerPollerConfigSection>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BootSection {
     /// Composition profile name. Stringly typed; composition validates
@@ -104,7 +104,7 @@ pub struct BootSection {
     pub profile: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct IdentitySection {
     pub tenant: Option<String>,
@@ -113,7 +113,29 @@ pub struct IdentitySection {
     pub default_project: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+impl IdentitySection {
+    pub fn set_tenant(mut self, tenant: impl Into<String>) -> Self {
+        self.tenant = Some(tenant.into());
+        self
+    }
+
+    pub fn set_default_agent(mut self, default_agent: impl Into<String>) -> Self {
+        self.default_agent = Some(default_agent.into());
+        self
+    }
+
+    pub fn set_default_owner(mut self, default_owner: impl Into<String>) -> Self {
+        self.default_owner = Some(default_owner.into());
+        self
+    }
+
+    pub fn set_default_project(mut self, default_project: impl Into<String>) -> Self {
+        self.default_project = Some(default_project.into());
+        self
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicySection {
     /// One of `local_single_user`, `hosted_multi_tenant`,
@@ -127,7 +149,7 @@ pub struct PolicySection {
     pub default_approval_policy: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DriversSection {
     /// Default driver name. Composition matches against
@@ -138,7 +160,7 @@ pub struct DriversSection {
     pub additional: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HarnessSection {
     /// Active harness id. Composition logs the value at boot; takes
@@ -146,7 +168,7 @@ pub struct HarnessSection {
     pub id: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunnerSection {
     pub heartbeat_interval_secs: Option<u64>,
@@ -167,7 +189,7 @@ pub struct RunnerSection {
     pub max_concurrent_conversation_runs: Option<u32>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SkillsSection {
     /// When false, regex activation criteria no longer auto-load full skill context.
@@ -181,6 +203,18 @@ pub enum StorageBackend {
     Postgres,
     #[doc(hidden)]
     Unknown(String),
+}
+
+impl Serialize for StorageBackend {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(match self {
+            Self::Postgres => "postgres",
+            Self::Unknown(candidate) => candidate,
+        })
+    }
 }
 
 impl<'de> Deserialize<'de> for StorageBackend {
@@ -217,7 +251,7 @@ impl<'de> Deserialize<'de> for StorageBackend {
 /// `url_env` and `secret_master_key_env` are environment variable NAMES, not
 /// credential-bearing values. The parser rejects raw URL-shaped values so
 /// credentials cannot be pasted into `config.toml`.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct StorageSection {
     /// Storage backend name. First production slice supports `"postgres"`.
@@ -241,7 +275,7 @@ pub struct StorageSection {
 /// environment variable, never a token value. The `secrets_guard`
 /// inline-secret check fires at parse time if an operator pastes a
 /// token-shaped string into either field documented as a name.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebuiSection {
     /// IP address the WebChat v2 listener binds. Default `127.0.0.1`
@@ -298,7 +332,7 @@ pub struct WebuiSection {
 ///
 /// Composition uses these as defaults when first seeding a user/project
 /// account. Runtime tools can install per-account overrides at any time.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BudgetSection {
     /// Per-user daily ceiling. Default in composition is `5.00`.
@@ -329,12 +363,84 @@ pub struct BudgetSection {
     pub overestimate_factor: Option<f64>,
 }
 
+impl BudgetSection {
+    pub fn set_user_daily_usd(mut self, user_daily_usd: impl Into<Option<f64>>) -> Self {
+        self.user_daily_usd = user_daily_usd.into();
+        self
+    }
+
+    pub fn set_project_daily_usd(mut self, project_daily_usd: impl Into<Option<f64>>) -> Self {
+        self.project_daily_usd = project_daily_usd.into();
+        self
+    }
+
+    pub fn set_mission_per_tick_usd(
+        mut self,
+        mission_per_tick_usd: impl Into<Option<f64>>,
+    ) -> Self {
+        self.mission_per_tick_usd = mission_per_tick_usd.into();
+        self
+    }
+
+    pub fn set_heartbeat_per_tick_usd(
+        mut self,
+        heartbeat_per_tick_usd: impl Into<Option<f64>>,
+    ) -> Self {
+        self.heartbeat_per_tick_usd = heartbeat_per_tick_usd.into();
+        self
+    }
+
+    pub fn set_routine_lightweight_usd(
+        mut self,
+        routine_lightweight_usd: impl Into<Option<f64>>,
+    ) -> Self {
+        self.routine_lightweight_usd = routine_lightweight_usd.into();
+        self
+    }
+
+    pub fn set_routine_standard_usd(
+        mut self,
+        routine_standard_usd: impl Into<Option<f64>>,
+    ) -> Self {
+        self.routine_standard_usd = routine_standard_usd.into();
+        self
+    }
+
+    pub fn set_background_job_default_usd(
+        mut self,
+        background_job_default_usd: impl Into<Option<f64>>,
+    ) -> Self {
+        self.background_job_default_usd = background_job_default_usd.into();
+        self
+    }
+
+    pub fn set_default_tz(mut self, default_tz: impl Into<String>) -> Self {
+        self.default_tz = Some(default_tz.into());
+        self
+    }
+
+    pub fn set_warn_at(mut self, warn_at: impl Into<Option<f64>>) -> Self {
+        self.warn_at = warn_at.into();
+        self
+    }
+
+    pub fn set_pause_at(mut self, pause_at: impl Into<Option<f64>>) -> Self {
+        self.pause_at = pause_at.into();
+        self
+    }
+
+    pub fn set_overestimate_factor(mut self, overestimate_factor: impl Into<Option<f64>>) -> Self {
+        self.overestimate_factor = overestimate_factor.into();
+        self
+    }
+}
+
 /// `[trigger_poller]` section. Controls the background trigger-poller worker.
 ///
 /// All fields are optional so a sparse or absent section is valid; the
 /// composition root applies its own compiled defaults for any field not set
 /// here. Env vars (`IRONCLAW_TRIGGER_POLLER_*`) override this section.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TriggerPollerConfigSection {
     /// Enable or disable the trigger poller. Default `false` (off) in
@@ -362,13 +468,48 @@ pub struct TriggerPollerConfigSection {
     pub tick_jitter_max_secs: Option<u64>,
 }
 
+impl TriggerPollerConfigSection {
+    pub fn set_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = Some(enabled);
+        self
+    }
+
+    pub fn set_poll_interval_secs(mut self, poll_interval_secs: u64) -> Self {
+        self.poll_interval_secs = Some(poll_interval_secs);
+        self
+    }
+
+    pub fn set_fires_per_tick(mut self, fires_per_tick: u32) -> Self {
+        self.fires_per_tick = Some(fires_per_tick);
+        self
+    }
+
+    pub fn set_max_concurrent_fires_per_trigger(
+        mut self,
+        max_concurrent_fires_per_trigger: u32,
+    ) -> Self {
+        self.max_concurrent_fires_per_trigger = Some(max_concurrent_fires_per_trigger);
+        self
+    }
+
+    pub fn set_startup_jitter_max_secs(mut self, startup_jitter_max_secs: u64) -> Self {
+        self.startup_jitter_max_secs = Some(startup_jitter_max_secs);
+        self
+    }
+
+    pub fn set_tick_jitter_max_secs(mut self, tick_jitter_max_secs: u64) -> Self {
+        self.tick_jitter_max_secs = Some(tick_jitter_max_secs);
+        self
+    }
+}
+
 /// One `[llm.<slot>]` entry. The slot name (typically `"default"` or
 /// `"mission"`) is the TOML table key.
 ///
 /// References a provider by `provider_id` (resolved against the merged
 /// `ProviderRegistry` in the composition root) and optionally overrides
 /// the provider's `default_model` and `api_key_env`.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LlmSlotSelection {
     /// Provider id from `providers.json` (built-in or user catalog).

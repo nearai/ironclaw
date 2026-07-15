@@ -227,10 +227,7 @@ async fn webui_event_stream_offers_always_for_typed_approval_gate() {
                 requested_by: Principal::Extension(ExtensionId::new("builtin").unwrap()),
                 action: Box::new(Action::Dispatch {
                     capability: capability.clone(),
-                    estimated_resources: ResourceEstimate {
-                        network_egress_bytes: Some(4096),
-                        ..ResourceEstimate::default()
-                    },
+                    estimated_resources: ResourceEstimate::default().set_network_egress_bytes(4096),
                 }),
                 invocation_fingerprint: None,
                 reason: "raw path /Users/firatsertgoz/.ssh/id_rsa and token sk-secret".to_string(),
@@ -489,10 +486,7 @@ async fn webui_event_stream_projects_spawn_approval_context() {
                 requested_by: Principal::Extension(ExtensionId::new("builtin").unwrap()),
                 action: Box::new(Action::SpawnCapability {
                     capability: CapabilityId::new("script.shell").unwrap(),
-                    estimated_resources: ResourceEstimate {
-                        process_count: Some(2),
-                        ..ResourceEstimate::default()
-                    },
+                    estimated_resources: ResourceEstimate::default().set_process_count(2),
                 }),
                 invocation_fingerprint: None,
                 reason: "raw spawn reason".to_string(),

@@ -231,6 +231,7 @@ where
                 runtime_policy: &self.runtime_policy,
                 capability_id: &request.capability_id,
                 scope: request.scope,
+                authenticated_actor_user_id: request.authenticated_actor_user_id,
                 estimate: request.estimate,
                 mounts: request.mounts,
                 resource_reservation: request.resource_reservation,

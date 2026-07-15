@@ -71,6 +71,13 @@ pub struct CapabilityDescriptor {
     pub effects: Vec<EffectKind>,
     pub default_permission: PermissionMode,
     pub runtime_credentials: Vec<RuntimeCredentialRequirement>,
+    /// Declared network egress allowlist for this capability, independent of any
+    /// runtime credential. This lets a keyless-but-networked tool (one that
+    /// declares the `Network` effect but injects no secret) populate its
+    /// `ApplyNetworkPolicy` allowlist directly from the manifest. Credential
+    /// `audience`s are folded in on top of these at grant issuance.
+    #[serde(default)]
+    pub network_targets: Vec<NetworkTargetPattern>,
     pub resource_profile: Option<ResourceProfile>,
 }
 

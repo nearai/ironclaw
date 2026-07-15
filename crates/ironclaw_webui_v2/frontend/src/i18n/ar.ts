@@ -847,6 +847,10 @@ registerPack("ar", {
   "ext.registry.emptyDesc": "كل الإضافات المتاحة مثبّتة بالفعل، أو لا يوجد سجل مُكوَّن.",
   "ext.registry.availableTitle": "الإضافات المتاحة",
   "ext.registry.noMatch": "لا توجد إضافات تطابق عامل التصفية.",
+  "ext.registry.import": "استيراد",
+  "ext.registry.importing": "جارٍ الاستيراد…",
+  "ext.registry.importSuccess": "تم استيراد الأداة — ثبّتها من السجل.",
+  "ext.registry.importFailed": "فشل الاستيراد",
 
   // Chat — history
   "chat.history.loading": "جارٍ التحميل...",
@@ -1060,6 +1064,13 @@ registerPack("ar", {
   "admin.dashboard.jobs": "المهام",
   "admin.dashboard.lastActive": "آخر نشاط",
 
+  // Admin — relative time
+  "admin.relative.never": "أبدًا",
+  "admin.relative.justNow": "الآن للتو",
+  "admin.relative.minutesAgo": "منذ {count} د",
+  "admin.relative.hoursAgo": "منذ {count} س",
+  "admin.relative.daysAgo": "منذ {count} يوم",
+
   // Admin — users list
   "admin.users.user": "مستخدم",
   "admin.users.userFallback": "مستخدم",
@@ -1070,6 +1081,8 @@ registerPack("ar", {
   "admin.users.filter.active": "نشط",
   "admin.users.filter.suspended": "موقوف",
   "admin.users.filter.admins": "مسؤولون",
+  "admin.users.status.active": "نشط",
+  "admin.users.status.suspended": "موقوف",
   "admin.users.newUser": "مستخدم جديد",
   "admin.users.createUser": "إنشاء مستخدم",
   "admin.users.creating": "جارٍ الإنشاء…",
@@ -1185,6 +1198,9 @@ registerPack("ar", {
   "extensions.configureName": "تكوين {name}",
   "extensions.allInstalled": "جميع الامتدادات المثبتة",
   "tools.installed": "Installed tools",
+  "extensions.scope.shared": "مشترك",
+  "extensions.scope.private": "خاص بي",
+  "mcp.installed": "خوادم MCP المثبتة",
   "extensions.oneCapability": "قدرة واحدة",
   "extensions.pluralCapabilities": "إمكانات {count}",
   "extensions.oneKeyword": "كلمة رئيسية واحدة",

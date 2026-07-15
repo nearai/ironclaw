@@ -4,10 +4,10 @@ use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount, CredentialAccountStatus,
     CredentialAccountUpdateBinding,
 };
-use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope};
+use ironclaw_host_api::{ExtensionId, InstallationState, InvocationId, ResourceScope};
 use ironclaw_product_workflow::{
     ExtensionCredentialSetupService, ExtensionCredentialSubmitRequest, LifecyclePackageKind,
-    LifecyclePackageRef, LifecyclePhase, RebornServicesError, RebornServicesErrorCode,
+    LifecyclePackageRef, LifecycleProductPayload, RebornServicesError, RebornServicesErrorCode,
     RebornServicesErrorKind,
 };
 use secrecy::{ExposeSecret, SecretString};
@@ -225,33 +225,37 @@ pub(crate) async fn bootstrap_nearai_mcp(
                 reason: format!("NEAR AI MCP package ref is invalid: {error}"),
             }
         })?;
-    let phase = extension_management
-        .project(package_ref.clone())
+    let projection = extension_management
+        .project(package_ref.clone(), &owner_scope.user_id)
         .await
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("NEAR AI MCP extension projection failed: {error}"),
-        })?
-        .phase;
-    match phase {
-        LifecyclePhase::Discovered | LifecyclePhase::Installed | LifecyclePhase::Active => {}
-        LifecyclePhase::Removed => {
-            tracing::debug!(
-                "NEAR AI MCP credentials are present, but the extension was removed; preserving explicit removed state"
-            );
-            return Ok(NearAiMcpBootstrapOutcome::SkippedPreservedRemoved);
-        }
-        LifecyclePhase::Disabled => {
-            tracing::debug!(
-                "NEAR AI MCP credentials are present, but the extension is disabled; preserving explicit disabled state"
-            );
-            return Ok(NearAiMcpBootstrapOutcome::SkippedDisabled);
-        }
-        other => {
-            tracing::debug!(
-                phase = ?other,
-                "NEAR AI MCP credentials are present, but the extension is not in an auto-activatable phase"
-            );
-            return Ok(NearAiMcpBootstrapOutcome::SkippedNonActivatable);
+        })?;
+    let phase = projection.phase;
+    // `install_scope` is present exactly when the caller has a visible
+    // installation; the projected `phase` is a resting state only for an
+    // installed package (a not-installed projection carries a neutral phase).
+    let installed = matches!(
+        projection.payload.as_ref(),
+        Some(LifecycleProductPayload::ExtensionList { extensions, .. })
+            if extensions.first().and_then(|extension| extension.install_scope).is_some()
+    );
+    if installed {
+        match phase {
+            InstallationState::Active | InstallationState::Installed => {}
+            InstallationState::Disabled => {
+                tracing::debug!(
+                    "NEAR AI MCP credentials are present, but the extension is disabled; preserving explicit disabled state"
+                );
+                return Ok(NearAiMcpBootstrapOutcome::SkippedDisabled);
+            }
+            other => {
+                tracing::debug!(
+                    phase = ?other,
+                    "NEAR AI MCP credentials are present, but the extension is not in an auto-activatable state"
+                );
+                return Ok(NearAiMcpBootstrapOutcome::SkippedNonActivatable);
+            }
         }
     }
 
@@ -322,37 +326,43 @@ pub(crate) async fn bootstrap_nearai_mcp(
         }
     }
 
-    if phase == LifecyclePhase::Discovered {
+    // Bootstrap acts as the base owner (the tenant operator), so the install
+    // derives a tenant-shared owner — the NEAR AI MCP extension is for the
+    // whole tenant, matching pre-#5459 behavior.
+    let bootstrap_caller = resource_scope.user_id.clone();
+    if !installed {
         extension_management
-            .install(package_ref.clone())
+            .install(package_ref.clone(), &bootstrap_caller)
             .await
             .map_err(|error| RebornBuildError::InvalidConfig {
                 reason: format!("NEAR AI MCP extension install failed: {error}"),
             })?;
     }
-    match phase {
-        LifecyclePhase::Discovered | LifecyclePhase::Installed => {
-            extension_management
-                .activate_with_credential_gate(
-                    package_ref,
-                    ExtensionActivationMode::Static,
-                    RuntimeExtensionActivationCredentialGate::new(
-                        resource_scope,
-                        product_auth.runtime_credential_account_selection_service(),
-                    ),
-                )
-                .await
-                .map_err(|error| RebornBuildError::InvalidConfig {
-                    reason: format!("NEAR AI MCP extension activation failed: {error}"),
-                })?;
-            Ok(NearAiMcpBootstrapOutcome::Activated)
-        }
-        LifecyclePhase::Active if submitted_credential => {
-            Ok(NearAiMcpBootstrapOutcome::SubmittedCredential)
-        }
-        LifecyclePhase::Active => Ok(NearAiMcpBootstrapOutcome::ReusedCredential),
-        LifecyclePhase::Disabled => Ok(NearAiMcpBootstrapOutcome::SkippedDisabled),
-        _ => Ok(NearAiMcpBootstrapOutcome::SkippedNonActivatable),
+    // A not-installed (just installed above) or an installed-but-inactive
+    // extension activates; an already-active one only reports its credential
+    // outcome.
+    if !installed || phase == InstallationState::Installed {
+        extension_management
+            .activate_with_credential_gate(
+                package_ref,
+                ExtensionActivationMode::Static,
+                RuntimeExtensionActivationCredentialGate::new(
+                    resource_scope,
+                    product_auth.runtime_credential_account_selection_service(),
+                ),
+                &bootstrap_caller,
+            )
+            .await
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("NEAR AI MCP extension activation failed: {error}"),
+            })?;
+        return Ok(NearAiMcpBootstrapOutcome::Activated);
+    }
+    // Installed and already active.
+    if submitted_credential {
+        Ok(NearAiMcpBootstrapOutcome::SubmittedCredential)
+    } else {
+        Ok(NearAiMcpBootstrapOutcome::ReusedCredential)
     }
 }
 
@@ -362,7 +372,6 @@ pub(crate) enum NearAiMcpBootstrapOutcome {
     SkippedDisabled,
     SkippedUnavailable,
     SkippedUnsupportedStorage,
-    SkippedPreservedRemoved,
     SkippedNonActivatable,
     ReusedCredential,
     SubmittedCredential,
@@ -376,7 +385,6 @@ impl NearAiMcpBootstrapOutcome {
             Self::SkippedDisabled
             | Self::SkippedUnavailable
             | Self::SkippedUnsupportedStorage
-            | Self::SkippedPreservedRemoved
             | Self::SkippedNonActivatable => tracing::debug!(
                 outcome = ?self,
                 "NEAR AI MCP bootstrap skipped; extension will not be auto-activated"

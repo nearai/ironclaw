@@ -5,9 +5,9 @@
 //! the just-finished run's transcript and, when the run is substantive enough,
 //! distills a reusable `SKILL.md` via the learning model, safety-scans it,
 //! installs it for the run's owner, and notifies the UI. The distillation
-//! *logic* lives in the `ironclaw_skill_learning` crate; this file owns the
-//! composition seam: the eligibility gate, the transcript read, the inference
-//! adapter, the scoped write, and the learned-skill live notification.
+//! *logic* lives in `ironclaw_skills::learning`; this file owns the composition
+//! seam: the eligibility gate, the transcript read, the inference adapter, the
+//! scoped write, and the learned-skill live notification.
 //!
 //! Skill learning requires a learning LLM provider, so the sink and its adapter
 //! are gated on `root-llm-provider` (the feature that wires `ironclaw_llm`).
@@ -71,12 +71,13 @@ mod learning {
     use ironclaw_host_api::{InvocationId, ResourceScope, TenantId, ThreadId, UserId};
     use ironclaw_llm::{ChatMessage, CompletionRequest, LlmProvider};
     use ironclaw_safety::{Sanitizer, validate_trusted_trigger_prompt};
-    use ironclaw_skill_learning::{
-        DistillOutcome, DistilledSkill, RefineOutcome, SkillInferenceError, SkillInferencePort,
-        distill_skill, refine_skill,
-    };
     use ironclaw_skills::{
-        ManagedSkillSource, SkillManagementErrorKind, SkillSummary, parse_skill_md,
+        ManagedSkillSource, SkillManagementErrorKind, SkillSummary,
+        learning::{
+            DistillOutcome, DistilledSkill, RefineOutcome, SkillInferenceError, SkillInferencePort,
+            distill_skill, refine_skill,
+        },
+        parse_skill_md,
     };
     use ironclaw_threads::{
         AppendAssistantDraftRequest, ContextWindow, LoadContextWindowRequest, MessageContent,

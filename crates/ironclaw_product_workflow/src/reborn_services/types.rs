@@ -13,8 +13,8 @@ use serde::{Deserialize, Deserializer, Serialize, de};
 use tokio::sync::mpsc;
 
 use crate::{
-    ChannelConnectionRequirement, LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload,
-    LifecycleReadinessBlocker,
+    ChannelConnectionRequirement, LifecycleInstallScope, LifecyclePackageRef,
+    LifecycleProductPayload, LifecycleReadinessBlocker,
 };
 
 const OUTBOUND_DELIVERY_TARGET_ID_MAX_BYTES: usize = 512;
@@ -93,6 +93,68 @@ pub struct RebornLogQueryRequest {
     pub tail: bool,
     #[serde(default)]
     pub follow: bool,
+}
+
+impl RebornLogQueryRequest {
+    pub fn set_limit(mut self, limit: u32) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    pub fn set_cursor(mut self, cursor: impl Into<String>) -> Self {
+        self.cursor = Some(cursor.into());
+        self
+    }
+
+    pub fn set_level(mut self, level: RebornLogLevel) -> Self {
+        self.level = Some(level);
+        self
+    }
+
+    pub fn set_target(mut self, target: impl Into<String>) -> Self {
+        self.target = Some(target.into());
+        self
+    }
+
+    pub fn set_thread_id(mut self, thread_id: impl Into<String>) -> Self {
+        self.thread_id = Some(thread_id.into());
+        self
+    }
+
+    pub fn set_run_id(mut self, run_id: impl Into<String>) -> Self {
+        self.run_id = Some(run_id.into());
+        self
+    }
+
+    pub fn set_turn_id(mut self, turn_id: impl Into<String>) -> Self {
+        self.turn_id = Some(turn_id.into());
+        self
+    }
+
+    pub fn set_tool_call_id(mut self, tool_call_id: impl Into<String>) -> Self {
+        self.tool_call_id = Some(tool_call_id.into());
+        self
+    }
+
+    pub fn set_tool_name(mut self, tool_name: impl Into<String>) -> Self {
+        self.tool_name = Some(tool_name.into());
+        self
+    }
+
+    pub fn set_source(mut self, source: impl Into<String>) -> Self {
+        self.source = Some(source.into());
+        self
+    }
+
+    pub fn set_tail(mut self, tail: bool) -> Self {
+        self.tail = tail;
+        self
+    }
+
+    pub fn set_follow(mut self, follow: bool) -> Self {
+        self.follow = follow;
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -255,6 +317,30 @@ pub struct RebornTimelineRequest {
     /// include here and round-trips it on each follow-up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
+}
+
+impl RebornTimelineRequest {
+    pub fn new(thread_id: impl Into<String>) -> Self {
+        Self {
+            thread_id: thread_id.into(),
+            ..Self::default()
+        }
+    }
+
+    pub fn set_thread_id(mut self, thread_id: impl Into<String>) -> Self {
+        self.thread_id = thread_id.into();
+        self
+    }
+
+    pub fn set_limit(mut self, limit: u32) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    pub fn set_cursor(mut self, cursor: impl Into<String>) -> Self {
+        self.cursor = Some(cursor.into());
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1241,11 +1327,14 @@ pub struct RebornExtensionInfo {
     pub tools: Vec<String>,
     pub needs_setup: bool,
     pub has_auth: bool,
-    /// The installation lifecycle state (§6.1), exposed exactly. Richer facade
-    /// phases (configured / failed / upgrade-required) collapse into this enum;
-    /// the UI re-derives those distinctions from `needs_setup` + config
-    /// completeness + `activation_error`.
+    /// The installation lifecycle state (§6.1), projected honestly and exposed
+    /// exactly: one of `installed` / `configured` / `active` / `disabled` /
+    /// `failed` / `unsupported`. `failed` is a terminal non-auth activation
+    /// failure and carries its redacted reason in `activation_error`;
+    /// auth-rejection failures surface on the `auth_accounts` axis instead.
     pub installation_state: InstallationState,
+    /// Redacted reason for a `failed` installation state (the durable
+    /// installation record's `last_error`); absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1263,6 +1352,10 @@ pub struct RebornExtensionInfo {
     /// Declared product surfaces (tool / auth / channel-with-direction).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub surfaces: Vec<RebornExtensionSurface>,
+    /// Whether this install is tenant-shared or private to the caller
+    /// (#5459 P1); `None` on pre-#5459 payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_scope: Option<LifecycleInstallScope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1311,7 +1404,7 @@ pub struct RebornExtensionOnboardingPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornSetupExtensionResponse {
     pub package_ref: LifecyclePackageRef,
-    pub phase: LifecyclePhase,
+    pub phase: InstallationState,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blockers: Vec<LifecycleReadinessBlocker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1419,6 +1512,43 @@ pub struct RebornOperatorSetupRequest {
     pub profile_id: Option<String>,
     #[serde(default)]
     pub webui_access_token: Option<SecretString>,
+}
+
+impl RebornOperatorSetupRequest {
+    pub fn set_provider_id(mut self, provider_id: impl Into<String>) -> Self {
+        self.provider_id = Some(provider_id.into());
+        self
+    }
+
+    pub fn set_adapter(mut self, adapter: impl Into<String>) -> Self {
+        self.adapter = Some(adapter.into());
+        self
+    }
+
+    pub fn set_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = Some(base_url.into());
+        self
+    }
+
+    pub fn set_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
+    pub fn set_api_key(mut self, api_key: SecretString) -> Self {
+        self.api_key = Some(api_key);
+        self
+    }
+
+    pub fn set_profile_id(mut self, profile_id: impl Into<String>) -> Self {
+        self.profile_id = Some(profile_id.into());
+        self
+    }
+
+    pub fn set_webui_access_token(mut self, webui_access_token: SecretString) -> Self {
+        self.webui_access_token = Some(webui_access_token);
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

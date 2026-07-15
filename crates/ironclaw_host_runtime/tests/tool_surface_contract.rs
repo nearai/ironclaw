@@ -8,6 +8,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -692,8 +693,21 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
         trigger_create
             .descriptor
             .description
-            .contains("outbound delivery target capabilities"),
+            .contains("builtin__outbound_delivery_targets_list"),
         "trigger_create description should point the model at delivery target selection"
+    );
+    assert!(
+        trigger_create
+            .descriptor
+            .description
+            .contains("pass delivery_target_id"),
+        "trigger_create description should teach per-trigger delivery routing"
+    );
+    assert!(
+        trigger_create.descriptor.description.contains(
+            "If delivery_target_id is set, never put a send, post, or deliver-results step"
+        ),
+        "trigger_create description should front-load the no-duplicate-delivery rule"
     );
     let trigger_prompt_description = trigger_create
         .descriptor
@@ -704,8 +718,31 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
         .and_then(serde_json::Value::as_str)
         .expect("trigger prompt description should be present");
     assert!(
-        trigger_prompt_description.contains("first select the target"),
-        "trigger_create prompt schema should steer delivery requests before trigger creation"
+        trigger_prompt_description
+            .contains("Never tell the prompt to send results back to the requesting user"),
+        "trigger_create prompt schema should forbid result self-delivery phrasing"
+    );
+    assert!(
+        trigger_prompt_description.contains("receiving results is routing"),
+        "trigger_create prompt schema should frame send-me asks as routing, not a prompt step"
+    );
+    let trigger_delivery_target_description = trigger_create
+        .descriptor
+        .parameters_schema
+        .get("properties")
+        .and_then(|properties| properties.get("delivery_target_id"))
+        .and_then(|property| property.get("description"))
+        .and_then(serde_json::Value::as_str)
+        .expect("trigger delivery_target_id description should be present");
+    assert!(
+        trigger_delivery_target_description.contains("builtin__outbound_delivery_targets_list"),
+        "delivery_target_id schema should point at the target list capability"
+    );
+    assert!(
+        trigger_delivery_target_description.contains(
+            "Do not also put a send, post, or deliver-results step for that result in prompt"
+        ),
+        "delivery_target_id schema should forbid duplicate prompt delivery"
     );
 
     let http_schema = &surface
@@ -1278,6 +1315,52 @@ async fn visible_surface_version_is_order_insensitive_for_equivalent_capability_
     assert_eq!(
         surface_a.version, surface_b.version,
         "equivalent capability sets must hash in canonical key order"
+    );
+}
+
+#[tokio::test]
+async fn visible_surface_preserves_registry_order_when_authorizations_finish_out_of_order() {
+    let context = context_with_grants([
+        (
+            capability_id("echo.say"),
+            vec![EffectKind::DispatchCapability],
+        ),
+        (
+            capability_id("files.read"),
+            vec![EffectKind::ReadFilesystem],
+        ),
+    ]);
+    let runtime = runtime_with(
+        registry_from_manifests([
+            (ECHO_MANIFEST, "/system/extensions/echo"),
+            (FILES_MANIFEST, "/system/extensions/files"),
+        ]),
+        Arc::new(DelayingGrantAuthorizer {
+            slow_capability: capability_id("echo.say"),
+            delay: Duration::from_millis(25),
+        }),
+    )
+    .with_trust_policy(Arc::new(trust_policy_for([
+        (
+            "echo",
+            "/system/extensions/echo/manifest.toml",
+            vec![EffectKind::DispatchCapability],
+        ),
+        (
+            "files",
+            "/system/extensions/files/manifest.toml",
+            vec![EffectKind::ReadFilesystem],
+        ),
+    ])));
+
+    let surface = runtime
+        .visible_capabilities(visible_request(context))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        visible_ids(&surface),
+        vec![capability_id("echo.say"), capability_id("files.read")]
     );
 }
 
@@ -2114,6 +2197,29 @@ impl TrustAwareCapabilityDispatchAuthorizer for CountingGrantAuthorizer {
         trust_decision: &TrustDecision,
     ) -> Decision {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        GrantAuthorizer::new()
+            .authorize_dispatch_with_trust(context, descriptor, estimate, trust_decision)
+            .await
+    }
+}
+
+struct DelayingGrantAuthorizer {
+    slow_capability: CapabilityId,
+    delay: Duration,
+}
+
+#[async_trait]
+impl TrustAwareCapabilityDispatchAuthorizer for DelayingGrantAuthorizer {
+    async fn authorize_dispatch_with_trust(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+        trust_decision: &TrustDecision,
+    ) -> Decision {
+        if descriptor.id == self.slow_capability {
+            tokio::time::sleep(self.delay).await;
+        }
         GrantAuthorizer::new()
             .authorize_dispatch_with_trust(context, descriptor, estimate, trust_decision)
             .await

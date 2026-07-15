@@ -25,17 +25,18 @@ use crate::{
     TurnActor, TurnAdmissionClass, TurnAdmissionLimitProvider, TurnAdmissionPolicy,
     TurnAdmissionReservationRecord, TurnCapacityResource, TurnCheckpointId, TurnCheckpointRecord,
     TurnError, TurnEventKind, TurnIdempotencyErrorReplay, TurnIdempotencyOperationKind,
-    TurnIdempotencyOutcomeKind, TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLifecycleEvent,
-    TurnLockVersion, TurnPersistenceSnapshot, TurnRecord, TurnRunId, TurnRunProfile, TurnRunRecord,
-    TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
+    TurnIdempotencyOutcomeKind, TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLeaseToken,
+    TurnLifecycleEvent, TurnLockVersion, TurnPersistenceSnapshot, TurnRecord, TurnRunId,
+    TurnRunProfile, TurnRunRecord, TurnRunState, TurnScope, TurnSpawnTreeStateStore,
+    TurnStateStore, TurnStatus,
     admission::{TurnAdmissionBucket, admission_buckets},
     events::{EventCursor, TurnEventPage, TurnEventProjectionSource, project_turn_events},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
-        ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
-        RecoverExpiredLeasesResponse, RelinquishRunRequest, TurnRunTransitionPort,
-        TurnRunnerOutcome,
+        ClaimRunRequest, ClaimRunsRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest,
+        HeartbeatRequest, RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest,
+        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, RelinquishRunRequest,
+        TurnRunTransitionPort, TurnRunnerOutcome,
     },
 };
 
@@ -144,6 +145,67 @@ impl Default for InMemoryTurnStateStoreLimits {
     }
 }
 
+impl InMemoryTurnStateStoreLimits {
+    pub fn set_max_events(mut self, max_events: usize) -> Self {
+        self.max_events = max_events;
+        self
+    }
+
+    pub fn set_max_terminal_records(mut self, max_terminal_records: usize) -> Self {
+        self.max_terminal_records = max_terminal_records;
+        self
+    }
+
+    pub fn set_max_idempotency_records(mut self, max_idempotency_records: usize) -> Self {
+        self.max_idempotency_records = max_idempotency_records;
+        self
+    }
+
+    pub fn set_runner_lease_ttl(mut self, runner_lease_ttl: ChronoDuration) -> Self {
+        self.runner_lease_ttl = runner_lease_ttl;
+        self
+    }
+
+    pub fn set_max_concurrent_runs_per_user(
+        mut self,
+        max_concurrent_runs_per_user: std::num::NonZeroU32,
+    ) -> Self {
+        self.max_concurrent_runs_per_user = Some(max_concurrent_runs_per_user);
+        self
+    }
+
+    pub fn clear_max_concurrent_runs_per_user(mut self) -> Self {
+        self.max_concurrent_runs_per_user = None;
+        self
+    }
+
+    pub fn set_max_concurrent_trigger_runs(
+        mut self,
+        max_concurrent_trigger_runs: std::num::NonZeroU32,
+    ) -> Self {
+        self.max_concurrent_trigger_runs = Some(max_concurrent_trigger_runs);
+        self
+    }
+
+    pub fn clear_max_concurrent_trigger_runs(mut self) -> Self {
+        self.max_concurrent_trigger_runs = None;
+        self
+    }
+
+    pub fn set_max_concurrent_conversation_runs(
+        mut self,
+        max_concurrent_conversation_runs: std::num::NonZeroU32,
+    ) -> Self {
+        self.max_concurrent_conversation_runs = Some(max_concurrent_conversation_runs);
+        self
+    }
+
+    pub fn clear_max_concurrent_conversation_runs(mut self) -> Self {
+        self.max_concurrent_conversation_runs = None;
+        self
+    }
+}
+
 pub struct InMemoryTurnStateStore {
     inner: Mutex<Inner>,
     submit_idempotency_ready: Notify,
@@ -245,6 +307,7 @@ struct RunRecord {
     status: RunStatusCell,
     profile: TurnRunProfile,
     resolved_model_route: Option<crate::run_profile::LoopModelRouteSnapshot>,
+    model_usage: Option<crate::run_profile::LoopModelUsage>,
     accepted_message_ref: AcceptedMessageRef,
     source_binding_ref: SourceBindingRef,
     reply_target_binding_ref: ReplyTargetBindingRef,
@@ -1121,7 +1184,11 @@ impl TurnStateStore for InMemoryTurnStateStore {
             run_id,
             status: RunStatusCell::new(TurnStatus::Queued),
             profile: profile.clone(),
-            resolved_model_route: None,
+            resolved_model_route: request
+                .requested_model
+                .as_deref()
+                .and_then(crate::run_profile::LoopModelRouteSnapshot::advisory),
+            model_usage: None,
             accepted_message_ref: request.accepted_message_ref.clone(),
             source_binding_ref: request.source_binding_ref.clone(),
             reply_target_binding_ref: request.reply_target_binding_ref.clone(),
@@ -1322,6 +1389,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
                 return response;
             }
             SubmitTurnRequest {
+                requested_model: None,
                 scope: request.child_scope.clone(),
                 actor: request.actor.clone(),
                 accepted_message_ref: request.accepted_message_ref.clone(),
@@ -1570,6 +1638,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
             status: RunStatusCell::new(TurnStatus::Queued),
             profile: profile.clone(),
             resolved_model_route: None,
+            model_usage: None,
             accepted_message_ref: request.accepted_message_ref.clone(),
             source_binding_ref: request.source_binding_ref.clone(),
             reply_target_binding_ref: request.reply_target_binding_ref.clone(),
@@ -1822,29 +1891,31 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
         request: ClaimRunRequest,
     ) -> Result<Option<ClaimedTurnRun>, TurnError> {
         let mut inner = self.lock_inner()?;
-        let Some(run_id) = inner.pop_matching_queued_run(request.scope_filter.as_ref()) else {
-            return Ok(None);
-        };
-        let mut record = inner.take_record(run_id)?;
-        let now = Utc::now();
-        let transition = record.status.set(TurnStatus::Running);
-        record.runner_id = Some(request.runner_id);
-        record.lease_token = Some(request.lease_token);
-        record.lease_expires_at = Some(inner.next_lease_expiry(now));
-        record.last_heartbeat_at = Some(now);
-        record.claim_count = record.claim_count.saturating_add(1);
-        record.event_cursor = inner.next_cursor();
-        inner.update_active_lock(&record, now);
-        inner.apply_status_transition(transition, &record);
-        let claimed = ClaimedTurnRun {
-            state: record.state(),
-            resolved_run_profile: record.profile.resolved.clone(),
-            runner_id: request.runner_id,
-            lease_token: request.lease_token,
-        };
-        inner.push_event(&record, TurnEventKind::RunnerClaimed, None, None);
-        inner.records.insert(run_id, record);
-        Ok(Some(claimed))
+        inner.claim_matching_queued_run(
+            request.runner_id,
+            request.lease_token,
+            request.scope_filter.as_ref(),
+        )
+    }
+
+    async fn claim_next_runs(
+        &self,
+        request: ClaimRunsRequest,
+    ) -> Result<Vec<ClaimedTurnRun>, TurnError> {
+        let mut inner = self.lock_inner()?;
+        let mut claimed_runs = Vec::new();
+        for _ in 0..request.max_runs {
+            let Some(claimed) = inner.claim_matching_queued_run(
+                request.runner_id,
+                TurnLeaseToken::new(),
+                request.scope_filter.as_ref(),
+            )?
+            else {
+                break;
+            };
+            claimed_runs.push(claimed);
+        }
+        Ok(claimed_runs)
     }
 
     async fn heartbeat(&self, request: HeartbeatRequest) -> Result<EventCursor, TurnError> {
@@ -2069,6 +2140,7 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
                 request.runner_id,
                 request.lease_token,
                 request.mapping,
+                request.model_usage,
             )
         };
         // A validated loop exit can either park a run on a gate or terminate one
@@ -2133,6 +2205,7 @@ impl Inner {
                     status: RunStatusCell::new(run.status),
                     profile: run.profile,
                     resolved_model_route: run.resolved_model_route,
+                    model_usage: run.model_usage,
                     accepted_message_ref: run.accepted_message_ref,
                     source_binding_ref: run.source_binding_ref,
                     reply_target_binding_ref: run.reply_target_binding_ref,
@@ -2682,6 +2755,37 @@ impl Inner {
         None
     }
 
+    fn claim_matching_queued_run(
+        &mut self,
+        runner_id: crate::TurnRunnerId,
+        lease_token: TurnLeaseToken,
+        scope_filter: Option<&TurnScope>,
+    ) -> Result<Option<ClaimedTurnRun>, TurnError> {
+        let Some(run_id) = self.pop_matching_queued_run(scope_filter) else {
+            return Ok(None);
+        };
+        let mut record = self.take_record(run_id)?;
+        let now = Utc::now();
+        let transition = record.status.set(TurnStatus::Running);
+        record.runner_id = Some(runner_id);
+        record.lease_token = Some(lease_token);
+        record.lease_expires_at = Some(self.next_lease_expiry(now));
+        record.last_heartbeat_at = Some(now);
+        record.claim_count = record.claim_count.saturating_add(1);
+        record.event_cursor = self.next_cursor();
+        self.update_active_lock(&record, now);
+        self.apply_status_transition(transition, &record);
+        let claimed = ClaimedTurnRun {
+            state: record.state(),
+            resolved_run_profile: record.profile.resolved.clone(),
+            runner_id,
+            lease_token,
+        };
+        self.push_event(&record, TurnEventKind::RunnerClaimed, None, None);
+        self.records.insert(run_id, record);
+        Ok(Some(claimed))
+    }
+
     fn remove_queued_run(&mut self, run_id: TurnRunId) {
         self.queued_runs
             .retain(|queued_run_id| *queued_run_id != run_id);
@@ -2830,6 +2934,7 @@ impl Inner {
             status: RunStatusCell::new(TurnStatus::Queued),
             profile,
             resolved_model_route: None,
+            model_usage: None,
             accepted_message_ref,
             source_binding_ref: request.source_binding_ref.clone(),
             reply_target_binding_ref: request.reply_target_binding_ref.clone(),
@@ -3051,14 +3156,23 @@ impl Inner {
         runner_id: crate::TurnRunnerId,
         lease_token: crate::TurnLeaseToken,
         mapping: LoopExitMapping,
+        model_usage: Option<crate::run_profile::LoopModelUsage>,
     ) -> Result<TurnRunState, TurnError> {
-        let record = self.take_record(run_id)?;
+        let mut record = self.take_record(run_id)?;
         let result = (|| {
             if let Err(error) = ensure_active_lease(&record, runner_id, lease_token, Utc::now()) {
                 return AppliedLoopTransition::Rejected {
                     record: Box::new(record),
                     error,
                 };
+            }
+            // The loop reports its cumulative per-run usage at every exit (the
+            // execution state carries the running total across block/resume
+            // legs), so replace rather than accumulate — a block→resume→complete
+            // sequence would otherwise double-count the pre-block legs. A run
+            // that reported no usage leaves the prior total intact.
+            if let Some(usage) = model_usage {
+                record.model_usage = Some(usage);
             }
             match mapping {
                 LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Completed) => {
@@ -3644,6 +3758,7 @@ impl RunRecord {
             status: self.status.get(),
             profile: self.profile.clone(),
             resolved_model_route: self.resolved_model_route.clone(),
+            model_usage: self.model_usage,
             checkpoint_id: self.checkpoint_id,
             gate_ref: self.gate_ref.clone(),
             blocked_activity_id: self.blocked_activity_id,
@@ -3677,6 +3792,7 @@ impl RunRecord {
             resolved_run_profile_id: self.profile.id.clone(),
             resolved_run_profile_version: self.profile.version,
             resolved_model_route: self.resolved_model_route.clone(),
+            model_usage: self.model_usage,
             received_at: self.received_at,
             checkpoint_id: self.checkpoint_id,
             gate_ref: self.gate_ref.clone(),
@@ -3987,10 +4103,7 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_pruning_removes_orphaned_turn_records() {
-        let limits = InMemoryTurnStateStoreLimits {
-            max_terminal_records: 1,
-            ..InMemoryTurnStateStoreLimits::default()
-        };
+        let limits = InMemoryTurnStateStoreLimits::default().set_max_terminal_records(1);
         let store = InMemoryTurnStateStore::with_limits(limits);
         let policy = AllowAllTurnAdmissionPolicy;
         let resolver = TestRunProfileResolver;
@@ -4005,6 +4118,7 @@ mod tests {
             let response = store
                 .submit_turn(
                     SubmitTurnRequest {
+                        requested_model: None,
                         scope: scope.clone(),
                         actor: TurnActor::new(UserId::new(format!("user-{index}")).unwrap()),
                         accepted_message_ref: AcceptedMessageRef::new(format!("accepted-{index}"))
@@ -4083,6 +4197,7 @@ mod tests {
         let response = store
             .submit_turn(
                 SubmitTurnRequest {
+                    requested_model: None,
                     scope: scope.clone(),
                     actor: TurnActor::new(UserId::new("user-lease-overlay").unwrap()),
                     accepted_message_ref: AcceptedMessageRef::new("accepted-lease-overlay")

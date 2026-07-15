@@ -72,6 +72,13 @@ EMULATE_GITHUB_READY_TOKEN = EMULATE_GITHUB_BEARER
 EMULATE_STARTUP_ATTEMPTS = 120
 EMULATE_STARTUP_POLL_SECONDS = 0.5
 
+# test-tools/*.zip are git-ignored build artifacts (test-tools/README.md);
+# rebuild whenever a tool's manifest/schema/prompt/wasm-src changes so an
+# uploaded fixture always matches checked-in source.
+TEST_TOOLS_DIR = ROOT / "test-tools"
+BUILD_TEST_TOOLS_SCRIPT = ROOT / "scripts" / "build-test-tools.sh"
+TEST_TOOL_NAMES = ("ascii-renderer", "hacker-news", "market-data")
+
 
 def _latest_mtime(path: Path) -> float:
     """Return the newest mtime under a file or directory."""
@@ -198,6 +205,55 @@ def _emulate_unavailable(reason: str) -> None:
     if os.environ.get("CI") == "true":
         pytest.fail(reason)
     pytest.skip(reason)
+
+
+def _wasip2_target_missing() -> bool:
+    try:
+        installed = subprocess.run(
+            ["rustup", "target", "list", "--installed"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=15,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return True
+    return "wasm32-wasip2" not in installed.split()
+
+
+def _test_tool_zip_stale(tool: str) -> bool:
+    zip_path = TEST_TOOLS_DIR / f"{tool}.zip"
+    if not zip_path.exists():
+        return True
+    # wasm-src/target/ is a build cache, not a source input; _latest_mtime
+    # already skips directories literally named "target".
+    return _latest_mtime(TEST_TOOLS_DIR / tool) > zip_path.stat().st_mtime
+
+
+@pytest.fixture(scope="session")
+def test_tool_zips() -> dict[str, Path]:
+    """Build (or reuse) the test-tools/*.zip fixture bundles.
+
+    Mirrors the `ironclaw_binary` staleness pattern: rebuild only the tools
+    whose manifest/schema/prompt/wasm-src changed since their zip was last
+    built, via `scripts/build-test-tools.sh`.
+    """
+    stale = [tool for tool in TEST_TOOL_NAMES if _test_tool_zip_stale(tool)]
+    if stale:
+        if _wasip2_target_missing():
+            _emulate_unavailable(
+                "wasm32-wasip2 target not installed "
+                "(run: rustup target add wasm32-wasip2) "
+                f"-- required to build test-tools/: {', '.join(stale)}"
+            )
+        print(f"Building test-tools/ fixtures (stale: {', '.join(stale)})...")
+        subprocess.run(
+            ["bash", str(BUILD_TEST_TOOLS_SCRIPT), *stale],
+            cwd=ROOT,
+            check=True,
+            timeout=300,
+        )
+    return {tool: TEST_TOOLS_DIR / f"{tool}.zip" for tool in TEST_TOOL_NAMES}
 
 
 def _forward_coverage_env(env: dict[str, str]) -> None:
@@ -951,6 +1007,42 @@ async def hosted_github_emulate_server(
             "GITHUB_OAUTH_CLIENT_SECRET": "hosted-github-client-secret",
         },
         extra_result={"emulate_github_url": emulate_github_server["url"]},
+    ):
+        yield server
+
+
+@pytest.fixture(scope="session")
+async def hosted_provider_emulate_server(
+    ironclaw_binary,
+    mock_llm_server,
+    emulate_google_server,
+    emulate_github_server,
+    emulate_slack_server,
+    wasm_tools_dir,
+):
+    """Start hosted mode with Google, GitHub, and Slack routed to Emulate."""
+    rewrite_map = {
+        "gmail.googleapis.com": emulate_google_server["url"],
+        "www.googleapis.com": emulate_google_server["url"],
+        "api.github.com": emulate_github_server["url"],
+        "slack.com": emulate_slack_server["url"],
+    }
+    async for server in _run_hosted_oauth_refresh_server(
+        ironclaw_binary,
+        mock_llm_server,
+        wasm_tools_dir,
+        extra_env={
+            "IRONCLAW_TEST_HTTP_REWRITE_MAP": json.dumps(rewrite_map),
+            "GITHUB_OAUTH_CLIENT_ID": "hosted-github-client-id",
+            "GITHUB_OAUTH_CLIENT_SECRET": "hosted-github-client-secret",
+            "SLACK_OAUTH_CLIENT_ID": "hosted-slack-client-id",
+            "SLACK_OAUTH_CLIENT_SECRET": "hosted-slack-client-secret",
+        },
+        extra_result={
+            "emulate_google_url": emulate_google_server["url"],
+            "emulate_github_url": emulate_github_server["url"],
+            "emulate_slack_url": emulate_slack_server["url"],
+        },
     ):
         yield server
 

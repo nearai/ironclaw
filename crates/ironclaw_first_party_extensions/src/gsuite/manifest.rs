@@ -283,12 +283,10 @@ pub const fn gmail_package_spec() -> GsuitePackageSpec {
 
 pub fn gsuite_resource_profile() -> ResourceProfile {
     ResourceProfile {
-        default_estimate: ResourceEstimate {
-            wall_clock_ms: Some(u64::from(GSUITE_TIMEOUT_MS)),
-            output_bytes: Some(GSUITE_OUTPUT_BYTES_LIMIT),
-            network_egress_bytes: Some(DEFAULT_NETWORK_EGRESS_BYTES),
-            ..ResourceEstimate::default()
-        },
+        default_estimate: ResourceEstimate::default()
+            .set_wall_clock_ms(u64::from(GSUITE_TIMEOUT_MS))
+            .set_output_bytes(GSUITE_OUTPUT_BYTES_LIMIT)
+            .set_network_egress_bytes(DEFAULT_NETWORK_EGRESS_BYTES),
         hard_ceiling: Some(ResourceCeiling {
             max_usd: None,
             max_input_tokens: None,

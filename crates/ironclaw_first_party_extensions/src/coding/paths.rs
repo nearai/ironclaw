@@ -2,6 +2,7 @@ use ironclaw_filesystem::{FileStat, FilesystemError, FilesystemOperation};
 use ironclaw_host_api::{RuntimeDispatchErrorKind, ScopedPath, VirtualPath};
 use ironclaw_safety::sensitive_paths::is_sensitive_path_str;
 use serde_json::Value;
+use tracing::debug;
 
 use super::{CodingCapabilityError, CodingCapabilityRequest};
 
@@ -41,25 +42,58 @@ fn resolve_path(
     let mounts = request
         .mounts
         .ok_or_else(|| CodingCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied))?;
+    // Name the offending path and the roots that DO exist: an agent that
+    // targeted an out-of-scope absolute path (e.g. one copied verbatim from a
+    // task description) can only correct course when the rejection says so.
+    //
+    // These summaries render paths and roots delimiter-free (`/` → space):
+    // the strict loop safe-summary validator rejects raw path delimiters, and
+    // FilesystemDenied surfaces as a Denied loop outcome whose only
+    // model-visible channel is the summary itself — a raw-path summary would
+    // silently collapse to the generic category sentence. Summaries that
+    // still fail validation (hostile file names) ride the model-visible
+    // diagnostic detail channel instead of the summary.
     let scoped_path = mounts
         .scoped_path(scoped_path_input(path))
-        .map_err(|_| input_error())?;
+        .map_err(|error| {
+            debug!(error = %error, "coding capability rejected scoped path input");
+            CodingCapabilityError::with_safe_summary(
+                RuntimeDispatchErrorKind::InputEncode,
+                format!(
+                    "{} is not under an available scoped root (available roots: {})",
+                    summary_path_hint(path),
+                    available_roots(mounts)
+                ),
+            )
+        })?;
     if is_sensitive_scoped_path(scoped_path.as_str()) {
         return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
-    let (virtual_path, grant) = mounts
-        .resolve_with_grant(&scoped_path)
-        .map_err(|_| CodingCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied))?;
+    let (virtual_path, grant) = mounts.resolve_with_grant(&scoped_path).map_err(|error| {
+        debug!(error = %error, "coding capability could not resolve scoped path");
+        CodingCapabilityError::with_safe_summary(
+            RuntimeDispatchErrorKind::FilesystemDenied,
+            format!(
+                "{} does not resolve inside an available scoped root (available roots: {})",
+                summary_path_hint(path),
+                available_roots(mounts)
+            ),
+        )
+    })?;
     if is_sensitive_resolved_path(&virtual_path) {
         return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
     if !operation_allowed(&grant.permissions, operation) {
-        return Err(CodingCapabilityError::new(
+        return Err(CodingCapabilityError::with_safe_summary(
             RuntimeDispatchErrorKind::FilesystemDenied,
+            format!(
+                "the mount for {} does not permit this operation",
+                summary_path_hint(path)
+            ),
         ));
     }
     Ok(ResolvedPath {
@@ -67,6 +101,32 @@ fn resolve_path(
         virtual_path,
         grant: grant.clone(),
     })
+}
+
+/// Delimiter-free path rendering for loop-safe failure summaries, mirroring
+/// `file.rs::safe_summary_path`: "/testbed/replacer.go" → "path testbed
+/// replacer.go". The strict summary validator bans `/` and `\`.
+fn summary_path_hint(path: &str) -> String {
+    let hint = path.trim_start_matches('/').replace(['/', '\\'], " ");
+    format!("path {hint}")
+}
+
+fn available_roots(mounts: &ironclaw_host_api::MountView) -> String {
+    let mut roots: Vec<String> = mounts
+        .mounts
+        .iter()
+        // Aliases are absolute ("/workspace"); render them without the
+        // leading delimiter so the summary stays loop-safe.
+        .map(|mount| {
+            mount
+                .alias
+                .as_str()
+                .trim_start_matches('/')
+                .replace(['/', '\\'], " ")
+        })
+        .collect();
+    roots.sort_unstable();
+    roots.join(", ")
 }
 
 fn scoped_path_input(path: &str) -> String {

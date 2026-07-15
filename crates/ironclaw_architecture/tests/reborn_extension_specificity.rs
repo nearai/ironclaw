@@ -15,9 +15,8 @@
 //! - **The package inventory crate** (`ironclaw_first_party_extensions`) —
 //!   it owns the concrete packages and their native executors.
 //! - **Sanctioned assemblers** — `ironclaw_reborn_cli` (the binary assembles
-//!   the native factory registry; overview §4.0), `ironclaw_reborn_migration`
-//!   (one-time forward migrations name what they fold forward), and this
-//!   architecture crate (names terms on purpose).
+//!   the native factory registry; overview §4.0) and this architecture crate
+//!   (names terms on purpose).
 //! - **Legacy-layer / v1 crates** — the v1 enclave is being strangled
 //!   wholesale, not policed term-by-term (same footing as
 //!   `reborn_retired_taxonomy.rs`).
@@ -226,7 +225,12 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "credential-prefix redaction (github_pat_)",
     ),
     (
-        "crates/ironclaw_loop_support/src/capability_port.rs",
+        "crates/ironclaw_loop_host/src/capability_port.rs",
+        "github",
+        "credential-prefix redaction (github_pat_)",
+    ),
+    (
+        "crates/ironclaw_webui_v2/frontend/src/pages/chat/lib/failureMessages.ts",
         "github",
         "credential-prefix redaction (github_pat_)",
     ),
@@ -515,12 +519,10 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
 /// structural reason, mirroring `reborn_retired_taxonomy.rs`: the one-time
 /// forward data migrations name what they fold forward.
 const SANCTIONED_PATHS: &[&str] = &[
-    "extension_host/channel_state_folds.rs",
     "extension_host/extension_installation_store.rs",
     // One-release legacy webhook-path aliases (MIG-5): the compatibility
     // table names the concrete legacy paths it forwards; each entry carries
     // its own removal note.
-    "extension_host/legacy_ingress_aliases.rs",
     "product_auth/durable/",
 ];
 
@@ -684,7 +686,6 @@ const SANCTIONED_SCAN_EXEMPT_CRATES: &[&str] = &[
     // The binary assembles the native factory registry (overview §4.0).
     "ironclaw_reborn_cli",
     // One-time forward migrations name what they fold forward.
-    "ironclaw_reborn_migration",
     // This crate's tests name every term on purpose.
     "ironclaw_architecture",
     // Load/stress tooling, not product code.
@@ -1045,22 +1046,31 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "github",
     ),
     ("crates/ironclaw_product_workflow/src/workflow.rs", "slack"),
-    ("crates/ironclaw_reborn/src/loop_driver_host.rs", "slack"),
-    ("crates/ironclaw_reborn/src/tool_disclosure.rs", "google"),
+    ("crates/ironclaw_host_api/src/dispatch.rs", "slack"),
     (
-        "crates/ironclaw_reborn/src/tool_disclosure.rs",
+        "crates/ironclaw_host_runtime/src/first_party_tools/schemas.rs",
+        "slack",
+    ),
+    (
+        "crates/ironclaw_host_runtime/src/services/wasm_execution.rs",
+        "slack",
+    ),
+    ("crates/ironclaw_runner/src/loop_driver_host.rs", "slack"),
+    ("crates/ironclaw_runner/src/tool_disclosure.rs", "google"),
+    (
+        "crates/ironclaw_runner/src/tool_disclosure.rs",
         "google-calendar",
     ),
     (
-        "crates/ironclaw_reborn/src/tool_disclosure.rs",
+        "crates/ironclaw_runner/src/tool_disclosure.rs",
         "web-access",
     ),
     (
-        "crates/ironclaw_reborn/src/tool_disclosure_port.rs",
+        "crates/ironclaw_runner/src/tool_disclosure_port.rs",
         "google",
     ),
     (
-        "crates/ironclaw_reborn/src/tool_disclosure_port.rs",
+        "crates/ironclaw_runner/src/tool_disclosure_port.rs",
         "google-calendar",
     ),
     (
@@ -1159,12 +1169,9 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/ironclaw_host_api/src/http.rs", "slack"),
     ("crates/ironclaw_host_api/src/ids.rs", "github"),
     ("crates/ironclaw_host_api/src/surface.rs", "slack"),
-    (
-        "crates/ironclaw_loop_support/src/capability_port.rs",
-        "gmail",
-    ),
-    ("crates/ironclaw_oauth/src/lib.rs", "google"),
-    ("crates/ironclaw_oauth/src/lib.rs", "notion"),
+    ("crates/ironclaw_loop_host/src/capability_port.rs", "gmail"),
+    ("crates/ironclaw_auth/src/loopback_oauth.rs", "google"),
+    ("crates/ironclaw_auth/src/loopback_oauth.rs", "notion"),
     (
         "crates/ironclaw_outbound/src/delivered_gate_routes.rs",
         "slack",
@@ -1235,14 +1242,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     (
         "crates/ironclaw_reborn_composition/src/root/communication_context.rs",
         "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/runtime.rs",
-        "github",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/runtime.rs",
-        "google",
     ),
     ("crates/ironclaw_skills/src/selector.rs", "github"),
     ("crates/ironclaw_skills/src/types.rs", "github"),

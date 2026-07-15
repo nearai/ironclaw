@@ -339,6 +339,13 @@ test("ConfigureModal activates any not-yet-active extension after OAuth setup co
 
   await oauthSetupArgs[0][1].onConfigured();
 
+  // The WebUI's OAuth-configured handler best-effort activates any not-yet-
+  // active extension (generic, no per-extension branch — see the tool-surface
+  // half below). This is intentionally belt-and-suspenders with the server-
+  // side OAuth continuation (`dispatch_auth_continuation`, which also
+  // activates on the callback); activation is idempotent, so the redundant
+  // client call is harmless and keeps the OAuth path consistent with pairing
+  // redemption, which activates the same way.
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
     ["activate", { id: "slack" }],
   ]);

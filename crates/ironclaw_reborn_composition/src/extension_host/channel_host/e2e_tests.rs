@@ -7,8 +7,8 @@
 //! the bundled slack manifest, `[channel.config]` configuration through
 //! `ChannelConfigService`, `GenericChannelHostAssembly` building the inbound
 //! graph (durable workflow state, provider-identity actor resolution,
-//! run-delivery observer), and the MIG-5 legacy alias mount forwarding into
-//! the generic ingress router. Scripted turn/approval/auth/egress fakes fill
+//! run-delivery observer), and the canonical generic-ingress route mount the
+//! fixtures post to. Scripted turn/approval/auth/egress fakes fill
 //! exactly the seams the production factory fills.
 //!
 //! One production-shape delta from the retired suite: the assembly wires the
@@ -84,6 +84,8 @@ use tower::ServiceExt;
 use ironclaw_extension_host::ExtensionHost;
 use ironclaw_extension_host::egress::{ApprovedChannelEgress, ChannelEgressTransport};
 
+use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
+
 use super::{
     ChannelExtras, ChannelHostDeliveryDeps, ChannelHostIdentity,
     FilesystemChannelWorkflowStateFactory, GenericChannelHostAssembly, GenericChannelHostDeps,
@@ -93,9 +95,9 @@ use crate::extension_host::channel_delivery::{
     IngressReplyContextSource, SnapshotChannelDeliveryResolver,
 };
 use crate::extension_host::extension_ingress::{
-    ExtensionIngressParts, InboundPayloadClassifier, PostAdmissionObserver, build_extension_ingress,
+    ExtensionIngressParts, InboundPayloadClassifier, PostAdmissionObserver,
+    build_extension_ingress, extension_ingress_route_mount,
 };
-use crate::extension_host::legacy_ingress_aliases::legacy_channel_ingress_alias_mounts;
 use crate::extension_host::run_delivery_ports::ProductAuthBlockedAuthPromptSource;
 use crate::webui::webui_serve::PublicRouteMount;
 use crate::{AuthChallengeProvider, RebornUserIdentityLookup, RebornUserIdentityLookupError};
@@ -121,10 +123,11 @@ const SECRET: &str = "topsecret";
 const GATE: &str = "gate:approval-00000000-0000-0000-0000-000000000001";
 const GATE_B: &str = "gate:approval-00000000-0000-0000-0000-000000000002";
 const AUTH_GATE: &str = "gate:auth-slack";
-/// The MIG-5 legacy alias path the fixtures post to (the alias forwards into
-/// the same generic router as the canonical
-/// `/webhooks/extensions/slack/events` route).
-const SLACK_EVENTS_PATH: &str = "/webhooks/slack/events";
+/// The canonical generic-ingress path the fixtures post to: the single
+/// `extension_ingress_route_mount` serves
+/// `/webhooks/extensions/{extension_id}/{route_suffix}` for every active
+/// channel extension.
+const SLACK_EVENTS_PATH: &str = "/webhooks/extensions/slack/events";
 
 struct Harness {
     mount: PublicRouteMount,
@@ -439,11 +442,8 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         )
         .await;
 
-    let mount = legacy_channel_ingress_alias_mounts(&ingress.router, None)
-        .expect("alias mounts build") // safety: bundled manifest projects a valid alias descriptor.
-        .into_iter()
-        .next()
-        .expect("slack alias mount exists"); // safety: the alias table carries the slack entry.
+    let mount =
+        extension_ingress_route_mount(&ingress).expect("extension ingress route mount builds"); // safety: bundled manifest projects a valid ingress descriptor.
 
     Harness {
         mount,
@@ -479,7 +479,7 @@ async fn configured_channel_config() -> Arc<ChannelConfigService> {
         ManifestSource::HostBundled,
         &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"), // safety: default catalog is valid in tests.
         None,
-        &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"), // safety: default registry is valid in tests.
+        &product_extension_host_api_contract_registry().expect("contracts"), // safety: default registry is valid in tests.
     )
     .expect("bundled channel manifest resolves"); // safety: compile-time bundled manifest is valid.
     let extension_id = ExtensionId::new("slack").expect("extension id"); // safety: static id is valid.
@@ -493,6 +493,7 @@ async fn configured_channel_config() -> Arc<ChannelConfigService> {
                 ExtensionManifestRef::new(extension_id.clone(), None),
                 Vec::new(),
                 chrono::Utc::now(),
+                ironclaw_extensions::InstallationOwner::Tenant,
             )
             .expect("installation"), // safety: static installation record is valid.
         )
@@ -552,7 +553,7 @@ impl ChannelConfigReactivation for NoopChannelConfigReactivation {
 /// bundled channel manifest active (binding the real `SlackChannelAdapter`),
 /// the generic recipe verifier over the test signing secret, the generic
 /// inbound sink over the harness's `DefaultProductWorkflow`, and the
-/// one-release legacy alias mount the fixtures post to. Every request
+/// canonical generic-ingress route mount the fixtures post to. Every request
 /// exercises the production per-request order: verification recipe →
 /// adapter parse → durable admission → post-admission delivery observer.
 /// A minimal `ExtensionHost` with the REAL bundled channel manifest active
@@ -560,7 +561,7 @@ impl ChannelConfigReactivation for NoopChannelConfigReactivation {
 /// router and the delivery resolver read.
 async fn slack_test_extension_host() -> Arc<ironclaw_extension_host::ExtensionHost> {
     use ironclaw_extension_host::test_support::{
-        FakeEgressFactory, FakeToolAdapter, RecordingDrain, RecordingRemovalHooks,
+        FakeEgressFactory, FakeToolAdapter, RecordingDrain,
     };
     use ironclaw_extension_host::{
         BindContext, BindError, ExtensionBindings, ExtensionEntrypoint, ExtensionHost,
@@ -587,8 +588,7 @@ async fn slack_test_extension_host() -> Arc<ironclaw_extension_host::ExtensionHo
 
     let resolved = {
         let host_ports = ironclaw_host_runtime::default_host_port_catalog().expect("host ports"); // safety: default catalog is valid in tests.
-        let contracts =
-            ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"); // safety: default registry is valid in tests.
+        let contracts = product_extension_host_api_contract_registry().expect("contracts"); // safety: default registry is valid in tests.
         ironclaw_extensions::ExtensionManifestRecord::from_toml(
             ironclaw_first_party_extensions::packages::slack_manifest_toml(),
             ironclaw_extensions::ManifestSource::HostBundled,
@@ -604,7 +604,6 @@ async fn slack_test_extension_host() -> Arc<ironclaw_extension_host::ExtensionHo
         ExtensionHost::new(ExtensionHostDeps {
             store: Arc::new(InMemoryInstallationRecordStore::default()),
             loader: Arc::new(SlackTestLoader),
-            removal_hooks: Arc::new(RecordingRemovalHooks::default()),
             drain: Arc::new(RecordingDrain::default()),
             egress: Arc::new(FakeEgressFactory),
             reserved_capability_ids: Default::default(),
@@ -1234,6 +1233,7 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
         agent_id: None,
         project_id: None,
         prompt: "triggered approval prompt".to_string(),
+        delivery_target: None,
     };
     driver
         .on_trigger_submitted(triggered_request_from_fire(
@@ -1509,6 +1509,7 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
         agent_id: None,
         project_id: None,
         prompt: "triggered auth prompt".to_string(),
+        delivery_target: None,
     };
     driver
         .on_trigger_submitted(triggered_request_from_fire(&fire, run_id, foreign_scope))
@@ -1640,6 +1641,7 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
         agent_id: None,
         project_id: None,
         prompt: "triggered auth prompt not dm".to_string(),
+        delivery_target: None,
     };
     driver
         .on_trigger_submitted(triggered_request_from_fire(&fire, run_id, foreign_scope))
@@ -2910,6 +2912,7 @@ fn turn_state(
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
         resolved_model_route: None,
+        model_usage: None,
         received_at: chrono::Utc::now(),
         checkpoint_id: None,
         gate_ref,
@@ -4235,6 +4238,7 @@ async fn generic_triggered_hook_routes_fire_to_the_owning_extension_driver() {
         agent_id: None,
         project_id: None,
         prompt: "generic triggered delivery".to_string(),
+        delivery_target: None,
     };
     use crate::automation::trigger_poller::PostSubmitDeliveryHook as _;
     hook.on_trigger_submitted(fire, blocked_run_id, foreign_run_scope())
@@ -4296,6 +4300,7 @@ async fn generic_triggered_hook_routes_fire_to_the_owning_extension_driver() {
         agent_id: None,
         project_id: None,
         prompt: "unroutable triggered delivery".to_string(),
+        delivery_target: None,
     };
     let unroutable_run_id = TurnRunId::new();
     hook.on_trigger_submitted(foreign_fire, unroutable_run_id, foreign_run_scope())

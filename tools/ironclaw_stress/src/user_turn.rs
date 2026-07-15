@@ -767,6 +767,7 @@ where
                 reply_target_binding_ref: ReplyTargetBindingRef::new(reply_target)
                     .map_err(|error| OperationFailure::invalid_request("prefill_submit", error))?,
                 requested_run_profile: None,
+                requested_model: None,
                 idempotency_key: IdempotencyKey::new(format!(
                     "ironclaw-stress-prefill:{operation_ref}"
                 ))
@@ -946,6 +947,7 @@ where
                     reply_target_binding_ref: ReplyTargetBindingRef::new(reply_target)
                         .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
                     requested_run_profile: None,
+                    requested_model: None,
                     idempotency_key: IdempotencyKey::new(format!(
                         "ironclaw-stress:{operation_ref}"
                     ))
@@ -1062,6 +1064,7 @@ where
                     reply_target_binding_ref: ReplyTargetBindingRef::new(reply_target)
                         .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
                     requested_run_profile: None,
+                    requested_model: None,
                     idempotency_key: IdempotencyKey::new(format!(
                         "ironclaw-stress:{operation_ref}"
                     ))

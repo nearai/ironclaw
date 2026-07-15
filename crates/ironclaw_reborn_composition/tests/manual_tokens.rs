@@ -318,6 +318,15 @@ impl AuthFlowManager for FailingManualTokenFlowManager {
     ) -> Result<AuthFlowRecord, AuthProductError> {
         unreachable!("manual-token cleanup tests do not cancel generic flows")
     }
+
+    async fn fail_completed_continuation(
+        &self,
+        _scope: &AuthProductScope,
+        _flow_id: AuthFlowId,
+        _error: AuthErrorCode,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        unreachable!("manual-token cleanup tests do not fail completed continuations")
+    }
 }
 
 fn auth_services() -> RebornProductAuthServices {

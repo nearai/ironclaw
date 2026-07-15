@@ -14,10 +14,7 @@ use serde_json::json;
 async fn mcp_lane_executes_manifest_transport_and_reconciles_resources() {
     let client = RecordingMcpClient::new(Ok(McpClientOutput {
         output: json!({"items":["issue-1"]}),
-        usage: ResourceUsage {
-            wall_clock_ms: 9,
-            ..ResourceUsage::default()
-        },
+        usage: ResourceUsage::default().set_wall_clock_ms(9),
         output_bytes: None,
     }));
     let runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), client.clone());
@@ -195,12 +192,10 @@ fn governor_with_default_limit(account: ResourceAccount) -> InMemoryResourceGove
     governor
         .set_limit(
             account,
-            ResourceLimits {
-                max_concurrency_slots: Some(10),
-                max_process_count: Some(10),
-                max_output_bytes: Some(100_000),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_concurrency_slots(10)
+                .set_max_process_count(10)
+                .set_max_output_bytes(100_000),
         )
         .unwrap();
     governor
@@ -220,12 +215,10 @@ fn mcp_request_from_manifest(
         package,
         capability_id,
         scope: sample_scope(),
-        estimate: ResourceEstimate {
-            concurrency_slots: Some(1),
-            process_count: Some(1),
-            output_bytes: Some(10_000),
-            ..ResourceEstimate::default()
-        },
+        estimate: ResourceEstimate::default()
+            .set_concurrency_slots(1)
+            .set_process_count(1)
+            .set_output_bytes(10_000),
         resource_reservation: None,
         invocation: McpInvocation { input },
     }

@@ -160,28 +160,38 @@ Rules — kept short on purpose:
   — `ExtensionHost` owns the only `InstallationRecordStore` writes and the
   only `ActiveSnapshot` swaps, serialized under one async mutex
   (`crates/ironclaw_extension_host/src/lifecycle.rs`).
-- [x] LIFE-6 The installation state machine is one shared enum
-  (`Installed/Activating/Active/Deactivating/Removing/RemovalPending/Removed`);
-  no extension-specific state value exists anywhere (grep + wire schema test).
+- [x] LIFE-6 The installation state machine is one shared enum — an honest
+  projection, not a persisted multi-step machine
+  (`Installed/Configured/Active/Disabled/Failed/Unsupported/Removed`); no
+  extension-specific state value exists anywhere (grep + wire schema test).
   — one `InstallationState` enum (relocated to
   `crates/ironclaw_host_api/src/state.rs` in P7a so the product wire and the
   host both name it without a new dependency edge; re-exported by
   `ironclaw_extension_host::state`); `installation_state_wire_form_matches_str`
   (`host_api/src/state.rs`) pins the exact wire vocabulary, now exposed on the
   extensions wire as `RebornExtensionInfo.installation_state`.
-- [x] LIFE-7 Every lifecycle transition is persisted; crash during any
-  transient state resumes deterministically at startup.
-  — `transient_states_resume_deterministically` (`state.rs`) plus
-  `restore_resumes_active_and_skips_invalid` (`tests/lifecycle_contract.rs`):
-  a record crashed mid-activation resumes to Installed (its interrupted
-  activation published nothing).
+- [x] LIFE-7 Every persisted installation state is a real resting state — no
+  transient state is ever written, so there is nothing to resume at startup;
+  a crash before an operation's terminal persist call simply leaves the
+  record at its last durable state.
+  — `legal_host_record_transitions_only`
+  (`crates/ironclaw_host_api/src/state.rs`) pins the seven-state transition
+  table with no transient member (e.g. `Configured`/`Disabled`/`Unsupported`
+  cannot transition to `Active` directly — they are derived, not stored
+  transition targets); activation atomicity (nothing published on failure) is
+  LIFE-8's `declared_tool_without_bound_adapter_fails_activation` /
+  `channel_activate_runs_and_its_failure_aborts`
+  (`tests/lifecycle_contract.rs`). NOTE: the prior crash-resume-from-transient-state
+  tests this item used to cite (`transient_states_resume_deterministically`,
+  `restore_resumes_active_and_skips_invalid`) were deleted with the transient
+  states themselves — that machinery was never invoked at real boot.
 - [x] LIFE-8 Activation failure (bind, hook, conflict, store) publishes
   nothing and records a typed, redacted error.
   — `declared_tool_without_bound_adapter_fails_activation`,
   `channel_activate_runs_and_its_failure_aborts`,
   `duplicate_capability_across_extensions_fails_activation`
   (`tests/lifecycle_contract.rs`): each leaves the snapshot unchanged and the
-  record back at Installed with a redacted `last_error`.
+  record at the terminal `Failed` state with a redacted `last_error`.
 - [x] LIFE-9 `channel.activate()` runs during activation; its failure aborts
   activation.
   — `channel_activate_runs_and_its_failure_aborts` (activate hook observed to
@@ -189,11 +199,16 @@ Rules — kept short on purpose:
 - [ ] LIFE-10 Removal follows the fixed order (unpublish → drain → vendor
   cleanup → auth revoke/grant delete → config/identity delete) — observed via
   scripted adapter and engine in one caller-level test.
-- [x] LIFE-11 Vendor cleanup failure lands in `RemovalPending`, is retryable,
-  and cannot report success early or resurrect the extension.
-  — `cleanup_failure_lands_in_removal_pending_and_retry_completes`
-  (`tests/lifecycle_contract.rs`): a cleanup failure lands `RemovalPending`,
-  never runs the later auth/delete steps, and the extension stays unpublished.
+- [x] LIFE-11 Vendor cleanup failure fails the removal operation loud with a
+  typed quarantine reason, is retryable, and cannot report success early or
+  resurrect the extension. There is no persisted `RemovalPending` state — the
+  removal facade retries the whole operation.
+  — `ui_facade_extension_remove_retries_incomplete_credential_cleanup_until_converged`
+  (`crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs`):
+  an incomplete credential cleanup returns a retryable
+  `ProductWorkflowError::Transient` carrying a typed
+  `SecretCleanupQuarantineReason` instead of reporting removal success, and a
+  subsequent retry converges (cleanup and removal complete).
 - [ ] LIFE-12 Removing one extension preserves grants of a shared vendor
   still used by another active extension; removes them when it was the last
   consumer.
@@ -446,7 +461,7 @@ Rules — kept short on purpose:
   (`auth_engine_contract.rs`) and the existing
   `serde_redaction_contract.rs` suite.
 - [x] AUTH-9 The auth account state machine is one shared enum
-  (`disconnected/authenticating/connected/expired/revoking` + typed
+  (`disconnected/authenticating/connected/expired` + typed
   `last_error`); no vendor- or extension-specific state exists; the wire
   exposes exactly this enum. — enum + typed `last_error` + transitions live
   with the engine (`crates/ironclaw_auth/src/account_state.rs`,
@@ -460,9 +475,10 @@ Rules — kept short on purpose:
   (`reborn_services_contract.rs`), driven through `list_extensions`; the
   projection `vendor_auth_accounts` (`reborn_services/extensions.rs`) maps a
   live grant to `connected` (MIG-1). Richer per-account state (expired/
-  authenticating/revoking) flows when the credential service surfaces it with
+  authenticating) flows when the credential service surfaces it with
   the post-P7 multi-account feature — the wire type already carries the full
-  enum.
+  enum. (`revoking` is not part of the enum: disconnect/removal delete the
+  account synchronously, so there is no transient wire state to surface.)
 - [x] AUTH-10 Flow TTL expiry and vendor denial land in `disconnected` with
   a typed reason; refresh failure lands in `expired`. —
   `projection_prefers_live_flow_then_account_status`

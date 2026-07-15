@@ -230,6 +230,10 @@ where
                     invocation_id,
                     capability_id: capability_id.clone(),
                     scope: scope.clone(),
+                    authenticated_actor_user_id: request
+                        .context
+                        .authenticated_actor_user_id
+                        .clone(),
                 })
                 .await?;
             debug!("capability run state started");
@@ -500,6 +504,7 @@ where
             .dispatch_json(CapabilityDispatchRequest {
                 capability_id: request.capability_id.clone(),
                 scope: scope.clone(),
+                authenticated_actor_user_id: request.context.authenticated_actor_user_id.clone(),
                 estimate: request.estimate.clone(),
                 mounts: obligation_outcome.mounts.clone(),
                 resource_reservation: obligation_outcome.resource_reservation.clone(),
@@ -646,6 +651,12 @@ where
             .get(&scope, invocation_id)
             .await?
             .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
+        if run_record.authenticated_actor_user_id != request.context.authenticated_actor_user_id {
+            return Err(CapabilityInvocationError::AuthorizationDenied {
+                capability: request.capability_id,
+                reason: DenyReason::PolicyDenied,
+            });
+        }
         if run_record.status != RunStatus::BlockedApproval {
             return Err(CapabilityInvocationError::ResumeNotBlocked {
                 capability: request.capability_id,
@@ -805,6 +816,12 @@ where
             .get(&scope, invocation_id)
             .await?
             .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
+        if run_record.authenticated_actor_user_id != request.context.authenticated_actor_user_id {
+            return Err(CapabilityInvocationError::AuthorizationDenied {
+                capability: request.capability_id,
+                reason: DenyReason::PolicyDenied,
+            });
+        }
         if run_record.status != RunStatus::BlockedAuth {
             return Err(CapabilityInvocationError::ResumeNotBlocked {
                 capability: request.capability_id,
@@ -1147,6 +1164,12 @@ where
             .get(&scope, invocation_id)
             .await?
             .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
+        if run_record.authenticated_actor_user_id != request.context.authenticated_actor_user_id {
+            return Err(CapabilityInvocationError::AuthorizationDenied {
+                capability: request.capability_id,
+                reason: DenyReason::PolicyDenied,
+            });
+        }
         if run_record.status != RunStatus::BlockedApproval {
             return Err(CapabilityInvocationError::ResumeNotBlocked {
                 capability: request.capability_id,
@@ -1367,6 +1390,7 @@ where
                 parent_process_id: authorized_context.process_id,
                 invocation_id,
                 scope: scope.clone(),
+                authenticated_actor_user_id: authorized_context.authenticated_actor_user_id.clone(),
                 extension_id: descriptor.provider.clone(),
                 capability_id: request.capability_id.clone(),
                 runtime: descriptor.runtime,
@@ -1464,6 +1488,10 @@ where
                     invocation_id,
                     capability_id: capability_id.clone(),
                     scope: scope.clone(),
+                    authenticated_actor_user_id: request
+                        .context
+                        .authenticated_actor_user_id
+                        .clone(),
                 })
                 .await?;
         }
@@ -1680,6 +1708,7 @@ where
                 parent_process_id: request.context.process_id,
                 invocation_id,
                 scope: scope.clone(),
+                authenticated_actor_user_id: request.context.authenticated_actor_user_id.clone(),
                 extension_id: descriptor.provider.clone(),
                 capability_id: request.capability_id.clone(),
                 runtime: descriptor.runtime,
@@ -1899,6 +1928,7 @@ where
             .dispatch_json(CapabilityDispatchRequest {
                 capability_id: capability_id.clone(),
                 scope: scope.clone(),
+                authenticated_actor_user_id: authorized_context.authenticated_actor_user_id.clone(),
                 estimate: estimate.clone(),
                 mounts: obligation_outcome.mounts.clone(),
                 resource_reservation: obligation_outcome.resource_reservation.clone(),

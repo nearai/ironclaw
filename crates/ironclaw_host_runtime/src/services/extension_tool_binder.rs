@@ -150,6 +150,9 @@ where
                 runtime_policy: &self.runtime_policy,
                 capability_id: &call.capability_id,
                 scope: call.scope,
+                // ToolCall carries actor authority within `scope`; this adapter
+                // interface has no separate human-actor handle.
+                authenticated_actor_user_id: None,
                 estimate: call.resources.estimate,
                 mounts: call.resources.mounts,
                 resource_reservation: call.resources.reservation,
@@ -178,9 +181,8 @@ fn tool_error_from_dispatch(error: DispatchError) -> ToolError {
             required_secrets,
             credential_requirements,
         },
-        DispatchError::Wasm { kind }
-        | DispatchError::Mcp { kind }
-        | DispatchError::Script { kind } => ToolError::Failed {
+        DispatchError::Wasm { kind, safe_summary } => ToolError::Failed { kind, safe_summary },
+        DispatchError::Mcp { kind } | DispatchError::Script { kind } => ToolError::Failed {
             kind,
             safe_summary: None,
         },

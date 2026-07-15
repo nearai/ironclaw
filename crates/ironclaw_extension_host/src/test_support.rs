@@ -22,7 +22,7 @@ use ironclaw_product_adapters::{
 };
 
 use crate::entrypoint::{BindContext, BindError, ExtensionBindings, ExtensionEntrypoint};
-use crate::lifecycle::{DrainController, EgressFactory, HookError, RemovalContext, RemovalHooks};
+use crate::lifecycle::{DrainController, EgressFactory, HookError};
 use crate::loaders::{ExtensionLoader, LoadContext, LoadedExtension};
 
 const MCP_MANIFEST: &str = r#"
@@ -319,42 +319,6 @@ impl ExtensionLoader for FakeLoader {
         Ok(LoadedExtension::new(Box::new(FakeEntrypoint {
             bindings: self.bindings.clone(),
         })))
-    }
-}
-
-/// Removal hooks that record their call order.
-#[derive(Default)]
-pub struct RecordingRemovalHooks {
-    pub calls: Arc<tokio::sync::Mutex<Vec<String>>>,
-    pub fail_revoke: bool,
-    pub fail_delete: bool,
-    /// Records the shared-vendor context each removal saw.
-    pub last_other_active: Arc<tokio::sync::Mutex<Vec<String>>>,
-}
-
-#[async_trait]
-impl RemovalHooks for RecordingRemovalHooks {
-    async fn revoke_and_delete_grants(&self, ctx: &RemovalContext<'_>) -> Result<(), HookError> {
-        *self.last_other_active.lock().await = ctx.other_active_extension_ids.to_vec();
-        self.calls.lock().await.push("revoke".to_string());
-        if self.fail_revoke {
-            Err(HookError::Failed {
-                reason: "scripted revoke failure".to_string(),
-            })
-        } else {
-            Ok(())
-        }
-    }
-
-    async fn delete_integration_state(&self, _ctx: &RemovalContext<'_>) -> Result<(), HookError> {
-        self.calls.lock().await.push("delete".to_string());
-        if self.fail_delete {
-            Err(HookError::Failed {
-                reason: "scripted delete failure".to_string(),
-            })
-        } else {
-            Ok(())
-        }
     }
 }
 

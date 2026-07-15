@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use ironclaw_host_api::{
     CapabilityDisplayOutputPreview, CapabilityId, DispatchFailureDetail, DispatchInputIssue,
     MountView, ResourceEstimate, ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement,
-    RuntimeDispatchErrorKind, SecretHandle,
+    RuntimeDispatchErrorKind, SecretHandle, UserId,
 };
 use serde_json::Value;
 
@@ -28,6 +28,7 @@ use crate::InvocationServices;
 pub struct FirstPartyCapabilityRequest {
     pub capability_id: CapabilityId,
     pub scope: ResourceScope,
+    pub authenticated_actor_user_id: Option<UserId>,
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
     pub services: InvocationServices,
@@ -40,6 +41,10 @@ impl fmt::Debug for FirstPartyCapabilityRequest {
             .debug_struct("FirstPartyCapabilityRequest")
             .field("capability_id", &self.capability_id)
             .field("scope", &self.scope)
+            .field(
+                "authenticated_actor_user_id",
+                &self.authenticated_actor_user_id,
+            )
             .field("estimate", &self.estimate)
             .field("mounts", &self.mounts)
             .field("services", &self.services)
@@ -52,6 +57,7 @@ impl PartialEq for FirstPartyCapabilityRequest {
     fn eq(&self, other: &Self) -> bool {
         self.capability_id == other.capability_id
             && self.scope == other.scope
+            && self.authenticated_actor_user_id == other.authenticated_actor_user_id
             && self.estimate == other.estimate
             && self.mounts == other.mounts
             && self.input == other.input
@@ -70,6 +76,7 @@ impl FirstPartyCapabilityRequest {
         Self {
             capability_id,
             scope,
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default(),
             mounts: None,
             services: InvocationServices {
@@ -389,10 +396,7 @@ mod tests {
     #[test]
     fn first_party_capability_error_with_usage_preserves_required_secrets() {
         let handle = SecretHandle::new("google-access-token").unwrap();
-        let usage = ResourceUsage {
-            network_egress_bytes: 42,
-            ..ResourceUsage::default()
-        };
+        let usage = ResourceUsage::default().set_network_egress_bytes(42);
         let error = FirstPartyCapabilityError::auth_required_with(vec![handle.clone()])
             .with_usage(usage.clone());
 
@@ -417,12 +421,8 @@ mod tests {
     #[test]
     fn first_party_capability_error_with_usage_on_dispatch_variant() {
         use ironclaw_host_api::RuntimeDispatchErrorKind;
-        let error = FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend).with_usage(
-            ResourceUsage {
-                network_egress_bytes: 10,
-                ..ResourceUsage::default()
-            },
-        );
+        let error = FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
+            .with_usage(ResourceUsage::default().set_network_egress_bytes(10));
         assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::Backend));
         assert_eq!(error.required_secrets(), None);
         assert!(!error.is_auth_required());

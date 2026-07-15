@@ -4,6 +4,7 @@ import { useT } from "../../../lib/i18n";
 import { Panel, StatCard, StatusPill } from "../../../design-system/primitives";
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
+import { SelectMenu } from "../../../design-system/select-menu";
 import { useAdminUserDetail, useAdminUsers } from "../hooks/useAdminUsers";
 import { useUsage } from "../hooks/useAdminUsage";
 import {
@@ -13,6 +14,9 @@ import {
   truncateId,
   statusTone,
   roleTone,
+  formatUserRole,
+  formatUserStatus,
+  buildRoleOptions,
 } from "../lib/admin-presenters";
 
 function DetailRow({ label, children }) {
@@ -32,6 +36,7 @@ export function UserDetail({ userId, onBack }) {
 
   const [role, setRole] = React.useState(null);
   const [confirmDelete, setConfirmDelete] = React.useState(false);
+  const roleOptions = React.useMemo(() => buildRoleOptions(t), [t]);
 
   const user = userQuery.data;
   const usageEntries = usageQuery.data?.usage || [];
@@ -93,8 +98,8 @@ export function UserDetail({ userId, onBack }) {
           <div>
             <h2 className="text-2xl font-semibold tracking-tight text-white">{user.display_name || user.id}</h2>
             <div className="mt-2 flex items-center gap-2">
-              <StatusPill tone={roleTone(user.role)} label={user.role || "member"} />
-              <StatusPill tone={statusTone(user.status)} label={user.status || "active"} />
+              <StatusPill tone={roleTone(user.role)} label={formatUserRole(user.role, t)} />
+              <StatusPill tone={statusTone(user.status)} label={formatUserStatus(user.status, t)} />
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -136,8 +141,8 @@ export function UserDetail({ userId, onBack }) {
             <span className="font-mono text-xs">{user.id}</span>
           </DetailRow>
           <DetailRow label={t("admin.user.email")}>{user.email || t("admin.user.notSet")}</DetailRow>
-          <DetailRow label={t("admin.user.created")}>{formatRelativeTime(user.created_at)}</DetailRow>
-          <DetailRow label={t("admin.user.lastLogin")}>{formatRelativeTime(user.last_login_at)}</DetailRow>
+          <DetailRow label={t("admin.user.created")}>{formatRelativeTime(user.created_at, t)}</DetailRow>
+          <DetailRow label={t("admin.user.lastLogin")}>{formatRelativeTime(user.last_login_at, t)}</DetailRow>
           {user.created_by && (
             <DetailRow label={t("admin.user.createdBy")}>
               <span className="font-mono text-xs">{truncateId(user.created_by)}</span>
@@ -149,7 +154,7 @@ export function UserDetail({ userId, onBack }) {
           <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("admin.user.summary")}</h3>
           <DetailRow label={t("admin.user.jobs")}>{user.job_count ?? 0}</DetailRow>
           <DetailRow label={t("admin.user.totalCost")}>{formatCost(user.total_cost)}</DetailRow>
-          <DetailRow label={t("admin.user.lastActive")}>{formatRelativeTime(user.last_active_at)}</DetailRow>
+          <DetailRow label={t("admin.user.lastActive")}>{formatRelativeTime(user.last_active_at, t)}</DetailRow>
         </Panel>
       </div>
 
@@ -158,14 +163,14 @@ export function UserDetail({ userId, onBack }) {
         <div className="flex items-end gap-3">
           <div>
             <label className="mb-1 block text-xs text-iron-300">{t("admin.user.currentRole")}</label>
-            <select
+            <SelectMenu
               value={role || user.role}
-              onChange={(e) => setRole(e.currentTarget.value)}
-              className="v2-select h-9 rounded-md border border-white/12 bg-white/[0.04] px-3 text-sm text-iron-100 outline-none focus:border-signal/45"
-            >
-              <option value="member">{t("admin.users.member")}</option>
-              <option value="admin">{t("admin.users.admin")}</option>
-            </select>
+              options={roleOptions}
+              onChange={setRole}
+              ariaLabel={t("admin.user.currentRole")}
+              className="!min-w-0 w-36"
+              buttonClassName="h-9 rounded-md border-white/12 bg-white/[0.04] px-3 font-sans text-sm text-iron-100"
+            />
           </div>
           <Button onClick={handleSaveRole} disabled={!role || role === user.role}>
             {t("admin.user.saveRole")}

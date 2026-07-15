@@ -215,8 +215,11 @@ AUTH_TOKEN = "e2e-test-token"
 OWNER_SCOPE_ID = "e2e-owner-scope"
 HTTP_WEBHOOK_SECRET = "e2e-http-webhook-secret"
 EMULATE_GOOGLE_BEARER = "mock-refreshed-access-token"
+EMULATE_GOOGLE_SECONDARY_BEARER = "emulate-google-secondary-token"
 EMULATE_SLACK_BEARER = "emulate-slack-token"
+EMULATE_SLACK_LIMITED_BEARER = "emulate-slack-limited-token"
 EMULATE_GITHUB_BEARER = "ghp_emulate_github_token"
+EMULATE_GITHUB_SECONDARY_BEARER = "ghp_emulate_github_secondary_token"
 
 # Bearer token for the Reborn WebUI v2 surface (`ironclaw-reborn serve`).
 # Must be >= 32 bytes: `serve` also uses this value as the SSO session-signing
@@ -232,10 +235,16 @@ SEL_V2 = {
     "sidebar":        "#gateway-sidebar",  # app navigation sidebar
     "sidebar_button": "#gateway-sidebar button",
     "sidebar_toggle": "button[aria-label='Toggle sidebar']",
+    "thread_delete_for": (
+        "[data-testid='thread-delete'][data-thread-id='{id}']"
+    ),
     "sign_out_button": "button[title='Sign out']",
     "chat_composer":  "[data-testid='chat-composer']",  # message textarea on /chat
     "attachment_file_input": "input[type=file][multiple]",
     "typing_indicator": "[data-testid='typing-indicator']",
+    "connection_status": "[data-testid='connection-status']",
+    "connection_status_toggle": "[data-testid='connection-status-toggle']",
+    "connection_status_label": "[data-testid='connection-status-label']",
     "msg_user":       "[data-testid='msg-user']",       # user message bubble
     "msg_assistant":  "[data-testid='msg-assistant']",  # assistant message bubble
     "msg_system":     "[data-testid='msg-system']",     # system notice bubble
@@ -315,6 +324,7 @@ SEL_V2 = {
         "[data-testid='settings-tool-permission-select'] button[aria-haspopup='listbox']"
     ),
     "settings_tool_lock": "[data-testid='settings-tool-lock']",
+    "skill_action_result": "[data-testid='skill-action-result']",
     "llm_provider_card_for": (
         "[data-testid='llm-provider-card'][data-provider-id='{provider_id}']"
     ),
@@ -330,6 +340,8 @@ SEL_V2 = {
     "automation_rename_button": "[data-testid='automation-rename-button']",
     "automation_rename_input": "[data-testid='automation-rename-input']",
     "automation_rename_save": "[data-testid='automation-rename-save']",
+    "automation_run_open": "[data-testid='automation-run-open']",
+    "automation_run_logs": "[data-testid='automation-run-logs']",
     "skills_card": "#skills-list .ext-card",
     "skill_name_placeholder": "skill-name",
     "skill_content_placeholder": "---\\nname: example\\ndescription: ...\\n---\\n",

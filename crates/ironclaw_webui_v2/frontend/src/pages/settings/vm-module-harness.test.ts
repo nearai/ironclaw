@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "vitest";
 import vm from "node:vm";
 
-import { sourceTextForVmTest } from "../../test-support/vm-module-harness.ts";
+import { sourceTextForVmTest } from "../../test-support/vm-module-harness";
 
 function evaluate(source, exportNames) {
   const context = { globalThis: {} };

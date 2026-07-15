@@ -399,6 +399,38 @@ where
             .await?;
         Ok(record)
     }
+
+    async fn fail_completed_continuation(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+        flow_id: AuthFlowId,
+        error: AuthErrorCode,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        let lock = self.lock_for(format!("flow:{flow_id}"));
+        let _guard = lock.lock().await;
+        let (mut record, version) = self
+            .read_flow(scope, flow_id)
+            .await?
+            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        if !scope_matches(scope, &record.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        // Only a completed flow that has not yet acknowledged its continuation
+        // can be terminalized by a continuation-dispatch failure. Anything else
+        // (already dispatched, or already terminal in another state) must not
+        // regress — this races safely against a concurrent completion/dispatch.
+        if record.status != AuthFlowStatus::Completed
+            || record.continuation_emitted_at.is_some()
+        {
+            return Err(AuthProductError::FlowAlreadyTerminal);
+        }
+        record.status = AuthFlowStatus::Failed;
+        record.error = Some(error);
+        record.updated_at = Utc::now();
+        self.write_flow(scope, &record, CasExpectation::Version(version))
+            .await?;
+        Ok(record)
+    }
 }
 
 #[async_trait]

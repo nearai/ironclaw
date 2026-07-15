@@ -603,6 +603,7 @@ async fn host_runtime_services_with_security_audit_sink_records_leak_block() {
         parent_process_id: None,
         tenant_id: resource_scope.tenant_id.clone(),
         user_id: resource_scope.user_id.clone(),
+        authenticated_actor_user_id: None,
         agent_id: resource_scope.agent_id.clone(),
         project_id: resource_scope.project_id.clone(),
         mission_id: resource_scope.mission_id.clone(),
@@ -675,10 +676,7 @@ async fn service_guard_releases_reservation_on_planner_denial() {
     let filesystem = LocalFilesystem::new();
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
-    let estimate = ResourceEstimate {
-        process_count: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_process_count(1);
     let reservation = governor
         .reserve(scope.clone(), estimate.clone())
         .expect("test reservation should be created");
@@ -703,6 +701,7 @@ async fn service_guard_releases_reservation_on_planner_denial() {
             runtime_policy: &policy,
             capability_id: &descriptor.id,
             scope,
+            authenticated_actor_user_id: None,
             estimate,
             mounts: None,
             resource_reservation: Some(reservation),
@@ -757,6 +756,7 @@ async fn service_guard_rejects_resolution_before_wasm_dispatch() {
             runtime_policy: &policy,
             capability_id: &descriptor.id,
             scope,
+            authenticated_actor_user_id: None,
             estimate,
             mounts: None,
             resource_reservation: None,
@@ -767,7 +767,8 @@ async fn service_guard_rejects_resolution_before_wasm_dispatch() {
     assert!(matches!(
         result,
         Err(DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::NetworkDenied
+            kind: RuntimeDispatchErrorKind::NetworkDenied,
+            safe_summary: None,
         })
     ));
     assert_eq!(inner.call_count(), 0);
@@ -788,10 +789,7 @@ async fn service_guard_releases_reservation_on_invocation_service_resolution_den
     let filesystem = LocalFilesystem::new();
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
-    let estimate = ResourceEstimate {
-        network_egress_bytes: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_network_egress_bytes(1);
     let reservation = governor
         .reserve(scope.clone(), estimate.clone())
         .expect("test reservation should be created");
@@ -819,6 +817,7 @@ async fn service_guard_releases_reservation_on_invocation_service_resolution_den
             runtime_policy: &policy,
             capability_id: &descriptor.id,
             scope,
+            authenticated_actor_user_id: None,
             estimate,
             mounts: None,
             resource_reservation: Some(reservation),
@@ -829,7 +828,8 @@ async fn service_guard_releases_reservation_on_invocation_service_resolution_den
     assert!(matches!(
         result,
         Err(DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::NetworkDenied
+            kind: RuntimeDispatchErrorKind::NetworkDenied,
+            safe_summary: None,
         })
     ));
     assert_eq!(inner.call_count(), 0);
@@ -873,6 +873,7 @@ async fn service_guard_rejects_required_secret_without_secret_store_before_dispa
             runtime_policy: &policy,
             capability_id: &descriptor.id,
             scope,
+            authenticated_actor_user_id: None,
             estimate,
             mounts: None,
             resource_reservation: None,
@@ -883,7 +884,8 @@ async fn service_guard_rejects_required_secret_without_secret_store_before_dispa
     assert!(matches!(
         result,
         Err(DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::SecretDenied
+            kind: RuntimeDispatchErrorKind::SecretDenied,
+            safe_summary: None,
         })
     ));
     assert_eq!(inner.call_count(), 0);
@@ -909,10 +911,7 @@ async fn first_party_adapter_releases_reservation_when_invocation_service_resolu
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
-    let estimate = ResourceEstimate {
-        network_egress_bytes: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_network_egress_bytes(1);
     let reservation = governor
         .reserve(scope.clone(), estimate.clone())
         .expect("test reservation should be created");
@@ -937,6 +936,7 @@ async fn first_party_adapter_releases_reservation_when_invocation_service_resolu
             runtime_policy: &policy,
             capability_id: &descriptor.id,
             scope,
+            authenticated_actor_user_id: None,
             estimate,
             mounts: None,
             resource_reservation: Some(reservation),
@@ -1041,10 +1041,7 @@ async fn first_party_adapter_releases_reservation_when_planner_denies() {
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
-    let estimate = ResourceEstimate {
-        network_egress_bytes: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_network_egress_bytes(1);
     let reservation = governor
         .reserve(scope.clone(), estimate.clone())
         .expect("test reservation should be created");
@@ -1069,6 +1066,7 @@ async fn first_party_adapter_releases_reservation_when_planner_denies() {
             runtime_policy: &policy,
             capability_id: &descriptor.id,
             scope,
+            authenticated_actor_user_id: None,
             estimate,
             mounts: None,
             resource_reservation: Some(reservation),
@@ -1148,6 +1146,7 @@ fn test_descriptor(runtime: RuntimeKind, effects: Vec<EffectKind>) -> Capability
         effects,
         default_permission: PermissionMode::Allow,
         runtime_credentials: Vec::new(),
+        network_targets: Vec::new(),
         resource_profile: None,
     }
 }
@@ -1222,6 +1221,7 @@ async fn assert_first_party_denies_before_handler(
             runtime_policy: &policy,
             capability_id: &descriptor.id,
             scope: sample_scope(),
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default(),
             mounts,
             resource_reservation: None,
@@ -1264,6 +1264,7 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingRunt
                 .reserve(request.scope, request.estimate)
                 .map_err(|_| DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::Resource,
+                    safe_summary: None,
                 })?,
         };
         let receipt: ResourceReceipt = request
@@ -1271,6 +1272,7 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingRunt
             .reconcile(reservation.id, usage.clone())
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
+                safe_summary: None,
             })?;
         Ok(RuntimeAdapterResult {
             output: Value::Null,

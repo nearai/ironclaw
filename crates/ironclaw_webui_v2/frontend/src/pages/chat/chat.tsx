@@ -11,7 +11,6 @@ import { AuthGenericCard } from "./components/auth-generic-card";
 import { AuthOauthCard } from "./components/auth-oauth-card";
 import { AuthTokenCard } from "./components/auth-token-card";
 import { ChatInput } from "./components/chat-input";
-import { ConnectionStatus } from "./components/connection-status";
 import { EmptyState } from "./components/empty-state";
 import { KeyboardShortcuts } from "./components/keyboard-shortcuts";
 import { MessageList } from "./components/message-list";
@@ -40,7 +39,7 @@ import { useInterfacePreferences } from "../../lib/interface-preferences";
 const THREAD_STATE_CLEAR_GRACE_MS = 1500;
 
 function pendingOnboardingLabel(onboarding) {
-  // Single source of channel display names (lib/channel-connection-events.js) so
+  // Single source of channel display names (lib/channel-connection-events.ts) so
   // the composer notice and the pairing-card title can't drift in casing.
   return channelConnectionDisplayName(onboarding?.extensionName);
 }
@@ -64,6 +63,7 @@ export function Chat({
   composerResetKey = "",
   gatewayStatus,
   globalAutoApproveEnabled = false,
+  onConnectionStatusChange,
 }) {
   const t = useT();
   const { showChatLogsShortcut } = useInterfacePreferences();
@@ -94,6 +94,10 @@ export function Chat({
     startOnboardingOAuth,
     dismissOnboardingPairing,
   } = useChat(activeThreadId);
+
+  React.useEffect(() => {
+    onConnectionStatusChange?.(sseStatus);
+  }, [onConnectionStatusChange, sseStatus]);
 
   const activeThread = React.useMemo(
     () => threads.find((thread) => thread.id === activeThreadId) || null,
@@ -297,8 +301,6 @@ export function Chat({
   return (
     <div className="flex h-full min-h-0 overflow-hidden">
       <div className="flex min-w-0 flex-1 flex-col">
-        <ConnectionStatus status={sseStatus} />
-
         {historyLoadError &&
         (
           <div

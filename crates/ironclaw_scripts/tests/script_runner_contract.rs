@@ -21,12 +21,10 @@ fn script_runtime_reserves_executes_and_reconciles_success() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                max_process_count: Some(10),
-                max_output_bytes: Some(10_000),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_concurrency_slots(1)
+                .set_max_process_count(10)
+                .set_max_output_bytes(10_000),
         )
         .unwrap();
     let capability_id = CapabilityId::new("script.echo").unwrap();
@@ -38,12 +36,10 @@ fn script_runtime_reserves_executes_and_reconciles_success() {
                 package: &script_package(),
                 capability_id: &capability_id,
                 scope,
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    process_count: Some(1),
-                    output_bytes: Some(10_000),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default()
+                    .set_concurrency_slots(1)
+                    .set_process_count(1)
+                    .set_output_bytes(10_000),
                 mounts: None,
                 resource_reservation: None,
                 invocation: ScriptInvocation {
@@ -92,10 +88,7 @@ fn script_runtime_denies_budget_before_backend_execution() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_output_bytes: Some(1),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_output_bytes(1),
         )
         .unwrap();
     let capability_id = CapabilityId::new("script.echo").unwrap();
@@ -107,10 +100,7 @@ fn script_runtime_denies_budget_before_backend_execution() {
                 package: &script_package(),
                 capability_id: &capability_id,
                 scope,
-                estimate: ResourceEstimate {
-                    output_bytes: Some(10_000),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default().set_output_bytes(10_000),
                 mounts: None,
                 resource_reservation: None,
                 invocation: ScriptInvocation { input: json!({}) },
@@ -139,10 +129,7 @@ fn script_runtime_releases_reservation_when_backend_exits_nonzero() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_concurrency_slots(1),
         )
         .unwrap();
     let capability_id = CapabilityId::new("script.echo").unwrap();
@@ -154,10 +141,7 @@ fn script_runtime_releases_reservation_when_backend_exits_nonzero() {
                 package: &script_package(),
                 capability_id: &capability_id,
                 scope,
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default().set_concurrency_slots(1),
                 mounts: None,
                 resource_reservation: None,
                 invocation: ScriptInvocation { input: json!({}) },
@@ -184,10 +168,7 @@ fn script_runtime_preserves_backend_error_when_release_cleanup_fails() {
                 package: &script_package(),
                 capability_id: &capability_id,
                 scope: sample_scope(),
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default().set_concurrency_slots(1),
                 mounts: None,
                 resource_reservation: None,
                 invocation: ScriptInvocation { input: json!({}) },
@@ -219,10 +200,7 @@ fn script_runtime_releases_reservation_when_output_limit_fails() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_concurrency_slots(1),
         )
         .unwrap();
     let capability_id = CapabilityId::new("script.echo").unwrap();
@@ -234,10 +212,7 @@ fn script_runtime_releases_reservation_when_output_limit_fails() {
                 package: &script_package(),
                 capability_id: &capability_id,
                 scope,
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default().set_concurrency_slots(1),
                 mounts: None,
                 resource_reservation: None,
                 invocation: ScriptInvocation { input: json!({}) },
@@ -260,10 +235,7 @@ fn script_runtime_rejects_non_script_package_before_reserving() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(0),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_concurrency_slots(0),
         )
         .unwrap();
     let capability_id = CapabilityId::new("echo.say").unwrap();
@@ -275,10 +247,7 @@ fn script_runtime_rejects_non_script_package_before_reserving() {
                 package: &wasm_package(),
                 capability_id: &capability_id,
                 scope,
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default().set_concurrency_slots(1),
                 mounts: None,
                 resource_reservation: None,
                 invocation: ScriptInvocation { input: json!({}) },
@@ -301,10 +270,7 @@ fn script_runtime_rejects_undeclared_capability_before_reserving() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(0),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_concurrency_slots(0),
         )
         .unwrap();
     let capability_id = CapabilityId::new("script.missing").unwrap();
@@ -316,10 +282,7 @@ fn script_runtime_rejects_undeclared_capability_before_reserving() {
                 package: &script_package(),
                 capability_id: &capability_id,
                 scope,
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default().set_concurrency_slots(1),
                 mounts: None,
                 resource_reservation: None,
                 invocation: ScriptInvocation { input: json!({}) },

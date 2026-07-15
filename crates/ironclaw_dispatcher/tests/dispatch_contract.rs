@@ -24,11 +24,9 @@ async fn dispatcher_routes_capability_through_resolved_binding() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                max_output_bytes: Some(10_000),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_concurrency_slots(1)
+                .set_max_output_bytes(10_000),
         )
         .unwrap();
     let binding = RecordingBinding::new(json!({"message": "hello adapter"}), Arc::clone(&governor));
@@ -42,6 +40,7 @@ async fn dispatcher_routes_capability_through_resolved_binding() {
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope: scope.clone(),
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate {
                 concurrency_slots: Some(1),
                 output_bytes: Some(10_000),
@@ -119,10 +118,8 @@ async fn dispatcher_fails_unknown_capability_before_any_binding_work() {
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("missing.say").unwrap(),
             scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
-            },
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default().set_concurrency_slots(1),
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "nope"}),
@@ -141,10 +138,7 @@ async fn dispatcher_releases_prepared_reservation_when_resolution_fails() {
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let scope = sample_scope();
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
-    let estimate = ResourceEstimate {
-        concurrency_slots: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_concurrency_slots(1);
     let reservation = governor.reserve(scope.clone(), estimate.clone()).unwrap();
     assert_eq!(governor.reserved_for(&account).concurrency_slots, 1);
     let resolver = ScriptedResolver::empty();
@@ -154,6 +148,7 @@ async fn dispatcher_releases_prepared_reservation_when_resolution_fails() {
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("missing.say").unwrap(),
             scope,
+            authenticated_actor_user_id: None,
             estimate,
             mounts: None,
             resource_reservation: Some(reservation),
@@ -189,6 +184,7 @@ async fn dispatcher_hands_prepared_reservation_to_the_binding() {
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope,
+            authenticated_actor_user_id: None,
             estimate,
             mounts: None,
             resource_reservation: Some(reservation),
@@ -376,6 +372,7 @@ impl BoundCapabilityAdapter for RecordingBinding {
                 .reserve(request.scope.clone(), request.estimate.clone())
                 .map_err(|_| DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::Resource,
+                    safe_summary: None,
                 })?,
         };
         let receipt = self
@@ -383,6 +380,7 @@ impl BoundCapabilityAdapter for RecordingBinding {
             .reconcile(reservation.id, usage.clone())
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
+                safe_summary: None,
             })?;
         Ok(RuntimeAdapterResult {
             output: self.output.clone(),
@@ -398,6 +396,7 @@ fn sample_request(capability_id: &str, input: Value) -> CapabilityDispatchReques
     CapabilityDispatchRequest {
         capability_id: CapabilityId::new(capability_id).unwrap(),
         scope: sample_scope(),
+        authenticated_actor_user_id: None,
         estimate: ResourceEstimate {
             concurrency_slots: Some(1),
             ..ResourceEstimate::default()

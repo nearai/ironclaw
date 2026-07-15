@@ -4,12 +4,12 @@ use std::{
 };
 
 use futures::{StreamExt, TryStreamExt, stream};
-use ironclaw_auth::AuthAccountState;
+use ironclaw_auth::{CredentialAccountStatus, project_auth_account_state};
 use ironclaw_host_api::{CapabilitySurfaceKind, ExtensionId, InstallationState};
 
 use crate::{
-    ChannelConnectionFacade, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
-    LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductAction,
+    ChannelAuthAccountState, ChannelConnectionFacade, LifecycleExtensionSummary,
+    LifecycleInstalledExtensionSummary, LifecyclePackageRef, LifecycleProductAction,
     LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleProductSurfaceContext, RebornAccountBindingSource,
     RebornAuthAccount, RebornExtensionActionResponse, RebornExtensionInfo,
@@ -38,7 +38,7 @@ pub(super) async fn list_extensions(
     let context = lifecycle_surface_context(caller.clone());
     let lifecycle = execute_lifecycle(
         facade.as_ref(),
-        context,
+        context.clone(),
         LifecycleProductAction::ExtensionList,
     )
     .await?;
@@ -46,12 +46,26 @@ pub(super) async fn list_extensions(
     let connections = channel_connection_facade
         .caller_channel_connections(caller.clone())
         .await?;
+    // Per-caller auth-account status per channel vendor: lets each account
+    // project its real §6.3 state (expired / refresh-failed) instead of the
+    // connected/disconnected collapse the connection bool alone permits.
+    let account_states = channel_connection_facade
+        .caller_channel_account_states(caller.clone())
+        .await?;
+    // Redacted per-extension activation errors from the durable installation
+    // records, projected onto `RebornExtensionInfo::activation_error`.
+    let activation_errors = facade
+        .installed_activation_errors(context)
+        .await
+        .map_err(map_lifecycle_error)?;
     Ok(RebornExtensionListResponse {
         extensions: lifecycle_extension_infos(
             installed,
             extension_credentials,
             caller,
             connections,
+            account_states,
+            activation_errors,
         )
         .await?,
     })
@@ -113,6 +127,19 @@ pub(super) async fn install_extension(
     Ok(action_response(&lifecycle, None, projection.as_ref()))
 }
 
+pub(super) async fn import_extension(
+    facade: &dyn LifecycleProductFacade,
+    caller: WebUiAuthenticatedCaller,
+    bundle: Vec<u8>,
+) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+    let context = lifecycle_surface_context(caller);
+    let lifecycle = facade
+        .import_extension_bundle(context, bundle)
+        .await
+        .map_err(map_lifecycle_error)?;
+    Ok(action_response(&lifecycle, None, None))
+}
+
 pub(super) async fn activate_extension(
     facade: &dyn LifecycleProductFacade,
     caller: WebUiAuthenticatedCaller,
@@ -128,35 +155,17 @@ pub(super) async fn activate_extension(
     let projection = project_action_package_best_effort(facade, context, &lifecycle).await;
     Ok(action_response(
         &lifecycle,
-        Some(lifecycle.phase == LifecyclePhase::Active),
+        Some(lifecycle.phase == InstallationState::Active),
         projection.as_ref(),
     ))
 }
 
 pub(super) async fn remove_extension(
     facade: &dyn LifecycleProductFacade,
-    channel_connection_facade: Arc<dyn ChannelConnectionFacade>,
     caller: WebUiAuthenticatedCaller,
     package_ref: LifecyclePackageRef,
 ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-    let context = lifecycle_surface_context(caller.clone());
-    let cleanup = removable_channel_cleanup(facade, context.clone(), &package_ref).await?;
-    if let Some(cleanup) = cleanup {
-        let (channel, requires_connection_facade_support) = cleanup.into_parts();
-        let should_disconnect = if requires_connection_facade_support {
-            channel_connection_facade
-                .caller_channel_connections(caller.clone())
-                .await?
-                .contains_key(&channel)
-        } else {
-            true
-        };
-        if should_disconnect {
-            channel_connection_facade
-                .disconnect_channel_for_caller(caller, &channel)
-                .await?;
-        }
-    }
+    let context = lifecycle_surface_context(caller);
     let lifecycle = execute_lifecycle(
         facade,
         context,
@@ -164,39 +173,6 @@ pub(super) async fn remove_extension(
     )
     .await?;
     Ok(action_response(&lifecycle, None, None))
-}
-
-async fn removable_channel_cleanup(
-    facade: &dyn LifecycleProductFacade,
-    context: LifecycleProductContext,
-    package_ref: &LifecyclePackageRef,
-) -> Result<Option<RemovableChannelCleanup>, RebornServicesError> {
-    if package_ref.kind != LifecyclePackageKind::Extension {
-        return Ok(None);
-    }
-    let lifecycle =
-        execute_lifecycle(facade, context, LifecycleProductAction::ExtensionList).await?;
-    let Some(LifecycleProductPayload::ExtensionList { extensions, .. }) = lifecycle.payload else {
-        return Ok(None);
-    };
-    Ok(extensions
-        .into_iter()
-        .filter(|installed| installed.summary.package_ref == *package_ref)
-        .find_map(|installed| removable_channel_cleanup_for_summary(&installed.summary)))
-}
-
-enum RemovableChannelCleanup {
-    Required(String),
-    IfConnectionFacadeSupportsChannel(String),
-}
-
-impl RemovableChannelCleanup {
-    fn into_parts(self) -> (String, bool) {
-        match self {
-            Self::Required(channel) => (channel, false),
-            Self::IfConnectionFacadeSupportsChannel(channel) => (channel, true),
-        }
-    }
 }
 
 async fn execute_lifecycle(
@@ -262,6 +238,8 @@ async fn lifecycle_extension_infos(
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
     caller: WebUiAuthenticatedCaller,
     connections: HashMap<String, bool>,
+    account_states: HashMap<String, ChannelAuthAccountState>,
+    activation_errors: HashMap<String, String>,
 ) -> Result<Vec<RebornExtensionInfo>, RebornServicesError> {
     let resolved = stream::iter(installed)
         .map(|installed| {
@@ -282,7 +260,15 @@ async fn lifecycle_extension_infos(
         .await?;
     Ok(resolved
         .into_iter()
-        .map(|(installed, readiness)| extension_info(installed, readiness, &connections))
+        .map(|(installed, readiness)| {
+            extension_info(
+                installed,
+                readiness,
+                &connections,
+                &account_states,
+                &activation_errors,
+            )
+        })
         .collect())
 }
 
@@ -326,12 +312,14 @@ fn extension_info(
     installed: LifecycleInstalledExtensionSummary,
     readiness: ExtensionCredentialReadiness,
     connections: &HashMap<String, bool>,
+    account_states: &HashMap<String, ChannelAuthAccountState>,
+    activation_errors: &HashMap<String, String>,
 ) -> RebornExtensionInfo {
     let phase = installed.phase;
     let has_auth = !installed.summary.credential_requirements.is_empty();
     let lifecycle_authenticated = matches!(
         phase,
-        LifecyclePhase::Active | LifecyclePhase::Activating | LifecyclePhase::Configured
+        InstallationState::Active | InstallationState::Configured
     );
     let authenticated = match readiness {
         ExtensionCredentialReadiness::NotRequired => lifecycle_authenticated,
@@ -341,6 +329,7 @@ fn extension_info(
     };
     let onboarding =
         extension_onboarding::for_installed_with_credential_status(&installed, readiness);
+    let install_scope = installed.install_scope;
     let summary = installed.summary;
     let has_external_channel_surface = has_external_channel_surface(&summary);
     let runtime = summary.runtime_kind.runtime_wire_name().to_string();
@@ -362,7 +351,14 @@ fn extension_info(
     } else {
         None
     };
-    let auth_accounts = vendor_auth_accounts(&summary, connected);
+    let account_state = account_states.get(summary.package_ref.id.as_str());
+    // Redacted activation error for this extension (host installation record's
+    // typed `last_error`), threaded onto the card slot the frontend already
+    // renders. `None` when the facade surfaces no failure for this extension.
+    let activation_error = activation_errors
+        .get(summary.package_ref.id.as_str())
+        .cloned();
+    let auth_accounts = vendor_auth_accounts(&summary, connected, account_state);
     let resolved_account_id = auth_accounts
         .first()
         .and_then(|vendor| vendor.accounts.first())
@@ -374,22 +370,25 @@ fn extension_info(
         runtime,
         description: summary.description,
         authenticated: authenticated && !channel_unconnected,
-        active: phase == LifecyclePhase::Active,
+        active: phase == InstallationState::Active,
         tools: summary.visible_capability_ids,
         needs_setup: channel_unconnected
             || readiness == ExtensionCredentialReadiness::MissingRequired
             || matches!(
                 phase,
-                LifecyclePhase::Installed | LifecyclePhase::Configured | LifecyclePhase::Failed
+                InstallationState::Installed
+                    | InstallationState::Configured
+                    | InstallationState::Failed
             ),
         has_auth,
-        installation_state: installation_state_from_phase(phase),
-        activation_error: None,
+        installation_state: wire_installation_state(phase, readiness),
+        activation_error,
         version: Some(summary.version),
         onboarding_state,
         onboarding: onboarding.onboarding,
         auth_accounts,
         surfaces,
+        install_scope,
     }
 }
 
@@ -435,53 +434,22 @@ fn has_external_channel_surface(summary: &LifecycleExtensionSummary) -> bool {
         .contains(&CapabilitySurfaceKind::Channel)
 }
 
-fn removable_channel_cleanup_for_summary(
-    summary: &LifecycleExtensionSummary,
-) -> Option<RemovableChannelCleanup> {
-    if has_external_channel_surface(summary) {
-        return Some(RemovableChannelCleanup::Required(
-            summary.package_ref.id.as_str().to_string(),
-        ));
-    }
-    // An extension without a channel surface can still hold the caller's
-    // per-channel connection when it authenticates against a vendor (for
-    // example, a tools package whose OAuth account is the channel's
-    // personal connection). Whether such a connection concept exists is
-    // the connection facade's call: it is consulted first and disconnect
-    // runs only when it reports this channel. The channel key is the
-    // package id — the same key the facade's connections map uses.
-    if summary.package_ref.kind == LifecyclePackageKind::Extension
-        && !summary.credential_requirements.is_empty()
+/// The wire installation state (§6.1): the composition-projected state,
+/// refined to `Configured` when the caller's required credentials are present
+/// but the extension is only `Installed` (not yet active). The composition
+/// projection already yields `Active` / `Disabled` / `Failed`; this adds the
+/// derived `Configured` distinction the product layer can prove from
+/// credential readiness.
+fn wire_installation_state(
+    projected: InstallationState,
+    readiness: ExtensionCredentialReadiness,
+) -> InstallationState {
+    if projected == InstallationState::Installed
+        && readiness == ExtensionCredentialReadiness::Configured
     {
-        return Some(RemovableChannelCleanup::IfConnectionFacadeSupportsChannel(
-            summary.package_ref.id.as_str().to_string(),
-        ));
-    }
-    None
-}
-
-/// Project the facade's richer lifecycle phase onto the shared §6.1
-/// installation-state enum the wire exposes. The mapping is total: the facade
-/// phases that are not distinct installation-lifecycle states (configured /
-/// disabled / failed / upgrade-required / installing / discovered / unsupported)
-/// collapse to `Installed`, and the UI re-derives those distinctions from
-/// `needs_setup` + config completeness + `activation_error` + version (UI-4).
-/// `Deactivating`/`RemovalPending` are host-transient and never surface as a
-/// facade phase.
-fn installation_state_from_phase(phase: LifecyclePhase) -> InstallationState {
-    match phase {
-        LifecyclePhase::Active => InstallationState::Active,
-        LifecyclePhase::Activating => InstallationState::Activating,
-        LifecyclePhase::Removing => InstallationState::Removing,
-        LifecyclePhase::Removed => InstallationState::Removed,
-        LifecyclePhase::Discovered
-        | LifecyclePhase::Installing
-        | LifecyclePhase::Installed
-        | LifecyclePhase::Configured
-        | LifecyclePhase::Disabled
-        | LifecyclePhase::UpgradeRequired
-        | LifecyclePhase::Failed
-        | LifecyclePhase::Unsupported => InstallationState::Installed,
+        InstallationState::Configured
+    } else {
+        projected
     }
 }
 
@@ -497,25 +465,33 @@ fn channel_auth_vendor(summary: &LifecycleExtensionSummary) -> String {
 }
 
 /// Per-vendor accounts list for the extensions wire (overview §6.4, ADR 0001).
-/// Shape only: one vendor, at most one account, derived from the caller's
-/// connection signal — a live grant backfills to `Connected` (MIG-1). Richer
-/// per-account state and multiple accounts arrive with the post-P7
-/// multi-account follow-up; the list shape is frozen so that lands without a
-/// wire break. `None` connection signal (no per-caller connection concept)
-/// yields no vendor entry.
+/// One vendor, at most one account today; the list shape is frozen so the
+/// post-P7 multi-account follow-up lands without a wire break. `None`
+/// connection signal (no per-caller connection concept) yields no vendor entry.
+///
+/// The account's state is the shared §6.3 machine, projected by
+/// [`project_auth_account_state`] from the caller's durable auth-account signal
+/// (`account_state`): a real credential-account status surfaces `expired` /
+/// `refresh-failed` (with a typed `last_error`) and a live auth flow surfaces
+/// `authenticating`. When the facade carries no richer status the connection
+/// bool is the MIG-1 backfill — a live grant reads as a `configured` account
+/// and projects `connected`.
 fn vendor_auth_accounts(
     summary: &LifecycleExtensionSummary,
     connected: Option<bool>,
+    account_state: Option<&ChannelAuthAccountState>,
 ) -> Vec<RebornVendorAuthAccounts> {
     let Some(is_connected) = connected else {
         return Vec::new();
     };
     let vendor = channel_auth_vendor(summary);
-    let state = if is_connected {
-        AuthAccountState::Connected
-    } else {
-        AuthAccountState::Disconnected
-    };
+    // Prefer the facade's durable credential-account status; fall back to the
+    // connection bool (a live grant backfills to `configured` → `connected`).
+    let account_status = account_state
+        .and_then(|state| state.account_status)
+        .or(is_connected.then_some(CredentialAccountStatus::Configured));
+    let active_flow_status = account_state.and_then(|state| state.active_flow_status);
+    let (state, last_error) = project_auth_account_state(account_status, active_flow_status);
     vec![RebornVendorAuthAccounts {
         vendor: vendor.clone(),
         // One account per vendor today; its id is the vendor id until the
@@ -524,7 +500,7 @@ fn vendor_auth_accounts(
             account_id: vendor,
             label: summary.name.clone(),
             state,
-            last_error: None,
+            last_error,
             is_default: true,
         }],
     }]
@@ -537,7 +513,7 @@ fn action_response(
 ) -> RebornExtensionActionResponse {
     let success = !matches!(
         lifecycle.phase,
-        LifecyclePhase::Failed | LifecyclePhase::Unsupported
+        InstallationState::Failed | InstallationState::Unsupported
     );
     let onboarding = projection
         .map(extension_onboarding::from_lifecycle)
@@ -587,8 +563,6 @@ mod tests {
     #[derive(Default)]
     struct TestConnections {
         connections: std::collections::HashMap<String, bool>,
-        disconnects: Mutex<Vec<(UserId, String)>>,
-        disconnect_failures: Mutex<usize>,
     }
 
     impl TestConnections {
@@ -598,17 +572,7 @@ mod tests {
                     .iter()
                     .map(|(key, value)| ((*key).to_string(), *value))
                     .collect(),
-                disconnects: Mutex::new(Vec::new()),
-                disconnect_failures: Mutex::new(0),
             }
-        }
-
-        fn disconnects(&self) -> Vec<(UserId, String)> {
-            self.disconnects.lock().expect("lock").clone()
-        }
-
-        fn fail_next_disconnects(&self, count: usize) {
-            *self.disconnect_failures.lock().expect("lock") = count;
         }
     }
 
@@ -619,23 +583,6 @@ mod tests {
             _caller: WebUiAuthenticatedCaller,
         ) -> Result<std::collections::HashMap<String, bool>, RebornServicesError> {
             Ok(self.connections.clone())
-        }
-
-        async fn disconnect_channel_for_caller(
-            &self,
-            caller: WebUiAuthenticatedCaller,
-            channel: &str,
-        ) -> Result<(), RebornServicesError> {
-            self.disconnects
-                .lock()
-                .expect("lock")
-                .push((caller.user_id, channel.to_string()));
-            let mut failures = self.disconnect_failures.lock().expect("lock");
-            if *failures > 0 {
-                *failures -= 1;
-                return Err(RebornServicesError::service_unavailable(true));
-            }
-            Ok(())
         }
     }
 
@@ -693,27 +640,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remove_action_disconnects_callers_channel_when_removing_channel_extension() {
+    async fn remove_action_delegates_once_with_authenticated_surface_context() {
         let facade = RemoveFacade::default();
         let caller = caller();
-        let connections = Arc::new(TestConnections::default());
-        let channel_connections: Arc<dyn ChannelConnectionFacade> = connections.clone();
 
-        let response =
-            remove_extension(&facade, channel_connections, caller.clone(), package_ref())
-                .await
-                .expect("remove response");
+        let response = remove_extension(&facade, caller.clone(), package_ref())
+            .await
+            .expect("remove response");
 
         assert!(response.success);
-        assert_eq!(
-            connections.disconnects(),
-            vec![(caller.user_id.clone(), "fixture".to_string())],
-            "the WebUI remove path must clear the caller's per-channel personal connection"
-        );
         let calls = facade.calls.lock().expect("lock");
-        assert_eq!(calls.len(), 2);
-        assert!(matches!(calls[0].1, LifecycleProductAction::ExtensionList));
-        let (context, action) = &calls[1];
+        assert_eq!(calls.len(), 1);
+        let (context, action) = &calls[0];
         assert_eq!(
             *action,
             LifecycleProductAction::ExtensionRemove {
@@ -732,152 +670,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remove_action_disconnects_slack_when_removing_visible_slack_extension() {
-        let facade = RemoveFacade::slack_tools_extension();
-        let caller = caller();
-        let connections = Arc::new(TestConnections::with_connections(&[("slack", false)]));
-        let channel_connections: Arc<dyn ChannelConnectionFacade> = connections.clone();
-
-        let response = remove_extension(
-            &facade,
-            channel_connections,
-            caller.clone(),
-            slack_package_ref(),
-        )
-        .await
-        .expect("remove response");
-
-        assert!(response.success);
-        assert_eq!(
-            connections.disconnects(),
-            vec![(caller.user_id.clone(), "slack".to_string())],
-            "removing the visible Slack extension must clear the caller's Slack identity binding"
-        );
-    }
-
-    #[tokio::test]
-    async fn remove_action_removes_slack_extension_when_slack_connection_facade_unwired() {
-        let facade = RemoveFacade::slack_tools_extension();
-        let caller = caller();
-
-        let response = remove_extension(
-            &facade,
-            Arc::new(StaticChannelConnectionFacade),
-            caller,
-            slack_package_ref(),
-        )
-        .await
-        .expect("unwired Slack cleanup must not block extension removal");
-
-        assert!(response.success);
-        let calls = facade.calls.lock().expect("lock");
-        assert_eq!(calls.len(), 2);
-        assert!(matches!(calls[0].1, LifecycleProductAction::ExtensionList));
-        assert!(matches!(
-            calls[1].1,
-            LifecycleProductAction::ExtensionRemove { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn remove_action_disconnects_facade_reported_connection_for_credentialed_extension() {
-        // The companion-package rule is vendor-blind: ANY credential-bearing
-        // extension consults the connection facade on removal, and the
-        // caller's channel connection is cleared exactly when the facade
-        // reports that channel key (the package id).
-        let facade = RemoveFacade::non_channel();
-        let caller = caller();
-        let connections = Arc::new(TestConnections::with_connections(&[("fixture", true)]));
-        let channel_connections: Arc<dyn ChannelConnectionFacade> = connections.clone();
-
-        let response =
-            remove_extension(&facade, channel_connections, caller.clone(), package_ref())
-                .await
-                .expect("remove response");
-
-        assert!(response.success);
-        assert_eq!(
-            connections.disconnects(),
-            vec![(caller.user_id.clone(), "fixture".to_string())],
-            "a credentialed extension the facade reports as a channel gets the caller disconnect"
-        );
-    }
-
-    #[tokio::test]
-    async fn remove_action_does_not_remove_channel_extension_when_disconnect_fails() {
-        let facade = RemoveFacade::default();
-        let caller = caller();
-        let connections = Arc::new(TestConnections::default());
-        connections.fail_next_disconnects(1);
-        let channel_connections: Arc<dyn ChannelConnectionFacade> = connections.clone();
-
-        let error = remove_extension(&facade, channel_connections, caller.clone(), package_ref())
-            .await
-            .expect_err("disconnect failure must stop removal");
-
-        assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
-        assert_eq!(
-            connections.disconnects(),
-            vec![(caller.user_id.clone(), "fixture".to_string())],
-            "the caller's channel cleanup should be attempted"
-        );
-        let calls = facade.calls.lock().expect("lock");
-        assert_eq!(calls.len(), 1);
-        assert!(
-            matches!(calls[0].1, LifecycleProductAction::ExtensionList),
-            "extension removal must remain retryable when channel cleanup fails"
-        );
-    }
-
-    #[tokio::test]
     async fn remove_action_stays_retryable_when_removal_fails_after_disconnect() {
-        // Disconnect deliberately runs before `ExtensionRemove` and is
-        // destructive: when removal then fails, the caller's pairing is
-        // already gone and they re-pair afterwards (accepted cost). What must
-        // hold is that the failure surfaces to the caller and a retry
-        // converges — the pre-remove lookup still finds the installed package
-        // and the disconnect is idempotent for an already-unpaired caller, so
-        // removal is re-attempted instead of being skipped.
         let facade = RemoveFacade::default();
         facade.fail_next_removes(1);
         let caller = caller();
-        let connections = Arc::new(TestConnections::default());
-        let channel_connections: Arc<dyn ChannelConnectionFacade> = connections.clone();
 
-        let error = remove_extension(
-            &facade,
-            channel_connections.clone(),
-            caller.clone(),
-            package_ref(),
-        )
-        .await
-        .expect_err("removal failure must surface after disconnect succeeded");
+        let error = remove_extension(&facade, caller.clone(), package_ref())
+            .await
+            .expect_err("removal failure must surface after disconnect succeeded");
         assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
         assert!(error.retryable, "transient removal failures stay retryable");
 
-        remove_extension(&facade, channel_connections, caller.clone(), package_ref())
+        remove_extension(&facade, caller, package_ref())
             .await
             .expect("retry converges once removal succeeds");
 
-        assert_eq!(
-            connections.disconnects(),
-            vec![
-                (caller.user_id.clone(), "fixture".to_string()),
-                (caller.user_id.clone(), "fixture".to_string()),
-            ],
-            "each attempt re-runs the idempotent caller disconnect"
-        );
         let calls = facade.calls.lock().expect("lock");
         let actions: Vec<_> = calls.iter().map(|(_, action)| action.clone()).collect();
-        assert_eq!(actions.len(), 4, "list+remove per attempt");
-        assert!(matches!(actions[0], LifecycleProductAction::ExtensionList));
+        assert_eq!(actions.len(), 2, "one remove call per attempt");
         assert!(matches!(
-            actions[1],
+            actions[0],
             LifecycleProductAction::ExtensionRemove { .. }
         ));
-        assert!(matches!(actions[2], LifecycleProductAction::ExtensionList));
         assert!(matches!(
-            actions[3],
+            actions[1],
             LifecycleProductAction::ExtensionRemove { .. }
         ));
     }
@@ -894,36 +710,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remove_action_does_not_disconnect_non_channel_extensions() {
-        let facade = RemoveFacade::non_channel();
-        let caller = caller();
-        let connections = Arc::new(TestConnections::default());
-        let channel_connections: Arc<dyn ChannelConnectionFacade> = connections.clone();
-
-        let response = remove_extension(&facade, channel_connections, caller, package_ref())
-            .await
-            .expect("remove response");
-
-        assert!(response.success);
-        assert!(
-            connections.disconnects().is_empty(),
-            "non-channel extension removal must not clear channel personal connections"
-        );
-        let calls = facade.calls.lock().expect("lock");
-        assert_eq!(calls.len(), 2);
-        assert!(matches!(calls[0].1, LifecycleProductAction::ExtensionList));
-        assert!(matches!(
-            calls[1].1,
-            LifecycleProductAction::ExtensionRemove { .. }
-        ));
-    }
-
-    #[tokio::test]
     async fn list_marks_active_credentialed_extension_unauthenticated_without_caller_account() {
         let facade = ListingFacade {
             extension: LifecycleInstalledExtensionSummary {
                 summary: summary_with_onboarding(),
-                phase: LifecyclePhase::Active,
+                phase: InstallationState::Active,
+                install_scope: None,
             },
         };
         let credentials = Arc::new(RecordingCredentials::default());
@@ -967,7 +759,8 @@ mod tests {
         let facade = ListingFacade {
             extension: LifecycleInstalledExtensionSummary {
                 summary: summary_with_onboarding(),
-                phase: LifecyclePhase::Active,
+                phase: InstallationState::Active,
+                install_scope: None,
             },
         };
         let credentials = UnavailableCredentials;
@@ -996,7 +789,8 @@ mod tests {
         let facade = ListingFacade {
             extension: LifecycleInstalledExtensionSummary {
                 summary: summary_without_browser_setup_credentials(),
-                phase: LifecyclePhase::Active,
+                phase: InstallationState::Active,
+                install_scope: None,
             },
         };
         let credentials = Arc::new(RecordingCredentials::default());
@@ -1030,7 +824,8 @@ mod tests {
             extensions: (0..EXTENSION_READINESS_CONCURRENCY + 3)
                 .map(|index| LifecycleInstalledExtensionSummary {
                     summary: summary_with_onboarding_for(&format!("fixture-{index}")),
-                    phase: LifecyclePhase::Active,
+                    phase: InstallationState::Active,
+                    install_scope: None,
                 })
                 .collect(),
         };
@@ -1122,7 +917,8 @@ mod tests {
         let facade = ListingFacade {
             extension: LifecycleInstalledExtensionSummary {
                 summary,
-                phase: LifecyclePhase::Active,
+                phase: InstallationState::Active,
+                install_scope: None,
             },
         };
 
@@ -1148,7 +944,8 @@ mod tests {
             Arc::new(ListingFacade {
                 extension: LifecycleInstalledExtensionSummary {
                     summary: unconnected_summary,
-                    phase: LifecyclePhase::Active,
+                    phase: InstallationState::Active,
+                    install_scope: None,
                 },
             }),
             None,
@@ -1197,7 +994,8 @@ mod tests {
         let facade = RegistryListingFacade {
             installed: LifecycleInstalledExtensionSummary {
                 summary: installed_summary,
-                phase: LifecyclePhase::Active,
+                phase: InstallationState::Active,
+                install_scope: None,
             },
             registry: vec![
                 search_extension_summary(registry_installed_summary),
@@ -1383,7 +1181,7 @@ mod tests {
             assert!(matches!(action, LifecycleProductAction::ExtensionList));
             Ok(LifecycleProductResponse {
                 package_ref: None,
-                phase: LifecyclePhase::Active,
+                phase: InstallationState::Active,
                 blockers: Vec::new(),
                 message: None,
                 payload: Some(LifecycleProductPayload::ExtensionList {
@@ -1434,7 +1232,7 @@ mod tests {
                     assert!(query.is_empty(), "registry search uses the empty query");
                     Ok(LifecycleProductResponse {
                         package_ref: None,
-                        phase: LifecyclePhase::Active,
+                        phase: InstallationState::Active,
                         blockers: Vec::new(),
                         message: None,
                         payload: Some(LifecycleProductPayload::ExtensionSearch {
@@ -1473,7 +1271,7 @@ mod tests {
             ));
             Ok(LifecycleProductResponse {
                 package_ref: Some(package_ref()),
-                phase: LifecyclePhase::Installed,
+                phase: InstallationState::Installed,
                 blockers: Vec::new(),
                 message: Some("Fixture installed.".to_string()),
                 payload: Some(LifecycleProductPayload::ExtensionInstall {
@@ -1496,13 +1294,14 @@ mod tests {
             }
             Ok(LifecycleProductResponse {
                 package_ref: Some(package_ref()),
-                phase: LifecyclePhase::Installed,
+                phase: InstallationState::Installed,
                 blockers: Vec::new(),
                 message: None,
                 payload: Some(LifecycleProductPayload::ExtensionList {
                     extensions: vec![LifecycleInstalledExtensionSummary {
                         summary: summary_with_onboarding(),
-                        phase: LifecyclePhase::Installed,
+                        phase: InstallationState::Installed,
+                        install_scope: None,
                     }],
                     count: 1,
                 }),
@@ -1529,24 +1328,6 @@ mod tests {
     }
 
     impl RemoveFacade {
-        fn non_channel() -> Self {
-            Self {
-                calls: Mutex::new(Vec::new()),
-                summary: summary_with_onboarding(),
-                channel: false,
-                remove_failures: Mutex::new(0),
-            }
-        }
-
-        fn slack_tools_extension() -> Self {
-            Self {
-                calls: Mutex::new(Vec::new()),
-                summary: slack_tools_summary(),
-                channel: false,
-                remove_failures: Mutex::new(0),
-            }
-        }
-
         fn fail_next_removes(&self, count: usize) {
             *self.remove_failures.lock().expect("lock") = count;
         }
@@ -1571,13 +1352,14 @@ mod tests {
                     }
                     Ok(LifecycleProductResponse {
                         package_ref: None,
-                        phase: LifecyclePhase::Installed,
+                        phase: InstallationState::Installed,
                         blockers: Vec::new(),
                         message: None,
                         payload: Some(LifecycleProductPayload::ExtensionList {
                             extensions: vec![LifecycleInstalledExtensionSummary {
                                 summary,
-                                phase: LifecyclePhase::Installed,
+                                phase: InstallationState::Installed,
+                                install_scope: None,
                             }],
                             count: 1,
                         }),
@@ -1595,7 +1377,7 @@ mod tests {
                     }
                     Ok(LifecycleProductResponse {
                         package_ref: Some(package_ref),
-                        phase: LifecyclePhase::Removed,
+                        phase: InstallationState::Removed,
                         blockers: Vec::new(),
                         message: Some("Fixture removed.".to_string()),
                         payload: Some(LifecycleProductPayload::ExtensionRemove { removed: true }),
@@ -1627,27 +1409,8 @@ mod tests {
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture").expect("valid ref")
     }
 
-    fn slack_package_ref() -> LifecyclePackageRef {
-        LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("valid ref")
-    }
-
     fn summary_with_onboarding() -> LifecycleExtensionSummary {
         summary_with_onboarding_for("fixture")
-    }
-
-    fn slack_tools_summary() -> LifecycleExtensionSummary {
-        let mut summary = summary_with_onboarding_for("slack");
-        summary.name = "Slack".to_string();
-        summary.credential_requirements = vec![LifecycleExtensionCredentialRequirement {
-            name: "slack_user_token".to_string(),
-            provider: ironclaw_auth::SLACK_PROVIDER_ID.to_string(),
-            required: true,
-            setup: LifecycleExtensionCredentialSetup::OAuth {
-                scopes: vec!["search:read".to_string()],
-            },
-        }];
-        summary.onboarding = None;
-        summary
     }
 
     fn summary_with_onboarding_for(package_id: &str) -> LifecycleExtensionSummary {

@@ -582,6 +582,7 @@ mod tests {
     use ironclaw_host_api::{InvocationId, ResourceScope};
 
     use super::*;
+    use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 
     /// An invented channel + auth extension: the vendor id is `acmechat`,
     /// the channel config declares two non-secret scoping fields keyed by
@@ -669,7 +670,7 @@ app_id = "/app_id"
             ManifestSource::HostBundled,
             &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
             None,
-            &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+            &product_extension_host_api_contract_registry().expect("contracts"),
         )
         .expect("fixture manifest parses");
         let extension_id = ExtensionId::new("acmechat").expect("extension id");
@@ -684,6 +685,7 @@ app_id = "/app_id"
                     ExtensionManifestRef::new(extension_id, None),
                     Vec::new(),
                     chrono::Utc::now(),
+                    ironclaw_extensions::InstallationOwner::Tenant,
                 )
                 .expect("installation"),
             )

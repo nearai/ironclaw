@@ -24,6 +24,15 @@ import {
   isFinalAssistantForRun,
   replaceAssistantReplyForRun,
 } from "./stream-order-memory";
+import {
+  createErrorChatMessage,
+  isErrorChatMessage,
+  isRunFailureMessageId,
+  RUN_FAILURE_ID_PREFIX,
+  STREAM_FAILURE_ID_PREFIX,
+  UNKNOWN_RUN_FAILURE_ID,
+} from "./message-types";
+import { groupMessages } from "./message-groups";
 
 function useChatEventsSourceForTest() {
   const source = readFileSync(
@@ -49,11 +58,15 @@ function useChatEventsSourceForTest() {
 }
 
 function createUseChatEventsHarness({
+  DateImpl = Date,
   gateFromEvent = () => null,
   failureMessageForRunStatus = () => "run failed",
+  failureMessageForStreamError = ({ error, kind, retryable }) =>
+    `stream:${error}:${kind}:${retryable}`,
   locallyResolvedGatesRef = { current: new Map() },
   noteConnectionInterruptedRunId = () => {},
   connectionContextForRunFailure = () => ({}),
+  onStreamError = () => {},
 } = {}) {
   let messages = [];
   let pendingGate = null;
@@ -64,22 +77,29 @@ function createUseChatEventsHarness({
   // [{ runId, success }] in fire order; one entry per settled run.
   const settledRuns = [];
   const context = {
-    Date,
+    Date: DateImpl,
+    createErrorChatMessage,
     React: {
       useCallback: (fn) => fn,
       useEffect: (fn) => fn(),
       useRef: (value) => ({ current: value }),
     },
     failureMessageForRunStatus,
+    failureMessageForStreamError,
     gateFromEvent,
     gateFromProjectionGate,
     globalThis: {},
     ensureGateToolActivity,
+    isErrorChatMessage,
+    isRunFailureMessageId,
     isTerminalToolStatus,
     isFinalAssistantForRun,
     replaceAssistantReplyForRun,
+    RUN_FAILURE_ID_PREFIX,
+    STREAM_FAILURE_ID_PREFIX,
     toolCardFromActivity,
     toolCardFromPreview,
+    UNKNOWN_RUN_FAILURE_ID,
     upsertToolActivityMessage,
   };
 
@@ -107,6 +127,7 @@ function createUseChatEventsHarness({
     toolActivityStateRef,
     noteConnectionInterruptedRunId,
     connectionContextForRunFailure,
+    onStreamError,
     onRunSettled: (runId, { success }) => settledRuns.push({ runId, success }),
   });
 
@@ -333,6 +354,296 @@ test("useChatEvents: replayed final_reply replaces existing same-run assistant i
   assert.equal(harness.messages[2].timestamp, "2026-07-08T12:59:00Z");
   assert.equal(harness.messages[2].keepFollowingActivityAfter, true);
   assert.equal(harness.isProcessing, false);
+});
+
+test("useChatEvents: unscoped activity uses only unambiguous run candidates", () => {
+  const runId = "run-google";
+  const replyMessage = {
+    id: `reply-${runId}`,
+    role: "assistant",
+    content: "Gmail, Calendar, Drive, and Sheets are connected.",
+    timestamp: "2026-07-08T13:00:00Z",
+    turnRunId: runId,
+    isFinalReply: true,
+  };
+  const groupedIds = (messages) =>
+    groupMessages(messages).map((item) =>
+      item.type === "activity-run" ? item.id : item.message.id,
+    );
+  const finalReplyEvent = {
+    type: "final_reply",
+    frame: {
+      reply: {
+        turn_run_id: runId,
+        text: replyMessage.content,
+        generated_at: replyMessage.timestamp,
+      },
+    },
+  };
+
+  for (const scenario of [
+    {
+      label: "active run",
+      toolId: "tool-invocation-active-extension-search",
+      expectedOrder: ["activity-run-tool-invocation-active-extension-search"],
+      arrange: (harness) => {
+        // Mirrors useChat's POST /messages response before any final_reply.
+        harness.setCurrentActiveRun({
+          runId,
+          threadId: "thread-1",
+          status: "running",
+          source: "local",
+        });
+      },
+      emit: (harness) =>
+        harness.handleEvent({
+          type: "capability_activity",
+          frame: {
+            activity: {
+              invocation_id: "invocation-active-extension-search",
+              capability_id: "builtin.extension_search",
+              status: "completed",
+            },
+          },
+        }),
+    },
+    {
+      label: "final reply",
+      toolId: "tool-invocation-final-preview",
+      expectedOrder: [
+        "activity-run-tool-invocation-final-preview",
+        `reply-${runId}`,
+        "follow-up-final-reply",
+      ],
+      arrange: (harness) => {
+        // Production path: the run id comes from the submit response, then
+        // final_reply clears activeRun before delayed live activity arrives.
+        harness.setCurrentActiveRun({
+          runId,
+          threadId: "thread-1",
+          status: "running",
+          source: "local",
+        });
+        harness.handleEvent(finalReplyEvent);
+        assert.equal(harness.activeRun, null);
+        harness.replaceMessages([
+          ...harness.messages,
+          {
+            id: "follow-up-final-reply",
+            role: "user",
+            content: "thanks",
+            timestamp: "2026-07-08T13:00:20Z",
+          },
+        ]);
+      },
+      emit: (harness) =>
+        harness.handleEvent({
+          type: "capability_display_preview",
+          frame: {
+            preview: {
+              invocation_id: "invocation-final-preview",
+              capability_id: "builtin.extension_install",
+              status: "completed",
+              title: "extension_install",
+            },
+          },
+        }),
+    },
+    {
+      label: "projection batch",
+      toolId: "tool-invocation-projection-install",
+      expectedOrder: [
+        "activity-run-tool-invocation-projection-install",
+        `reply-${runId}`,
+      ],
+      arrange: (harness) => {
+        harness.replaceMessages([replyMessage]);
+      },
+      emit: (harness) =>
+        harness.handleEvent({
+          type: "projection_update",
+          frame: {
+            state: {
+              items: [
+                { run_status: { run_id: runId, status: "completed" } },
+                {
+                  capability_activity: {
+                    invocation_id: "invocation-projection-install",
+                    capability_id: "builtin.extension_install",
+                    status: "completed",
+                  },
+                },
+              ],
+            },
+          },
+        }),
+    },
+    {
+      label: "mixed terminal and active projection batch",
+      toolId: "tool-invocation-projection-active-install",
+      expectedOrder: [
+        "reply-run-old",
+        "follow-up-projection-active",
+        "activity-run-tool-invocation-projection-active-install",
+      ],
+      expectedRunId: "run-new",
+      arrange: (harness) => {
+        harness.replaceMessages([
+          {
+            id: "reply-run-old",
+            role: "assistant",
+            content: "The first run is done.",
+            timestamp: "2026-07-08T13:00:00Z",
+            turnRunId: "run-old",
+            isFinalReply: true,
+          },
+          {
+            id: "follow-up-projection-active",
+            role: "user",
+            content: "run something else",
+            timestamp: "2026-07-08T13:00:20Z",
+          },
+        ]);
+      },
+      emit: (harness) =>
+        harness.handleEvent({
+          type: "projection_update",
+          frame: {
+            state: {
+              items: [
+                { run_status: { run_id: "run-old", status: "completed" } },
+                { run_status: { run_id: "run-new", status: "running" } },
+                {
+                  capability_activity: {
+                    invocation_id: "invocation-projection-active-install",
+                    capability_id: "builtin.extension_install",
+                    status: "completed",
+                  },
+                },
+              ],
+            },
+          },
+        }),
+    },
+  ]) {
+    const harness = createUseChatEventsHarness();
+    scenario.arrange(harness);
+    scenario.emit(harness);
+
+    const toolMessage = harness.messages.find((message) => message.id === scenario.toolId);
+    assert.equal(toolMessage?.turnRunId, scenario.expectedRunId || runId, scenario.label);
+    assert.deepEqual(groupedIds(harness.messages), scenario.expectedOrder, scenario.label);
+  }
+});
+
+test("useChatEvents: unscoped activity stays unscoped when run candidates conflict", () => {
+  const groupedIds = (messages) =>
+    groupMessages(messages).map((item) =>
+      item.type === "activity-run" ? item.id : item.message.id,
+    );
+
+  {
+    const harness = createUseChatEventsHarness();
+    harness.setCurrentActiveRun({
+      runId: "run-old",
+      threadId: "thread-1",
+      status: "running",
+      source: "local",
+    });
+    harness.handleEvent({
+      type: "final_reply",
+      frame: {
+        reply: {
+          turn_run_id: "run-old",
+          text: "The first run is done.",
+          generated_at: "2026-07-08T13:00:00Z",
+        },
+      },
+    });
+    harness.setCurrentActiveRun({
+      runId: "run-new",
+      threadId: "thread-1",
+      status: "running",
+      source: "local",
+    });
+    harness.replaceMessages([
+      ...harness.messages,
+      {
+        id: "follow-up-conflicting-live",
+        role: "user",
+        content: "run something else",
+        timestamp: "2026-07-08T13:00:20Z",
+      },
+    ]);
+    harness.handleEvent({
+      type: "capability_activity",
+      frame: {
+        activity: {
+          invocation_id: "invocation-conflicting-live",
+          capability_id: "builtin.extension_search",
+          status: "completed",
+        },
+      },
+    });
+
+    const toolMessage = harness.messages.find(
+      (message) => message.id === "tool-invocation-conflicting-live",
+    );
+    assert.equal(toolMessage?.turnRunId, null);
+    assert.deepEqual(groupedIds(harness.messages), [
+      "reply-run-old",
+      "follow-up-conflicting-live",
+      "activity-run-tool-invocation-conflicting-live",
+    ]);
+  }
+
+  {
+    const harness = createUseChatEventsHarness();
+    harness.replaceMessages([
+      {
+        id: "reply-run-old",
+        role: "assistant",
+        content: "The first run is done.",
+        timestamp: "2026-07-08T13:00:00Z",
+        turnRunId: "run-old",
+        isFinalReply: true,
+      },
+      {
+        id: "follow-up-conflicting-projection",
+        role: "user",
+        content: "run something else",
+        timestamp: "2026-07-08T13:00:20Z",
+      },
+    ]);
+    harness.handleEvent({
+      type: "projection_update",
+      frame: {
+        state: {
+          items: [
+            { run_status: { run_id: "run-old", status: "completed" } },
+            { run_status: { run_id: "run-new", status: "completed" } },
+            {
+              capability_activity: {
+                invocation_id: "invocation-conflicting-projection",
+                capability_id: "builtin.extension_install",
+                status: "completed",
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    const toolMessage = harness.messages.find(
+      (message) => message.id === "tool-invocation-conflicting-projection",
+    );
+    assert.equal(toolMessage?.turnRunId, null);
+    assert.deepEqual(groupedIds(harness.messages), [
+      "reply-run-old",
+      "follow-up-conflicting-projection",
+      "activity-run-tool-invocation-conflicting-projection",
+    ]);
+  }
 });
 
 test("useChatEvents: stale projection text does not duplicate finalized same-run reply", () => {
@@ -1367,6 +1678,69 @@ test("useChatEvents: category-only failure update upgrades existing error", () =
   assert.equal(harness.messages[0].content, "category:model_unavailable");
 });
 
+test("useChatEvents: adjacent duplicate run failures collapse across unknown and known run ids", () => {
+  const harness = createUseChatEventsHarness({
+    failureMessageForRunStatus: ({ failureCategory }) =>
+      failureCategory || "run failed",
+  });
+  const failureCategory = "model_credentials_invalid";
+
+  harness.handleEvent({
+    type: "failed",
+    frame: {
+      run_state: {
+        status: "failed",
+        failure: { category: failureCategory },
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: "run-known-failure",
+              status: "failed",
+              failure_category: failureCategory,
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, "err-run-known-failure");
+  assert.equal(harness.messages[0].content, failureCategory);
+
+  harness.replaceMessages([
+    ...harness.messages,
+    { id: "pending-next", role: "user", content: "try again" },
+  ]);
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: "run-next-failure",
+              status: "failed",
+              failure_category: failureCategory,
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 3);
+  assert.equal(harness.messages[2].id, "err-run-next-failure");
+  assert.equal(harness.messages[2].content, failureCategory);
+});
+
 test("useChatEvents: locally resolved approval gate is not restored by stale projection", () => {
   const runId = "run-denied";
   const gateRef = "gate:approval-denied";
@@ -2123,4 +2497,139 @@ test("useChatEvents: typed failed event settles the run as not successful", () =
   assert.deepEqual(harness.settledRuns, [
     { runId: "run-typed-failed-1", success: false },
   ]);
+});
+
+test("useChatEvents: stream error event appends inline error and clears active state", () => {
+  const seenStreamErrors = [];
+  const callerStreamErrors = [];
+  const harness = createUseChatEventsHarness({
+    failureMessageForStreamError: (input) => {
+      seenStreamErrors.push(input);
+      return "The chat stream failed inline.";
+    },
+    onStreamError: (input) => callerStreamErrors.push(input),
+  });
+  harness.setCurrentActiveRun({
+    runId: "run-stream-error",
+    threadId: "thread-1",
+    status: "running",
+  });
+
+  harness.handleEvent({
+    type: "error",
+    frame: {
+      error: "unavailable",
+      kind: "service_unavailable",
+      retryable: true,
+    },
+  });
+  harness.handleEvent({
+    type: "error",
+    frame: {
+      error: "unavailable",
+      kind: "service_unavailable",
+      retryable: true,
+    },
+  });
+
+  assert.equal(harness.isProcessing, false);
+  assert.equal(harness.pendingGate, null);
+  assert.equal(harness.activeRun, null);
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].role, "error");
+  assert.equal(harness.messages[0].content, "The chat stream failed inline.");
+  assert.deepEqual(plain(seenStreamErrors), [
+    {
+      error: "unavailable",
+      kind: "service_unavailable",
+      retryable: true,
+    },
+  ]);
+  assert.deepEqual(plain(callerStreamErrors), [
+    {
+      error: "unavailable",
+      kind: "service_unavailable",
+      retryable: true,
+    },
+    {
+      error: "unavailable",
+      kind: "service_unavailable",
+      retryable: true,
+    },
+  ]);
+});
+
+test("useChatEvents: stream error dedupe only suppresses adjacent repeats", () => {
+  const seenStreamErrors = [];
+  const harness = createUseChatEventsHarness({
+    failureMessageForStreamError: (input) => {
+      seenStreamErrors.push(input);
+      return `stream:${input.kind}`;
+    },
+  });
+  const streamErrorFrame = {
+    error: "unavailable",
+    kind: "service_unavailable",
+    retryable: true,
+  };
+
+  harness.handleEvent({ type: "error", frame: streamErrorFrame });
+  harness.handleEvent({ type: "error", frame: streamErrorFrame });
+
+  assert.equal(harness.messages.length, 1);
+  const firstError = harness.messages[0];
+  assert.equal(firstError.role, "error");
+  assert.match(
+    firstError.id,
+    /^err-stream-unavailable-service_unavailable-retryable-/,
+  );
+
+  harness.replaceMessages([
+    ...harness.messages,
+    { id: "assistant-between-errors", role: "assistant", content: "between" },
+  ]);
+  harness.handleEvent({ type: "error", frame: streamErrorFrame });
+  harness.handleEvent({ type: "error", frame: streamErrorFrame });
+
+  assert.equal(harness.messages.length, 3);
+  const secondError = harness.messages[2];
+  assert.equal(secondError.role, "error");
+  assert.match(
+    secondError.id,
+    /^err-stream-unavailable-service_unavailable-retryable-/,
+  );
+  assert.notEqual(secondError.id, firstError.id);
+  assert.equal(secondError.content, "stream:service_unavailable");
+  assert.equal(seenStreamErrors.length, 2);
+});
+
+test("useChatEvents: stream error ids avoid timestamp collisions", () => {
+  class FixedDate extends Date {
+    constructor(...args) {
+      super(args.length > 0 ? args[0] : 1_788_259_200_000);
+    }
+
+    static now() {
+      return 1_788_259_200_000;
+    }
+  }
+
+  const harness = createUseChatEventsHarness({ DateImpl: FixedDate });
+  const baseId = `${STREAM_FAILURE_ID_PREFIX}unavailable-service_unavailable-retryable`;
+  harness.replaceMessages([
+    { id: `${baseId}-1788259200000`, role: "error", content: "first" },
+    { id: "assistant-between-errors", role: "assistant", content: "between" },
+  ]);
+
+  harness.handleEvent({
+    type: "error",
+    frame: {
+      error: "unavailable",
+      kind: "service_unavailable",
+      retryable: true,
+    },
+  });
+
+  assert.equal(harness.messages.length, 3);
+  assert.equal(harness.messages[2].id, `${baseId}-1788259200000-1`);
 });

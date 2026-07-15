@@ -489,6 +489,7 @@ impl DeliveryCoordinator {
         result
     }
 
+    // arch-exempt: too_many_args, needs a DeliveryDispatch context bundle (intent/attempt/target/parts + dispatch identity), plan #5898
     #[allow(clippy::too_many_arguments)]
     async fn drive_authorized(
         &self,

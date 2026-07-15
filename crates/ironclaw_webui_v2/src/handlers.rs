@@ -1588,6 +1588,24 @@ pub async fn install_extension(
     Ok(Json(response))
 }
 
+/// `POST /api/webchat/v2/extensions/import` — admin-only: upload a standalone
+/// tool bundle (a zip with manifest.toml + wasm/ + schemas/ + prompts/). The
+/// bundle is unpacked, validated, written under `/system/extensions/<id>/`, and
+/// added to the Registry. Gated on `operator_webui_config` (admin).
+pub async fn import_extension(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+    body: axum::body::Bytes,
+) -> Result<Json<RebornExtensionActionResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    let response = state
+        .services()
+        .import_extension(caller, body.to_vec())
+        .await?;
+    Ok(Json(response))
+}
+
 /// `POST /api/webchat/v2/extensions/{package_id}/activate`
 pub async fn activate_extension(
     State(state): State<WebUiV2State>,

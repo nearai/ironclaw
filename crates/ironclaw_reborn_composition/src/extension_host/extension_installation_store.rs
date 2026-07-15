@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use ironclaw_extensions::{
     ExtensionActivationState, ExtensionHealthSnapshot, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
-    ExtensionManifestRecord, ExtensionManifestRef, InMemoryExtensionInstallationStore,
-    ManifestHash, ManifestSource, ResolvedExtensionManifest,
+    ExtensionManifestRecord, ExtensionRemovalCleanupRequirement,
+    InMemoryExtensionInstallationStore, ManifestHash, ManifestSource, ResolvedExtensionManifest,
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{ExtensionId, VirtualPath};
@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 const DEFAULT_INSTALLATION_STATE_PATH: &str = "/system/extensions/.installations/state.json";
+const INSTALLATION_STATE_IO_ERROR: &str = "failed to load extension installation state";
 
 pub(crate) struct FilesystemExtensionInstallationStore {
     filesystem: std::sync::Arc<dyn RootFilesystem>,
@@ -27,34 +28,9 @@ impl FilesystemExtensionInstallationStore {
         let inner = InMemoryExtensionInstallationStore::default();
         match filesystem.read_file(&state_path).await {
             Ok(bytes) => {
-                let mut state: WireState =
+                let state: WireState =
                     serde_json::from_slice(&bytes).map_err(invalid_installation_error)?;
-                let migrated = migrate_retired_slack_bot_identity(&mut state);
-                let backfilled = state.load_into(&inner).await?;
-                if migrated || backfilled {
-                    if migrated {
-                        tracing::debug!(
-                            "migrated retired slack_bot installation state to the unified slack extension"
-                        );
-                    }
-                    if backfilled {
-                        // One-time idempotent backfill (extension-runtime
-                        // REC-3): legacy raw-TOML records were compiled once
-                        // through the manifest reader; persist the resolved
-                        // contracts so later loads never reparse.
-                        tracing::debug!(
-                            "backfilled resolved extension contracts for legacy manifest records"
-                        );
-                    }
-                    let store = Self {
-                        filesystem,
-                        state_path,
-                        inner,
-                        save_lock: Mutex::new(()),
-                    };
-                    store.save_snapshot().await?;
-                    return Ok(store);
-                }
+                state.load_into(&inner).await?;
             }
             Err(FilesystemError::NotFound { .. }) => {}
             Err(error) => {
@@ -63,9 +39,7 @@ impl FilesystemExtensionInstallationStore {
                     state_path = %state_path.as_str(),
                     "extension installation state load failed"
                 );
-                return Err(invalid_installation_error(
-                    "failed to load extension installation state",
-                ));
+                return Err(invalid_installation_error(INSTALLATION_STATE_IO_ERROR));
             }
         }
         Ok(Self {
@@ -82,12 +56,27 @@ impl FilesystemExtensionInstallationStore {
 
     async fn save_snapshot(&self) -> Result<(), ExtensionInstallationError> {
         let state = WireState::from_store(&self.inner).await?;
-        let bytes = serde_json::to_vec_pretty(&state).map_err(invalid_installation_error)?;
-        self.filesystem
-            .write_file(&self.state_path, &bytes)
-            .await
-            .map_err(invalid_installation_error)
+        write_snapshot(&self.filesystem, &self.state_path, &state).await
     }
+}
+
+async fn write_snapshot(
+    filesystem: &std::sync::Arc<dyn RootFilesystem>,
+    state_path: &VirtualPath,
+    state: &WireState,
+) -> Result<(), ExtensionInstallationError> {
+    let bytes = serde_json::to_vec_pretty(state).map_err(invalid_installation_error)?;
+    filesystem
+        .write_file(state_path, &bytes)
+        .await
+        .map_err(|error| {
+            tracing::debug!(
+                ?error,
+                state_path = %state_path.as_str(),
+                "extension installation state write failed"
+            );
+            invalid_installation_error(INSTALLATION_STATE_IO_ERROR)
+        })
 }
 
 fn default_installation_state_path() -> Result<VirtualPath, ExtensionInstallationError> {
@@ -220,107 +209,7 @@ impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
     }
 }
 
-/// One-time forward migration (NEA-25 unified Slack extension): the Slack
-/// channel package identity `slack_bot` merged into the unified `slack`
-/// extension. Persisted state written by earlier builds may still carry
-/// `slack_bot` manifest records and installation rows; fold them forward so
-/// the store only ever holds the unified identity. The `slack_bot` manifest
-/// record is dropped (the unified manifest ships host-bundled). Its
-/// installation state merges into `slack`'s: an enabled `slack_bot` install
-/// keeps the unified extension enabled, and credential bindings union. This
-/// is a load-time data migration persisted immediately — no code path
-/// resolves the retired identity afterwards.
-fn migrate_retired_slack_bot_identity(state: &mut WireState) -> bool {
-    let manifest_count = state.manifests.len();
-    state
-        .manifests
-        .retain(|record| !record.raw_toml.contains("\nid = \"slack_bot\""));
-    let mut changed = state.manifests.len() != manifest_count;
-
-    let retired: Vec<ExtensionInstallation> = state
-        .installations
-        .iter()
-        .filter(|installation| installation.extension_id().as_str() == "slack_bot")
-        .cloned()
-        .collect();
-    if retired.is_empty() {
-        return changed;
-    }
-    state
-        .installations
-        .retain(|installation| installation.extension_id().as_str() != "slack_bot");
-    changed = true;
-
-    let retired_enabled = retired
-        .iter()
-        .any(|installation| installation.activation_state() == ExtensionActivationState::Enabled);
-    let retired_bindings: Vec<_> = retired
-        .iter()
-        .flat_map(|installation| installation.credential_bindings().iter().cloned())
-        .collect();
-
-    let Ok(unified_id) = ExtensionId::new("slack") else {
-        return changed;
-    };
-    // The store fails closed on installations without a matching manifest
-    // record. If the legacy state only ever installed the bot channel, no
-    // `slack` record exists yet — seed the host-bundled unified manifest so
-    // the folded installation stays loadable.
-    let has_unified_record = state
-        .manifests
-        .iter()
-        .any(|record| record.raw_toml.contains("\nid = \"slack\""));
-    if !has_unified_record {
-        state.manifests.push(WireManifestRecord {
-            raw_toml: ironclaw_first_party_extensions::packages::slack_manifest_toml().to_string(),
-            source: WireManifestSource::HostBundled,
-            manifest_hash: None,
-            // Compiled by the backfill path on this same load.
-            resolved: None,
-        });
-    }
-    if let Some(existing) = state
-        .installations
-        .iter_mut()
-        .find(|installation| installation.extension_id() == &unified_id)
-    {
-        let activation = if retired_enabled {
-            ExtensionActivationState::Enabled
-        } else {
-            existing.activation_state()
-        };
-        let mut bindings = existing.credential_bindings().to_vec();
-        for binding in retired_bindings {
-            if !bindings.contains(&binding) {
-                bindings.push(binding);
-            }
-        }
-        if let Ok(merged) = ExtensionInstallation::new(
-            existing.installation_id().clone(),
-            unified_id.clone(),
-            activation,
-            ExtensionManifestRef::new(unified_id, None),
-            bindings,
-            chrono::Utc::now(),
-        ) {
-            *existing = merged;
-        }
-    } else if let Some(first) = retired.into_iter().next()
-        && let Ok(renamed) = ExtensionInstallation::new(
-            first.installation_id().clone(),
-            unified_id.clone(),
-            first.activation_state(),
-            ExtensionManifestRef::new(unified_id, None),
-            first.credential_bindings().to_vec(),
-            chrono::Utc::now(),
-        )
-    {
-        state.installations.push(renamed);
-    }
-    changed
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct WireState {
     manifests: Vec<WireManifestRecord>,
     installations: Vec<ExtensionInstallation>,
@@ -332,7 +221,7 @@ struct WireState {
 }
 
 /// One installation's stored non-secret channel-config values.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct WireChannelConfig {
     extension_id: String,
     values: Vec<(String, String)>,
@@ -365,35 +254,31 @@ impl WireState {
         })
     }
 
-    /// Load the wire state; returns whether any manifest record lacked a
-    /// persisted resolved contract and was backfilled by compiling its raw
-    /// source once (extension-runtime REC-3).
+    /// Load the wire state into the in-memory store.
     async fn load_into(
-        self,
+        &self,
         store: &InMemoryExtensionInstallationStore,
-    ) -> Result<bool, ExtensionInstallationError> {
-        let mut backfilled = false;
-        for manifest in self.manifests {
-            backfilled |= manifest.resolved.is_none();
+    ) -> Result<(), ExtensionInstallationError> {
+        for manifest in &self.manifests {
             store
-                .upsert_manifest(manifest.into_manifest_record()?)
+                .upsert_manifest(manifest.clone().into_manifest_record()?)
                 .await?;
         }
-        for installation in self.installations {
-            store.upsert_installation(installation).await?;
+        for installation in &self.installations {
+            store.upsert_installation(installation.clone()).await?;
         }
-        for config in self.channel_configs {
+        for config in &self.channel_configs {
             let extension_id =
                 ExtensionId::new(&config.extension_id).map_err(invalid_installation_error)?;
             store
-                .set_channel_config(&extension_id, config.values)
+                .set_channel_config(&extension_id, config.values.clone())
                 .await?;
         }
-        Ok(backfilled)
+        Ok(())
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct WireManifestRecord {
     raw_toml: String,
     source: WireManifestSource,
@@ -404,29 +289,29 @@ struct WireManifestRecord {
     /// which backfill by compiling once at load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resolved: Option<ResolvedExtensionManifest>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    removal_cleanup_requirements: Vec<ExtensionRemovalCleanupRequirement>,
 }
 
 impl WireManifestRecord {
     fn into_manifest_record(self) -> Result<ExtensionManifestRecord, ExtensionInstallationError> {
-        if let Some(resolved) = self.resolved {
-            return ExtensionManifestRecord::from_resolved(
-                self.raw_toml,
-                self.source.into_manifest_source(),
-                resolved,
-                self.manifest_hash,
-            );
-        }
-        let host_ports = ironclaw_host_runtime::default_host_port_catalog()
-            .map_err(invalid_installation_error)?;
-        let contracts = ironclaw_host_runtime::default_host_api_contract_registry()
-            .map_err(invalid_installation_error)?;
-        ExtensionManifestRecord::from_toml(
+        // Every installed record is persisted with its compiled resolved
+        // contract (see `From<ExtensionManifestRecord>`), so a load always
+        // rebuilds from `resolved` and never reparses `raw_toml`. A record
+        // without a resolved contract is not a legacy row to backfill — it is
+        // corrupt or unexpected, so fail loud instead of reparsing.
+        let resolved = self.resolved.ok_or_else(|| {
+            invalid_installation_error(
+                "installed extension record is missing its resolved manifest contract",
+            )
+        })?;
+        Ok(ExtensionManifestRecord::from_resolved(
             self.raw_toml,
             self.source.into_manifest_source(),
-            &host_ports,
+            resolved,
             self.manifest_hash,
-            &contracts,
-        )
+        )?
+        .with_removal_cleanup_requirements(self.removal_cleanup_requirements))
     }
 }
 
@@ -437,6 +322,7 @@ impl From<ExtensionManifestRecord> for WireManifestRecord {
             source: WireManifestSource::from_manifest_source(record.manifest().source),
             manifest_hash: record.manifest_hash().cloned(),
             resolved: Some(record.resolved().clone()),
+            removal_cleanup_requirements: record.removal_cleanup_requirements().to_vec(),
         }
     }
 }
@@ -500,6 +386,7 @@ mod tests {
     use ironclaw_host_api::HostPortCatalog;
 
     use super::*;
+    use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 
     #[tokio::test]
     async fn load_at_treats_not_found_as_empty_state() {
@@ -518,93 +405,6 @@ mod tests {
                 .await
                 .expect("list installations")
                 .is_empty()
-        );
-    }
-
-    #[tokio::test]
-    async fn load_at_migrates_retired_slack_bot_identity_forward() {
-        // One-time forward migration: persisted state from the split-identity
-        // era carries slack_bot installation rows. Loading folds them into
-        // the unified slack extension and persists immediately, so no code
-        // path ever resolves the retired identity.
-        let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
-        let state_path =
-            VirtualPath::new("/tenants/acme/system/extensions/.installations/state.json")
-                .expect("valid state path");
-
-        let slack_bot_id = ExtensionId::new("slack_bot").expect("extension id");
-        let slack_id = ExtensionId::new("slack").expect("extension id");
-        let legacy_state = WireState {
-            manifests: vec![WireManifestRecord {
-                raw_toml: "schema_version = \"reborn.extension_manifest.v2\"\nid = \"slack_bot\"\n(historical split-identity record; dropped without parsing)".to_string(),
-                source: WireManifestSource::HostBundled,
-                manifest_hash: None,
-                resolved: None,
-            }],
-            installations: vec![
-                ExtensionInstallation::new(
-                    ExtensionInstallationId::new("slack_bot".to_string())
-                        .expect("installation id"),
-                    slack_bot_id.clone(),
-                    ExtensionActivationState::Enabled,
-                    ExtensionManifestRef::new(slack_bot_id, None),
-                    Vec::new(),
-                    Utc::now(),
-                )
-                .expect("legacy installation"),
-                ExtensionInstallation::new(
-                    ExtensionInstallationId::new("slack".to_string()).expect("installation id"),
-                    slack_id.clone(),
-                    ExtensionActivationState::Installed,
-                    ExtensionManifestRef::new(slack_id.clone(), None),
-                    Vec::new(),
-                    Utc::now(),
-                )
-                .expect("tools installation"),
-            ],
-            channel_configs: Vec::new(),
-        };
-        filesystem
-            .write_file(
-                &state_path,
-                &serde_json::to_vec(&legacy_state).expect("state serializes"),
-            )
-            .await
-            .expect("seed legacy state");
-
-        let store = FilesystemExtensionInstallationStore::load_at(
-            Arc::clone(&filesystem),
-            state_path.clone(),
-        )
-        .await
-        .expect("store loads with migration");
-
-        let installations = store.list_installations().await.expect("list");
-        assert_eq!(installations.len(), 1, "{installations:?}");
-        let unified = &installations[0];
-        assert_eq!(unified.extension_id(), &slack_id);
-        assert_eq!(
-            unified.activation_state(),
-            ExtensionActivationState::Enabled,
-            "an enabled slack_bot install keeps the unified extension enabled"
-        );
-
-        // The migrated snapshot is persisted immediately: reloading from disk
-        // sees only the unified identity.
-        let persisted = filesystem
-            .read_file(&state_path)
-            .await
-            .expect("read migrated snapshot");
-        let rendered = String::from_utf8(persisted).expect("utf8 snapshot");
-        // The unified manifest legitimately keeps the `slack_bot_token`
-        // credential HANDLE; only the extension identity is retired.
-        assert!(
-            !rendered.contains("\"slack_bot\""),
-            "migrated snapshot must not carry the retired identity: {rendered}"
-        );
-        assert!(
-            !rendered.contains("id = \\\"slack_bot\\\""),
-            "migrated snapshot must not carry the retired manifest record"
         );
     }
 
@@ -690,6 +490,7 @@ prompt_doc_ref = "prompts/gmail/echo.md"
                     manifest_ref,
                     Vec::new(),
                     Utc::now(),
+                    ironclaw_extensions::InstallationOwner::Tenant,
                 )
                 .expect("valid installation"),
             )
@@ -803,36 +604,6 @@ client_credentials = { client_id_handle = "zephyrite_client_id" }
 access_token = "/access_token"
 "#;
 
-    /// A minimal v2 manifest that validates against the runtime default
-    /// host-port catalog and contract registry (the legacy-backfill parse
-    /// context).
-    const LEGACY_V2_MANIFEST: &str = r#"
-schema_version = "reborn.extension_manifest.v2"
-id = "oldtimer"
-name = "Oldtimer"
-version = "0.1.0"
-description = "legacy raw-TOML record fixture"
-trust = "third_party"
-
-[runtime]
-kind = "wasm"
-module = "wasm/oldtimer.wasm"
-
-[[host_api]]
-id = "ironclaw.capability_provider/v1"
-section = "capability_provider.tools"
-
-[capability_provider.tools]
-
-[[capability_provider.tools.capabilities]]
-id = "oldtimer.echo"
-description = "Echoes input"
-default_permission = "allow"
-visibility = "model"
-input_schema_ref = "schemas/oldtimer/echo.input.v1.json"
-output_schema_ref = "schemas/oldtimer/echo.output.v1.json"
-"#;
-
     fn state_path() -> VirtualPath {
         VirtualPath::new("/system/extensions/.installations/state.json").expect("state path")
     }
@@ -850,7 +621,7 @@ output_schema_ref = "schemas/oldtimer/echo.output.v1.json"
             ManifestSource::InstalledLocal,
             &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
             None,
-            &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+            &product_extension_host_api_contract_registry().expect("contracts"),
         )
         .expect("v3 manifest parses");
         let expected_manifest = record.manifest().clone();
@@ -890,63 +661,6 @@ output_schema_ref = "schemas/oldtimer/echo.output.v1.json"
         assert_eq!(reloaded.raw_toml(), "# raw manifest source unavailable");
     }
 
-    /// REC-3 (store tier): legacy wire records without a resolved contract
-    /// backfill by compiling once at load, persist the compiled contract,
-    /// and a second load is a byte-identical no-op.
-    async fn assert_legacy_records_backfill_idempotently(filesystem: Arc<dyn RootFilesystem>) {
-        let legacy_state = serde_json::json!({
-            "manifests": [{
-                "raw_toml": LEGACY_V2_MANIFEST,
-                "source": "installed_local",
-            }],
-            "installations": [],
-        });
-        filesystem
-            .write_file(
-                &state_path(),
-                &serde_json::to_vec_pretty(&legacy_state).expect("serialize"),
-            )
-            .await
-            .expect("seed legacy state");
-
-        let store =
-            FilesystemExtensionInstallationStore::load_at(Arc::clone(&filesystem), state_path())
-                .await
-                .expect("legacy state loads");
-        let record = store
-            .get_manifest(&ExtensionId::new("oldtimer").expect("id"))
-            .await
-            .expect("get manifest")
-            .expect("record present");
-        assert_eq!(record.resolved().id.as_str(), "oldtimer");
-        drop(store);
-
-        let backfilled_bytes = filesystem
-            .read_file(&state_path())
-            .await
-            .expect("state file exists");
-        let backfilled: serde_json::Value =
-            serde_json::from_slice(&backfilled_bytes).expect("state is JSON");
-        assert!(
-            backfilled["manifests"][0]["resolved"].is_object(),
-            "backfill must persist the compiled resolved contract"
-        );
-
-        // Second load: nothing left to backfill; the snapshot is untouched.
-        let _store =
-            FilesystemExtensionInstallationStore::load_at(Arc::clone(&filesystem), state_path())
-                .await
-                .expect("backfilled state loads");
-        let second_bytes = filesystem
-            .read_file(&state_path())
-            .await
-            .expect("state file exists");
-        assert_eq!(
-            backfilled_bytes, second_bytes,
-            "second load must be a no-op (idempotent backfill)"
-        );
-    }
-
     /// Channel-config persistence (extension-runtime §6.4): values round-trip
     /// through the durable snapshot, state files written BEFORE the configure
     /// surface existed load unchanged (serde default), and a snapshot with no
@@ -963,7 +677,7 @@ output_schema_ref = "schemas/oldtimer/echo.output.v1.json"
             ManifestSource::InstalledLocal,
             &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
             None,
-            &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+            &product_extension_host_api_contract_registry().expect("contracts"),
         )
         .expect("v3 manifest parses");
         let extension_id = ExtensionId::new("zephyrite").expect("id");
@@ -979,6 +693,7 @@ output_schema_ref = "schemas/oldtimer/echo.output.v1.json"
                     ExtensionManifestRef::new(extension_id.clone(), None),
                     Vec::new(),
                     Utc::now(),
+                    ironclaw_extensions::InstallationOwner::Tenant,
                 )
                 .expect("installation"),
             )
@@ -1054,11 +769,6 @@ output_schema_ref = "schemas/oldtimer/echo.output.v1.json"
         assert_rehydrates_without_reparse(Arc::new(InMemoryBackend::new())).await;
     }
 
-    #[tokio::test]
-    async fn legacy_records_backfill_idempotently_in_memory() {
-        assert_legacy_records_backfill_idempotently(Arc::new(InMemoryBackend::new())).await;
-    }
-
     #[cfg(feature = "libsql")]
     async fn libsql_filesystem(dir: &std::path::Path) -> Arc<dyn RootFilesystem> {
         let db = std::sync::Arc::new(
@@ -1077,12 +787,5 @@ output_schema_ref = "schemas/oldtimer/echo.output.v1.json"
     async fn records_rehydrate_from_resolved_on_libsql() {
         let dir = tempfile::tempdir().expect("tempdir");
         assert_rehydrates_without_reparse(libsql_filesystem(dir.path()).await).await;
-    }
-
-    #[cfg(feature = "libsql")]
-    #[tokio::test]
-    async fn legacy_records_backfill_idempotently_on_libsql() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        assert_legacy_records_backfill_idempotently(libsql_filesystem(dir.path()).await).await;
     }
 }

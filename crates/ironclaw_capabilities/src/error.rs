@@ -151,7 +151,8 @@ fn dispatch_error_kind(error: &DispatchError) -> DispatchFailureKind {
 
 fn dispatch_error_safe_summary(error: &DispatchError) -> Option<String> {
     match error {
-        DispatchError::FirstParty { safe_summary, .. } => safe_summary.clone(),
+        DispatchError::FirstParty { safe_summary, .. }
+        | DispatchError::Wasm { safe_summary, .. } => safe_summary.clone(),
         _ => None,
     }
 }
@@ -242,6 +243,7 @@ mod tests {
     fn dispatch_error_kind_forwards_wasm_runtime_kind_as_str() {
         let kind = dispatch_error_kind(&DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Memory,
+            safe_summary: None,
         });
         assert_eq!(kind.as_str(), "Memory");
     }
@@ -272,6 +274,7 @@ mod tests {
     fn from_dispatch_error_preserves_redacted_runtime_kind() {
         let err = CapabilityInvocationError::from(DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Guest,
+            safe_summary: None,
         });
         match err {
             CapabilityInvocationError::Dispatch { kind, .. } => {

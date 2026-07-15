@@ -7,7 +7,7 @@ import { ToolsTab } from "./components/tools-tab";
 import { RegistryTab } from "./components/registry-tab";
 import { useExtensions } from "./hooks/useExtensions";
 
-export function ExtensionsPage() {
+export function ExtensionsPage({ isAdmin = false } = {}) {
   const { tab = "registry" } = useParams();
   const [configuring, setConfiguring] = React.useState(null);
 
@@ -25,6 +25,8 @@ export function ExtensionsPage() {
     install,
     activate,
     remove,
+    importTool,
+    isImporting,
     invalidate,
   } = useExtensions();
 
@@ -33,6 +35,7 @@ export function ExtensionsPage() {
     (payload) => install({ ...payload, onNeedsSetup: handleConfigure }),
     [handleConfigure, install]
   );
+  const handleImport = React.useCallback((file) => importTool({ file }), [importTool]);
   const handleCloseModal = React.useCallback(() => setConfiguring(null), []);
   const handleSaved = React.useCallback(() => invalidate(), [invalidate]);
   const handleActivateFromModal = React.useCallback(
@@ -98,6 +101,9 @@ export function ExtensionsPage() {
       onActivate={activate}
       onConfigure={handleConfigure}
       onRemove={remove}
+      onImport={handleImport}
+      isAdmin={isAdmin}
+      isImporting={isImporting}
       isBusy={isBusy}
     />),
   };

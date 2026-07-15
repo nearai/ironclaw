@@ -9,6 +9,9 @@ import {
   STATE_LABELS,
   STATE_TONES,
   hasChannelSurface,
+  primaryAuthAccount,
+  authAccountNeedsReconnect,
+  authAccountReasonLabelKey,
 } from "../lib/extensions-schema";
 import { extensionLifecycleState, primaryExtensionAction } from "../lib/extension-actions";
 
@@ -69,9 +72,11 @@ function extensionCardSourceForTest() {
  *   - React (useState, useRef, useEffect)
  *   - useT i18n stub
  *   - Badge, Button, Icon design-system stubs
- *   - RUNTIME_LABELS, STATE_TONES, STATE_LABELS, hasChannelSurface — the REAL
- *     exports of extensions-schema (imported above), so the card is exercised
- *     against the production surface/runtime model with no drift risk
+ *   - RUNTIME_LABELS, STATE_TONES, STATE_LABELS, hasChannelSurface,
+ *     primaryAuthAccount, authAccountNeedsReconnect, authAccountReasonLabelKey
+ *     — the REAL exports of extensions-schema (imported above), so the card
+ *     is exercised against the production surface/runtime/auth-account model
+ *     with no drift risk
  *   - primaryExtensionAction — the REAL export of extension-actions
  */
 function makeContext() {
@@ -102,6 +107,9 @@ function makeContext() {
     Button,
     Icon,
     hasChannelSurface,
+    primaryAuthAccount,
+    authAccountNeedsReconnect,
+    authAccountReasonLabelKey,
     RUNTIME_LABELS,
     STATE_TONES,
     STATE_LABELS,
@@ -128,7 +136,7 @@ function renderExtensionCard(ext) {
 }
 
 // ---------------------------------------------------------------------------
-// Tree-walking helpers (matching style from channels-tab.test.mts)
+// Tree-walking helpers (matching style from channels-tab.test.ts)
 // ---------------------------------------------------------------------------
 
 /**
@@ -290,6 +298,167 @@ test("setup-required primary action reads Connect for a channel and Configure fo
     "credential extension should keep Configure",
   );
   assert.equal(renderedContainsValue(credential, "connect"), false);
+});
+
+test("expired channel account renders the Reconnect (expired) affordance and expiry notice (G4)", () => {
+  // A channel whose §6.3 account state is `expired` must not read as a
+  // first-time Connect: the affordance becomes the distinct expired-reconnect
+  // label and the card surfaces an expiry notice derived from the account state.
+  const rendered = renderExtensionCard({
+    package_ref: { id: "acme" },
+    runtime: "first_party",
+    surfaces: channelSurfaces,
+    onboarding_state: "setup_required",
+    display_name: "Acme",
+    auth_accounts: [
+      {
+        vendor: "acme",
+        accounts: [
+          { account_id: "acme", state: "expired", last_error: "refresh_failed", is_default: true },
+        ],
+      },
+    ],
+  });
+  assert.equal(
+    renderedContainsValue(rendered, "reconnectExpired"),
+    true,
+    "an expired account must offer the Reconnect (expired) affordance",
+  );
+  assert.equal(
+    renderedContainsValue(rendered, "accountExpired"),
+    true,
+    "an expired account must render an expiry notice",
+  );
+  // It is not a fresh Connect.
+  assert.equal(renderedContainsValue(rendered, "connect"), false);
+});
+
+test("healthy connected channel account shows Connect/Reconnect but no expiry affordance (G4)", () => {
+  const rendered = renderExtensionCard({
+    package_ref: { id: "acme" },
+    runtime: "first_party",
+    surfaces: channelSurfaces,
+    onboarding_state: "setup_required",
+    display_name: "Acme",
+    auth_accounts: [
+      { vendor: "acme", accounts: [{ account_id: "acme", state: "connected", is_default: true }] },
+    ],
+  });
+  assert.equal(
+    renderedContainsValue(rendered, "reconnectExpired"),
+    false,
+    "a connected account must not use the expired affordance",
+  );
+  assert.equal(
+    renderedContainsValue(rendered, "accountExpired"),
+    false,
+    "a connected account must not render an expiry notice",
+  );
+  assert.equal(
+    renderedContainsValue(rendered, "connect"),
+    true,
+    "an unconnected-but-healthy channel keeps the plain Connect affordance",
+  );
+});
+
+test("failed extension renders its activation_error as a danger reason banner", () => {
+  // `activation_error` is present iff `installation_state === "failed"`
+  // (§6.1) — a terminal, non-auth activation failure. The card must surface
+  // the redacted reason regardless of runtime/surfaces.
+  const rendered = renderExtensionCard({
+    package_ref: { id: "acme" },
+    runtime: "first_party",
+    display_name: "Acme",
+    installation_state: "failed",
+    activation_error: "The vendor webhook returned a 500.",
+  });
+  assert.equal(
+    renderedContainsValue(rendered, "The vendor webhook returned a 500."),
+    true,
+    "a failed extension must render its redacted activation_error reason",
+  );
+});
+
+test("disconnected auth accounts render a distinct reason per last_error, not a generic expiry notice (G4)", () => {
+  // A revoked grant is disconnected-with-a-reason, not the `expired` state —
+  // it must still offer Reconnect with its own copy, not the refresh_failed
+  // expiry notice or (retired) `revoking` copy.
+  const revoked = renderExtensionCard({
+    package_ref: { id: "acme" },
+    runtime: "first_party",
+    surfaces: channelSurfaces,
+    onboarding_state: "setup_required",
+    display_name: "Acme",
+    auth_accounts: [
+      {
+        vendor: "acme",
+        accounts: [
+          { account_id: "acme", state: "disconnected", last_error: "grant_revoked", is_default: true },
+        ],
+      },
+    ],
+  });
+  assert.equal(
+    renderedContainsValue(revoked, "accountRevoked"),
+    true,
+    "a revoked grant must render its own reason",
+  );
+  assert.equal(renderedContainsValue(revoked, "accountExpired"), false);
+  assert.equal(
+    renderedContainsValue(revoked, "reconnectExpired"),
+    true,
+    "a revoked account still offers the reconnect affordance",
+  );
+
+  const missingCredential = renderExtensionCard({
+    package_ref: { id: "acme" },
+    runtime: "first_party",
+    surfaces: channelSurfaces,
+    onboarding_state: "setup_required",
+    display_name: "Acme",
+    auth_accounts: [
+      {
+        vendor: "acme",
+        accounts: [
+          {
+            account_id: "acme",
+            state: "disconnected",
+            last_error: "credential_missing",
+            is_default: true,
+          },
+        ],
+      },
+    ],
+  });
+  assert.equal(
+    renderedContainsValue(missingCredential, "accountCredentialMissing"),
+    true,
+    "a missing credential must render its own reason",
+  );
+  assert.equal(renderedContainsValue(missingCredential, "accountRevoked"), false);
+  assert.equal(renderedContainsValue(missingCredential, "accountExpired"), false);
+
+  // A fresh, never-connected account (disconnected, no last_error) stays a
+  // plain first-time Connect with no reason banner at all.
+  const fresh = renderExtensionCard({
+    package_ref: { id: "acme" },
+    runtime: "first_party",
+    surfaces: channelSurfaces,
+    onboarding_state: "setup_required",
+    display_name: "Acme",
+    auth_accounts: [
+      { vendor: "acme", accounts: [{ account_id: "acme", state: "disconnected", is_default: true }] },
+    ],
+  });
+  assert.equal(renderedContainsValue(fresh, "accountRevoked"), false);
+  assert.equal(renderedContainsValue(fresh, "accountCredentialMissing"), false);
+  assert.equal(renderedContainsValue(fresh, "accountExpired"), false);
+  assert.equal(
+    renderedContainsValue(fresh, "reconnectExpired"),
+    false,
+    "a fresh never-connected account is not a reconnect",
+  );
+  assert.equal(renderedContainsValue(fresh, "connect"), true);
 });
 
 test("active package with missing auth renders auth needed setup state", () => {

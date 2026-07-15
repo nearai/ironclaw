@@ -55,7 +55,7 @@ use axum::http::{Method, Request, StatusCode, header};
 use chrono::Utc;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, TenantId, UserId};
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse,
 };
@@ -146,10 +146,10 @@ async fn build_timeline_runtime(root: &tempfile::TempDir) -> RebornRuntime {
         })
         .with_trigger_poller_settings(
             TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test()
-                .with_worker_config(TriggerPollerWorkerConfig {
-                    poll_interval: Duration::from_millis(20),
-                    ..Default::default()
-                }),
+                .with_worker_config(
+                    TriggerPollerWorkerConfig::default()
+                        .set_poll_interval(Duration::from_millis(20)),
+                ),
         )
         .with_model_gateway_override(Arc::new(StaticGateway) as Arc<dyn HostManagedModelGateway>);
 
@@ -251,6 +251,7 @@ fn make_trigger_record(
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::cron("* * * * *").expect("valid cron expression"),
         prompt: TRIGGER_PROMPT.to_string(),
+        delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at: Utc::now() - chrono::Duration::seconds(120),
         last_run_at: None,

@@ -1,4 +1,9 @@
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{
+    collections::HashSet,
+    future::Future,
+    pin::Pin,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -454,6 +459,25 @@ impl RebornProductAuthServicePorts {
     }
 }
 
+/// RAII guard for the process-local continuation-dispatch single-flight lease.
+///
+/// Removes `flow_id` from the in-flight set on drop. It owns only the shared
+/// `Arc<Mutex<…>>` and the id, never a held `MutexGuard`, so it is safe to hold
+/// across the dispatch await; the mutex is locked only briefly on acquire and on
+/// drop.
+struct ContinuationDispatchLease {
+    inflight: Arc<Mutex<HashSet<AuthFlowId>>>,
+    flow_id: AuthFlowId,
+}
+
+impl Drop for ContinuationDispatchLease {
+    fn drop(&mut self) {
+        if let Ok(mut inflight) = self.inflight.lock() {
+            inflight.remove(&self.flow_id);
+        }
+    }
+}
+
 /// Reborn product-auth service bundle exposed by the composition root.
 ///
 /// This is the single composition seam for product-facing auth flows,
@@ -493,6 +517,18 @@ pub struct RebornProductAuthServices {
     /// by product-auth issue #4112 and remains genuinely optional until the
     /// durable backend exposes the same scoped projection as the in-memory port.
     flow_record_source: Option<Arc<dyn AuthFlowRecordSource>>,
+    /// Process-local single-flight guard for typed continuation dispatch.
+    ///
+    /// Between `complete_oauth_callback` (which marks the flow `Completed`) and
+    /// `mark_continuation_dispatched` (which stamps the durable
+    /// `continuation_emitted_at` fence), a completed flow is briefly
+    /// re-dispatchable. Two concurrent callbacks for that flow would each invoke
+    /// the continuation dispatcher — double activation, and a second wait on a
+    /// blocking dispatcher. This set holds the flows whose continuation dispatch
+    /// is in flight in this process so a concurrent second dispatch fails fast as
+    /// retryable instead of re-dispatching. The durable `continuation_emitted_at`
+    /// fence still covers the cross-process/replay case.
+    continuation_dispatch_inflight: Arc<Mutex<HashSet<AuthFlowId>>>,
 }
 
 impl std::fmt::Debug for RebornProductAuthServices {
@@ -530,7 +566,11 @@ impl std::fmt::Debug for RebornProductAuthServices {
             )
             .field("flow_record_source", &self.flow_record_source.is_some())
             .field("auth_engine", &self.auth_engine.is_some())
-            .field("oauth_gate_driver", &self.oauth_gate_driver.is_some());
+            .field("oauth_gate_driver", &self.oauth_gate_driver.is_some())
+            .field(
+                "continuation_dispatch_inflight",
+                &"Arc<Mutex<HashSet<AuthFlowId>>>",
+            );
         dbg.finish()
     }
 }
@@ -566,6 +606,7 @@ impl RebornProductAuthServices {
             auth_engine: None,
             oauth_gate_driver: None,
             flow_record_source: None,
+            continuation_dispatch_inflight: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -1398,6 +1439,17 @@ impl RebornProductAuthServices {
         if completed.continuation_emitted_at.is_some() {
             return Ok(completed);
         }
+        // Single-flight: a concurrent callback for the same completed flow —
+        // arriving in the window before `mark_continuation_dispatched` stamps the
+        // durable `continuation_emitted_at` fence — must not re-invoke the
+        // continuation dispatcher (double activation) or re-run the provider
+        // exchange. It fails fast as retryable rather than blocking on the
+        // in-flight dispatch. The guard releases the flow's lease on drop, which
+        // covers every return path below (success, terminalized failure, and the
+        // retryable non-lifecycle failure).
+        let Some(_lease) = self.acquire_continuation_dispatch_lease(completed.id) else {
+            return Err(AuthProductError::BackendUnavailable);
+        };
         let emitted_at = Utc::now();
         let event = AuthContinuationEvent {
             flow_id: completed.id,
@@ -1412,12 +1464,29 @@ impl RebornProductAuthServices {
             .dispatch_auth_continuation(event)
             .await
         {
+            let dispatch_error_code = error.code();
             self.record_auth_continuation_dispatch_failure(&completed);
             tracing::debug!(
                 flow_id = %completed.id,
-                error_code = ?error.code(),
+                error_code = ?dispatch_error_code,
                 "reborn auth flow completed but continuation dispatch failed"
             );
+            // Honest extension state machine: a lifecycle-activation continuation
+            // that fails to dispatch is a terminal activation failure. Terminalize
+            // the flow and compensate the just-minted credential so a failed
+            // activation never leaves a live credential or a re-dispatchable flow.
+            // Non-lifecycle continuations (setup-only, turn-gate resume, …) stay
+            // retryable: their credential is independently useful and the caller
+            // may re-drive the same flow.
+            if let AuthContinuationRef::LifecycleActivation { package_ref } = &completed.continuation
+            {
+                self.compensate_failed_lifecycle_activation(
+                    &completed,
+                    package_ref.clone(),
+                    dispatch_error_code,
+                )
+                .await;
+            }
             let error = match error {
                 AuthProductError::TokenExchangeFailed
                 | AuthProductError::ProviderDenied
@@ -1429,6 +1498,85 @@ impl RebornProductAuthServices {
         self.flow_manager
             .mark_continuation_dispatched(&completed.scope, completed.id, emitted_at)
             .await
+    }
+
+    /// Compensate a terminally-failed lifecycle activation.
+    ///
+    /// The OAuth exchange already minted a credential for an extension whose
+    /// activation then failed terminally. Revoke that credential (clearing its
+    /// secrets) through the blessed lifecycle-cleanup path, then terminalize the
+    /// completed flow so it can never be re-dispatched. Both steps are
+    /// best-effort — on failure they log and the caller still returns the
+    /// sanitized dispatch error — but neither may leave a live credential paired
+    /// with a re-dispatchable flow.
+    async fn compensate_failed_lifecycle_activation(
+        &self,
+        completed: &AuthFlowRecord,
+        package_ref: ironclaw_auth::LifecyclePackageRef,
+        dispatch_error_code: AuthErrorCode,
+    ) {
+        match ExtensionId::new(package_ref.as_str()) {
+            Ok(extension_id) => {
+                let request = SecretCleanupRequest {
+                    scope: completed.scope.clone(),
+                    extension_id,
+                    // The OAuth callback stores the minted personal credential as
+                    // `UserReusable` with no extension ownership, so an
+                    // extension-keyed cleanup alone would never reach it; select
+                    // the owner's account for this provider — the same selector a
+                    // channel disconnect uses to revoke (not delete) the token.
+                    provider: Some(completed.provider.clone()),
+                    action: ironclaw_auth::SecretCleanupAction::Uninstall,
+                };
+                if let Err(error) = self.cleanup_service.cleanup_for_lifecycle(request).await {
+                    tracing::warn!(
+                        flow_id = %completed.id,
+                        error_code = ?error.code(),
+                        "failed to compensate credential after terminal lifecycle activation failure"
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    flow_id = %completed.id,
+                    %error,
+                    "lifecycle activation package ref is not a valid extension id; \
+                     skipping credential compensation"
+                );
+            }
+        }
+        if let Err(error) = self
+            .flow_manager
+            .fail_completed_continuation(&completed.scope, completed.id, dispatch_error_code)
+            .await
+        {
+            tracing::warn!(
+                flow_id = %completed.id,
+                error_code = ?error.code(),
+                "failed to terminalize auth flow after terminal lifecycle activation failure"
+            );
+        }
+    }
+
+    /// Acquire the process-local continuation-dispatch lease for `flow_id`.
+    ///
+    /// Returns `None` when a dispatch for this flow is already in flight in this
+    /// process (or the guard mutex is poisoned), so the caller fails fast as
+    /// retryable. The returned guard releases the lease on drop; it never holds
+    /// the mutex across an await (only set membership), so it is safe to carry
+    /// across the dispatch.
+    fn acquire_continuation_dispatch_lease(
+        &self,
+        flow_id: AuthFlowId,
+    ) -> Option<ContinuationDispatchLease> {
+        let mut inflight = self.continuation_dispatch_inflight.lock().ok()?;
+        if !inflight.insert(flow_id) {
+            return None;
+        }
+        Some(ContinuationDispatchLease {
+            inflight: self.continuation_dispatch_inflight.clone(),
+            flow_id,
+        })
     }
 
     fn record_auth_continuation_dispatch_failure(&self, completed: &AuthFlowRecord) {
@@ -1910,6 +2058,15 @@ mod tests {
         ) -> Result<AuthFlowRecord, AuthProductError> {
             unreachable!("constructor tests do not call auth-flow methods")
         }
+
+        async fn fail_completed_continuation(
+            &self,
+            _scope: &AuthProductScope,
+            _flow_id: AuthFlowId,
+            _error: ironclaw_auth::AuthErrorCode,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
+            unreachable!("constructor tests do not call auth-flow methods")
+        }
     }
 
     #[async_trait::async_trait]
@@ -2356,6 +2513,15 @@ mod tests {
                 _emitted_at: Timestamp,
             ) -> Result<AuthFlowRecord, AuthProductError> {
                 unreachable!("terminal-race test does not call mark_continuation_dispatched")
+            }
+
+            async fn fail_completed_continuation(
+                &self,
+                _scope: &AuthProductScope,
+                _flow_id: AuthFlowId,
+                _error: ironclaw_auth::AuthErrorCode,
+            ) -> Result<AuthFlowRecord, AuthProductError> {
+                unreachable!("terminal-race test does not call fail_completed_continuation")
             }
         }
 

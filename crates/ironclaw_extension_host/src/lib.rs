@@ -34,7 +34,7 @@ pub use entrypoint::{
 };
 pub use lifecycle::{
     DrainController, EgressFactory, ExtensionHost, ExtensionHostDeps, HookError, LifecycleError,
-    RemovalContext, RemovalHooks, RestoreReport, SnapshotWatch,
+    SnapshotWatch,
 };
 pub use loaders::{ExtensionLoader, LoadContext, LoadedExtension, NativeExtensionFactory};
 pub use recipes::{SnapshotAuthRecipeResolver, VendorRecipeConflict, unified_vendor_recipes};

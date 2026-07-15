@@ -159,7 +159,7 @@ fn dispatch_error_for_kind(
     safe_summary: Option<String>,
 ) -> DispatchError {
     match runtime {
-        RuntimeKind::Wasm => DispatchError::Wasm { kind },
+        RuntimeKind::Wasm => DispatchError::Wasm { kind, safe_summary },
         RuntimeKind::Mcp => DispatchError::Mcp { kind },
         RuntimeKind::Script => DispatchError::Script { kind },
         RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::FirstParty {

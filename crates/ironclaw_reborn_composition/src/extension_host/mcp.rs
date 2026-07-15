@@ -544,6 +544,7 @@ mod tests {
                                     required: true,
                                 },
                             ],
+                            network_targets: Vec::new(),
                             resource_profile: None,
                         }],
                     },

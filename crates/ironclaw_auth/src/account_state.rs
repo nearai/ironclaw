@@ -11,11 +11,14 @@
 //!       ▲                            │ TTL/denied/error              │
 //!       │◀───────────────────────────┘                               │
 //!       │                                     refresh failure/expiry ▼
-//!       │◀──────── Revoking ◀──disconnect/removal── Connected / Expired
+//!       │◀────────── disconnect / removal ──────────── Connected / Expired
 //! ```
 //!
 //! `Refreshing` is deliberately not a state: it is internal to the engine and
-//! never observable on the wire.
+//! never observable on the wire. Neither is a `Revoking` window: disconnect and
+//! removal delete the account synchronously (`Revoked`/`Missing` project to
+//! `Disconnected`), so no in-progress revoking state is ever produced or
+//! observed on the wire.
 
 use serde::{Deserialize, Serialize};
 
@@ -30,7 +33,6 @@ pub enum AuthAccountState {
     Authenticating,
     Connected,
     Expired,
-    Revoking,
 }
 
 impl AuthAccountState {
@@ -40,11 +42,13 @@ impl AuthAccountState {
             Self::Authenticating => "authenticating",
             Self::Connected => "connected",
             Self::Expired => "expired",
-            Self::Revoking => "revoking",
         }
     }
 
     /// Whether a transition from `self` to `next` is legal (overview §6.3).
+    ///
+    /// Disconnect and removal delete the account synchronously and project to
+    /// `Disconnected`; there is no observable `Revoking` window.
     pub fn can_transition_to(self, next: AuthAccountState) -> bool {
         use AuthAccountState::*;
         matches!(
@@ -53,10 +57,9 @@ impl AuthAccountState {
                 | (Authenticating, Connected)   // callback ok
                 | (Authenticating, Disconnected) // TTL / denied / error
                 | (Connected, Expired)          // refresh failure / expiry
-                | (Connected, Revoking)         // disconnect / removal
-                | (Expired, Revoking)
-                | (Expired, Authenticating)     // re-auth from expired
-                | (Revoking, Disconnected)
+                | (Connected, Disconnected)     // disconnect / removal
+                | (Expired, Disconnected)       // disconnect / removal
+                | (Expired, Authenticating) // re-auth from expired
         )
     }
 }
@@ -149,7 +152,6 @@ mod tests {
             (AuthAccountState::Authenticating, "authenticating"),
             (AuthAccountState::Connected, "connected"),
             (AuthAccountState::Expired, "expired"),
-            (AuthAccountState::Revoking, "revoking"),
         ] {
             assert_eq!(state.as_str(), expected);
             assert_eq!(
@@ -166,14 +168,12 @@ mod tests {
         assert!(Authenticating.can_transition_to(Connected));
         assert!(Authenticating.can_transition_to(Disconnected));
         assert!(Connected.can_transition_to(Expired));
-        assert!(Connected.can_transition_to(Revoking));
-        assert!(Expired.can_transition_to(Revoking));
+        assert!(Connected.can_transition_to(Disconnected));
+        assert!(Expired.can_transition_to(Disconnected));
         assert!(Expired.can_transition_to(Authenticating));
-        assert!(Revoking.can_transition_to(Disconnected));
         // Illegal jumps.
         assert!(!Disconnected.can_transition_to(Connected));
         assert!(!Connected.can_transition_to(Authenticating));
-        assert!(!Revoking.can_transition_to(Connected));
         assert!(!Expired.can_transition_to(Connected));
     }
 

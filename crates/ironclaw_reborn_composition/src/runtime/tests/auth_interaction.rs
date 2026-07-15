@@ -14,7 +14,7 @@ use ironclaw_host_api::runtime_policy::{
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
 use ironclaw_host_api::{InvocationId, ResourceScope, RuntimeCredentialAuthRequirement, UserId};
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse,
 };
@@ -169,11 +169,11 @@ async fn build_runtime(
                 source_binding_id: format!("{owner}-source"),
                 reply_target_binding_id: format!("{owner}-reply"),
             })
-            .with_runner_settings(TurnRunnerSettings {
-                heartbeat_interval: Duration::from_secs(60),
-                poll_interval: Duration::from_secs(60),
-                ..TurnRunnerSettings::default()
-            })
+            .with_runner_settings(
+                TurnRunnerSettings::default()
+                    .set_heartbeat_interval(Duration::from_secs(60))
+                    .set_poll_interval(Duration::from_secs(60)),
+            )
             .with_model_gateway_override(Arc::new(UnusedModelGateway)),
     )
     .await?;
@@ -199,6 +199,7 @@ async fn submit_and_block_auth_run(
         .turn_state
         .submit_turn(
             SubmitTurnRequest {
+                requested_model: None,
                 scope: scope.clone(),
                 actor,
                 accepted_message_ref: AcceptedMessageRef::new("message-runtime-auth-read-model")

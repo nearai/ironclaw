@@ -847,6 +847,10 @@ registerPack("ja", {
   "ext.registry.emptyDesc": "利用可能な拡張機能はすべてインストール済みか、レジストリが設定されていません。",
   "ext.registry.availableTitle": "利用可能な拡張機能",
   "ext.registry.noMatch": "フィルターに一致する拡張機能はありません。",
+  "ext.registry.import": "インポート",
+  "ext.registry.importing": "インポート中…",
+  "ext.registry.importSuccess": "ツールをインポートしました — レジストリからインストールしてください。",
+  "ext.registry.importFailed": "インポートに失敗しました",
 
   // Chat — history
   "chat.history.loading": "読み込み中...",
@@ -1060,6 +1064,13 @@ registerPack("ja", {
   "admin.dashboard.jobs": "ジョブ",
   "admin.dashboard.lastActive": "最終アクティブ",
 
+  // Admin — relative time
+  "admin.relative.never": "なし",
+  "admin.relative.justNow": "たった今",
+  "admin.relative.minutesAgo": "{count}分前",
+  "admin.relative.hoursAgo": "{count}時間前",
+  "admin.relative.daysAgo": "{count}日前",
+
   // Admin — users list
   "admin.users.user": "ユーザー",
   "admin.users.userFallback": "ユーザー",
@@ -1070,6 +1081,8 @@ registerPack("ja", {
   "admin.users.filter.active": "アクティブ",
   "admin.users.filter.suspended": "停止",
   "admin.users.filter.admins": "管理者",
+  "admin.users.status.active": "アクティブ",
+  "admin.users.status.suspended": "停止",
   "admin.users.newUser": "新規ユーザー",
   "admin.users.createUser": "ユーザー作成",
   "admin.users.creating": "作成中…",
@@ -1185,6 +1198,9 @@ registerPack("ja", {
   "extensions.configureName": "{name} を設定します",
   "extensions.allInstalled": "インストール済み",
   "tools.installed": "Installed tools",
+  "extensions.scope.shared": "共有",
+  "extensions.scope.private": "自分のもの",
+  "mcp.installed": "インストール済みの MCP サーバー",
   "extensions.oneCapability": "1 機能",
   "extensions.pluralCapabilities": "{count} 機能",
   "extensions.oneKeyword": "1 キーワード",

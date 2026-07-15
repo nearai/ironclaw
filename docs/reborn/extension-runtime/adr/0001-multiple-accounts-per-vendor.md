@@ -64,7 +64,7 @@ the selection request already carries the requester
   *resolved* account.
 - §3.2 shared vendors: scope union and incremental re-consent become
   per-account (a work account may hold narrower consent than a personal one).
-- §6.2 removal order step 4: the rule is unchanged, applied per account;
+- §6.2 removal order step 3: the rule is unchanged, applied per account;
   per-extension bindings are deleted with their extension.
 - §4.3 keepalive sweep: already account-enumerating and vendor-blind;
   correct as-is.

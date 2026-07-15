@@ -4,8 +4,13 @@
 //! only extension-specific participation is manifest data and the two
 //! idempotent adapter hooks. Installation state and the active snapshot are
 //! written here and nowhere else; a single async mutex serializes lifecycle
-//! operations (single serving process assumption). The removal order is
-//! fixed (§6.2) and identical for every extension.
+//! operations (single serving process assumption).
+//!
+//! The host record carries only the working subset it can prove —
+//! `InstallationState::{Installed, Active, Failed}` plus a redacted
+//! `last_error`. Removal is the facade path (`remove_record` drops the row and
+//! the facade runs auth/credential cleanup); the host does not own a
+//! multi-step removal pipeline.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, RwLock};
@@ -20,32 +25,6 @@ use crate::entrypoint::{BindError, check_binding};
 use crate::loaders::{ExtensionLoader, LoadContext};
 use crate::state::InstallationState;
 use crate::store::{InstallationRecord, InstallationRecordStore, StoreError};
-
-/// Host-side hooks for the removal steps `ExtensionHost` sequences but does
-/// not itself own (auth revoke/grant deletion, integration-state deletion,
-/// draining). Injected by composition; the host owns only the order.
-#[async_trait]
-pub trait RemovalHooks: Send + Sync {
-    /// Best-effort remote revoke plus local grant deletion for the
-    /// extension's vendors, shared-vendor aware: a vendor still used by
-    /// another active extension keeps its grants. Failure lands the removal
-    /// in `RemovalPending`.
-    async fn revoke_and_delete_grants(&self, ctx: &RemovalContext<'_>) -> Result<(), HookError>;
-
-    /// Delete config/secrets, identity bindings, and route registrations for
-    /// this extension. Conversation and LLM history are never touched.
-    /// Failure lands the removal in `RemovalPending`.
-    async fn delete_integration_state(&self, ctx: &RemovalContext<'_>) -> Result<(), HookError>;
-}
-
-/// Context for the host-owned removal hooks.
-pub struct RemovalContext<'a> {
-    pub extension_id: &'a str,
-    pub installation_id: &'a str,
-    /// Extension ids that remain active after this removal — hooks use this
-    /// for shared-vendor awareness.
-    pub other_active_extension_ids: &'a [String],
-}
 
 /// Drains in-flight work for an extension before its snapshot generation is
 /// dropped. Injected by composition.
@@ -82,7 +61,6 @@ pub trait EgressFactory: Send + Sync {
 pub struct ExtensionHostDeps {
     pub store: Arc<dyn InstallationRecordStore>,
     pub loader: Arc<dyn ExtensionLoader>,
-    pub removal_hooks: Arc<dyn RemovalHooks>,
     pub drain: Arc<dyn DrainController>,
     pub egress: Arc<dyn EgressFactory>,
     /// Host-owned capability ids (the built-in registry). An extension
@@ -227,14 +205,13 @@ impl ExtensionHost {
 
     /// Activate an installed extension: load → bind → binding check → global
     /// conflict check → `channel.activate()` → persist Active → publish one
-    /// new generation. Failure publishes nothing and records a typed error.
+    /// new generation. Failure publishes nothing and records the terminal
+    /// `Failed` state with a redacted `last_error` (non-auth activation
+    /// failure; the projection surfaces it as `Failed`, distinct from a
+    /// pristine `Installed`).
     pub async fn activate(&self, extension_id: &str) -> Result<(), LifecycleError> {
         let mut guard = self.lifecycle_lock.lock().await;
         let record = self.require_installed(extension_id).await?;
-
-        // Persist the transient Activating state before any work.
-        self.persist_state(&record, InstallationState::Activating, None)
-            .await?;
 
         match self.build_active(&record).await {
             Ok(active) => {
@@ -242,7 +219,7 @@ impl ExtensionHost {
                 if let Some(conflict) = guard.snapshot.would_conflict(&active) {
                     self.persist_state(
                         &record,
-                        InstallationState::Installed,
+                        InstallationState::Failed,
                         Some(redact(&conflict.to_string())),
                     )
                     .await?;
@@ -275,7 +252,7 @@ impl ExtensionHost {
                     {
                         self.persist_state(
                             &record,
-                            InstallationState::Installed,
+                            InstallationState::Failed,
                             Some(redact(&error.to_string())),
                         )
                         .await?;
@@ -295,7 +272,7 @@ impl ExtensionHost {
             Err(error) => {
                 self.persist_state(
                     &record,
-                    InstallationState::Installed,
+                    InstallationState::Failed,
                     Some(redact(&error.to_string())),
                 )
                 .await?;
@@ -309,8 +286,6 @@ impl ExtensionHost {
     pub async fn deactivate(&self, extension_id: &str) -> Result<(), LifecycleError> {
         let mut guard = self.lifecycle_lock.lock().await;
         let record = self.require_installed(extension_id).await?;
-        self.persist_state(&record, InstallationState::Deactivating, None)
-            .await?;
         self.publish_with(&mut guard, extension_id, None).await?;
         let _ = self
             .deps
@@ -322,155 +297,32 @@ impl ExtensionHost {
         Ok(())
     }
 
-    /// Remove an extension following the fixed order (§6.2):
-    /// unpublish → drain → channel.cleanup() → auth revoke + grant delete →
-    /// config/secret/identity delete → Removed. A cleanup failure lands in
-    /// `RemovalPending` (retryable) and never reports success early.
-    pub async fn remove(&self, extension_id: &str) -> Result<(), LifecycleError> {
-        let mut guard = self.lifecycle_lock.lock().await;
-        let record = self.require_installed(extension_id).await?;
-
-        // 1. Persist Removing; unpublish (new work rejected).
-        self.persist_state(&record, InstallationState::Removing, None)
-            .await?;
-        let active = guard.snapshot.extension(extension_id);
-        self.publish_with(&mut guard, extension_id, None).await?;
-
-        // 2. Drain in-flight work (bounded).
-        let _ = self
-            .deps
-            .drain
-            .drain(extension_id, self.deps.hook_deadline)
-            .await;
-
-        let other_active = guard.snapshot.extension_ids();
-        let ctx = RemovalContext {
-            extension_id: &record.extension_id,
-            installation_id: &record.installation_id,
-            other_active_extension_ids: &other_active,
-        };
-
-        // 3. channel.cleanup() — idempotent, best-effort.
-        if let Some(active) = &active
-            && let Some(channel) = &active.channel
-        {
-            let egress = self.deps.egress.egress_for_channel(
-                extension_id,
-                &record.installation_id,
-                record
-                    .resolved
-                    .channel
-                    .as_ref()
-                    .map(|channel| channel.egress.as_slice())
-                    .unwrap_or(&[]),
-            );
-            if let Err(error) = with_deadline(
-                self.deps.hook_deadline,
-                channel.cleanup(
-                    &ironclaw_product_adapters::ChannelContext {
-                        extension_id: &record.extension_id,
-                        installation_id: &record.installation_id,
-                        config: &record.config,
-                    },
-                    egress.as_ref(),
-                ),
-            )
-            .await
-            {
-                return self
-                    .to_removal_pending(&record, &redact(&error.to_string()))
-                    .await;
-            }
-        }
-
-        // 4. Auth revoke + grant deletion (shared-vendor aware).
-        if let Err(error) = self.deps.removal_hooks.revoke_and_delete_grants(&ctx).await {
-            return self
-                .to_removal_pending(&record, &redact(&error.to_string()))
-                .await;
-        }
-
-        // 5. Config/secret/identity/route deletion.
-        if let Err(error) = self.deps.removal_hooks.delete_integration_state(&ctx).await {
-            return self
-                .to_removal_pending(&record, &redact(&error.to_string()))
-                .await;
-        }
-
-        // 6. Persist Removed and delete the record. History is never touched.
-        self.deps.store.delete(extension_id).await?;
-        Ok(())
-    }
-
-    /// Retry a `RemovalPending` removal from step 3.
-    pub async fn retry_removal(&self, extension_id: &str) -> Result<(), LifecycleError> {
-        // The extension is already unpublished; re-run the cleanup tail by
-        // re-entering `remove` (idempotent hooks).
-        self.remove(extension_id).await
-    }
-
-    /// Drop an installation record without running the removal pipeline.
-    ///
-    /// Transitional (facade era): removal side effects are still owned by
-    /// the lifecycle facade, which unpublishes via [`Self::deactivate`] and
-    /// then drops the mirrored record here. Deleted when the facade
-    /// collapses and [`Self::remove`] becomes the production removal path.
+    /// Drop an installation record. This is the live removal path: the
+    /// lifecycle facade unpublishes via [`Self::deactivate`], runs auth /
+    /// credential cleanup (`cleanup_for_lifecycle`), and drops the mirrored
+    /// host record here.
     pub async fn remove_record(&self, extension_id: &str) -> Result<(), LifecycleError> {
         let _guard = self.lifecycle_lock.lock().await;
         self.deps.store.delete(extension_id).await?;
         Ok(())
     }
 
-    /// Restore all enabled generations at startup and publish once. An
-    /// invalid extension is skipped with a typed error and does not block the
-    /// valid rest.
-    pub async fn restore_at_startup(&self) -> Result<RestoreReport, LifecycleError> {
-        let mut guard = self.lifecycle_lock.lock().await;
-        let records = self.deps.store.list().await?;
-        let mut restored = Vec::new();
-        let mut skipped = Vec::new();
-
-        for record in records {
-            // Resolve the transient state deterministically.
-            let target = record.state.resume_target();
-            if target != InstallationState::Active {
-                // Non-active (or activation-interrupted → Installed) records
-                // are left as they resolve; only Active extensions publish.
-                if record.state != target {
-                    self.persist_state(&record, target, record.last_error.clone())
-                        .await?;
-                }
-                continue;
-            }
-            match self.build_active(&record).await {
-                Ok(active) => restored.push((record.extension_id.clone(), Arc::new(active))),
-                Err(error) => {
-                    self.persist_state(
-                        &record,
-                        InstallationState::Installed,
-                        Some(redact(&error.to_string())),
-                    )
-                    .await?;
-                    skipped.push((record.extension_id.clone(), redact(&error.to_string())));
-                }
-            }
-        }
-
-        guard.generation += 1;
-        let snapshot = ActiveSnapshot::build(
-            Generation(guard.generation),
-            restored
-                .iter()
-                .map(|(_, active)| Arc::clone(active))
-                .collect(),
-        )?;
-        guard.snapshot = snapshot;
-        self.mirror_snapshot(&guard.snapshot);
-
-        Ok(RestoreReport {
-            restored: restored.into_iter().map(|(id, _)| id).collect(),
-            skipped,
-        })
+    /// The redacted `last_error` for every installation record that carries
+    /// one, keyed by extension id. A record has a `last_error` exactly when its
+    /// last activation attempt failed (state `Failed`); the product projection
+    /// uses the presence of a reason to surface `InstallationState::Failed` and
+    /// threads the reason itself onto the extensions wire's `activation_error`.
+    pub async fn installation_errors(
+        &self,
+    ) -> Result<std::collections::HashMap<String, String>, LifecycleError> {
+        Ok(self
+            .deps
+            .store
+            .list()
+            .await?
+            .into_iter()
+            .filter_map(|record| record.last_error.map(|error| (record.extension_id, error)))
+            .collect())
     }
 
     async fn require_installed(
@@ -562,22 +414,6 @@ impl ExtensionHost {
             .await
     }
 
-    async fn to_removal_pending(
-        &self,
-        record: &InstallationRecord,
-        reason: &str,
-    ) -> Result<(), LifecycleError> {
-        self.persist_state(
-            record,
-            InstallationState::RemovalPending,
-            Some(reason.to_string()),
-        )
-        .await?;
-        Err(LifecycleError::ActivationHook {
-            reason: reason.to_string(),
-        })
-    }
-
     /// Rebuild and publish the next generation with `extension_id` set to
     /// `active` (or removed when `None`). One immutable `Arc` swap.
     async fn publish_with(
@@ -601,13 +437,6 @@ impl ExtensionHost {
         self.mirror_snapshot(&guard.snapshot);
         Ok(())
     }
-}
-
-/// Result of a startup restore.
-#[derive(Debug, Default)]
-pub struct RestoreReport {
-    pub restored: Vec<String>,
-    pub skipped: Vec<(String, String)>,
 }
 
 /// Redact a hook/error string to a bounded, delimiter-free summary so no raw

@@ -181,6 +181,9 @@ fn write_extension_fixture_with_metadata(
     fs::create_dir_all(&extension_root).expect("fixture extension dir");
     let name = toml_basic_string_value(name);
     let description = toml_basic_string_value(description);
+    // Filesystem-discovered manifests validate as `InstalledLocal` (#5499),
+    // which forbids the legacy top-level `[[capabilities]]` shape — the
+    // fixture uses the installed-legal `capability_provider` host_api form.
     fs::write(
         extension_root.join("manifest.toml"),
         format!(

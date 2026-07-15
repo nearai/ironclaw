@@ -429,6 +429,56 @@ pub struct ResourceLimits {
 }
 
 impl ResourceLimits {
+    pub fn set_max_usd(mut self, max_usd: Decimal) -> Self {
+        self.max_usd = Some(max_usd);
+        self
+    }
+
+    pub fn set_max_input_tokens(mut self, max_input_tokens: u64) -> Self {
+        self.max_input_tokens = Some(max_input_tokens);
+        self
+    }
+
+    pub fn set_max_output_tokens(mut self, max_output_tokens: u64) -> Self {
+        self.max_output_tokens = Some(max_output_tokens);
+        self
+    }
+
+    pub fn set_max_wall_clock_ms(mut self, max_wall_clock_ms: u64) -> Self {
+        self.max_wall_clock_ms = Some(max_wall_clock_ms);
+        self
+    }
+
+    pub fn set_max_output_bytes(mut self, max_output_bytes: u64) -> Self {
+        self.max_output_bytes = Some(max_output_bytes);
+        self
+    }
+
+    pub fn set_max_network_egress_bytes(mut self, max_network_egress_bytes: u64) -> Self {
+        self.max_network_egress_bytes = Some(max_network_egress_bytes);
+        self
+    }
+
+    pub fn set_max_process_count(mut self, max_process_count: u32) -> Self {
+        self.max_process_count = Some(max_process_count);
+        self
+    }
+
+    pub fn set_max_concurrency_slots(mut self, max_concurrency_slots: u32) -> Self {
+        self.max_concurrency_slots = Some(max_concurrency_slots);
+        self
+    }
+
+    pub fn set_period(mut self, period: BudgetPeriod) -> Self {
+        self.period = period;
+        self
+    }
+
+    pub fn set_thresholds(mut self, thresholds: BudgetThresholds) -> Self {
+        self.thresholds = thresholds;
+        self
+    }
+
     /// True when every dimension is unbounded (None or explicit zero).
     pub fn is_unlimited(&self) -> bool {
         is_decimal_unlimited(self.max_usd)

@@ -309,6 +309,24 @@ pub trait AuthFlowManager: Send + Sync {
         scope: &AuthProductScope,
         flow_id: AuthFlowId,
     ) -> Result<AuthFlowRecord, AuthProductError>;
+
+    /// Terminalize a completed OAuth flow whose typed continuation dispatch
+    /// failed terminally.
+    ///
+    /// The honest extension state machine treats a failed lifecycle activation
+    /// as terminal: the completed flow must not remain re-dispatchable, so a
+    /// `Completed` flow whose continuation has not yet been acknowledged
+    /// (`continuation_emitted_at` is `None`) transitions to `Failed` carrying
+    /// `error`. A flow that already acknowledged its continuation, or that is
+    /// already terminal in another state, returns
+    /// [`AuthProductError::FlowAlreadyTerminal`] and is left untouched — the
+    /// call is safe to race against a concurrent completion.
+    async fn fail_completed_continuation(
+        &self,
+        scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+        error: AuthErrorCode,
+    ) -> Result<AuthFlowRecord, AuthProductError>;
 }
 
 /// Read-only auth-flow projection source for product interaction views.

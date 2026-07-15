@@ -243,6 +243,7 @@ mod tests {
     use ironclaw_secrets::InMemorySecretStore;
 
     use super::*;
+    use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 
     /// Invented channel extension declaring the admission fields by the
     /// handle-suffix convention.
@@ -315,7 +316,7 @@ supports_threads = false
             ManifestSource::HostBundled,
             &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
             None,
-            &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+            &product_extension_host_api_contract_registry().expect("contracts"),
         )
         .expect("fixture manifest parses");
         let extension_id = ExtensionId::new("vendorx").expect("extension id");
@@ -330,6 +331,7 @@ supports_threads = false
                     ExtensionManifestRef::new(extension_id.clone(), None),
                     Vec::new(),
                     chrono::Utc::now(),
+                    ironclaw_extensions::InstallationOwner::Tenant,
                 )
                 .expect("installation"),
             )
@@ -400,7 +402,7 @@ supports_threads = false
             ManifestSource::HostBundled,
             &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
             None,
-            &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+            &product_extension_host_api_contract_registry().expect("contracts"),
         )
         .expect("fixture manifest parses");
         let fields = &record

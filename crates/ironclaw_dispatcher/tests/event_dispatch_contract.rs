@@ -139,6 +139,7 @@ async fn dispatcher_logs_release_failure_without_masking_dispatch_error() {
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope,
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate {
                 concurrency_slots: Some(1),
                 ..ResourceEstimate::default()
@@ -218,6 +219,7 @@ async fn dispatcher_emits_failed_event_for_unknown_capability_without_reserving(
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope,
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate {
                 concurrency_slots: Some(1),
                 ..ResourceEstimate::default()
@@ -322,6 +324,7 @@ impl BoundCapabilityAdapter for EchoBinding {
                 .reserve(request.scope.clone(), request.estimate.clone())
                 .map_err(|_| DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::Resource,
+                    safe_summary: None,
                 })?,
         };
         let receipt = self
@@ -329,6 +332,7 @@ impl BoundCapabilityAdapter for EchoBinding {
             .reconcile(reservation.id, usage.clone())
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
+                safe_summary: None,
             })?;
         Ok(RuntimeAdapterResult {
             output,
@@ -364,6 +368,7 @@ fn sample_request(capability_id: &str, input: Value) -> CapabilityDispatchReques
     CapabilityDispatchRequest {
         capability_id: CapabilityId::new(capability_id).unwrap(),
         scope: sample_scope(),
+        authenticated_actor_user_id: None,
         estimate: ResourceEstimate {
             concurrency_slots: Some(1),
             output_bytes: Some(10_000),

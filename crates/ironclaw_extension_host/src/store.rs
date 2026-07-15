@@ -1,15 +1,14 @@
 //! Persistence port for installation lifecycle records.
 //!
-//! `ExtensionHost` is the only writer of installation state; this port is how
-//! it persists each transition so a crash mid-transition resumes
-//! deterministically at startup. The record carries the resolved contract
-//! (so restore never needs the package source), the current lifecycle state,
-//! the non-secret config values, and a typed, redacted last error.
+//! `ExtensionHost` is the only writer of installation state; this port is the
+//! host's working set, rehydrated from the facade's durable
+//! `ExtensionActivationState` records at every boot. The record carries the
+//! resolved contract (so a restore never needs the package source), the
+//! current working state (`Installed` / `Active` / `Failed`), the non-secret
+//! config values, and a typed, redacted last error.
 //!
-//! Production implementations back this on the durable Reborn filesystem
-//! (both DB backends). This crate ships the in-memory implementation used by
-//! contract tests; the composition-side durable implementation is wired in
-//! P2's cutover.
+//! The in-memory implementation is the only implementation today: the host
+//! record is a derived execution view, not the durable source of truth.
 
 use std::sync::Arc;
 

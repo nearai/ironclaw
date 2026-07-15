@@ -16,8 +16,9 @@ use chrono::Utc;
 use futures::future::try_join_all;
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{
-    AuthProductScope, AuthProviderId, CredentialAccountId, CredentialAccountProjection,
-    CredentialAccountUpdateBinding, ProviderScope,
+    AuthFlowStatus, AuthProductScope, AuthProviderId, CredentialAccountId,
+    CredentialAccountProjection, CredentialAccountStatus, CredentialAccountUpdateBinding,
+    ProviderScope,
 };
 use ironclaw_common::{AutomationName, AutomationNameError};
 use ironclaw_host_api::{
@@ -179,8 +180,18 @@ pub struct RebornOperatorToolInfo {
     pub effects: Arc<[EffectKind]>,
 }
 
+#[async_trait]
 pub trait RebornOperatorToolCatalog: Send + Sync {
-    fn list_operator_tools(&self) -> Vec<RebornOperatorToolInfo>;
+    /// Tools visible to `caller` in the operator/settings surface (#5459 P1).
+    ///
+    /// The settings/tools routes are authenticated-caller routes (not
+    /// operator-gated), so a member reads this catalog. It MUST therefore be
+    /// filtered by installation owner exactly like the model capability
+    /// surface: tenant-shared tools for everyone, user-private tools only for
+    /// their owner. An unfiltered catalog would disclose another user's
+    /// private install (its capability id, description, effects) — the leak
+    /// this parameter closes.
+    async fn list_operator_tools(&self, caller: &UserId) -> Vec<RebornOperatorToolInfo>;
 }
 
 #[derive(Clone)]
@@ -211,6 +222,28 @@ fn rejected_busy_notice(status: TurnStatus) -> String {
     }
 }
 
+/// The caller's durable auth-account signal for one channel extension's vendor
+/// — the raw inputs the extensions-list facade feeds to
+/// [`ironclaw_auth::project_auth_account_state`] so an account renders its real
+/// §6.3 state (`expired` / `refresh-failed` / `authenticating`) plus a typed
+/// last error, instead of the connected/disconnected collapse the
+/// [`ChannelConnectionFacade::caller_channel_connections`] bool alone permits.
+///
+/// Both inputs are optional. A facade that only knows the caller holds a live
+/// grant leaves both `None` and the projection falls back to the connection
+/// bool (a live grant backfills to `connected`, MIG-1); a facade that reads the
+/// durable credential-account status supplies `account_status` (and, mid-flow,
+/// `active_flow_status`) so the wire surfaces the real state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChannelAuthAccountState {
+    /// The caller's durable credential-account status for the extension's
+    /// vendor, when the facade can read it.
+    pub account_status: Option<CredentialAccountStatus>,
+    /// A live (non-terminal) auth flow for the extension's vendor, when one is
+    /// in progress — projects to `authenticating`.
+    pub active_flow_status: Option<AuthFlowStatus>,
+}
+
 /// Per-user channel connection state. Returns, for the calling user, which
 /// channel extensions they have personally connected (for example, Slack OAuth).
 /// Keyed by channel package id (e.g. `"slack"`) -> `true` when connected.
@@ -222,6 +255,24 @@ pub trait ChannelConnectionFacade: Send + Sync {
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<std::collections::HashMap<String, bool>, RebornServicesError>;
+
+    /// The caller's durable auth-account signal per channel extension, keyed by
+    /// channel package id — richer than the connected/disconnected bool
+    /// [`Self::caller_channel_connections`] returns. Lets the extensions wire
+    /// project the shared §6.3 auth-account state (`expired` / `refresh-failed`)
+    /// and its typed last error for each vendor account.
+    ///
+    /// Default: empty. A facade that does not yet read durable credential-account
+    /// status reports none and the wire falls back to the connection bool; the
+    /// production channel-connection facade overrides this to project each
+    /// caller's account status.
+    async fn caller_channel_account_states(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<std::collections::HashMap<String, ChannelAuthAccountState>, RebornServicesError>
+    {
+        Ok(std::collections::HashMap::new())
+    }
 
     async fn disconnect_channel_for_caller(
         &self,
@@ -1091,13 +1142,18 @@ async fn auto_approve_config_entry(
     })
 }
 
-fn find_operator_tool(
+async fn find_operator_tool(
     config: &RebornOperatorApprovalConfig,
     raw_capability_id: &str,
+    caller: &UserId,
 ) -> Result<RebornOperatorToolInfo, RebornServicesError> {
+    // Look up within the CALLER-filtered catalog so a foreign user-private
+    // tool reads as an unknown key (same masking as list), never disclosing
+    // that it exists or letting a member set a permission on it (#5459 P1).
     config
         .tool_catalog
-        .list_operator_tools()
+        .list_operator_tools(caller)
+        .await
         .into_iter()
         .find(|tool| tool.capability_id.as_str() == raw_capability_id)
         .ok_or_else(|| operator_config_unknown_key_error("key"))
@@ -2282,6 +2338,17 @@ pub trait RebornServicesApi: Send + Sync {
         package_ref: LifecyclePackageRef,
     ) -> Result<RebornExtensionActionResponse, RebornServicesError>;
 
+    /// Import a standalone extension from an uploaded bundle (zip bytes) — the
+    /// WebUI "Install Tool" path. Default is unavailable so non-local impls and
+    /// test stubs need no change.
+    async fn import_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _bundle: Vec<u8>,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
     async fn activate_extension(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -3426,13 +3493,15 @@ impl RebornServicesApi for RebornServices {
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOperatorConfigListResponse, RebornServicesError> {
-        let _ = caller;
         let Some(config) = &self.operator_approval_config else {
             return Ok(operator_config_not_wired_response());
         };
         let scope = caller_resource_scope(&caller);
         let mut entries = vec![auto_approve_config_entry(config, &scope).await?];
-        let tools = config.tool_catalog.list_operator_tools();
+        let tools = config
+            .tool_catalog
+            .list_operator_tools(&scope.user_id)
+            .await;
         let tool_context = operator_tool_permission_context(config, &scope, &tools).await?;
         entries.extend(
             try_join_all(
@@ -3467,7 +3536,7 @@ impl RebornServicesApi for RebornServices {
         let entry = if key == AUTO_APPROVE_CONFIG_KEY {
             auto_approve_config_entry(config, &scope).await?
         } else if let Some(capability_id) = key.strip_prefix(TOOL_CONFIG_PREFIX) {
-            let tool = find_operator_tool(config, capability_id)?;
+            let tool = find_operator_tool(config, capability_id, &scope.user_id).await?;
             tool_config_entry(config, &scope, &tool).await?
         } else {
             return Err(operator_config_unknown_key_error("key"));
@@ -3504,7 +3573,7 @@ impl RebornServicesApi for RebornServices {
                 .map_err(operator_config_store_error)?;
             auto_approve_config_entry(config, &scope).await?
         } else if let Some(capability_id) = key.strip_prefix(TOOL_CONFIG_PREFIX) {
-            let tool = find_operator_tool(config, capability_id)?;
+            let tool = find_operator_tool(config, capability_id, &scope.user_id).await?;
             if tool_permission_locked(&tool) {
                 return Err(operator_config_invalid_value("state"));
             }
@@ -3725,6 +3794,7 @@ impl RebornServicesApi for RebornServices {
         )?;
         let product_context = ironclaw_product_context::resolve_web_ui(scope.product_owner(&actor));
         let submit = SubmitTurnRequest {
+            requested_model: None,
             scope: scope.clone(),
             actor,
             accepted_message_ref: accepted_message_ref.clone(),
@@ -4734,6 +4804,14 @@ impl RebornServicesApi for RebornServices {
         extensions::install_extension(self.lifecycle_facade.as_ref(), caller, package_ref).await
     }
 
+    async fn import_extension(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        bundle: Vec<u8>,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        extensions::import_extension(self.lifecycle_facade.as_ref(), caller, bundle).await
+    }
+
     async fn activate_extension(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -4747,13 +4825,7 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         package_ref: LifecyclePackageRef,
     ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        extensions::remove_extension(
-            self.lifecycle_facade.as_ref(),
-            self.channel_connection_facade.clone(),
-            caller,
-            package_ref,
-        )
-        .await
+        extensions::remove_extension(self.lifecycle_facade.as_ref(), caller, package_ref).await
     }
 
     async fn setup_extension(

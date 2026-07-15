@@ -19,10 +19,10 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_turns::{
-    GateRef, GetRunStateRequest, SanitizedFailure, TurnActor, TurnBlockedGateKind, TurnCoordinator,
-    TurnError, TurnEventKind, TurnEventProjectionCursor, TurnEventProjectionError,
-    TurnEventProjectionRequest, TurnEventProjectionSource, TurnEventReducerService,
-    TurnLifecycleEvent, TurnRunId, TurnScope, TurnStatus,
+    GateRef, GetRunStateRequest, ModelInvalidOutputDetailReason, SanitizedFailure, TurnActor,
+    TurnBlockedGateKind, TurnCoordinator, TurnError, TurnEventKind, TurnEventProjectionCursor,
+    TurnEventProjectionError, TurnEventProjectionRequest, TurnEventProjectionSource,
+    TurnEventReducerService, TurnLifecycleEvent, TurnRunId, TurnScope, TurnStatus,
     run_profile::{
         SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest,
         SystemInferenceTaskId, SystemPromptId, SystemPromptSource, SystemTaskKind,
@@ -33,7 +33,7 @@ use tokio::sync::{Mutex, OnceCell, Semaphore};
 
 use crate::AuthChallengeProvider;
 use crate::failure_summary::{
-    pinned_failure_summary_for_category, reborn_failure_summary_for_category,
+    pinned_failure_summary_for_category, reborn_failure_summary_for_category_and_detail,
 };
 use crate::product_auth::api::auth_prompt::{
     BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth,
@@ -884,12 +884,19 @@ async fn failure_details_for_turn_event(
     let Some(category) = failure_category_for_turn_event(event) else {
         return FailureProjectionDetails::default();
     };
-    let fallback_summary = reborn_failure_summary_for_category(Some(&category)).to_string();
     // The model-visible raw cause for the failure travels on the failure
     // record's detail channel, surfaced on `TurnLifecycleEvent.detail` by the
     // upstream runner. Source it here so the explainer (and model) get the real
     // cause instead of only the bounded category.
     let detail = detail_for_turn_event(event, &category);
+    let invalid_output_detail =
+        ModelInvalidOutputDetailReason::from_failure_category_and_safe_summary(
+            &category,
+            detail.as_deref(),
+        );
+    let fallback_summary =
+        reborn_failure_summary_for_category_and_detail(Some(&category), invalid_output_detail)
+            .to_string();
     let cache_key = FailureExplanationCacheKey {
         run_id: event.run_id,
         category: category.clone(),
@@ -977,7 +984,7 @@ fn failure_explanation_request(input: &FailureExplanationInput) -> Option<System
 }
 
 fn failure_explanation_system_prompt() -> &'static str {
-    ironclaw_loop_support::FAILURE_EXPLANATION_SYSTEM_PROMPT
+    ironclaw_loop_host::FAILURE_EXPLANATION_SYSTEM_PROMPT
 }
 
 pub(super) fn failure_explanation_user_prompt(input: &FailureExplanationInput) -> String {
@@ -1027,7 +1034,7 @@ pub(super) fn bounded_failure_explanation(content: &str) -> Option<String> {
     (!truncated.is_empty()).then_some(truncated)
 }
 
-fn turn_status_wire(status: TurnStatus) -> &'static str {
+pub(super) fn turn_status_wire(status: TurnStatus) -> &'static str {
     match status {
         TurnStatus::Queued => "queued",
         TurnStatus::Running => "running",

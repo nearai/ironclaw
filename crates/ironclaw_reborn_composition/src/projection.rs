@@ -1,4 +1,7 @@
-use std::sync::{Arc, atomic::AtomicU64};
+use std::{
+    sync::{Arc, atomic::AtomicU64},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
@@ -32,7 +35,7 @@ use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_turns::{
     ReplyTargetBindingRef, SanitizedFailure, TurnActor, TurnCoordinator, TurnError,
     TurnEventProjectionCursor, TurnEventProjectionSource, TurnEventSink, TurnLifecycleEvent,
-    TurnRunId, TurnScope, run_profile::LoopHostMilestoneSink,
+    TurnRunId, TurnScope, TurnStatus, run_profile::LoopHostMilestoneSink,
 };
 use tokio::sync::{broadcast, mpsc};
 
@@ -61,7 +64,8 @@ use runtime_replay::{
 // Only the Slack delivery path (feature-gated) consumes this re-export.
 pub(crate) use turn_events::approval_prompt_context_view;
 use turn_events::{
-    FailureExplanationProvider, ModelFailureExplanationProvider, TurnEventBridge, TurnEventPayload,
+    FailureExplanationProvider, ModelFailureExplanationProvider, TurnEventBridge, TurnEventDrain,
+    TurnEventPayload, turn_status_wire,
 };
 
 pub(crate) use display_preview::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore};
@@ -73,6 +77,7 @@ const WEBUI_RUNTIME_ITEM_MAX_PAYLOADS: usize = WEBUI_PROJECTION_PAGE_LIMIT + 1;
 const WEBUI_PROJECTION_ADAPTER_ID: &str = "webui_v2";
 const WEBUI_PROJECTION_INSTALLATION_ID: &str = "webui_v2.local";
 const TURN_EVENT_WAKE_BUFFER: usize = 256;
+const WEBUI_TERMINAL_TURN_LIVE_DRAIN_TIMEOUT: Duration = Duration::from_millis(50);
 
 #[derive(Clone)]
 pub(crate) struct RebornProjectionServices {
@@ -355,7 +360,8 @@ impl ProjectionStream for WebuiRuntimeProjectionStream {
             .await?;
         }
 
-        self.append_turn_events(&mut batch, &request).await?;
+        self.append_turn_events(&mut batch, Some(&mut subscription), &request)
+            .await?;
         self.batch_into_outbound(batch, &request)
     }
 }
@@ -444,7 +450,10 @@ impl WebuiRuntimeProjectionStream {
             send_projection_subscription_error(&sender, error).await;
             return;
         }
-        if let Err(error) = self.append_turn_events(&mut batch, &request).await {
+        if let Err(error) = self
+            .append_turn_events(&mut batch, Some(&mut subscription), &request)
+            .await
+        {
             send_projection_subscription_error(&sender, error).await;
             return;
         }
@@ -482,7 +491,10 @@ impl WebuiRuntimeProjectionStream {
                             return;
                         }
                     };
-                    if let Err(error) = self.append_turn_events(&mut batch, &request).await {
+                    if let Err(error) = self
+                        .append_turn_events(&mut batch, Some(&mut subscription), &request)
+                        .await
+                    {
                         send_projection_subscription_error(&sender, error).await;
                         return;
                     }
@@ -519,7 +531,10 @@ impl WebuiRuntimeProjectionStream {
                         send_projection_subscription_error(&sender, error).await;
                         return;
                     }
-                    if let Err(error) = self.append_turn_events(&mut batch, &request).await {
+                    if let Err(error) = self
+                        .append_turn_events(&mut batch, Some(&mut subscription), &request)
+                        .await
+                    {
                         send_projection_subscription_error(&sender, error).await;
                         return;
                     }
@@ -537,6 +552,7 @@ impl WebuiRuntimeProjectionStream {
     async fn append_turn_events(
         &self,
         batch: &mut WebuiProjectionBatch,
+        mut subscription: Option<&mut EventProjectionSubscription>,
         request: &ProjectionSubscriptionRequest,
     ) -> Result<(), ProductAdapterError> {
         let turn_after = batch.cursor().turn.clone();
@@ -549,6 +565,17 @@ impl WebuiRuntimeProjectionStream {
                 self.auth_challenges.as_deref(),
             )
             .await?;
+        if turn_drain_has_terminal_run_status(&turn_drain)
+            && let Some(subscription) = subscription.as_mut()
+        {
+            drain_runtime_items_before_terminal_turn(
+                subscription,
+                batch,
+                &request.scope,
+                self.display_previews.as_ref(),
+            )
+            .await?;
+        }
         for TurnEventPayload {
             cursor: turn_cursor,
             payload,
@@ -654,6 +681,29 @@ fn collect_buffered_runtime_items(
     items
 }
 
+async fn drain_runtime_items_before_terminal_turn(
+    subscription: &mut EventProjectionSubscription,
+    batch: &mut WebuiProjectionBatch,
+    scope: &TurnScope,
+    display_previews: &dyn CapabilityDisplayPreviewSource,
+) -> Result<(), ProductAdapterError> {
+    consume_buffered_runtime_items(subscription, batch, scope, display_previews).await?;
+    if !batch.has_runtime_payload_capacity() {
+        return Ok(());
+    }
+    let item = tokio::time::timeout(WEBUI_TERMINAL_TURN_LIVE_DRAIN_TIMEOUT, subscription.next())
+        .await
+        .ok()
+        .flatten();
+    if let Some(item) = item {
+        let keep_consuming = push_runtime_item(batch, item, scope, display_previews).await?;
+        if keep_consuming {
+            consume_buffered_runtime_items(subscription, batch, scope, display_previews).await?;
+        }
+    }
+    Ok(())
+}
+
 async fn push_ordered_initial_runtime_items(
     batch: &mut WebuiProjectionBatch,
     first: ProjectionStreamItem,
@@ -665,13 +715,12 @@ async fn push_ordered_initial_runtime_items(
     // are buffered, drain live updates before a terminal durable run status so
     // the browser can render assistant text/progress before settling the run.
     if durable_item_has_terminal_run_status(&first)
-        && buffered.first().is_some_and(projection_item_is_live_update)
+        && buffered.iter().any(projection_item_is_live_update)
     {
-        let live_prefix_len = buffered
-            .iter()
-            .take_while(|item| projection_item_is_live_update(item))
-            .count();
-        for item in buffered.iter().take(live_prefix_len).cloned() {
+        let (live_updates, other_items): (Vec<_>, Vec<_>) = buffered
+            .into_iter()
+            .partition(projection_item_is_live_update);
+        for item in live_updates {
             if !push_runtime_item(batch, item, scope, display_previews).await? {
                 return Ok(false);
             }
@@ -679,7 +728,7 @@ async fn push_ordered_initial_runtime_items(
         if !push_runtime_item(batch, first, scope, display_previews).await? {
             return Ok(false);
         }
-        for item in buffered.into_iter().skip(live_prefix_len) {
+        for item in other_items {
             if !push_runtime_item(batch, item, scope, display_previews).await? {
                 return Ok(false);
             }
@@ -708,6 +757,48 @@ async fn push_runtime_item(
         return Ok(false);
     }
     batch.push_runtime_item(item, scope, display_previews).await
+}
+
+fn turn_drain_has_terminal_run_status(drain: &TurnEventDrain) -> bool {
+    drain
+        .payloads
+        .iter()
+        .any(|payload| outbound_payload_has_terminal_run_status(&payload.payload))
+}
+
+fn outbound_payload_has_terminal_run_status(payload: &ProductOutboundPayload) -> bool {
+    let state = match payload {
+        ProductOutboundPayload::ProjectionSnapshot { state }
+        | ProductOutboundPayload::ProjectionUpdate { state } => state,
+        _ => return false,
+    };
+    state.items.iter().any(|item| {
+        matches!(
+            item,
+            ProductProjectionItem::RunStatus { status, .. }
+                if product_run_status_is_terminal(status)
+        )
+    })
+}
+
+fn product_run_status_is_terminal(status: &str) -> bool {
+    const TERMINAL_RUNTIME_STATUSES: &[RunProjectionStatus] = &[
+        RunProjectionStatus::Completed,
+        RunProjectionStatus::Cancelled,
+        RunProjectionStatus::Failed,
+        RunProjectionStatus::Killed,
+    ];
+    const TERMINAL_TURN_STATUSES: &[TurnStatus] = &[
+        TurnStatus::Completed,
+        TurnStatus::Cancelled,
+        TurnStatus::Failed,
+    ];
+    TERMINAL_RUNTIME_STATUSES
+        .iter()
+        .any(|terminal| status == run_status_wire(*terminal))
+        || TERMINAL_TURN_STATUSES
+            .iter()
+            .any(|terminal| status == turn_status_wire(*terminal))
 }
 
 fn projection_item_is_live_update(item: &ProjectionStreamItem) -> bool {

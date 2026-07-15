@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_loop_support::LoopCapabilityPortFactory;
+use ironclaw_loop_host::LoopCapabilityPortFactory;
 use ironclaw_turns::run_profile::{AgentLoopHostError, LoopCapabilityPort, LoopRunContext};
 
 use super::recording_test_capability_port::RecordingTestCapabilityPort;

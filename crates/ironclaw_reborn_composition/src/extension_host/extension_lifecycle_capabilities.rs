@@ -1,3 +1,4 @@
+// arch-exempt: large_file, model-visible extension removal adapter and caller tests, plan #5905
 use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
@@ -85,7 +86,7 @@ fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         )?,
         lifecycle_manifest(
             EXTENSION_REMOVE_CAPABILITY_ID,
-            "Remove an installed Reborn extension from durable local-dev lifecycle state",
+            "Remove an installed Reborn extension from durable local-dev lifecycle state. Use this when the user asks to uninstall, remove, disable, disconnect, unpair, unlink, or revoke access for an extension, integration, app, account, external channel, or the current external chat. Pass the extension's registry id as extension_id; removal also performs extension-owned cleanup such as authentication, identity, and channel bindings when supported.",
             vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
             PermissionMode::Ask,
         )?,
@@ -115,12 +116,11 @@ fn lifecycle_manifest(
         prompt_doc_ref: None,
         required_host_ports: Vec::new(),
         runtime_credentials: Vec::new(),
+        network_targets: Vec::new(),
         resource_profile: Some(ResourceProfile {
-            default_estimate: ResourceEstimate {
-                wall_clock_ms: Some(100),
-                output_bytes: Some(16 * 1024),
-                ..ResourceEstimate::default()
-            },
+            default_estimate: ResourceEstimate::default()
+                .set_wall_clock_ms(100)
+                .set_output_bytes(16 * 1024),
             hard_ceiling: None,
         }),
     })
@@ -157,21 +157,29 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     Arc::clone(&self.credential_accounts),
                 );
                 self.extension_management
-                    .search(&input.query, Some(&credential_gate))
+                    .search(&input.query, Some(&credential_gate), &request.scope.user_id)
                     .await
+                    .map_err(lifecycle_error)
             }
             EXTENSION_INSTALL_CAPABILITY_ID => {
                 let input: ExtensionIdInput = parse_input(request.input)?;
+                // The dispatch scope carries the ACTING user, so a chat-driven
+                // install derives the same owner the WebUI path would (#5459
+                // P1): operator → tenant-shared, member → private.
                 self.extension_management
-                    .install(extension_package_ref(input.extension_id)?)
+                    .install(
+                        extension_package_ref(input.extension_id)?,
+                        &request.scope.user_id,
+                    )
                     .await
+                    .map_err(lifecycle_error)
             }
             EXTENSION_ACTIVATE_CAPABILITY_ID => {
                 let input: ExtensionIdInput = parse_input(request.input)?;
                 let package_ref = extension_package_ref(input.extension_id)?;
                 let requirements = self
                     .extension_management
-                    .activation_credential_requirements(&package_ref)
+                    .activation_credential_requirements(&package_ref, &request.scope.user_id)
                     .await
                     .map_err(lifecycle_error)?;
                 let credential_gate = RuntimeExtensionActivationCredentialGate::new(
@@ -193,25 +201,32 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     request.services.runtime_http_egress.clone(),
                 );
                 self.extension_management
-                    .activate_with_credential_gate(package_ref, mode, credential_gate)
+                    .activate_with_credential_gate(
+                        package_ref,
+                        mode,
+                        credential_gate,
+                        &request.scope.user_id,
+                    )
                     .await
+                    .map_err(lifecycle_error)
             }
             EXTENSION_REMOVE_CAPABILITY_ID => {
                 let input: ExtensionIdInput = parse_input(request.input)?;
-                // Credential revocation lives on the port's `remove` (the single
-                // convergence point shared with the WebUI facade), so the scope
-                // is threaded through rather than cleaned up here.
                 self.extension_management
-                    .remove(extension_package_ref(input.extension_id)?, &request.scope)
+                    .remove(
+                        extension_package_ref(input.extension_id)?,
+                        &request.scope,
+                        request.authenticated_actor_user_id.as_ref(),
+                    )
                     .await
+                    .map_err(lifecycle_error)
             }
             _ => {
                 return Err(FirstPartyCapabilityError::new(
                     RuntimeDispatchErrorKind::UndeclaredCapability,
                 ));
             }
-        }
-        .map_err(lifecycle_error)?;
+        }?;
 
         // An inbound-channel activation carries a structured connection
         // requirement; surface it as a display preview so WebChat opens the
@@ -296,10 +311,8 @@ fn display_channel_name(channel: &str) -> String {
 }
 
 fn resource_usage(started: Instant) -> ResourceUsage {
-    ResourceUsage {
-        wall_clock_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-        ..ResourceUsage::default()
-    }
+    ResourceUsage::default()
+        .set_wall_clock_ms(started.elapsed().as_millis().try_into().unwrap_or(u64::MAX))
 }
 
 fn credential_stage_error(error: CredentialStageError) -> FirstPartyCapabilityError {
@@ -359,9 +372,8 @@ mod tests {
 
     use super::*;
     use crate::{RebornBuildInput, RebornServices, build_reborn_services};
-    use ironclaw_product_workflow::{
-        ChannelConnectionRequirement, LifecyclePhase, RebornChannelConnectStrategy,
-    };
+    use ironclaw_host_api::InstallationState;
+    use ironclaw_product_workflow::{ChannelConnectionRequirement, RebornChannelConnectStrategy};
 
     fn slack_activation_response() -> LifecycleProductResponse {
         let requirement = ChannelConnectionRequirement {
@@ -375,7 +387,7 @@ mod tests {
         };
         LifecycleProductResponse {
             package_ref: None,
-            phase: LifecyclePhase::Active,
+            phase: InstallationState::Active,
             blockers: Vec::new(),
             message: Some("activation guidance".to_string()),
             payload: Some(LifecycleProductPayload::ExtensionActivate {
@@ -431,7 +443,7 @@ mod tests {
         };
         let channel_activation = LifecycleProductResponse {
             package_ref: None,
-            phase: LifecyclePhase::Active,
+            phase: InstallationState::Active,
             blockers: Vec::new(),
             message: Some("activation guidance".to_string()),
             payload: Some(LifecycleProductPayload::ExtensionActivate {
@@ -450,7 +462,7 @@ mod tests {
 
         let tool_activation = LifecycleProductResponse {
             package_ref: None,
-            phase: LifecyclePhase::Active,
+            phase: InstallationState::Active,
             blockers: Vec::new(),
             message: None,
             payload: Some(LifecycleProductPayload::ExtensionActivate {
@@ -831,10 +843,31 @@ mod tests {
 
         let active = active_extension_capability_ids(&extension_management).await;
         assert!(!active.iter().any(|id| id == "github.search_issues"));
+
+        // #5525 review: a foreign caller probing the same private credentialed
+        // install must NOT receive the auth gate — that response confirms the
+        // install exists and leaks its credential requirement shape. Ownership
+        // masks before the credential preflight, so the non-owner sees the
+        // same failure a missing installation would produce.
+        let outcome = crate::approval_test_support::invoke_with_local_dev_approval(
+            &services,
+            EXTENSION_ACTIVATE_CAPABILITY_ID,
+            execution_context_for_user(
+                "extension-tool-foreign-user",
+                [EXTENSION_ACTIVATE_CAPABILITY_ID],
+            ),
+            serde_json::json!({"extension_id": "github"}),
+            trust_decision(),
+        )
+        .await;
+        let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
+            panic!("foreign caller must get the masked failure, not an auth gate: {outcome:?}");
+        };
+        assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
     }
 
     #[tokio::test]
-    async fn local_dev_extension_search_hides_onboarding_after_credentialed_activation() {
+    async fn local_dev_extension_search_distinguishes_configured_from_active() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = build_reborn_services(RebornBuildInput::local_dev(
             "extension-tools-active-search-owner",
@@ -890,6 +923,15 @@ mod tests {
             .find(|extension| extension["package_ref"]["id"] == "github")
             .expect("github search result");
         assert_eq!(installed_github["installation_phase"], "installed");
+        let installed_message = installed_search["message"]
+            .as_str()
+            .expect("installed inactive search should carry activation guidance");
+        assert!(
+            installed_message.contains("installed but not activated")
+                && installed_message.contains("not currently callable tools")
+                && installed_message.contains(EXTENSION_ACTIVATE_CAPABILITY_ID),
+            "installed inactive GitHub search must not imply tools are active, got {installed_search}"
+        );
         assert!(
             installed_github.get("credential_requirements").is_none(),
             "installed inactive GitHub model-visible search results must not expose stale PAT requirements before activation"
@@ -909,11 +951,18 @@ mod tests {
         )
         .await
         .expect("configured search succeeds");
+        let configured_message = configured_search["message"]
+            .as_str()
+            .expect("configured inactive search should carry activation guidance");
         assert!(
-            configured_search["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("already configured or active")),
-            "configured GitHub search should override stale PAT onboarding, got {configured_search}"
+            configured_message.contains("installed but not activated")
+                && configured_message.contains("configured only means")
+                && configured_message.contains("not currently callable tools"),
+            "configured GitHub search must not report activation before activation, got {configured_search}"
+        );
+        assert!(
+            !configured_message.contains("ready"),
+            "configured-but-inactive GitHub search must not be marked ready, got {configured_search}"
         );
         let extensions = configured_search["payload"]["extensions"]
             .as_array()
@@ -951,7 +1000,7 @@ mod tests {
         assert!(
             active_search["message"]
                 .as_str()
-                .is_some_and(|message| message.contains("already configured or active")),
+                .is_some_and(|message| message.contains("active installed extension results")),
             "active GitHub search should override stale PAT onboarding, got {active_search}"
         );
         let extensions = active_search["payload"]["extensions"]
@@ -1396,9 +1445,17 @@ mod tests {
     fn execution_context<'a>(
         capability_ids: impl IntoIterator<Item = &'a str>,
     ) -> ExecutionContext {
+        execution_context_for_user("extension-tool-test-user", capability_ids)
+    }
+
+    fn execution_context_for_user<'a>(
+        user: &str,
+        capability_ids: impl IntoIterator<Item = &'a str>,
+    ) -> ExecutionContext {
         let caller = ExtensionId::new("extension-tool-test-caller").expect("valid extension id");
-        ExecutionContext::local_default(
-            UserId::new("extension-tool-test-user").expect("valid user id"),
+        let user_id = UserId::new(user).expect("valid user id");
+        let mut context = ExecutionContext::local_default(
+            user_id.clone(),
             caller.clone(),
             RuntimeKind::FirstParty,
             TrustClass::FirstParty,
@@ -1410,7 +1467,9 @@ mod tests {
             },
             MountView::default(),
         )
-        .expect("valid execution context")
+        .expect("valid execution context");
+        context.authenticated_actor_user_id = Some(user_id);
+        context
     }
 
     fn capability_grant(capability_id: &str, grantee: ExtensionId) -> CapabilityGrant {

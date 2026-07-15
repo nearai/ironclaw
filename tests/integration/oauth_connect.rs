@@ -695,6 +695,7 @@ app_id = "/app_id"
                 ExtensionManifestRef::new(extension_id.clone(), None),
                 Vec::new(),
                 chrono::Utc::now(),
+                ironclaw_extensions::InstallationOwner::Tenant,
             )
             .expect("installation"),
         )

@@ -9,7 +9,8 @@ use std::fmt;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    AgentId, CapabilitySurfaceKind, ChannelPresentation, ProjectId, TenantId, UserId,
+    AgentId, CapabilitySurfaceKind, ChannelPresentation, InstallationState, ProjectId, TenantId,
+    UserId,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
@@ -124,29 +125,6 @@ impl LifecyclePackageRef {
         self.require_kind(LifecyclePackageKind::Extension)?;
         Ok(self)
     }
-}
-
-/// Browser lifecycle contract phases.
-///
-/// Some phases are forward-declared. The first local facades currently emit
-/// only the states they can prove from their backing systems; future
-/// extension/skill stores may make the remaining states reachable without
-/// changing the wire enum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LifecyclePhase {
-    Discovered,
-    Installing,
-    Installed,
-    Configured,
-    Activating,
-    Active,
-    Disabled,
-    UpgradeRequired,
-    Failed,
-    Removing,
-    Removed,
-    Unsupported,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -405,14 +383,33 @@ pub struct LifecycleExtensionSummary {
 pub struct LifecycleSearchExtensionSummary {
     #[serde(flatten)]
     pub summary: LifecycleExtensionSummary,
+    /// The installed state of this catalog result for the caller, or `None`
+    /// when the caller has no visible installation of it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub installation_phase: Option<LifecyclePhase>,
+    pub installation_phase: Option<InstallationState>,
+}
+
+/// Whether an installed extension is tenant-shared or private to the caller
+/// (#5459 P1). Serialized on the wire; `#[serde(default)]`-friendly via
+/// `Option` on the summary so pre-#5459 payloads keep deserializing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleInstallScope {
+    /// Installed for the whole tenant (admin install) — visible to every user.
+    Shared,
+    /// Installed privately by the caller — visible only to them.
+    Private,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LifecycleInstalledExtensionSummary {
     pub summary: LifecycleExtensionSummary,
-    pub phase: LifecyclePhase,
+    /// The projected installation state (§6.1) for the caller's installation.
+    pub phase: InstallationState,
+    /// `None` only when the caller has no visible installation (projection of
+    /// an uninstalled package); list responses always carry `Some`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_scope: Option<LifecycleInstallScope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -496,7 +493,12 @@ pub enum LifecycleSkillSource {
 pub struct LifecycleProductResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package_ref: Option<LifecyclePackageRef>,
-    pub phase: LifecyclePhase,
+    /// The package's resting installation state for a single-package action
+    /// (install → `Installed`, activate → `Active`, remove → `Removed`,
+    /// failure → `Failed` / `Unsupported`). For multi-item responses (search /
+    /// list) this is a neutral `Installed`; the per-item states ride the
+    /// payload.
+    pub phase: InstallationState,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blockers: Vec<LifecycleReadinessBlocker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -508,7 +510,7 @@ pub struct LifecycleProductResponse {
 impl LifecycleProductResponse {
     pub fn projection(
         package_ref: Option<LifecyclePackageRef>,
-        phase: LifecyclePhase,
+        phase: InstallationState,
         blockers: Vec<LifecycleReadinessBlocker>,
     ) -> Self {
         Self {
@@ -551,6 +553,37 @@ pub trait LifecycleProductFacade: Send + Sync {
         context: LifecycleProductContext,
         package_ref: LifecyclePackageRef,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError>;
+
+    /// Import a standalone extension from an uploaded bundle (zip bytes) — the
+    /// WebUI "Install Tool" path. Default is unavailable; only the local runtime
+    /// facade implements it.
+    async fn import_extension_bundle(
+        &self,
+        _context: LifecycleProductContext,
+        _bundle: Vec<u8>,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        Err(ProductWorkflowError::InvalidBindingRequest {
+            reason: "extension import is not supported by this runtime".to_string(),
+        })
+    }
+
+    /// Redacted activation error for each installed extension whose activation
+    /// failed, keyed by extension id — sourced from the durable installation
+    /// record's typed `last_error`. The extensions-list facade threads this
+    /// into `RebornExtensionInfo::activation_error` so a failed extension shows
+    /// *why* it failed instead of collapsing to a bare `installed`/`failed`
+    /// state with no reason.
+    ///
+    /// Default: none. A facade that does not surface durable installation
+    /// errors reports no reason and the wire's `activation_error` stays absent;
+    /// the production extension-host facade overrides this to read the
+    /// installation records' `last_error`.
+    async fn installed_activation_errors(
+        &self,
+        _context: LifecycleProductContext,
+    ) -> Result<std::collections::HashMap<String, String>, ProductWorkflowError> {
+        Ok(std::collections::HashMap::new())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -589,7 +622,7 @@ impl UnsupportedLifecycleProductFacade {
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         Ok(LifecycleProductResponse::projection(
             package_ref,
-            LifecyclePhase::Unsupported,
+            InstallationState::Unsupported,
             vec![LifecycleReadinessBlocker::runtime(Some(
                 self.runtime_ref.clone(),
             ))?],

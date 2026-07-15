@@ -8,7 +8,9 @@ use clap::Args;
 #[cfg(feature = "openai-compat-beta")]
 use ironclaw_reborn_composition::build_openai_compat_route_mount;
 use ironclaw_reborn_composition::build_webui_services;
-use ironclaw_reborn_composition::host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_reborn_composition::host_api::{
+    AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
+};
 use ironclaw_reborn_composition::{
     LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSource,
     LocalTriggerAccessStore, RebornBuildInput, RebornReadiness, RebornRuntimeIdentity,
@@ -418,6 +420,34 @@ impl ServeCommand {
             let runtime = build_reborn_runtime(runtime_input)
                 .await
                 .context("failed to assemble Reborn runtime for `serve`")?;
+
+            // Tenant-shared tool credentials from the environment (#5459):
+            // `IRONCLAW_REBORN_DEV_SECRET__<handle>=<value>` pairs, parsed by
+            // `dev_secret_seeds_from_env` (see its doc for the contract), are
+            // written into the tenant-shared admin-managed scope so a keyed
+            // tool (network + `use_secret`) resolves its `InjectSecretOnce`
+            // obligation for EVERY user of the tenant — including SSO users
+            // who never provisioned it — from one operator-set key. Inert
+            // unless the operator sets one; ops/dev path, not per-user setup.
+            for (shared_scope, handle, value) in dev_secret_seeds_from_env(
+                std::env::vars(),
+                &tenant_id,
+                &user_id,
+                &default_agent_id,
+                default_project_id.as_ref(),
+            )? {
+                let handle_name = handle.as_str().to_string();
+                runtime
+                    .seed_local_dev_secret(shared_scope, handle, value)
+                    .await
+                    .map_err(|err| anyhow!("failed to seed dev secret `{handle_name}`: {err}"))?;
+                tracing::warn!(
+                    target: "ironclaw::reborn::cli",
+                    secret_handle = %handle_name,
+                    "seeded IRONCLAW_REBORN_DEV_SECRET__ tool credential at the tenant-shared scope"
+                );
+            }
+
             let bundle: RebornWebuiBundle = build_webui_services(&runtime, None)?;
             #[cfg(feature = "openai-compat-beta")]
             let openai_compat_mount = build_openai_compat_route_mount(
@@ -508,22 +538,12 @@ impl ServeCommand {
             // Generic extension channel ingress (extension-runtime P4): one
             // mount serves `/webhooks/extensions/{extension_id}/{route_suffix}`
             // for every active extension; the route table follows the active
-            // snapshot. The retired per-vendor webhook paths mount as
-            // one-release forwarding aliases into the SAME router (MIG-5) —
-            // never double-mounted, the alias forwards internally.
+            // snapshot.
             if let Some(ingress_parts) = runtime.services().extension_ingress_parts() {
                 let ingress_mount =
                     ironclaw_reborn_composition::extension_ingress_route_mount(&ingress_parts)
                         .context("failed to compose the extension ingress route mount")?;
                 serve_config = serve_config.with_public_route_mount(ingress_mount);
-                for alias_mount in
-                    ironclaw_reborn_composition::legacy_extension_ingress_alias_mounts(
-                        &ingress_parts,
-                    )
-                    .context("failed to compose the legacy channel ingress alias mounts")?
-                {
-                    serve_config = serve_config.with_public_route_mount(alias_mount);
-                }
             }
             // The generic post-OAuth channel identity binding: installed
             // channel extensions bind through generic discovery over the
@@ -880,6 +900,56 @@ fn print_serve_banner(
     eprintln!();
 }
 
+/// Parse `IRONCLAW_REBORN_DEV_SECRET__<handle>=<value>` pairs from an
+/// environment snapshot into the `(scope, handle, value)` seeds `serve` writes
+/// through `RebornRuntime::seed_local_dev_secret` (#5459 tenant-shared tool
+/// credentials). The contract, pinned by the unit tests below:
+/// - only names carrying the exact `IRONCLAW_REBORN_DEV_SECRET__` prefix
+///   participate; every other env var is ignored;
+/// - empty values are skipped (an exported-but-blank var is not a secret);
+/// - the suffix IS the [`SecretHandle`] and must be handle-legal (lowercase
+///   ASCII); an invalid handle — e.g. a conventionally ALL-CAPS suffix — is a
+///   hard startup error, never a silent skip;
+/// - every seed targets the caller identity's tenant-shared, admin-managed
+///   scope (`tenant_shared_managed_scope`), never the caller's own scope.
+///
+/// Takes the environment as an iterator parameter so tests never read or
+/// mutate process-global env.
+fn dev_secret_seeds_from_env(
+    vars: impl IntoIterator<Item = (String, String)>,
+    tenant_id: &TenantId,
+    user_id: &UserId,
+    default_agent_id: &AgentId,
+    default_project_id: Option<&ProjectId>,
+) -> anyhow::Result<Vec<(ResourceScope, SecretHandle, String)>> {
+    const DEV_SECRET_PREFIX: &str = "IRONCLAW_REBORN_DEV_SECRET__";
+    let mut seeds = Vec::new();
+    for (name, value) in vars {
+        let Some(handle_raw) = name.strip_prefix(DEV_SECRET_PREFIX) else {
+            continue;
+        };
+        if value.is_empty() {
+            continue;
+        }
+        let handle = SecretHandle::new(handle_raw)
+            .map_err(|err| anyhow!("{name}: invalid secret handle `{handle_raw}`: {err}"))?;
+        // The caller invocation owner alias (tenant/user/agent/project),
+        // mapped to the tenant-shared scope the runtime's InjectSecretOnce
+        // resolution falls back to (caller-first, then tenant-shared).
+        let owner = ResourceScope {
+            tenant_id: tenant_id.clone(),
+            user_id: user_id.clone(),
+            agent_id: Some(default_agent_id.clone()),
+            project_id: default_project_id.cloned(),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        seeds.push((owner.tenant_shared_managed_scope(), handle, value));
+    }
+    Ok(seeds)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -887,9 +957,90 @@ mod tests {
     const WEBUI_BASE_URL_ENV: &str = "IRONCLAW_REBORN_WEBUI_BASE_URL";
 
     fn clear_webui_env() {
-        // SAFETY: tests are serialized by `WEBUI_BASE_URL_ENV_LOCK`; no other
+        // SAFETY: tests are serialized by `the shared crate process-env lock`; no other
         // thread reads or writes this env var while the guard is held.
         unsafe { std::env::remove_var(WEBUI_BASE_URL_ENV) };
+    }
+
+    fn dev_secret_identity() -> (TenantId, UserId, AgentId) {
+        (
+            TenantId::new("tenant-a").expect("tenant"),
+            UserId::new("user-a").expect("user"),
+            AgentId::new("agent-a").expect("agent"),
+        )
+    }
+
+    /// #5499 review finding #5: the `IRONCLAW_REBORN_DEV_SECRET__` serve
+    /// bridge itself was untested — a typo'd prefix, a mis-parsed handle, a
+    /// non-skipped empty value, or seeding at the caller's own scope instead
+    /// of the tenant-shared one would all reach production unseen. The env
+    /// snapshot is an iterator parameter, so no process env is touched.
+    #[test]
+    fn dev_secret_seeds_parse_prefix_skip_empty_and_target_tenant_shared_scope() {
+        let (tenant, user, agent) = dev_secret_identity();
+        let vars = vec![
+            (
+                "IRONCLAW_REBORN_DEV_SECRET__market_data_api_key".to_string(),
+                "shared-key".to_string(),
+            ),
+            // Exported-but-blank must be skipped, not seeded as "".
+            (
+                "IRONCLAW_REBORN_DEV_SECRET__blank_value".to_string(),
+                String::new(),
+            ),
+            // Non-secret env noise must be ignored, including near-misses
+            // that share a shorter IRONCLAW_REBORN_ prefix.
+            (
+                "IRONCLAW_REBORN_WEBUI_BASE_URL".to_string(),
+                "http://localhost:8080".to_string(),
+            ),
+            ("PATH".to_string(), "/usr/bin".to_string()),
+        ];
+
+        let seeds =
+            dev_secret_seeds_from_env(vars, &tenant, &user, &agent, None).expect("seeds parse");
+
+        assert_eq!(seeds.len(), 1, "exactly the one prefixed non-empty var");
+        let (scope, handle, value) = &seeds[0];
+        assert_eq!(handle.as_str(), "market_data_api_key");
+        assert_eq!(value, "shared-key");
+        // The seed targets the tenant-shared admin-managed scope: tenant
+        // preserved, user replaced by the wire-stable shared-owner sentinel
+        // (hardcoded here as a tripwire — persisted scopes depend on it),
+        // sub-user axes dropped. Seeding at the caller's own scope would
+        // make the secret invisible to every other user of the tenant.
+        assert_eq!(scope.tenant_id, tenant);
+        assert_eq!(scope.user_id.as_str(), "__ironclaw_tenant_shared_admin__");
+        assert!(
+            scope.agent_id.is_none(),
+            "shared scope drops the agent axis"
+        );
+        assert!(
+            scope.project_id.is_none(),
+            "shared scope drops the project axis"
+        );
+    }
+
+    /// The env-var suffix IS the secret handle, and handles are
+    /// lowercase-only — an ALL-CAPS suffix (the conventional env style) must
+    /// fail serve startup loudly instead of silently skipping the seed and
+    /// leaving every tenant user gating on AuthRequired.
+    #[test]
+    fn dev_secret_invalid_handle_is_a_startup_error() {
+        let (tenant, user, agent) = dev_secret_identity();
+        let vars = vec![(
+            "IRONCLAW_REBORN_DEV_SECRET__MARKET_DATA_API_KEY".to_string(),
+            "shared-key".to_string(),
+        )];
+
+        let error = dev_secret_seeds_from_env(vars, &tenant, &user, &agent, None)
+            .expect_err("an invalid handle suffix must be a startup error");
+
+        let message = format!("{error}");
+        assert!(
+            message.contains("invalid secret handle") && message.contains("MARKET_DATA_API_KEY"),
+            "error must name the offending variable: {message}"
+        );
     }
 
     #[test]
@@ -905,10 +1056,7 @@ mod tests {
     #[test]
     fn webui_default_agent_uses_config_override() {
         let runtime_identity = RebornRuntimeIdentity::reborn_cli();
-        let identity = IdentitySection {
-            default_agent: Some("configured-agent".to_string()),
-            ..IdentitySection::default()
-        };
+        let identity = IdentitySection::default().set_default_agent("configured-agent");
 
         assert_eq!(
             resolve_webui_default_agent(Some(&identity), &runtime_identity),
@@ -929,10 +1077,7 @@ mod tests {
 
     #[test]
     fn webui_runtime_owner_accepts_matching_config_owner() {
-        let identity = IdentitySection {
-            default_owner: Some("local-user".to_string()),
-            ..IdentitySection::default()
-        };
+        let identity = IdentitySection::default().set_default_owner("local-user");
 
         assert_eq!(
             resolve_webui_runtime_owner(Some(&identity), "local-user").unwrap(),
@@ -946,10 +1091,7 @@ mod tests {
         // the bug class that silently made every thread invisible: the facade
         // writes under `owners/local-user` while the loop host reads under
         // `owners/reborn-cli`. Fail loud at startup instead.
-        let identity = IdentitySection {
-            default_owner: Some("reborn-cli".to_string()),
-            ..IdentitySection::default()
-        };
+        let identity = IdentitySection::default().set_default_owner("reborn-cli");
 
         let error = resolve_webui_runtime_owner(Some(&identity), "local-user")
             .expect_err("divergent owner must be rejected");
@@ -1343,11 +1485,9 @@ mod tests {
     #[tokio::test]
     async fn webui_serve_wires_notion_dcr_with_public_base_url_env_origin() {
         let callback_origin = {
-            let _guard = crate::commands::serve_sso::WEBUI_BASE_URL_ENV_LOCK
-                .lock()
-                .expect("env lock");
+            let _guard = crate::runtime::test_env::lock_runtime_env();
             clear_webui_env();
-            // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleaned up before the guard drops.
+            // SAFETY: serialized by the shared crate process-env lock; cleaned up before the guard drops.
             unsafe {
                 std::env::set_var(WEBUI_BASE_URL_ENV, " https://configured.example/ ");
             }
@@ -1383,11 +1523,9 @@ mod tests {
 
     #[test]
     fn webui_notion_dcr_callback_origin_rejects_slash_only_public_base_url_env() {
-        let _guard = crate::commands::serve_sso::WEBUI_BASE_URL_ENV_LOCK
-            .lock()
-            .expect("env lock");
+        let _guard = crate::runtime::test_env::lock_runtime_env();
         clear_webui_env();
-        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleaned up before the guard drops.
+        // SAFETY: serialized by the shared crate process-env lock; cleaned up before the guard drops.
         unsafe {
             std::env::set_var(WEBUI_BASE_URL_ENV, "/");
         }
@@ -1404,11 +1542,9 @@ mod tests {
 
     #[test]
     fn webui_notion_dcr_callback_origin_rejects_public_cleartext_base_url_env() {
-        let _guard = crate::commands::serve_sso::WEBUI_BASE_URL_ENV_LOCK
-            .lock()
-            .expect("env lock");
+        let _guard = crate::runtime::test_env::lock_runtime_env();
         clear_webui_env();
-        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleaned up before the guard drops.
+        // SAFETY: serialized by the shared crate process-env lock; cleaned up before the guard drops.
         unsafe {
             std::env::set_var(WEBUI_BASE_URL_ENV, "http://configured.example");
         }

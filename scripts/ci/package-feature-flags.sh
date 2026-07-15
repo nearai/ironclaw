@@ -54,7 +54,7 @@ case "${package}" in
   ironclaw_reborn_composition)
     printf '%s\n' "--features test-support,webui-v2-beta,libsql"
     ;;
-  ironclaw_reborn)
+  ironclaw_runner)
     printf '%s\n' "--features root-llm-provider,libsql-secrets,libsql-restart-tests,webui-user-store"
     ;;
   ironclaw_reborn_event_store)
@@ -83,9 +83,10 @@ case "${package}" in
     printf '%s\n' "--features webui-v2-beta"
     ;;
   ironclaw_reborn_openai_compat)
-    # `libsql` compiles + runs the durable ref-store contract folded in from the
-    # former ironclaw_reborn_openai_compat_storage crate (enables `storage`).
-    printf '%s\n' "--features libsql"
+    # `openai-compat-beta` activates the route/workflow/streaming contract
+    # suites; `libsql` also exercises the durable ref-store contract folded in
+    # from the former ironclaw_reborn_openai_compat_storage crate.
+    printf '%s\n' "--features openai-compat-beta,libsql"
     ;;
   ironclaw_extension_host)
     # The lifecycle contract test (`lifecycle_contract`) uses the crate's

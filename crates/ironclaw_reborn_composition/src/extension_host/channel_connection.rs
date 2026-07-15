@@ -22,13 +22,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_auth::{
-    AuthProductScope, AuthProviderId, AuthSurface, SecretCleanupAction, SecretCleanupReport,
-    SecretCleanupRequest,
+    AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountStatus, SecretCleanupAction,
+    SecretCleanupReport, SecretCleanupRequest,
 };
 use ironclaw_extensions::ExtensionInstallationStore;
 use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, TenantId};
 use ironclaw_product_workflow::{
-    ChannelConnectionFacade, RebornServicesError, WebUiAuthenticatedCaller,
+    ChannelAuthAccountState, ChannelConnectionFacade, RebornServicesError, WebUiAuthenticatedCaller,
 };
 
 use crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore;
@@ -66,6 +66,62 @@ impl ChannelCredentialCleanup for crate::RebornProductAuthServices {
                     error.code
                 ))
             })
+    }
+}
+
+/// Read-side port over the caller's durable credential-account status for a
+/// vendor, so the extensions wire can project each channel account's real
+/// §6.3 state (`connected` / `expired` / `disconnected`) instead of the
+/// connected/disconnected collapse the identity-binding bool alone permits.
+/// Production forwards to the product-auth
+/// [`crate::RebornProductAuthServices::credential_account_record_source`]; the
+/// facade leaves the live-flow (`authenticating`) axis to the auth-flow
+/// projection that owns thread-scoped setup flows.
+#[async_trait]
+pub(crate) trait ChannelAccountStatusReader: Send + Sync {
+    /// The caller's durable credential-account status for `provider`, or `None`
+    /// when the caller holds no account for that vendor.
+    async fn account_status_for_caller(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        provider: &str,
+    ) -> Result<Option<CredentialAccountStatus>, RebornServicesError>;
+}
+
+#[async_trait]
+impl ChannelAccountStatusReader for crate::RebornProductAuthServices {
+    async fn account_status_for_caller(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        provider: &str,
+    ) -> Result<Option<CredentialAccountStatus>, RebornServicesError> {
+        let provider_id = AuthProviderId::new(provider)
+            .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
+        let scope = AuthProductScope::credential_owner(
+            &ResourceScope {
+                tenant_id: caller.tenant_id.clone(),
+                user_id: caller.user_id.clone(),
+                agent_id: caller.agent_id.clone(),
+                project_id: caller.project_id.clone(),
+                mission_id: None,
+                thread_id: None,
+                invocation_id: InvocationId::new(),
+            },
+            AuthSurface::Callback,
+        );
+        let accounts = self
+            .credential_account_record_source()
+            .accounts_for_owner(&scope)
+            .await
+            .map_err(|error| {
+                RebornServicesError::internal_from(format!(
+                    "channel account status lookup failed: {error:?}"
+                ))
+            })?;
+        Ok(accounts
+            .into_iter()
+            .find(|account| account.provider == provider_id)
+            .map(|account| account.status))
     }
 }
 
@@ -108,6 +164,11 @@ pub(crate) struct GenericChannelConnectionFacade {
     /// minted a personal vendor credential in the first place, so there is
     /// nothing to revoke on disconnect.
     credential_cleanup: Option<Arc<dyn ChannelCredentialCleanup>>,
+    /// Read-side per-caller credential-account status, so the extensions wire
+    /// can project `expired` / `disconnected` (with a typed reason) rather than
+    /// the connected/disconnected collapse. `None` when product auth is not
+    /// composed; the wire then falls back to the identity-binding bool.
+    account_status_reader: Option<Arc<dyn ChannelAccountStatusReader>>,
     /// Generic DM-target store: discovered entries get a disconnect cleanup
     /// that drops the caller's provisioned DM target. `None` when the
     /// composed runtime carries no durable channel storage.
@@ -115,6 +176,8 @@ pub(crate) struct GenericChannelConnectionFacade {
 }
 
 impl GenericChannelConnectionFacade {
+    // arch-exempt: too_many_args, needs a ChannelConnectionFacadeDeps bundle for the distinct discovery/identity/cleanup/status ports, plan #5905
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         tenant_id: TenantId,
         entries: Vec<ChannelConnectionEntry>,
@@ -122,6 +185,7 @@ impl GenericChannelConnectionFacade {
         identity_lookup: Arc<dyn RebornUserIdentityLookup>,
         identity_delete_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
         credential_cleanup: Option<Arc<dyn ChannelCredentialCleanup>>,
+        account_status_reader: Option<Arc<dyn ChannelAccountStatusReader>>,
         dm_target_store: Option<Arc<FilesystemChannelDmTargetStore>>,
     ) -> Self {
         Self {
@@ -131,6 +195,7 @@ impl GenericChannelConnectionFacade {
             identity_lookup,
             identity_delete_store,
             credential_cleanup,
+            account_status_reader,
             dm_target_store,
         }
     }
@@ -290,6 +355,44 @@ impl ChannelConnectionFacade for GenericChannelConnectionFacade {
         Ok(connections)
     }
 
+    async fn caller_channel_account_states(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<HashMap<String, ChannelAuthAccountState>, RebornServicesError> {
+        let Some(reader) = &self.account_status_reader else {
+            return Ok(HashMap::new());
+        };
+        if caller.tenant_id != self.tenant_id {
+            return Ok(HashMap::new());
+        }
+        let entries = self.connection_entries().await?;
+        let mut states = HashMap::new();
+        for entry in &entries {
+            // The first provider whose account the caller holds decides the
+            // vendor account state (length ≤ 1 today). `active_flow_status`
+            // stays `None`: the mid-flow `authenticating` signal is projected
+            // from thread-scoped setup flows owned by the auth-flow read model,
+            // not this per-caller connection facade.
+            let mut account_status = None;
+            for provider in &entry.providers {
+                if let Some(status) = reader.account_status_for_caller(&caller, provider).await? {
+                    account_status = Some(status);
+                    break;
+                }
+            }
+            if let Some(account_status) = account_status {
+                states.insert(
+                    entry.extension_id.clone(),
+                    ChannelAuthAccountState {
+                        account_status: Some(account_status),
+                        active_flow_status: None,
+                    },
+                );
+            }
+        }
+        Ok(states)
+    }
+
     async fn disconnect_channel_for_caller(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -379,6 +482,7 @@ mod tests {
     use ironclaw_product_adapters::AdapterInstallationId;
 
     use super::*;
+    use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
     use crate::provider_identity::{
         RebornUserIdentityBindingError, RebornUserIdentityLookupError,
         installation_scoped_provider_user_id,
@@ -427,6 +531,7 @@ mod tests {
             identity_store.clone(),
             identity_store,
             credential_cleanup,
+            None,
             None,
         )
     }
@@ -669,6 +774,100 @@ mod tests {
         assert_eq!(identity_store.deletes(), Vec::new());
     }
 
+    /// The generic facade projects the caller's durable credential-account
+    /// status per vendor through the injected reader, so the extensions wire
+    /// can render `expired` instead of the connected/disconnected collapse.
+    /// A foreign tenant gets no account states (fail-closed).
+    #[tokio::test]
+    async fn facade_projects_caller_account_status_per_vendor() {
+        let identity_store = bound_identity_store("install-alpha");
+        let reader = Arc::new(RecordingAccountStatusReader::new(Some(
+            CredentialAccountStatus::RefreshFailed,
+        )));
+        let facade = GenericChannelConnectionFacade::new(
+            tenant(),
+            vec![ChannelConnectionEntry {
+                extension_id: EXTENSION.to_string(),
+                providers: vec![VENDOR.to_string()],
+                scope_source: Arc::new(StaticScopeSource(Some(scope("install-alpha")))),
+                disconnect_cleanup: None,
+            }],
+            None,
+            identity_store.clone(),
+            identity_store,
+            None,
+            Some(reader.clone()),
+            None,
+        );
+
+        let states = facade
+            .caller_channel_account_states(caller())
+            .await
+            .expect("account states");
+        let state = states
+            .get(EXTENSION)
+            .expect("vendor account state projected");
+        assert_eq!(
+            state.account_status,
+            Some(CredentialAccountStatus::RefreshFailed),
+            "the caller's real durable status must reach the wire, not the connection bool",
+        );
+        assert_eq!(state.active_flow_status, None);
+        assert_eq!(
+            reader.calls(),
+            vec![(caller().user_id, VENDOR.to_string())],
+            "the reader was consulted for the caller + vendor",
+        );
+
+        let foreign = WebUiAuthenticatedCaller::new(
+            TenantId::new("tenant:other").expect("tenant"),
+            UserId::new("user:alice").expect("user"),
+            None::<AgentId>,
+            None,
+        );
+        assert!(
+            facade
+                .caller_channel_account_states(foreign)
+                .await
+                .expect("account states")
+                .is_empty(),
+            "a foreign tenant gets no account states",
+        );
+    }
+
+    struct RecordingAccountStatusReader {
+        status: Option<CredentialAccountStatus>,
+        calls: Mutex<Vec<(UserId, String)>>,
+    }
+
+    impl RecordingAccountStatusReader {
+        fn new(status: Option<CredentialAccountStatus>) -> Self {
+            Self {
+                status,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<(UserId, String)> {
+            self.calls.lock().expect("lock").clone()
+        }
+    }
+
+    #[async_trait]
+    impl ChannelAccountStatusReader for RecordingAccountStatusReader {
+        async fn account_status_for_caller(
+            &self,
+            caller: &WebUiAuthenticatedCaller,
+            provider: &str,
+        ) -> Result<Option<CredentialAccountStatus>, RebornServicesError> {
+            self.calls
+                .lock()
+                .expect("lock")
+                .push((caller.user_id.clone(), provider.to_string()));
+            Ok(self.status)
+        }
+    }
+
     /// Discovered-extension disconnect: the generic DM-target cleanup drops
     /// the caller's provisioned direct-conversation record between the
     /// credential revoke and the binding delete.
@@ -757,7 +956,7 @@ team_id = "/team/id"
             ManifestSource::HostBundled,
             &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
             None,
-            &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+            &product_extension_host_api_contract_registry().expect("contracts"),
         )
         .expect("fixture manifest parses");
         let extension_id = ExtensionId::new(EXTENSION).expect("extension id");
@@ -772,6 +971,7 @@ team_id = "/team/id"
                     ExtensionManifestRef::new(extension_id.clone(), None),
                     Vec::new(),
                     chrono::Utc::now(),
+                    ironclaw_extensions::InstallationOwner::Tenant,
                 )
                 .expect("installation"),
             )
@@ -809,6 +1009,7 @@ team_id = "/team/id"
             Some(installation_store as Arc<dyn ExtensionInstallationStore>),
             identity_store.clone(),
             identity_store.clone(),
+            None,
             None,
             Some(Arc::clone(&dm_store)),
         );

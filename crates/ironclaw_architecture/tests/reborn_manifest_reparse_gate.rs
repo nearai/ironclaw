@@ -1,5 +1,5 @@
-//! REC-1 gate: raw manifest TOML is reparsed only by the **compiler**,
-//! **migration**, and **bundled-asset** paths — never by a projection/loader
+//! REC-1 gate: raw manifest TOML is reparsed only by the **compiler** and
+//! **bundled-asset** paths — never by a projection/loader
 //! path that reads an installed extension. An installed extension projects
 //! from its persisted resolved record (`ExtensionManifestRecord::from_resolved`
 //! / `resolved.to_internal`), so a NEW `ExtensionManifest::parse` /
@@ -31,9 +31,6 @@ fn workspace_root() -> PathBuf {
 enum ReparseCategory {
     /// One-time compile of a manifest into a resolved record at install/ingest.
     Compiler,
-    /// One-time migration/backfill of legacy raw-TOML records (reads the
-    /// resolved record when present; reparses only pre-resolved legacy rows).
-    Migration,
     /// Compile of a host-bundled static manifest asset — there is no installed
     /// resolved record for a pure bundled descriptor.
     BundledAsset,
@@ -41,25 +38,13 @@ enum ReparseCategory {
 
 /// `(path, call_count, category, justification)`. Every production reparse site
 /// lives here; the call count is pinned so a new reparse in an existing
-/// compiler/migration module still forces a conscious allowlist edit.
+/// compiler module still forces a conscious allowlist edit.
 const ALLOWLIST: &[(&str, usize, ReparseCategory, &str)] = &[
     (
         "crates/ironclaw_extensions/src/lib.rs",
         1,
         ReparseCategory::Compiler,
         "the canonical manifest-file loader/parser in the manifest-owning crate (load_package_entry)",
-    ),
-    (
-        "crates/ironclaw_reborn_migration/src/convert/extensions.rs",
-        1,
-        ReparseCategory::Migration,
-        "legacy v2 installed-record → v3 conversion",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/extension_host/extension_installation_store.rs",
-        1,
-        ReparseCategory::Migration,
-        "legacy backfill: from_resolved when a resolved record exists, from_toml only for pre-resolved legacy rows",
     ),
     (
         "crates/ironclaw_product_adapter_registry/src/lib.rs",
@@ -80,10 +65,10 @@ const ALLOWLIST: &[(&str, usize, ReparseCategory, &str)] = &[
         "install/activation-time compile of the installed manifest into its resolved record",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/host_ingress.rs",
+        "crates/ironclaw_reborn_composition/src/extension_host/available_extension_import.rs",
         1,
-        ReparseCategory::BundledAsset,
-        "legacy bundled-channel ingress descriptor built from the static bundled asset; retires at the canonical /webhooks/extensions cutover",
+        ReparseCategory::Compiler,
+        "install-time compile of an imported (zip-uploaded) manifest into its resolved record",
     ),
 ];
 
@@ -185,7 +170,7 @@ fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 #[test]
-fn manifest_reparse_stays_within_the_compiler_migration_and_bundled_paths() {
+fn manifest_reparse_stays_within_the_compiler_and_bundled_paths() {
     let root = workspace_root();
     let mut files = Vec::new();
     for subtree in ["crates", "src"] {
@@ -223,7 +208,7 @@ fn manifest_reparse_stays_within_the_compiler_migration_and_bundled_paths() {
             None => problems.push(format!(
                 "NEW manifest reparse in `{path}` ({count} call(s)) — a projection/loader path must \
                  read the persisted resolved record (from_resolved / resolved.to_internal), not \
-                 reparse raw TOML. If this is a compiler/migration/bundled-asset site, add it to \
+                 reparse raw TOML. If this is a compiler/bundled-asset site, add it to \
                  ALLOWLIST with its category and justification."
             )),
             Some(expected) if expected != count => problems.push(format!(

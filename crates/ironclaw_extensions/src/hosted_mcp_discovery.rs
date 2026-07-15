@@ -63,6 +63,7 @@ pub fn package_with_discovered_hosted_mcp_tools(
             effects: capability.effects.clone(),
             default_permission: capability.default_permission,
             runtime_credentials: capability.runtime_credentials.clone(),
+            network_targets: capability.network_targets.clone(),
             resource_profile: capability.resource_profile.clone(),
         })
         .collect();
@@ -196,6 +197,9 @@ fn discovered_capability_manifest(
         prompt_doc_ref: None,
         required_host_ports: template.required_host_ports.clone(),
         runtime_credentials: template.runtime_credentials.clone(),
+        // MCP discovered tools derive egress from their credential audiences,
+        // not a manifest-declared allowlist.
+        network_targets: Vec::new(),
         resource_profile: template.resource_profile.clone(),
     })
 }

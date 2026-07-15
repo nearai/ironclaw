@@ -11,6 +11,12 @@ default_agent = "reborn-cli-agent"
 [runner]
 heartbeat_interval_secs = 5
 poll_interval_ms = 200
+# Hosted single-tenant has one elected process as the turn-runner authority.
+# Do not cap global runner slots here: the LLM/provider and storage pool should
+# be the bottlenecks, not an artificial in-process semaphore. Per-user and
+# trigger caps still use the compiled safety defaults unless explicitly
+# overridden.
+worker_count = 0
 
 [skills]
 regex_activation_enabled = true
@@ -20,14 +26,11 @@ backend = "postgres"
 url_env = "IRONCLAW_REBORN_POSTGRES_URL"
 secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
 # All Postgres-backed subsystems (turns, threads, messages, events, secrets)
-# share this single pool, and each filesystem op checks out a connection. A
-# size of 1-2 starves the heartbeat/webui under a single turn, so the runner
-# lease expires and the turn wedges. Size for runtime concurrency while staying
-# under the upstream pooler cap: the reference deployment fronts Postgres with
-# the Supabase Supavisor session pooler (default pool size ~15), so 10 leaves
-# headroom for migrations and any admin sessions. Override at runtime without a
-# redeploy via IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE (env wins over this file).
-pool_max_size = 10
+# share this single pool, and each filesystem op checks out a connection. Size
+# for runtime concurrency while leaving room for migrations and admin sessions.
+# Override at runtime without a redeploy via
+# IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE (env wins over this file).
+pool_max_size = 32
 # Remote Postgres defaults to TLS. For trusted private-network deployments
 # where the provider cannot complete TLS, set both DATABASE_SSLMODE=disable
 # and IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT=true.

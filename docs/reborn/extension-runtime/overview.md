@@ -688,7 +688,7 @@ validation probe → store.
 ## 6. Lifecycle and standard state machines
 
 `ExtensionHost` (new crate) is the **only** active-set writer. Operations:
-install, activate, deactivate, upgrade, remove, restore-at-startup. Every
+install, activate, deactivate, upgrade, remove. Every
 extension moves through the **same pipeline and the same states** — the only
 extension-specific participation is manifest data and the two idempotent
 adapter hooks. No extension may introduce a state, a cleanup path, or a
@@ -697,39 +697,63 @@ crates) and by the architecture gates.
 
 ### 6.1 Installation state machine (one enum, every extension)
 
+The installation state is an **honest projection**, not a persisted multi-step
+machine. The durable intent is `ironclaw_extensions::ExtensionActivationState`
+(`{Installed, Disabled, Enabled}`); the wire/UI enum below is projected from that
+intent plus active-set membership, the record's `last_error`, credential
+completeness, and runtime support.
+
 ```text
-Installed ──activate──▶ Activating ──publish──▶ Active
-    ▲                        │ failure                │
-    └────────────────────────┘                        │ deactivate/upgrade
-                                                      ▼
-Removed ◀──done── Removing ◀──remove── Installed ◀── Deactivating (drain)
-                     │ cleanup failure        
-                     ▼
-              RemovalPending ──retry──▶ Removing
+              activate ok
+  Installed ───────────────▶ Active
+     │  ▲                      │
+     │  └─────── deactivate ───┘
+     │                         │
+     │ activate fails          │ re-activate fails
+     ▼ (non-auth)              ▼ (non-auth)
+    Failed ◀──────────────────┘   (carries last_error; no auto-retry)
 ```
 
-- `Activating`, `Deactivating`, `Removing` are transient and persisted, so a
-  crash mid-transition resumes deterministically at startup.
-- Activation failure returns to `Installed` with a typed, redacted error on the
-  record — never a half-published extension.
-- `RemovalPending` is the standard "vendor cleanup failed, will retry" state.
-  It is visible, retryable, and cannot report success early or resurrect the
-  extension.
+- One enum, snake_case on the wire: `installed | configured | active | disabled
+  | failed | unsupported`. The host persists only the working subset it can
+  prove — `Installed` (staged), `Active` (serving), `Failed` (activation failed,
+  carries a typed redacted `last_error`). `Configured` (required credentials
+  present, not yet active), `Disabled` (user turned it off), and `Unsupported`
+  (runtime cannot serve) are **derived at projection time**. `Removed` is an
+  action-response signal only — removal drops the record; it is never a resting
+  state.
+- `Failed` is the terminal **non-auth** activation failure (capability/route
+  conflict, bad bind, unsupported runtime); it does not auto-retry and is
+  distinct from a pristine `Installed`. **Auth**-rejection failures are
+  represented by the auth-account axis (§6.3), not here.
+- There is no transient `Activating`/`Deactivating`/`Removing`/`RemovalPending`
+  state: under the single-serving-process model those windows are internal to a
+  mutex-held operation, never observed on the wire, and the durable intent plus
+  `last_error` already reconstruct the resting state after a restart. Activation
+  and removal are **operations**, not persisted intermediate states.
 - The wire exposes exactly this enum; the UI renders it identically for every
   extension.
 
-### 6.2 Removal order (fixed, host-owned)
+### 6.2 Removal (host-owned operation)
 
-1. Persist `Removing`; unpublish from the active snapshot (new work rejected).
-2. Drain in-flight work (bounded deadline; in-flight holds its generation `Arc`).
-3. `channel.cleanup()` — vendor-side unwiring, idempotent, best-effort.
-4. Auth engine: best-effort remote revoke per recipe; **always** delete local
-   grants/accounts scoped to this extension's vendors (unless another active
-   extension shares the vendor — then grants survive for it).
-5. Delete channel config/secrets, identity bindings, and route registrations.
-6. Persist `Removed`. Failure at 3–5 → `RemovalPending` + typed reason.
-7. Conversation and LLM history is **never** deleted (repo law); cleanup means
-   integration state only.
+Removal is a single host-owned operation, not a persisted state sequence. The
+fixed order is:
+
+1. Deactivate: unpublish from the active snapshot (new work rejected) and drain
+   in-flight work under a bounded deadline (in-flight holds its generation `Arc`).
+2. `channel.cleanup()` — vendor-side unwiring, idempotent, best-effort.
+3. Auth engine (`cleanup_for_lifecycle`): best-effort remote revoke per recipe
+   and cancellation of pending auth flows; **always** delete local grants/
+   accounts scoped to this extension's vendors — unless another active extension
+   shares the vendor, in which case its grants survive. Ownership-aware and
+   idempotent.
+4. Delete channel config/secrets, identity bindings, and route registrations.
+5. Drop the installation record.
+
+Failure in 2–4 fails the operation loud with a typed, redacted quarantine
+reason; the caller retries removal. There is no dormant "removal-pending" state
+and no early success. Conversation and LLM history is **never** deleted (repo
+law); cleanup means integration state only.
 
 The same order runs for every extension. Slack's old bespoke cleanup
 (`extension remove` special cases) is deleted, not generalized.
@@ -742,14 +766,18 @@ states or transitions:
 ```text
 Disconnected ──start flow──▶ Authenticating ──callback ok──▶ Connected
       ▲                            │ TTL/denied/error              │
-      │◀───────────────────────────┘                               │
-      │                                     refresh failure/expiry ▼
-      │◀──────── Revoking ◀──disconnect/removal── Connected / Expired
+      │◀───────────────────────────┘                              │
+      │                                    refresh failure/expiry  ▼
+      │                                                         Expired
+      │◀───────── disconnect / removal (delete account) ───────────┘
 ```
 
-- States: `disconnected | authenticating | connected | expired | revoking`,
-  plus a typed `last_error`. `Refreshing` is internal to the engine and never
-  observable as a distinct wire state.
+- States: `disconnected | authenticating | connected | expired`, plus a typed
+  `last_error` (`refresh_failed | grant_revoked | flow_expired | vendor_denied |
+  exchange_failed | validation_probe_failed | credential_missing`). `Refreshing`
+  is internal to the engine and never observable as a distinct wire state.
+  Disconnect and removal delete the account synchronously, so there is no
+  transient "revoking" wire state.
 - `api_key` uses the same machine (`authenticating` = form submitted +
   validation probe running).
 - Exactly one transition consumes a callback (replay-safe); flow TTL expiry
@@ -773,9 +801,11 @@ behavior without a wire break.
 
 ### 6.5 Other lifecycle rules
 
-- Startup restores all enabled generations from persisted records and publishes
-  once; an invalid extension is skipped with a typed error and does not block
-  valid ones.
+- Startup re-activates every extension whose durable intent
+  (`ExtensionActivationState::Enabled`) says so, publishing one generation —
+  it re-derives `Active` from the durable intent, not by resuming any
+  persisted transient state (none exists); an invalid extension is skipped
+  with a typed error and does not block valid ones.
 - Upgrade — boot-time adoption of a changed host-bundled contract — swaps the
   new generation atomically; the old generation drains via its `Arc`. A
   widening consent gate is deliberately not built (§3.3, §7).

@@ -11,6 +11,7 @@
 //! (`mcp`, `mcp_discovery`) behind one internal module. The crate root re-exports
 //! the same public items from here so the crate's public API is unchanged.
 
+pub(crate) mod available_extension_import;
 pub(crate) mod available_extensions;
 pub(crate) mod bundled_skills;
 pub(crate) mod channel_config;
@@ -23,10 +24,10 @@ pub(crate) mod channel_host;
 pub(crate) mod channel_identity;
 pub(crate) mod channel_identity_store;
 pub(crate) mod channel_outbound_targets;
-pub(crate) mod channel_state_folds;
 pub(crate) mod channel_subject_routes;
 pub(crate) mod channel_triggered_delivery;
 pub(crate) mod extension_activation_credentials;
+pub(crate) mod extension_bundle;
 pub(crate) mod extension_credential_requirements;
 pub(crate) mod extension_ingress;
 pub(crate) mod extension_installation_store;
@@ -35,10 +36,10 @@ pub(crate) mod extension_lifecycle_capabilities;
 #[cfg(test)]
 pub(crate) mod extension_lifecycle_capabilities_auth_tests;
 pub(crate) mod extension_lifecycle_command;
+pub(crate) mod extension_removal_cleanup;
 pub(crate) mod generic_host;
 pub(crate) mod gsuite;
-#[cfg(feature = "webui-v2-beta")]
-pub(crate) mod legacy_ingress_aliases;
+pub(crate) mod host_api_contracts;
 pub(crate) mod lifecycle;
 pub(crate) mod mcp;
 pub(crate) mod mcp_discovery;
@@ -46,3 +47,7 @@ pub(crate) mod run_delivery_ports;
 pub(crate) mod skill_learning;
 pub(crate) mod skill_listing;
 pub(crate) mod webui_extension_credentials;
+
+// Keep the bundle policy owned by `extension_bundle`; lifecycle consumes only
+// the decoder through this narrow module-level seam.
+pub(crate) use extension_bundle::unzip_extension_bundle;

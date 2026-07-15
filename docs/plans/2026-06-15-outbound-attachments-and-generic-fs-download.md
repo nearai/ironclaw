@@ -30,7 +30,7 @@ approach (§3.1–3.3 dropped). The agent references files it creates by their `
 path; the WebUI renders workspace-path references as downloadable file chips over the
 generic endpoint. Rationale: the download is a presentation concern over the filesystem
 (the path *is* the file's identity), it reuses the already-built generic endpoint, and
-it avoids a deep/risky change to the core agent loop (`ironclaw_loop_support` finalize +
+it avoids a deep/risky change to the core agent loop (`ironclaw_loop_host` finalize +
 `AssistantReply`). A structured `attach_file` tool + harvest can be added later *iff* a
 non-text surface needs native structured attachments (e.g. Slack file upload) — at which
 point a concrete consumer justifies the cost. The `attach_file` tool work explored this
@@ -172,7 +172,7 @@ profile.
 
 ### 3.2 Harvest refs onto the finalized assistant message _(dropped — not implemented)_
 
-**Crate:** `ironclaw_turns` (loop host) + `ironclaw_reborn`/composition (the
+**Crate:** `ironclaw_turns` (loop host) + `ironclaw_runner`/composition (the
 `LoopTranscriptPort` impl).
 
 The loop already streams capability results past
@@ -374,7 +374,7 @@ pass.
 | Layer | File(s) |
 |-------|---------|
 | Tool | `crates/ironclaw_first_party_extensions/src/coding/{file.rs,mod.rs}`, `crates/ironclaw_host_runtime/src/first_party_tools/mod.rs` |
-| Harvest | `crates/ironclaw_turns/src/run_profile/host.rs`, the `LoopTranscriptPort` impl in `ironclaw_reborn`/composition |
+| Harvest | `crates/ironclaw_turns/src/run_profile/host.rs`, the `LoopTranscriptPort` impl in `ironclaw_runner`/composition |
 | Persist | reuses `crates/ironclaw_threads/src/contract.rs` (`attachments`, `MessageContent::with_attachments`) — no change |
 | Projection | `crates/ironclaw_product_adapters/src/outbound.rs`, `crates/ironclaw_webui_v2/src/schema.rs` |
 | FS read port | `crates/ironclaw_product_workflow/src/reborn_services/project_fs.rs` (+ `reborn_services.rs`, `lib.rs`) |
