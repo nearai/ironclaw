@@ -2151,12 +2151,13 @@ async fn append_tool_result_reference_persists_model_observation_in_envelope() {
 }
 
 /// Issue #5838: `ironclaw_reborn_composition::local_dev` inlines a first-look
-/// result preview up to `TOOL_RESULT_RECORD_READ_MAX_BYTES` (2048 bytes) into
-/// the `result_reference` observation. This pins that a full-size,
-/// JSON-braces-heavy 2048-byte preview survives this crate's own
-/// `validate_model_observation` boundary (whole-envelope cap 4096 bytes) —
-/// the preview is not dropped, and it appears in the replayed model-visible
-/// content.
+/// result preview up to `TOOL_RESULT_RECORD_READ_MAX_BYTES` into the
+/// `result_reference` observation. This pins that a full-size,
+/// JSON-braces-heavy preview at that cap survives this crate's own
+/// `validate_model_observation` boundary (`MAX_MODEL_OBSERVATION_BYTES`,
+/// derived from `TOOL_RESULT_RECORD_READ_MAX_BYTES` with escaping/overhead
+/// headroom) — the preview is not dropped, and it appears in the replayed
+/// model-visible content.
 #[tokio::test]
 async fn append_tool_result_reference_retains_full_size_result_preview() {
     let service = InMemorySessionThreadService::default();
@@ -2172,24 +2173,27 @@ async fn append_tool_result_reference_retains_full_size_result_preview() {
         .await
         .unwrap();
 
-    // JSON-braces-heavy text repeated to exactly 2048 bytes, matching the
-    // production preview cap.
+    // JSON-braces-heavy text repeated to exactly the production preview cap,
+    // stressing worst-case JSON-string-escaping inflation (every `"` doubles
+    // under escaping) against the whole-envelope validator.
     let unit = r#"{"id":1,"value":"x"},"#;
-    let mut preview = unit.repeat(2048 / unit.len() + 1);
-    preview.truncate(2048);
-    assert_eq!(preview.len(), 2048);
+    let mut preview = unit.repeat(TOOL_RESULT_RECORD_READ_MAX_BYTES / unit.len() + 1);
+    preview.truncate(TOOL_RESULT_RECORD_READ_MAX_BYTES);
+    assert_eq!(preview.len(), TOOL_RESULT_RECORD_READ_MAX_BYTES);
 
     let observation = serde_json::json!({
         "schema_version": 1,
         "status": "success",
-        "summary": "Tool completed; preview truncated, use result_read with the result reference and offset 2048 for more output.",
+        "summary": format!(
+            "Tool completed; preview truncated, use result_read with the result reference and offset {TOOL_RESULT_RECORD_READ_MAX_BYTES} for more output."
+        ),
         "detail": {
             "kind": "result_reference",
             "result_ref": "result:full-size-result-preview-tool",
-            "byte_len": 9000,
+            "byte_len": TOOL_RESULT_RECORD_READ_MAX_BYTES * 2,
             "preview": preview,
-            "total_bytes": 9000,
-            "next_offset": 2048
+            "total_bytes": TOOL_RESULT_RECORD_READ_MAX_BYTES * 2,
+            "next_offset": TOOL_RESULT_RECORD_READ_MAX_BYTES
         },
         "artifacts": [{
             "artifact_ref": "result:full-size-result-preview-tool",
@@ -2217,7 +2221,7 @@ async fn append_tool_result_reference_retains_full_size_result_preview() {
     assert_eq!(
         envelope.model_observation,
         Some(observation),
-        "a full-size 2048-byte preview must not be dropped by envelope validation"
+        "a full-size preview at the production cap must not be dropped by envelope validation"
     );
     // The replayed content is the JSON-encoded observation, so the quote
     // characters in the JSON-braces-heavy preview are escaped there; compare

@@ -10,7 +10,19 @@ use serde::{Deserialize, Serialize};
 // ASCII letters, digits, `_`, `-`, or `.`.
 const MAX_TOOL_RESULT_REF_BYTES: usize = 256;
 const MAX_TOOL_RESULT_SUMMARY_BYTES: usize = 512;
-const MAX_MODEL_OBSERVATION_BYTES: usize = 4096;
+/// Whole-envelope cap for a `model_observation` JSON blob (preview text plus
+/// surrounding schema fields). Derived from
+/// `crate::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES` (the largest raw
+/// preview/chunk this crate will ever embed) with 2.5x headroom: JSON-string
+/// escaping of adversarial preview content can double byte count (every `"`
+/// becomes `\"`), and the remaining margin covers the fixed envelope fields
+/// (summary, result_ref, artifacts). See
+/// `append_tool_result_reference_retains_full_size_result_preview` for the
+/// worst-case-escaping regression pin. Keep this derived, not a second
+/// independent literal -- see PR #5902 (100,000 -> 2,048 regression) for what
+/// happens when the preview cap and this ceiling drift apart.
+const MAX_MODEL_OBSERVATION_BYTES: usize =
+    crate::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES * 5 / 2 + 4096;
 const MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION: u64 = 1;
 const MODEL_OBSERVATION_SUMMARY_MAX_BYTES: usize = 512;
 const MODEL_OBSERVATION_ARTIFACTS_MAX: usize = 16;
