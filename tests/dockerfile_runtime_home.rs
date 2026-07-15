@@ -117,12 +117,12 @@ fn runtime_image_declares_and_prepares_ironclaw_home() {
         "runtime image must set HOME to /home/ironclaw for ~/.ironclaw state",
     );
     assert!(
-        dockerfile.contains("WORKDIR /home/ironclaw"),
-        "runtime image must start in the ironclaw home directory",
+        dockerfile.contains("mkdir -p /data/ironclaw-reborn /workspace"),
+        "runtime image must prepare the Reborn data directory and default workspace",
     );
     assert!(
-        dockerfile.contains("mkdir -p /home/ironclaw/.ironclaw"),
-        "runtime image must pre-create ~/.ironclaw before dropping privileges",
+        dockerfile.contains("WORKDIR /workspace"),
+        "runtime image must preserve the Reborn default workspace as the process directory",
     );
 }
 
