@@ -1019,6 +1019,82 @@ test("useChatEvents: projection approval gate preserves always-allow affordance"
   assert.equal(activity?.toolName, "Approval required");
 });
 
+test("useChatEvents: runtime replay cannot overwrite a hydrated approval gate", () => {
+  const runId = "run-hydrated-approval";
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: runId, status: "blocked_approval" } },
+          {
+            gate: {
+              run_id: runId,
+              gate_kind: "approval",
+              gate_ref: "gate:hydrated-approval",
+              invocation_id: "invocation-hydrated-approval",
+              headline: "Approval required",
+              allow_always: true,
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  harness.handleEvent({
+    type: "projection_snapshot",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: runId, status: "running" } },
+          {
+            capability_activity: {
+              invocation_id: "invocation-hydrated-approval",
+              turn_run_id: runId,
+              capability_id: "builtin.echo",
+              status: "running",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.pendingGate?.gateRef, "gate:hydrated-approval");
+  assert.equal(harness.isProcessing, false);
+  assert.deepEqual(plain(harness.activeRun), {
+    runId,
+    threadId: "thread-1",
+    status: "blocked_approval",
+  });
+  assert.equal(
+    harness.messages.find(
+      (message) => message.id === "tool-invocation-hydrated-approval",
+    )?.toolStatus,
+    "running",
+  );
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: runId, status: "queued" } }],
+      },
+    },
+  });
+
+  assert.equal(harness.pendingGate, null);
+  assert.equal(harness.isProcessing, true);
+  assert.deepEqual(plain(harness.activeRun), {
+    runId,
+    threadId: "thread-1",
+    status: "queued",
+  });
+});
+
 test("useChatEvents: projection gate visibility is independent of item order", () => {
   const runId = "run-gate-before-status";
   const harness = createUseChatEventsHarness();

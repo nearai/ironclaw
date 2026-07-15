@@ -424,10 +424,28 @@ function applyProjectionItems({
         runId && PROMPT_RUN_STATUSES.has(status)
           ? locallyResolvedStateForRun(locallyResolvedGatesRef, runId)
           : null;
+      const pendingPromptOwnsRunDecision = Boolean(
+        status === "running" &&
+          runId &&
+          promptRunIdRef?.current === runId &&
+          activeRunRef?.current?.runId === runId &&
+          GATE_ACTIVE_RUN_STATUSES.has(activeRunRef.current.status),
+      );
       if (runId && stalePromptRunIds.has(runId)) {
         continue;
       }
       if (isStaleLocalRunStatus) {
+        continue;
+      }
+      // Runtime replay and turn lifecycle updates share the run_status wire
+      // shape. On subscription startup the blocked-turn gate is delivered
+      // first so it cannot wait forever for a runtime item, then the runtime
+      // snapshot may still report the parked capability as `running`. That
+      // runtime fact must not clear the authoritative turn gate and put the UI
+      // back into typing mode. A real gate resolution emits `queued` from the
+      // turn coordinator before the run is claimed again, which still clears
+      // the prompt through the normal branch below.
+      if (pendingPromptOwnsRunDecision) {
         continue;
       }
       if (isStaleTerminalStatus) {
