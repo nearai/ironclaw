@@ -123,7 +123,7 @@ Then open **`http://127.0.0.1:3000/v2`** and log in with the
 test harnesses, though the banner still prints `:0`. `[webui].listen_port = 0`
 in `config.toml` is **rejected**, since a config-driven ephemeral port is almost
 always a mistake. For the Slack host-beta ingress, build with
-`--features slack-v2-host-beta` (it includes `webui-v2-beta`).
+`--features webui-v2-beta` (Slack ships as a first-party extension; no separate feature).
 
 ### Choose your model provider
 

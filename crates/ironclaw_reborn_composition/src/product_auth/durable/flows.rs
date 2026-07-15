@@ -570,12 +570,12 @@ where
                         if let Some(h) = &previous_access_secret
                             && previous_access_secret.as_ref() != account.access_secret.as_ref()
                         {
-                            let _ = self.secret_store.delete(&request.scope.resource, h).await;
+                            self.purge_secret_handle(&request.scope.resource, h).await;
                         }
                         if let Some(h) = &previous_refresh_secret
                             && previous_refresh_secret.as_ref() != account.refresh_secret.as_ref()
                         {
-                            let _ = self.secret_store.delete(&request.scope.resource, h).await;
+                            self.purge_secret_handle(&request.scope.resource, h).await;
                         }
                         Ok(account.id)
                     }
@@ -626,12 +626,12 @@ where
         if let Some(h) = &previous_access_secret
             && previous_access_secret.as_ref() != account.access_secret.as_ref()
         {
-            let _ = self.secret_store.delete(&scope.resource, h).await;
+            self.purge_secret_handle(&scope.resource, h).await;
         }
         if let Some(h) = &previous_refresh_secret
             && previous_refresh_secret.as_ref() != account.refresh_secret.as_ref()
         {
-            let _ = self.secret_store.delete(&scope.resource, h).await;
+            self.purge_secret_handle(&scope.resource, h).await;
         }
         Ok(account_id)
     }

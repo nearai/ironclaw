@@ -27,7 +27,7 @@ class ValidateRebornBinaryArtifactTests(unittest.TestCase):
             f"{digest}  {VALIDATOR.ARCHIVE_NAME}\n",
             encoding="utf-8",
         )
-        self.write_manifest("webui-v2-beta,slack-v2-host-beta")
+        self.write_manifest("webui-v2-beta")
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -50,7 +50,7 @@ class ValidateRebornBinaryArtifactTests(unittest.TestCase):
         VALIDATOR.validate_artifact(
             self.artifact_dir,
             "a" * 40,
-            "webui-v2-beta,slack-v2-host-beta",
+            "webui-v2-beta",
         )
 
     def test_accepts_array_feature_superset(self) -> None:
@@ -65,7 +65,7 @@ class ValidateRebornBinaryArtifactTests(unittest.TestCase):
         VALIDATOR.validate_artifact(
             self.artifact_dir,
             "a" * 40,
-            "webui-v2-beta,slack-v2-host-beta",
+            "webui-v2-beta",
         )
 
     def test_rejects_missing_required_feature(self) -> None:
@@ -75,7 +75,7 @@ class ValidateRebornBinaryArtifactTests(unittest.TestCase):
             VALIDATOR.validate_artifact(
                 self.artifact_dir,
                 "a" * 40,
-                "webui-v2-beta,slack-v2-host-beta",
+                "webui-v2-beta",
             )
 
     def test_rejects_invalid_feature_shape(self) -> None:
@@ -87,7 +87,7 @@ class ValidateRebornBinaryArtifactTests(unittest.TestCase):
             VALIDATOR.validate_artifact(
                 self.artifact_dir,
                 "a" * 40,
-                "webui-v2-beta,slack-v2-host-beta",
+                "webui-v2-beta",
             )
 
     def test_rejects_empty_feature_entries(self) -> None:
@@ -99,7 +99,7 @@ class ValidateRebornBinaryArtifactTests(unittest.TestCase):
                     VALIDATOR.validate_artifact(
                         self.artifact_dir,
                         "a" * 40,
-                        "webui-v2-beta,slack-v2-host-beta",
+                        "webui-v2-beta",
                     )
 
     def test_rejects_duplicate_features(self) -> None:
@@ -114,7 +114,7 @@ class ValidateRebornBinaryArtifactTests(unittest.TestCase):
                     VALIDATOR.validate_artifact(
                         self.artifact_dir,
                         "a" * 40,
-                        "webui-v2-beta,slack-v2-host-beta",
+                        "webui-v2-beta",
                     )
 
     def test_rejects_corrupt_archive(self) -> None:
@@ -124,12 +124,12 @@ class ValidateRebornBinaryArtifactTests(unittest.TestCase):
             VALIDATOR.validate_artifact(
                 self.artifact_dir,
                 "a" * 40,
-                "webui-v2-beta,slack-v2-host-beta",
+                "webui-v2-beta",
             )
 
     def test_rejects_mismatched_manifest(self) -> None:
         self.write_manifest(
-            "webui-v2-beta,slack-v2-host-beta",
+            "webui-v2-beta",
             product_ref="b" * 40,
         )
 
@@ -137,7 +137,7 @@ class ValidateRebornBinaryArtifactTests(unittest.TestCase):
             VALIDATOR.validate_artifact(
                 self.artifact_dir,
                 "a" * 40,
-                "webui-v2-beta,slack-v2-host-beta",
+                "webui-v2-beta",
             )
 
 

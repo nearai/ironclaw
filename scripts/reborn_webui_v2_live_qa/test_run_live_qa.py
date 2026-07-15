@@ -7312,11 +7312,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIn("if ! (", prepare_body)
         self.assertIn("validate_reborn_binary_artifact.py", prepare_body)
         self.assertIn(
-            "--features webui-v2-beta,slack-v2-host-beta",
+            "--features webui-v2-beta",
             prepare_body,
         )
         self.assertIn(
-            "webui-v2-beta,slack-v2-host-beta",
+            "webui-v2-beta",
             prepare_body,
         )
         self.assertIn("using the canary fallback build", prepare_body)
@@ -7332,11 +7332,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             reborn_e2e,
         )
         self.assertIn(
-            "--features openai-compat-beta,slack-v2-host-beta",
+            "--features openai-compat-beta",
             reborn_e2e,
         )
         self.assertIn(
-            '["openai-compat-beta","slack-v2-host-beta","webui-v2-beta"]',
+            '["openai-compat-beta","webui-v2-beta"]',
             reborn_e2e,
         )
         self.assertIn(

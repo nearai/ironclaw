@@ -338,7 +338,7 @@ mode also requires `--confirm-host-access` and refuses non-loopback hosts.
 
 ### Slack service
 
-Slack support is compiled behind the `slack-v2-host-beta` Cargo feature. That
+Slack ships as a first-party extension in the unified extension runtime. That
 feature includes `webui-v2-beta`, so Slack runs on the same `serve` command:
 
 ```bash
@@ -348,7 +348,7 @@ export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"
 export IRONCLAW_REBORN_WEBUI_USER_ID="reborn-cli"
 export IRONCLAW_REBORN_SLACK_ENABLED="true"
 
-cargo run -q -p ironclaw_reborn_cli --features slack-v2-host-beta --bin ironclaw-reborn -- serve
+cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn -- serve
 ```
 
 Enable Slack by setting `IRONCLAW_REBORN_SLACK_ENABLED=true`, or by adding a

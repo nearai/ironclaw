@@ -5,7 +5,7 @@ not the legacy v1 Slack WASM channel.
 
 Slack support has two gates:
 
-1. The binary must be built with the `slack-v2-host-beta` Cargo feature.
+1. The binary must be built with the `webui-v2-beta` Cargo feature (Slack ships as a first-party extension; there is no separate Slack feature).
 2. Runtime config must set `[slack].enabled = true`, or the deployment env
    must set `IRONCLAW_REBORN_SLACK_ENABLED=true`.
 
@@ -20,7 +20,7 @@ For local source runs:
 ```bash
 cargo run -q \
   -p ironclaw_reborn_cli \
-  --features slack-v2-host-beta \
+  --features webui-v2-beta \
   --bin ironclaw-reborn \
   -- serve
 ```
@@ -30,18 +30,18 @@ For a local source build:
 ```bash
 cargo build \
   -p ironclaw_reborn_cli \
-  --features slack-v2-host-beta \
+  --features webui-v2-beta \
   --bin ironclaw-reborn
 ```
 
-`slack-v2-host-beta` includes `webui-v2-beta`, so do not pass both unless you
+Slack is included in every `webui-v2-beta` build, so no extra feature is
 prefer to be explicit:
 
 ```bash
---features webui-v2-beta,slack-v2-host-beta
+--features webui-v2-beta
 ```
 
-`Dockerfile.reborn` already builds with `webui-v2-beta,slack-v2-host-beta`.
+`Dockerfile.reborn` already builds with `webui-v2-beta`.
 Slack is still disabled unless the mounted or seeded Reborn config enables it.
 
 ## Public Endpoint
@@ -248,7 +248,7 @@ Start the service:
 ```bash
 cargo run -q \
   -p ironclaw_reborn_cli \
-  --features slack-v2-host-beta \
+  --features webui-v2-beta \
   --bin ironclaw-reborn \
   -- serve --host 127.0.0.1 --port 3000
 ```
@@ -275,9 +275,9 @@ Verification checklist:
 
 ## Troubleshooting
 
-### Slack enablement requires ... slack-v2-host-beta
+### Slack enablement
 
-Rebuild or rerun ironclaw-reborn with --features slack-v2-host-beta.
+Rebuild or rerun ironclaw-reborn with --features webui-v2-beta.
 
 ### Slack route never receives events
 

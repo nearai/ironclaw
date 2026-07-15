@@ -219,7 +219,7 @@ jobs:
         run: >-
           cargo build
           -p ironclaw_reborn_cli
-          --features openai-compat-beta,slack-v2-host-beta
+          --features openai-compat-beta
           --bin ironclaw-reborn
 
       - name: Mark OpenAI-compatible binary feature set
@@ -272,7 +272,7 @@ jobs:
           )
           jq -n \
             --arg product_ref "${product_ref}" \
-            --argjson features '["openai-compat-beta","slack-v2-host-beta","webui-v2-beta"]' \
+            --argjson features '["openai-compat-beta","webui-v2-beta"]' \
             '{format_version: 1, product_ref: $product_ref, features: $features}' \
             > "${artifact_dir}/manifest.json"
           echo "product_ref=${product_ref}" >> "${GITHUB_OUTPUT}"

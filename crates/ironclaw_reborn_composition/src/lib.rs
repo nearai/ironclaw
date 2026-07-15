@@ -86,7 +86,6 @@ pub use extension_host::extension_lifecycle_command::{
 pub use extension_host::gsuite::{
     bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers,
 };
-#[cfg(feature = "webui-v2-beta")]
 pub use extension_host::skill_listing::{RebornSkillListError, list_reborn_local_skills};
 #[cfg(feature = "test-support")]
 pub use factory::AttachmentTestSupport;

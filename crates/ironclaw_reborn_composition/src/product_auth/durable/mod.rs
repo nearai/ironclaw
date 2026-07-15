@@ -150,6 +150,22 @@ where
         lock
     }
 
+    /// Best-effort secret deletion for rotation/cleanup paths: the handle is
+    /// already unreachable via the account record, so a failure only leaves
+    /// orphaned material — log it instead of dropping the error silently.
+    async fn purge_secret_handle(
+        &self,
+        scope: &ironclaw_host_api::ResourceScope,
+        handle: &ironclaw_host_api::SecretHandle,
+    ) {
+        if let Err(error) = self.secret_store.delete(scope, handle).await {
+            tracing::debug!(
+                secret_store_reason = error.stable_reason(),
+                "best-effort secret cleanup failed"
+            );
+        }
+    }
+
     async fn read_record<T>(
         &self,
         scope: &ResourceScope,
