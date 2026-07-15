@@ -78,7 +78,7 @@ cleanup into a compatibility break.
 ```bash
 bash scripts/codebase-graph.sh status
 cargo metadata --no-deps --format-version 1 \
-  | jq -r '.packages[] | select(.metadata.ironclaw.layer == "legacy") | .name'
+  | jq -r '.packages[] | select(.metadata?.ironclaw?.layer == "legacy") | .name'
 cargo metadata --no-deps --format-version 1 \
   | jq -r '.packages[] as $p | $p.dependencies[]? | select(.name=="ironclaw" or .name=="ironclaw_gateway" or .name=="ironclaw_tui" or .name=="ironclaw_embeddings") | $p.name + " -> " + .name'
 rg -l '(^use ironclaw::|\bironclaw::)' tests crates/ironclaw_reborn_migration
