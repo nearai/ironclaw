@@ -1,9 +1,11 @@
 # ironclaw_reborn_migration
 
-Standalone tool + library that converts **IronClaw v1 / engine-v2 persisted
-state** into the **Reborn** state substrate. Ships as its own binary
-(`ironclaw-reborn-migration`); the conversion engine is a library
-(`run_migration`) so it can later be wired into `ironclaw-reborn` startup.
+Standalone migration crate for Reborn operator migrations. The default build is
+legacy-free and ships the Reborn extension ownership migration binary. The full
+**IronClaw v1 / engine-v2 persisted state** importer remains available behind
+the explicit `full-migration` feature and ships as `ironclaw-reborn-migration`;
+the conversion engine is a library (`run_migration`) so it can later be wired
+into `ironclaw-reborn` startup.
 
 - **Read side** = the root `ironclaw` crate (`ironclaw::db::connect_with_handles`)
   — one v1 database (PostgreSQL **or** libSQL). Engine-v2 state is **not** a
@@ -20,7 +22,7 @@ state** into the **Reborn** state substrate. Ships as its own binary
   `MigrationReport` (the manifest), with the reason and the Reborn gap named.
 
 ```
-cargo run -p ironclaw_reborn_migration -- \
+cargo run -p ironclaw_reborn_migration --features full-migration,libsql -- \
   --source-libsql ~/.ironclaw/ironclaw.db \
   --target-libsql ./reborn-local-dev.db \
   --tenant-id default --agent-id default --dry-run
@@ -95,7 +97,8 @@ writes with, pinning conversion correctness independently of that reconciliation
 
 ## Tests
 
-`tests/migration_roundtrip.rs` (`required-features = ["libsql"]`, Docker-free):
+`tests/migration_roundtrip.rs` (`required-features = ["full-migration",
+"libsql"]`, Docker-free):
 seeds a rich v1+engine-v2 fixture (conversations, every routine trigger variant,
 cron + non-cron missions with a mission thread, memory docs, settings, a secret,
 an OAuth + a channel identity, an installed WASM tool), runs the migration, and
@@ -107,5 +110,5 @@ nothing. Add a Postgres variant with the `postgres_pool_or_skip()`
 skip-if-no-Docker helper (see `crates/ironclaw_reborn_composition/tests/postgres_substrate.rs`).
 
 ```
-cargo test -p ironclaw_reborn_migration --features libsql --test migration_roundtrip
+cargo test -p ironclaw_reborn_migration --features full-migration,libsql --test migration_roundtrip
 ```
