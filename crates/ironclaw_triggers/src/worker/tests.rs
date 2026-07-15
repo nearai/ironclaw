@@ -731,7 +731,9 @@ async fn tick_keeps_blocked_active_run_locked_until_terminal() {
         Arc::new(RecordingMaterializer::success("content:trigger-fire")),
         Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
         Arc::new(RecordingActiveRunLookup::with_state(
-            TriggerActiveRunState::Blocked,
+            TriggerActiveRunState::Blocked {
+                kind: BlockedActiveRunKind::Approval,
+            },
         )),
     );
 
@@ -2275,7 +2277,9 @@ async fn tick_fire_once_blocked_active_run_is_left_pending() {
         Arc::new(RecordingMaterializer::success("content:fire-once")),
         Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
         Arc::new(RecordingActiveRunLookup::with_state(
-            TriggerActiveRunState::Blocked,
+            TriggerActiveRunState::Blocked {
+                kind: BlockedActiveRunKind::Approval,
+            },
         )),
     );
 
@@ -2434,7 +2438,9 @@ async fn tick_recurring_blocked_active_run_stays_active() {
         Arc::new(RecordingMaterializer::success("content:trigger-fire")),
         Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
         Arc::new(RecordingActiveRunLookup::with_state(
-            TriggerActiveRunState::Blocked,
+            TriggerActiveRunState::Blocked {
+                kind: BlockedActiveRunKind::Approval,
+            },
         )),
     );
 

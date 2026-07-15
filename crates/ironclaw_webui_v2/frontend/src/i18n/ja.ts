@@ -1292,6 +1292,18 @@ registerPack("ja", {
   "automations.detail.thread": "スレッド",
   "automations.filter.failures": "失敗",
   "automations.filter.running": "実行中",
+  "automations.hold.approval": "承認待ちです",
+  "automations.hold.auth": "アカウントの再接続待ちです",
+  "automations.hold.inProgress": "前回の実行がまだ進行中です",
+  "automations.hold.meta.inProgress":
+    "{since}に開始 · 完了後に次の実行が始まります · 実行中に{count}件の予定された実行時刻が経過しました",
+  "automations.hold.meta.inProgressUnknownCount":
+    "{since}に開始 · 完了後に次の実行が始まります · 経過した予定実行時刻の件数は不明です",
+  "automations.hold.meta.paused":
+    "{since}から一時停止中 · 保留中に{count}件の予定された実行時刻が経過しました",
+  "automations.hold.meta.pausedUnknownCount":
+    "{since}から一時停止中 · 経過した予定実行時刻の件数は不明です",
+  "automations.hold.other": "前回の実行がまだ完了していません",
   "automations.status.needsReview": "確認が必要",
   "automations.status.running": "実行中",
   "automations.summary.failures": "失敗",

@@ -49,10 +49,12 @@ export function RunDots({ runs = [] }) {
           title={`${run.status_label} · ${run.fired_label}`}
           className={cn(
             "h-3 w-3 rounded-full border",
-            run.status === "ok" && "border-emerald-300/50 bg-emerald-400",
+            run.status === "ok" &&
+              "border-[color-mix(in_srgb,var(--v2-positive-text)_50%,var(--v2-panel-border))] bg-[var(--v2-positive-text)]",
             run.status === "error" && "border-red-300/50 bg-red-400",
             run.status === "running" && "border-sky-300/60 bg-sky-400",
-            run.status === "unknown" && "border-iron-500 bg-iron-600"
+            run.status === "unknown" &&
+              "border-[var(--v2-text-faint)] bg-[var(--v2-text-muted)]"
           )}
         />
       ))}
@@ -118,7 +120,7 @@ export function RecentRunRow({ run }) {
         </div>
         {run.run_id &&
         (
-          <div className="mt-1 truncate font-mono text-[11px] text-iron-500">
+          <div className="mt-1 truncate font-mono text-[11px] text-[var(--v2-text-muted)]">
             {t("automations.detail.run")} {run.run_id}
           </div>
         )}

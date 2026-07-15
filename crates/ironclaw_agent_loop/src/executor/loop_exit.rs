@@ -24,6 +24,48 @@ use super::{
 /// stays reviewable and versioned with the rest of the prompt surface.
 pub(super) const FINAL_ANSWER_NUDGE: &str = include_str!("../../prompts/final_answer_nudge.md");
 
+/// Instruction injected by the tools-capable completion nudge — drive the model
+/// to *finish* the task (writing any required output artifact with its tools)
+/// before answering, rather than merely synthesize prose from work already done.
+/// Unlike `FINAL_ANSWER_NUDGE`, this is delivered as an inline message on an
+/// ordinary loop iteration with the full tool surface still available.
+pub(super) const COMPLETION_NUDGE: &str = include_str!("../../prompts/completion_nudge.md");
+
+/// Hard cap on tools-capable completion nudges per run. Each nudge re-enters the
+/// loop for at least one more model call (plus any tool calls the model makes),
+/// so this bounds the extra work a stuck run can generate.
+pub(super) const COMPLETION_NUDGE_LIMIT: u32 = 2;
+
+/// Whether an admitted assistant reply "trailed off" without a real closing
+/// answer: empty after trimming, or ending in a colon (the model narrated a next
+/// step — "Let me write the file:" — but emitted no tool call, so the turn ended
+/// mid-intent). Mirrors nearai-bench's `trailed_off_without_answer` so the
+/// in-loop nudge fires on the same signal the out-of-loop bench nudge used.
+pub(super) fn reply_trailed_off(content: &str) -> bool {
+    let trimmed = content.trim();
+    trimmed.is_empty() || trimmed.ends_with(':')
+}
+
+/// Inline control message carrying the completion-nudge instruction. Delivered as
+/// a `User` turn (matching `FINAL_ANSWER_NUDGE`'s role and the bench nudge, which
+/// re-prompted the agent with a user message) so the model treats it as a fresh
+/// directive to act on with its tools. Fallible (never panics) like the
+/// `FINAL_ANSWER_NUDGE` construction: a malformed static body surfaces as a
+/// planner-contract error the caller propagates.
+pub(super) fn completion_nudge_control_message() -> Result<LoopInlineMessage, AgentLoopExecutorError>
+{
+    let safe_body =
+        LoopInlineMessageBody::new(COMPLETION_NUDGE.trim().to_string()).map_err(|_| {
+            AgentLoopExecutorError::PlannerContract {
+                detail: "completion-nudge control text was invalid",
+            }
+        })?;
+    Ok(LoopInlineMessage {
+        role: LoopInlineMessageRole::User,
+        safe_body,
+    })
+}
+
 /// Driver-specific "final-answer" nudge: when the loop would otherwise end a turn
 /// with no real assistant answer (empty/trailed-off reply, model-call budget
 /// exhausted, or no-progress detected), issue ONE extra **tool-free** model call

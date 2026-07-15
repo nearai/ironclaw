@@ -97,7 +97,10 @@ pub(super) fn model_error_class(error: &AgentLoopHostError) -> Option<ModelError
         AgentLoopHostErrorKind::Internal => Some(ModelErrorClass::Internal),
         AgentLoopHostErrorKind::InvalidOutput => Some(ModelErrorClass::InvalidOutput),
         AgentLoopHostErrorKind::BudgetExceeded => Some(ModelErrorClass::ContextOverflow),
-        AgentLoopHostErrorKind::BudgetAccountingFailed => Some(ModelErrorClass::Unavailable),
+        // Accounting storage failed before the host could establish a
+        // trustworthy budget outcome. Preserve the typed host error instead
+        // of retrying it as a provider availability failure.
+        AgentLoopHostErrorKind::BudgetAccountingFailed => None,
         // Budget approval requirement is a gate, not a transient model
         // error — pass it through unclassified so the loop's gate handling
         // path takes over rather than the recovery strategy.

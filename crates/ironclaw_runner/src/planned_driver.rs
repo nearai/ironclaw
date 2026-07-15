@@ -1,3 +1,4 @@
+// arch-exempt: large_file, caller-level failure mapping regression stays with the driver, plan #4088
 //! Planned Reborn loop driver.
 //!
 //! This module is the bridge from the runner-facing `AgentLoopDriver` trait to
@@ -581,6 +582,27 @@ mod tests {
                 reason_kind: MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY.to_string(),
                 // No upstream detail: the bounded safe summary is the fallback.
                 detail: Some("model credentials are unavailable".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn executor_budget_accounting_diagnostics_preserve_distinct_failure_category() {
+        let mapped = map_executor_error(AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Model,
+            kind: AgentLoopHostErrorKind::BudgetAccountingFailed,
+            safe_summary: LoopSafeSummary::new("resource accounting storage is unavailable")
+                .expect("safe"),
+            reason_kind: None,
+            diagnostic_ref: None,
+            detail: None,
+        });
+
+        assert_eq!(
+            mapped,
+            AgentLoopDriverError::Failed {
+                reason_kind: "budget_accounting_failed".to_string(),
+                detail: Some("resource accounting storage is unavailable".to_string()),
             }
         );
     }
