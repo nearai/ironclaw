@@ -648,6 +648,7 @@ mod tests {
         FirstPartyCapabilityRequest {
             capability_id: CapabilityId::new(HTTP_SAVE_CAPABILITY_ID).unwrap(),
             scope: sample_scope(),
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default(),
             mounts: Some(workspace_mount()),
             services: InvocationServices {
