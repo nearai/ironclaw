@@ -56,8 +56,9 @@ use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
 use ironclaw_secrets::InMemorySecretStore;
 use ironclaw_triggers::{
     ClaimDueFireRequest, ClearActiveFireRequest, FireAcceptedRequest, InMemoryTriggerRepository,
-    MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, TriggerError, TriggerRecord,
-    TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerSchedule, TriggerState,
+    MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, MissingTriggerActiveRunLookup, TriggerError,
+    TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerSchedule,
+    TriggerState,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -8127,6 +8128,10 @@ fn runtime_with_trigger_repository_and_create_hook(
         builtin_first_party_handlers_with_trigger_create_hook(
             trigger_repository,
             trigger_create_hook,
+            // Test-only wiring (#5886): this helper isn't a production call
+            // site, so it defaults the same `Missing`-resolving lookup the
+            // bare `insert_handlers` wrapper uses.
+            Arc::new(MissingTriggerActiveRunLookup),
         )
         .unwrap(),
     ))

@@ -24,11 +24,12 @@ function useSSESourceForTest() {
   return `${lines.join("\n")}\nglobalThis.__testExports = { useSSE };`;
 }
 
-function createHarness({ visibilityState = "visible" } = {}) {
+function createHarness({ online = true, visibilityState = "visible" } = {}) {
   const statuses = [];
   const streams = [];
   const timers = [];
   const documentListeners = new Map();
+  const windowListeners = new Map();
   let cleanup = null;
 
   function EventSource() {}
@@ -75,6 +76,11 @@ function createHarness({ visibilityState = "visible" } = {}) {
       addEventListener: (name, handler) => documentListeners.set(name, handler),
       removeEventListener: (name) => documentListeners.delete(name),
     },
+    navigator: { onLine: online },
+    window: {
+      addEventListener: (name, handler) => windowListeners.set(name, handler),
+      removeEventListener: (name) => windowListeners.delete(name),
+    },
     setTimeout: (handler, delay) => {
       const timer = { handler, delay };
       timers.push(timer);
@@ -92,8 +98,45 @@ function createHarness({ visibilityState = "visible" } = {}) {
     onEvent: () => {},
   });
 
-  return { cleanup, context, documentListeners, result, statuses, streams, timers };
+  return {
+    cleanup,
+    context,
+    documentListeners,
+    result,
+    statuses,
+    streams,
+    timers,
+    windowListeners,
+  };
 }
+
+test("useSSE reflects browser offline and online events", () => {
+  const { cleanup, context, statuses, streams, windowListeners } = createHarness();
+
+  const stream = streams[0];
+  stream.readyState = context.EventSource.OPEN;
+  stream.onopen();
+  windowListeners.get("offline")();
+  assert.deepEqual(statuses, ["connecting", "connected", "reconnecting"]);
+
+  windowListeners.get("online")();
+  assert.deepEqual(statuses, [
+    "connecting",
+    "connected",
+    "reconnecting",
+    "connected",
+  ]);
+
+  cleanup();
+  assert.equal(windowListeners.has("offline"), false);
+  assert.equal(windowListeners.has("online"), false);
+});
+
+test("useSSE starts reconnecting when the browser is already offline", () => {
+  const { statuses } = createHarness({ online: false });
+
+  assert.deepEqual(statuses, ["reconnecting"]);
+});
 
 test("useSSE lets EventSource handle transient reconnects", () => {
   const { context, statuses, streams, timers } = createHarness();

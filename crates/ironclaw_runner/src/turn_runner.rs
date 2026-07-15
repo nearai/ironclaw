@@ -15,7 +15,8 @@ use tracing::{debug, error};
 use ironclaw_turns::{SanitizedFailure, runner::ClaimedTurnRun};
 
 use crate::failure_categories::{
-    MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
+    BUDGET_ACCOUNTING_FAILED_CATEGORY, MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
+    MODEL_CREDITS_EXHAUSTED_CATEGORY,
 };
 
 /// Create a `SanitizedFailure` from a known-valid static category.
@@ -45,7 +46,9 @@ pub(crate) fn sanitized_driver_failure(
 ) -> Option<SanitizedFailure> {
     let base = if matches!(
         reason_kind,
-        MODEL_CREDITS_EXHAUSTED_CATEGORY | MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY
+        MODEL_CREDITS_EXHAUSTED_CATEGORY
+            | MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY
+            | BUDGET_ACCOUNTING_FAILED_CATEGORY
     ) {
         match SanitizedFailure::new(reason_kind.to_string()) {
             Ok(failure) => Some(failure),
@@ -113,6 +116,7 @@ impl std::error::Error for HostFactoryError {}
 #[cfg(test)]
 mod tests {
     use super::sanitized_driver_failure;
+    use crate::failure_categories::BUDGET_ACCOUNTING_FAILED_CATEGORY;
 
     #[test]
     fn sanitized_driver_failure_returns_driver_failed_for_invalid_category() {
@@ -130,5 +134,20 @@ mod tests {
 
         assert_eq!(failure.category(), "driver_failed");
         assert_eq!(failure.detail(), Some("HTTP 404 model not found"));
+    }
+
+    #[test]
+    fn sanitized_driver_failure_preserves_budget_accounting_category() {
+        let failure = sanitized_driver_failure(
+            BUDGET_ACCOUNTING_FAILED_CATEGORY,
+            Some("resource accounting storage is unavailable"),
+        )
+        .expect("budget accounting category is valid");
+
+        assert_eq!(failure.category(), BUDGET_ACCOUNTING_FAILED_CATEGORY);
+        assert_eq!(
+            failure.detail(),
+            Some("resource accounting storage is unavailable")
+        );
     }
 }

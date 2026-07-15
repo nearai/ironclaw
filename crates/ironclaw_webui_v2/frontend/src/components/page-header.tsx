@@ -12,6 +12,7 @@ const DOCS_URL = "https://docs.ironclaw.com";
 export function PageHeader({
   threadsState,
   notificationsState,
+  status = null,
   onToggleSidebar,
   sidebarOpen = true,
 }) {
@@ -100,6 +101,7 @@ export function PageHeader({
           )}
 
       <div className="ml-auto flex shrink-0 items-center gap-1">
+        {status}
         <NotificationCenter state={notificationsState} />
         <TeeShield />
         <NavLink

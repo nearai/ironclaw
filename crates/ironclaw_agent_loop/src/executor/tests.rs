@@ -1,3 +1,4 @@
+// arch-exempt: large_file, canonical executor regression remains with shared loop fixtures, plan #4088
 use std::collections::VecDeque;
 
 use ironclaw_host_api::{
@@ -2277,6 +2278,135 @@ async fn nudge_respects_one_shot_cap() {
 }
 
 #[tokio::test]
+async fn completion_nudge_lets_model_use_tools_to_finish_after_trailing_off() {
+    // The task-flip proof, end-to-end through the real loop: the model reads,
+    // then trails off announcing a write it never performs (reply ends with ':').
+    // WITH the gate on, the loop re-enters with the FULL tool surface + the
+    // completion-nudge directive; the model then executes its write tool and
+    // gives a real closing answer — the run completes having produced the
+    // artifact it was trailing off on.
+    let result_ref = LoopResultRef::new("result:file-written").expect("valid");
+    let host = MockHost::new(vec![
+        // Turn 1: trails off — "let me write the file:" with no tool call.
+        reply_response_with_text("Here are the recommendations, let me write them to the file:"),
+        // Turn 2 (the nudged retry): actually invokes the write tool.
+        calls_response(),
+        // Turn 3: real closing answer.
+        reply_response_with_text("Done — wrote the recommendations to the output file."),
+    ])
+    .with_driver_nudges_enabled()
+    .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
+        outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+            result_ref: result_ref.clone(),
+            safe_summary: "wrote file".to_string(),
+            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            terminate_hint: false,
+            byte_len: 0,
+            output_digest: None,
+            model_observation: None,
+        })],
+        stopped_on_suspension: false,
+    }]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(
+        matches!(exit, LoopExit::Completed(_)),
+        "expected completed exit, got {exit:?}"
+    );
+    // The write tool ran exactly once — on the nudged retry (it could not have
+    // run on the trailed-off turn 1, which emitted no tool call).
+    assert_eq!(
+        host.batch_invocations().len(),
+        1,
+        "the completion nudge must let the model execute its write tool"
+    );
+    // Three prompt-driven model calls: trail-off, tool call, closing answer.
+    let prompt_requests = host.prompt_requests();
+    assert_eq!(
+        prompt_requests.len(),
+        3,
+        "expected trail-off + nudged retry + close"
+    );
+    assert!(prompt_requests[0].inline_messages.is_empty());
+    assert!(
+        prompt_requests[1]
+            .inline_messages
+            .iter()
+            .any(|m| m.safe_body.as_str().contains("Finish the task now")),
+        "the nudged retry must carry the completion-nudge directive"
+    );
+    assert_eq!(final_staged_state(&host).completion_nudges_used, 1);
+}
+
+#[tokio::test]
+async fn completion_nudge_disabled_leaves_trailed_off_run_without_tool_use() {
+    // Control: the SAME trailed-off trajectory with the gate OFF (production
+    // default). The run ends right after the trail-off — the write tool is never
+    // reached, so the artifact is never produced (the failure the nudge fixes).
+    let host = MockHost::new(vec![
+        reply_response_with_text("Here are the recommendations, let me write them to the file:"),
+        // Present but must NOT be consumed — the loop must not continue.
+        calls_response(),
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(
+        host.prompt_requests().len(),
+        1,
+        "without the nudge the run ends after the trailed-off turn"
+    );
+    assert_eq!(
+        host.batch_invocations().len(),
+        0,
+        "without the nudge no tool runs — the artifact is never written"
+    );
+    assert_eq!(final_staged_state(&host).completion_nudges_used, 0);
+}
+
+#[tokio::test]
+async fn completion_nudge_skipped_on_clean_reply() {
+    // Gate ON but the first reply is a clean, complete answer (does not trail
+    // off): no nudge fires, a single prompt-driven model call, graceful
+    // completion. Guards against regressing correct short answers.
+    let host = MockHost::new(vec![reply_response_with_text(
+        "Here is the complete answer.",
+    )])
+    .with_driver_nudges_enabled();
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(
+        host.prompt_requests().len(),
+        1,
+        "a clean, complete reply must not trigger a completion nudge"
+    );
+    assert_eq!(
+        final_staged_state(&host).completion_nudges_used,
+        0,
+        "no completion nudge issued for a clean reply"
+    );
+}
+
+#[tokio::test]
 async fn no_progress_nudge_model_failure_falls_back_to_failed_exit() {
     // Gate ON but the nudge's OWN model call fails (non-cancel host error). The
     // nudge is best-effort: it must NOT bork the run — the no-progress exit
@@ -3182,6 +3312,42 @@ async fn model_unrecoverable_host_error_preserves_sanitized_diagnostics() {
             safe_summary: LoopSafeSummary::new("model credentials are unavailable").expect("safe"),
             reason_kind: None,
             diagnostic_ref: Some(LoopDiagnosticRef::new("diag:model-credentials").expect("valid")),
+            detail: None,
+        }
+    );
+}
+
+#[tokio::test]
+async fn model_budget_accounting_failure_preserves_kind_without_model_retry() {
+    let accounting_error = || {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::BudgetAccountingFailed,
+            "resource accounting storage is unavailable",
+        )
+    };
+    let host = MockHost::new(Vec::new()).with_model_errors(vec![
+        accounting_error(),
+        accounting_error(),
+        accounting_error(),
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let error = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect_err("accounting outages must remain typed host failures");
+
+    assert_eq!(host.model_requests().len(), 1);
+    assert_eq!(
+        error,
+        AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Model,
+            kind: AgentLoopHostErrorKind::BudgetAccountingFailed,
+            safe_summary: LoopSafeSummary::new("resource accounting storage is unavailable")
+                .expect("safe"),
+            reason_kind: None,
+            diagnostic_ref: None,
             detail: None,
         }
     );
