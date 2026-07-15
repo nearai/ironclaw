@@ -33,8 +33,8 @@ use ironclaw_turns::{
 };
 use uuid::Uuid;
 
-use crate::factory::LocalDevTurnStateStore;
 use crate::product_auth::api::auth::RebornAuthContinuationDispatcher;
+use crate::turn_run_snapshot::TurnRunSnapshotSource;
 
 /// Source of the durable turn-state snapshot the fan-out scans. Split out so
 /// tests can hand-build snapshots without a filesystem-backed store.
@@ -44,33 +44,20 @@ pub(crate) trait BlockedAuthSnapshotSource: Send + Sync {
 }
 
 #[async_trait]
-impl BlockedAuthSnapshotSource for LocalDevTurnStateStore {
+impl<T> BlockedAuthSnapshotSource for T
+where
+    T: TurnRunSnapshotSource + ?Sized,
+{
     async fn snapshot(&self) -> Option<TurnPersistenceSnapshot> {
-        // The durable filesystem store returns an async `Result`; the
-        // in-memory authority returns a sync infallible snapshot. Mirrors the
-        // retired `LocalDevChannelConnectionResumeReadModel::snapshot`.
-        #[cfg(all(
-            any(feature = "libsql", feature = "postgres"),
-            not(feature = "inmemory-turn-state")
-        ))]
-        {
-            match self.persistence_snapshot().await {
-                Ok(snapshot) => Some(snapshot),
-                Err(error) => {
-                    tracing::debug!(
-                        %error,
-                        "blocked-auth fan-out could not read the turn persistence snapshot"
-                    );
-                    None
-                }
+        match self.turn_run_snapshot().await {
+            Ok(snapshot) => Some(snapshot),
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    "blocked-auth fan-out could not read the turn persistence snapshot"
+                );
+                None
             }
-        }
-        #[cfg(any(
-            feature = "inmemory-turn-state",
-            not(any(feature = "libsql", feature = "postgres"))
-        ))]
-        {
-            Some(self.persistence_snapshot())
         }
     }
 }

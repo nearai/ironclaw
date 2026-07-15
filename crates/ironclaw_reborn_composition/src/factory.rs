@@ -1613,6 +1613,8 @@ fn production_config(
 async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, RebornBuildError> {
     #[cfg(any(test, feature = "test-support"))]
     let network_http_egress_for_test = input.network_http_egress_for_test.clone();
+    #[cfg(any(test, feature = "test-support"))]
+    let trust_fixture_extensions_for_test = input.trust_fixture_extensions_for_test;
     let RebornBuildInput {
         profile,
         storage,
@@ -2064,14 +2066,25 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         ),
     ));
     services = attach_wasm_runtime(services)?;
-    let mut available_extensions = AvailableExtensionCatalog::from_filesystem_root(
-        filesystem.as_ref(),
-        &VirtualPath::new("/system/extensions")?,
-    )
-    .await
-    .map_err(|error| RebornBuildError::InvalidConfig {
-        reason: format!("available extension catalog could not be loaded: {error}"),
-    })?;
+    let extensions_root = VirtualPath::new("/system/extensions")?;
+    #[cfg(any(test, feature = "test-support"))]
+    let filesystem_catalog = if trust_fixture_extensions_for_test {
+        AvailableExtensionCatalog::from_filesystem_root_trusting_fixtures_for_test(
+            filesystem.as_ref(),
+            &extensions_root,
+        )
+        .await
+    } else {
+        AvailableExtensionCatalog::from_filesystem_root(filesystem.as_ref(), &extensions_root).await
+    };
+    #[cfg(not(any(test, feature = "test-support")))]
+    let filesystem_catalog =
+        AvailableExtensionCatalog::from_filesystem_root(filesystem.as_ref(), &extensions_root)
+            .await;
+    let mut available_extensions =
+        filesystem_catalog.map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("available extension catalog could not be loaded: {error}"),
+        })?;
     available_extensions.extend(
         AvailableExtensionCatalog::from_first_party_assets_with_nearai_mcp_config(
             nearai_mcp_bootstrap_config.as_ref(),
@@ -4219,6 +4232,8 @@ async fn build_production_shaped(
         require_wasm_credentials,
         #[cfg(any(test, feature = "test-support"))]
             network_http_egress_for_test: _,
+        #[cfg(any(test, feature = "test-support"))]
+            trust_fixture_extensions_for_test: _,
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_callback,
@@ -5091,11 +5106,13 @@ where
         compose_product_auth_services(ProductAuthServicesCompositionInput {
             ports: product_auth_ports,
             turn_coordinator: turn_coordinator.clone(),
-            // No blocked-auth fan-out here yet: this builder's turn state is the
-            // generic filesystem store, not the local-dev alias the snapshot
-            // source is implemented for. Completions resume only their own run,
-            // exactly this builder's prior behavior.
-            blocked_auth_snapshot_source: None,
+            // Blocked-auth fan-out over this builder's own durable turn-state
+            // store: a completed connect resumes every run the same owner has
+            // parked on the same provider, matching the local-dev builder. The
+            // blanket `TurnRunSnapshotSource` impl covers the generic
+            // filesystem store directly.
+            blocked_auth_snapshot_source: Some(Arc::clone(&turn_state)
+                as Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>),
             // This production builder wires no lifecycle-activation facade, so an
             // empty slot leaves lifecycle-activation auth continuations unsupported
             // here, preserving this builder's prior behavior.

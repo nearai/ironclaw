@@ -187,6 +187,13 @@ pub struct RebornBuildInput {
     pub(crate) require_wasm_credentials: bool,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) network_http_egress_for_test: Option<Arc<dyn NetworkHttpEgress>>,
+    /// Test-support only: stamp filesystem-discovered extension packages as
+    /// `HostBundled` so integration fixtures that model host-bundled
+    /// extensions (the §8 invented-vendor acme fixture) may assert
+    /// first-party trust. Production discovery always stamps
+    /// `InstalledLocal` (#5459).
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) trust_fixture_extensions_for_test: bool,
     pub(crate) product_auth_ports: Option<RebornProductAuthServicePorts>,
     pub(crate) oauth_provider_configs: Vec<OAuthProviderBackendConfig>,
     pub(crate) oauth_dcr_callback: Option<OAuthDcrCallbackConfig>,
@@ -710,6 +717,14 @@ impl RebornBuildInput {
         self
     }
 
+    /// Trust filesystem-discovered fixture extensions as host-bundled
+    /// (first-party-eligible). Test-support only; see the field doc.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_trusted_fixture_extensions_for_test(mut self) -> Self {
+        self.trust_fixture_extensions_for_test = true;
+        self
+    }
+
     /// Inject Reborn-native product-auth service ports.
     ///
     /// Production callers should provide durable implementations here. The
@@ -795,6 +810,8 @@ impl RebornBuildInput {
             require_wasm_credentials: false,
             #[cfg(any(test, feature = "test-support"))]
             network_http_egress_for_test: None,
+            #[cfg(any(test, feature = "test-support"))]
+            trust_fixture_extensions_for_test: false,
             product_auth_ports: None,
             oauth_provider_configs: Vec::new(),
             oauth_dcr_callback: None,

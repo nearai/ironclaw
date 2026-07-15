@@ -709,6 +709,7 @@ impl RebornIntegrationGroupBuilder {
         ) = capability.mode().into_parts(
             milestone_sink.clone(),
             group_thread_harness.service.clone() as Arc<dyn SessionThreadService>,
+            Arc::clone(&turn_store),
         )?;
 
         // Enabler (b): production resolves `CapabilityAllowSet::All` for a

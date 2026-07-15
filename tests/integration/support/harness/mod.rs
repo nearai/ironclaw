@@ -106,10 +106,18 @@ impl HarnessCapabilityMode {
     /// `HostRuntimeCapabilityHarness::install_durable_capability_io`'s doc
     /// for why the durable-io swap must happen here rather than at harness
     /// construction (issue #5838).
+    ///
+    /// `turn_store` is the caller's REAL shared turn-state store
+    /// (`group.rs`'s `GroupSharedStorage.turn_store`), consumed only by the
+    /// `HostRuntime` arm and only when that harness opted into
+    /// `.with_trigger_active_run_lookup_for_test()` — see
+    /// `HostRuntimeCapabilityHarness::install_trigger_active_run_lookup_for_test`'s
+    /// doc (#5886).
     pub(crate) fn into_parts(
         self,
         milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
         turn_thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
+        turn_store: Arc<ironclaw_turns::FilesystemTurnStateStore<HarnessTurnBackend>>,
     ) -> HarnessResult<HarnessCapabilityParts> {
         match self {
             Self::Recording(port) => {
@@ -130,6 +138,9 @@ impl HarnessCapabilityMode {
             Self::HostRuntime(harness) => {
                 if harness.durable_capability_io_requested {
                     harness.install_durable_capability_io(turn_thread_service);
+                }
+                if harness.trigger_active_run_lookup_requested {
+                    harness.install_trigger_active_run_lookup_for_test(turn_store)?;
                 }
                 Ok((
                     harness.capability_factory(milestone_sink),
@@ -565,6 +576,13 @@ impl HostRuntimeCapabilityHarness {
         if !native_extension_factories.is_empty() {
             input = input.with_native_extension_factories(native_extension_factories);
         }
+        // Fixture extensions are filesystem-discovered, not host-bundled, so
+        // the InstalledLocal trust stamp would (correctly) reject their
+        // first-party trust claim; this test-support flag routes them through
+        // the HostBundled stamp instead.
+        if !fixture_extension_dirs.is_empty() {
+            input = input.with_trusted_fixture_extensions_for_test();
+        }
         // Mirror the binary's channel-extension binding assembly (DEL-7):
         // the slack channel adapter + extras ride the composition input seam
         // exactly as `ironclaw_reborn_cli` supplies them, so activated slack
@@ -838,6 +856,50 @@ impl HostRuntimeCapabilityHarness {
         *self.io.lock().unwrap() = io;
         *self.result_writer_io.lock().unwrap() = result_writer_io;
         *self.durable_capability_io_thread_service.lock().unwrap() = Some(thread_service);
+    }
+
+    /// #5886: re-wire `builtin.trigger_list` dispatch to a REAL
+    /// `TriggerActiveRunLookup` built over `turn_store` — the caller's actual
+    /// shared turn-state store, where the group's real triggered runs (and
+    /// their `BlockedApproval` gates) are recorded. This harness's own
+    /// baked-in lookup (from `new_with_options` -> `build_reborn_services`)
+    /// is scoped to a DIFFERENT, disjoint turn-state store this harness's
+    /// capability dispatch never actually writes through in group-based
+    /// tests (`group.rs`'s `into_group` routes real dispatch over its own
+    /// shared coordinator/turn_store), so it can never see the run and
+    /// `trigger_list` always omits `active_hold`.
+    ///
+    /// `turn_store` MUST be the SAME store the caller's runs actually persist
+    /// to (`group.rs`'s `GroupSharedStorage.turn_store`) — mirrors
+    /// `install_durable_capability_io`'s same interior-mutability constraint:
+    /// that store only exists AFTER this harness is already built and `Arc`'d,
+    /// so this runs post-construction, from `HarnessCapabilityMode::into_parts`,
+    /// gated on `trigger_active_run_lookup_requested`.
+    fn install_trigger_active_run_lookup_for_test(
+        &self,
+        turn_store: Arc<ironclaw_turns::FilesystemTurnStateStore<HarnessTurnBackend>>,
+    ) -> HarnessResult<()> {
+        let repo = self
+            .trigger_repository_for_test()
+            .ok_or("trigger_active_run_lookup wiring requires a captured trigger repository")?;
+        let active_run_lookup =
+            ironclaw_reborn_composition::test_support::local_dev_trigger_active_run_lookup_for_test(
+                turn_store,
+            );
+        let trigger_lookup_storage_root = self.root.path().join("trigger-active-run-lookup");
+        std::fs::create_dir_all(&trigger_lookup_storage_root)?;
+        let trigger_runtime = assembly::local_dev_trigger_only_host_runtime(
+            trigger_lookup_storage_root,
+            repo,
+            active_run_lookup,
+        )?;
+        let inner = self.runtime.lock().unwrap().clone();
+        *self.runtime.lock().unwrap() = Arc::new(assembly::TriggerActiveRunLookupHostRuntime::new(
+            inner,
+            trigger_runtime,
+            CapabilityId::new(ironclaw_host_runtime::TRIGGER_LIST_CAPABILITY_ID)?,
+        ));
+        Ok(())
     }
 
     fn invocations(&self) -> Vec<CapabilityInvocation> {

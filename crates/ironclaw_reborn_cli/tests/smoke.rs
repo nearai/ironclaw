@@ -1614,49 +1614,6 @@ fn http_status_line(port: u16, request: &str, label: &str) -> Result<String, Str
 }
 
 #[cfg(feature = "webui-v2-beta")]
-fn post_slack_events_response(port: u16) -> Result<String, String> {
-    http_full_response(
-        port,
-        concat!(
-            "POST /webhooks/slack/events HTTP/1.1\r\n",
-            "Host: 127.0.0.1\r\n",
-            "Content-Type: application/json\r\n",
-            "Content-Length: 2\r\n",
-            "Connection: close\r\n",
-            "\r\n",
-            "{}"
-        ),
-        "Slack route probe",
-    )
-}
-
-/// Like [`http_status_line`], but reads the whole response (status line,
-/// headers, and body) so callers can assert on the body shape.
-#[cfg(feature = "webui-v2-beta")]
-fn http_full_response(port: u16, request: &str, label: &str) -> Result<String, String> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let mut stream = loop {
-        match std::net::TcpStream::connect(("127.0.0.1", port)) {
-            Ok(stream) => break stream,
-            Err(_) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            Err(error) => return Err(format!("connect to serve listener failed: {error}")),
-        }
-    };
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-        .map_err(|error| format!("set {label} read timeout failed: {error}"))?;
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|error| format!("write {label} failed: {error}"))?;
-    let mut response = String::new();
-    std::io::Read::read_to_string(&mut stream, &mut response)
-        .map_err(|error| format!("read {label} response failed: {error}"))?;
-    Ok(response)
-}
-
-#[cfg(feature = "webui-v2-beta")]
 #[test]
 fn serve_rejects_malformed_host_before_webui_handoff() {
     let temp = tempfile::tempdir().expect("tempdir");

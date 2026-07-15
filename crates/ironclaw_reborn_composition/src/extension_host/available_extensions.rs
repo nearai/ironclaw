@@ -400,7 +400,26 @@ impl AvailableExtensionCatalog {
         F: RootFilesystem + ?Sized,
     {
         Ok(Self::from_packages(
-            load_filesystem_packages(fs, root).await?,
+            load_filesystem_packages(fs, root, ManifestSource::InstalledLocal).await?,
+        ))
+    }
+
+    /// Test-support only: discover filesystem packages with the
+    /// `HostBundled` stamp, so integration fixtures that model host-bundled
+    /// extensions (the invented-vendor acme fixture, overview §8) may assert
+    /// first-party trust. Production discovery always stamps
+    /// `InstalledLocal` (#5459: a restart must never launder an uploaded
+    /// bundle into first-party trust).
+    #[cfg(feature = "test-support")]
+    pub(crate) async fn from_filesystem_root_trusting_fixtures_for_test<F>(
+        fs: &F,
+        root: &VirtualPath,
+    ) -> Result<Self, ProductWorkflowError>
+    where
+        F: RootFilesystem + ?Sized,
+    {
+        Ok(Self::from_packages(
+            load_filesystem_packages(fs, root, ManifestSource::HostBundled).await?,
         ))
     }
 
@@ -749,6 +768,7 @@ pub(crate) fn bytes_asset(path: &str, bytes: &[u8]) -> AvailableExtensionAsset {
 async fn load_filesystem_packages<F>(
     fs: &F,
     root: &VirtualPath,
+    stamp: ManifestSource,
 ) -> Result<Vec<AvailableExtensionPackage>, ProductWorkflowError>
 where
     F: RootFilesystem + ?Sized,
@@ -788,7 +808,7 @@ where
         if reserved_host_bundled_extension_id(&extension_id) {
             continue;
         }
-        match load_filesystem_package(fs, entry, &host_ports, &contracts).await {
+        match load_filesystem_package(fs, entry, &host_ports, &contracts, stamp).await {
             Ok(Some(package)) => packages.push(package),
             Ok(None) => {}
             // Per-entry validation failure is fail-open: a stale materialized
@@ -816,6 +836,7 @@ async fn load_filesystem_package<F>(
     entry: DirEntry,
     host_ports: &HostPortCatalog,
     contracts: &HostApiContractRegistry,
+    stamp: ManifestSource,
 ) -> Result<Option<AvailableExtensionPackage>, ProductWorkflowError>
 where
     F: RootFilesystem + ?Sized,
@@ -841,14 +862,9 @@ where
             reason: format!("available extension manifest is not UTF-8: {error}"),
         }
     })?;
-    let record = ExtensionManifestRecord::from_toml(
-        manifest_toml,
-        ManifestSource::InstalledLocal,
-        host_ports,
-        None,
-        contracts,
-    )
-    .map_err(map_binding_error)?;
+    let record =
+        ExtensionManifestRecord::from_toml(manifest_toml, stamp, host_ports, None, contracts)
+            .map_err(map_binding_error)?;
     let surface_kinds = surface_kinds_from_manifest_record(&record, entry.name.as_str())?;
     let channel_directions = channel_directions_from_manifest_record(&record, entry.name.as_str())?;
     let channel_presentation = channel_presentation_from_manifest_record(&record);
@@ -882,7 +898,9 @@ where
         // materialize under this root, so stamping discovery `HostBundled`
         // would let a process restart launder an untrusted upload into
         // first-party trust (#5459 review: import → restart → install).
-        source: ManifestSource::InstalledLocal,
+        // `stamp` is `InstalledLocal` on every production path; only the
+        // test-support fixture constructor passes `HostBundled`.
+        source: stamp,
         package,
         cleanup_requirements: Vec::new(),
         surface_kinds,
