@@ -866,6 +866,12 @@ registerPack("ko", {
   "ext.registry.importing": "가져오는 중…",
   "ext.registry.importSuccess": "도구를 가져왔습니다 — 레지스트리에서 설치하세요.",
   "ext.registry.importFailed": "가져오기 실패",
+  "ext.catalog.loadErrorTitle": "확장 카탈로그를 사용할 수 없습니다",
+  "ext.catalog.loadErrorDesc": "확장 카탈로그를 불러올 수 없습니다. 연결을 확인하고 다시 시도하세요.",
+  "ext.catalog.partialErrorTitle": "일부 확장 데이터를 사용할 수 없습니다",
+  "ext.catalog.partialErrorDesc": "사용 가능한 확장 데이터는 표시되지만 일부 세부 정보를 불러오지 못했습니다. 연결을 확인하고 다시 시도하세요.",
+  "ext.catalog.retry": "다시 시도",
+  "ext.catalog.retrying": "다시 시도하는 중…",
 
   // Chat — history
   "chat.history.loading": "로딩 중...",

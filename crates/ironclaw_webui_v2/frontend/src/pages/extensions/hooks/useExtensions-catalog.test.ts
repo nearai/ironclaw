@@ -55,6 +55,9 @@ function useExtensionsForTest({ extensions, registry }) {
     useQuery: (config) => ({
       data: queryData.get(config.queryKey[0]) || {},
       isLoading: false,
+      error: null,
+      isRefetching: false,
+      refetch: () => Promise.resolve(),
     }),
     useQueryClient: () => ({ invalidateQueries: () => {} }),
     useT: () => (key, params = {}) =>
@@ -136,6 +139,69 @@ test("useExtensions merges registry and installed entries with installed first",
     catalogEntries.length,
     "id-less registry and installed entries receive stable fallback ids",
   );
+});
+
+test("useExtensions exposes catalog errors and refetches both catalog queries", async () => {
+  const catalogError = new Error("catalog unavailable");
+  const refetched = [];
+  const queryConfigs = [];
+  const context = {
+    React: {
+      useCallback: (fn) => fn,
+      useEffect: () => {},
+      useRef: () => ({ current: null }),
+      useState: (initial) => [typeof initial === "function" ? initial() : initial, () => {}],
+    },
+    activateExtension: () => {},
+    approvePairingCode: () => {},
+    fetchExtensionRegistry: () => {},
+    fetchExtensionSetup: () => {},
+    fetchExtensions: () => {},
+    fetchPairingRequests: () => {},
+    gatewayStatus: () => {},
+    globalThis: {},
+    installExtension: () => {},
+    isChannelExtensionKind: () => false,
+    listConnectableChannels: () => {},
+    removeExtension: () => {},
+    startExtensionOauth: () => {},
+    submitExtensionSetup: () => {},
+    useMutation: () => ({ isPending: false, mutate: () => {} }),
+    useQuery: (config) => {
+      queryConfigs.push(config);
+      const { queryKey } = config;
+      const key = queryKey[0];
+      return {
+        data: key === "extensions" ? { extensions: [] } : key === "extension-registry" ? { entries: [] } : {},
+        error: key === "extension-registry" ? catalogError : null,
+        isLoading: false,
+        isRefetching: false,
+        refetch: () => {
+          refetched.push(key);
+          return Promise.resolve();
+        },
+      };
+    },
+    useQueryClient: () => ({ invalidateQueries: () => {} }),
+    useT: () => (key) => key,
+    window: { clearInterval: () => {}, confirm: () => true, setInterval: () => 1 },
+  };
+  vm.runInNewContext(useExtensionsSourceForTest(), context);
+  const result = context.globalThis.__testExports.useExtensions();
+
+  assert.equal(result.extensionsError, null);
+  assert.equal(result.registryError, catalogError);
+  assert.equal(result.error, catalogError);
+  assert.equal(
+    queryConfigs.find(({ queryKey }) => queryKey[0] === "extensions")?.networkMode,
+    "always",
+  );
+  assert.equal(
+    queryConfigs.find(({ queryKey }) => queryKey[0] === "extension-registry")?.networkMode,
+    "always",
+  );
+  await result.refetch();
+  assert.deepEqual(refetched, ["extensions", "extension-registry"]);
 });
 
 test("install/activate auth popups: noopener null is not an error; insecure URLs are", () => {
