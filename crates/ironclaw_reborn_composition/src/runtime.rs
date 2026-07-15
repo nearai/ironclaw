@@ -1550,13 +1550,21 @@ impl RebornRuntime {
             .extension_management
             .as_ref()
             .map(|management| management.installation_store_handle());
+        let snapshot_updates = local_runtime
+            .extension_management
+            .as_ref()
+            .and_then(|management| management.generic_host())
+            .map(|host| host.snapshot_watch().subscribe());
         let post_bind_factory = match (
             self.services.channel_delivery_resolver(),
             local_runtime.channel_dm_target_store.clone(),
+            snapshot_updates,
         ) {
-            (Some(delivery), Some(store)) => Some(Arc::new(
+            (Some(delivery), Some(store), Some(snapshot_updates)) => Some(Arc::new(
                 crate::extension_host::channel_dm_provisioning::ChannelDmTargetProvisioning::new(
-                    delivery, store,
+                    delivery,
+                    store,
+                    snapshot_updates,
                 ),
             )
                 as Arc<
@@ -4719,6 +4727,38 @@ mod tests {
     use chrono::Utc;
     use ironclaw_auth::{GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE};
 
+    #[derive(Default)]
+    struct SlackDmOpenNetworkEgress {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ironclaw_network::NetworkHttpEgress for SlackDmOpenNetworkEgress {
+        async fn execute(
+            &self,
+            request: ironclaw_network::NetworkHttpRequest,
+        ) -> Result<ironclaw_network::NetworkHttpResponse, ironclaw_network::NetworkHttpError>
+        {
+            assert!(
+                request.url.ends_with("/api/conversations.open"),
+                "unexpected Slack request: {}",
+                request.url
+            );
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let body = br#"{"ok":true,"channel":{"id":"D-RUNTIME-RACE"}}"#.to_vec();
+            Ok(ironclaw_network::NetworkHttpResponse {
+                status: 200,
+                headers: vec![("content-type".to_string(), "application/json".to_string())],
+                usage: ironclaw_network::NetworkUsage {
+                    request_bytes: request.body.len() as u64,
+                    response_bytes: body.len() as u64,
+                    resolved_ip: None,
+                },
+                body,
+            })
+        }
+    }
+
     #[test]
     fn persistent_grantee_resolver_maps_outbound_delivery_target_set_to_synthetic_provider() {
         let registry = Arc::new(ironclaw_extensions::ExtensionRegistry::new());
@@ -4882,6 +4922,140 @@ output_schema_ref = "schemas/write.output.json"
             auth.is_none(),
             "auth accessor must be None without a local-dev runtime"
         );
+    }
+
+    #[tokio::test]
+    async fn runtime_channel_identity_bind_waits_for_activation_snapshot_before_dm_provisioning() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let network_egress = Arc::new(SlackDmOpenNetworkEgress::default());
+        let build_input = RebornBuildInput::local_dev(
+            "runtime-channel-bind-race-owner",
+            root.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_dev_runtime_policy())
+        .with_network_http_egress_for_test(network_egress.clone())
+        .with_channel_extension_bindings(vec![crate::input::ChannelExtensionBinding {
+            extension_id: "slack".to_string(),
+            adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
+            inbound_payload_classifier: None,
+            preference_target_codec: None,
+        }]);
+        let input =
+            RebornRuntimeInput::from_services(build_input).with_identity(RebornRuntimeIdentity {
+                tenant_id: "runtime-channel-bind-race-tenant".to_string(),
+                agent_id: "runtime-channel-bind-race-agent".to_string(),
+                source_binding_id: "runtime-channel-bind-race-source".to_string(),
+                reply_target_binding_id: "runtime-channel-bind-race-reply".to_string(),
+            });
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let local_runtime = runtime
+            .services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime services");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management");
+        let operator = extension_management
+            .tenant_operator_user_id_for_test()
+            .clone();
+        let slack_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
+            .expect("valid Slack ref");
+        extension_management
+            .install(slack_ref.clone(), &operator)
+            .await
+            .expect("install Slack before OAuth callback");
+
+        let slack_id = ironclaw_host_api::ExtensionId::new("slack").expect("Slack extension id");
+        local_runtime
+            .channel_config
+            .as_ref()
+            .expect("channel config service")
+            .save(
+                &slack_id,
+                vec![
+                    ("slack_bot_token".to_string(), "xoxb-test".to_string()),
+                    (
+                        "slack_signing_secret".to_string(),
+                        "signing-test".to_string(),
+                    ),
+                    ("slack_team_id".to_string(), "T-RUNTIME".to_string()),
+                    ("slack_api_app_id".to_string(), "A-RUNTIME".to_string()),
+                ],
+            )
+            .await
+            .expect("configure Slack channel deployment values");
+
+        let binding_config = runtime
+            .channel_identity_binding_config()
+            .expect("production runtime channel identity binding config");
+        let mut resource = ResourceScope::local_default(operator.clone(), InvocationId::new())
+            .expect("callback resource scope");
+        resource.tenant_id = runtime.thread_scope.tenant_id.clone();
+        let callback_scope =
+            ironclaw_auth::AuthProductScope::new(resource, ironclaw_auth::AuthSurface::Callback);
+        let identity = ironclaw_auth::OAuthProviderIdentity::new(
+            "U-RUNTIME",
+            Some("T-RUNTIME".to_string()),
+            None,
+            Some("A-RUNTIME".to_string()),
+        )
+        .expect("proven Slack identity");
+        let rollback =
+            crate::extension_host::channel_identity::bind_channel_identities_for_callback(
+                &binding_config,
+                "slack",
+                &callback_scope,
+                Some(&identity),
+            )
+            .await
+            .expect("bind Slack identity before activation")
+            .expect("Slack callback maps to the installed channel extension");
+        drop(rollback);
+
+        // Give the spawned production post-bind hook a deterministic turn
+        // while Slack is still absent from the generic host snapshot. The old
+        // one-shot implementation exits here and can never provision later.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        let dm_targets = local_runtime
+            .channel_dm_target_store
+            .as_ref()
+            .expect("channel DM-target store");
+        assert!(
+            dm_targets
+                .load("slack", &operator)
+                .await
+                .expect("load pre-activation DM target")
+                .is_none(),
+            "OAuth binding alone must not fabricate a target before activation"
+        );
+
+        extension_management
+            .activate_with_prechecked_credentials_for_test(
+                slack_ref,
+                ExtensionActivationMode::Static,
+            )
+            .await
+            .expect("activate Slack and publish the generic host snapshot");
+
+        let record = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(record) = dm_targets
+                    .load("slack", &operator)
+                    .await
+                    .expect("load post-activation DM target")
+                {
+                    break record;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("activation publication should unblock DM provisioning");
+        assert_eq!(record.target["conversation_id"], "D-RUNTIME-RACE");
+        assert_eq!(network_egress.calls.load(Ordering::SeqCst), 1);
     }
 
     /// Wiring guard: the `regex_skill_activation_enabled` flag from

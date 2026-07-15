@@ -9,11 +9,12 @@
 //! convention the retired lane used); adapters without target listing
 //! simply provision nothing.
 //!
-//! Provisioning is fire-and-forget: a failure is logged and retried on the
-//! next OAuth connection — it never fails the callback that already bound
-//! the identity.
+//! Provisioning is fire-and-forget and never fails the callback that already
+//! bound the identity. OAuth continuation can publish activation just after
+//! the bind, so an inactive snapshot waits on the generic host's publication
+//! signal and retries against each new generation for a bounded interval.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use ironclaw_host_api::UserId;
 use ironclaw_product_adapters::TargetQuery;
@@ -26,6 +27,22 @@ use crate::extension_host::channel_identity::{
     ChannelIdentityPostBind, ChannelIdentityPostBindFactory,
 };
 
+const ACTIVATION_PUBLICATION_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Debug, thiserror::Error)]
+enum DmTargetProvisioningError {
+    #[error("channel extension is not active in the snapshot")]
+    ExtensionInactive,
+    #[error("channel target discovery failed: {0}")]
+    TargetDiscovery(String),
+    #[error("channel DM-target persistence failed: {0}")]
+    Persistence(String),
+    #[error("timed out waiting for channel extension activation")]
+    ActivationTimeout,
+    #[error("channel extension activation publisher stopped")]
+    ActivationPublisherStopped,
+}
+
 /// The direct-conversation target query grammar adapters interpret.
 fn direct_conversation_query(external_actor_id: &str) -> String {
     format!("im:{external_actor_id}")
@@ -37,14 +54,20 @@ fn direct_conversation_query(external_actor_id: &str) -> String {
 pub(crate) struct ChannelDmTargetProvisioning {
     delivery: Arc<dyn ChannelDeliveryResolver>,
     store: Arc<FilesystemChannelDmTargetStore>,
+    snapshot_updates: tokio::sync::watch::Receiver<u64>,
 }
 
 impl ChannelDmTargetProvisioning {
     pub(crate) fn new(
         delivery: Arc<dyn ChannelDeliveryResolver>,
         store: Arc<FilesystemChannelDmTargetStore>,
+        snapshot_updates: tokio::sync::watch::Receiver<u64>,
     ) -> Self {
-        Self { delivery, store }
+        Self {
+            delivery,
+            store,
+            snapshot_updates,
+        }
     }
 }
 
@@ -57,6 +80,7 @@ impl ChannelIdentityPostBindFactory for ChannelDmTargetProvisioning {
             extension_id: extension_id.to_string(),
             delivery: Arc::clone(&self.delivery),
             store: Arc::clone(&self.store),
+            snapshot_updates: self.snapshot_updates.clone(),
         }))
     }
 }
@@ -66,6 +90,7 @@ struct ChannelDmTargetPostBind {
     extension_id: String,
     delivery: Arc<dyn ChannelDeliveryResolver>,
     store: Arc<FilesystemChannelDmTargetStore>,
+    snapshot_updates: tokio::sync::watch::Receiver<u64>,
 }
 
 impl ChannelIdentityPostBind for ChannelDmTargetPostBind {
@@ -73,14 +98,16 @@ impl ChannelIdentityPostBind for ChannelDmTargetPostBind {
         let extension_id = self.extension_id.clone();
         let delivery = Arc::clone(&self.delivery);
         let store = Arc::clone(&self.store);
+        let snapshot_updates = self.snapshot_updates.clone();
         let external_actor_id = external_actor_id.to_string();
         tokio::spawn(async move {
-            match provision_dm_target(
+            match provision_dm_target_after_bind(
                 &extension_id,
                 &delivery,
                 &store,
                 &user_id,
                 &external_actor_id,
+                snapshot_updates,
             )
             .await
             {
@@ -95,11 +122,35 @@ impl ChannelIdentityPostBind for ChannelDmTargetPostBind {
                 Err(reason) => tracing::warn!(
                     extension_id,
                     %reason,
-                    "channel DM-target provisioning failed after identity bind; \
-                     will retry on the next OAuth connection"
+                    "channel DM-target provisioning failed after identity bind"
                 ),
             }
         });
+    }
+}
+
+async fn provision_dm_target_after_bind(
+    extension_id: &str,
+    delivery: &Arc<dyn ChannelDeliveryResolver>,
+    store: &Arc<FilesystemChannelDmTargetStore>,
+    user_id: &UserId,
+    external_actor_id: &str,
+    mut snapshot_updates: tokio::sync::watch::Receiver<u64>,
+) -> Result<bool, DmTargetProvisioningError> {
+    let deadline = tokio::time::Instant::now() + ACTIVATION_PUBLICATION_TIMEOUT;
+    loop {
+        match provision_dm_target(extension_id, delivery, store, user_id, external_actor_id).await {
+            Err(DmTargetProvisioningError::ExtensionInactive) => {
+                match tokio::time::timeout_at(deadline, snapshot_updates.changed()).await {
+                    Ok(Ok(())) => continue,
+                    Ok(Err(_)) => {
+                        return Err(DmTargetProvisioningError::ActivationPublisherStopped);
+                    }
+                    Err(_) => return Err(DmTargetProvisioningError::ActivationTimeout),
+                }
+            }
+            result => return result,
+        }
     }
 }
 
@@ -107,15 +158,15 @@ impl ChannelIdentityPostBind for ChannelDmTargetPostBind {
 /// delivery, ask the adapter for the caller's direct conversation, persist
 /// the generic record. `Ok(false)` when the adapter does not support target
 /// listing or returns no candidate.
-pub(crate) async fn provision_dm_target(
+async fn provision_dm_target(
     extension_id: &str,
     delivery: &Arc<dyn ChannelDeliveryResolver>,
     store: &Arc<FilesystemChannelDmTargetStore>,
     user_id: &UserId,
     external_actor_id: &str,
-) -> Result<bool, String> {
+) -> Result<bool, DmTargetProvisioningError> {
     let Some(channel) = delivery.resolve_channel_delivery(extension_id) else {
-        return Err("channel extension is not active in the snapshot".to_string());
+        return Err(DmTargetProvisioningError::ExtensionInactive);
     };
     let candidates = match channel
         .adapter
@@ -132,7 +183,11 @@ pub(crate) async fn provision_dm_target(
     {
         Ok(candidates) => candidates,
         Err(ironclaw_product_adapters::ChannelError::Unsupported) => return Ok(false),
-        Err(error) => return Err(error.to_string()),
+        Err(error) => {
+            return Err(DmTargetProvisioningError::TargetDiscovery(
+                error.to_string(),
+            ));
+        }
     };
     let Some(candidate) = candidates.first() else {
         return Ok(false);
@@ -148,13 +203,16 @@ pub(crate) async fn provision_dm_target(
             ),
         )
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| DmTargetProvisioningError::Persistence(error.to_string()))?;
     Ok(true)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
 
     use async_trait::async_trait;
     use ironclaw_filesystem::InMemoryBackend;
@@ -265,6 +323,25 @@ mod tests {
         }
     }
 
+    struct EventuallyActiveDeliveryResolver {
+        active: Arc<AtomicBool>,
+        adapter: Arc<RecordingAdapter>,
+    }
+
+    impl ChannelDeliveryResolver for EventuallyActiveDeliveryResolver {
+        fn resolve_channel_delivery(&self, extension_id: &str) -> Option<ResolvedChannelDelivery> {
+            if extension_id != "vendorx" || !self.active.load(Ordering::SeqCst) {
+                return None;
+            }
+            Some(ResolvedChannelDelivery {
+                extension_id: extension_id.to_string(),
+                installation_id: "vendorx-install-1".to_string(),
+                adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
+                egress: Arc::new(NoopEgress),
+            })
+        }
+    }
+
     fn store() -> Arc<FilesystemChannelDmTargetStore> {
         Arc::new(FilesystemChannelDmTargetStore::new(
             Arc::new(InMemoryBackend::new()),
@@ -301,8 +378,11 @@ mod tests {
         assert_eq!(record.target["conversation_id"], "DM-77");
 
         // The factory hands the same behavior to the identity hook.
-        let provisioning =
-            ChannelDmTargetProvisioning::new(Arc::clone(&delivery), Arc::clone(&store));
+        let provisioning = ChannelDmTargetProvisioning::new(
+            Arc::clone(&delivery),
+            Arc::clone(&store),
+            tokio::sync::watch::channel(0_u64).1,
+        );
         assert!(
             provisioning.post_bind_for_extension("vendorx").is_some(),
             "every discovered extension gets a post-bind provisioner"
@@ -337,7 +417,57 @@ mod tests {
         let error = provision_dm_target("ghost", &delivery, &store, &user, "U777")
             .await
             .expect_err("inactive extension fails");
-        assert!(error.contains("not active"), "{error}");
+        assert!(
+            matches!(error, DmTargetProvisioningError::ExtensionInactive),
+            "{error}"
+        );
         assert!(store.load("ghost", &user).await.expect("load").is_none());
+    }
+
+    #[tokio::test]
+    async fn post_bind_provisioning_waits_for_extension_activation_publication() {
+        let adapter = Arc::new(RecordingAdapter::with_candidate(Some("S-9"), "DM-77"));
+        let active = Arc::new(AtomicBool::new(false));
+        let delivery: Arc<dyn ChannelDeliveryResolver> =
+            Arc::new(EventuallyActiveDeliveryResolver {
+                active: Arc::clone(&active),
+                adapter: Arc::clone(&adapter),
+            });
+        let store = store();
+        let user = UserId::new("user-alice").expect("user");
+        let (snapshot_published, snapshot_updates) = tokio::sync::watch::channel(0_u64);
+
+        let provision = provision_dm_target_after_bind(
+            "vendorx",
+            &delivery,
+            &store,
+            &user,
+            "U777",
+            snapshot_updates,
+        );
+        let activate = async {
+            tokio::task::yield_now().await;
+            assert!(
+                store
+                    .load("vendorx", &user)
+                    .await
+                    .expect("load before activation")
+                    .is_none(),
+                "provisioning must wait while the channel extension is inactive"
+            );
+            active.store(true, Ordering::SeqCst);
+            snapshot_published.send_replace(1);
+        };
+
+        let (result, ()) = tokio::join!(provision, activate);
+        assert!(result.expect("provisioning resumes after activation"));
+        assert!(
+            store
+                .load("vendorx", &user)
+                .await
+                .expect("load after activation")
+                .is_some(),
+            "activation publication should unblock and persist the DM target"
+        );
     }
 }
