@@ -8,9 +8,8 @@ under `/v2/`, authenticates a bearer caller, and runs one text turn through the
 This is intentionally small and complements the Rust composition tests
 (`crates/ironclaw_reborn_composition/tests/webui_v2_e2e.rs`), which drive the
 same router in-process via `tower::ServiceExt::oneshot` with no real TCP
-listener or browser. It also differs from `test_reborn_gateway_smoke.py`, which
-exercises the legacy `ironclaw` web channel (`/api/chat/*`) under ENGINE_V2 —
-NOT the `ironclaw-reborn` binary or the v2 webUI.
+listener or browser. This is the browser smoke for the standalone
+`ironclaw-reborn` binary and the v2 webUI surface.
 
 Wiring confirmed manually before this test existed:
 - The v2 SPA + `serve` subcommand are gated behind `webui-v2-beta` (transitively

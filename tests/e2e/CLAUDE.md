@@ -73,7 +73,6 @@ from `tests/e2e/` for the full, current set.
 | File | What it tests |
 |------|--------------|
 | `test_reborn_webui_v2_smoke.py` | Canonical v2 smoke: serve boots, SPA renders authed shell, bearer auth + `?token=` shim scope, text turn persists/streams, thread list/delete, timeline pagination, composer-while-running, approval-gate send block, **new-chat-while-a-run-is-active (the #5256 `submitBusyRef` deadlock regression)** |
-| `test_reborn_gateway_smoke.py` | Legacy `ironclaw` web channel (`/api/chat/*`) under `ENGINE_V2` — NOT the reborn binary |
 | `test_reborn_v2_file_download.py` | Agent-produced workspace files are downloadable from the v2 UI |
 | `test_v2_activity_shell.py` | v2 activity shell rendering |
 | `test_v2_*_flow.py` / `test_v2_engine_*.py` | v2 auth/OAuth matrix (GitHub PAT, GSuite, Notion MCP) and v2-engine approval/auth/tool-lifecycle/error-handling |

@@ -272,6 +272,7 @@ impl LoopbackMcpRuntimeHttpEgress {
         }
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
+            .no_proxy()
             // Disable automatic redirect-following so a mock 3xx cannot redirect
             // the client off loopback. The start_with(mcp_url) hermetic guard only
             // checks the first request URL; a followed redirect to an external host

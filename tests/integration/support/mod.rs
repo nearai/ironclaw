@@ -14,6 +14,7 @@ pub mod harness_mcp;
 pub mod harness_web_access;
 pub mod hooks;
 pub mod http_matcher;
+pub mod mock_mcp_server;
 pub mod oauth_flow;
 pub mod outbound_preferences;
 pub mod planned_runtime_parts_shape;

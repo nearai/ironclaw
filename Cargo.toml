@@ -87,16 +87,30 @@ path = "tests/support/reborn_harness_lib.rs"
 
 [dev-dependencies]
 async-trait = "0.1"
+axum = "0.8"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4.3"
+libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str", "maths"] }
+secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.11"
 toml = "0.9"
+tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-test = "0.4"
+tower = { version = "0.5", features = ["util"] }
 tracing-test = "0.2"
 testcontainers-modules = { version = "0.12", features = ["postgres"] }
 pretty_assertions = "1"
 tempfile = "3"
+thiserror = "2"
 insta = { version = "1.46.3", features = ["yaml"] }
+url = "2"
+zip = { version = "8", default-features = false, features = ["deflate"] }
 # Pull the LLM crate's `testing` feature in only for tests so `StubLlm` and
 # fault-injection helpers don't ship in release binaries.
 ironclaw_llm = { path = "crates/ironclaw_llm", version = "0.1.0", features = ["testing"] }
@@ -104,9 +118,12 @@ ironclaw_agent_loop = { path = "crates/ironclaw_agent_loop", version = "0.1.0", 
 ironclaw_approvals = { path = "crates/ironclaw_approvals", version = "0.1.0" }
 # C-ATTACH: `InboundAttachment` for `submit_turn_with_image_attachment`.
 ironclaw_attachments = { path = "crates/ironclaw_attachments", version = "0.1.0" }
+ironclaw_auth = { path = "crates/ironclaw_auth", version = "0.1.0" }
 ironclaw_authorization = { path = "crates/ironclaw_authorization", version = "0.1.0" }
+ironclaw_common = { path = "crates/ironclaw_common", version = "0.4.2" }
 ironclaw_extensions = { path = "crates/ironclaw_extensions", version = "0.1.0" }
 ironclaw_filesystem = { path = "crates/ironclaw_filesystem", version = "0.1.0" }
+ironclaw_host_api = { path = "crates/ironclaw_host_api", version = "0.1.0" }
 ironclaw_mcp = { path = "crates/ironclaw_mcp", version = "0.1.0" }
 ironclaw_first_party_extensions = { path = "crates/ironclaw_first_party_extensions", version = "0.1.0" }
 # W6-COLD-SPOTS: `CommunicationPreferenceRecord`/`CommunicationPreferenceKey`
@@ -115,6 +132,7 @@ ironclaw_outbound = { path = "crates/ironclaw_outbound", version = "0.1.0" }
 # Recording hook doubles + `HookDispatcherBuilderFactory` builders for the
 # C-HOOKS / E-HOOK-INFRA int-tier coverage (tests/integration/support/hooks.rs).
 ironclaw_hooks = { path = "crates/ironclaw_hooks", version = "0.1.0" }
+ironclaw_loop_host = { path = "crates/ironclaw_loop_host", version = "0.1.0" }
 ironclaw_host_runtime = { path = "crates/ironclaw_host_runtime", version = "0.1.0" }
 ironclaw_network = { path = "crates/ironclaw_network", version = "0.1.0" }
 ironclaw_processes = { path = "crates/ironclaw_processes", version = "0.1.0" }
@@ -145,6 +163,7 @@ ironclaw_webui_v2 = { path = "crates/ironclaw_webui_v2", version = "0.1.0", feat
 ironclaw_slack_v2_adapter = { path = "crates/ironclaw_slack_v2_adapter", version = "0.1.0" }
 ironclaw_reborn_config = { path = "crates/ironclaw_reborn_config", version = "0.1.0" }
 ironclaw_reborn_openai_compat = { path = "crates/ironclaw_reborn_openai_compat", version = "0.1.0", features = ["openai-compat-beta"] }
+ironclaw_reborn_traces = { path = "crates/ironclaw_reborn_traces", version = "0.1.0" }
 ironclaw_run_state = { path = "crates/ironclaw_run_state", version = "0.1.0" }
 ironclaw_threads = { path = "crates/ironclaw_threads", version = "0.1.0" }
 # `InMemoryDurableEventLog` for the W5-WEBUI-API-1 SSE scenario's test-local
@@ -158,6 +177,7 @@ ironclaw_triggers = { path = "crates/ironclaw_triggers", version = "0.1.0", feat
 # trusted-trigger submit path (ironclaw_reborn_composition::runtime.rs).
 ironclaw_conversations = { path = "crates/ironclaw_conversations", version = "0.1.0" }
 ironclaw_trust = { path = "crates/ironclaw_trust", version = "0.1.0" }
+ironclaw_turns = { path = "crates/ironclaw_turns", version = "0.1.0" }
 ironclaw_wasm = { path = "crates/ironclaw_wasm", version = "0.1.0" }
 # Named `#[case]` parametrization for the storage-backend matrix tests (slice 3).
 rstest = "0.23"
