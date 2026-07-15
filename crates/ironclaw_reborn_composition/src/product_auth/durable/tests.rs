@@ -4375,3 +4375,82 @@ async fn filesystem_complete_credential_selection_rejects_different_auth_surface
          surface-mismatched account), got: {err:?}"
     );
 }
+
+/// A1 · Supersede-on-start (RFC 9700 §4.7.1) over the durable filesystem store.
+/// A re-opened "Connect" popup cancels the prior non-terminal `SetupOnly` flow
+/// for the same owner+provider, leaving exactly one live setup flow — without
+/// touching an in-flight extension (`LifecycleActivation`) flow or a different
+/// provider. Exercises the real durable `cancel_superseded_setup_flows` path,
+/// which lists the owner+surface+session flow root (thread/invocation-agnostic)
+/// and cancels each matching setup flow.
+#[tokio::test]
+async fn filesystem_cancel_superseded_setup_flows_supersedes_only_matching_setup_only_flow() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let scope = test_scope();
+    let service = test_service(filesystem, secret_store);
+    let github = AuthProviderId::new("github").unwrap();
+
+    let setup_flow = |provider: AuthProviderId, continuation: AuthContinuationRef| {
+        let scope = scope.clone();
+        let service = &service;
+        async move {
+            service
+                .create_flow(NewAuthFlow {
+                    id: None,
+                    scope,
+                    kind: AuthFlowKind::IntegrationCredential,
+                    provider,
+                    challenge: AuthChallenge::OAuthUrl {
+                        authorization_url: OAuthAuthorizationUrl::new(
+                            "https://provider.example/oauth",
+                        )
+                        .unwrap(),
+                        expires_at: Utc::now() + Duration::minutes(5),
+                    },
+                    continuation,
+                    update_binding: None,
+                    opaque_state_hash: Some(state_hash("state")),
+                    pkce_verifier_hash: Some(pkce_hash("pkce")),
+                    expires_at: Utc::now() + Duration::minutes(5),
+                })
+                .await
+                .unwrap()
+        }
+    };
+
+    // Prior abandoned github setup popup (SetupOnly, still AwaitingUser).
+    let first = setup_flow(github.clone(), AuthContinuationRef::SetupOnly).await;
+    // Bystanders supersede must never disturb.
+    let lifecycle = setup_flow(
+        github.clone(),
+        AuthContinuationRef::LifecycleActivation {
+            package_ref: ironclaw_auth::LifecyclePackageRef::new("github-ext").unwrap(),
+        },
+    )
+    .await;
+    let other_provider = setup_flow(google_provider(), AuthContinuationRef::SetupOnly).await;
+
+    let superseded = service
+        .cancel_superseded_setup_flows(&scope, &github)
+        .await
+        .unwrap();
+    assert_eq!(superseded, vec![first.id]);
+
+    let status = |id| {
+        let scope = scope.clone();
+        let service = &service;
+        async move { service.get_flow(&scope, id).await.unwrap().unwrap().status }
+    };
+    assert_eq!(status(first.id).await, AuthFlowStatus::Canceled);
+    assert_eq!(status(lifecycle.id).await, AuthFlowStatus::AwaitingUser);
+    assert_eq!(status(other_provider.id).await, AuthFlowStatus::AwaitingUser);
+
+    // Idempotent: nothing live left to cancel for github.
+    let again = service
+        .cancel_superseded_setup_flows(&scope, &github)
+        .await
+        .unwrap();
+    assert!(again.is_empty());
+    assert_eq!(status(first.id).await, AuthFlowStatus::Canceled);
+}

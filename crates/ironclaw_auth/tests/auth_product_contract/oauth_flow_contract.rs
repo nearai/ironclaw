@@ -832,3 +832,102 @@ async fn get_flow_returns_none_owner_record_and_cross_scope_denial() {
         .expect_err("cross scope");
     assert_eq!(cross_scope, AuthProductError::CrossScopeDenied);
 }
+
+/// Create a `SetupOnly` setup flow (the web "Connect" flavour) for `provider`.
+async fn setup_flow(
+    services: &InMemoryAuthProductServices,
+    owner: AuthProductScope,
+    provider: AuthProviderId,
+) -> ironclaw_auth::AuthFlowRecord {
+    services
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: owner,
+            kind: AuthFlowKind::IntegrationCredential,
+            provider,
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: authorization_url("https://provider.example/oauth"),
+                expires_at: Utc::now() + Duration::minutes(5),
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: Some(state_hash("state-hash")),
+            pkce_verifier_hash: Some(pkce_hash("pkce-hash")),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .expect("setup flow")
+}
+
+async fn flow_status(
+    services: &InMemoryAuthProductServices,
+    owner: &AuthProductScope,
+    flow_id: ironclaw_auth::AuthFlowId,
+) -> AuthFlowStatus {
+    services
+        .get_flow(owner, flow_id)
+        .await
+        .expect("lookup")
+        .expect("record")
+        .status
+}
+
+/// A1 · Supersede-on-start (RFC 9700 §4.7.1). A re-opened "Connect" popup must
+/// cancel the prior non-terminal `SetupOnly` flow for the same owner+provider,
+/// leaving exactly one live setup flow — without disturbing an in-flight
+/// extension (`LifecycleActivation`) flow, a different provider, or another
+/// owner.
+#[tokio::test]
+async fn cancel_superseded_setup_flows_supersedes_only_matching_setup_only_flow() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    // Bind bob's scope once: `scope()` mints a fresh invocation_id per call and
+    // `get_flow` compares full scope equality, so a re-derived scope would not
+    // locate the record (that owner-vs-full-scope distinction is exactly what
+    // the supersede's owner-granularity matching must bridge).
+    let bob = scope("bob");
+    let other_provider = AuthProviderId::new("gmail").expect("valid provider");
+
+    // First "Connect" popup for github: abandoned, still AwaitingUser.
+    let first = setup_flow(&services, owner.clone(), provider()).await;
+    // Bystanders supersede must never touch:
+    let lifecycle = oauth_flow(&services, owner.clone()).await; // LifecycleActivation
+    let other_prov = setup_flow(&services, owner.clone(), other_provider).await;
+    let other_owner = setup_flow(&services, bob.clone(), provider()).await;
+
+    // The second "Connect" popup starts: supersede the prior github setup flow.
+    let superseded = services
+        .cancel_superseded_setup_flows(&owner, &provider())
+        .await
+        .expect("supersede");
+    assert_eq!(superseded, vec![first.id]);
+
+    // Flow A is Canceled; every bystander survives untouched.
+    assert_eq!(
+        flow_status(&services, &owner, first.id).await,
+        AuthFlowStatus::Canceled
+    );
+    assert_eq!(
+        flow_status(&services, &owner, lifecycle.id).await,
+        AuthFlowStatus::AwaitingUser
+    );
+    assert_eq!(
+        flow_status(&services, &owner, other_prov.id).await,
+        AuthFlowStatus::AwaitingUser
+    );
+    assert_eq!(
+        flow_status(&services, &bob, other_owner.id).await,
+        AuthFlowStatus::AwaitingUser
+    );
+
+    // Idempotent: a second supersede finds nothing live left to cancel.
+    let again = services
+        .cancel_superseded_setup_flows(&owner, &provider())
+        .await
+        .expect("supersede idempotent");
+    assert!(again.is_empty());
+    assert_eq!(
+        flow_status(&services, &owner, first.id).await,
+        AuthFlowStatus::Canceled
+    );
+}

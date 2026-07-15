@@ -545,6 +545,54 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         record.updated_at = now;
         Ok(record.clone())
     }
+
+    async fn cancel_superseded_setup_flows(
+        &self,
+        scope: &crate::AuthProductScope,
+        provider: &crate::AuthProviderId,
+    ) -> Result<Vec<AuthFlowId>, AuthProductError> {
+        // Owner granularity (tenant/user/agent/project + surface + session);
+        // setup flows are thread-less and each re-opened connect popup mints a
+        // fresh invocation, so `flow_shares_setup_owner_root` — not full scope
+        // equality — is the correct predicate here, mirroring the durable
+        // store's per-owner+surface+session flow-root listing.
+        let now = Utc::now();
+        let mut state = self.lock_state();
+        let mut superseded = Vec::new();
+        for record in state.flows.values_mut() {
+            if flow_shares_setup_owner_root(&record.scope, scope)
+                && &record.provider == provider
+                && matches!(record.continuation, crate::AuthContinuationRef::SetupOnly)
+                && !crate::is_terminal_status(record.status)
+            {
+                record.status = AuthFlowStatus::Canceled;
+                record.error = Some(crate::AuthErrorCode::Canceled);
+                record.updated_at = now;
+                superseded.push(record.id);
+            }
+        }
+        superseded.sort();
+        Ok(superseded)
+    }
+}
+
+/// Owner-root match for supersede-on-start: two auth scopes share a setup-flow
+/// root iff they carry the same owner (tenant/user/agent/project), surface, and
+/// session — the exact granularity of the durable flow-root path, which omits
+/// the transient thread/mission/invocation axes. Full scope equality would miss
+/// a prior setup flow started under a different per-request invocation.
+fn flow_shares_setup_owner_root(
+    flow_scope: &crate::AuthProductScope,
+    scope: &crate::AuthProductScope,
+) -> bool {
+    let flow_resource = &flow_scope.resource;
+    let resource = &scope.resource;
+    flow_resource.tenant_id == resource.tenant_id
+        && flow_resource.user_id == resource.user_id
+        && flow_resource.agent_id == resource.agent_id
+        && flow_resource.project_id == resource.project_id
+        && flow_scope.surface == scope.surface
+        && flow_scope.session_id == scope.session_id
 }
 
 #[async_trait]
@@ -829,6 +877,33 @@ impl CredentialAccountService for InMemoryAuthProductServices {
                 validate_refresh_target(account, &request)?;
                 if account.refresh_secret.as_ref() == Some(&refresh_secret_used) {
                     account.status = CredentialAccountStatus::RefreshFailed;
+                    account.updated_at = Utc::now();
+                }
+                Ok(CredentialRefreshReport {
+                    account: account.projection(),
+                    recovery: recovery_projection_for_single_account(
+                        account.provider.clone(),
+                        account,
+                    ),
+                    refreshed: false,
+                })
+            }
+            Err(AuthProductError::InvalidGrant) => {
+                // A14 · Fidelity with production
+                // `ProviderBackedCredentialAccountService::refresh_account`: a
+                // provider `invalid_grant` means the refresh token is permanently
+                // revoked, so the account becomes `Revoked` (reauthorize-required),
+                // not merely `RefreshFailed`. Without this arm the fake left the
+                // account status unchanged (propagating the raw error), hiding a
+                // divergence from the production path.
+                let mut state = self.lock_state();
+                let account = state
+                    .accounts
+                    .get_mut(&request.account_id)
+                    .ok_or(AuthProductError::CredentialMissing)?;
+                validate_refresh_target(account, &request)?;
+                if account.refresh_secret.as_ref() == Some(&refresh_secret_used) {
+                    account.status = CredentialAccountStatus::Revoked;
                     account.updated_at = Utc::now();
                 }
                 Ok(CredentialRefreshReport {

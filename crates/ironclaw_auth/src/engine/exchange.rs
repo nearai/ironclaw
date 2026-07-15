@@ -92,10 +92,11 @@ impl AuthEngine {
             log_vendor_error(&vendor, response.status, &response.body, "token exchange");
             return Err(AuthProductError::TokenExchangeFailed);
         }
-        let extracted = extract_token_response(&recipe, &response.body, &request.scopes)
-            .inspect_err(|_| {
-                tracing::debug!(vendor, "token response extraction failed");
-            })?;
+        let extracted =
+            extract_token_response(&recipe, &response.body, &request.scopes, ScopeClamp::ToRequested)
+                .inspect_err(|_| {
+                    tracing::debug!(vendor, "token response extraction failed");
+                })?;
 
         let provider_identity = self
             .extract_identity(&scope, &recipe, &extracted)
@@ -176,13 +177,16 @@ impl AuthEngine {
             }
             return Err(AuthProductError::RefreshFailed);
         }
-        let extracted =
-            extract_token_response(&recipe, &response.body, &request.scopes).map_err(|error| {
-                match error {
-                    AuthProductError::BackendUnavailable => AuthProductError::BackendUnavailable,
-                    _ => AuthProductError::RefreshFailed,
-                }
-            })?;
+        let extracted = extract_token_response(
+            &recipe,
+            &response.body,
+            &request.scopes,
+            ScopeClamp::PreserveGranted,
+        )
+        .map_err(|error| match error {
+            AuthProductError::BackendUnavailable => AuthProductError::BackendUnavailable,
+            _ => AuthProductError::RefreshFailed,
+        })?;
 
         let rotates = recipe
             .refresh
@@ -393,11 +397,22 @@ fn token_request_headers_and_body(
     (headers, form.finish().into_bytes())
 }
 
+/// Whether the A6 exchange-scope clamp (store `granted ∩ requested`) applies.
+/// Only the initial authorization-code exchange clamps; refresh preserves the
+/// granted set so a vendor's rotation response is recorded as-is (the account's
+/// scopes were already clamped at exchange time).
+#[derive(Clone, Copy)]
+pub(super) enum ScopeClamp {
+    ToRequested,
+    PreserveGranted,
+}
+
 /// Bounded JSON-pointer extraction of the token response (AUTH-5).
 pub(super) fn extract_token_response(
     recipe: &OAuth2CodeRecipe,
     body: &[u8],
     requested_scopes: &[ProviderScope],
+    clamp: ScopeClamp,
 ) -> Result<ExtractedTokenResponse, AuthProductError> {
     let value: serde_json::Value =
         serde_json::from_slice(body).map_err(|_| AuthProductError::TokenExchangeFailed)?;
@@ -427,26 +442,54 @@ pub(super) fn extract_token_response(
             let granted = pointer_string(&value, extraction.path.as_str())
                 .map(|text| parse_scope_list(&text))
                 .filter(|scopes| !scopes.is_empty());
-            match (granted, extraction.missing) {
-                (Some(scopes), _) => scopes
-                    .into_iter()
-                    .map(ProviderScope::new)
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|_| AuthProductError::TokenExchangeFailed)?,
-                (None, MissingScopeBehavior::Reject) => {
-                    return Err(AuthProductError::TokenExchangeFailed);
+            match granted {
+                Some(granted) => {
+                    let granted = granted
+                        .into_iter()
+                        .map(ProviderScope::new)
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|_| AuthProductError::TokenExchangeFailed)?;
+                    match clamp {
+                        // A6 · Enforce granted ⊆ requested on the echoed-scope path
+                        // (RFC 9700 §2.3). Store only scopes the vendor granted AND
+                        // the user requested: drop any scope granted beyond the
+                        // request (stop over-claiming an unrequested scope), and
+                        // never widen a narrower-than-requested grant back up to
+                        // the full requested set. Generic and spec-agnostic — every
+                        // vendor gets the same clamp. Applied only on the initial
+                        // exchange; refresh preserves the granted set.
+                        ScopeClamp::ToRequested => {
+                            let clamped: Vec<ProviderScope> = granted
+                                .iter()
+                                .filter(|scope| requested_scopes.contains(scope))
+                                .cloned()
+                                .collect();
+                            let over_granted = granted.len().saturating_sub(clamped.len());
+                            if over_granted > 0 || clamped.len() < requested_scopes.len() {
+                                // Count-only guard log — never the scope values or
+                                // the response body; the stored grant is the
+                                // intersection, never wider than either side.
+                                tracing::warn!(
+                                    requested_scope_count = requested_scopes.len(),
+                                    granted_scope_count = clamped.len(),
+                                    over_granted_scope_count = over_granted,
+                                    "oauth exchange granted a scope set differing from requested; storing granted ∩ requested (never wider than requested or granted)"
+                                );
+                            }
+                            if clamped.is_empty() {
+                                // The vendor echoed only scopes outside the request
+                                // — no legitimate granted scope to store, so fall
+                                // through to the missing-scope behavior exactly as
+                                // an omitted scope would.
+                                scopes_when_grant_absent(extraction.missing, requested_scopes)?
+                            } else {
+                                clamped
+                            }
+                        }
+                        ScopeClamp::PreserveGranted => granted,
+                    }
                 }
-                (None, MissingScopeBehavior::FallbackToRequested) => {
-                    // The vendor reported no granted scopes; the stored grant
-                    // falls back to the requested set. Count-only log — a
-                    // narrower actual grant must not be silently widened
-                    // without a trace.
-                    tracing::warn!(
-                        requested_scope_count = requested_scopes.len(),
-                        "token response carried no granted scopes; falling back to requested"
-                    );
-                    requested_scopes.to_vec()
-                }
+                None => scopes_when_grant_absent(extraction.missing, requested_scopes)?,
             }
         }
     };
@@ -457,6 +500,29 @@ pub(super) fn extract_token_response(
         scopes,
         body: value,
     })
+}
+
+/// Fallback scope set when the vendor echoed no usable granted scope — either
+/// none at all, or only scopes outside the request. RFC 6749 §3.3 makes an
+/// omitted scope ⇒ requested legitimate (`FallbackToRequested`); `Reject` fails
+/// closed. Shared by the no-scope and empty-intersection (A6) paths so both
+/// honor the recipe's declared missing-scope behavior identically.
+fn scopes_when_grant_absent(
+    missing: MissingScopeBehavior,
+    requested_scopes: &[ProviderScope],
+) -> Result<Vec<ProviderScope>, AuthProductError> {
+    match missing {
+        MissingScopeBehavior::Reject => Err(AuthProductError::TokenExchangeFailed),
+        MissingScopeBehavior::FallbackToRequested => {
+            // Count-only log — a narrower actual grant must not be silently
+            // widened without a trace.
+            tracing::warn!(
+                requested_scope_count = requested_scopes.len(),
+                "token response carried no granted scopes; falling back to requested"
+            );
+            Ok(requested_scopes.to_vec())
+        }
+    }
 }
 
 /// Scope lists arrive space- or comma-separated depending on the vendor;

@@ -1274,6 +1274,17 @@ impl RebornProductAuthServices {
         &self,
         request: RebornOAuthStartFlowRequest,
     ) -> Result<AuthFlowRecord, AuthProductError> {
+        // A1 · Supersede-on-start (RFC 9700 §4.7.1). Before minting a new setup
+        // flow, cancel any prior non-terminal `SetupOnly` flow for the same
+        // owner+provider so a re-opened connect popup cannot leave two live
+        // authorization requests racing to write the same credential. This is
+        // the durable analogue of the gate path's reusable-flow supersede.
+        // Best-effort + idempotent; `create_flow` below keeps
+        // `CasExpectation::Absent`, so a genuinely concurrent create still races
+        // cleanly on the new flow id.
+        self.flow_manager
+            .cancel_superseded_setup_flows(&request.scope, &request.provider)
+            .await?;
         self.flow_manager
             .create_flow(NewAuthFlow {
                 id: request.flow_id,

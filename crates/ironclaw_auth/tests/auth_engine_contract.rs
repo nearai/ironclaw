@@ -667,7 +667,17 @@ async fn pointer_extraction_reads_nested_fields_and_scope_fallback() {
         .engine
         .exchange_callback(
             context,
-            callback_request("slack", vec![ProviderScope::new("search:read").unwrap()]),
+            // Request both granted scopes so the A6 clamp (granted ∩ requested)
+            // is a no-op here and this case keeps proving comma-separated
+            // multi-scope pointer extraction. The over-claim clamp itself is
+            // covered by `exchange_clamps_echoed_scopes_to_granted_intersect_requested`.
+            callback_request(
+                "slack",
+                vec![
+                    ProviderScope::new("search:read").unwrap(),
+                    ProviderScope::new("chat:write").unwrap(),
+                ],
+            ),
         )
         .await
         .expect("slack exchange");
@@ -719,6 +729,54 @@ async fn pointer_extraction_reads_nested_fields_and_scope_fallback() {
         exchange.scopes,
         vec![ProviderScope::new("search:read").unwrap()],
         "missing scope falls back to requested (fallback_to_requested)"
+    );
+}
+
+/// A6 · Scope downgrade / over-claim on the echoed-scope path (RFC 9700 §2.3).
+/// The vendor echoes a scope set that both over-grants a scope the user never
+/// requested (`chat:write`) and omits one that was requested (`channels:read`).
+/// The stored grant must be exactly `granted ∩ requested` — the over-granted
+/// scope is dropped (no over-claim) and the grant is never widened to the full
+/// requested set. Generic clamp, no vendor branch.
+#[tokio::test]
+async fn exchange_clamps_echoed_scopes_to_granted_intersect_requested() {
+    let harness = Harness::new(vec![manifest_recipe("slack", "slack")]);
+    let scope = test_scope();
+    harness.server.script(
+        "https://slack.com/api/oauth.v2.access",
+        200,
+        serde_json::json!({
+            "ok": true,
+            "app_id": "A100",
+            "team": { "id": "T100" },
+            "authed_user": {
+                "id": "U100",
+                "access_token": "xoxp-clamp-token",
+                // Over-grants chat:write (not requested) and omits channels:read
+                // (requested) — both within the recipe ceiling.
+                "scope": "search:read,chat:write"
+            }
+        }),
+    );
+    let exchange = harness
+        .engine
+        .exchange_callback(
+            exchange_context(&scope),
+            callback_request(
+                "slack",
+                vec![
+                    ProviderScope::new("search:read").unwrap(),
+                    ProviderScope::new("channels:read").unwrap(),
+                ],
+            ),
+        )
+        .await
+        .expect("slack exchange");
+    assert_eq!(
+        exchange.scopes,
+        vec![ProviderScope::new("search:read").unwrap()],
+        "stored grant is granted ∩ requested: chat:write over-grant dropped, \
+         channels:read never widened in"
     );
 }
 
