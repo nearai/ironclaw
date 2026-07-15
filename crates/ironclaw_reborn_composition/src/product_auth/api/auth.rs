@@ -1015,10 +1015,22 @@ impl RebornProductAuthServices {
         &self,
         request: SecretCleanupRequest,
     ) -> Result<SecretCleanupReport, RebornCredentialLifecycleError> {
-        self.cleanup_service
+        let report = self
+            .cleanup_service
             .cleanup_for_lifecycle(request)
             .await
-            .map_err(RebornCredentialLifecycleError::from)
+            .map_err(RebornCredentialLifecycleError::from)?;
+        for event in &report.canceled_turn_gate_continuations {
+            self.continuation_dispatcher
+                .dispatch_canceled_auth_continuation(event.clone())
+                .await
+                .map_err(RebornCredentialLifecycleError::from)?;
+            self.flow_manager
+                .mark_continuation_dispatched(&event.scope, event.flow_id, event.emitted_at)
+                .await
+                .map_err(RebornCredentialLifecycleError::from)?;
+        }
+        Ok(report)
     }
 
     pub async fn handle_oauth_callback(

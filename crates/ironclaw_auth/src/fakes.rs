@@ -506,7 +506,10 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         if !scope_matches(scope, &record.scope) {
             return Err(AuthProductError::CrossScopeDenied);
         }
-        if record.status != AuthFlowStatus::Completed {
+        if !matches!(
+            record.status,
+            AuthFlowStatus::Completed | AuthFlowStatus::Canceled | AuthFlowStatus::Failed
+        ) {
             return Err(AuthProductError::FlowAlreadyTerminal);
         }
         // Idempotent: if already marked by a concurrent caller, return existing record.
@@ -1192,15 +1195,40 @@ impl SecretCleanupService for InMemoryAuthProductServices {
         // can no longer mint a credential for a torn-down extension. Owner
         // decision 2026-07-15: cancel on both Deactivate and Uninstall (any
         // provider-selected cleanup). Idempotent.
+        //
+        // F2 · Any matched flow whose `TurnGateResume` continuation has not
+        // been acknowledged — freshly canceled here or already terminal — is
+        // reported so the composition layer denies its blocked turn gate
+        // instead of leaving the turn parked. `mark_continuation_dispatched`
+        // makes the handoff emit-once across cleanup retries.
         if let Some(provider) = request.provider.as_ref() {
             for record in state.flows.values_mut() {
-                if !crate::is_terminal_status(record.status)
-                    && &record.provider == provider
-                    && flow_matches_credential_owner(&record.scope, &request.scope)
+                if &record.provider != provider
+                    || !flow_matches_credential_owner(&record.scope, &request.scope)
                 {
+                    continue;
+                }
+                if !crate::is_terminal_status(record.status) {
                     record.status = AuthFlowStatus::Canceled;
                     record.error = Some(crate::AuthErrorCode::Canceled);
                     record.updated_at = Utc::now();
+                }
+                if record.continuation_emitted_at.is_none()
+                    && matches!(
+                        record.continuation,
+                        crate::AuthContinuationRef::TurnGateResume { .. }
+                    )
+                {
+                    report
+                        .canceled_turn_gate_continuations
+                        .push(AuthContinuationEvent {
+                            flow_id: record.id,
+                            scope: record.scope.clone(),
+                            continuation: record.continuation.clone(),
+                            provider: record.provider.clone(),
+                            credential_account_id: record.credential_account_id,
+                            emitted_at: Utc::now(),
+                        });
                 }
             }
         }

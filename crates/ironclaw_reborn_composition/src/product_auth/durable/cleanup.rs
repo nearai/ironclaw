@@ -4,9 +4,9 @@ use ironclaw_filesystem::{CasExpectation, RootFilesystem};
 
 use super::FilesystemAuthProductServices;
 use ironclaw_auth::{
-    AuthFlowManager, AuthProductError, CredentialAccountOwnerScope, CredentialAccountStatus,
-    CredentialOwnership, SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest,
-    SecretCleanupService,
+    AuthContinuationEvent, AuthContinuationRef, AuthFlowManager, AuthProductError,
+    CredentialAccountOwnerScope, CredentialAccountStatus, CredentialOwnership, SecretCleanupAction,
+    SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
 };
 
 #[async_trait]
@@ -97,17 +97,43 @@ where
         // vendor safe by construction — the removal caller only selects a
         // provider exclusive to the removed extension. Idempotent: a concurrently
         // terminal flow is skipped, never an error.
+        //
+        // F2 · Any enumerated flow whose `TurnGateResume` continuation was
+        // never acknowledged — freshly canceled here or already terminal — is
+        // reported so the composition layer denies its blocked turn gate
+        // instead of leaving the turn parked. `mark_continuation_dispatched`
+        // makes the handoff emit-once across cleanup retries.
         if let Some(provider) = request.provider.as_ref() {
             for flow in self
                 .lifecycle_flows_for_owner_provider(&request.scope.resource, provider)
                 .await?
             {
-                match self.cancel_flow(&flow.scope, flow.id).await {
-                    Ok(_) => {}
-                    Err(AuthProductError::Canceled)
-                    | Err(AuthProductError::FlowAlreadyTerminal)
-                    | Err(AuthProductError::UnknownOrExpiredFlow) => {}
-                    Err(error) => return Err(error),
+                let canceled = match flow.status {
+                    status if ironclaw_auth::is_terminal_status(status) => flow,
+                    _ => match self.cancel_flow(&flow.scope, flow.id).await {
+                        Ok(canceled) => canceled,
+                        Err(AuthProductError::Canceled)
+                        | Err(AuthProductError::FlowAlreadyTerminal)
+                        | Err(AuthProductError::UnknownOrExpiredFlow) => flow,
+                        Err(error) => return Err(error),
+                    },
+                };
+                if canceled.continuation_emitted_at.is_none()
+                    && matches!(
+                        canceled.continuation,
+                        AuthContinuationRef::TurnGateResume { .. }
+                    )
+                {
+                    report
+                        .canceled_turn_gate_continuations
+                        .push(AuthContinuationEvent {
+                            flow_id: canceled.id,
+                            scope: canceled.scope.clone(),
+                            continuation: canceled.continuation.clone(),
+                            provider: canceled.provider.clone(),
+                            credential_account_id: canceled.credential_account_id,
+                            emitted_at: Utc::now(),
+                        });
                 }
             }
         }

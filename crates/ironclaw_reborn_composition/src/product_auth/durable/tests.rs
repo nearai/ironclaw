@@ -4466,9 +4466,19 @@ async fn filesystem_cancel_superseded_setup_flows_supersedes_only_matching_setup
 /// A different provider's pending flow survives the provider-scoped cleanup, and
 /// a second cleanup is idempotent. Durable analogue of the fake-tier
 /// `uninstall_cancels_pending_flow_and_rejects_late_callback`.
+///
+/// F2 · The same cleanup reports every unacknowledged `TurnGateResume`
+/// continuation for gate denial — the pending turn-gate flow it cancels AND an
+/// already-failed turn-gate flow whose failure was never dispatched — exactly
+/// once each: acknowledging via `mark_continuation_dispatched` (which must
+/// accept canceled and failed flows) converges a retry to an empty report,
+/// while the `SetupOnly` flows are never reported.
 #[tokio::test]
 async fn filesystem_cleanup_cancels_pending_flow_across_surfaces() {
-    use ironclaw_auth::{SecretCleanupAction, SecretCleanupRequest, SecretCleanupService};
+    use ironclaw_auth::{
+        AuthErrorCode, AuthGateRef, OAuthCallbackFailureInput, SecretCleanupAction,
+        SecretCleanupRequest, SecretCleanupService, TurnRunRef,
+    };
     use ironclaw_host_api::ExtensionId;
 
     let filesystem = test_filesystem();
@@ -4505,10 +4515,58 @@ async fn filesystem_cleanup_cancels_pending_flow_across_surfaces() {
         }
     };
 
+    let gate_flow = |gate: &'static str| {
+        let scope = flow_scope.clone();
+        let service = &service;
+        let github = github.clone();
+        async move {
+            service
+                .create_flow(NewAuthFlow {
+                    id: None,
+                    scope,
+                    kind: AuthFlowKind::IntegrationCredential,
+                    provider: github,
+                    challenge: AuthChallenge::OAuthUrl {
+                        authorization_url: OAuthAuthorizationUrl::new(
+                            "https://provider.example/oauth",
+                        )
+                        .unwrap(),
+                        expires_at: Utc::now() + Duration::minutes(5),
+                    },
+                    continuation: AuthContinuationRef::TurnGateResume {
+                        turn_run_ref: TurnRunRef::new(format!("run-{gate}")).unwrap(),
+                        gate_ref: AuthGateRef::new(format!("gate:{gate}")).unwrap(),
+                    },
+                    update_binding: None,
+                    opaque_state_hash: Some(state_hash(gate)),
+                    pkce_verifier_hash: Some(pkce_hash(gate)),
+                    expires_at: Utc::now() + Duration::minutes(5),
+                })
+                .await
+                .unwrap()
+        }
+    };
+
     // Pending github connect popup, minted under the `Web` surface.
     let pending = setup_flow(github.clone()).await;
     // A different provider's pending flow must survive a github-scoped cleanup.
     let bystander = setup_flow(google_provider()).await;
+    // A pending turn-gate flow (a tool call blocked on auth) and a turn-gate
+    // flow whose provider callback already failed terminally without its
+    // failure continuation ever being dispatched.
+    let turn_flow = gate_flow("turn").await;
+    let failed_turn_flow = gate_flow("failed-turn").await;
+    service
+        .fail_oauth_callback(
+            &flow_scope,
+            OAuthCallbackFailureInput {
+                flow_id: failed_turn_flow.id,
+                opaque_state_hash: state_hash("failed-turn"),
+                error: AuthErrorCode::TokenExchangeFailed,
+            },
+        )
+        .await
+        .expect("terminal callback failure persists");
 
     // The extension is uninstalled. Cleanup arrives on the `Callback`-surface
     // credential-owner scope with a fresh invocation id — a different surface
@@ -4525,7 +4583,7 @@ async fn filesystem_cleanup_cancels_pending_flow_across_surfaces() {
         "fixture must model the cross-invocation caller"
     );
 
-    service
+    let report = service
         .cleanup_for_lifecycle(SecretCleanupRequest {
             scope: cleanup_scope.clone(),
             extension_id: ExtensionId::new("github").unwrap(),
@@ -4540,13 +4598,42 @@ async fn filesystem_cleanup_cancels_pending_flow_across_surfaces() {
         let service = &service;
         async move { service.get_flow(&scope, id).await.unwrap().unwrap().status }
     };
-    // The cross-surface enumeration found and canceled the pending flow…
+    // The cross-surface enumeration found and canceled the pending flows…
     assert_eq!(status(pending.id).await, AuthFlowStatus::Canceled);
+    assert_eq!(status(turn_flow.id).await, AuthFlowStatus::Canceled);
     // …and the unrelated provider's flow was left live.
     assert_eq!(status(bystander.id).await, AuthFlowStatus::AwaitingUser);
 
-    // Idempotent: a second cleanup finds nothing live to cancel and still succeeds.
-    service
+    // F2 · Exactly the two unacknowledged TURN-GATE flows are handed over for
+    // gate denial (never the `SetupOnly` connect flows), the already-failed one
+    // included: its blocked turn is parked all the same.
+    assert_eq!(report.canceled_turn_gate_continuations.len(), 2);
+    let cleanup_flow_ids = report
+        .canceled_turn_gate_continuations
+        .iter()
+        .map(|event| event.flow_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        cleanup_flow_ids,
+        [turn_flow.id, failed_turn_flow.id].into_iter().collect()
+    );
+    for event in &report.canceled_turn_gate_continuations {
+        service
+            .mark_continuation_dispatched(&event.scope, event.flow_id, event.emitted_at)
+            .await
+            .expect("cleanup denial acknowledgement supports canceled and failed flows");
+    }
+    let failed_after_ack = service
+        .get_flow(&flow_scope, failed_turn_flow.id)
+        .await
+        .expect("failed flow lookup")
+        .expect("failed flow remains durable");
+    assert_eq!(failed_after_ack.status, AuthFlowStatus::Failed);
+    assert!(failed_after_ack.continuation_emitted_at.is_some());
+
+    // Idempotent: a second cleanup finds nothing live to cancel, reports no
+    // further turn-gate continuations, and still succeeds.
+    let retry = service
         .cleanup_for_lifecycle(SecretCleanupRequest {
             scope: cleanup_scope,
             extension_id: ExtensionId::new("github").unwrap(),
@@ -4555,5 +4642,6 @@ async fn filesystem_cleanup_cancels_pending_flow_across_surfaces() {
         })
         .await
         .unwrap();
+    assert!(retry.canceled_turn_gate_continuations.is_empty());
     assert_eq!(status(pending.id).await, AuthFlowStatus::Canceled);
 }

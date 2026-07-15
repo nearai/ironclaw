@@ -648,7 +648,7 @@ async fn cleanup_cancels_all_pending_flow_kinds_for_provider_on_deactivate() {
 
     // Deactivate (owner call: same as uninstall for flow cancellation), provider
     // selected, arriving on the callback-surface owner scope.
-    services
+    let report = services
         .cleanup_for_lifecycle(SecretCleanupRequest {
             scope: callback_cleanup_scope("alice"),
             extension_id: ExtensionId::new("github").expect("extension"),
@@ -657,6 +657,18 @@ async fn cleanup_cancels_all_pending_flow_kinds_for_provider_on_deactivate() {
         })
         .await
         .expect("cleanup");
+
+    // F2 · Exactly the canceled TURN-GATE flow is handed to the composition
+    // layer for gate denial — once, and never the `SetupOnly` connect flow.
+    assert_eq!(report.canceled_turn_gate_continuations.len(), 1);
+    let event = &report.canceled_turn_gate_continuations[0];
+    assert_eq!(event.flow_id, gate.id);
+    assert_eq!(event.provider, provider());
+    assert_eq!(event.credential_account_id, None);
+    assert!(matches!(
+        &event.continuation,
+        AuthContinuationRef::TurnGateResume { gate_ref, .. } if gate_ref.as_str() == "gate:a3"
+    ));
 
     let status = |id| {
         let services = &services;
@@ -678,8 +690,16 @@ async fn cleanup_cancels_all_pending_flow_kinds_for_provider_on_deactivate() {
         "a different provider's pending flow must survive provider-scoped cleanup"
     );
 
-    // Idempotent: a second cleanup finds nothing live to cancel and still succeeds.
+    // Acknowledge the gate-denial handoff exactly as the composition dispatch
+    // loop does, so a cleanup retry cannot re-emit the same denial.
     services
+        .mark_continuation_dispatched(&event.scope, event.flow_id, event.emitted_at)
+        .await
+        .expect("cleanup denial acknowledgement supports canceled flows");
+
+    // Idempotent: a second cleanup finds nothing live to cancel, reports no
+    // further turn-gate continuations, and still succeeds.
+    let retry = services
         .cleanup_for_lifecycle(SecretCleanupRequest {
             scope: callback_cleanup_scope("alice"),
             extension_id: ExtensionId::new("github").expect("extension"),
@@ -688,5 +708,87 @@ async fn cleanup_cancels_all_pending_flow_kinds_for_provider_on_deactivate() {
         })
         .await
         .expect("idempotent cleanup");
+    assert!(retry.canceled_turn_gate_continuations.is_empty());
     assert_eq!(status(setup.id).await, AuthFlowStatus::Canceled);
+}
+
+/// F2 · A flow can reach a terminal state (here: `Completed`) with its
+/// `TurnGateResume` continuation still unacknowledged — completion is durable
+/// but dispatch is not. Lifecycle cleanup must still synthesize exactly one
+/// denial handoff for it (a gate cannot remain parked after its credential is
+/// removed), and acknowledging via `mark_continuation_dispatched` converges a
+/// retry to an empty report.
+#[tokio::test]
+async fn completed_unacknowledged_turn_gate_cleanup_emits_once_then_converges() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let account = services
+        .create_account(account_request(
+            owner.clone(),
+            "cleanup completed",
+            CredentialAccountStatus::Configured,
+        ))
+        .await
+        .expect("account");
+    let expires_at = Utc::now() + Duration::minutes(5);
+    let flow = services
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: owner.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: provider(),
+            challenge: AuthChallenge::AccountSelectionRequired {
+                provider: provider(),
+                accounts: vec![account.projection()],
+            },
+            continuation: AuthContinuationRef::TurnGateResume {
+                turn_run_ref: TurnRunRef::new("run-cleanup-completed").expect("turn run ref"),
+                gate_ref: AuthGateRef::new("gate:cleanup-completed").expect("gate ref"),
+            },
+            update_binding: None,
+            opaque_state_hash: None,
+            pkce_verifier_hash: None,
+            expires_at,
+        })
+        .await
+        .expect("flow");
+    let completed = services
+        .complete_credential_selection(
+            &owner,
+            CredentialSelectionInput {
+                flow_id: flow.id,
+                credential_account_id: account.id,
+            },
+        )
+        .await
+        .expect("selection completes");
+    assert_eq!(completed.status, AuthFlowStatus::Completed);
+    assert!(completed.continuation_emitted_at.is_none());
+
+    // Completion is durable but dispatch is not acknowledged yet. Lifecycle
+    // cleanup must still synthesize a denial so a gate cannot remain parked
+    // after its credential is removed.
+    let request = SecretCleanupRequest {
+        scope: owner.clone(),
+        extension_id: ExtensionId::new("github").expect("extension"),
+        provider: Some(provider()),
+        action: SecretCleanupAction::Uninstall,
+    };
+    let report = services
+        .cleanup_for_lifecycle(request.clone())
+        .await
+        .expect("cleanup");
+    assert_eq!(report.canceled_turn_gate_continuations.len(), 1);
+    let event = &report.canceled_turn_gate_continuations[0];
+    assert_eq!(event.flow_id, flow.id);
+
+    services
+        .mark_continuation_dispatched(&owner, flow.id, event.emitted_at)
+        .await
+        .expect("acknowledge cleanup continuation");
+    let retry = services
+        .cleanup_for_lifecycle(request)
+        .await
+        .expect("cleanup retry");
+    assert!(retry.canceled_turn_gate_continuations.is_empty());
 }

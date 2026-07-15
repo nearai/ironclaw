@@ -385,7 +385,10 @@ where
         if !scope_matches(scope, &record.scope) {
             return Err(AuthProductError::CrossScopeDenied);
         }
-        if record.status != AuthFlowStatus::Completed {
+        if !matches!(
+            record.status,
+            AuthFlowStatus::Completed | AuthFlowStatus::Canceled | AuthFlowStatus::Failed
+        ) {
             return Err(AuthProductError::FlowAlreadyTerminal);
         }
         // Idempotent: if the continuation was already marked by a concurrent

@@ -20,9 +20,10 @@ use ironclaw_secrets::SecretStore;
 use serde::{Serialize, de::DeserializeOwned};
 
 use ironclaw_auth::{
-    AuthFlowId, AuthFlowOwnerScope, AuthFlowRecord, AuthProductError, AuthSessionId, AuthSurface,
-    CredentialAccount, CredentialAccountId, CredentialAccountOwnerScope,
-    CredentialAccountSelectionRequest, CredentialAccountStatus, NewCredentialAccount,
+    AuthContinuationRef, AuthFlowId, AuthFlowOwnerScope, AuthFlowRecord, AuthProductError,
+    AuthSessionId, AuthSurface, CredentialAccount, CredentialAccountId,
+    CredentialAccountOwnerScope, CredentialAccountSelectionRequest, CredentialAccountStatus,
+    NewCredentialAccount,
 };
 use ironclaw_host_api::VirtualPath;
 
@@ -43,6 +44,15 @@ mod tests;
 
 const MAX_OWNER_SESSION_ROOTS_PER_SURFACE: usize = 1024;
 const MAX_OWNER_RECORDS_PER_ROOT: usize = 1024;
+
+fn flow_requires_lifecycle_cleanup(flow: &AuthFlowRecord) -> bool {
+    !ironclaw_auth::is_terminal_status(flow.status)
+        || (flow.continuation_emitted_at.is_none()
+            && matches!(
+                flow.continuation,
+                AuthContinuationRef::TurnGateResume { .. }
+            ))
+}
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) use provider::UnavailableAuthProviderClient;
@@ -338,8 +348,9 @@ where
         Ok(flows)
     }
 
-    /// Non-terminal auth-flow records for a credential owner + provider, walked
-    /// across surfaces/sessions but not one thread (A3).
+    /// Auth-flow records still requiring lifecycle cleanup for a credential
+    /// owner + provider, walked across surfaces/sessions but not one thread
+    /// (A3 + F2).
     ///
     /// The lifecycle/disconnect analogue of [`Self::account_records_for_owner`]:
     /// flow storage is keyed by agent/project/surface/session (see `flow_root`)
@@ -350,12 +361,10 @@ where
     /// provider's non-terminal flows so a late provider callback cannot mint a
     /// credential for a torn-down extension. Provider-agnostic by construction.
     ///
-    /// The predicate is deliberately the non-terminal test only
-    /// (`!is_terminal_status`). Main additionally re-enumerates completed-but-
-    /// unacked `TurnGateResume` flows here (via `flow_requires_lifecycle_cleanup`)
-    /// to drive a parked-turn notification; this branch's `SecretCleanupReport`
-    /// has no such field, so that arm is omitted and owned by the concurrent
-    /// main-delta reconciliation.
+    /// Beyond the non-terminal test, `flow_requires_lifecycle_cleanup` also
+    /// re-enumerates terminal flows whose `TurnGateResume` continuation was
+    /// never acknowledged, so cleanup can report them for gate denial instead
+    /// of leaving their blocked turns parked.
     async fn lifecycle_flows_for_owner_provider(
         &self,
         resource: &ResourceScope,
@@ -371,7 +380,7 @@ where
             invocation_id: ironclaw_host_api::InvocationId::new(),
         };
         self.flow_records_for_resource_filtered(&resource, |flow| {
-            &flow.provider == provider && !ironclaw_auth::is_terminal_status(flow.status)
+            &flow.provider == provider && flow_requires_lifecycle_cleanup(flow)
         })
         .await
     }
