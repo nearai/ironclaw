@@ -420,15 +420,6 @@ impl HostRuntimeCapabilityHarness {
         Ok(())
     }
 
-    /// The fixed user this harness dispatches first-party capabilities under
-    /// (see [`Self::with_user_id`]). Credential seeding aimed at a capability's
-    /// dispatch-time account selection must use THIS user — for groups that do
-    /// not align the capability user to the binding subject, it differs from
-    /// the thread's binding actor.
-    pub(crate) fn capability_user_id(&self) -> &UserId {
-        &self.user_id
-    }
-
     async fn enable_global_auto_approve_for_product_and_harness_users(&self) -> HarnessResult<()> {
         let product_scope = product_scope();
         self.enable_global_auto_approve(product_scope.clone())

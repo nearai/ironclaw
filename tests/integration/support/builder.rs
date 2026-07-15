@@ -1657,10 +1657,22 @@ impl RebornIntegrationHarness {
 
     /// Seed a Configured credential account WITH real secret material for
     /// `provider` through the production manual-token flow, scoped so this
-    /// group's CAPABILITY dispatch finds it: account selection matches all of
-    /// `(tenant, user, agent, project)`, and the user must be the capability
-    /// harness's dispatch user — which, on groups that do not align it to the
-    /// binding subject, differs from this thread's binding actor.
+    /// thread's CAPABILITY dispatch finds it: account selection matches all of
+    /// `(tenant, user, agent, project)`, and the user must be the one
+    /// dispatch-time execution-context resolution actually stamps on the run.
+    ///
+    /// That user is NOT the capability harness's fixed constructor user: the
+    /// production capability surface (`local_dev_visible_capability_request` /
+    /// `local_dev_resource_scope_for_run` in
+    /// `crates/ironclaw_reborn_composition/src/runtime/local_dev.rs`) resolves
+    /// the execution user per run as `thread owner → run actor → fixed
+    /// fallback`, and every harness thread run carries an actor — so the fixed
+    /// fallback never applies here. Seeding under the harness's fixed
+    /// constructor user (the old behavior) left every credentialed extension
+    /// activation `BlockedAuth` in groups that do not align the harness user
+    /// to the binding subject, because the activation credential gate looked
+    /// up the run's resolved user while the seed rows sat under the
+    /// constructor user.
     pub async fn seed_capability_credential_account(
         &self,
         provider: &str,
@@ -1675,7 +1687,14 @@ impl RebornIntegrationHarness {
                 );
             }
         };
-        let scope = self.run_resource_scope_for_user(harness.capability_user_id().clone());
+        // Mirror production execution-user resolution (owner → actor); the
+        // harness fixed-user fallback is unreachable for thread-driven runs.
+        let dispatch_user = self
+            .turn_scope
+            .explicit_owner_user_id()
+            .cloned()
+            .unwrap_or_else(|| self.binding.actor_user_id.clone());
+        let scope = self.run_resource_scope_for_user(dispatch_user);
         harness
             .seed_credential_account_with_material(&scope, provider, label, provider_scopes)
             .await
@@ -1683,9 +1702,9 @@ impl RebornIntegrationHarness {
 
     /// This thread's run `(tenant, agent, project)` scope with `user_id` as
     /// the owner — the exact four fields dispatch-time credential-account
-    /// selection matches. Which user is correct depends on the caller: the
-    /// binding actor for user-aligned groups, the capability dispatch user
-    /// otherwise.
+    /// selection matches. Pass the run's resolved execution user (thread
+    /// owner → binding actor), the same resolution production capability
+    /// dispatch applies — see `seed_capability_credential_account`.
     fn run_resource_scope_for_user(&self, user_id: UserId) -> ResourceScope {
         ResourceScope {
             tenant_id: self.turn_scope.tenant_id.clone(),

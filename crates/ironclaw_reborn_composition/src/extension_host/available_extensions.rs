@@ -998,27 +998,28 @@ mod tests {
         assert!(!EffectKind::Network.is_write());
     }
 
+    /// Every bundled package must SHIP every asset its manifest references.
+    /// The host runtime's hot capability catalog reads each capability's
+    /// `input_schema_ref`/`output_schema_ref`/`prompt_doc_ref` from the
+    /// materialized package root at surface publish, and the WASM loader reads
+    /// `[runtime].module` at bind — a dangling ref does not fail install or
+    /// activation, it fails the NEXT visible-surface refresh, which kills every
+    /// subsequent turn with `host_stage_unavailable_capability`.
+    ///
+    /// The package set is derived from the catalog itself, never a
+    /// hand-maintained id list: the slack S3 regression shipped exactly
+    /// because slack was absent from this test's previous inline list while
+    /// its bundle omitted three tools' schema/prompt assets.
     #[test]
     fn bundled_first_party_manifest_asset_refs_are_packaged() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        assert!(
+            !catalog.packages.is_empty(),
+            "bundled first-party catalog must not be empty"
+        );
 
-        let extension_ids = vec![
-            "github",
-            "notion",
-            "web-access",
-            NEARAI_EXTENSION_ID,
-            "google-calendar",
-            "google-docs",
-            "google-drive",
-            "google-sheets",
-            "google-slides",
-            "gmail",
-        ];
-
-        for extension_id in extension_ids {
-            let package_ref =
-                LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id).unwrap();
-            let package = catalog.resolve(&package_ref).unwrap();
+        for package in &catalog.packages {
+            let extension_id = &package.package_ref.id;
             let assets = package
                 .assets
                 .iter()
@@ -1030,6 +1031,14 @@ mod tests {
             // asset on purpose: discovered/dynamic schemas are inlined at
             // discovery time, not packaged files.
             let is_dynamic_ref = |schema_ref: &str| schema_ref.contains("/dynamic/");
+
+            if let ExtensionRuntime::Wasm { module } = &package.package.manifest.runtime {
+                assert!(
+                    assets.contains(module.as_str()),
+                    "{extension_id} missing wasm runtime module asset {}",
+                    module.as_str()
+                );
+            }
 
             for capability in &package.package.manifest.capabilities {
                 assert!(
