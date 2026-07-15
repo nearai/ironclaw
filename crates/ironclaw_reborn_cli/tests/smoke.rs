@@ -155,6 +155,47 @@ fn dockerfile_reborn_builds_with_postgres_feature() {
 }
 
 #[test]
+fn default_dockerfile_targets_reborn_runtime() {
+    let dockerfile =
+        std::fs::read_to_string(workspace_root().join("Dockerfile")).expect("Dockerfile");
+
+    assert!(
+        dockerfile.contains("--package ironclaw_reborn_cli")
+            && dockerfile.contains("--bin ironclaw-reborn")
+            && dockerfile.contains("COPY --from=builder /app/target/dist/ironclaw-reborn /usr/local/bin/ironclaw-reborn")
+            && dockerfile.contains("ENTRYPOINT [\"ironclaw-reborn-entrypoint\"]"),
+        "default Dockerfile must build and run the Reborn CLI image: {dockerfile}"
+    );
+    assert!(
+        !dockerfile.contains("--bin ironclaw\n")
+            && !dockerfile.contains("ENTRYPOINT [\"ironclaw\"]")
+            && !dockerfile.contains("/usr/local/bin/ironclaw\n"),
+        "default Dockerfile must not build or run the legacy root ironclaw binary: {dockerfile}"
+    );
+}
+
+#[test]
+fn release_workflows_target_reborn_tags() {
+    let release = std::fs::read_to_string(workspace_root().join(".github/workflows/release.yml"))
+        .expect("release workflow");
+    let rebuild = std::fs::read_to_string(
+        workspace_root().join(".github/workflows/rebuild-release-image.yml"),
+    )
+    .expect("rebuild release image workflow");
+
+    assert!(
+        release.contains("ironclaw-reborn-v[0-9]+.[0-9]+.[0-9]+*")
+            && rebuild.contains("EXPECTED_REF=\"ironclaw-reborn-v${EXPECTED_TAG}\""),
+        "release workflows must use the Reborn tag family"
+    );
+    assert!(
+        !release.contains("ironclaw-v[0-9]+.[0-9]+.[0-9]+*")
+            && !rebuild.contains("EXPECTED_REF=\"ironclaw-v${EXPECTED_TAG}\""),
+        "release workflows must not trigger from the legacy root tag family"
+    );
+}
+
+#[test]
 fn dockerfile_reborn_ships_extension_ownership_migration() {
     let dockerfile = std::fs::read_to_string(workspace_root().join("Dockerfile.reborn"))
         .expect("Dockerfile.reborn");

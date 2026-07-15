@@ -13,10 +13,14 @@ publish = false
 [package.metadata.ironclaw]
 layer = "app"
 
-# Keep disabled until #3483 resolves cargo-dist tag/versioning + Windows WiX
-# packaging for the standalone Reborn binary.
 [package.metadata.dist]
-dist = false
+dist = true
+
+[package.metadata.wix]
+upgrade-guid = "6301E43A-1806-43AC-9732-8785B45EE105"
+path-guid = "47201070-B2F0-4AFF-9604-60209AF4B700"
+license = false
+eula = false
 
 [features]
 default = ["root-llm-provider"]

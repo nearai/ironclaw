@@ -47,7 +47,7 @@ jobs:
           SOURCE_REF: ${{ inputs.source_ref }}
           SOURCE_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          EXPECTED_REF="ironclaw-v${EXPECTED_TAG}"
+          EXPECTED_REF="ironclaw-reborn-v${EXPECTED_TAG}"
           if [[ "${SOURCE_REF}" != "${EXPECTED_REF}" ]]; then
             echo "::error::Expected source_ref '${EXPECTED_REF}' for tag '${EXPECTED_TAG}', got '${SOURCE_REF}'"
             exit 1
