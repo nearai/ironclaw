@@ -96,7 +96,7 @@ impl AuthEngine {
             &recipe,
             &response.body,
             &request.scopes,
-            ScopeClamp::ToRequested,
+            ScopeClamp::ToRecipeCeiling,
         )
         .inspect_err(|_| {
             tracing::debug!(vendor, "token response extraction failed");
@@ -401,13 +401,13 @@ fn token_request_headers_and_body(
     (headers, form.finish().into_bytes())
 }
 
-/// Whether the A6 exchange-scope clamp (store `granted ∩ requested`) applies.
-/// Only the initial authorization-code exchange clamps; refresh preserves the
-/// granted set so a vendor's rotation response is recorded as-is (the account's
-/// scopes were already clamped at exchange time).
+/// Whether the A6 exchange-scope clamp (store `granted ∩ recipe ceiling`)
+/// applies. Only the initial authorization-code exchange clamps; refresh
+/// preserves the granted set so a vendor's rotation response is recorded as-is
+/// (the account's scopes were already clamped at exchange time).
 #[derive(Clone, Copy)]
 pub(super) enum ScopeClamp {
-    ToRequested,
+    ToRecipeCeiling,
     PreserveGranted,
 }
 
@@ -454,37 +454,55 @@ pub(super) fn extract_token_response(
                         .collect::<Result<Vec<_>, _>>()
                         .map_err(|_| AuthProductError::TokenExchangeFailed)?;
                     match clamp {
-                        // A6 · Enforce granted ⊆ requested on the echoed-scope path
-                        // (RFC 9700 §2.3). Store only scopes the vendor granted AND
-                        // the user requested: drop any scope granted beyond the
-                        // request (stop over-claiming an unrequested scope), and
-                        // never widen a narrower-than-requested grant back up to
-                        // the full requested set. Generic and spec-agnostic — every
-                        // vendor gets the same clamp. Applied only on the initial
-                        // exchange; refresh preserves the granted set.
-                        ScopeClamp::ToRequested => {
+                        // A6 · Clamp the echoed grant to the recipe's declared
+                        // scope ceiling (RFC 9700 §2.3): a scope no recipe ever
+                        // declared is dropped (no over-claim). A scope granted
+                        // beyond THIS flow's request but within the ceiling is
+                        // kept — vendors with cumulative grants (opted into via
+                        // recipe data, e.g. Google's `include_granted_scopes`
+                        // authorize param) echo previously granted scopes on
+                        // every exchange, and the stored account is shared by
+                        // every extension using the vendor, so discarding them
+                        // would silently sign the other extensions out (the
+                        // gmail → google-docs regression). The per-flow request
+                        // still drives the authorize URL and the downgrade warn
+                        // below; it is not the storage bound. Generic and
+                        // spec-agnostic — every vendor gets the same clamp.
+                        // Applied only on the initial exchange; refresh
+                        // preserves the granted set.
+                        ScopeClamp::ToRecipeCeiling => {
                             let clamped: Vec<ProviderScope> = granted
                                 .iter()
-                                .filter(|scope| requested_scopes.contains(scope))
+                                .filter(|scope| {
+                                    recipe
+                                        .scopes
+                                        .iter()
+                                        .any(|ceiling| ceiling == scope.as_str())
+                                })
                                 .cloned()
                                 .collect();
-                            let over_granted = granted.len().saturating_sub(clamped.len());
-                            if over_granted > 0 || clamped.len() < requested_scopes.len() {
+                            let outside_ceiling = granted.len().saturating_sub(clamped.len());
+                            let missing_requested = requested_scopes
+                                .iter()
+                                .filter(|scope| !clamped.contains(scope))
+                                .count();
+                            if outside_ceiling > 0 || missing_requested > 0 {
                                 // Count-only guard log — never the scope values or
-                                // the response body; the stored grant is the
-                                // intersection, never wider than either side.
+                                // the response body; the stored grant is never
+                                // wider than granted ∩ ceiling.
                                 tracing::warn!(
                                     requested_scope_count = requested_scopes.len(),
                                     granted_scope_count = clamped.len(),
-                                    over_granted_scope_count = over_granted,
-                                    "oauth exchange granted a scope set differing from requested; storing granted ∩ requested (never wider than requested or granted)"
+                                    outside_ceiling_scope_count = outside_ceiling,
+                                    missing_requested_scope_count = missing_requested,
+                                    "oauth exchange grant differs from this flow's request; storing granted ∩ recipe ceiling"
                                 );
                             }
                             if clamped.is_empty() {
-                                // The vendor echoed only scopes outside the request
-                                // — no legitimate granted scope to store, so fall
-                                // through to the missing-scope behavior exactly as
-                                // an omitted scope would.
+                                // The vendor echoed only scopes outside every
+                                // declared ceiling — no legitimate granted scope
+                                // to store, so fall through to the missing-scope
+                                // behavior exactly as an omitted scope would.
                                 scopes_when_grant_absent(extraction.missing, requested_scopes)?
                             } else {
                                 clamped

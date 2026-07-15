@@ -289,6 +289,34 @@ fn manifest_recipe(package: &str, vendor: &str) -> ResolvedVendorAuthRecipe {
     }
 }
 
+/// The unified shared-vendor recipe the production resolver builds: recipes
+/// for one vendor are identical except `scopes`/`display_name`, and the scope
+/// ceiling is the union across every declaring manifest
+/// (`ironclaw_extension_host::unified_vendor_recipes`, overview §3.2). This
+/// test-local mirror unions the real bundled manifests the same way so the
+/// engine suite exercises the ceiling production actually resolves.
+fn unified_manifest_recipe(vendor: &str, packages: &[&str]) -> ResolvedVendorAuthRecipe {
+    let mut packages = packages.iter();
+    let first = packages
+        .next()
+        .expect("unified recipe needs at least one package");
+    let mut unified = manifest_recipe(first, vendor);
+    for package in packages {
+        let next = manifest_recipe(package, vendor);
+        let (VendorAuthRecipe::Oauth2Code(unified_recipe), VendorAuthRecipe::Oauth2Code(incoming)) =
+            (&mut unified.recipe, &next.recipe)
+        else {
+            panic!("unified_manifest_recipe unions oauth2_code recipes only");
+        };
+        for scope in &incoming.scopes {
+            if !unified_recipe.scopes.contains(scope) {
+                unified_recipe.scopes.push(scope.clone());
+            }
+        }
+    }
+    unified
+}
+
 fn synthetic_recipe(vendor: &str, toml_text: &str) -> ResolvedVendorAuthRecipe {
     let recipe: VendorAuthRecipe = toml::from_str(toml_text).expect("synthetic recipe parses");
     ResolvedVendorAuthRecipe {
@@ -667,10 +695,11 @@ async fn pointer_extraction_reads_nested_fields_and_scope_fallback() {
         .engine
         .exchange_callback(
             context,
-            // Request both granted scopes so the A6 clamp (granted ∩ requested)
-            // is a no-op here and this case keeps proving comma-separated
-            // multi-scope pointer extraction. The over-claim clamp itself is
-            // covered by `exchange_clamps_echoed_scopes_to_granted_intersect_requested`.
+            // Request both granted scopes so the A6 clamp (granted ∩ recipe
+            // ceiling) is a no-op here and this case keeps proving
+            // comma-separated multi-scope pointer extraction. The over-claim
+            // clamp itself is covered by
+            // `exchange_clamps_echoed_scopes_to_recipe_ceiling`.
             callback_request(
                 "slack",
                 vec![
@@ -733,13 +762,14 @@ async fn pointer_extraction_reads_nested_fields_and_scope_fallback() {
 }
 
 /// A6 · Scope downgrade / over-claim on the echoed-scope path (RFC 9700 §2.3).
-/// The vendor echoes a scope set that both over-grants a scope the user never
-/// requested (`chat:write`) and omits one that was requested (`channels:read`).
-/// The stored grant must be exactly `granted ∩ requested` — the over-granted
-/// scope is dropped (no over-claim) and the grant is never widened to the full
-/// requested set. Generic clamp, no vendor branch.
+/// The vendor echoes a scope set that both over-grants a scope no recipe ever
+/// declared (`admin.conversations:write`, outside the ceiling) and omits one
+/// that was requested (`channels:read`). The stored grant must be exactly
+/// `granted ∩ recipe ceiling` — the outside-ceiling scope is dropped (no
+/// over-claim) and the grant is never widened to the requested set. Generic
+/// clamp, no vendor branch.
 #[tokio::test]
-async fn exchange_clamps_echoed_scopes_to_granted_intersect_requested() {
+async fn exchange_clamps_echoed_scopes_to_recipe_ceiling() {
     let harness = Harness::new(vec![manifest_recipe("slack", "slack")]);
     let scope = test_scope();
     harness.server.script(
@@ -752,9 +782,9 @@ async fn exchange_clamps_echoed_scopes_to_granted_intersect_requested() {
             "authed_user": {
                 "id": "U100",
                 "access_token": "xoxp-clamp-token",
-                // Over-grants chat:write (not requested) and omits channels:read
-                // (requested) — both within the recipe ceiling.
-                "scope": "search:read,chat:write"
+                // Grants a scope outside the recipe ceiling (dropped) and
+                // omits channels:read (requested — never widened back in).
+                "scope": "search:read,admin.conversations:write"
             }
         }),
     );
@@ -775,8 +805,74 @@ async fn exchange_clamps_echoed_scopes_to_granted_intersect_requested() {
     assert_eq!(
         exchange.scopes,
         vec![ProviderScope::new("search:read").unwrap()],
-        "stored grant is granted ∩ requested: chat:write over-grant dropped, \
+        "stored grant is granted ∩ ceiling: the undeclared scope is dropped, \
          channels:read never widened in"
+    );
+}
+
+/// The shared-vendor cumulative-grant regression (gmail → google-docs
+/// sign-out): several extensions share one vendor account, each connect
+/// requests only its own extension's scopes, and a cumulative-grant vendor
+/// (recipe data: Google's `include_granted_scopes` authorize param) echoes
+/// previously granted scopes on every exchange. The clamp must keep every
+/// echoed scope inside the UNIFIED recipe ceiling — clamping to this flow's
+/// request would strip the first extension's scopes from the shared account
+/// and sign it out.
+#[tokio::test]
+async fn exchange_preserves_cumulative_grant_within_unified_ceiling() {
+    // The production resolver unions scopes across every manifest declaring
+    // the vendor (`unified_vendor_recipes`); mirror that union over the real
+    // gmail + google-docs manifests.
+    let harness = Harness::new(vec![unified_manifest_recipe(
+        "google",
+        &["gmail", "google-docs"],
+    )]);
+    let scope = test_scope();
+    let docs_scopes = vec![
+        ProviderScope::new("https://www.googleapis.com/auth/documents").unwrap(),
+        ProviderScope::new("https://www.googleapis.com/auth/documents.readonly").unwrap(),
+    ];
+    // The docs connect happens second: gmail's scopes were granted earlier,
+    // so Google echoes the cumulative grant alongside the newly consented
+    // docs scopes (space-separated, as Google returns them).
+    let cumulative_grant = [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/documents.readonly",
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.send",
+        "https://www.googleapis.com/auth/gmail.modify",
+    ]
+    .join(" ");
+    harness.server.script(
+        "https://oauth2.googleapis.com/token",
+        200,
+        serde_json::json!({
+            "access_token": "ya29-cumulative",
+            "refresh_token": "1//refresh-cumulative",
+            "expires_in": 3599,
+            "scope": cumulative_grant
+        }),
+    );
+    let exchange = harness
+        .engine
+        .exchange_callback(
+            exchange_context(&scope),
+            callback_request("google", docs_scopes),
+        )
+        .await
+        .expect("google exchange");
+    let stored: Vec<&str> = exchange.scopes.iter().map(|s| s.as_str()).collect();
+    assert_eq!(
+        stored,
+        vec![
+            "https://www.googleapis.com/auth/documents",
+            "https://www.googleapis.com/auth/documents.readonly",
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.send",
+            "https://www.googleapis.com/auth/gmail.modify",
+        ],
+        "the cumulative grant within the unified ceiling is preserved — \
+         gmail's scopes survive the google-docs connect"
     );
 }
 
@@ -1347,10 +1443,17 @@ async fn dcr_vendor_registers_once_and_runs_standard_oauth_afterwards() {
 
     // The token exchange then runs the standard oauth2_code flow against the
     // discovered token endpoint, carrying the RFC 8707 resource indicator.
+    // Notion rotates single-use refresh tokens on ~1h access tokens; the
+    // recipe must capture both or the credential silently dies at expiry
+    // (the A4 regression).
     harness.server.script(
         "https://mcp.notion.com/discovered/token",
         200,
-        serde_json::json!({ "access_token": "notion-access", "expires_in": 3600 }),
+        serde_json::json!({
+            "access_token": "notion-access",
+            "refresh_token": "notion-refresh-1",
+            "expires_in": 3600
+        }),
     );
     let exchange = harness
         .engine
@@ -1361,6 +1464,15 @@ async fn dcr_vendor_registers_once_and_runs_standard_oauth_afterwards() {
         .await
         .expect("notion exchange");
     assert!(exchange.provider_identity.is_none());
+    let refresh_secret = exchange
+        .refresh_secret
+        .as_ref()
+        .expect("notion recipe captures the rotating refresh token (A4)");
+    assert_eq!(
+        harness.secret_value(&scope.resource, refresh_secret).await,
+        Some("notion-refresh-1".to_string()),
+        "the captured refresh token is stored for the refresh path"
+    );
     let token_request = &harness
         .server
         .requests_for("https://mcp.notion.com/discovered/token")[0];
@@ -1373,6 +1485,35 @@ async fn dcr_vendor_registers_once_and_runs_standard_oauth_afterwards() {
     assert_eq!(
         form.get("client_id").map(String::as_str),
         Some("notion-dcr-client-1")
+    );
+}
+
+/// A4 pin on the REAL bundled manifest: Notion issues ~1h access tokens with
+/// single-use rotating refresh tokens, so its recipe must declare the
+/// `refresh_token`/`expires_in` capture pointers and the rotation flag. The
+/// pointer-driven engine captures nothing that is not declared — without
+/// these the token is stored non-expiring and every Notion connection dies
+/// at the first expiry with no recovery.
+#[test]
+fn notion_recipe_declares_refresh_and_expiry_capture() {
+    let resolved = manifest_recipe("notion-mcp", "notion");
+    let VendorAuthRecipe::Oauth2Code(recipe) = &resolved.recipe else {
+        panic!("notion declares oauth2_code");
+    };
+    assert!(
+        recipe.token_response.refresh_token.is_some(),
+        "notion token_response must capture /refresh_token"
+    );
+    assert!(
+        recipe.token_response.expires_in.is_some(),
+        "notion token_response must capture /expires_in (else stored non-expiring)"
+    );
+    assert!(
+        recipe
+            .refresh
+            .as_ref()
+            .is_some_and(|refresh| refresh.rotates_refresh_token),
+        "notion refresh tokens rotate single-use; the recipe must declare it"
     );
 }
 
