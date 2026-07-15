@@ -611,6 +611,68 @@ async def test_reborn_legacy_extensions_catalog_failure_shows_retry(
         await context.close()
 
 
+async def test_reborn_legacy_extensions_enrichment_failure_preserves_registry(
+    reborn_v2_server, reborn_v2_browser
+):
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+    extensions_available = False
+    extension_requests = 0
+
+    async def fulfill_json(route, payload, status=200):
+        await route.fulfill(
+            status=status,
+            content_type="application/json",
+            body=json.dumps(payload),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    async def handle_extensions(route):
+        nonlocal extension_requests
+        path = urlparse(route.request.url).path
+        if path == "/api/webchat/v2/extensions" and route.request.method == "GET":
+            extension_requests += 1
+            if extensions_available:
+                await fulfill_json(route, {"extensions": []})
+            else:
+                await fulfill_json(
+                    route,
+                    {"error": "service_unavailable", "kind": "service_unavailable"},
+                    status=503,
+                )
+            return
+        if path == "/api/webchat/v2/extensions/registry" and route.request.method == "GET":
+            await fulfill_json(route, {"entries": [REGISTRY_TOOL]})
+            return
+        await route.continue_()
+
+    await page.route("**/api/webchat/v2/extensions**", handle_extensions)
+
+    try:
+        await page.goto(
+            f"{reborn_v2_server}/v2/extensions/registry?token={REBORN_V2_AUTH_TOKEN}"
+        )
+        warning_banner = page.get_by_role("alert")
+        await expect(page.get_by_text("Registry Tool", exact=True)).to_be_visible(
+            timeout=15000
+        )
+        await expect(warning_banner).to_contain_text(
+            "Some extension data is unavailable"
+        )
+        await expect(warning_banner).not_to_contain_text("Extension catalog unavailable")
+        assert extension_requests >= 1
+
+        failed_request_count = extension_requests
+        extensions_available = True
+        await warning_banner.get_by_role("button", name="Retry").click()
+
+        await expect(warning_banner).to_have_count(0)
+        await expect(page.get_by_text("Registry Tool", exact=True)).to_be_visible()
+        assert extension_requests > failed_request_count
+    finally:
+        await context.close()
+
+
 async def test_reborn_legacy_extensions_offline_attempts_catalog_requests(
     reborn_v2_server, reborn_v2_browser
 ):
