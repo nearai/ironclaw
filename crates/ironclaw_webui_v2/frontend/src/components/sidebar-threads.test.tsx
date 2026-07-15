@@ -91,8 +91,21 @@ function findNodeByProp(root, prop, value) {
   return found;
 }
 
+function findNodeByType(root, type) {
+  let found = null;
+  visitNode(root, (node) => {
+    if (!found && node.type === type) found = node;
+  });
+  assert.ok(found, `expected node with type=${type}`);
+  return found;
+}
+
 function renderInteractiveSidebarThreads(props = {}, windowOverrides = {}) {
+  function ConfirmDialog(dialogProps) {
+    return { type: "confirm-dialog", props: dialogProps };
+  }
   const context = {
+    ConfirmDialog,
     React: createReactStub(),
     NavLink: "NavLink",
     Icon: "Icon",
@@ -117,7 +130,6 @@ function renderInteractiveSidebarThreads(props = {}, windowOverrides = {}) {
     useThreadStates: () => new Map(),
     window: {
       alert: () => {},
-      confirm: () => true,
       ...windowOverrides,
     },
   };
@@ -199,7 +211,6 @@ test("SidebarThreads exposes a visible delete action for listed threads", async 
 
 test("SidebarThreads surfaces delete handler failures from the delete button", async () => {
   const alerts = [];
-  const confirms = [];
   const deletions = [];
   const { context, rendered } = renderInteractiveSidebarThreads(
     {
@@ -210,19 +221,18 @@ test("SidebarThreads surfaces delete handler failures from the delete button", a
     },
     {
       alert: (message) => alerts.push(message),
-      confirm: (message) => {
-        confirms.push(message);
-        return true;
-      },
     },
   );
 
   const deleteButton = findNodeByProp(rendered, "data-testid", "thread-delete");
   const event = clickEvent();
   deleteButton.props.onClick(event);
+  assert.deepEqual(deletions, [], "opening the dialog must not delete the thread");
+
+  const confirmDialog = findNodeByType(rendered, "confirm-dialog");
+  confirmDialog.props.onConfirm();
   await flushPromises();
 
-  assert.deepEqual(confirms, ["thread.deleteConfirm"]);
   assert.deepEqual(deletions, ["thread-old"]);
   assert.deepEqual(alerts, ["chat.deleteBusy"]);
   assert.equal(event.defaultPrevented, true);

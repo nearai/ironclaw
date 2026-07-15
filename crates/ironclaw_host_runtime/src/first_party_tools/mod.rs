@@ -300,15 +300,22 @@ pub fn builtin_first_party_handlers_for_process_backend(
 
 /// Create handlers for all built-in first-party capabilities using an
 /// explicitly composed trigger repository and trigger-create lifecycle hook.
+///
+/// `active_run_lookup` is required (not `Option`): the caller-scoped
+/// `trigger_list` capability derives its `active_hold` projection from it, so
+/// production wiring must always supply the same lookup the automations
+/// panel uses (#5886).
 pub fn builtin_first_party_handlers_with_trigger_create_hook(
     trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup>,
 ) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
     let mut registry = builtin_first_party_base_registry()?;
     trigger_management::insert_handlers_with_create_hook(
         &mut registry,
         trigger_repository,
         trigger_create_hook,
+        active_run_lookup,
     )?;
     Ok(registry)
 }
@@ -316,11 +323,13 @@ pub fn builtin_first_party_handlers_with_trigger_create_hook(
 pub fn builtin_first_party_handlers_with_trigger_create_hook_for_process_backend(
     trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup>,
     process_backend: ProcessBackendKind,
 ) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
     let mut registry = builtin_first_party_handlers_with_trigger_create_hook(
         trigger_repository,
         trigger_create_hook,
+        active_run_lookup,
     )?;
     if !process_port_backed_builtins_enabled(process_backend) {
         remove_process_port_backed_builtin_handlers(&mut registry)?;
@@ -570,7 +579,8 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
         };
         let wall_clock_ms = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
         let output_limit_bytes = match request.capability_id.as_str() {
-            HTTP_CAPABILITY_ID | HTTP_SAVE_CAPABILITY_ID => http::MAX_HTTP_OUTPUT_BYTES,
+            HTTP_CAPABILITY_ID => http::MAX_HTTP_OUTPUT_BYTES,
+            HTTP_SAVE_CAPABILITY_ID => FIRST_PARTY_MAX_OUTPUT_BYTES,
             _ => FIRST_PARTY_MAX_OUTPUT_BYTES,
         };
         let output_bytes = bounded_output_bytes(&output, output_limit_bytes).map_err(|error| {

@@ -1,16 +1,19 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use ironclaw_host_api::ThreadId;
+use ironclaw_host_api::Timestamp;
 use ironclaw_product_workflow::{
     AutomationListRequest, AutomationName, AutomationProductFacade, ProductAgentBoundCaller,
-    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationActiveHold, RebornAutomationHoldReason, RebornAutomationInfo,
+    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
     TriggerRunThreadScope,
 };
 use ironclaw_triggers::{
-    TriggerError, TriggerId, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus,
-    TriggerRunRecord, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
+    ActiveHoldProjection, ActiveHoldReason, TriggerActiveRunLookup, TriggerError, TriggerId,
+    TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus,
+    TriggerSchedule, TriggerSourceKind, TriggerState, active_holds_for_records,
 };
 
 const AUTOMATION_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
@@ -34,6 +37,7 @@ const AUTOMATION_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Clone)]
 pub struct RebornAutomationProductFacade {
     trigger_repository: Arc<dyn TriggerRepository>,
+    active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
     backend_timeout: Duration,
     /// Whether the background trigger poller is running. Surfaced to the WebUI
     /// so the panel can warn that listed automations will not fire while
@@ -47,14 +51,19 @@ impl std::fmt::Debug for RebornAutomationProductFacade {
         formatter
             .debug_struct("RebornAutomationProductFacade")
             .field("trigger_repository", &"Arc<dyn TriggerRepository>")
+            .field("active_run_lookup", &"Arc<dyn TriggerActiveRunLookup>")
             .finish()
     }
 }
 
 impl RebornAutomationProductFacade {
-    pub(crate) fn new(trigger_repository: Arc<dyn TriggerRepository>) -> Self {
+    pub(crate) fn new(
+        trigger_repository: Arc<dyn TriggerRepository>,
+        active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
+    ) -> Self {
         Self {
             trigger_repository,
+            active_run_lookup,
             backend_timeout: AUTOMATION_BACKEND_TIMEOUT,
             scheduler_enabled: true,
         }
@@ -70,13 +79,35 @@ impl RebornAutomationProductFacade {
     #[cfg(test)]
     pub(crate) fn with_backend_timeout(
         trigger_repository: Arc<dyn TriggerRepository>,
+        active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
         backend_timeout: Duration,
     ) -> Self {
         Self {
             trigger_repository,
+            active_run_lookup,
             backend_timeout,
             scheduler_enabled: true,
         }
+    }
+
+    /// Batch-resolve active-run states for records holding an active fire and
+    /// derive each record's hold projection (#5886), shared with
+    /// `ironclaw_host_runtime::first_party_tools::trigger_management` via
+    /// `ironclaw_triggers::active_holds_for_records`. Lookup failure degrades
+    /// to "no hold" — this is a display-only projection and must not fail the
+    /// panel list.
+    async fn active_holds_for_records(
+        &self,
+        records: &[TriggerRecord],
+        deadline: tokio::time::Instant,
+        now: Timestamp,
+    ) -> HashMap<TriggerId, RebornAutomationActiveHold> {
+        let timeout = deadline.saturating_duration_since(tokio::time::Instant::now());
+        active_holds_for_records(&*self.active_run_lookup, records, now, timeout)
+            .await
+            .into_iter()
+            .map(|(trigger_id, hold)| (trigger_id, wire_hold_from_projection(hold)))
+            .collect()
     }
 }
 
@@ -124,26 +155,32 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
         .map_err(|_| backend_timeout_error())?
         .map_err(map_trigger_error)?;
 
-        if records.is_empty() || request.run_limit == 0 {
-            return Ok(records
-                .into_iter()
-                .map(|record| automation_info_from_record(record, &[]))
-                .collect());
-        }
-
-        let trigger_ids: Vec<TriggerId> = records.iter().map(|r| r.trigger_id).collect();
+        // The required run-history fetch runs before the optional hold lookup
+        // so a slow hold derivation (#5886) can never steal deadline budget
+        // from data the caller actually needs. When there's nothing to fetch
+        // (no records, or run history wasn't requested) skip the batch call
+        // entirely rather than issuing it with an empty id list.
         let mut runs_by_trigger: HashMap<TriggerId, Vec<TriggerRunRecord>> =
-            tokio::time::timeout_at(
-                deadline,
-                self.trigger_repository.list_trigger_run_history_batch(
-                    caller.tenant_id.clone(),
-                    &trigger_ids,
-                    request.run_limit,
-                ),
-            )
-            .await
-            .map_err(|_| backend_timeout_error())?
-            .map_err(map_trigger_error)?;
+            if records.is_empty() || request.run_limit == 0 {
+                HashMap::new()
+            } else {
+                let trigger_ids: Vec<TriggerId> = records.iter().map(|r| r.trigger_id).collect();
+                tokio::time::timeout_at(
+                    deadline,
+                    self.trigger_repository.list_trigger_run_history_batch(
+                        caller.tenant_id.clone(),
+                        &trigger_ids,
+                        request.run_limit,
+                    ),
+                )
+                .await
+                .map_err(|_| backend_timeout_error())?
+                .map_err(map_trigger_error)?
+            };
+
+        let mut holds = self
+            .active_holds_for_records(&records, deadline, chrono::Utc::now())
+            .await;
 
         Ok(records
             .into_iter()
@@ -151,7 +188,8 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
                 let runs = runs_by_trigger
                     .remove(&record.trigger_id)
                     .unwrap_or_default();
-                automation_info_from_record(record, &runs)
+                let hold = holds.remove(&record.trigger_id);
+                automation_info_from_record(record, &runs, hold)
             })
             .collect())
     }
@@ -198,7 +236,7 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
 
         Ok(RebornAutomationMutationResponse {
             updated: record.is_some(),
-            automation: record.map(|record| automation_info_from_record(record, &[])),
+            automation: record.map(|record| automation_info_from_record(record, &[], None)),
         })
     }
 
@@ -291,7 +329,7 @@ impl RebornAutomationProductFacade {
 
         Ok(RebornAutomationMutationResponse {
             updated: record.is_some(),
-            automation: record.map(|record| automation_info_from_record(record, &[])),
+            automation: record.map(|record| automation_info_from_record(record, &[], None)),
         })
     }
 }
@@ -344,6 +382,7 @@ fn trigger_is_caller_visible(trigger: &TriggerRecord, caller: &ProductAgentBound
 fn automation_info_from_record(
     record: TriggerRecord,
     runs: &[TriggerRunRecord],
+    active_hold: Option<RebornAutomationActiveHold>,
 ) -> RebornAutomationInfo {
     let source = automation_source_from_record(&record);
     let is_active = record.has_active_fire();
@@ -365,6 +404,25 @@ fn automation_info_from_record(
         recent_runs: runs.iter().filter_map(map_recent_run).collect(),
         is_active,
         created_at: Some(record.created_at),
+        active_hold,
+    }
+}
+
+/// Maps the crate-neutral hold projection (`ironclaw_triggers`) to this
+/// facade's wire DTO. The reason/elapsed-occurrence derivation itself lives
+/// in `ironclaw_triggers::active_hold_projection` — only the wire-type
+/// mapping belongs here (#5886).
+fn wire_hold_from_projection(hold: ActiveHoldProjection) -> RebornAutomationActiveHold {
+    RebornAutomationActiveHold {
+        reason: match hold.reason {
+            ActiveHoldReason::Approval => RebornAutomationHoldReason::Approval,
+            ActiveHoldReason::Auth => RebornAutomationHoldReason::Auth,
+            ActiveHoldReason::InProgress => RebornAutomationHoldReason::InProgress,
+            ActiveHoldReason::Other => RebornAutomationHoldReason::Other,
+        },
+        since: hold.since,
+        elapsed_occurrences: hold.elapsed_occurrences,
+        elapsed_occurrences_capped: hold.elapsed_occurrences_capped,
     }
 }
 

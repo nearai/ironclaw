@@ -31,6 +31,17 @@ const RUN_STATUS_PRESENTATION = {
   unknown: { labelKey: "automations.runStatus.unknown", tone: "muted" },
 };
 
+// Display tone + i18n label key for an active hold (#5886): a trigger that is
+// due but not queued because it's blocked on approval/auth/an in-flight run.
+// "in_progress" mirrors the running-run tone (info); the other reasons mirror
+// the paused-state tone (warning) since the automation is effectively stalled.
+const ACTIVE_HOLD_PRESENTATION = {
+  approval: { labelKey: "automations.hold.approval", tone: "warning" },
+  auth: { labelKey: "automations.hold.auth", tone: "warning" },
+  in_progress: { labelKey: "automations.hold.inProgress", tone: "info" },
+  other: { labelKey: "automations.hold.other", tone: "warning" },
+};
+
 // Fallback translator: if a caller forgets to pass `t`, return the raw key
 // rather than crash. Production paths always thread the real translator.
 function tr(t) {
@@ -241,6 +252,45 @@ export function primaryStatusTone(automation) {
   return stateTone(automation?.state);
 }
 
+function holdStatusLabel(hold, t) {
+  const key = ACTIVE_HOLD_PRESENTATION[hold?.reason]?.labelKey || "automations.hold.other";
+  return tr(t)(key);
+}
+
+function holdStatusTone(hold) {
+  return ACTIVE_HOLD_PRESENTATION[hold?.reason]?.tone || "warning";
+}
+
+// One-line explanation shown under the status pill: when the hold started and
+// how many scheduled occurrences elapsed while it was in effect. Counts
+// beyond the backend's cap render as "{count}+" per elapsed_occurrences_capped.
+// The backend sends elapsed_occurrences as null/absent when it couldn't
+// derive a count (e.g. a malformed persisted schedule) — that must read as
+// "unavailable", never as a false "0 occurrences elapsed". The backend
+// computes elapsed_occurrences for every active hold regardless of reason
+// (approval/auth/in_progress/other), so in_progress holds go through the
+// same capped/unknown/exact formatting as the rest — it only swaps in the
+// "previous run still executing" copy via a distinct key family.
+function holdMetaLabel(hold, t, locale) {
+  const tx = tr(t);
+  const since = formatAutomationDate(hold?.since, tx("automations.date.unknown"), locale);
+  const isInProgress = hold?.reason === "in_progress";
+  const countedKey = isInProgress ? "automations.hold.meta.inProgress" : "automations.hold.meta.paused";
+  const unknownCountKey = isInProgress
+    ? "automations.hold.meta.inProgressUnknownCount"
+    : "automations.hold.meta.pausedUnknownCount";
+  if (hold?.elapsed_occurrences_capped) {
+    return tx(countedKey, {
+      since,
+      count: `${hold?.elapsed_occurrences ?? 0}+`,
+    });
+  }
+  if (hold?.elapsed_occurrences === null || hold?.elapsed_occurrences === undefined) {
+    return tx(unknownCountKey, { since });
+  }
+  return tx(countedKey, { since, count: String(hold.elapsed_occurrences) });
+}
+
 export function lastStatusLabel(status, t) {
   const key = LAST_STATUS_PRESENTATION[status]?.labelKey || "automations.lastStatus.none";
   return tr(t)(key);
@@ -306,6 +356,13 @@ function normalizeAutomation(automation, t, locale) {
     latest_unattached_run_thread_timestamp: latestUnattachedRunThreadTimestamp(recentRuns),
   };
 
+  // #5886: an active_hold means a due trigger is being intentionally skipped
+  // (blocked on approval/auth, or a prior run still in flight) rather than
+  // queued. When present it overrides the ordinary status pill so the user
+  // sees why nothing is running, plus a meta line with when/how-many
+  // scheduled occurrences have elapsed.
+  const activeHold = automation.active_hold || null;
+
   return {
     ...normalized,
     display_name: automation.name || tx("automations.untitled"),
@@ -313,8 +370,11 @@ function normalizeAutomation(automation, t, locale) {
     schedule_label: automationScheduleLabel(automation.source, t, locale),
     state_label: stateLabel(automation.state, t),
     state_tone: stateTone(automation.state),
-    primary_status_label: primaryStatusLabel(normalized, t),
-    primary_status_tone: primaryStatusTone(normalized),
+    primary_status_label: activeHold
+      ? holdStatusLabel(activeHold, t)
+      : primaryStatusLabel(normalized, t),
+    primary_status_tone: activeHold ? holdStatusTone(activeHold) : primaryStatusTone(normalized),
+    hold_meta_label: activeHold ? holdMetaLabel(activeHold, t, locale) : null,
     next_run_timestamp: parseTimestamp(automation.next_run_at),
     next_run_label: formatAutomationDate(
       automation.next_run_at,
