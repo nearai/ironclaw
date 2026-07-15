@@ -232,8 +232,12 @@ export function ChatInput({
   );
 
   const handleSend = React.useCallback(async () => {
-    const submittedText = text.trim();
-    const submittedAttachments = attachments;
+    // Read the live refs instead of the values captured by the last render.
+    // A keydown can follow an input or async attachment update before React
+    // commits another render; using captured state in that window silently
+    // treats the new payload as empty and drops the Enter submit.
+    const submittedText = textRef.current.trim();
+    const submittedAttachments = attachmentsRef.current;
     const sendContent =
       submittedText ||
       (submittedAttachments.length > 0 ? ATTACHMENTS_ONLY_CONTENT : "");
@@ -303,8 +307,6 @@ export function ChatInput({
       setIsSending(false);
     }
   }, [
-    text,
-    attachments,
     disabled,
     sendDisabled,
     isSending,

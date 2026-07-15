@@ -866,6 +866,12 @@ registerPack("ja", {
   "ext.registry.importing": "インポート中…",
   "ext.registry.importSuccess": "ツールをインポートしました — レジストリからインストールしてください。",
   "ext.registry.importFailed": "インポートに失敗しました",
+  "ext.catalog.loadErrorTitle": "拡張機能カタログを利用できません",
+  "ext.catalog.loadErrorDesc": "拡張機能カタログを読み込めませんでした。接続を確認して再試行してください。",
+  "ext.catalog.partialErrorTitle": "一部の拡張機能データを利用できません",
+  "ext.catalog.partialErrorDesc": "利用可能な拡張機能データを表示していますが、一部の詳細を読み込めませんでした。接続を確認して再試行してください。",
+  "ext.catalog.retry": "再試行",
+  "ext.catalog.retrying": "再試行中…",
 
   // Chat — history
   "chat.history.loading": "読み込み中...",

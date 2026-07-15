@@ -866,6 +866,12 @@ registerPack("hi", {
   "ext.registry.importing": "आयात हो रहा है…",
   "ext.registry.importSuccess": "टूल आयात हो गया — इसे रजिस्ट्री से इंस्टॉल करें।",
   "ext.registry.importFailed": "आयात विफल",
+  "ext.catalog.loadErrorTitle": "एक्सटेंशन कैटलॉग उपलब्ध नहीं है",
+  "ext.catalog.loadErrorDesc": "एक्सटेंशन कैटलॉग लोड नहीं हो सका। अपना कनेक्शन जाँचें और फिर कोशिश करें।",
+  "ext.catalog.partialErrorTitle": "कुछ एक्सटेंशन डेटा उपलब्ध नहीं है",
+  "ext.catalog.partialErrorDesc": "उपलब्ध एक्सटेंशन डेटा दिखाया गया है, लेकिन कुछ विवरण लोड नहीं हो सके। अपना कनेक्शन जाँचें और फिर कोशिश करें।",
+  "ext.catalog.retry": "फिर कोशिश करें",
+  "ext.catalog.retrying": "फिर कोशिश की जा रही है…",
 
   // Chat — history
   "chat.history.loading": "लोड हो रहा है...",
