@@ -89,6 +89,8 @@ function renderExtensionsPage(tab, extensionState = {}) {
       mcpRegistry: [],
       catalogEntries: [],
       connectableChannels: [],
+      isExtensionsLoading: false,
+      isRegistryLoading: false,
       isLoading: false,
       extensionsError: null,
       registryError: null,
@@ -122,6 +124,38 @@ function renderExtensionsPage(tab, extensionState = {}) {
   };
 }
 
+function findComponent(node, component) {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const match = findComponent(child, component);
+      if (match) return match;
+    }
+    return null;
+  }
+  if (!node || typeof node !== "object") return null;
+  if (node.type === component) return node;
+  return findComponent(node.children, component);
+}
+
+test("ExtensionsPage renders registry data while installed extensions are still loading", () => {
+  const catalogEntries = [{ id: "registry-tool" }];
+  const { RegistryTab, rendered } = renderExtensionsPage("registry", {
+    catalogEntries,
+    isExtensionsLoading: true,
+    isRegistryLoading: false,
+  });
+
+  const renderedJson = JSON.stringify(rendered);
+  assert.doesNotMatch(
+    renderedJson,
+    /v2-skeleton/,
+    "the registry must not remain behind the installed-extension skeleton",
+  );
+  const registryTab = findComponent(rendered, RegistryTab);
+  assert.ok(registryTab, "the registry tab content must be rendered");
+  assert.equal(registryTab.props.catalogEntries, catalogEntries);
+});
+
 function templateText(node) {
   if (node == null) return "";
   if (Array.isArray(node)) return node.map(templateText).join(" ");
@@ -140,8 +174,11 @@ function templateValues(node) {
 }
 
 for (const tab of ["installed", "unknown"]) {
-  test(`ExtensionsPage redirects ${tab} tab to registry`, () => {
-    const { Navigate, rendered } = renderExtensionsPage(tab);
+  test(`ExtensionsPage redirects ${tab} tab before waiting for data`, () => {
+    const { Navigate, rendered } = renderExtensionsPage(tab, {
+      isExtensionsLoading: true,
+      isRegistryLoading: true,
+    });
 
     assert.equal(rendered.values[0], Navigate);
     assert.match(rendered.strings.join(""), /to="\/extensions\/registry"/);

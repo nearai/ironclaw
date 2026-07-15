@@ -54,7 +54,8 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     mcpRegistry,
     catalogEntries,
     connectableChannels,
-    isLoading,
+    isExtensionsLoading,
+    isRegistryLoading,
     extensionsError,
     registryError,
     refetch,
@@ -94,6 +95,16 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     [activate]
   );
 
+  if (!["channels", "mcp", "registry"].includes(tab)) {
+    return (<Navigate to="/extensions/registry" replace />);
+  }
+
+  // The registry response already contains every catalog entry plus its
+  // installed flag. Render that snapshot as soon as it arrives; the slower
+  // installed-extension request can progressively replace installed registry
+  // cards with their full management controls when enrichment finishes.
+  const isLoading = isRegistryLoading || (tab !== "registry" && isExtensionsLoading);
+
   if (isLoading) {
     return (
       <div className="flex h-full flex-col overflow-y-auto">
@@ -117,10 +128,6 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
         </div>
       </div>
     );
-  }
-
-  if (tab === "installed") {
-    return (<Navigate to="/extensions/registry" replace />);
   }
 
   const blockingError = tab === "registry" ? registryError : extensionsError;
@@ -167,10 +174,6 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
       isBusy={isBusy}
     />),
   };
-
-  if (!tabContent[tab]) {
-    return (<Navigate to="/extensions/registry" replace />);
-  }
 
   const partialError = tab === "registry" ? extensionsError : registryError;
 

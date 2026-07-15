@@ -6,7 +6,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from playwright.async_api import expect
 
-from helpers import REBORN_V2_AUTH_TOKEN
+from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2
 from reborn_webui_harness import (
     reborn_v2_browser,  # noqa: F401 - imported fixture
     reborn_v2_server,  # noqa: F401 - imported fixture
@@ -164,6 +164,7 @@ async def _open_mocked_extensions_page(
     oauth_start_responses=None,
     activate_responses=None,
     remove_responses=None,
+    defer_extension_list=False,
 ):
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
@@ -183,6 +184,9 @@ async def _open_mocked_extensions_page(
     oauth_start_requests: list[dict] = []
     extension_list_requests: list[str] = []
     registry_requests: list[str] = []
+    extension_list_gate = asyncio.Event()
+    if not defer_extension_list:
+        extension_list_gate.set()
 
     async def fulfill_json(route, payload, status=200):
         await route.fulfill(
@@ -199,6 +203,7 @@ async def _open_mocked_extensions_page(
 
         if path == "/api/webchat/v2/extensions" and request.method == "GET":
             extension_list_requests.append(request.url)
+            await extension_list_gate.wait()
             await fulfill_json(route, {"extensions": installed_extensions})
             return
 
@@ -403,6 +408,7 @@ async def _open_mocked_extensions_page(
         "oauth_start_requests": oauth_start_requests,
         "extension_list_requests": extension_list_requests,
         "registry_requests": registry_requests,
+        "extension_list_gate": extension_list_gate,
     }
 
 
@@ -452,13 +458,17 @@ async def _capture_next_confirm(page, *, accept: bool):
     return dialog_future
 
 
-async def _wait_for_request_count(requests: list, count: int, *, timeout: float = 5.0):
+async def _wait_for_request_count(
+    requests: list, minimum_count: int, *, timeout: float = 5.0
+):
     deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:
-        if len(requests) > count:
+        if len(requests) >= minimum_count:
             return
         await asyncio.sleep(0.05)
-    raise AssertionError(f"Timed out waiting for request count > {count}; got {len(requests)}")
+    raise AssertionError(
+        f"Timed out waiting for request count >= {minimum_count}; got {len(requests)}"
+    )
 
 
 async def test_reborn_legacy_extensions_registry_search_and_install(
@@ -497,6 +507,27 @@ async def test_reborn_legacy_extensions_registry_search_and_install(
         await harness["context"].close()
 
 
+async def test_reborn_v2_extension_registry_renders_while_installed_list_is_pending(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        registry=[REGISTRY_TOOL],
+        defer_extension_list=True,
+    )
+    try:
+        await _wait_for_request_count(harness["extension_list_requests"], 1)
+        assert harness["extension_list_requests"], "installed list request must be pending"
+        assert not harness["extension_list_gate"].is_set()
+        await harness["page"].locator(
+            SEL_V2["extension_card_for"].format(id="registry-tool")
+        ).wait_for(state="visible", timeout=3000)
+    finally:
+        harness["extension_list_gate"].set()
+        await harness["context"].close()
+
+
 async def test_reborn_legacy_extensions_page_refetches_on_revisit(
     reborn_v2_server, reborn_v2_browser
 ):
@@ -524,11 +555,11 @@ async def test_reborn_legacy_extensions_page_refetches_on_revisit(
 
         await _wait_for_request_count(
             harness["extension_list_requests"],
-            first_extension_fetches,
+            first_extension_fetches + 1,
         )
         await _wait_for_request_count(
             harness["registry_requests"],
-            first_registry_fetches,
+            first_registry_fetches + 1,
         )
     finally:
         await harness["context"].close()

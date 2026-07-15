@@ -341,6 +341,8 @@ export function useExtensions() {
     registry,
     catalogEntries,
     connectableChannels,
+    isExtensionsLoading: extensionsQuery.isLoading,
+    isRegistryLoading: registryQuery.isLoading,
     isLoading,
     extensionsError: extensionsQuery.error || null,
     registryError: registryQuery.error || null,
