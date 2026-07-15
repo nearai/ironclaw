@@ -1656,7 +1656,9 @@ impl RebornProductAuthServices {
         // exists, mirroring the gate driver: a flow is never visible without
         // its verifier, and a failed secret write fails the start (fail-closed)
         // instead of leaving a live flow whose callback can never complete.
-        let flow_id = request.flow_id.unwrap_or_else(AuthFlowId::new);
+        // `AuthFlowId::default()` mints a fresh v4 id (see the `uuid_id!` macro),
+        // so this is "the caller's id, or a new one" — never a nil sentinel.
+        let flow_id = request.flow_id.unwrap_or_default();
         self.store_setup_pkce_verifier(
             &request.scope,
             flow_id,

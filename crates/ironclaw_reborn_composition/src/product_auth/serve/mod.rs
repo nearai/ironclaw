@@ -1738,17 +1738,6 @@ mod tests {
         }
     }
 
-    fn test_state() -> ProductAuthRouteState {
-        ProductAuthRouteState::new(
-            Arc::new(RebornProductAuthServices::local_dev_in_memory(Arc::new(
-                NoopDispatcher,
-            ))),
-            TenantId::new("tenant-alpha").expect("tenant"),
-            None,
-            None,
-        )
-    }
-
     fn test_resource_scope() -> ResourceScope {
         ResourceScope {
             tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
