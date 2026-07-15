@@ -19,6 +19,60 @@ where
         request: SecretCleanupRequest,
     ) -> Result<SecretCleanupReport, AuthProductError> {
         let mut report = SecretCleanupReport::default();
+        // A3 · Cancel the provider's pending flows BEFORE enumerating
+        // accounts (RFC 9700 §4.7.1 + RFC 7009 §1). Ordering closes the
+        // callback/removal race: a callback racing this cleanup either loses
+        // — its flow is canceled first, so `complete_oauth_callback` rejects
+        // before writing an account — or wins and completes first, in which
+        // case the account it minted already exists when the scan below runs
+        // and is revoked like any other. Scanning accounts first left a
+        // window where a callback completing between the scan and the flow
+        // cancellation minted a credential that survived removal.
+        //
+        // Owner decision 2026-07-15: cancel on both Deactivate and Uninstall.
+        // Shared-vendor safe by construction — the removal caller only
+        // selects a provider exclusive to the removed extension. Idempotent:
+        // a concurrently terminal flow is skipped, never an error.
+        //
+        // F2 · Any enumerated flow whose `TurnGateResume` continuation was
+        // never acknowledged — freshly canceled here or already terminal — is
+        // reported so the composition layer denies its blocked turn gate
+        // instead of leaving the turn parked. `mark_continuation_dispatched`
+        // makes the handoff emit-once across cleanup retries.
+        if let Some(provider) = request.provider.as_ref() {
+            for flow in self
+                .lifecycle_flows_for_owner_provider(&request.scope.resource, provider)
+                .await?
+            {
+                let canceled = match flow.status {
+                    status if ironclaw_auth::is_terminal_status(status) => flow,
+                    _ => match self.cancel_flow(&flow.scope, flow.id).await {
+                        Ok(canceled) => canceled,
+                        Err(AuthProductError::Canceled)
+                        | Err(AuthProductError::FlowAlreadyTerminal)
+                        | Err(AuthProductError::UnknownOrExpiredFlow) => flow,
+                        Err(error) => return Err(error),
+                    },
+                };
+                if canceled.continuation_emitted_at.is_none()
+                    && matches!(
+                        canceled.continuation,
+                        AuthContinuationRef::TurnGateResume { .. }
+                    )
+                {
+                    report
+                        .canceled_turn_gate_continuations
+                        .push(AuthContinuationEvent {
+                            flow_id: canceled.id,
+                            scope: canceled.scope.clone(),
+                            continuation: canceled.continuation.clone(),
+                            provider: canceled.provider.clone(),
+                            credential_account_id: canceled.credential_account_id,
+                            emitted_at: Utc::now(),
+                        });
+                }
+            }
+        }
         // Credential-owner granularity, not full scope equality: lifecycle and
         // disconnect callers mint a fresh `invocation_id` (and often arrive
         // from a different thread), so an exact-scope lookup could never find
@@ -87,54 +141,6 @@ where
             }
             if let Some(h) = &purge_refresh {
                 self.purge_secret_handle(&current.scope.resource, h).await;
-            }
-        }
-        // A3 · Removal/disconnect cancels pending flows (RFC 9700 §4.7.1 +
-        // RFC 7009 §1). A provider-selected cleanup cancels EVERY non-terminal
-        // flow for the credential-owner + provider so a late provider callback
-        // can no longer mint a credential for a torn-down extension. Owner
-        // decision 2026-07-15: cancel on both Deactivate and Uninstall. Shared-
-        // vendor safe by construction — the removal caller only selects a
-        // provider exclusive to the removed extension. Idempotent: a concurrently
-        // terminal flow is skipped, never an error.
-        //
-        // F2 · Any enumerated flow whose `TurnGateResume` continuation was
-        // never acknowledged — freshly canceled here or already terminal — is
-        // reported so the composition layer denies its blocked turn gate
-        // instead of leaving the turn parked. `mark_continuation_dispatched`
-        // makes the handoff emit-once across cleanup retries.
-        if let Some(provider) = request.provider.as_ref() {
-            for flow in self
-                .lifecycle_flows_for_owner_provider(&request.scope.resource, provider)
-                .await?
-            {
-                let canceled = match flow.status {
-                    status if ironclaw_auth::is_terminal_status(status) => flow,
-                    _ => match self.cancel_flow(&flow.scope, flow.id).await {
-                        Ok(canceled) => canceled,
-                        Err(AuthProductError::Canceled)
-                        | Err(AuthProductError::FlowAlreadyTerminal)
-                        | Err(AuthProductError::UnknownOrExpiredFlow) => flow,
-                        Err(error) => return Err(error),
-                    },
-                };
-                if canceled.continuation_emitted_at.is_none()
-                    && matches!(
-                        canceled.continuation,
-                        AuthContinuationRef::TurnGateResume { .. }
-                    )
-                {
-                    report
-                        .canceled_turn_gate_continuations
-                        .push(AuthContinuationEvent {
-                            flow_id: canceled.id,
-                            scope: canceled.scope.clone(),
-                            continuation: canceled.continuation.clone(),
-                            provider: canceled.provider.clone(),
-                            credential_account_id: canceled.credential_account_id,
-                            emitted_at: Utc::now(),
-                        });
-                }
             }
         }
         Ok(report)

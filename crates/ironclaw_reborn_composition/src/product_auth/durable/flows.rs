@@ -158,8 +158,21 @@ where
         record.pkce_verifier_hash = Some(exchange.pkce_verifier_hash);
         record.credential_account_id = Some(account_id);
         record.updated_at = now;
-        self.write_flow(scope, &record, CasExpectation::Version(version))
-            .await?;
+        if let Err(error) = self
+            .write_flow(scope, &record, CasExpectation::Version(version))
+            .await
+        {
+            // The exchange already minted/updated the credential account, but
+            // the flow's completion write lost a CAS race — e.g. a concurrent
+            // lifecycle cancel from extension removal on another replica. A
+            // live credential must not outlive its flow: revoke it
+            // best-effort (clearing its secret handles) so a torn-down
+            // extension cannot retain a token minted mid-removal, then
+            // surface the original conflict.
+            self.compensate_unanchored_callback_account(scope, account_id)
+                .await;
+            return Err(error);
+        }
         Ok(record)
     }
 
@@ -499,6 +512,58 @@ impl<F> FilesystemAuthProductServices<F>
 where
     F: RootFilesystem + 'static,
 {
+    /// Best-effort compensation for a callback whose account write committed
+    /// but whose flow-completion write lost a CAS race — typically a
+    /// concurrent lifecycle cancel while an extension is being removed.
+    /// Revokes the account and purges its secret handles so the credential
+    /// cannot outlive its canceled flow. Failures are logged, never
+    /// propagated: the caller surfaces the original conflict, and the
+    /// lifecycle cleanup's account scan (which now runs AFTER flow
+    /// cancellation) remains the durable backstop.
+    async fn compensate_unanchored_callback_account(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+        account_id: CredentialAccountId,
+    ) {
+        let lock = self.lock_for(format!("account:{account_id}"));
+        let _guard = lock.lock().await;
+        let (mut account, version) = match self.read_account(scope, account_id).await {
+            Ok(Some(found)) => found,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(
+                    %account_id,
+                    error_code = ?error.code(),
+                    "callback compensation could not read the just-minted account"
+                );
+                return;
+            }
+        };
+        let purge_access = account.access_secret.take();
+        let purge_refresh = account.refresh_secret.take();
+        account.status = CredentialAccountStatus::Revoked;
+        account.updated_at = Utc::now();
+        if let Err(error) = self
+            .write_account(&account, CasExpectation::Version(version))
+            .await
+        {
+            tracing::warn!(
+                %account_id,
+                error_code = ?error.code(),
+                "callback compensation could not revoke the just-minted account"
+            );
+            return;
+        }
+        if let Some(handle) = &purge_access {
+            self.purge_secret_handle(&account.scope.resource, handle)
+                .await;
+        }
+        if let Some(handle) = &purge_refresh {
+            self.purge_secret_handle(&account.scope.resource, handle)
+                .await;
+        }
+    }
+
     async fn resolve_callback_account(
         &self,
         flow_id: AuthFlowId,

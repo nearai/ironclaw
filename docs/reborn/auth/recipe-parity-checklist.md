@@ -56,23 +56,30 @@ Legend: ✅ all boxes ticked · ⏳ in progress · ⚪ N/A · 🔴 known-broken 
 
 ---
 
-## Notion 🟢
+## Notion 🟢 (re-verified on THIS branch — 2026-07-15 audit correction)
 
-Recipe = `oauth/notion_oauth.rs:10-20` (`HostOAuthProviderSpec`, `TokenResponseShape::Standard`,
-`ExchangeScopePolicy::FallbackToRequested`, token endpoint `https://mcp.notion.com/token`).
-Manifest `assets/notion-mcp/manifest.toml` declares credentials via `runtime_credentials` only.
-_(Main-provenance names; on the rollup the equivalent is the `[auth.notion]` bundled recipe →
-`OAuth2CodeRecipe` executed by `ironclaw_auth`'s `AuthEngine`.)_
+Recipe = the `[auth.notion]` bundled TOML (`assets/notion-mcp/manifest.toml`) →
+`OAuth2CodeRecipe` executed by `ironclaw_auth`'s `AuthEngine` (DCR — no
+`client_credentials` block). _Audit correction: the previous 🟢 here rested on
+main's auto-parsing `Standard` token shape, which did **not** survive the
+merge — the pointer-driven engine captures only declared pointers, and the
+bundled recipe declared none for refresh/expiry, so every Notion connection
+died ~1h after connect. Fixed by declaring the captures in the manifest;
+provenance below is this branch._
 
 - [x] **Handshake** — PKCE-S256 + host `state` + HTTPS-only token endpoint (inherited from §S H1-H5).
-- [x] **Token lifecycle — captures `refresh_token` + `expires_in`** (A4). The shared `Standard`
-  shape parses both (`oauth_provider_client.rs:632-644,708-723`); `store_token_pair:404-413`
-  computes `access_expires_at` from `expires_in`. **Proven:** `product_auth_providers.rs`
-  `compose_provider_client_routes_notion_to_configured_provider_spec:407` (asserts the composed
-  Notion client carries refresh + expiry) + `oauth_provider_client/tests.rs` token-sink tests.
+- [x] **Token lifecycle — captures `refresh_token` + `expires_in`** (A4).
+  `[auth.notion.token_response]` declares `/refresh_token` + `/expires_in`;
+  `[auth.notion.refresh] rotates_refresh_token = true`. **Proven:**
+  `auth_engine_contract::notion_recipe_declares_refresh_and_expiry_capture`
+  (pin on the real manifest) +
+  `auth_engine_contract::dcr_vendor_registers_once_and_runs_standard_oauth_afterwards`
+  (exchange captures and stores the rotating refresh token).
 - [x] **Non-expiring guard** — absent/`0` `expires_in` → non-expiring, not already-expired
-  (`store_token_pair:409` `.filter(|secs| *secs > 0)`). Proven by the same tests. _(On the rollup:
-  `exchange.rs::store_token_pair` `.filter(|seconds| *seconds > 0)`.)_
+  (`engine/exchange.rs::store_token_pair` `.filter(|seconds| *seconds > 0)`).
+- [ ] **A16 (now non-latent)** — with refresh live, a Notion DCR client expiry
+  surfaces as `invalid_client` on refresh; the engine does not yet re-register.
+  Tracked backlog, sequenced behind this fix.
 - flow-lifecycle & engine-hardening: inherit §S.
 
 ## Google 🟢 (gmail, drive, calendar, docs, sheets, slides)

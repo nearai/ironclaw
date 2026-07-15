@@ -1135,6 +1135,49 @@ impl SecretCleanupService for InMemoryAuthProductServices {
         let mut state = self.lock_state();
         let quarantines = state.quarantines.clone();
         let mut report = SecretCleanupReport::default();
+        // A3 · Cancel the provider's pending flows BEFORE enumerating
+        // accounts, mirroring the durable store's order (which closes the
+        // callback/removal race there — the fake serializes the whole
+        // cleanup under one lock, so here the order is fidelity only).
+        // Owner decision 2026-07-15: cancel on both Deactivate and
+        // Uninstall (any provider-selected cleanup). Idempotent.
+        //
+        // F2 · Any matched flow whose `TurnGateResume` continuation has not
+        // been acknowledged — freshly canceled here or already terminal — is
+        // reported so the composition layer denies its blocked turn gate
+        // instead of leaving the turn parked. `mark_continuation_dispatched`
+        // makes the handoff emit-once across cleanup retries.
+        if let Some(provider) = request.provider.as_ref() {
+            for record in state.flows.values_mut() {
+                if &record.provider != provider
+                    || !flow_matches_credential_owner(&record.scope, &request.scope)
+                {
+                    continue;
+                }
+                if !crate::is_terminal_status(record.status) {
+                    record.status = AuthFlowStatus::Canceled;
+                    record.error = Some(crate::AuthErrorCode::Canceled);
+                    record.updated_at = Utc::now();
+                }
+                if record.continuation_emitted_at.is_none()
+                    && matches!(
+                        record.continuation,
+                        crate::AuthContinuationRef::TurnGateResume { .. }
+                    )
+                {
+                    report
+                        .canceled_turn_gate_continuations
+                        .push(AuthContinuationEvent {
+                            flow_id: record.id,
+                            scope: record.scope.clone(),
+                            continuation: record.continuation.clone(),
+                            provider: record.provider.clone(),
+                            credential_account_id: record.credential_account_id,
+                            emitted_at: Utc::now(),
+                        });
+                }
+            }
+        }
         // Credential-owner granularity, not full scope equality: cleanup
         // callers mint a fresh invocation (and often a different thread), so
         // exact matching could never find the account the flow stored.
@@ -1187,49 +1230,6 @@ impl SecretCleanupService for InMemoryAuthProductServices {
                 }
             } else if had_grant {
                 report.retained_accounts.push(account.id);
-            }
-        }
-        // A3 · Removal/disconnect cancels pending flows (RFC 9700 §4.7.1 +
-        // RFC 7009 §1): a provider-selected cleanup cancels EVERY non-terminal
-        // flow for the credential-owner + provider so a late provider callback
-        // can no longer mint a credential for a torn-down extension. Owner
-        // decision 2026-07-15: cancel on both Deactivate and Uninstall (any
-        // provider-selected cleanup). Idempotent.
-        //
-        // F2 · Any matched flow whose `TurnGateResume` continuation has not
-        // been acknowledged — freshly canceled here or already terminal — is
-        // reported so the composition layer denies its blocked turn gate
-        // instead of leaving the turn parked. `mark_continuation_dispatched`
-        // makes the handoff emit-once across cleanup retries.
-        if let Some(provider) = request.provider.as_ref() {
-            for record in state.flows.values_mut() {
-                if &record.provider != provider
-                    || !flow_matches_credential_owner(&record.scope, &request.scope)
-                {
-                    continue;
-                }
-                if !crate::is_terminal_status(record.status) {
-                    record.status = AuthFlowStatus::Canceled;
-                    record.error = Some(crate::AuthErrorCode::Canceled);
-                    record.updated_at = Utc::now();
-                }
-                if record.continuation_emitted_at.is_none()
-                    && matches!(
-                        record.continuation,
-                        crate::AuthContinuationRef::TurnGateResume { .. }
-                    )
-                {
-                    report
-                        .canceled_turn_gate_continuations
-                        .push(AuthContinuationEvent {
-                            flow_id: record.id,
-                            scope: record.scope.clone(),
-                            continuation: record.continuation.clone(),
-                            provider: record.provider.clone(),
-                            credential_account_id: record.credential_account_id,
-                            emitted_at: Utc::now(),
-                        });
-                }
             }
         }
         Ok(report)

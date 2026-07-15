@@ -302,9 +302,13 @@ struct WireManifestRecord {
     source: WireManifestSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     manifest_hash: Option<ManifestHash>,
-    /// The compiled contract (extension-runtime REC-1/REC-2). Loads rebuild
-    /// from it without reparsing `raw_toml`; absent only on legacy records,
-    /// which backfill by compiling once at load.
+    /// The compiled contract (extension-runtime REC-1/REC-2). Every record is
+    /// persisted with it and loads rebuild from it without reparsing
+    /// `raw_toml`. This is a blank-slate schema: there is no pre-PR record to
+    /// migrate, so an absent `resolved` is a corrupt/unexpected row and the
+    /// load fails loud (see `into_manifest_record`) — it is never backfilled.
+    /// The field stays `Option` only so a truncated/garbled row deserializes
+    /// far enough to be rejected with a clear error rather than a serde panic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resolved: Option<ResolvedExtensionManifest>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

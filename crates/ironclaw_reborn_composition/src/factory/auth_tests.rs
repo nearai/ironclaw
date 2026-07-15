@@ -662,7 +662,7 @@ async fn local_dev_google_oauth_backend_accepts_optional_client_secret_config() 
 }
 
 #[tokio::test]
-async fn oauth_callback_with_stale_gate_maps_to_terminal_invalid_request() {
+async fn oauth_callback_with_stale_gate_converges_without_resuming() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_reborn_services(
         RebornBuildInput::local_dev("local-dev-auth-stale-owner", dir.path().join("local-dev"))
@@ -697,13 +697,34 @@ async fn oauth_callback_with_stale_gate_maps_to_terminal_invalid_request() {
     )
     .await;
 
-    let error = product_auth
-        .handle_oauth_callback(authorized_request(auth_scope, flow_id))
+    // A continuation for a superseded gate converges as a settled no-op: the
+    // credential is minted (that part is real work the user completed) and
+    // the continuation is acknowledged, but the run's CURRENT gate must not
+    // be resumed by a stale reference. Erroring here instead used to leave
+    // the completed flow permanently unacknowledged and the reconcile loop
+    // hammering a non-retryable failure.
+    product_auth
+        .handle_oauth_callback(authorized_request(auth_scope.clone(), flow_id))
         .await
-        .expect_err("stale auth gate should not resume");
+        .expect("a stale-gate continuation converges without resuming");
 
-    assert_eq!(error.code, AuthErrorCode::InvalidRequest);
-    assert!(!error.retryable);
+    let state = turn_coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: scope.clone(),
+            run_id,
+        })
+        .await
+        .expect("run state");
+    assert_eq!(
+        state.status,
+        TurnStatus::BlockedAuth,
+        "the run stays parked on its CURRENT gate"
+    );
+    assert_eq!(
+        state.gate_ref.as_ref().map(|gate| gate.as_str()),
+        Some("gate:current-auth"),
+        "the stale continuation never touched the current gate"
+    );
 }
 
 #[tokio::test]
