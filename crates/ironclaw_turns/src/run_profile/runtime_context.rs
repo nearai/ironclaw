@@ -366,6 +366,8 @@ fn render_presentation_hint(presentation: &ChannelPresentation) -> String {
     match presentation.max_message_chars {
         Some(max) => format!("{format}, \u{2264}{max} chars/message"),
         None => format.to_string(),
+    }
+}
 
 /// Sanitize a string for safe interpolation into model-visible prompt text.
 ///

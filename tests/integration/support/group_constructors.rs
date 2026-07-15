@@ -274,7 +274,7 @@ impl RebornIntegrationGroupBuilder {
     }
 
     /// Build an extension-lifecycle group. See [`RebornIntegrationGroup::extension_lifecycle`].
-    pub async fn extension_lifecycle(self) -> HarnessResult<RebornIntegrationGroup> {
+    pub async fn extension_lifecycle(mut self) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
         // Lifecycle ownership is caller-derived. Align the shared capability
         // harness with the group's canonical binding subject so install and
@@ -284,6 +284,29 @@ impl RebornIntegrationGroupBuilder {
             &base,
         )
         .await?;
+        // C-SLACK-LIFECYCLE (issue #6105): wire the REAL generic
+        // channel-connection facade over this harness's own `RebornServices`,
+        // mirroring the production `build_reborn_runtime` slot fill — so
+        // `builtin.extension_remove` of a channel extension runs the real
+        // per-caller disconnect instead of skipping it on an empty facade
+        // slot. Identities come from the group's single-source dispatch scope
+        // so the facade's tenant check matches dispatch-time callers.
+        let scope = &base.product_harness.scope;
+        let channel_connection =
+            ironclaw_reborn_composition::test_support::build_channel_connection_for_test(
+                host_runtime
+                    .reborn_services_for_test()
+                    .ok_or("extension_lifecycle harness is missing its RebornServices bundle")?,
+                ironclaw_reborn_composition::test_support::ChannelConnectionTestConfig {
+                    tenant_id: scope.tenant_id.as_str().to_string(),
+                    agent_id: scope
+                        .agent_id
+                        .as_ref()
+                        .map(|agent| agent.as_str().to_string())
+                        .ok_or("group product scope is missing an agent id")?,
+                },
+            )?;
+        self.channel_connection = Some(Arc::new(channel_connection));
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.into_group(base, capability).await
     }
@@ -303,7 +326,7 @@ impl RebornIntegrationGroupBuilder {
         let host_runtime =
             super::super::harness::profiles::extension::extension_delivery_tools().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
-        self.into_group(base, capability).await
+        self.build_with_capability(capability).await
     }
 
     /// Build a visibility-probe group. See

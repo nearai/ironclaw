@@ -88,6 +88,14 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// `HostRuntimeCapabilityHarness`-based integration tests stay
     /// byte-identical.
     pub(crate) durable_capability_io: bool,
+    /// #5886 harness-wiring seam: when `true`, the harness's `builtin.trigger_list`
+    /// dispatch is later re-routed (post-construction, once the caller's real
+    /// shared turn-state store exists) to a REAL `TriggerActiveRunLookup`
+    /// instead of the harness's own baked-in lookup, which is scoped to a
+    /// turn-state store group-based tests never write real runs into. See
+    /// `HostRuntimeCapabilityHarness::install_trigger_active_run_lookup_for_test`.
+    /// Opt-in; every other harness stays byte-identical.
+    pub(crate) trigger_active_run_lookup_requested: bool,
 }
 
 impl HostRuntimeHarnessOptions {
@@ -108,7 +116,16 @@ impl HostRuntimeHarnessOptions {
             recording_network_egress: None,
             project_service_fault_injection: false,
             durable_capability_io: false,
+            trigger_active_run_lookup_requested: false,
         }
+    }
+
+    /// Request the post-construction real `TriggerActiveRunLookup` rewire
+    /// (#5886) — see the field doc on
+    /// [`Self::trigger_active_run_lookup_requested`].
+    pub(crate) fn with_trigger_active_run_lookup_for_test(mut self) -> Self {
+        self.trigger_active_run_lookup_requested = true;
+        self
     }
 
     pub(crate) fn with_seed_extension_credentials(mut self) -> Self {

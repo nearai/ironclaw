@@ -92,11 +92,15 @@ impl AuthEngine {
             log_vendor_error(&vendor, response.status, &response.body, "token exchange");
             return Err(AuthProductError::TokenExchangeFailed);
         }
-        let extracted =
-            extract_token_response(&recipe, &response.body, &request.scopes, ScopeClamp::ToRequested)
-                .inspect_err(|_| {
-                    tracing::debug!(vendor, "token response extraction failed");
-                })?;
+        let extracted = extract_token_response(
+            &recipe,
+            &response.body,
+            &request.scopes,
+            ScopeClamp::ToRequested,
+        )
+        .inspect_err(|_| {
+            tracing::debug!(vendor, "token response extraction failed");
+        })?;
 
         let provider_identity = self
             .extract_identity(&scope, &recipe, &extracted)

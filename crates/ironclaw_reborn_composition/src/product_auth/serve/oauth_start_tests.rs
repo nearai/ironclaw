@@ -37,6 +37,12 @@ mod tests {
         ) -> Result<(), AuthProductError> {
             Ok(())
         }
+        async fn dispatch_canceled_auth_continuation(
+            &self,
+            _event: ironclaw_auth::AuthContinuationEvent,
+        ) -> Result<(), ironclaw_auth::AuthProductError> {
+            Ok(())
+        }
     }
 
     fn test_resource_scope() -> ResourceScope {

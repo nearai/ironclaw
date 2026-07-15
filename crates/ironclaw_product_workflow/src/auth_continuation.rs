@@ -530,7 +530,6 @@ mod tests {
         owner_user_id: &str,
     ) -> TurnRunState {
         TurnRunState {
-            model_usage: None,
             scope: TurnScope::new_with_owner(
                 TenantId::new("tenant-auth").unwrap(),
                 Some(AgentId::new("agent-auth").unwrap()),
@@ -796,7 +795,6 @@ mod tests {
         let actor = TurnActor::new(UserId::new("alice").unwrap());
         let submit = coordinator
             .submit_turn(SubmitTurnRequest {
-                requested_model: None,
                 scope: scope.clone(),
                 requested_model: None,
                 actor: actor.clone(),

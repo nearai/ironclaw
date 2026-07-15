@@ -2,7 +2,7 @@
 
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
-    CredentialOwnership, NewCredentialAccount, ProviderScope, SLACK_PERSONAL_PROVIDER_ID,
+    CredentialOwnership, NewCredentialAccount, ProviderScope,
 };
 use ironclaw_host_api::{
     AgentId, InvocationId, MountView, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,

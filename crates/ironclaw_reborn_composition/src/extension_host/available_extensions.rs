@@ -1669,39 +1669,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
-    #[test]
-    fn bundled_extension_removal_cleanup_metadata_is_explicit_and_slack_personal_only() {
-        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
-        let slack = catalog
-            .resolve(&LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").unwrap())
-            .unwrap();
-        let slack_bot = catalog
-            .resolve(
-                &LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack_bot").unwrap(),
-            )
-            .unwrap();
-        let github = catalog
-            .resolve(&LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").unwrap())
-            .unwrap();
-
-        assert_eq!(
-            slack.cleanup_requirements,
-            vec![ExtensionRemovalCleanupRequirement::channel_connection(
-                ExtensionRemovalCleanupAdapterId::new("slack.personal_connection").unwrap(),
-                ExtensionRemovalChannelId::new("slack").unwrap(),
-            )]
-        );
-        assert!(
-            slack_bot.cleanup_requirements.is_empty(),
-            "operator-owned slack_bot must not inherit personal cleanup"
-        );
-        assert!(
-            github.cleanup_requirements.is_empty(),
-            "ordinary bundled packages default to no host-owned cleanup"
-        );
-    }
-
     #[test]
     fn non_channel_product_adapter_surface_does_not_project_channel_surface() {
         const MANIFEST: &str = r#"

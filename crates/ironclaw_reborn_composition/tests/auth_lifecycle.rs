@@ -36,6 +36,12 @@ impl RebornAuthContinuationDispatcher for NoopContinuationDispatcher {
     ) -> Result<(), AuthProductError> {
         Ok(())
     }
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        _event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        Ok(())
+    }
 }
 
 struct AccessOnlyRefreshProvider;

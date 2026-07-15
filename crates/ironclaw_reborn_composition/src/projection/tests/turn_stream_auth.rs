@@ -439,6 +439,12 @@ async fn webui_event_stream_creates_vendor_oauth_prompt_for_runtime_credential_g
         ) -> Result<(), ironclaw_auth::AuthProductError> {
             Ok(())
         }
+        async fn dispatch_canceled_auth_continuation(
+            &self,
+            _event: ironclaw_auth::AuthContinuationEvent,
+        ) -> Result<(), ironclaw_auth::AuthProductError> {
+            Ok(())
+        }
     }
 
     #[derive(Debug)]

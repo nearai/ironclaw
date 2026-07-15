@@ -104,21 +104,11 @@ impl OAuthGateFlowDriver {
         let query = turn_gate_query(&auth_scope, request.scope, &turn_run_ref, request.gate_ref);
 
         let _setup_guard = self.setup_lock.lock().await;
-        let exact = self
-            .reusable_flow_for_query(request.flow_manager, request.flow_source, query.clone())
-            .await?;
         if let Some(existing) = self
-            .provider
-            .select_reusable_flow(&auth_scope, exact.clone(), request.flow_source.as_ref())
+            .reusable_flow_for_query(request.flow_manager, request.flow_source, query.clone())
             .await?
         {
-            if let Some(rejected_exact) = exact.filter(|flow| flow.id != existing.id) {
-                self.retire_flow(request.flow_manager, rejected_exact).await;
-            }
             return challenge_view_from_flow(&existing);
-        }
-        if let Some(rejected_exact) = exact {
-            self.retire_flow(request.flow_manager, rejected_exact).await;
         }
 
         let flow_id = AuthFlowId::new();
@@ -133,17 +123,13 @@ impl OAuthGateFlowDriver {
                 requested_scopes: provider_scopes(&requirement.provider_scopes)?,
             })
             .await?;
-        if let Err(error) = self
-            .store_pkce_verifier(
-                &auth_scope.resource,
-                flow_id,
-                prepared.pkce_verifier.clone(),
-            )
-            .await
-        {
-            self.provider.abandon_flow(&auth_scope, flow_id).await;
-            return Err(error);
-        }
+        let expires_at = Utc::now() + ChronoDuration::seconds(GATE_FLOW_TTL_SECONDS);
+        self.store_pkce_verifier(
+            &auth_scope.resource,
+            flow_id,
+            prepared.pkce_verifier.clone(),
+        )
+        .await?;
         let flow = match request
             .flow_manager
             .create_flow(NewAuthFlow {
@@ -170,57 +156,18 @@ impl OAuthGateFlowDriver {
             Err(AuthProductError::BackendConflict) => {
                 self.cleanup_pkce_verifier(&auth_scope.resource, flow_id)
                     .await;
-                self.provider.abandon_flow(&auth_scope, flow_id).await;
-                let existing = self
-                    .reusable_flow_for_query(request.flow_manager, request.flow_source, query)
-                    .await?
-                    .ok_or(AuthProductError::BackendConflict)?;
-                self.provider
-                    .publish_flow(&auth_scope, existing.id, existing.expires_at)
-                    .await?;
-                self.provider
-                    .select_reusable_flow(&auth_scope, Some(existing), request.flow_source.as_ref())
+                self.reusable_flow_for_query(request.flow_manager, request.flow_source, query)
                     .await?
                     .ok_or(AuthProductError::BackendConflict)?
             }
             Err(error) => {
                 self.cleanup_pkce_verifier(&auth_scope.resource, flow_id)
                     .await;
-                self.provider.abandon_flow(&auth_scope, flow_id).await;
                 return Err(error);
             }
         };
 
-        if let Err(error) = self
-            .provider
-            .publish_flow(&auth_scope, flow.id, flow.expires_at)
-            .await
-        {
-            self.cleanup_pkce_verifier(&auth_scope.resource, flow.id)
-                .await;
-            let _ = request.flow_manager.cancel_flow(&flow.scope, flow.id).await;
-            self.provider.abandon_flow(&auth_scope, flow.id).await;
-            if error == AuthProductError::BackendConflict
-                && let Some(existing) = self
-                    .provider
-                    .select_reusable_flow(&auth_scope, None, request.flow_source.as_ref())
-                    .await?
-            {
-                return challenge_view_from_flow(&existing);
-            }
-            return Err(error);
-        }
-
-        match challenge_view_from_flow(&flow) {
-            Ok(challenge) => Ok(challenge),
-            Err(error) => {
-                self.cleanup_pkce_verifier(&auth_scope.resource, flow_id)
-                    .await;
-                self.provider.abandon_flow(&auth_scope, flow_id).await;
-                let _ = request.flow_manager.cancel_flow(&auth_scope, flow_id).await;
-                Err(error)
-            }
-        }
+        challenge_view_from_flow(&flow)
     }
 
     async fn reusable_flow_for_query(
@@ -239,20 +186,10 @@ impl OAuthGateFlowDriver {
         // now-defunct PKCE verifier so it does not linger in the secret store.
         self.cleanup_pkce_verifier(&existing.scope.resource, existing.id)
             .await;
-        let canceled = flow_manager
+        flow_manager
             .cancel_flow(&existing.scope, existing.id)
-            .await?;
-        self.provider
-            .abandon_flow(&canceled.scope, canceled.id)
-            .await;
-        Ok(None)
-    }
-
-    async fn retire_flow(&self, flow_manager: &Arc<dyn AuthFlowManager>, flow: AuthFlowRecord) {
-        self.cleanup_pkce_verifier(&flow.scope.resource, flow.id)
-            .await;
-        let _ = flow_manager.cancel_flow(&flow.scope, flow.id).await;
-        self.provider.abandon_flow(&flow.scope, flow.id).await;
+            .await
+            .map(|_| None)
     }
 
     async fn store_pkce_verifier(
@@ -402,10 +339,6 @@ pub(crate) fn challenge_view_from_flow(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::time::Duration;
-
     use ironclaw_auth::{
         AuthEngineDeps, AuthFlowStatus, EngineCallbackBase, InMemoryAuthProductServices,
         OAuthAuthorizationUrl, ResolvedVendorAuthRecipe, StaticAuthRecipeResolver,
@@ -414,8 +347,6 @@ mod tests {
         AgentId, ExtensionId, TenantId, ThreadId, UserId, VendorAuthRecipe, VendorId,
     };
     use ironclaw_secrets::InMemorySecretStore;
-    use tokio::sync::Notify;
-    use tokio::time::timeout;
 
     fn acme_vendor_recipe() -> ResolvedVendorAuthRecipe {
         let recipe: VendorAuthRecipe = serde_json::from_value(serde_json::json!({
@@ -496,156 +427,6 @@ mod tests {
             .expect("callback base"),
             dcr_client_name: "IronClaw test".to_string(),
         }))
-    }
-
-    #[derive(Default)]
-    struct RaceOAuthProviderState {
-        current_epoch: Mutex<Option<AuthFlowId>>,
-        block_first_publish: AtomicBool,
-        prepare_calls: AtomicUsize,
-        publish_calls: AtomicUsize,
-        first_publish_entered: Notify,
-        release_first_publish: Notify,
-    }
-
-    impl RaceOAuthProviderState {
-        fn current_epoch(&self) -> Option<AuthFlowId> {
-            *self.current_epoch.lock().expect("race epoch lock")
-        }
-    }
-
-    struct RaceOAuthProvider {
-        state: Arc<RaceOAuthProviderState>,
-    }
-
-    impl fmt::Debug for RaceOAuthProvider {
-        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter
-                .debug_struct("RaceOAuthProvider")
-                .finish_non_exhaustive()
-        }
-    }
-
-    #[async_trait]
-    impl OAuthGateProvider for RaceOAuthProvider {
-        fn provider_id(&self) -> &'static str {
-            "race_oauth"
-        }
-
-        fn pkce_secret_handle_label(&self) -> &'static str {
-            "race-oauth-pkce"
-        }
-
-        async fn select_reusable_flow(
-            &self,
-            scope: &AuthProductScope,
-            exact: Option<AuthFlowRecord>,
-            flow_source: &dyn AuthFlowRecordSource,
-        ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
-            if let Some(epoch) = self.state.current_epoch() {
-                return flow_source.flow_for_owner_by_id(scope, epoch).await;
-            }
-            if let Some(exact) = exact {
-                let mut epoch = self.state.current_epoch.lock().expect("race epoch lock");
-                if epoch.is_none() {
-                    *epoch = Some(exact.id);
-                }
-                return Ok((*epoch == Some(exact.id)).then_some(exact));
-            }
-            Ok(None)
-        }
-
-        async fn prepare_flow(
-            &self,
-            _scope: &AuthProductScope,
-            flow_id: AuthFlowId,
-            _scopes: Vec<ProviderScope>,
-            _expires_at: Timestamp,
-        ) -> Result<PreparedOAuthGateFlow, AuthProductError> {
-            self.state.prepare_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(race_prepared_flow(flow_id))
-        }
-
-        async fn publish_flow(
-            &self,
-            _scope: &AuthProductScope,
-            flow_id: AuthFlowId,
-            _expires_at: Timestamp,
-        ) -> Result<(), AuthProductError> {
-            let publish_call = self.state.publish_calls.fetch_add(1, Ordering::SeqCst);
-            if publish_call == 0 && self.state.block_first_publish.load(Ordering::SeqCst) {
-                self.state.first_publish_entered.notify_one();
-                self.state.release_first_publish.notified().await;
-            }
-            let mut epoch = self.state.current_epoch.lock().expect("race epoch lock");
-            match *epoch {
-                Some(current) if current == flow_id => Ok(()),
-                Some(_) => Err(AuthProductError::BackendConflict),
-                None => {
-                    *epoch = Some(flow_id);
-                    Ok(())
-                }
-            }
-        }
-    }
-
-    fn race_prepared_flow(flow_id: AuthFlowId) -> PreparedOAuthGateFlow {
-        let pkce_verifier = SecretString::from(ironclaw_common::pkce::generate_code_verifier());
-        let pkce_secret = PkceVerifierSecret::new(pkce_verifier.clone()).unwrap();
-        PreparedOAuthGateFlow {
-            authorization_url: OAuthAuthorizationUrl::new(format!(
-                "https://provider.example/oauth?flow_id={flow_id}"
-            ))
-            .unwrap(),
-            opaque_state_hash: opaque_state_hash(format!("state-{flow_id}").as_str()).unwrap(),
-            pkce_verifier_hash: pkce_verifier_hash(&pkce_secret).unwrap(),
-            pkce_verifier,
-        }
-    }
-
-    fn race_scope(thread_id: &str) -> TurnScope {
-        TurnScope::new(
-            TenantId::new("tenant-race").unwrap(),
-            Some(AgentId::new("agent-race").unwrap()),
-            None,
-            ThreadId::new(thread_id).unwrap(),
-        )
-    }
-
-    fn race_requirement() -> RuntimeCredentialAuthRequirement {
-        RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new("race_oauth").unwrap(),
-            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
-            requester_extension: ExtensionId::new("race-extension").unwrap(),
-            provider_scopes: Vec::new(),
-        }
-    }
-
-    async fn race_challenge(
-        driver: Arc<OAuthGateFlowDriver>,
-        shared: Arc<InMemoryAuthProductServices>,
-        scope: TurnScope,
-        owner_user_id: UserId,
-        run_id: TurnRunId,
-        gate_ref: AuthGateRef,
-        requirement: RuntimeCredentialAuthRequirement,
-    ) -> Result<AuthChallengeView, AuthProductError> {
-        let flow_manager: Arc<dyn AuthFlowManager> = shared.clone();
-        let flow_source: Arc<dyn AuthFlowRecordSource> = shared;
-        driver
-            .challenge_for_blocked_gate(
-                OAuthGateChallengeRequest {
-                    flow_manager: &flow_manager,
-                    flow_source: &flow_source,
-                    requirements: std::slice::from_ref(&requirement),
-                    scope: &scope,
-                    owner_user_id: &owner_user_id,
-                    run_id,
-                    gate_ref: &gate_ref,
-                },
-                &requirement,
-            )
-            .await
     }
 
     struct GateFixture {

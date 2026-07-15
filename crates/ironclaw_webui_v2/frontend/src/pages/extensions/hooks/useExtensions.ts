@@ -313,24 +313,6 @@ export function useExtensions() {
     },
   });
 
-  const importMutation = useMutation({
-    mutationFn: ({ file }) => importExtension(file),
-    onSuccess: (res) => {
-      if (res.success) {
-        setActionResult({
-          type: "success",
-          message: res.message || t("ext.registry.importSuccess"),
-        });
-      } else {
-        setActionResult({ type: "error", message: res.message || t("ext.registry.importFailed") });
-      }
-      invalidate();
-    },
-    onError: (err) => {
-      setActionResult({ type: "error", message: err.message });
-    },
-  });
-
   const isLoading = extensionsQuery.isLoading || registryQuery.isLoading;
   const isBusy = installMutation.isPending || activateMutation.isPending || removeMutation.isPending || importMutation.isPending;
   const remove = React.useCallback(

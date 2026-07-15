@@ -55,9 +55,17 @@
 //! 14. [`result_read`] — `wrap_result_read_capability_for_test`, the
 //!     production `result_read` synthetic-capability wrap, for the same
 //!     durable tool-result projection coverage (issue #5838).
+//! 15. [`channel_connection`] — [`ChannelConnectionTestBundle`],
+//!     `build_channel_connection_for_test` — the REAL generic
+//!     channel-connection facade (§6.4) + OAuth-callback-shaped identity
+//!     binding over a composed harness's own stores, late-bound into the
+//!     same removal-cleanup slot production fills (C-SLACK-LIFECYCLE seam,
+//!     issue #6105).
 
 mod automation;
 mod budget_gateway;
+#[cfg(feature = "test-support")]
+mod channel_connection;
 mod durable;
 mod local_dev_boot;
 mod local_dev_capability_io;
@@ -68,8 +76,6 @@ mod projection;
 mod refreshing_capability_port;
 mod result_read;
 mod skill_activation;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_channel_connection;
 mod trace_capture;
 mod trigger_materializer;
 mod user_profile;
@@ -80,6 +86,10 @@ pub use automation::{
 };
 pub use budget_gateway::{
     BudgetTestGateway, FailingTestGateway, ScriptedReply, assistant_reply_without_text_for_test,
+};
+#[cfg(feature = "test-support")]
+pub use channel_connection::{
+    ChannelConnectionTestBundle, ChannelConnectionTestConfig, build_channel_connection_for_test,
 };
 #[cfg(feature = "test-support")]
 pub use durable::open_local_dev_extension_installation_store_for_test;

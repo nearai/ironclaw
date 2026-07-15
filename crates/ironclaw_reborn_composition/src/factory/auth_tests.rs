@@ -108,6 +108,12 @@ impl RebornAuthContinuationDispatcher for NoopContinuationDispatcher {
     ) -> Result<(), ironclaw_auth::AuthProductError> {
         Ok(())
     }
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        _event: ironclaw_auth::AuthContinuationEvent,
+    ) -> Result<(), ironclaw_auth::AuthProductError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -701,7 +707,7 @@ async fn oauth_callback_with_stale_gate_maps_to_terminal_invalid_request() {
 }
 
 #[tokio::test]
-async fn oauth_callback_with_lifecycle_activation_activates_and_publishes_extension() {
+async fn oauth_callback_with_lifecycle_activation_returns_ok_without_resume() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_reborn_services(
         RebornBuildInput::local_dev(
@@ -713,211 +719,22 @@ async fn oauth_callback_with_lifecycle_activation_activates_and_publishes_extens
     .await
     .expect("local-dev services build");
     let product_auth = services.product_auth.as_ref().expect("product auth");
-    let extension_management = services
-        .local_runtime
-        .as_ref()
-        .and_then(|runtime| runtime.extension_management.as_ref())
-        .expect("extension management");
-    let package_ref = ironclaw_product_workflow::LifecyclePackageRef::new(
-        ironclaw_product_workflow::LifecyclePackageKind::Extension,
-        "github",
-    )
-    .expect("github package ref");
-    let lifecycle_owner = UserId::new("alice").expect("valid lifecycle owner"); // safety: fixed test user id literal is valid.
-    extension_management
-        .install(package_ref.clone(), &lifecycle_owner)
-        .await
-        .expect("install github before OAuth");
     let auth_scope = auth_scope_for_turn(
         &turn_scope(),
         &TurnActor::new(UserId::new("alice").unwrap()),
     );
     let continuation = AuthContinuationRef::LifecycleActivation {
-        package_ref: LifecyclePackageRef::new("github").unwrap(),
+        package_ref: LifecyclePackageRef::new("github-extension").unwrap(),
     };
     let flow_id = create_flow(product_auth, auth_scope.clone(), continuation.clone()).await;
 
     let response = product_auth
         .handle_oauth_callback(authorized_request(auth_scope, flow_id))
         .await
-        .expect("OAuth callback activates extension");
+        .expect("lifecycle continuation is deferred");
 
     assert_eq!(response.flow_id, flow_id);
     assert_eq!(response.continuation, continuation);
-    let projection = extension_management
-        .project(package_ref, &lifecycle_owner)
-        .await
-        .expect("project github after OAuth callback");
-    assert_eq!(
-        projection.phase,
-        ironclaw_product_workflow::LifecyclePhase::Active
-    );
-    assert!(
-        extension_management
-            .active_model_visible_capabilities()
-            .await
-            .expect("active extension capabilities")
-            .iter()
-            .any(|capability| capability.id.as_str() == "github.search_issues"),
-        "OAuth callback must publish GitHub tools before reporting success"
-    );
-}
-
-#[cfg(feature = "slack-v2-host-beta")]
-#[tokio::test]
-async fn slack_oauth_callback_activates_and_publishes_all_personal_tools() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
-        RebornBuildInput::local_dev(
-            "local-dev-slack-auth-lifecycle-owner",
-            dir.path().join("local-dev"),
-        )
-        .with_product_auth_ports(in_memory_product_auth_ports()),
-    )
-    .await
-    .expect("local-dev services build");
-    let product_auth = services.product_auth.as_ref().expect("product auth");
-    let turn_coordinator = services
-        .turn_coordinator
-        .as_ref()
-        .expect("turn coordinator");
-    let local_runtime = services.local_runtime.as_ref().expect("local runtime");
-    let extension_management = services
-        .local_runtime
-        .as_ref()
-        .and_then(|runtime| runtime.extension_management.as_ref())
-        .expect("extension management");
-    let package_ref = ironclaw_product_workflow::LifecyclePackageRef::new(
-        ironclaw_product_workflow::LifecyclePackageKind::Extension,
-        "slack",
-    )
-    .expect("Slack package ref");
-    let lifecycle_owner = UserId::new("alice").expect("valid lifecycle owner"); // safety: fixed test user id literal is valid.
-    extension_management
-        .install(package_ref.clone(), &lifecycle_owner)
-        .await
-        .expect("install Slack before OAuth");
-    let auth_scope = auth_scope_for_turn(
-        &turn_scope(),
-        &TurnActor::new(UserId::new("alice").unwrap()),
-    );
-    let blocked_scope = turn_scope();
-    let blocked_run = submit_and_block_provider_auth_run(
-        turn_coordinator.as_ref(),
-        local_runtime.turn_state.as_ref(),
-        blocked_scope.clone(),
-        TurnActor::new(UserId::new("alice").unwrap()),
-        "slack-lifecycle",
-        ironclaw_auth::SLACK_PERSONAL_PROVIDER_ID,
-        "slack",
-    )
-    .await;
-    let slack_provider = AuthProviderId::new(ironclaw_auth::SLACK_PERSONAL_PROVIDER_ID)
-        .expect("Slack personal provider");
-    let flow_id = create_provider_flow(
-        product_auth,
-        auth_scope.clone(),
-        AuthContinuationRef::LifecycleActivation {
-            package_ref: LifecyclePackageRef::new("slack").unwrap(),
-        },
-        slack_provider.clone(),
-    )
-    .await;
-    let scopes = crate::extension_host::available_extensions::slack_personal_oauth_setup_scopes()
-        .iter()
-        .map(|scope| ProviderScope::new(*scope).expect("Slack OAuth scope"))
-        .collect();
-
-    product_auth
-        .handle_oauth_callback(authorized_provider_request(
-            auth_scope,
-            flow_id,
-            slack_provider,
-            scopes,
-        ))
-        .await
-        .expect("Slack OAuth callback activates extension");
-
-    assert_eq!(
-        extension_management
-            .project(package_ref, &lifecycle_owner)
-            .await
-            .expect("project Slack after OAuth")
-            .phase,
-        ironclaw_product_workflow::LifecyclePhase::Active
-    );
-    let mut slack_capabilities = extension_management
-        .active_model_visible_capabilities()
-        .await
-        .expect("active Slack capabilities")
-        .into_iter()
-        .map(|capability| capability.id.as_str().to_string())
-        .filter(|capability_id| capability_id.starts_with("slack."))
-        .collect::<Vec<_>>();
-    slack_capabilities.sort();
-    assert_eq!(
-        slack_capabilities,
-        vec![
-            "slack.get_conversation_history",
-            "slack.get_conversation_info",
-            "slack.get_thread_replies",
-            "slack.get_user_info",
-            "slack.list_conversations",
-            "slack.search_messages",
-            "slack.send_message",
-            "slack.whoami",
-        ]
-    );
-    let blocked_state = turn_coordinator
-        .get_run_state(GetRunStateRequest {
-            scope: blocked_scope,
-            run_id: blocked_run,
-        })
-        .await
-        .expect("blocked Slack run after OAuth");
-    assert_eq!(blocked_state.status, TurnStatus::Queued);
-    assert_eq!(blocked_state.gate_ref, None);
-}
-
-#[tokio::test]
-async fn failed_lifecycle_activation_is_not_projected_as_completed_oauth() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
-        RebornBuildInput::local_dev(
-            "local-dev-auth-lifecycle-failure-owner",
-            dir.path().join("local-dev"),
-        )
-        .with_product_auth_ports(in_memory_product_auth_ports()),
-    )
-    .await
-    .expect("local-dev services build");
-    let product_auth = services.product_auth.as_ref().expect("product auth");
-    let auth_scope = auth_scope_for_turn(
-        &turn_scope(),
-        &TurnActor::new(UserId::new("alice").unwrap()),
-    );
-    let flow_id = create_flow(
-        product_auth,
-        auth_scope.clone(),
-        AuthContinuationRef::LifecycleActivation {
-            package_ref: LifecyclePackageRef::new("github").unwrap(),
-        },
-    )
-    .await;
-
-    product_auth
-        .handle_oauth_callback(authorized_request(auth_scope.clone(), flow_id))
-        .await
-        .expect_err("uninstalled extension cannot activate after OAuth");
-
-    assert_eq!(
-        product_auth
-            .reconcile_oauth_flow(&auth_scope, flow_id)
-            .await
-            .expect("sanitized flow status"),
-        ironclaw_auth::AuthFlowStatus::Failed,
-        "the popup poll must terminate after lifecycle activation fails"
-    );
 }
 
 #[tokio::test]
@@ -1051,10 +868,7 @@ async fn submit_and_block_provider_auth_run(
                 gate_ref: GateRef::new(format!("gate:fanout-{suffix}")).unwrap(),
                 credential_requirements: vec![
                     ironclaw_host_api::RuntimeCredentialAuthRequirement {
-                        provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new(
-                            provider,
-                        )
-                        .unwrap(),
+                        provider: ironclaw_host_api::VendorId::new(provider).unwrap(),
                         setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
                             scopes: Vec::new(),
                         },

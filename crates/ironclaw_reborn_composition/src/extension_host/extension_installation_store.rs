@@ -4,13 +4,12 @@ use ironclaw_extensions::{
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
     ExtensionManifestRecord, ExtensionRemovalCleanupRequirement,
     InMemoryExtensionInstallationStore, ManifestHash, ManifestSource, ResolvedExtensionManifest,
+    canonicalize_installation_rows,
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{ExtensionId, VirtualPath};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-
-use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 
 const DEFAULT_INSTALLATION_STATE_PATH: &str = "/system/extensions/.installations/state.json";
 const INSTALLATION_STATE_IO_ERROR: &str = "failed to load extension installation state";
@@ -39,6 +38,7 @@ impl FilesystemExtensionInstallationStore {
                 let normalized_state = WireState {
                     manifests: state.manifests,
                     installations: normalized_installations,
+                    channel_configs: state.channel_configs,
                 };
 
                 // Validate the complete normalized snapshot before writing it

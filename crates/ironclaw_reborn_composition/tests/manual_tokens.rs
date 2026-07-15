@@ -33,6 +33,12 @@ impl RebornAuthContinuationDispatcher for NoopContinuationDispatcher {
     ) -> Result<(), AuthProductError> {
         Ok(())
     }
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        _event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -53,6 +59,12 @@ impl RebornAuthContinuationDispatcher for RecordingContinuationDispatcher {
         event: AuthContinuationEvent,
     ) -> Result<(), AuthProductError> {
         self.events.lock().unwrap().push(event);
+        Ok(())
+    }
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        _event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
         Ok(())
     }
 }
@@ -81,6 +93,12 @@ impl RebornAuthContinuationDispatcher for FailsFirstContinuationDispatcher {
             return Err(AuthProductError::BackendUnavailable);
         }
         self.events.lock().unwrap().push(event);
+        Ok(())
+    }
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        _event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
         Ok(())
     }
 }
@@ -300,22 +318,6 @@ impl AuthFlowManager for FailingManualTokenFlowManager {
         _input: OAuthCallbackFailureInput,
     ) -> Result<AuthFlowRecord, AuthProductError> {
         unreachable!("manual-token cleanup tests do not fail OAuth callbacks")
-    }
-
-    async fn claim_continuation_dispatch(
-        &self,
-        _scope: &AuthProductScope,
-        _input: ironclaw_auth::AuthContinuationDispatchClaimInput,
-    ) -> Result<AuthFlowRecord, AuthProductError> {
-        unreachable!("manual-token cleanup tests do not claim continuations")
-    }
-
-    async fn settle_continuation_dispatch(
-        &self,
-        _scope: &AuthProductScope,
-        _input: ironclaw_auth::AuthContinuationDispatchSettlementInput,
-    ) -> Result<AuthFlowRecord, AuthProductError> {
-        unreachable!("manual-token cleanup tests do not settle continuations")
     }
 
     async fn mark_continuation_dispatched(

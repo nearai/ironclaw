@@ -536,6 +536,7 @@ impl HostRuntimeCapabilityHarness {
             recording_network_egress,
             project_service_fault_injection,
             durable_capability_io,
+            trigger_active_run_lookup_requested,
         } = options;
         let root = Arc::new(tempfile::tempdir()?);
         let storage_root = root.path().join("local-dev");
@@ -1542,7 +1543,11 @@ impl HostRuntimeCapabilityHarness {
             .collect();
         let parts =
             ironclaw_reborn_composition::test_support::RefreshingLocalDevCapabilityPortTestParts {
-                runtime: Arc::clone(&self.runtime),
+                runtime: self
+                    .runtime
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
                 run_context: run_context.clone(),
                 fallback_user_id: dispatch_user,
                 // All four mount views = this harness's single `mounts` view.

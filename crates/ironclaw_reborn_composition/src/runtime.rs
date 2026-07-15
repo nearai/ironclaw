@@ -4016,7 +4016,7 @@ pub async fn build_reborn_runtime(
     // doesn't disturb its later use.
     #[cfg(feature = "inmemory-turn-state")]
     let turn_state_flush = local_runtime.map(|lr| Arc::clone(&lr.turn_state));
-    Ok(RebornRuntime {
+    let runtime = RebornRuntime {
         services,
         turn_coordinator,
         channel_host_assembly,
@@ -4056,7 +4056,24 @@ pub async fn build_reborn_runtime(
         boot,
         #[cfg(feature = "root-llm-provider")]
         llm_reload,
-    })
+    };
+    // Fill the composition's late-bound channel-connection facade slot (§6.4)
+    // now the runtime's serving tenant is known: extension removal
+    // (`RebornLocalExtensionManagementPort::remove`) disconnects the caller's
+    // channel identity through this facade, and the identity-binding write
+    // hook is only reachable from runtime-backed compositions — so filling
+    // here keeps "wherever a binding can be written, removal disconnects it".
+    // First write wins by `OnceLock` contract: a test bundle that filled the
+    // slot before the runtime was built keeps its facade (same stores, same
+    // durable state), so the discarded `set` result is deliberate.
+    if let Some(local_runtime) = runtime.services.local_runtime.as_ref()
+        && let Some(channel_connection) = runtime.generic_channel_connection_facade()
+    {
+        let _ = local_runtime
+            .channel_disconnect_slot
+            .set(channel_connection);
+    }
+    Ok(runtime)
 }
 
 /// Thin wrapper over

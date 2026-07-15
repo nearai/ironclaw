@@ -4,8 +4,7 @@
 //! composition, one-way hashing of callback material, and sanitized response
 //! rendering. It deliberately delegates durable flow state, provider exchange,
 //! credential mutation, and continuation dispatch to [`RebornProductAuthServices`].
-
-// arch-exempt: large_file, product-auth route composition surface, plan #5905
+// arch-exempt: large_file, product-auth serve router and DTO/route composition surface; decomposition into per-route submodules tracked by the Slack-OAuth audit, plan #5604
 
 mod accounts;
 mod lifecycle;
@@ -13,12 +12,6 @@ mod manual_token;
 mod oauth;
 #[cfg(test)]
 mod oauth_start_tests;
-
-#[cfg(feature = "slack-v2-host-beta")]
-pub(crate) use oauth::{
-    CallbackScopeResolution, OAuthCallbackDescriptor, OAuthCallbackTerminalHookFuture,
-    oauth_provider_callback_handler,
-};
 
 use std::{
     hash::Hash,
@@ -57,9 +50,7 @@ use ironclaw_host_api::ingress::{
 use ironclaw_host_api::{
     AgentId, ExtensionId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
 };
-use ironclaw_product_workflow::{
-    LifecyclePackageKind, RebornServicesApi, RebornServicesError, WebUiAuthenticatedCaller,
-};
+use ironclaw_product_workflow::WebUiAuthenticatedCaller;
 use lru::LruCache;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -150,7 +141,7 @@ const OAUTH_RATE_WINDOW_SECONDS: NonZeroU32 = match NonZeroU32::new(60) {
     // SAFETY: 60 is a non-zero literal rate-limit window.
     None => unreachable!(),
 };
-pub(crate) const PRODUCT_AUTH_FLOW_MAX_TTL_SECONDS: i64 = 10 * 60;
+const PRODUCT_AUTH_FLOW_MAX_TTL_SECONDS: i64 = 10 * 60;
 const PRODUCT_AUTH_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
 const OAUTH_CALLBACK_QUERY_MAX_BYTES: usize = 16 * 1024;
 const OAUTH_CALLBACK_FIELD_MAX_BYTES: usize = 512;
@@ -160,7 +151,6 @@ const RAW_OAUTH_VALUE_MAX_BYTES: usize = 4 * 1024;
 #[derive(Clone)]
 pub(crate) struct ProductAuthRouteState {
     product_auth: Arc<RebornProductAuthServices>,
-    installed_extension_lookup: Option<Arc<dyn InstalledExtensionLookup>>,
     tenant_id: TenantId,
     default_agent_id: Option<AgentId>,
     default_project_id: Option<ProjectId>,
@@ -177,49 +167,6 @@ pub(crate) struct ProductAuthRouteState {
     pkce_verifiers: ExpiringLruCache<AuthFlowId, StoredPkceVerifier>,
 }
 
-#[async_trait::async_trait]
-trait InstalledExtensionLookup: Send + Sync {
-    async fn is_installed(
-        &self,
-        caller: &WebUiAuthenticatedCaller,
-        extension_id: &ExtensionId,
-    ) -> Result<bool, RebornServicesError>;
-}
-
-struct RebornServicesInstalledExtensionLookup {
-    api: Arc<dyn RebornServicesApi>,
-}
-
-#[async_trait::async_trait]
-impl InstalledExtensionLookup for RebornServicesInstalledExtensionLookup {
-    async fn is_installed(
-        &self,
-        caller: &WebUiAuthenticatedCaller,
-        extension_id: &ExtensionId,
-    ) -> Result<bool, RebornServicesError> {
-        let inventory = self.api.list_extensions(caller.clone()).await?;
-        Ok(inventory.extensions.iter().any(|extension| {
-            extension.package_ref.kind == LifecyclePackageKind::Extension
-                && extension.package_ref.id.as_str() == extension_id.as_str()
-        }))
-    }
-}
-
-#[cfg(test)]
-struct TestInstalledExtensionLookup;
-
-#[cfg(test)]
-#[async_trait::async_trait]
-impl InstalledExtensionLookup for TestInstalledExtensionLookup {
-    async fn is_installed(
-        &self,
-        _caller: &WebUiAuthenticatedCaller,
-        _extension_id: &ExtensionId,
-    ) -> Result<bool, RebornServicesError> {
-        Ok(true)
-    }
-}
-
 impl ProductAuthRouteState {
     pub(crate) fn new(
         product_auth: Arc<RebornProductAuthServices>,
@@ -229,7 +176,6 @@ impl ProductAuthRouteState {
     ) -> Self {
         Self {
             product_auth,
-            installed_extension_lookup: None,
             tenant_id,
             default_agent_id,
             default_project_id,
@@ -267,7 +213,7 @@ impl ProductAuthRouteState {
             .ok_or_else(ProductAuthRouteFailure::backend_unavailable)
     }
 
-    pub(crate) fn store_pkce_verifier(
+    fn store_pkce_verifier(
         &self,
         flow_id: AuthFlowId,
         verifier: SecretString,
@@ -292,7 +238,7 @@ impl ProductAuthRouteState {
             .ok_or_else(ProductAuthRouteFailure::unknown_or_expired_flow)
     }
 
-    pub(crate) fn remove_pkce_verifier(&self, flow_id: AuthFlowId) {
+    fn remove_pkce_verifier(&self, flow_id: AuthFlowId) {
         self.pkce_verifiers.remove(&flow_id);
     }
 }
@@ -302,10 +248,6 @@ impl std::fmt::Debug for ProductAuthRouteState {
         let mut builder = formatter.debug_struct("ProductAuthRouteState");
         builder
             .field("product_auth", &"Arc<RebornProductAuthServices>")
-            .field(
-                "installed_extension_lookup",
-                &self.installed_extension_lookup.is_some(),
-            )
             .field("tenant_id", &self.tenant_id)
             .field("default_agent_id", &self.default_agent_id)
             .field("default_project_id", &self.default_project_id)
@@ -395,49 +337,6 @@ pub(crate) struct ProductAuthRouteMount {
     pub(crate) descriptors: Vec<IngressRouteDescriptor>,
 }
 
-async fn extension_oauth_start_handler(
-    State(state): State<ProductAuthRouteState>,
-    Extension(caller): Extension<WebUiAuthenticatedCaller>,
-    Path(package_id): Path<String>,
-    Json(request): Json<ExtensionOAuthStartRequest>,
-) -> Result<Json<ProductOAuthStartResponse>, ProductAuthRouteFailure> {
-    let requester_extension =
-        ExtensionId::new(package_id).map_err(|_| ProductAuthRouteFailure::invalid_request())?;
-    state
-        .require_installed_extension(&caller, &requester_extension)
-        .await?;
-    let response = if request.provider == SLACK_PERSONAL_PROVIDER_ID {
-        #[cfg(feature = "slack-v2-host-beta")]
-        let response = crate::slack::slack_personal_oauth::start_extension_oauth_flow(
-            state.clone(),
-            caller.clone(),
-            request,
-            requester_extension.clone(),
-        )
-        .await?;
-        #[cfg(not(feature = "slack-v2-host-beta"))]
-        return Err(ProductAuthRouteFailure::backend_unavailable());
-        #[cfg(feature = "slack-v2-host-beta")]
-        response
-    } else {
-        oauth::start_extension_oauth_flow(
-            state.clone(),
-            caller.clone(),
-            request,
-            requester_extension.clone(),
-        )
-        .await?
-    };
-    if let Err(error) = state
-        .require_installed_extension(&caller, &requester_extension)
-        .await
-    {
-        oauth::abort_started_extension_oauth_flow(&state, &response.0).await?;
-        return Err(error);
-    }
-    Ok(response)
-}
-
 // Product-auth HTTP is a host-owned auth/secret-ingress boundary. Its
 // mutations enter `RebornProductAuthServices` directly; they are not in-turn
 // tool calls and must not surface raw secrets through the model-visible
@@ -460,7 +359,7 @@ pub(crate) fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductA
             )
             .route(
                 EXTENSION_OAUTH_START_PATH,
-                post(extension_oauth_start_handler),
+                post(oauth::extension_oauth_start_handler),
             )
             .route(
                 MANUAL_TOKEN_SUBMIT_PATH,
@@ -504,7 +403,6 @@ pub(crate) fn product_auth_route_descriptors() -> Vec<IngressRouteDescriptor> {
     const PROTECTED_MUTATIONS: &[(&str, &str)] = &[
         (OAUTH_START_ROUTE_ID, OAUTH_START_PATH),
         (EXTENSION_OAUTH_START_ROUTE_ID, EXTENSION_OAUTH_START_PATH),
-        (OAUTH_FLOW_RECONCILE_ROUTE_ID, OAUTH_FLOW_RECONCILE_PATH),
         (MANUAL_TOKEN_SUBMIT_ROUTE_ID, MANUAL_TOKEN_SUBMIT_PATH),
         (MANUAL_TOKEN_SETUP_ROUTE_ID, MANUAL_TOKEN_SETUP_PATH),
         (
@@ -748,10 +646,10 @@ pub(crate) struct ManualTokenSubmitResponse {
 /// invocation to carry forward.
 // Option<T> fields already default to None in serde without #[serde(default)].
 #[derive(Default, Deserialize)]
-pub(crate) struct ScopeFields {
-    pub(crate) session_id: Option<String>,
-    pub(crate) thread_id: Option<String>,
-    pub(crate) invocation_id: Option<String>,
+pub(super) struct ScopeFields {
+    session_id: Option<String>,
+    thread_id: Option<String>,
+    invocation_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -870,41 +768,35 @@ pub(super) struct VendorOAuthCallbackQuery {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct ProductAuthRouteFailure {
+pub(super) struct ProductAuthRouteFailure {
     status: StatusCode,
     body: RebornOAuthCallbackError,
-    callback_failure_stage: RebornOAuthCallbackFailureStage,
 }
 
 impl ProductAuthRouteFailure {
-    pub(crate) fn new(status: StatusCode, code: AuthErrorCode) -> Self {
+    fn new(status: StatusCode, code: AuthErrorCode) -> Self {
         Self {
             status,
             body: RebornOAuthCallbackError {
                 code,
                 retryable: matches!(code, AuthErrorCode::BackendUnavailable),
             },
-            callback_failure_stage: RebornOAuthCallbackFailureStage::Terminal,
         }
     }
 
-    pub(crate) fn invalid_request() -> Self {
+    fn invalid_request() -> Self {
         Self::new(StatusCode::BAD_REQUEST, AuthErrorCode::InvalidRequest)
     }
 
-    pub(crate) fn extension_not_installed() -> Self {
-        Self::new(StatusCode::CONFLICT, AuthErrorCode::InvalidRequest)
-    }
-
-    pub(crate) fn malformed_callback() -> Self {
+    fn malformed_callback() -> Self {
         Self::new(StatusCode::BAD_REQUEST, AuthErrorCode::MalformedCallback)
     }
 
-    pub(crate) fn unknown_or_expired_flow() -> Self {
+    fn unknown_or_expired_flow() -> Self {
         Self::new(StatusCode::NOT_FOUND, AuthErrorCode::UnknownOrExpiredFlow)
     }
 
-    pub(crate) fn backend_unavailable() -> Self {
+    fn backend_unavailable() -> Self {
         Self::new(
             StatusCode::SERVICE_UNAVAILABLE,
             AuthErrorCode::BackendUnavailable,
@@ -937,15 +829,6 @@ impl From<RebornOAuthCallbackError> for ProductAuthRouteFailure {
     }
 }
 
-impl From<RebornOAuthCallbackAttemptError> for ProductAuthRouteFailure {
-    fn from(error: RebornOAuthCallbackAttemptError) -> Self {
-        let callback_failure_stage = error.stage();
-        let mut failure = route_failure_from_callback_error(error.error());
-        failure.callback_failure_stage = callback_failure_stage;
-        failure
-    }
-}
-
 pub(super) fn route_failure_from_callback_error(
     error: RebornOAuthCallbackError,
 ) -> ProductAuthRouteFailure {
@@ -963,13 +846,11 @@ pub(super) fn route_failure_from_callback_error(
         }
         AuthErrorCode::CredentialMissing
         | AuthErrorCode::AccountSelectionRequired
-        | AuthErrorCode::ProviderIdentityAlreadyConnected
-        | AuthErrorCode::ConnectionConflict => StatusCode::CONFLICT,
+        | AuthErrorCode::ProviderIdentityAlreadyConnected => StatusCode::CONFLICT,
     };
     ProductAuthRouteFailure {
         status,
         body: error,
-        callback_failure_stage: RebornOAuthCallbackFailureStage::Terminal,
     }
 }
 
@@ -1043,7 +924,7 @@ pub(super) fn scope_from_authenticated_caller_parts(
 /// when `invocation_id` is absent. Use for follow-up routes where the browser
 /// MUST carry back the id minted by a prior setup/start response so the host
 /// can re-derive the matching scope without minting a fresh, unmatched one.
-pub(crate) fn scope_from_authenticated_caller_parts_requiring_invocation(
+pub(super) fn scope_from_authenticated_caller_parts_requiring_invocation(
     caller: &WebUiAuthenticatedCaller,
     fields: &ScopeFields,
 ) -> Result<AuthProductScope, ProductAuthRouteFailure> {
@@ -1053,7 +934,7 @@ pub(crate) fn scope_from_authenticated_caller_parts_requiring_invocation(
     scope_from_authenticated_caller_parts(caller, fields)
 }
 
-pub(crate) async fn scoped_update_binding_for_requester(
+pub(super) async fn scoped_update_binding_for_requester(
     state: &ProductAuthRouteState,
     scope: AuthProductScope,
     provider: AuthProviderId,
@@ -1275,7 +1156,7 @@ pub(super) fn validate_callback_field(
         .map_err(|_| ProductAuthRouteFailure::malformed_callback())
 }
 
-pub(crate) fn scope_hint(scope: &AuthProductScope) -> OAuthCallbackScopeHint {
+pub(super) fn scope_hint(scope: &AuthProductScope) -> OAuthCallbackScopeHint {
     OAuthCallbackScopeHint {
         user_id: scope.resource.user_id.clone(),
         agent_id: scope.resource.agent_id.clone(),
@@ -1325,11 +1206,11 @@ pub(super) fn compose_authorization_url(
     OAuthAuthorizationUrl::new(endpoint.to_string()).map_err(ProductAuthRouteFailure::from)
 }
 
-pub(crate) fn opaque_state_hash(value: &str) -> Result<OpaqueStateHash, ProductAuthRouteFailure> {
+pub(super) fn opaque_state_hash(value: &str) -> Result<OpaqueStateHash, ProductAuthRouteFailure> {
     OpaqueStateHash::new(sha256_hex(value)).map_err(ProductAuthRouteFailure::from)
 }
 
-pub(crate) fn pkce_verifier_hash(value: &str) -> Result<PkceVerifierHash, ProductAuthRouteFailure> {
+pub(super) fn pkce_verifier_hash(value: &str) -> Result<PkceVerifierHash, ProductAuthRouteFailure> {
     PkceVerifierHash::new(sha256_hex(value)).map_err(ProductAuthRouteFailure::from)
 }
 
@@ -1512,7 +1393,7 @@ pub(super) fn parse_optional_extension(
 /// same way; centralising the timeout/error wiring stops each handler from
 /// having to re-derive the same four lines and keeps the failure projection
 /// identical across routes.
-pub(crate) async fn run_with_backend_timeout<T, E, F>(
+pub(super) async fn run_with_backend_timeout<T, E, F>(
     future: F,
 ) -> Result<T, ProductAuthRouteFailure>
 where
@@ -1605,20 +1486,11 @@ mod tests {
         ) -> Result<(), AuthProductError> {
             Ok(())
         }
-    }
-
-    struct SequencedInstalledExtensionLookup {
-        calls: std::sync::atomic::AtomicUsize,
-    }
-
-    #[async_trait]
-    impl InstalledExtensionLookup for SequencedInstalledExtensionLookup {
-        async fn is_installed(
+        async fn dispatch_canceled_auth_continuation(
             &self,
-            _caller: &WebUiAuthenticatedCaller,
-            _extension_id: &ExtensionId,
-        ) -> Result<bool, RebornServicesError> {
-            Ok(self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0)
+            _event: ironclaw_auth::AuthContinuationEvent,
+        ) -> Result<(), ironclaw_auth::AuthProductError> {
+            Ok(())
         }
     }
 
@@ -1646,6 +1518,12 @@ mod tests {
                 .lock()
                 .expect("recording dispatcher lock")
                 .push(event);
+            Ok(())
+        }
+        async fn dispatch_canceled_auth_continuation(
+            &self,
+            _event: ironclaw_auth::AuthContinuationEvent,
+        ) -> Result<(), ironclaw_auth::AuthProductError> {
             Ok(())
         }
     }
@@ -1804,8 +1682,7 @@ mod tests {
             TenantId::new("tenant-alpha").expect("tenant"),
             None,
             None,
-        )
-        .with_test_installed_extension_lookup();
+        );
         let app = product_auth_route_mount(state)
             .protected
             .layer(axum::Extension(test_caller()));
@@ -1997,8 +1874,7 @@ mod tests {
             TenantId::new("tenant-alpha").expect("tenant"),
             None,
             None,
-        )
-        .with_test_installed_extension_lookup();
+        );
         let app = product_auth_route_mount(state)
             .protected
             .layer(axum::Extension(test_caller()));

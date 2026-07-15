@@ -24,7 +24,8 @@ use ironclaw_auth::{
     SecretSubmitRequest, SecretSubmitResult,
 };
 use ironclaw_host_api::{
-    AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
+    AgentId, InstallationState, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId,
+    UserId,
 };
 use ironclaw_product_workflow::{
     LifecyclePackageKind, LifecyclePackageRef, RebornCancelRunResponse, RebornCreateThreadResponse,
@@ -85,6 +86,12 @@ impl RebornAuthContinuationDispatcher for RecordingAuthDispatcher {
         event: AuthContinuationEvent,
     ) -> Result<(), AuthProductError> {
         self.events.lock().expect("auth events lock").push(event);
+        Ok(())
+    }
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        _event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
         Ok(())
     }
 }
@@ -260,19 +267,21 @@ impl UnusedServices {
                     )
                     .expect("installed extension package ref"),
                     display_name: (*package_id).to_string(),
-                    kind: "wasm_tool".to_string(),
+                    runtime: "wasm".to_string(),
                     description: "test installed extension".to_string(),
                     authenticated: false,
                     active: false,
                     tools: Vec::new(),
                     needs_setup: true,
                     has_auth: true,
-                    activation_status: None,
+                    installation_state: InstallationState::Installed,
                     activation_error: None,
                     version: None,
-                    install_scope: None,
                     onboarding_state: None,
                     onboarding: None,
+                    auth_accounts: Vec::new(),
+                    surfaces: Vec::new(),
+                    install_scope: None,
                 })
                 .collect(),
         }
@@ -505,7 +514,6 @@ fn build_app_with_product_auth_and_installed_extensions(
     (
         build_app_with_product_auth_service_config_and_extensions(
             product_auth,
-            None,
             installed_package_ids,
         ),
         dispatcher,
@@ -521,12 +529,11 @@ fn build_app_with_product_auth_service(
 fn build_app_with_product_auth_service_and_config(
     product_auth: Arc<RebornProductAuthServices>,
 ) -> axum::Router {
-    build_app_with_product_auth_service_config_and_extensions(product_auth, google_oauth, &[])
+    build_app_with_product_auth_service_config_and_extensions(product_auth, &[])
 }
 
 fn build_app_with_product_auth_service_config_and_extensions(
     product_auth: Arc<RebornProductAuthServices>,
-    google_oauth: Option<GoogleOAuthRouteConfig>,
     installed_package_ids: &[&str],
 ) -> axum::Router {
     let bundle = RebornWebuiBundle {

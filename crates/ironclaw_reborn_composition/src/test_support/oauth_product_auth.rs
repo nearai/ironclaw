@@ -331,6 +331,13 @@ impl crate::product_auth::api::auth::RebornAuthContinuationDispatcher
     ) -> Result<(), ironclaw_auth::AuthProductError> {
         Ok(())
     }
+
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        _event: ironclaw_auth::AuthContinuationEvent,
+    ) -> Result<(), ironclaw_auth::AuthProductError> {
+        Ok(())
+    }
 }
 
 /// Bundle returned by [`build_oauth_product_auth_for_test`].

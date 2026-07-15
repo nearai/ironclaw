@@ -69,6 +69,7 @@ use ironclaw_product_workflow::{
     IdempotencyLedger, InboundTurnService, ResolvedBinding,
 };
 use ironclaw_reborn_composition::build_default_budget_accountant;
+use ironclaw_reborn_composition::test_support::ChannelConnectionTestBundle;
 use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::{
     BudgetEventSink, BudgetGateStore, InMemoryBudgetEventSink, InMemoryBudgetGateStore,
@@ -174,12 +175,12 @@ pub(crate) struct GroupSharedStorage {
     /// Capability backend. Groups use `HostRuntime`; the degenerate single-shot
     /// path may use `Recording`.
     pub(crate) capability: GroupCapability,
-    /// C-SLACK-LIFECYCLE (issue #6105): the REAL Slack channel-connection
+    /// C-SLACK-LIFECYCLE (issue #6105): the REAL generic channel-connection
     /// facade + OAuth-callback-shaped connect handles, built over the
-    /// capability harness's own `RebornServices` (same durable host state,
-    /// same late-bound cleanup slot `extension_remove` dispatches to).
+    /// capability harness's own `RebornServices` (same durable stores, same
+    /// late-bound cleanup slot `extension_remove` dispatches to).
     /// `Some` only for `extension_lifecycle()` groups.
-    pub(crate) slack_channel_connection: Option<Arc<SlackChannelConnectionTestBundle>>,
+    pub(crate) channel_connection: Option<Arc<ChannelConnectionTestBundle>>,
     /// The group's single shared `TurnCoordinator`, over the ONE planned
     /// runtime built once at group construction (Option P: one
     /// scheduler/coordinator/executor over the shared turn-run queue, exactly
@@ -373,7 +374,7 @@ impl RebornIntegrationGroup {
             runner_lease_ttl_override: None,
             lease_recovery_interval_override: None,
             real_gate_dispatch_services: false,
-            slack_channel_connection: None,
+            channel_connection: None,
         }
     }
 
@@ -385,11 +386,11 @@ impl RebornIntegrationGroup {
         self.shared.trace_capture_scope.as_deref()
     }
 
-    /// C-SLACK-LIFECYCLE (issue #6105): the real Slack channel-connection
+    /// C-SLACK-LIFECYCLE (issue #6105): the real generic channel-connection
     /// bundle for this group. `Some` only for [`Self::extension_lifecycle`]
     /// groups.
-    pub fn slack_channel_connection(&self) -> Option<Arc<SlackChannelConnectionTestBundle>> {
-        self.shared.slack_channel_connection.clone()
+    pub fn channel_connection(&self) -> Option<Arc<ChannelConnectionTestBundle>> {
+        self.shared.channel_connection.clone()
     }
 
     /// The group-canonical binding's ACTOR user id — the identity capability
@@ -591,11 +592,11 @@ pub struct RebornIntegrationGroupBuilder {
     /// keeps the `Rejecting*InteractionService` stubs, matching today's
     /// behavior byte-for-byte).
     real_gate_dispatch_services: bool,
-    /// C-SLACK-LIFECYCLE (issue #6105): the real Slack channel-connection
+    /// C-SLACK-LIFECYCLE (issue #6105): the real generic channel-connection
     /// bundle built over the capability harness's own `RebornServices`.
     /// Set by `extension_lifecycle()` before `into_group`; `None` for every
     /// other constructor.
-    slack_channel_connection: Option<Arc<SlackChannelConnectionTestBundle>>,
+    channel_connection: Option<Arc<ChannelConnectionTestBundle>>,
 }
 
 impl RebornIntegrationGroupBuilder {
@@ -969,7 +970,7 @@ impl RebornIntegrationGroupBuilder {
                 budget_account,
                 planned_runtime_parts_shape,
                 real_gate_dispatch_services: self.real_gate_dispatch_services,
-                slack_channel_connection: self.slack_channel_connection,
+                channel_connection: self.channel_connection,
             }),
         })
     }

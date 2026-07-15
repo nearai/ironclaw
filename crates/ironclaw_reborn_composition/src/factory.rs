@@ -1,8 +1,8 @@
 // arch-exempt: large_file, needs Reborn composition helper extraction, plan #4469
 use std::{
     path::{Path, PathBuf},
+    sync::Arc,
     sync::atomic::AtomicBool,
-    sync::{Arc, OnceLock},
 };
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -97,8 +97,6 @@ use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRu
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 use ironclaw_outbound::{InMemoryDeliveredGateRouteStore, InMemoryTriggeredRunDeliveryStore};
 use ironclaw_processes::ProcessServices;
-#[cfg(any(feature = "slack-v2-host-beta", test))]
-use ironclaw_product_workflow::ChannelConnectionFacade;
 use ironclaw_product_workflow::{
     LifecycleProductSurfaceContext, ProductAuthTurnGateResumeDispatcher, ProjectService,
 };
@@ -154,7 +152,7 @@ use ironclaw_turns::{InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore};
 
 use crate::RebornProductAuthServicePorts;
 use crate::extension_host::lifecycle::{
-    RebornLocalLifecycleFacade, RebornLocalSkillManagementPort, build_local_skill_management_port,
+    RebornLocalSkillManagementPort, build_local_skill_management_port,
 };
 use crate::extension_host::mcp::hosted_http_mcp_runtime;
 use crate::extension_host::{
@@ -173,9 +171,6 @@ use crate::extension_host::{
     },
 };
 use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput};
-use crate::lifecycle_auth_continuation::{
-    LifecycleAuthContinuationDispatcher, LifecycleProductFacadeSlot,
-};
 use crate::local_dev_authorization::{StoreApprovalSettingsProvider, local_dev_authorizer};
 use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
 use crate::local_dev_mounts::{
@@ -1315,6 +1310,18 @@ pub(crate) struct RebornLocalRuntimeServices {
     )]
     pub(crate) channel_dm_target_store:
         Option<Arc<crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore>>,
+    /// Late-binding slot for the generic per-user channel-connection facade
+    /// (extension-runtime §6.4). Extension removal disconnects the
+    /// authenticated caller's channel identity through it; the slot is filled
+    /// once the facade's serving tenant is known — by runtime composition
+    /// (`build_reborn_runtime`, via
+    /// `RebornRuntime::generic_channel_connection_facade`) or by the
+    /// channel-connection test bundle over a services-only harness. Stays
+    /// empty (removal skips the disconnect) only in compositions that never
+    /// build the facade — which are also the compositions with no production
+    /// surface that could have written an identity binding.
+    pub(crate) channel_disconnect_slot:
+        Arc<std::sync::OnceLock<Arc<dyn ironclaw_product_workflow::ChannelConnectionFacade>>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub(crate) host_runtime_http_egress: Option<HostRuntimeHttpEgressPort>,
     pub(crate) skill_mounts: MountView,
@@ -1516,12 +1523,11 @@ fn auth_continuation_dispatcher(
     blocked_auth_snapshot_source: Option<
         Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>,
     >,
-    lifecycle: LifecycleProductFacadeSlot,
 ) -> Arc<dyn RebornAuthContinuationDispatcher> {
     let single_run: Arc<dyn RebornAuthContinuationDispatcher> = Arc::new(
         ProductAuthTurnGateResumeDispatcher::new(Arc::clone(&turn_coordinator)),
     );
-    let turn_dispatcher = match blocked_auth_snapshot_source {
+    match blocked_auth_snapshot_source {
         // Local paths fan a completed flow out to the caller's other
         // provider-blocked runs (pair/authorize once, all waiting chats
         // continue). Production-shaped builders pass None until their
@@ -1534,11 +1540,7 @@ fn auth_continuation_dispatcher(
             ))
         }
         None => single_run,
-    };
-    Arc::new(LifecycleAuthContinuationDispatcher::new(
-        turn_dispatcher,
-        lifecycle,
-    ))
+    }
 }
 
 struct ProductAuthServicesCompositionInput {
@@ -1569,7 +1571,7 @@ fn compose_product_auth_services(
         None => ports,
     };
     let mut services = ports.into_services(
-        auth_continuation_dispatcher(turn_coordinator, blocked_auth_snapshot_source, lifecycle),
+        auth_continuation_dispatcher(turn_coordinator, blocked_auth_snapshot_source),
         secret_store,
     );
     if let Some(sink) = security_audit_sink {
@@ -1958,7 +1960,6 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     let security_audit_sink = services.security_audit_sink();
     let nearai_mcp_host_managed_scope =
         AuthProductScope::new(nearai_mcp_owner_scope.clone(), AuthSurface::Api);
-    let lifecycle_auth_continuation_slot: LifecycleProductFacadeSlot = Arc::new(OnceLock::new());
     let product_auth = match product_auth_ports {
         Some(ports) => compose_product_auth_services(ProductAuthServicesCompositionInput {
             ports,
@@ -2002,7 +2003,6 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                             as Arc<
                                 dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource,
                             >),
-                        Arc::clone(&lifecycle_auth_continuation_slot),
                     ),
                     Arc::clone(&secret_store),
                 )
@@ -2033,7 +2033,6 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                             as Arc<
                                 dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource,
                             >),
-                        Arc::clone(&lifecycle_auth_continuation_slot),
                     ));
                 let services = match provider_composition.client.clone() {
                     Some(provider_client) => services.with_provider_client(provider_client),
@@ -2131,7 +2130,13 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             // their installs are tenant-shared, everyone else's are private.
             nearai_mcp_owner_scope.user_id.clone(),
         )
-        .with_removal_cleanup_registry(removal_cleanup),
+        .with_removal_cleanup_registry(removal_cleanup)
+        // Removal of a channel+auth extension disconnects the caller through
+        // the facade this late-bound slot carries once composition (runtime
+        // build or the channel-connection test bundle) fills it.
+        .with_channel_disconnect_slot(Arc::clone(
+            &store_graph.local_runtime.channel_disconnect_slot,
+        )),
     );
     let nearai_mcp_bootstrap_outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
         nearai_mcp_bootstrap_config,
@@ -2714,6 +2719,7 @@ async fn build_local_dev_store_graph(
         channel_config: None,
         channel_identity_store: None,
         channel_dm_target_store: None,
+        channel_disconnect_slot: Arc::new(std::sync::OnceLock::new()),
         runtime_http_egress: None,
         host_runtime_http_egress: None,
         skill_mounts,
@@ -2865,6 +2871,7 @@ async fn build_local_dev_store_graph(
         channel_config: None,
         channel_identity_store: None,
         channel_dm_target_store: None,
+        channel_disconnect_slot: Arc::new(std::sync::OnceLock::new()),
         runtime_http_egress: None,
         host_runtime_http_egress: None,
         skill_mounts,
@@ -5766,6 +5773,7 @@ mod tests {
             channel_config: base_runtime.channel_config.clone(),
             channel_identity_store: base_runtime.channel_identity_store.clone(),
             channel_dm_target_store: base_runtime.channel_dm_target_store.clone(),
+            channel_disconnect_slot: Arc::clone(&base_runtime.channel_disconnect_slot),
             runtime_http_egress: base_runtime.runtime_http_egress.clone(),
             host_runtime_http_egress: base_runtime.host_runtime_http_egress.clone(),
             skill_mounts: base_runtime.skill_mounts.clone(),

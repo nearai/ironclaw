@@ -21,11 +21,11 @@ use ironclaw_host_api::{
 };
 use ironclaw_product_adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use ironclaw_product_workflow::{
-    ChannelConnectionRequirement, LifecycleBlockerRef, LifecycleExtensionSummary,
-    LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
-    LifecycleProductPayload, LifecycleProductResponse, LifecycleReadinessBlocker,
-    LifecycleSearchExtensionSummary, ProductWorkflowError, RebornChannelConnectStrategy,
-    RebornServicesError,
+    ChannelConnectionFacade, ChannelConnectionRequirement, LifecycleBlockerRef,
+    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
+    LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleReadinessBlocker, LifecycleSearchExtensionSummary, ProductWorkflowError,
+    RebornChannelConnectStrategy, RebornServicesError, WebUiAuthenticatedCaller,
 };
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
@@ -144,6 +144,20 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     /// not re-derive admin-ness.
     tenant_operator_user_id: UserId,
     removal_cleanup: Arc<ExtensionRemovalCleanupRegistry>,
+    /// Late-binding slot for the generic per-user channel-connection facade
+    /// (extension-runtime §6.4), shared with
+    /// `RebornLocalRuntimeServices::channel_disconnect_slot`. Removing
+    /// an extension whose manifest declares a channel surface backed by an
+    /// auth vendor disconnects the authenticated caller through it (revoke
+    /// personal vendor credential → vendor cleanup → delete identity
+    /// bindings) at this single convergence point, so `builtin.extension_remove`
+    /// and the WebUI remove route cannot drift apart (issue #6091 shape).
+    /// A still-empty slot skips the disconnect: identity bindings are only
+    /// written through compositions that fill the slot (runtime composition
+    /// in `build_reborn_runtime`, or the channel-connection test bundle), so
+    /// an empty slot has no binding to disconnect. `new` defaults to a fresh
+    /// unshared (never-filled) slot for focused tests.
+    channel_disconnect_slot: Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionFacade>>>,
 }
 
 /// Concurrent `import_bundle` decodes allowed before further uploads wait.
@@ -308,6 +322,7 @@ impl RebornLocalExtensionManagementPort {
             import_decode_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORT_DECODES)),
             tenant_operator_user_id,
             removal_cleanup: Arc::new(ExtensionRemovalCleanupRegistry::empty()),
+            channel_disconnect_slot: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -535,6 +550,18 @@ impl RebornLocalExtensionManagementPort {
         removal_cleanup: Arc<ExtensionRemovalCleanupRegistry>,
     ) -> Self {
         self.removal_cleanup = removal_cleanup;
+        self
+    }
+
+    /// Share the composition's late-binding channel-connection facade slot
+    /// (see the field doc). Composition passes the SAME `Arc` stored on
+    /// `RebornLocalRuntimeServices` so a fill by runtime composition (or the
+    /// channel-connection test bundle) is visible to the removal path here.
+    pub(crate) fn with_channel_disconnect_slot(
+        mut self,
+        slot: Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionFacade>>>,
+    ) -> Self {
+        self.channel_disconnect_slot = slot;
         self
     }
 
@@ -1480,11 +1507,22 @@ impl RebornLocalExtensionManagementPort {
             let removed_providers =
                 Self::removed_extension_providers_from_manifest(&removal_manifest)?;
             let cleanup_requirements = removal_manifest.removal_cleanup_requirements().to_vec();
+            // §6.4: a channel surface backed by an auth vendor holds
+            // per-caller identity bindings; removal runs the real per-caller
+            // disconnect (below) while the installation still exists. Same
+            // predicate the generic facade's discovery uses
+            // (`discover_channel_extensions`).
+            let removes_connectable_channel = {
+                let resolved = removal_manifest.resolved();
+                resolved.channel.is_some() && !resolved.auth.is_empty()
+            };
             // Deliberately validate cleanup actors only after caller
             // authorization and manifest/provider preflight. Hoisting this
             // check above the operation guard would change private-install
             // masking and concurrent error precedence.
-            if !cleanup_requirements.is_empty() && authenticated_actor_user_id.is_none() {
+            if (!cleanup_requirements.is_empty() || removes_connectable_channel)
+                && authenticated_actor_user_id.is_none()
+            {
                 return Err(ProductWorkflowError::InvalidBindingRequest {
                     reason: "extension removal cleanup requires an authenticated actor".to_string(),
                 });
@@ -1508,6 +1546,48 @@ impl RebornLocalExtensionManagementPort {
                 self.removal_cleanup
                     .cleanup_requirements(&cleanup_requirements, cleanup_context)
                     .await?;
+            }
+            // Per-caller channel disconnect (§6.4, issue #6091 shape): run the
+            // REAL disconnect — revoke the caller's personal vendor credential
+            // → vendor cleanup → delete the caller's identity bindings —
+            // through the same generic facade the extensions page reads, so
+            // connection state, durable bindings, lifecycle phase, and tool
+            // dispatchability flip together on removal. Runs before teardown
+            // so the installation-scoped binding prefix still resolves; a
+            // failure keeps the installation authoritative and stays
+            // retryable, mirroring the credential cleanup below.
+            if removes_connectable_channel && let Some(actor_user_id) = authenticated_actor_user_id
+            {
+                if let Some(channel_connection) = self.channel_disconnect_slot.get() {
+                    channel_connection
+                        .disconnect_channel_for_caller(
+                            WebUiAuthenticatedCaller::new(
+                                removal_scope.tenant_id.clone(),
+                                actor_user_id.clone(),
+                                removal_scope.agent_id.clone(),
+                                removal_scope.project_id.clone(),
+                            ),
+                            extension_id.as_str(),
+                        )
+                        .await
+                        .map_err(|error| ProductWorkflowError::Transient {
+                            reason: format!(
+                                "channel connection cleanup did not complete for extension {}: {:?}; retry removal",
+                                extension_id.as_str(),
+                                error.code
+                            ),
+                        })?;
+                } else {
+                    // No facade composed: this composition wired no surface
+                    // that can write an identity binding (the slot is filled
+                    // by exactly the compositions that wire the binding-write
+                    // hook), so there is no binding to disconnect.
+                    tracing::debug!(
+                        extension_id = extension_id.as_str(),
+                        "channel connection facade slot is empty; extension removal proceeds \
+                         without a per-caller channel disconnect"
+                    );
+                }
             }
             // Actor-scoped credential cleanup completes while an installed row
             // still proves who owns the retry. The operation is idempotent.
@@ -2741,23 +2821,6 @@ fn extension_search_has_ready_result(payload: Option<&LifecycleProductPayload>) 
         return false;
     };
     extensions.iter().any(|extension| {
-        matches!(extension.installation_phase, Some(LifecyclePhase::Active))
-            && !extension
-                .summary
-                .surface_kinds
-                .contains(&LifecycleExtensionSurfaceKind::ExternalChannel)
-            && extension.summary.credential_requirements.is_empty()
-            && extension.summary.onboarding.is_none()
-    })
-}
-
-fn extension_search_has_inactive_installed_result(
-    payload: Option<&LifecycleProductPayload>,
-) -> bool {
-    let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) = payload else {
-        return false;
-    };
-    extensions.iter().any(|extension| {
         matches!(
             extension.installation_phase,
             Some(InstallationState::Active)
@@ -3599,6 +3662,7 @@ mod tests {
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
                 Some(credential_cleanup.clone() as Arc<dyn ExtensionCredentialCleanup>),
                 external_cleanup_registry,
+                None,
             );
         external_cleanup.set_probe(&storage_root, installation_store.clone(), "github");
 
@@ -3667,6 +3731,311 @@ mod tests {
                 .await
                 .expect("manifest lookup")
                 .is_some()
+        );
+    }
+
+    /// A v3 channel+auth fixture (mirrors the slack manifest shape): the
+    /// §6.4 removal-disconnect predicate is manifest-derived — a `[channel]`
+    /// surface plus at least one `[auth.*]` vendor means per-caller identity
+    /// bindings can exist, so removal must run the per-caller disconnect.
+    fn fixture_connectable_channel_package() -> AvailableExtensionPackage {
+        let manifest_toml = r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "acmechat"
+name = "AcmeChat"
+version = "0.1.0"
+description = "connectable channel removal fixture"
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "acmechat.extension/v1"
+
+[[tools]]
+id = "acmechat.read_messages"
+description = "Read AcmeChat messages"
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/acmechat/read_messages.input.v1.json"
+
+[[tools.credentials]]
+handle = "acmechat_user_token"
+vendor = "acmechat"
+scopes = ["messages.read"]
+audience = { scheme = "https", host = "api.acmechat.example" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[channel]
+id = "messages"
+display_name = "AcmeChat messages"
+inbound = true
+outbound = true
+conversation_model = "continuous"
+
+[channel.ingress]
+route_suffix = "events"
+method = "post"
+body_limit_bytes = 1048576
+
+[channel.ingress.verification]
+kind = "shared_secret_header"
+secret_handle = "acmechat_webhook_secret"
+header = "X-AcmeChat-Secret"
+
+[channel.config]
+fields = [
+  { handle = "acmechat_webhook_secret", label = "Webhook secret", secret = true },
+  { handle = "acmechat_team_id", label = "Workspace ID", secret = false },
+]
+
+[channel.presentation]
+supports_markdown = false
+supports_threads = false
+
+[auth.acmechat]
+method = "oauth2_code"
+display_name = "AcmeChat account"
+authorization_endpoint = "https://auth.acmechat.example/authorize"
+token_endpoint = "https://auth.acmechat.example/token"
+scopes = ["messages.read"]
+client_credentials = { client_id_handle = "acmechat_oauth_client_id" }
+
+[auth.acmechat.token_response]
+access_token = "/access_token"
+
+[auth.acmechat.identity]
+account_id = "/authed_user/id"
+team_id = "/team/id"
+"#;
+        let manifest = ExtensionManifest::parse(
+            manifest_toml,
+            ManifestSource::HostBundled,
+            &ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
+            &product_extension_host_api_contract_registry().expect("host API contracts"),
+        )
+        .expect("connectable channel fixture manifest");
+        fixture_extension_package_from_parsed_manifest(manifest_toml, "acmechat", manifest)
+    }
+
+    /// Recording double for the §6.4 per-caller disconnect the removal path
+    /// dispatches through the late-bound facade slot. `fail_next(n)` scripts
+    /// the next `n` disconnects to fail so retry convergence can be pinned.
+    #[derive(Default)]
+    struct RecordingChannelConnectionFacade {
+        disconnects: StdMutex<Vec<(WebUiAuthenticatedCaller, String)>>,
+        failures_remaining: AtomicUsize,
+    }
+
+    impl RecordingChannelConnectionFacade {
+        fn fail_next(&self, count: usize) {
+            self.failures_remaining.store(count, Ordering::SeqCst);
+        }
+
+        fn disconnects(&self) -> Vec<(WebUiAuthenticatedCaller, String)> {
+            self.disconnects.lock().expect("disconnect lock").clone()
+        }
+    }
+
+    #[async_trait]
+    impl ChannelConnectionFacade for RecordingChannelConnectionFacade {
+        async fn caller_channel_connections(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+        ) -> Result<std::collections::HashMap<String, bool>, RebornServicesError> {
+            Ok(std::collections::HashMap::new())
+        }
+
+        async fn disconnect_channel_for_caller(
+            &self,
+            caller: WebUiAuthenticatedCaller,
+            channel: &str,
+        ) -> Result<(), RebornServicesError> {
+            self.disconnects
+                .lock()
+                .expect("disconnect lock")
+                .push((caller, channel.to_string()));
+            if self
+                .failures_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(RebornServicesError::internal_from("disconnect unavailable"));
+            }
+            Ok(())
+        }
+    }
+
+    fn connectable_channel_removal_fixture(
+        slot: Option<Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionFacade>>>>,
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
+        Arc<SharedExtensionRegistry>,
+        Arc<InMemoryExtensionInstallationStore>,
+    ) {
+        extension_lifecycle_fixture_with_all_cleanup(
+            AvailableExtensionCatalog::from_packages(vec![fixture_connectable_channel_package()]),
+            ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            None,
+            Arc::new(ExtensionRemovalCleanupRegistry::empty()),
+            slot,
+        )
+    }
+
+    /// §6.4 / issue #6091: removing a channel+auth extension runs the REAL
+    /// per-caller disconnect through the late-bound facade slot, with the
+    /// authenticated caller's identity, before teardown — and an empty slot
+    /// (a composition with no binding-write surface) skips it while removal
+    /// still converges.
+    #[tokio::test]
+    async fn extension_remove_of_connectable_channel_disconnects_the_caller() {
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "acmechat")
+            .expect("valid ref");
+        let channel_connection = Arc::new(RecordingChannelConnectionFacade::default());
+        let slot: Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionFacade>>> =
+            Arc::new(std::sync::OnceLock::new());
+        slot.set(channel_connection.clone() as Arc<dyn ChannelConnectionFacade>)
+            .ok();
+        let (_dir, _storage_root, facade, _active_registry, installation_store) =
+            connectable_channel_removal_fixture(Some(Arc::clone(&slot)));
+
+        facade
+            .execute(
+                lifecycle_surface_context_for_user("alice"),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("alice installs acmechat");
+        facade
+            .execute(
+                lifecycle_surface_context_for_user("alice"),
+                LifecycleProductAction::ExtensionRemove {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("alice removes acmechat");
+
+        let disconnects = channel_connection.disconnects();
+        assert_eq!(disconnects.len(), 1, "removal runs exactly one disconnect");
+        assert_eq!(disconnects[0].1, "acmechat");
+        assert_eq!(
+            disconnects[0].0.user_id.as_str(),
+            "alice",
+            "the disconnect caller is the authenticated removal actor"
+        );
+        assert!(
+            installation_store
+                .get_installation(
+                    &ExtensionInstallationId::new("acmechat").expect("valid installation id")
+                )
+                .await
+                .expect("installation lookup")
+                .is_none(),
+            "the removal itself completed"
+        );
+
+        // Empty slot: no composition surface can have written a binding, so
+        // removal proceeds without a disconnect instead of failing closed.
+        let (_dir2, _storage_root2, unwired_facade, _registry2, unwired_store) =
+            connectable_channel_removal_fixture(None);
+        unwired_facade
+            .execute(
+                lifecycle_surface_context_for_user("alice"),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("alice installs acmechat without a facade slot");
+        unwired_facade
+            .execute(
+                lifecycle_surface_context_for_user("alice"),
+                LifecycleProductAction::ExtensionRemove { package_ref },
+            )
+            .await
+            .expect("removal without a composed facade proceeds");
+        assert!(
+            unwired_store
+                .get_installation(
+                    &ExtensionInstallationId::new("acmechat").expect("valid installation id")
+                )
+                .await
+                .expect("installation lookup")
+                .is_none()
+        );
+    }
+
+    /// Retry convergence: a failing disconnect keeps the installation
+    /// authoritative and surfaces a retryable error; the retry re-runs the
+    /// full disconnect and converges once it succeeds.
+    #[tokio::test]
+    async fn extension_remove_stays_retryable_when_channel_disconnect_fails() {
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "acmechat")
+            .expect("valid ref");
+        let channel_connection = Arc::new(RecordingChannelConnectionFacade::default());
+        channel_connection.fail_next(1);
+        let slot: Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionFacade>>> =
+            Arc::new(std::sync::OnceLock::new());
+        slot.set(channel_connection.clone() as Arc<dyn ChannelConnectionFacade>)
+            .ok();
+        let (_dir, _storage_root, facade, _active_registry, installation_store) =
+            connectable_channel_removal_fixture(Some(Arc::clone(&slot)));
+
+        facade
+            .execute(
+                lifecycle_surface_context_for_user("alice"),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("alice installs acmechat");
+        let error = facade
+            .execute(
+                lifecycle_surface_context_for_user("alice"),
+                LifecycleProductAction::ExtensionRemove {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect_err("disconnect failure must fail the removal");
+        assert!(
+            matches!(
+                &error,
+                ProductWorkflowError::Transient { reason }
+                    if reason.contains("channel connection cleanup")
+            ),
+            "disconnect failures stay retryable: {error:?}"
+        );
+        assert!(
+            installation_store
+                .get_installation(
+                    &ExtensionInstallationId::new("acmechat").expect("valid installation id")
+                )
+                .await
+                .expect("installation lookup")
+                .is_some(),
+            "the installation must survive the failed removal so the owner can retry"
+        );
+
+        facade
+            .execute(
+                lifecycle_surface_context_for_user("alice"),
+                LifecycleProductAction::ExtensionRemove { package_ref },
+            )
+            .await
+            .expect("retry converges once the disconnect succeeds");
+        assert_eq!(
+            channel_connection.disconnects().len(),
+            2,
+            "the retry re-runs the full disconnect"
         );
     }
 
@@ -5167,105 +5536,6 @@ mod tests {
                 .snapshot()
                 .get_extension(&ExtensionId::new("fixture").unwrap())
                 .is_some()
-        );
-    }
-
-    #[tokio::test]
-    async fn restore_skips_installation_absent_from_catalog_and_restores_valid_installation() {
-        // Regression for PR #5499 review finding: a persisted installation
-        // row whose extension id the catalog does not (yet) materialize a
-        // package for — e.g. a placeholder row written by the standalone
-        // v1->Reborn migration tool — must not abort restore for every other
-        // installation.
-        let (_dir, _storage_root, port, _active_registry, installation_store, _trust_policy) =
-            extension_management_port_fixture_with_catalog_service_and_trust(
-                AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
-                ExtensionLifecycleService::new(ExtensionRegistry::new()),
-            );
-        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
-            .expect("valid ref");
-        port.install(package_ref.clone(), &lifecycle_owner())
-            .await
-            .expect("install fixture extension");
-        port.activate_with_prechecked_credentials_for_test(
-            package_ref,
-            ExtensionActivationMode::Static,
-        )
-        .await
-        .expect("activate fixture extension");
-
-        let orphan_extension_id = ExtensionId::new("orphan_migrated").expect("valid extension id");
-        let orphan_installation_id =
-            ExtensionInstallationId::new("orphan_migrated").expect("valid installation");
-        installation_store
-            .upsert_manifest(fixture_manifest_record_with_source(
-                &orphan_migrated_manifest(),
-                ManifestSource::InstalledLocal,
-                None,
-            ))
-            .await
-            .expect("upsert orphan manifest absent from the catalog");
-        installation_store
-            .upsert_installation(
-                ExtensionInstallation::new(
-                    orphan_installation_id.clone(),
-                    orphan_extension_id.clone(),
-                    ExtensionActivationState::Enabled,
-                    ExtensionManifestRef::new(orphan_extension_id.clone(), None),
-                    Vec::new(),
-                    chrono::Utc::now(),
-                    InstallationOwner::Tenant,
-                )
-                .expect("orphan installation"),
-            )
-            .await
-            .expect("upsert orphan installation absent from the catalog");
-
-        let restored_catalog =
-            AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]);
-        let restored_lifecycle = Arc::new(Mutex::new(ExtensionLifecycleService::new(
-            ExtensionRegistry::new(),
-        )));
-        let restored_active_registry =
-            Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
-        let restored_trust_policy = test_extension_trust_policy();
-        let restored_active_extensions = test_active_extension_publisher(
-            Arc::clone(&restored_active_registry),
-            Arc::clone(&restored_trust_policy),
-        );
-        let installation_store: Arc<dyn ExtensionInstallationStore> = installation_store;
-
-        restore_extension_lifecycle_state(
-            &restored_catalog,
-            &port.filesystem,
-            &installation_store,
-            &restored_lifecycle,
-            &restored_active_extensions,
-        )
-        .await
-        .expect("restore succeeds by skipping the orphan installation");
-
-        // The valid installation still restores normally.
-        assert!(
-            restored_active_registry
-                .snapshot()
-                .get_extension(&ExtensionId::new("fixture").expect("valid extension id"))
-                .is_some()
-        );
-        // The orphan row is preserved (never deleted or rewritten) for when
-        // the migration tool later materializes its catalog package.
-        assert!(
-            installation_store
-                .get_installation(&orphan_installation_id)
-                .await
-                .expect("read orphan installation")
-                .is_some()
-        );
-        assert!(
-            restored_active_registry
-                .snapshot()
-                .get_extension(&orphan_extension_id)
-                .is_none()
         );
     }
 
@@ -7588,6 +7858,7 @@ mod tests {
             lifecycle_service,
             credential_cleanup,
             Arc::new(ExtensionRemovalCleanupRegistry::empty()),
+            None,
         )
     }
 
@@ -7596,6 +7867,7 @@ mod tests {
         lifecycle_service: ExtensionLifecycleService,
         credential_cleanup: Option<Arc<dyn ExtensionCredentialCleanup>>,
         removal_cleanup: Arc<ExtensionRemovalCleanupRegistry>,
+        channel_connection_slot: Option<Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionFacade>>>>,
     ) -> (
         tempfile::TempDir,
         std::path::PathBuf,
@@ -7636,21 +7908,23 @@ mod tests {
         );
         let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
         let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
-        let extension_management = Arc::new(
-            RebornLocalExtensionManagementPort::new(
-                root_filesystem,
-                catalog,
-                installation_store.clone(),
-                Arc::new(Mutex::new(lifecycle_service)),
-                test_active_extension_publisher(
-                    Arc::clone(&active_registry),
-                    test_extension_trust_policy(),
-                ),
-                credential_cleanup,
-                lifecycle_owner(),
-            )
-            .with_removal_cleanup_registry(removal_cleanup),
-        );
+        let mut port = RebornLocalExtensionManagementPort::new(
+            root_filesystem,
+            catalog,
+            installation_store.clone(),
+            Arc::new(Mutex::new(lifecycle_service)),
+            test_active_extension_publisher(
+                Arc::clone(&active_registry),
+                test_extension_trust_policy(),
+            ),
+            credential_cleanup,
+            lifecycle_owner(),
+        )
+        .with_removal_cleanup_registry(removal_cleanup);
+        if let Some(slot) = channel_connection_slot {
+            port = port.with_channel_disconnect_slot(slot);
+        }
+        let extension_management = Arc::new(port);
         let facade =
             crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(skill_management)
                 .with_extension_management(extension_management);
