@@ -868,6 +868,8 @@ registerPack("ar", {
   "ext.registry.importFailed": "فشل الاستيراد",
   "ext.catalog.loadErrorTitle": "دليل الإضافات غير متاح",
   "ext.catalog.loadErrorDesc": "تعذّر تحميل دليل الإضافات. تحقّق من اتصالك وحاول مرة أخرى.",
+  "ext.catalog.partialErrorTitle": "بعض بيانات الإضافات غير متاحة",
+  "ext.catalog.partialErrorDesc": "يتم عرض بيانات الإضافات المتاحة، ولكن تعذّر تحميل بعض التفاصيل. تحقّق من اتصالك وحاول مرة أخرى.",
   "ext.catalog.retry": "إعادة المحاولة",
   "ext.catalog.retrying": "جارٍ إعادة المحاولة…",
 

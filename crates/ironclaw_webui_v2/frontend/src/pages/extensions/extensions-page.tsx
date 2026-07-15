@@ -8,15 +8,25 @@ import { RegistryTab } from "./components/registry-tab";
 import { useExtensions } from "./hooks/useExtensions";
 import { useT } from "../../lib/i18n";
 
-function CatalogErrorBanner({ isRefetching, onRetry }) {
+function CatalogErrorBanner({ isPartial = false, isRefetching, onRetry }) {
   const t = useT();
+  const toneClass = isPartial
+    ? "border-[color-mix(in_srgb,var(--v2-warning-text)_30%,transparent)] bg-[var(--v2-warning-soft)] text-[var(--v2-warning-text)]"
+    : "border-[color-mix(in_srgb,var(--v2-danger-text)_30%,transparent)] bg-[var(--v2-danger-soft)] text-[var(--v2-danger-text)]";
+  const titleKey = isPartial
+    ? "ext.catalog.partialErrorTitle"
+    : "ext.catalog.loadErrorTitle";
+  const descriptionKey = isPartial
+    ? "ext.catalog.partialErrorDesc"
+    : "ext.catalog.loadErrorDesc";
+
   return (
     <div
-      className="rounded-lg border border-[color-mix(in_srgb,var(--v2-danger-text)_30%,transparent)] bg-[var(--v2-danger-soft)] px-4 py-4 text-[var(--v2-danger-text)]"
+      className={`rounded-lg border px-4 py-4 ${toneClass}`}
       role="alert"
     >
-      <p className="text-sm font-semibold">{t("ext.catalog.loadErrorTitle")}</p>
-      <p className="mt-1 text-sm">{t("ext.catalog.loadErrorDesc")}</p>
+      <p className="text-sm font-semibold">{t(titleKey)}</p>
+      <p className="mt-1 text-sm">{t(descriptionKey)}</p>
       <button
         type="button"
         className="mt-4 rounded-md border border-current px-3 py-1.5 text-sm font-medium transition-opacity hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-50"
@@ -103,7 +113,8 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     return (<Navigate to="/extensions/registry" replace />);
   }
 
-  if (extensionsError || (registryError && tab === "registry")) {
+  const blockingError = tab === "registry" ? registryError : extensionsError;
+  if (blockingError) {
     return (
       <div className="flex h-full flex-col overflow-y-auto">
         <div className="v2-page-entrance flex-1 p-4 sm:p-6">
@@ -151,13 +162,19 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     return (<Navigate to="/extensions/registry" replace />);
   }
 
+  const partialError = tab === "registry" ? extensionsError : registryError;
+
   return (
     <div className="flex h-full flex-col overflow-y-auto">
       <div className="v2-page-entrance flex-1 p-4 sm:p-6">
         <div className="space-y-5">
           <ActionToast result={actionResult} onDismiss={clearResult} />
-          {registryError &&
-          (<CatalogErrorBanner isRefetching={isRefetching} onRetry={refetch} />)}
+          {partialError &&
+          (<CatalogErrorBanner
+            isPartial
+            isRefetching={isRefetching}
+            onRetry={refetch}
+          />)}
           {tabContent[tab]}
         </div>
       </div>

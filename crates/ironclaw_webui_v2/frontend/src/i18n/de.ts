@@ -868,6 +868,8 @@ registerPack("de", {
   "ext.registry.importFailed": "Import fehlgeschlagen",
   "ext.catalog.loadErrorTitle": "Erweiterungskatalog nicht verfügbar",
   "ext.catalog.loadErrorDesc": "Der Erweiterungskatalog konnte nicht geladen werden. Prüfe deine Verbindung und versuche es erneut.",
+  "ext.catalog.partialErrorTitle": "Einige Erweiterungsdaten sind nicht verfügbar",
+  "ext.catalog.partialErrorDesc": "Die verfügbaren Erweiterungsdaten werden angezeigt, einige Details konnten jedoch nicht geladen werden. Prüfe deine Verbindung und versuche es erneut.",
   "ext.catalog.retry": "Erneut versuchen",
   "ext.catalog.retrying": "Erneuter Versuch…",
 

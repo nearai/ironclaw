@@ -868,6 +868,8 @@ registerPack("pt-BR", {
   "ext.registry.importFailed": "Falha na importação",
   "ext.catalog.loadErrorTitle": "Catálogo de extensões indisponível",
   "ext.catalog.loadErrorDesc": "Não foi possível carregar o catálogo de extensões. Verifique sua conexão e tente novamente.",
+  "ext.catalog.partialErrorTitle": "Alguns dados de extensões não estão disponíveis",
+  "ext.catalog.partialErrorDesc": "Os dados de extensões disponíveis são exibidos, mas não foi possível carregar alguns detalhes. Verifique sua conexão e tente novamente.",
   "ext.catalog.retry": "Tentar novamente",
   "ext.catalog.retrying": "Tentando novamente…",
 

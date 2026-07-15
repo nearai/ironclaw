@@ -868,6 +868,8 @@ registerPack("uk", {
   "ext.registry.importFailed": "Не вдалося імпортувати",
   "ext.catalog.loadErrorTitle": "Каталог розширень недоступний",
   "ext.catalog.loadErrorDesc": "Не вдалося завантажити каталог розширень. Перевірте з’єднання та повторіть спробу.",
+  "ext.catalog.partialErrorTitle": "Деякі дані розширень недоступні",
+  "ext.catalog.partialErrorDesc": "Доступні дані розширень відображаються, але деякі деталі не вдалося завантажити. Перевірте з’єднання та повторіть спробу.",
   "ext.catalog.retry": "Повторити",
   "ext.catalog.retrying": "Повторна спроба…",
 

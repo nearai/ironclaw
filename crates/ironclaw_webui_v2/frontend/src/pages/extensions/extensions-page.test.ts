@@ -18,6 +18,9 @@ function renderExtensionsPage(tab, extensionState = {}) {
   const translations = {
     "ext.catalog.loadErrorTitle": "Extension catalog unavailable",
     "ext.catalog.loadErrorDesc": "The extension catalog could not be loaded.",
+    "ext.catalog.partialErrorTitle": "Some extension data is unavailable",
+    "ext.catalog.partialErrorDesc":
+      "The available extension data is shown, but some details could not be loaded.",
     "ext.catalog.retry": "Retry",
     "ext.catalog.retrying": "Retrying…",
   };
@@ -130,6 +133,28 @@ test("ExtensionsPage keeps installed channels visible when only the registry fai
 
   assert.ok(values.includes(CatalogErrorBanner));
   assert.ok(values.includes(ChannelsTab));
+});
+
+test("ExtensionsPage keeps the registry visible when installed-extension enrichment fails", () => {
+  const refetch = () => {};
+  const { CatalogErrorBanner, RegistryTab, rendered } = renderExtensionsPage("registry", {
+    extensionsError: new Error("offline"),
+    refetch,
+  });
+  const values = templateValues(rendered);
+  const banner = CatalogErrorBanner({
+    isPartial: true,
+    isRefetching: false,
+    onRetry: refetch,
+  });
+  const text = templateText(banner);
+
+  assert.ok(values.includes(CatalogErrorBanner));
+  assert.ok(values.includes(RegistryTab));
+  assert.match(text, /Some extension data is unavailable/);
+  assert.match(text, /The available extension data is shown/);
+  assert.match(text, /--v2-warning-text/);
+  assert.doesNotMatch(text, /Extension catalog unavailable/);
 });
 
 test("ExtensionsPage blocks installed tabs when the installed-extension query fails", () => {

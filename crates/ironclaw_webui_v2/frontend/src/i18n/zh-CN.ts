@@ -868,6 +868,8 @@ registerPack("zh-CN", {
   "ext.registry.importFailed": "导入失败",
   "ext.catalog.loadErrorTitle": "扩展目录暂不可用",
   "ext.catalog.loadErrorDesc": "无法加载扩展目录。请检查网络连接后重试。",
+  "ext.catalog.partialErrorTitle": "部分扩展数据暂不可用",
+  "ext.catalog.partialErrorDesc": "已显示当前可用的扩展数据，但有些详细信息无法加载。请检查网络连接后重试。",
   "ext.catalog.retry": "重试",
   "ext.catalog.retrying": "正在重试…",
 

@@ -947,6 +947,9 @@ registerPack("en", {
   "ext.catalog.loadErrorTitle": "Extension catalog unavailable",
   "ext.catalog.loadErrorDesc":
     "The extension catalog could not be loaded. Check your connection and try again.",
+  "ext.catalog.partialErrorTitle": "Some extension data is unavailable",
+  "ext.catalog.partialErrorDesc":
+    "The available extension data is shown, but some details could not be loaded. Check your connection and try again.",
   "ext.catalog.retry": "Retry",
   "ext.catalog.retrying": "Retrying…",
 

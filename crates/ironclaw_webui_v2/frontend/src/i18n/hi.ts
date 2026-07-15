@@ -868,6 +868,8 @@ registerPack("hi", {
   "ext.registry.importFailed": "आयात विफल",
   "ext.catalog.loadErrorTitle": "एक्सटेंशन कैटलॉग उपलब्ध नहीं है",
   "ext.catalog.loadErrorDesc": "एक्सटेंशन कैटलॉग लोड नहीं हो सका। अपना कनेक्शन जाँचें और फिर कोशिश करें।",
+  "ext.catalog.partialErrorTitle": "कुछ एक्सटेंशन डेटा उपलब्ध नहीं है",
+  "ext.catalog.partialErrorDesc": "उपलब्ध एक्सटेंशन डेटा दिखाया गया है, लेकिन कुछ विवरण लोड नहीं हो सके। अपना कनेक्शन जाँचें और फिर कोशिश करें।",
   "ext.catalog.retry": "फिर कोशिश करें",
   "ext.catalog.retrying": "फिर कोशिश की जा रही है…",
 
