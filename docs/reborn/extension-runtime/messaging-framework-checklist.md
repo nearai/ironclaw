@@ -201,6 +201,10 @@ Rules — kept short on purpose (same discipline as `checklist.md`):
 - [ ] GATE-2 Composition names no messaging extension; the deletion test (remove a
   messaging extension crate; generic workspace still builds and tests) passes.
 - [ ] GATE-3 The retired-taxonomy and dependency-direction gates still pass.
+- [ ] GATE-4 **Addition test** (design §1.1): a new HTTP vendor is a manifest
+  `[messaging]` block + a thin `ToolAdapter` with **zero** generic-source change
+  (the complement of GATE-2's deletion test); the `acme-messenger` fixture
+  (TEST-2) is the standing proof that the generic paths need no real vendor.
 
 ## 12. Docs and rollout (DOC) — M3
 

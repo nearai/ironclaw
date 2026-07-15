@@ -35,6 +35,36 @@ Three invariants frame everything:
 - **The model sees one contract per tool, regardless of vendor.** Same schema in,
   same schema out, regardless of the vendor the adapter drives.
 
+### 1.1 Design intent — build generic, implement Slack (the addition test)
+
+**Slack is the only consumer now, but the framework must be built fully general —
+so adding the *next* vendor is a manifest declaration plus a thin adapter, not a
+second integration.** This is the bar the implementing engineer is held to, not
+an aspiration:
+
+- **The addition test.** Adding a new HTTP vendor (e.g. Discord) = a `[messaging]`
+  block naming its subset + one `ToolAdapter` that does `match capability_id →
+  call the vendor API → normalize`, with **zero change to any generic crate**. If
+  adding a vendor requires touching generic code, the abstraction leaked and the
+  design failed.
+- **Slack goes *through* the generic seams, never around them.** The profiles,
+  expander, normalized types, output validation, dispatch pipeline, relay/act
+  enforcement, discovery, and the shared `messaging_core` pattern are the generic
+  infrastructure; Slack is their first *user*, not a shortcut. Everything
+  Slack-specific lives in the Slack adapter; nothing Slack-shaped leaks upward.
+- **What every future vendor reuses for free:** all of the above. **The only
+  per-vendor work:** the `[messaging]` subset + the adapter's `invoke` (the API
+  calls + the normalization mapping).
+- **Proven, not asserted** — three enforcers (§15): the **`acme-messenger`
+  fixture** (an invented vendor that drives every generic path, so no generic path
+  can secretly depend on a real product), the **genericity gate** (no vendor id /
+  Slack-ism in generic crates), and the **conformance suite** (vendors as rows).
+  Build these *alongside* Slack, not after.
+- **The one caveat.** "Trivial" holds for an HTTP vendor. A vendor whose user API
+  is **not** HTTP (Telegram = MTProto) additionally needs a host-side transport
+  client (§8) — the single non-trivial part, and a property of that vendor's
+  protocol, not a gap in the framework: it still reuses every generic piece above.
+
 ---
 
 ## 2. Prior art and rationale
