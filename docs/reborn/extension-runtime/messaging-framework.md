@@ -3,7 +3,9 @@
 **Status:** Proposed (2026-07-14). New feature work on the finished extension
 runtime, sequenced **after** the P0–P7 train.
 **Companions:** `adr/0002-messaging-tool-framework.md` (the *decision*, rationale,
-and rejected options); `messaging-framework-checklist.md` (acceptance).
+and rejected options); `messaging-framework-tools.md` (**canonical** tool
+schemas + descriptions + the Slack migration-parity audit);
+`messaging-framework-checklist.md` (acceptance).
 **Reading order:** `overview.md` (runtime model) → `adr/0002` (why) → this (how) →
 `messaging-framework-checklist.md` (done-when).
 
@@ -166,6 +168,11 @@ that always DMs you privately and puts nothing in shared spaces.
 
 ## 4. Data model — the framework-owned normalized types
 
+> **Canonical:** `messaging-framework-tools.md` §1 holds the authoritative
+> `types.v1` (with the audit-driven `ConversationRef.private` and
+> `Message.permalink` additions and the `UserRef.display_name` mapping rule). The
+> block below is the illustrative core; where they differ, the tools doc wins.
+
 Shipped once as a framework asset `schemas/messaging/types.v1.json`; every tool
 schema `$ref`s it. Ids are **opaque and round-trippable** (you pass them back to
 act on the object) but every reference the model reads is **enriched** with
@@ -256,6 +263,13 @@ named type is a readability choice, not a requirement (§16).
 ---
 
 ## 5. The standard tools
+
+> **Canonical:** each tool's exact model-facing **description**, **prompt doc**,
+> and input/output schema — with the Slack migration-parity fixes (search `sort`
+> + `permalink`, raised `read_history`/`list_conversations` limits,
+> `read_history` `after`, preserved send safety prompt) — lives in
+> `messaging-framework-tools.md` §2–8. The per-tool JSON below is the illustrative
+> baseline; the tools doc is authoritative.
 
 Each tool is a host-defined **capability profile** `ironclaw.messaging.<tool>.v1`
 carrying an input and output schema. The **core** tools are the baseline of a

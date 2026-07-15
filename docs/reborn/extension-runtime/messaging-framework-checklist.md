@@ -1,6 +1,7 @@
 # Messaging Tool Framework — Acceptance Checklist
 
 **Companions:** `messaging-framework.md` (engineering design),
+`messaging-framework-tools.md` (canonical tool contract + Slack parity audit),
 `adr/0002-messaging-tool-framework.md` (decision).
 **Status:** Proposed — nothing below is built yet; every box is unchecked.
 
@@ -31,8 +32,11 @@ Rules — kept short on purpose (same discipline as `checklist.md`):
 - [ ] TYPE-5 One host-defined `CapabilityProfileContract` exists per standard
   tool (`ironclaw.messaging.<tool>.v1`), each with input **and** output
   `schema_ref`; all nine load and validate.
-- [ ] TYPE-6 Each tool's input/output schema (§5.1–5.7) is a shipped asset and
-  `$ref`s `types.v1`; the schemas compile (no unresolved `$ref`).
+- [ ] TYPE-6 Each tool's input/output schema is a shipped asset and `$ref`s
+  `types.v1`; the schemas compile (no unresolved `$ref`). Canonical shapes:
+  `messaging-framework-tools.md` §1–8.
+- [ ] TYPE-7 `ConversationRef.private` (optional) and `Message.permalink`
+  (optional) exist (audit G8/G5), and `Message.author` is a resolved `UserRef`.
 
 ## 2. Manifest and expansion (MAN) — M0
 
@@ -173,6 +177,19 @@ Rules — kept short on purpose (same discipline as `checklist.md`):
 - [ ] SLK-4 The Slack `send_message` tool acts on the **user** token and is
   subject to SAFE-1; delivery still uses the bot token.
 - [ ] SLK-5 Extends the existing Slack tool integration test; no parallel suite.
+- [ ] SLK-6 **Migration-parity audit closed** (`messaging-framework-tools.md`
+  Appendix A): every old Slack input param and output field is either carried or a
+  listed conscious drop. Specifically pinned: search `sort` and `permalink`
+  present; `read_history` default 50 / max 200 and `list_conversations` default
+  100 / max 200 (no silent cap regression); `read_history` `after` present;
+  `ConversationRef.private` populated from `is_private`; a `#channel-name` target
+  resolves; `UserRef.display_name` follows the `real_name ‖ display_name ‖ handle`
+  rule.
+- [ ] SLK-7 `get_user` does **not** surface `email` (deliberate privacy drop, G7);
+  a test asserts the field is absent from the output.
+- [ ] SLK-8 The `send_message` prompt doc carries the delegated-authority /
+  never-deliver-the-final-answer safety text (G1); asserted present in the shipped
+  package prompt.
 
 ## 10. Telegram — new user-acting tools (TG) — M3
 
