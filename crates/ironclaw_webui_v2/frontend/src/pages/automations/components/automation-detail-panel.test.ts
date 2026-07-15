@@ -130,6 +130,7 @@ function createHarness({ onRenameAutomation = () => {} } = {}) {
   let hookCursor = 0;
 
   function Button() {}
+  function ConfirmDialog() {}
   function EmptyPanel() {}
   function Icon() {}
   function Input() {}
@@ -171,6 +172,7 @@ function createHarness({ onRenameAutomation = () => {} } = {}) {
   const context = {
     globalThis: {},
     Button,
+    ConfirmDialog,
     EmptyPanel,
     Icon,
     Input,
@@ -186,13 +188,13 @@ function createHarness({ onRenameAutomation = () => {} } = {}) {
     recentRunKey: (run) => run.run_id,
     useNavigate: () => () => {},
     useT: () => t,
-    window: { confirm: () => true },
   };
 
   vm.runInNewContext(sourceForTest(), context);
   const exports = context.globalThis.__testExports;
   return {
     Button,
+    ConfirmDialog,
     Input,
     exports,
     render(overrides = {}) {
@@ -205,6 +207,32 @@ function createHarness({ onRenameAutomation = () => {} } = {}) {
     },
   };
 }
+
+test("AutomationDetailPanel deletes only after confirming the shared dialog", () => {
+  const deletions = [];
+  const harness = createHarness();
+
+  let rendered = harness.render({
+    onDeleteAutomation: (automationId) => deletions.push(automationId),
+  });
+  const deleteButton = componentProps(rendered, harness.Button).find(
+    (button) => button["aria-label"] === "Delete: Daily status",
+  );
+  assert.ok(deleteButton, "delete button should render");
+
+  deleteButton.onClick();
+  assert.deepEqual(deletions, []);
+
+  rendered = harness.render({
+    onDeleteAutomation: (automationId) => deletions.push(automationId),
+  });
+  const [dialog] = componentProps(rendered, harness.ConfirmDialog);
+  assert.equal(dialog.open, true);
+  assert.equal(dialog.title, "Delete: Daily status");
+
+  dialog.onConfirm();
+  assert.deepEqual(deletions, ["automation-alpha"]);
+});
 
 test("AutomationDetailPanel submits a trimmed rename from the inline editor", () => {
   const calls = [];

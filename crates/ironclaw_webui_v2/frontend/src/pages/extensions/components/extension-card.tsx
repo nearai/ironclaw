@@ -228,7 +228,11 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   const primary = primaryActions[0];
 
   return (
-    <div className={CARD}>
+    <div
+      className={CARD}
+      data-testid="extension-card"
+      data-extension-id={packageId(ext)}
+    >
       <div className="flex items-start gap-2">
         <Badge tone={tone} label={label} size="sm" />
         <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--v2-text-strong)]">
@@ -322,7 +326,11 @@ export function RegistryCard({ entry, onInstall = null, isBusy, statusLabel = un
   const [kwOpen, setKwOpen] = React.useState(false);
 
   return (
-    <div className={CARD}>
+    <div
+      className={CARD}
+      data-testid="extension-card"
+      data-extension-id={packageId(entry)}
+    >
       <div className="flex items-start gap-2">
         <Badge
           tone="muted"
