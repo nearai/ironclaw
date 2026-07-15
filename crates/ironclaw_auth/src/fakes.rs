@@ -926,6 +926,34 @@ impl CredentialAccountService for InMemoryAuthProductServices {
                     refreshed: false,
                 })
             }
+            Err(AuthProductError::InvalidGrant) => {
+                // Fidelity with production
+                // `ProviderBackedCredentialAccountService::refresh_account`: a
+                // provider `invalid_grant` means the refresh token is
+                // permanently revoked, so the account becomes `Revoked`
+                // (reauthorize-required), not merely `RefreshFailed`. Without
+                // this arm the fake left the account status unchanged and
+                // propagated the raw error, hiding the divergence from the
+                // production path.
+                let mut state = self.lock_state();
+                let account = state
+                    .accounts
+                    .get_mut(&request.account_id)
+                    .ok_or(AuthProductError::CredentialMissing)?;
+                validate_refresh_target(account, &request)?;
+                if account.refresh_secret.as_ref() == Some(&refresh_secret_used) {
+                    account.status = CredentialAccountStatus::Revoked;
+                    account.updated_at = Utc::now();
+                }
+                Ok(CredentialRefreshReport {
+                    account: account.projection(),
+                    recovery: recovery_projection_for_single_account(
+                        account.provider.clone(),
+                        account,
+                    ),
+                    refreshed: false,
+                })
+            }
             Err(error) => Err(error),
         }
     }
