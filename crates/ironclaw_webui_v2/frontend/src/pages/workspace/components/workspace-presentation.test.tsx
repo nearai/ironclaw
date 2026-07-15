@@ -61,6 +61,6 @@ test("workspace viewer renders a locale-aware human-readable file size", () => {
     />,
   );
 
-  assert.match(html, /application\/octet-stream · 1,5 kB/);
+  assert.match(html, /application\/octet-stream · 1,5\s+kB/);
   assert.doesNotMatch(html, /1536/);
 });

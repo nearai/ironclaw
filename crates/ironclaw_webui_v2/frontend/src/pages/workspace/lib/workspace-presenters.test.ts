@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
+import { test, vi } from "vitest";
 
 import {
   areaDisplayName,
@@ -32,9 +32,34 @@ test("workspace root entries sort by their localized labels", () => {
   );
 });
 
+test("workspace entry sorting tolerates missing display names", () => {
+  const entries = [
+    { name: "report.txt", path: "report.txt", is_dir: false },
+    { path: "unnamed", is_dir: false },
+  ];
+
+  assert.doesNotThrow(() => sortEntries(entries));
+  assert.doesNotThrow(() => sortEntries(entries, () => undefined));
+});
+
 test("workspace file sizes use human-readable locale-aware units", () => {
   assert.equal(formatWorkspaceFileSize(120, "en"), "120 bytes");
   assert.equal(formatWorkspaceFileSize(5 * 1024 * 1024, "en"), "5 MB");
   assert.equal(formatWorkspaceFileSize(1536, "de"), "1,5 kB");
+  assert.equal(formatWorkspaceFileSize(null, "en"), "");
+  assert.equal(formatWorkspaceFileSize(undefined, "en"), "");
   assert.equal(formatWorkspaceFileSize(-1, "en"), "");
+});
+
+test("workspace file sizes retain a primitive fallback when Intl units are unavailable", () => {
+  const formatter = vi.spyOn(Intl, "NumberFormat").mockImplementation(() => {
+    throw new RangeError("unit formatting unavailable");
+  });
+
+  try {
+    assert.equal(formatWorkspaceFileSize(1536, "de"), "1.5 KB");
+    assert.equal(formatWorkspaceFileSize(1, "en"), "1 byte");
+  } finally {
+    formatter.mockRestore();
+  }
 });

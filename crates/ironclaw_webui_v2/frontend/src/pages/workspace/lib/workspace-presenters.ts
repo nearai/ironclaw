@@ -20,6 +20,7 @@ export function areaDisplayName(areaId, t) {
 // locale-aware labels. The product has historically used KB/MB wording for
 // 1024-based thresholds, so retain that user-facing convention here.
 export function formatWorkspaceFileSize(bytes, locale = "en") {
+  if (bytes == null) return "";
   const size = Number(bytes);
   if (!Number.isFinite(size) || size < 0) return "";
 
@@ -31,16 +32,26 @@ export function formatWorkspaceFileSize(bytes, locale = "en") {
     unitIndex += 1;
   }
 
+  const maximumFractionDigits = value >= 10 || Number.isInteger(value) ? 0 : 1;
   const options: Intl.NumberFormatOptions = {
     style: "unit",
     unit: units[unitIndex],
     unitDisplay: unitIndex === 0 ? "long" : "short",
-    maximumFractionDigits: value >= 10 || Number.isInteger(value) ? 0 : 1,
+    maximumFractionDigits,
   };
   try {
     return new Intl.NumberFormat(locale || "en", options).format(value);
   } catch {
-    return new Intl.NumberFormat("en", options).format(value);
+    try {
+      return new Intl.NumberFormat("en", options).format(value);
+    } catch {
+      // Older browsers may not support every unit. Keep the render tree alive
+      // with a dependency-free label even when the English retry also fails.
+      const precision = 10 ** maximumFractionDigits;
+      const rounded = Math.round(value * precision) / precision;
+      const fallbackUnits = [size === 1 ? "byte" : "bytes", "KB", "MB", "GB", "TB", "PB"];
+      return `${rounded} ${fallbackUnits[unitIndex]}`;
+    }
   }
 }
 
@@ -50,7 +61,9 @@ export function formatWorkspaceFileSize(bytes, locale = "en") {
 export function sortEntries(entries, displayName = (entry) => entry.name) {
   return [...(entries || [])].sort((a, b) => {
     if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
-    return displayName(a).localeCompare(displayName(b), undefined, { sensitivity: "base" });
+    const left = String(displayName(a) ?? "");
+    const right = String(displayName(b) ?? "");
+    return left.localeCompare(right, undefined, { sensitivity: "base" });
   });
 }
 
