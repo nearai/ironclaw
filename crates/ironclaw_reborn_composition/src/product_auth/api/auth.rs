@@ -21,7 +21,8 @@ use ironclaw_auth::{
     OAuthProviderIdentity, OpaqueStateHash, PkceVerifierHash,
     ProviderBackedCredentialAccountService, ProviderCallbackOutcome, ProviderScope,
     SecretCleanupReport, SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest,
-    SecretSubmitResult, Timestamp, TurnGateAuthFlowQuery, TurnRunRef, scope_matches,
+    SecretSubmitResult, Timestamp, TurnGateAuthFlowQuery, TurnRunRef, is_terminal_status,
+    scope_matches,
 };
 use ironclaw_events::{SecurityAuditEvent, SecurityAuditSink, SecurityBoundary, SecurityDecision};
 use ironclaw_product_adapters::AuthPromptChallengeKind;
@@ -586,6 +587,26 @@ impl RebornProductAuthServicePorts {
         ));
         self.provider_client = provider_client;
         self
+    }
+}
+
+/// Expiry-honest status projection (RFC 6819 §5.1.5.3) shared by the OAuth
+/// flow-status and reconcile reads.
+///
+/// A non-terminal flow whose `expires_at` has passed is dead — its popup can
+/// never complete a callback (`ensure_oauth_callback_flow_known` already
+/// rejects it) — but nothing sweeps the durable record to `Expired`. Reporting
+/// its stored `AwaitingUser` forever leaves the browser's popup watcher with no
+/// signal but its own timeout. A terminal record keeps its real status: a
+/// `Failed` flow still owes provider-owned cleanup that polling must converge,
+/// and relabelling it `Expired` would hide that.
+///
+/// Projection only — callers must not write the projected status back.
+fn project_flow_status(record: &AuthFlowRecord, now: Timestamp) -> AuthFlowStatus {
+    if !is_terminal_status(record.status) && record.expires_at <= now {
+        AuthFlowStatus::Expired
+    } else {
+        record.status
     }
 }
 
@@ -1458,10 +1479,14 @@ impl RebornProductAuthServices {
         Ok(record.provider)
     }
 
-    /// Load a caller-scoped flow for status reconciliation without applying the
-    /// interactive callback expiry check. Failed terminal cleanup remains owed
-    /// after `expires_at`, and status polling must be able to finish it without
+    /// Load a caller-scoped flow for status reconciliation without rejecting an
+    /// expired flow outright. Failed terminal cleanup remains owed after
+    /// `expires_at`, and status polling must be able to finish it without
     /// exposing cross-scope flow existence.
+    ///
+    /// The record's status is projected through [`project_flow_status`], so a
+    /// non-terminal flow past its deadline reads as `Expired` while a terminal
+    /// flow keeps its real status (and its owed cleanup).
     #[allow(
         dead_code,
         reason = "used by the feature-scoped webui-v2-beta OAuth status route"
@@ -1472,7 +1497,10 @@ impl RebornProductAuthServices {
         flow_id: AuthFlowId,
     ) -> Result<AuthFlowRecord, RebornOAuthCallbackError> {
         match self.flow_manager.get_flow(scope, flow_id).await {
-            Ok(Some(record)) => Ok(record),
+            Ok(Some(mut record)) => {
+                record.status = project_flow_status(&record, Utc::now());
+                Ok(record)
+            }
             Ok(None) | Err(AuthProductError::CrossScopeDenied) => {
                 Err(AuthProductError::UnknownOrExpiredFlow.into())
             }
@@ -1530,7 +1558,10 @@ impl RebornProductAuthServices {
                         Err(error) => Err(error.into_auth_error().into()),
                     };
                 }
-                Ok(record.status)
+                // Same projection as `flow_record_for_status`: every early
+                // return above is terminal, so this is the only branch that can
+                // still be holding a non-terminal record past its deadline.
+                Ok(project_flow_status(&record, Utc::now()))
             }
             Ok(None) => Err(AuthProductError::UnknownOrExpiredFlow.into()),
             // Never distinguish "owned by another scope" from "unknown": both

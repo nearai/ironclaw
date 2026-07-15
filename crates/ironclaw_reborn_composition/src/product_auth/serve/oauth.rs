@@ -1487,6 +1487,94 @@ mod tests {
         );
     }
 
+    /// The flow-status poll must be expiry-honest. A non-terminal flow whose
+    /// `expires_at` has passed is dead — the user's popup can never complete it
+    /// — but nothing sweeps it to `Expired` in storage, so the read projection
+    /// must report `Expired` itself. Reporting `awaiting_user` forever leaves
+    /// the browser's popup watcher to its own timeout with no signal.
+    ///
+    /// Projection only: the durable record is NOT mutated by a GET.
+    #[tokio::test]
+    async fn oauth_flow_status_reports_expired_for_non_terminal_flow_past_its_expiry() {
+        use ironclaw_auth::{AuthFlowKind, AuthFlowManager, NewAuthFlow};
+
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let product_auth = Arc::new(
+            RebornProductAuthServices::from_shared(
+                shared.clone(),
+                Arc::new(RecordingDispatcher::default()),
+            )
+            .with_flow_record_source(shared.clone()),
+        );
+        let tenant = TenantId::new("tenant-alpha").expect("tenant");
+        let state = ProductAuthRouteState::new(product_auth, tenant.clone(), None, None);
+        let caller = WebUiAuthenticatedCaller::new(
+            tenant,
+            UserId::new("user-alpha").expect("user"),
+            None,
+            None,
+        );
+        let invocation_id = ironclaw_host_api::InvocationId::new().to_string();
+        let fields = ScopeFields {
+            session_id: None,
+            thread_id: None,
+            invocation_id: Some(invocation_id.clone()),
+        };
+        let scope = scope_from_authenticated_caller_parts_requiring_invocation(&caller, &fields)
+            .expect("caller scope");
+
+        // An abandoned "Connect" popup: `create_flow` mints it `AwaitingUser`,
+        // and its deadline has already passed with no callback and no sweep.
+        let expired_at = Utc::now() - ChronoDuration::minutes(1);
+        let flow = shared
+            .create_flow(NewAuthFlow {
+                id: None,
+                scope: scope.clone(),
+                kind: AuthFlowKind::IntegrationCredential,
+                provider: AuthProviderId::new("google").expect("provider"),
+                challenge: AuthChallenge::OAuthUrl {
+                    authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
+                        .expect("authorization url"),
+                    expires_at: expired_at,
+                },
+                continuation: AuthContinuationRef::SetupOnly,
+                update_binding: None,
+                opaque_state_hash: None,
+                pkce_verifier_hash: None,
+                expires_at: expired_at,
+            })
+            .await
+            .expect("expired setup flow");
+        assert_eq!(flow.status, AuthFlowStatus::AwaitingUser);
+
+        let Json(observed) = oauth_flow_status_handler(
+            State(state),
+            Extension(caller),
+            Path(flow.id.to_string()),
+            axum::extract::Query(OAuthFlowStatusQuery {
+                invocation_id: Some(invocation_id),
+            }),
+        )
+        .await
+        .expect("status read");
+
+        assert_eq!(
+            observed.status,
+            AuthFlowStatus::Expired,
+            "a non-terminal flow past its deadline must poll as expired, not awaiting_user"
+        );
+        assert_eq!(
+            shared
+                .get_flow(&scope, flow.id)
+                .await
+                .expect("lookup")
+                .expect("record")
+                .status,
+            AuthFlowStatus::AwaitingUser,
+            "GET status is projection-only and must not mutate the durable record"
+        );
+    }
+
     #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_personal_turn_gate_callback_activates_binding_lifecycle_and_account() {
