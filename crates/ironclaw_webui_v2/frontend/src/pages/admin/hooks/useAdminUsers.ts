@@ -9,6 +9,9 @@ import {
   deleteAdminUser,
   suspendAdminUser,
   activateAdminUser,
+  fetchUserSecrets,
+  putUserSecret,
+  deleteUserSecret,
 } from "../lib/admin-api";
 
 export function useAdminUsers() {
@@ -83,4 +86,34 @@ export function useAdminUserDetail(userId) {
     enabled: Boolean(userId),
     refetchInterval: 10_000,
   });
+}
+
+export function useAdminUserSecrets(userId) {
+  const queryClient = useQueryClient();
+  const queryKey = ["admin", "user", userId, "secrets"];
+  const query = useQuery({
+    queryKey,
+    queryFn: () => fetchUserSecrets(userId),
+    enabled: Boolean(userId),
+  });
+
+  const invalidate = () => queryClient.invalidateQueries({ queryKey });
+  const putMutation = useMutation({
+    mutationFn: ({ handle, value }) => putUserSecret(userId, handle, value),
+    onSuccess: invalidate,
+  });
+  const deleteMutation = useMutation({
+    mutationFn: (handle) => deleteUserSecret(userId, handle),
+    onSuccess: invalidate,
+  });
+
+  return {
+    secrets: Array.isArray(query.data) ? query.data : [],
+    query,
+    putSecret: (handle, value) => putMutation.mutateAsync({ handle, value }),
+    deleteSecret: deleteMutation.mutateAsync,
+    isSaving: putMutation.isPending,
+    isDeleting: deleteMutation.isPending,
+    mutationError: putMutation.error || deleteMutation.error,
+  };
 }
