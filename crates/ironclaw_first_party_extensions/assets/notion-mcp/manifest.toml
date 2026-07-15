@@ -27,6 +27,15 @@ authorization_endpoint = "https://mcp.notion.com/authorize"
 token_endpoint = "https://mcp.notion.com/token"
 scopes = []
 
+# Notion MCP is OAuth 2.1 with a dynamically registered public client:
+# access tokens expire (~1h) and refresh tokens rotate single-use. Without
+# the refresh/expiry captures below the engine stores the token as
+# non-expiring and every Notion connection dies within the hour.
+[auth.notion.refresh]
+rotates_refresh_token = true
+
 [auth.notion.token_response]
 access_token = "/access_token"
+refresh_token = "/refresh_token"
+expires_in = "/expires_in"
 scope = { path = "/scope", missing = "fallback_to_requested" }

@@ -1443,10 +1443,17 @@ async fn dcr_vendor_registers_once_and_runs_standard_oauth_afterwards() {
 
     // The token exchange then runs the standard oauth2_code flow against the
     // discovered token endpoint, carrying the RFC 8707 resource indicator.
+    // Notion rotates single-use refresh tokens on ~1h access tokens; the
+    // recipe must capture both or the credential silently dies at expiry
+    // (the A4 regression).
     harness.server.script(
         "https://mcp.notion.com/discovered/token",
         200,
-        serde_json::json!({ "access_token": "notion-access", "expires_in": 3600 }),
+        serde_json::json!({
+            "access_token": "notion-access",
+            "refresh_token": "notion-refresh-1",
+            "expires_in": 3600
+        }),
     );
     let exchange = harness
         .engine
@@ -1457,6 +1464,15 @@ async fn dcr_vendor_registers_once_and_runs_standard_oauth_afterwards() {
         .await
         .expect("notion exchange");
     assert!(exchange.provider_identity.is_none());
+    let refresh_secret = exchange
+        .refresh_secret
+        .as_ref()
+        .expect("notion recipe captures the rotating refresh token (A4)");
+    assert_eq!(
+        harness.secret_value(&scope.resource, refresh_secret).await,
+        Some("notion-refresh-1".to_string()),
+        "the captured refresh token is stored for the refresh path"
+    );
     let token_request = &harness
         .server
         .requests_for("https://mcp.notion.com/discovered/token")[0];
@@ -1469,6 +1485,35 @@ async fn dcr_vendor_registers_once_and_runs_standard_oauth_afterwards() {
     assert_eq!(
         form.get("client_id").map(String::as_str),
         Some("notion-dcr-client-1")
+    );
+}
+
+/// A4 pin on the REAL bundled manifest: Notion issues ~1h access tokens with
+/// single-use rotating refresh tokens, so its recipe must declare the
+/// `refresh_token`/`expires_in` capture pointers and the rotation flag. The
+/// pointer-driven engine captures nothing that is not declared — without
+/// these the token is stored non-expiring and every Notion connection dies
+/// at the first expiry with no recovery.
+#[test]
+fn notion_recipe_declares_refresh_and_expiry_capture() {
+    let resolved = manifest_recipe("notion-mcp", "notion");
+    let VendorAuthRecipe::Oauth2Code(recipe) = &resolved.recipe else {
+        panic!("notion declares oauth2_code");
+    };
+    assert!(
+        recipe.token_response.refresh_token.is_some(),
+        "notion token_response must capture /refresh_token"
+    );
+    assert!(
+        recipe.token_response.expires_in.is_some(),
+        "notion token_response must capture /expires_in (else stored non-expiring)"
+    );
+    assert!(
+        recipe
+            .refresh
+            .as_ref()
+            .is_some_and(|refresh| refresh.rotates_refresh_token),
+        "notion refresh tokens rotate single-use; the recipe must declare it"
     );
 }
 
