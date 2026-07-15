@@ -579,7 +579,8 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
         };
         let wall_clock_ms = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
         let output_limit_bytes = match request.capability_id.as_str() {
-            HTTP_CAPABILITY_ID | HTTP_SAVE_CAPABILITY_ID => http::MAX_HTTP_OUTPUT_BYTES,
+            HTTP_CAPABILITY_ID => http::MAX_HTTP_OUTPUT_BYTES,
+            HTTP_SAVE_CAPABILITY_ID => FIRST_PARTY_MAX_OUTPUT_BYTES,
             _ => FIRST_PARTY_MAX_OUTPUT_BYTES,
         };
         let output_bytes = bounded_output_bytes(&output, output_limit_bytes).map_err(|error| {

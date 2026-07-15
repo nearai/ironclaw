@@ -22,10 +22,13 @@ import uuid
 
 import httpx
 import pytest
+from playwright.async_api import expect
 
-from helpers import REBORN_V2_AUTH_TOKEN
+from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2
 from reborn_webui_harness import (
     reborn_bearer_headers,
+    reborn_v2_browser,  # noqa: F401 - imported fixture
+    reborn_v2_page,  # noqa: F401 - imported fixture
     reborn_v2_server,  # noqa: F401 - imported fixture
 )
 
@@ -46,15 +49,22 @@ async def admin_client(reborn_v2_server):
 @pytest.fixture()
 async def test_user(admin_client):
     """Create a member user, yield its record + one-time token, delete after."""
-    email = f"test-{uuid.uuid4().hex[:8]}@example.com"
+    suffix = uuid.uuid4().hex[:8]
+    email = f"test-{suffix}@example.com"
+    display_name = f"E2E Test User {suffix}"
     r = await admin_client.post(
         f"{ADMIN_BASE}/users",
-        json={"display_name": "E2E Test User", "email": email, "role": "member"},
+        json={"display_name": display_name, "email": email, "role": "member"},
     )
     assert r.status_code == 200, r.text
     body = r.json()
     user = body["user"]
-    yield {"id": user["user_id"], "email": email, "token": body["api_token"]}
+    yield {
+        "id": user["user_id"],
+        "email": email,
+        "display_name": display_name,
+        "token": body["api_token"],
+    }
     await admin_client.delete(f"{ADMIN_BASE}/users/{user['user_id']}")
 
 
@@ -129,7 +139,82 @@ async def test_get_user_detail(admin_client, test_user):
     assert r.status_code == 200, r.text
     user = r.json()["user"]
     assert user["user_id"] == test_user["id"]
-    assert user["display_name"] == "E2E Test User"
+    assert user["display_name"] == test_user["display_name"]
+
+
+async def test_admin_token_visibility_matches_user_creation_lifecycle(
+    admin_client, reborn_v2_page, reborn_v2_server, test_user
+):
+    """Creation shows the one-time token; existing-user details do not."""
+    await reborn_v2_page.goto(
+        f"{reborn_v2_server}/v2/admin/users?token={REBORN_V2_AUTH_TOKEN}"
+    )
+    created_user_id = None
+    try:
+        display_name = f"UI Token User {uuid.uuid4().hex[:8]}"
+        email = f"ui-token-{uuid.uuid4().hex[:8]}@example.com"
+        await reborn_v2_page.get_by_role(
+            "button", name=SEL_V2["admin_new_user_button_name"], exact=True
+        ).click()
+        create_form = reborn_v2_page.locator(SEL_V2["admin_create_form"])
+        await create_form.locator(SEL_V2["admin_display_name_input"]).fill(display_name)
+        await create_form.locator(SEL_V2["admin_email_input"]).fill(email)
+
+        async with reborn_v2_page.expect_response(
+            lambda response: response.request.method == "POST"
+            and response.url.endswith(f"{ADMIN_BASE}/users")
+        ) as response_info:
+            await create_form.get_by_role(
+                "button", name=SEL_V2["admin_create_user_button_name"], exact=True
+            ).click()
+        create_response = await response_info.value
+        assert create_response.status == 200
+        created = await create_response.json()
+        created_user_id = created["user"]["user_id"]
+        one_time_token = created["api_token"]
+
+        await expect(
+            reborn_v2_page.get_by_text(
+                SEL_V2["admin_token_created_text"], exact=True
+            )
+        ).to_be_visible(timeout=15000)
+        await expect(
+            reborn_v2_page.locator(SEL_V2["admin_token_value"]).filter(
+                has_text=one_time_token
+            )
+        ).to_be_visible()
+        await expect(
+            reborn_v2_page.get_by_text(
+                SEL_V2["admin_token_description_text"], exact=True
+            )
+        ).to_be_visible()
+
+        await reborn_v2_page.get_by_role(
+            "button", name=test_user["display_name"], exact=True
+        ).click()
+        await expect(
+            reborn_v2_page.get_by_role(
+                "heading", name=test_user["display_name"], exact=True
+            )
+        ).to_be_visible(timeout=15000)
+        await expect(
+            reborn_v2_page.get_by_role(
+                "button",
+                name=SEL_V2["admin_create_token_button_name"],
+                exact=True,
+            )
+        ).to_have_count(0)
+        await expect(
+            reborn_v2_page.get_by_text(
+                SEL_V2["admin_token_description_text"], exact=True
+            )
+        ).to_have_count(0)
+    finally:
+        if created_user_id is not None:
+            cleanup = await admin_client.delete(
+                f"{ADMIN_BASE}/users/{created_user_id}"
+            )
+            assert cleanup.status_code == 200, cleanup.text
 
 
 async def test_update_user_profile(admin_client, test_user):

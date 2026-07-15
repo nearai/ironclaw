@@ -9,6 +9,37 @@ import { McpTab } from "./components/mcp-tab";
 import { RegistryTab } from "./components/registry-tab";
 import { useExtensions } from "./hooks/useExtensions";
 
+function CatalogErrorBanner({ isPartial = false, isRefetching, onRetry }) {
+  const t = useT();
+  const toneClass = isPartial
+    ? "border-[color-mix(in_srgb,var(--v2-warning-text)_30%,transparent)] bg-[var(--v2-warning-soft)] text-[var(--v2-warning-text)]"
+    : "border-[color-mix(in_srgb,var(--v2-danger-text)_30%,transparent)] bg-[var(--v2-danger-soft)] text-[var(--v2-danger-text)]";
+  const titleKey = isPartial
+    ? "ext.catalog.partialErrorTitle"
+    : "ext.catalog.loadErrorTitle";
+  const descriptionKey = isPartial
+    ? "ext.catalog.partialErrorDesc"
+    : "ext.catalog.loadErrorDesc";
+
+  return (
+    <div
+      className={`rounded-lg border px-4 py-4 ${toneClass}`}
+      role="alert"
+    >
+      <p className="text-sm font-semibold">{t(titleKey)}</p>
+      <p className="mt-1 text-sm">{t(descriptionKey)}</p>
+      <button
+        type="button"
+        className="mt-4 rounded-md border border-current px-3 py-1.5 text-sm font-medium transition-opacity hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-50"
+        onClick={onRetry}
+        disabled={isRefetching}
+      >
+        {isRefetching ? t("ext.catalog.retrying") : t("ext.catalog.retry")}
+      </button>
+    </div>
+  );
+}
+
 export function ExtensionsPage({ isAdmin = false } = {}) {
   const t = useT();
   const { tab = "registry" } = useParams();
@@ -24,6 +55,10 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     catalogEntries,
     connectableChannels,
     isLoading,
+    extensionsError,
+    registryError,
+    refetch,
+    isRefetching,
     isBusy,
     actionResult,
     clearResult,
@@ -88,6 +123,17 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     return (<Navigate to="/extensions/registry" replace />);
   }
 
+  const blockingError = tab === "registry" ? registryError : extensionsError;
+  if (blockingError) {
+    return (
+      <div className="flex h-full flex-col overflow-y-auto">
+        <div className="v2-page-entrance flex-1 p-4 sm:p-6">
+          <CatalogErrorBanner isRefetching={isRefetching} onRetry={refetch} />
+        </div>
+      </div>
+    );
+  }
+
   const tabContent = {
     channels: (<ChannelsTab
       status={status}
@@ -126,11 +172,19 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     return (<Navigate to="/extensions/registry" replace />);
   }
 
+  const partialError = tab === "registry" ? extensionsError : registryError;
+
   return (
     <div className="flex h-full flex-col overflow-y-auto">
       <div className="v2-page-entrance flex-1 p-4 sm:p-6">
         <div className="space-y-5">
           <ActionToast result={actionResult} onDismiss={clearResult} />
+          {partialError &&
+          (<CatalogErrorBanner
+            isPartial
+            isRefetching={isRefetching}
+            onRetry={refetch}
+          />)}
           {tabContent[tab]}
         </div>
       </div>
