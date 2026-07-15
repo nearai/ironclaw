@@ -21,6 +21,7 @@ mod support;
 // set by the `report.record(...)` sequence below, not declaration order.
 mod scenario_activate_then_active_cross_thread;
 mod scenario_credential_extension_lifecycle_state_machine;
+mod scenario_extension_activation_reauth_gate;
 mod scenario_install_then_visible_cross_thread;
 mod scenario_install_unknown_extension_id_fails_safely;
 mod scenario_remove_then_absent_cross_thread;
@@ -102,6 +103,17 @@ async fn extensions_group_e2e() {
     report.record(
         "slack_state_survives_reopen",
         scenario_slack_state_survives_reopen::run(&g).await,
+    );
+
+    // Scenario 9 (issue #6105 bucket-3 arms): activation-time re-auth gate —
+    // activate over a REVOKED credential parks BlockedAuth with a renderable
+    // provider requirement (#6043 shape), persists no misleading Failed error
+    // (#5878's reported extension_activate surface), and a reconfigure
+    // unwedges it. Uses "notion" (removed by scenario 2; credentials
+    // untouched by every other scenario).
+    report.record(
+        "extension_activation_reauth_gate",
+        scenario_extension_activation_reauth_gate::run(&g).await,
     );
 
     report.assert_all_passed();

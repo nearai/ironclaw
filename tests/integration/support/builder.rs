@@ -1578,6 +1578,33 @@ impl RebornIntegrationHarness {
             .await
     }
 
+    /// Flip every non-revoked credential account for `provider` under this
+    /// group's capability dispatch scope to `Revoked` — modeling an external
+    /// revocation of the user's grant (#5878 shape). Same scoping as
+    /// [`Self::seed_capability_credential_account`]; errors if nothing was
+    /// revoked so a vacuous revoke can't silently pass a re-auth assertion.
+    pub async fn revoke_capability_credential_accounts(&self, provider: &str) -> HarnessResult<()> {
+        let harness = match &self._shared.capability {
+            GroupCapability::HostRuntime(arc) => arc,
+            GroupCapability::Recording => {
+                return Err(
+                    "no host-runtime capability backend to revoke credential accounts".into(),
+                );
+            }
+        };
+        let scope = self.run_resource_scope_for_user(harness.capability_user_id().clone());
+        let revoked = harness
+            .revoke_credential_accounts_for_provider(&scope, provider)
+            .await?;
+        if revoked == 0 {
+            return Err(format!(
+                "no non-revoked credential account for provider {provider:?} was found to revoke"
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     /// This thread's run `(tenant, agent, project)` scope with `user_id` as
     /// the owner — the exact four fields dispatch-time credential-account
     /// selection matches. Which user is correct depends on the caller: the
