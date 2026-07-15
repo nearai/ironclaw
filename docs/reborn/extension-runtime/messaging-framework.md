@@ -18,7 +18,7 @@ edit, delete, react — is defined **once**, as host-owned **capability profiles
 with normalized input/output schemas. An extension does **not** hand-write these
 tools; it **declares the subset it supports** in a small `[messaging]` manifest
 section. At install time the host **expands** that declaration into ordinary
-per-extension tool surfaces (`slack.send_message`, `telegram.read_history`, …),
+per-extension tool surfaces (`slack.send_message`, `slack.read_history`, …),
 which flow through the existing resolver / dispatcher / disclosure / UI unchanged.
 Each extension's tool adapter implements the per-vendor behavior and **normalizes
 its output** to the shared schema (raw `U0123` → `{id, display_name}`).
@@ -26,16 +26,14 @@ its output** to the shared schema (raw `U0123` → `{id, display_name}`).
 Three invariants frame everything:
 
 - **The messaging tools act as the *user-acquired identity*** — the Matrix
-  bridge term is **puppeting** (Slack OAuth user token, Telegram paired session),
-  never the bot. The bot is only the **channel** (inbound + the assistant's
+  bridge term is **puppeting** (Slack's OAuth user token), never the bot. The bot is only the **channel** (inbound + the assistant's
   replies, owned by the delivery coordinator; the bridge term is **relaying**).
   See §3.
 - **The recipient decides the surface** (§3.1): anything to *you* is a channel
   relay (no tool); anything to *someone else* is a puppeting tool call. This is a
   host-enforced confidentiality guarantee, not a convention.
 - **The model sees one contract per tool, regardless of vendor.** Same schema in,
-  same schema out, whether the adapter is a Slack HTTP call or a Telegram MTProto
-  client.
+  same schema out, regardless of the vendor the adapter drives.
 
 ---
 
@@ -103,11 +101,11 @@ Slack MCP. Treat the "per-app vs unified" reading as directional, not settled.
 | Acts as | the **bot** | the **user** (user-acquired identity) |
 | Direction | inbound events + the assistant's replies | model-initiated actions *as the user* |
 | Owner | delivery coordinator (`overview.md` §5.4) | the tool dispatcher (`overview.md` §5.2) |
-| Credential | bot token (`slack_bot_token`, Telegram bot token) | OAuth user token (Slack) / paired session (Telegram) |
+| Credential | bot token (`slack_bot_token`) | OAuth user token (`slack_user_token`) |
 
 An extension may declare `[channel]` only (a bot entrypoint, no user-acting
-tools — Telegram today), `[messaging]` only (act-as-user tools with no inbound
-bot), or both (Slack).
+tools), `[messaging]` only (act-as-user tools with no inbound bot), or both
+(Slack).
 
 ### 3.1 The relay/act boundary — decided by the recipient (CRITICAL)
 
@@ -116,7 +114,7 @@ and the rule that decides which surface handles a message is simply **who the
 recipient is:**
 
 - **Recipient = you (the owner/requester)** → the **channel** delivers it (relay:
-  the Slack bot, the Telegram bot, WebUI). Results, summaries, notifications,
+  the Slack bot, WebUI). Results, summaries, notifications,
   automation output, "send me…", "DM me…" — all of it. The model does **not** call
   a tool for this: it produces the answer and ends the turn, and the host delivers
   it back to where the request came from (or your saved notification target).
@@ -151,12 +149,12 @@ was set up with that target ahead of time** — automations still relay results 
 you via the channel freely.
 
 **When the user identity is not connected**, an outward send **gates** (raises the
-connect/pairing prompt, §9) — it does **not** fall back to a bot relay (the
+connect prompt, §9) — it does **not** fall back to a bot relay (the
 deliberate divergence from mautrix, §2). Real identity or nothing.
 
 All of this lives in the shared **coordinator + dispatch** pipeline over the
-owner's identity, so **Slack, Telegram, Discord, and WebUI behave identically** —
-it is what the two surfaces *mean*, not per-vendor logic. Pinned by a
+owner's identity, so **every channel behaves identically** — it is what the two
+surfaces *mean*, not per-vendor logic. Pinned by a
 cross-channel conformance test (§15).
 
 *Product default (§16):* invoking IronClaw **in a shared channel** replies in that
@@ -209,7 +207,7 @@ resolved human context.
       "required": ["id", "conversation"],
       "additionalProperties": false,
       "properties": {
-        "id":           { "type": "string", "description": "Message id — unique WITHIN its conversation, not globally (Slack ts, Telegram message_id)." },
+        "id":           { "type": "string", "description": "Message id — unique WITHIN its conversation, not globally (e.g. Slack ts)." },
         "conversation": { "type": "string", "description": "ConversationRef.id this message belongs to." },
         "thread":       { "type": "string", "description": "Thread id, when the message sits in a thread." }
       }
@@ -275,8 +273,9 @@ Each tool is a host-defined **capability profile** `ironclaw.messaging.<tool>.v1
 carrying an input and output schema. The **core** tools are the baseline of a
 messaging integration — converse (`send_message`), observe (`read_history`,
 `list_conversations`), and identify (`get_user`) — and every real chat platform
-supports them, whether acting as the user (Slack, Telegram-paired) or as a bot
-(Discord). The **optional** tools are richer or spottier and appear only when the
+supports them, whether the tools act as the user (as Slack does) or, on a
+bot-only platform, as a bot. The **optional** tools are richer or spottier and
+appear only when the
 extension declares them. **"Core" does not mean mandatory** — the manifest
 declares any subset, so a read-only or send-only integration is valid; core is
 the standard baseline plus a genericity signal. (Scope is chat platforms; an
@@ -484,30 +483,21 @@ Validation (extends `manifest_v3_contract`): every `tools` entry is a known
 standard tool; a `thread`-bearing tool with `supports_threads = false` is
 rejected; `[[messaging.credentials]]` is required if any declared tool has the
 `use_secret` effect; the credential vendor must have a resolvable identity source
-(an `[auth.<vendor>]` recipe **or** a pairing modality — §9).
+(an `[auth.<vendor>]` recipe — §9).
 
 ### 6.2 Worked example — Slack (migrates today's five bespoke tools)
 
 The block in §6.1 **is** the Slack opt-in. It expands to the same five capability
 ids Slack ships today (`slack.send_message`, …) — so migration is parity (§14).
 
-### 6.3 Worked example — Telegram (gains user-acting tools via pairing)
+### 6.3 Other vendors (future)
 
-Telegram is a bot **channel** today with no tools. Once its **pairing** flow
-yields a user session (§9), it adds:
-
-```toml
-[messaging]
-tools = ["send_message", "read_history", "list_conversations", "get_user", "search_messages", "add_reaction"]
-supports_threads = true             # forum topics / reply threads
-
-[[messaging.credentials]]
-handle = "telegram_user_session"    # the paired user session (NOT the bot token the channel uses)
-vendor = "telegram"
-# No `audience`/`injection`: Telegram user-acting is MTProto, not HTTP — the host
-# drives a Telegram-user client and injects the session there (see §8). The
-# credential is declared so the connect gate and storage work generically.
-```
+Slack is the only consumer in scope now. A future messaging extension (e.g.
+Discord) opts in the same way — a `[messaging]` block naming its subset and its
+user-acquired credential — with **no change to the framework**; that reuse is the
+genericity the profiles + expander buy. A vendor whose user-acting transport is
+not HTTP (and so does not fit restricted egress) additionally needs its own
+host-side client — out of scope until such a vendor is built (§8).
 
 ### 6.4 What the host does with it — expansion into ordinary tool surfaces
 
@@ -686,9 +676,7 @@ display_name}`. So the function:
 4. Build `Message`s with resolved authors; validate host-side (§11).
 
 The cache amortizes the extra calls across the turn/conversation; a resolution
-miss degrades gracefully (id as `display_name`) rather than failing the call. For
-Telegram the same shape holds — the entities come back inline from `getDialogs`/
-`getHistory`, so often *no* extra call is needed.
+miss degrades gracefully (id as `display_name`) rather than failing the call.
 
 ### 7.4 The shared vendor "messaging core"
 
@@ -729,80 +717,41 @@ No generic crate names Slack; the binary assembles it:
    per-invocation construction), then runs the dispatcher pipeline (§ overview
    5.2) and `invoke`.
 
-### 7.6 Telegram — same structure, different transport
-
-Telegram's `TelegramMessagingAdapter::invoke` has the **identical** match-and-
-normalize shape, but its per-op functions call the **host-side MTProto client
-port** (§8) instead of `RestrictedEgress`, because MTProto is not HTTP:
-`read_history` → the client's `get_history` → normalize peer ids to `UserRef`
-(from the getDialogs/access-hash cache). Its `messaging_core` is Telegram's own
-crate module (Bot-API/MTProto rendering). Same profiles, same output schemas,
-different transport and session handling — which is the whole point: the model
-sees one contract regardless.
-
 ---
 
-## 8. Transport — HTTP vendors vs. Telegram (MTProto)
+## 8. Transport — HTTP via restricted egress
 
-The framework supports two adapter transports; the tool contract is identical
-across both.
+The Slack messaging adapter uses the existing host port `RestrictedEgress`
+(`tool_adapter.rs:103`): scheme/host/method allowlist from the resolved contract,
+host-side credential injection, response size caps. **No new transport
+mechanism** — a messaging adapter looks like today's Slack tool, just native
+(§7.1).
 
-**HTTP vendors (Slack, Discord).** The adapter uses the existing host port
-`RestrictedEgress` (`tool_adapter.rs:103`): scheme/host/method allowlist from the
-resolved contract, host-side credential injection, size caps. No new mechanism —
-a messaging adapter looks like today's Slack tool.
-
-**Telegram (user-acting = MTProto).** MTProto is a **binary, non-HTTP** protocol,
-so it does **not** fit `RestrictedEgress` (HTTP-only — verified). Proposal: add a
-narrow **host-side Telegram-user client** port when Telegram user-acting is built
-(the runtime's "add a hook when a vendor defeats the descriptor" rule, overview
-§4.3). The adapter calls that port; the host owns the MTProto/TDLib client and
-**holds the paired session** (the credential — bytes never reach the adapter, same
-guarantee as HTTP injection).
-
-Behavioral facts that shape it (verified Telegram-protocol behavior, not repo
-code — no Telegram user-client exists yet):
-
-- **Pull-on-demand, no message mirror required.** After pairing, a single
-  `messages.getDialogs` returns recent conversations + last message + the entities
-  (with `access_hash`) needed to reference them; `messages.getHistory` and
-  `messages.search` then read on demand. `list_conversations` ≈ getDialogs,
-  `read_history` ≈ getHistory, `search_messages` ≈ messages.search. So "what are my
-  recent messages?" works on the first call after pairing — no background sync.
-- **State the adapter/host keeps** = the **session** (persist across restarts;
-  don't re-login) + an optional `id → access_hash` cache (rebuildable from
-  getDialogs). This maps onto `ScopedToolState` (`tool_adapter.rs:164`). It is
-  **not** a message-history mirror; a TDLib local DB is an optional optimization,
-  not a requirement.
-- **Bounded caveats** the adapter surfaces as `ToolError::Failed`: cold references
-  (`resolveUsername` first for a peer never seen); rate limits (`FLOOD_WAIT`) on
-  large enumerations; secret (E2E) chats are device-local and invisible to a
-  server session.
+A future vendor whose user-acting API is **not** HTTP (and so does not fit
+`RestrictedEgress`) would need its own **host-side client** behind a narrow
+adapter-facing port (the runtime's "add a hook when a vendor defeats the
+descriptor" rule, overview §4.3). That is **out of scope** here — Slack is HTTP —
+and is noted only so the seam is understood: the tool *contract* is
+transport-independent, so such a vendor later changes the adapter's transport, not
+the profiles the model sees.
 
 ---
 
 ## 9. Identity, credentials, and connect
 
 - **The messaging credential is the user-acquired (puppeting) identity**, distinct
-  from the bot the channel delivers on. It is declared in `[[messaging.credentials]]`.
-- **Acquisition** rides the existing connect surface, generalized to a
-  **step-based flow** (the mautrix `LoginProcess` steer, §2) so OAuth and pairing
-  are one abstraction rather than parallel mechanisms:
-  - **OAuth vendors (Slack):** the `[auth.<vendor>]` recipe + the auth engine
-    (`overview.md` §4.3) — the flow that already yields `slack_user_token`.
-  - **Pairing vendors (Telegram):** the existing pairing modality — the
-    `Pairing { .. }` lifecycle gate
-    (`crates/ironclaw_product_workflow/src/lifecycle.rs:157`), the
-    `PairingRequired` event (`crates/ironclaw_common/src/event.rs:163`), the
-    Telegram pairing-code card (`ironclaw_product_adapters/src/outbound.rs:1027`).
-    Modeled as connect steps (code entry / QR display-and-wait / token paste),
-    covering both flows uniformly. Whether pairing becomes a formal auth-engine
-    method or a step-flow variant is decided in §16.
+  from the bot the channel delivers on. It is declared in `[[messaging.credentials]]`;
+  for Slack it is the OAuth user token (`slack_user_token`).
+- **Acquisition** rides the existing connect surface: Slack's `[auth.slack]`
+  recipe + the auth engine (`overview.md` §4.3) — the flow that already yields
+  `slack_user_token`, unchanged. (A future vendor with a different connect
+  mechanism plugs into the same gate; generalizing the connect flow is deferred
+  until such a vendor exists — §16.)
 - **Gate + resume:** a tool call with a missing/expired grant returns
-  `ToolError::AuthRequired`; the host raises the generic gate keyed by the tool's
-  declared vendor (OAuth gate or pairing gate) and resumes the blocked turn on
-  connect — unchanged from `overview.md` §5.2/§4.3. There is **no bot-relay
-  fallback** (§3.1): unconnected → gate, never a bot-attributed send.
+  `ToolError::AuthRequired`; the host raises the generic auth gate keyed by the
+  tool's declared vendor and resumes the blocked turn on connect — unchanged from
+  `overview.md` §5.2/§4.3. There is **no bot-relay fallback** (§3.1): unconnected →
+  gate, never a bot-attributed send.
 
 ---
 
@@ -877,9 +826,6 @@ identically. Pinned by the cross-channel conformance test (§15).
 | `ironclaw_dispatcher` | Host-side **output-schema validation** on `ToolResult`; **constraint-A policy step** on messaging write tools | new steps in existing pipeline |
 | `ironclaw_product_workflow` | **Constraint-B** owner-only target enforcement in the delivery coordinator; automation-denial for act-as-user | coordinator exists |
 | `ironclaw_slack_extension` | Migrate 5 tools → `[messaging]`; **native `ToolAdapter`** replacing the WASM module (§7.1); `invoke` normalizes output; extract shared `messaging_core` from `pub(crate)` helpers (§7.4) | crate exists |
-| `ironclaw_telegram_extension` | New `ToolAdapter`; `[messaging]`; MTProto behavior via the host client port | channel crate exists, tool adapter new |
-| `ironclaw_host_runtime` (or a new `ironclaw_telegram_user` host crate) | **Host-side Telegram-user (MTProto/TDLib) client** + session store; the adapter-facing port | new — the largest new component |
-| connect/auth path | Step-based connect covering OAuth + pairing uniformly | OAuth engine + pairing modality exist; generalization new |
 | `ironclaw_architecture` | Genericity gate: no messaging tool id / vendor name leaks into generic crates | gate pattern exists |
 
 Composition stays assembly-only (`overview.md` §3.3 discipline); no messaging tool
@@ -897,8 +843,7 @@ integration where touched, `cargo test -p ironclaw_architecture`).
 | **M0** | Profiles + `types.v1` schemas + `[messaging]` reader/expander + `implements`/`output_schema_ref` wiring + conformance + host output validation. Fixture (`acme-messenger`) declares `[messaging]` and passes the conformance suite. | — |
 | **M1** | **Relay/act guarantee** — constraint-A dispatch step, constraint-B coordinator enforcement, automation denial, connect-gate-not-relay. Cross-channel conformance test green (the CRITICAL safety gate). | M0 |
 | **M2** | Slack migration — 5 tools → `[messaging]`, normalized output (authors → `UserRef`), parity test (same capability ids); folds the `get_user_info` round-trip. | M0, M1 |
-| **M3** | Telegram user-acting — host-side MTProto client + session store + step-based pairing; `[messaging]`; `invoke` reusing the crate's rendering core. Second production proof. | M1 |
-| **M4** | Genericity gate to zero; docs; checklist fully evidenced. Discord remains a pure addition test (no generic change). | M2, M3 |
+| **M3** | Genericity gate to zero; docs; checklist fully evidenced. A future vendor (e.g. Discord) remains a pure addition test — no generic change. | M2 |
 
 M1 is sequenced early and on the critical path deliberately: the safety guarantee
 ships **before** any real puppeting tool is broadly enabled.
@@ -911,7 +856,7 @@ ships **before** any real puppeting tool is broadly enabled.
   `crates/ironclaw_auth/tests/auth_engine_contract.rs`): given an adapter claiming
   a profile + a scripted vendor backend, assert each declared tool honors the
   input schema and returns **schema-valid, normalized** output (ids resolved).
-  Slack, Telegram, and the `acme-messenger` fixture run it.
+  Slack and the `acme-messenger` fixture run it.
 - **Structural profile conformance** in the resolver/activation tests: a mismatched
   schema ref or missing operation fails activation.
 - **Integration proof** through the production dispatcher (activate the real Slack
@@ -952,30 +897,23 @@ ships **before** any real puppeting tool is broadly enabled.
 
 **Open questions:**
 
-1. **Pairing as a credential mechanism.** Formal auth-engine method vs. a
-   step-flow variant of the connect abstraction (§9); what a paired Telegram tool
-   actually injects (session vs. bearer). (`adr/0002` open Q2.)
-2. **Host-side Telegram client** hosting: TDLib vs. a native MTProto lib; process
-   model (one long-lived client per paired user); session persistence + security
-   (the auth key is a full-account credential — encryption at rest, revocation,
-   "active session" hygiene).
-3. **Custom / vendor emoji** in `Reaction.emoji` and `add_reaction`: normalize to
+1. **Custom / vendor emoji** in `Reaction.emoji` and `add_reaction`: normalize to
    Unicode, `:shortcode:`, or a tagged union for custom/guild emoji ids?
-4. **Cross-conversation "recent messages."** There is no single "my last N
+2. **Cross-conversation "recent messages."** There is no single "my last N
    messages across all chats" primitive; it is a composition (`list_conversations`
    → `read_history` per chat). Do we expose a convenience profile, or leave it to
    the model to compose?
-5. **`text` normalization fidelity** — how far to normalize vendor formatting
+3. **`text` normalization fidelity** — how far to normalize vendor formatting
    (mentions, links, custom entities) into Markdown without losing round-trip
    fidelity for `edit_message`.
-6. **Output-schema versioning** — how `types.v1` → `types.v2` rolls without a wire
+4. **Output-schema versioning** — how `types.v1` → `types.v2` rolls without a wire
    break for already-installed extensions.
-7. **Relay/act enforcement wiring (§12).** Confirm the exact call sites for
+5. **Relay/act enforcement wiring (§12).** Confirm the exact call sites for
    constraint A (dispatch), constraint B (coordinator), and especially how `ask`
    resolves in a non-interactive routine (the automation-denial rule) — the
    least-verified point. Verify none silently regress the duplicate / self-send /
    leak cases.
-8. **Coverage gap from the prior-art pass** (§2): the managed agent-tool platforms
+6. **Coverage gap from the prior-art pass** (§2): the managed agent-tool platforms
    (Composio, Arcade, Pipedream) and legacy stacks (libpurple, TDLib, XMPP) were
    not verified. A targeted follow-up would confirm whether any do cross-platform
    normalization worth borrowing.

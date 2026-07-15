@@ -11,6 +11,12 @@ enforcement wiring, the crate map, and phasing). **Acceptance:**
 `../messaging-framework-checklist.md`. This ADR holds the decision, rationale, and
 rejected options; those companions hold the how and the done-when.
 
+**Scope amendment:** the initial implementation targets **Slack as the only
+consumer**. Telegram and other vendors are deferred. This ADR still argues the
+two-identity model generically (and cites pairing as how a future non-OAuth vendor
+would connect), but nothing Telegram-specific is in scope now — the design doc,
+tools contract, and checklist are Slack-only.
+
 **Trigger citation (required by `implementation.md` §14):** `overview.md` §7
 excluded a **"Generic 'dynamic tools' abstraction"** with the reason *"MCP is
 the only dynamic source; one `[mcp]` section, owned by the MCP loader"* and the
@@ -147,28 +153,27 @@ channel is a separate surface. On that footing:
 
 ## 1. The standard messaging tool set — core vs. optional
 
-Derived from the real Slack tools (acting as the OAuth **user**) and Telegram's
-user surface (acting as the **paired user**), then pressure-tested against a
-**bot-only** platform (Discord, where user automation is against ToS). The
-pressure test is the whole point: the supported subset varies, which is *why*
-the manifest must declare it. The vendor column shows which *identity* performs
-the operation (§Context, "the two-identity model").
+Derived from the real Slack tools (acting as the OAuth **user**), then
+pressure-tested against a **bot-only** platform (Discord, where user automation is
+against ToS). The pressure test is the whole point: the supported subset varies,
+which is *why* the manifest must declare it. The vendor column shows which
+*identity* performs the operation (§Context, "the two-identity model").
 
-| Standard tool | Purpose (abstract) | Slack (OAuth user) | Telegram (paired user) | Discord (bot) | Tier |
-| --- | --- | --- | --- | --- | --- |
-| `send_message` | Post a message to a conversation | ✅ | ✅ | ✅ | **core** |
-| `read_history` | Read recent messages of a conversation | ✅ | ✅ (own chats) | ✅ (perms) | **core** |
-| `list_conversations` | Enumerate conversations the identity sees | ✅ | ✅ (dialogs) | ✅ | **core** |
-| `get_user` | Resolve a user reference to profile info | ✅ | ✅ | ✅ | **core** |
-| `search_messages` | Full-text search across messages | ✅ | ✅ | ❌ *no bot search API* | optional |
-| `edit_message` | Edit a previously sent message | ✅ | ✅ | ✅ (own) | optional |
-| `delete_message` | Delete a message | ✅ | ✅ | ✅ | optional |
-| `add_reaction` | React to a message | ✅ | ✅ | ✅ | optional |
+| Standard tool | Purpose (abstract) | Slack (OAuth user) | Discord (bot) | Tier |
+| --- | --- | --- | --- | --- |
+| `send_message` | Post a message to a conversation | ✅ | ✅ | **core** |
+| `read_history` | Read recent messages of a conversation | ✅ | ✅ (perms) | **core** |
+| `list_conversations` | Enumerate conversations the identity sees | ✅ | ✅ | **core** |
+| `get_user` | Resolve a user reference to profile info | ✅ | ✅ | **core** |
+| `search_messages` | Full-text search across messages | ✅ | ❌ *no bot search API* | optional |
+| `edit_message` | Edit a previously sent message | ✅ | ✅ (own) | optional |
+| `delete_message` | Delete a message | ✅ | ✅ | optional |
+| `add_reaction` | React to a message | ✅ | ✅ | optional |
 
 **The core is the baseline of a messaging integration — send, read, list,
-identify — and all four hold across every real chat platform** (Slack-user,
-Telegram-paired, *and* a Discord bot). What varies, and therefore stays optional
-and manifest-declared, is: **search** (genuinely spotty — Slack ✅, Telegram ✅,
+identify — and all four hold across every real chat platform** (a user identity
+like Slack's, *and* even a bot like Discord's). What varies, and therefore stays
+optional and manifest-declared, is: **search** (genuinely spotty — Slack ✅,
 Discord-bot ❌, no bot search API); **mutations** (`edit_message`/`delete_message`)
 and **reactions**, which are widely supported on chat platforms but are
 higher-stakes writes (`external_write`) and the first to disappear on simpler
@@ -177,17 +182,16 @@ independently of the tool itself: the **identity** (a user-acquired identity get
 the full surface; a bot-only platform like Discord is narrower), and the
 extension's own choice (a deliberately read-only or send-only integration).
 **"Core" is a baseline plus a genericity signal, not a mandate** — the manifest
-declares any subset. So a Slack extension and a *paired* Telegram extension both
-declare the full read-rich set; a Discord extension declares everything its bot
-supports (all but `search_messages`).
+declares any subset. So a Slack extension declares the full read-rich set; a
+bot-only extension like Discord declares everything its bot supports (all but
+`search_messages`).
 
 **Reply-in-thread is a parameter, not a tool.** Slack already expresses it as
-`thread_ts` on `send_message`, Telegram as `message_thread_id`, Discord via a
-thread channel id. The framework models it as an optional `thread` field on
-`send_message` (and on `read_history`), **gated by a `supports_threads` flag**
-that extends the existing `[channel.presentation]` descriptor (Slack
-`supports_threads=true`, Telegram `supports_threads=true`,
-`assets/*/manifest.toml`). A dedicated `reply_in_thread` tool is deliberately
+`thread_ts` on `send_message`, Discord via a thread channel id. The framework
+models it as an optional `thread` field on `send_message` (and on `read_history`),
+**gated by a `supports_threads` flag** that extends the existing
+`[channel.presentation]` descriptor (Slack `supports_threads=true`,
+`assets/slack/manifest.toml`). A dedicated `reply_in_thread` tool is deliberately
 not minted.
 
 ---
@@ -602,18 +606,6 @@ owner is a product call (`messaging-framework.md` §13).
   instead of `raw_output.v1.json`. `search_messages` is Slack-specific but is a
   first-class optional profile, so it migrates cleanly. This extends the
   existing Slack tool integration test rather than adding a parallel one.
-- **Telegram — gains user-acting tools via pairing.** Telegram ships **no tools**
-  today (`assets/telegram/manifest.toml`: "No tools, no WASM module") — it is a
-  bot *channel* only. Once its pairing flow yields a user-acquired identity (the
-  connect analogue of Slack's OAuth — the existing `manual_token`/pairing-code
-  modality), it declares the **same read-rich subset** as Slack —
-  `[messaging] profiles = ["send_message","read_history","list_conversations",
-  "get_user","search_messages", …]` — whose tools act as the *paired user*, not
-  the Bot API. The new `ToolAdapter::invoke` reuses the extension crate's pure
-  rendering via the shared messaging core (§6.2), though its transport is the
-  user surface, not the bot channel's Bot API. The tool *definitions/schemas*
-  come free (framework-owned); the per-vendor `invoke` and the pairing credential
-  are the real work. This is the tool-side "addition test."
 - **Discord — the bot-acting contrast + addition test.** Discord does not
   sanction a user-acting identity (user automation violates ToS), so a Discord
   messaging extension's tools act as the **bot** and declare only what a bot
@@ -738,17 +730,14 @@ unavailable → grep/read fallback, per the `ironclaw-reborn-orientation` skill)
 1. **Section shape.** `[messaging]` recipe + expander (recommended) vs. pure
    `[[tools]] implements=` (re-expose v3 fields, no expander)? The latter is
    lower-mechanism but leaves per-tool boilerplate (§2.4).
-2. **Pairing as a credential mechanism.** The identity rule is settled — the
-   tools act as the user-acquired identity, the channel as the bot (§Context,
-   §6.3). What's open is *how a pairing-acquired credential is modeled*: does
-   pairing become a first-class **auth-engine recipe method** (a third alongside
-   `oauth2_code`/`api_key`, `recipe.rs:195`), or stay the separate `manual_token`
-   pairing modality it is today — and what does a paired Telegram tool actually
-   inject (a user session vs. a bearer token), given its transport differs from
-   the bot channel's Bot API (§6.2)?
+2. **Non-OAuth connect (deferred).** Slack uses OAuth, so this is not in scope
+   now. When a future vendor needs a non-OAuth user identity (e.g. pairing), how
+   is that credential modeled — a new auth-engine method vs. the existing
+   `manual_token` modality — and how does its (possibly non-HTTP) transport plug
+   in? Deferred until such a vendor is built.
 3. **Threads as a param vs. a tool**, and whether one `thread` field can
-   faithfully model Slack `thread_ts`, Telegram `message_thread_id` (forum
-   topics), and Discord thread channels without leaking vendor semantics.
+   faithfully model Slack `thread_ts` and Discord thread channels without leaking
+   vendor semantics.
 4. **Output-validation strictness.** Reject non-conforming adapter output (fail
    the tool call) vs. coerce/annotate? And how are the framework ref types
    versioned (`…​.v1` → `…​.v2`) without a wire break?

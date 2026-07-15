@@ -49,8 +49,7 @@ Rules — kept short on purpose (same discipline as `checklist.md`):
 - [ ] MAN-4 `[[messaging.credentials]]` is required when any declared tool has the
   `use_secret` effect; absence fails closed.
 - [ ] MAN-5 The credential `vendor` must resolve to an identity source (an
-  `[auth.<vendor>]` recipe **or** a declared pairing modality); an unresolvable
-  vendor fails activation.
+  `[auth.<vendor>]` recipe); an unresolvable vendor fails activation.
 - [ ] MAN-6 The expander turns each `tools` entry into a `CapabilityDeclV2` with
   id `<ext>.<tool>`, `implements = [profile]`, framework schema refs, framework
   effects/permission, `visibility = Model`, and the declared credentials
@@ -76,7 +75,7 @@ Rules — kept short on purpose (same discipline as `checklist.md`):
 - [ ] VAL-4 A missing/expired credential returns `ToolError::AuthRequired` and
   raises the generic gate (not a silent failure).
 
-## 4. Adapter contract and normalization (ADP) — M0/M2/M3
+## 4. Adapter contract and normalization (ADP) — M0/M2
 
 - [ ] ADP-1 A messaging extension implements only `ToolAdapter::invoke`; no new
   trait is added to the extension ABI.
@@ -122,13 +121,12 @@ Rules — kept short on purpose (same discipline as `checklist.md`):
   without a live approver, `ask` does not resolve to "yes". Driven through a
   proactive run, asserting the denial.
 - [ ] SAFE-7 **Connect gate, not relay:** an outward send with no connected user
-  identity raises the connect/pairing gate and never falls back to a
-  bot-attributed send.
+  identity raises the connect gate and never falls back to a bot-attributed send.
 - [ ] SAFE-8 **Cross-channel identical:** SAFE-1..7 pass with the same assertions
-  for Slack, Telegram, WebUI, and the `acme-messenger` fixture — proof the
-  guarantee is generic, not per-vendor.
+  for Slack, WebUI, and the `acme-messenger` fixture — proof the guarantee is
+  generic, not per-vendor.
 
-## 6. Identity, credentials and connect (ID) — M1/M3
+## 6. Identity, credentials and connect (ID) — M1/M2
 
 - [ ] ID-1 The messaging credential is the user-acquired identity, stored and
   injected host-side; credential bytes never reach the adapter.
@@ -137,28 +135,15 @@ Rules — kept short on purpose (same discipline as `checklist.md`):
   `slack_bot_token` for delivery).
 - [ ] ID-3 OAuth acquisition (Slack) rides the existing `[auth.<vendor>]` engine
   and yields the user token with the declared scopes.
-- [ ] ID-4 Pairing acquisition (Telegram) rides the connect surface and yields a
-  stored session; the gate/resume path resumes the blocked turn on connect.
-- [ ] ID-5 Connect is modeled as a step-based flow covering OAuth and pairing
-  uniformly (design §9); a new vendor's connect is data/steps, not bespoke code.
-- [ ] ID-6 Multi-account resolution (`adr/0001`) applies unchanged: a messaging
+- [ ] ID-4 Multi-account resolution (`adr/0001`) applies unchanged: a messaging
   tool executes under exactly one resolved account.
 
-## 7. Transport (XP) — M0/M3
+## 7. Transport (XP) — M0
 
-- [ ] XP-1 HTTP vendors (Slack) drive `invoke` through the existing
-  `RestrictedEgress` port with host-side credential injection and host allowlist —
-  no new transport mechanism.
-- [ ] XP-2 A host-side Telegram-user (MTProto/TDLib) client exists behind a narrow
-  adapter-facing port; the adapter never speaks MTProto directly and never holds
-  session bytes.
-- [ ] XP-3 The Telegram session persists across process restarts and is encrypted
-  at rest; revocation/logout is supported and observable.
-- [ ] XP-4 `list_conversations`/`read_history`/`search_messages` for Telegram work
-  on the first call after pairing (getDialogs bootstrap), with no background
-  message-mirror requirement.
-- [ ] XP-5 Telegram bounded caveats (cold reference resolve, `FLOOD_WAIT`, secret
-  chats invisible) surface as recoverable `ToolError::Failed`, never terminal.
+- [ ] XP-1 Slack drives `invoke` through the existing `RestrictedEgress` port with
+  host-side credential injection and host allowlist — no new transport mechanism.
+- [ ] XP-2 A future non-HTTP vendor's host-side transport is out of scope; the tool
+  contract stays transport-independent (design §8).
 
 ## 8. Discovery / anti-bloat (DISC) — M0
 
@@ -197,31 +182,19 @@ Rules — kept short on purpose (same discipline as `checklist.md`):
   never-deliver-the-final-answer safety text (G1); asserted present in the shipped
   package prompt.
 
-## 10. Telegram — new user-acting tools (TG) — M3
-
-- [ ] TG-1 Telegram declares a `[messaging]` block acting as the paired user
-  (not the Bot API); the channel surface is unchanged.
-- [ ] TG-2 Each declared Telegram tool's `invoke` returns schema-valid normalized
-  output through the host MTProto client.
-- [ ] TG-3 Telegram reuses the extension crate's rendering core (shared with
-  `deliver`); no duplicated formatting.
-- [ ] TG-4 One end-to-end integration proof: pair → `list_conversations` →
-  `read_history` → `send_message` (to a non-owner) through the production
-  dispatcher.
-
-## 11. Testing and conformance suite (TEST) — all phases
+## 10. Testing and conformance suite (TEST) — all phases
 
 - [ ] TEST-1 A reusable messaging **conformance suite** exists (vendors as rows,
   scripted backend), asserting input-schema adherence and schema-valid normalized
-  output per declared tool. Slack, Telegram, and `acme-messenger` run it.
+  output per declared tool. Slack and `acme-messenger` run it.
 - [ ] TEST-2 The `acme-messenger` fixture declares `[messaging]` and drives every
   generic path end-to-end (install → connect → invoke → normalized output),
   proving no generic path needs a real product.
 - [ ] TEST-3 The CRITICAL cross-channel relay/act test (SAFE-8) is green in CI.
-- [ ] TEST-4 Persistence (Telegram session, resolution cache) passes on both DB
-  backends.
+- [ ] TEST-4 Persistence (the resolution cache and any scoped tool state) passes
+  on both DB backends.
 
-## 12. Architecture gates and genericity (GATE) — M4
+## 11. Architecture gates and genericity (GATE) — M3
 
 - [ ] GATE-1 No messaging tool id, profile id, or vendor name appears in a generic
   crate (`ironclaw_architecture` specificity gate extended; allowlist → zero).
@@ -229,7 +202,7 @@ Rules — kept short on purpose (same discipline as `checklist.md`):
   messaging extension crate; generic workspace still builds and tests) passes.
 - [ ] GATE-3 The retired-taxonomy and dependency-direction gates still pass.
 
-## 13. Docs and rollout (DOC) — M4
+## 12. Docs and rollout (DOC) — M3
 
 - [ ] DOC-1 `messaging-framework.md` and this checklist reflect the shipped design;
   `adr/0002` status updated when accepted.

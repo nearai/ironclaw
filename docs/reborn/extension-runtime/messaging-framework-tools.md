@@ -43,7 +43,7 @@ or listed as a conscious drop.
       "properties": {
         "id":           { "type": "string", "description": "Opaque vendor user id (round-trippable; pass back to get_user / mentions)." },
         "display_name": { "type": "string", "description": "Resolved human name. Mapping rule: the vendor's best full/real name, else the chosen display name, else the handle. Always present — the adapter resolves it even at the cost of an extra lookup." },
-        "username":     { "type": "string", "description": "Handle without a leading @, where the platform has one (Slack `name`, Telegram `username`)." },
+        "username":     { "type": "string", "description": "Handle without a leading @, where the platform has one (e.g. Slack `name`)." },
         "is_bot":       { "type": "boolean", "description": "True if this user is a bot/app account." }
       }
     },
@@ -53,7 +53,7 @@ or listed as a conscious drop.
       "additionalProperties": false,
       "properties": {
         "id":      { "type": "string", "description": "Opaque conversation id. Pass to read_history / send_message." },
-        "kind":    { "type": "string", "enum": ["dm", "group", "channel"], "description": "dm = 1:1; group = multi-person private chat (Slack mpim, Telegram group); channel = named/broadcast channel (Slack public/private channel, Telegram channel)." },
+        "kind":    { "type": "string", "enum": ["dm", "group", "channel"], "description": "dm = 1:1; group = multi-person private chat (Slack mpim); channel = named/broadcast channel (Slack public/private channel)." },
         "title":   { "type": "string", "description": "Name of a group/channel; for a dm, the other participant's display name." },
         "private": { "type": "boolean", "description": "For a channel/group: true if private/invite-only, false if public. Omitted when the platform has no public/private distinction." }
       }
@@ -63,7 +63,7 @@ or listed as a conscious drop.
       "required": ["id", "conversation"],
       "additionalProperties": false,
       "properties": {
-        "id":           { "type": "string", "description": "Message id — unique WITHIN its conversation, not globally (Slack ts, Telegram message_id)." },
+        "id":           { "type": "string", "description": "Message id — unique WITHIN its conversation, not globally (e.g. Slack ts)." },
         "conversation": { "type": "string", "description": "ConversationRef.id this message belongs to." },
         "thread":       { "type": "string", "description": "Thread id, when the message sits in a thread." }
       }
@@ -484,9 +484,11 @@ out `ts`→`ref.id`+`created_at`✓＋ · `text`✓ · `user`→`author`(resolve
 
 ## Appendix B — cross-check (what is and isn't chat-messaging)
 
-Grepped every first-party manifest. Chat-messaging (framework scope): **Slack**
-(migrates), **Telegram** (gains — currently channel-only, 0 tools). **Not**
-chat-messaging, deliberately excluded:
+Grepped every first-party manifest. Chat-messaging in framework scope: **Slack**
+— the only consumer now (migrates its 5 tools). A future chat platform (e.g.
+Discord, or Telegram once it has a user-acting identity) would declare
+`[messaging]` the same way, no framework change. **Not** chat-messaging,
+deliberately excluded:
 
 - **Gmail** (`gmail.send_message`, `reply_to_message`, `list_messages`, …) — email:
   no chat conversation model, no reactions, threading is different. Stays bespoke
@@ -495,5 +497,5 @@ chat-messaging, deliberately excluded:
   search, not chat.
 - **web-access** (`search`) — web search.
 
-No other extension exposes a chat send/read/react surface; only Slack and Telegram
-declare `[messaging]`.
+No other extension exposes a chat send/read/react surface; only Slack declares
+`[messaging]` today.
