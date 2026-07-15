@@ -4,6 +4,7 @@ import { useT } from "../../../lib/i18n";
 import { Panel } from "../../../design-system/primitives";
 import { Button } from "../../../design-system/button";
 import { Input } from "../../../design-system/input";
+import { Modal, ModalBody, ModalFooter } from "../../../design-system/modal";
 import { useAdminUserSecrets } from "../hooks/useAdminUsers";
 
 export function UserSecretsPanel({ userId }) {
@@ -18,7 +19,10 @@ export function UserSecretsPanelView({
   deleteSecret,
   isSaving,
   isDeleting,
-  mutationError,
+  putError,
+  deleteError,
+  resetPut,
+  resetDelete,
 }) {
   const t = useT();
   const [handle, setHandle] = React.useState("");
@@ -26,24 +30,29 @@ export function UserSecretsPanelView({
   const [success, setSuccess] = React.useState("");
   const [pendingDelete, setPendingDelete] = React.useState(null);
   const normalizedHandle = handle.trim();
+  const isMutating = isSaving || isDeleting;
 
   const handleSubmit = async (event) => {
     event.preventDefault();
-    if (!normalizedHandle || value.length === 0) return;
+    if (!normalizedHandle || value.length === 0 || isMutating) return;
     setSuccess("");
+    resetPut?.();
+    resetDelete?.();
     try {
       await putSecret(normalizedHandle, value);
       setHandle("");
       setValue("");
       setSuccess(t("admin.user.secrets.saved", { handle: normalizedHandle }));
     } catch (_) {
-      // The mutation exposes its sanitized error through `mutationError`.
+      // The mutation exposes its sanitized error through `putError`.
     }
   };
 
   const handleDelete = async () => {
-    if (!pendingDelete) return;
+    if (!pendingDelete || isMutating) return;
     setSuccess("");
+    resetPut?.();
+    resetDelete?.();
     try {
       await deleteSecret(pendingDelete);
       setSuccess(t("admin.user.secrets.deleted", { handle: pendingDelete }));
@@ -57,6 +66,19 @@ export function UserSecretsPanelView({
     setHandle(secretHandle);
     setValue("");
     setSuccess("");
+    resetPut?.();
+  };
+
+  const beginDelete = (secretHandle) => {
+    setPendingDelete(secretHandle);
+    setSuccess("");
+    resetDelete?.();
+  };
+
+  const closeDelete = () => {
+    if (isDeleting) return;
+    setPendingDelete(null);
+    resetDelete?.();
   };
 
   return (
@@ -102,6 +124,7 @@ export function UserSecretsPanelView({
                   size="sm"
                   data-testid="admin-secret-replace"
                   data-secret-handle={secret.handle}
+                  disabled={isMutating}
                   onClick={() => beginReplace(secret.handle)}
                 >
                   {t("admin.user.secrets.replace")}
@@ -112,7 +135,8 @@ export function UserSecretsPanelView({
                   size="sm"
                   data-testid="admin-secret-delete"
                   data-secret-handle={secret.handle}
-                  onClick={() => setPendingDelete(secret.handle)}
+                  disabled={isMutating}
+                  onClick={() => beginDelete(secret.handle)}
                 >
                   {t("admin.user.secrets.delete")}
                 </Button>
@@ -136,6 +160,7 @@ export function UserSecretsPanelView({
               onChange={(event) => {
                 setHandle(event.currentTarget.value);
                 setSuccess("");
+                resetPut?.();
               }}
               autoComplete="off"
               spellCheck={false}
@@ -155,6 +180,7 @@ export function UserSecretsPanelView({
               onChange={(event) => {
                 setValue(event.currentTarget.value);
                 setSuccess("");
+                resetPut?.();
               }}
               autoComplete="new-password"
               spellCheck={false}
@@ -169,7 +195,7 @@ export function UserSecretsPanelView({
           type="submit"
           size="sm"
           loading={isSaving}
-          disabled={!normalizedHandle || value.length === 0}
+          disabled={isMutating || !normalizedHandle || value.length === 0}
           data-testid="admin-secret-save"
         >
           {isSaving
@@ -187,51 +213,55 @@ export function UserSecretsPanelView({
           {success}
         </p>
       )}
-      {mutationError && (
+      {putError && (
         <p className="mt-4 text-sm text-red-200" role="alert">
-          {t("admin.user.secrets.actionFailed", { message: mutationError.message })}
+          {t("admin.user.secrets.actionFailed", { message: putError.message })}
         </p>
       )}
 
       {pendingDelete && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
-          data-testid="admin-secret-delete-dialog"
-          onClick={() => !isDeleting && setPendingDelete(null)}
+        <Modal
+          open
+          onClose={closeDelete}
+          title={t("admin.user.secrets.deleteTitle")}
+          size="sm"
         >
-          <div
-            className="w-full max-w-md rounded-xl border border-iron-700 bg-iron-900 p-6"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <h3 className="text-lg font-semibold text-iron-100">
-              {t("admin.user.secrets.deleteTitle")}
-            </h3>
-            <p className="mt-2 text-sm text-iron-300">
-              {t("admin.user.secrets.deleteDesc", { handle: pendingDelete })}
-            </p>
-            <div className="mt-5 flex justify-end gap-2">
-              <Button
-                type="button"
-                variant="ghost"
-                disabled={isDeleting}
-                onClick={() => setPendingDelete(null)}
-              >
-                {t("admin.users.cancel")}
-              </Button>
-              <Button
-                type="button"
-                variant="danger"
-                loading={isDeleting}
-                data-testid="admin-secret-delete-confirm"
-                onClick={handleDelete}
-              >
-                {isDeleting
-                  ? t("admin.user.secrets.deleting")
-                  : t("admin.user.secrets.delete")}
-              </Button>
+          <ModalBody>
+            <div data-testid="admin-secret-delete-dialog">
+              <p className="mt-2 text-sm text-iron-300">
+                {t("admin.user.secrets.deleteDesc", { handle: pendingDelete })}
+              </p>
+              {deleteError && (
+                <p className="mt-4 text-sm text-red-200" role="alert">
+                  {t("admin.user.secrets.actionFailed", { message: deleteError.message })}
+                </p>
+              )}
             </div>
-          </div>
-        </div>
+          </ModalBody>
+          <ModalFooter>
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={isDeleting}
+              data-testid="admin-secret-delete-cancel"
+              onClick={closeDelete}
+            >
+              {t("admin.users.cancel")}
+            </Button>
+            <Button
+              type="button"
+              variant="danger"
+              loading={isDeleting}
+              disabled={isMutating}
+              data-testid="admin-secret-delete-confirm"
+              onClick={handleDelete}
+            >
+              {isDeleting
+                ? t("admin.user.secrets.deleting")
+                : t("admin.user.secrets.delete")}
+            </Button>
+          </ModalFooter>
+        </Modal>
       )}
     </Panel>
   );

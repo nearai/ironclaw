@@ -114,6 +114,9 @@ export function useAdminUserSecrets(userId) {
     deleteSecret: deleteMutation.mutateAsync,
     isSaving: putMutation.isPending,
     isDeleting: deleteMutation.isPending,
-    mutationError: putMutation.error || deleteMutation.error,
+    putError: putMutation.error,
+    deleteError: deleteMutation.error,
+    resetPut: putMutation.reset,
+    resetDelete: deleteMutation.reset,
   };
 }

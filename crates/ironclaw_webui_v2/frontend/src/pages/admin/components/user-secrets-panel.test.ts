@@ -9,21 +9,18 @@ function visit(node, fn) {
     for (const item of node) visit(item, fn);
     return;
   }
-  if (!node || typeof node !== "object") return;
+  if (node == null) return;
   fn(node);
-  if (Array.isArray(node.values)) {
-    for (const value of node.values) visit(value, fn);
+  if (typeof node === "object") {
+    for (const value of Object.values(node)) visit(value, fn);
   }
 }
 
 function collectScalars(root) {
   const scalars = [];
-  visit(root, (node) => {
-    if (!Array.isArray(node.values)) return;
-    for (const value of node.values) {
-      if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-        scalars.push(value);
-      }
+  visit(root, (value) => {
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      scalars.push(value);
     }
   });
   return scalars;
@@ -32,7 +29,7 @@ function collectScalars(root) {
 function findByTestId(root, testId, handle) {
   let found = null;
   visit(root, (node) => {
-    if (found || node.props?.["data-testid"] !== testId) return;
+    if (found || typeof node !== "object" || node.props?.["data-testid"] !== testId) return;
     if (handle !== undefined && node.props?.["data-secret-handle"] !== handle) return;
     found = node;
   });
@@ -42,7 +39,7 @@ function findByTestId(root, testId, handle) {
 function createHarness(overrides = {}) {
   const state = [];
   let cursor = 0;
-  const calls = { put: [], delete: [] };
+  const calls = { put: [], delete: [], resetPut: 0, resetDelete: 0 };
   const React = {
     useState(initial) {
       const index = cursor;
@@ -67,6 +64,9 @@ function createHarness(overrides = {}) {
     {
       Button: function Button() {},
       Input: function Input() {},
+      Modal: function Modal() {},
+      ModalBody: function ModalBody() {},
+      ModalFooter: function ModalFooter() {},
       Panel: function Panel() {},
       React,
       useT: () => translate,
@@ -80,7 +80,10 @@ function createHarness(overrides = {}) {
     deleteSecret: async (handle) => calls.delete.push(handle),
     isSaving: false,
     isDeleting: false,
-    mutationError: null,
+    putError: null,
+    deleteError: null,
+    resetPut: () => { calls.resetPut += 1; },
+    resetDelete: () => { calls.resetDelete += 1; },
     ...overrides,
   };
 
@@ -101,6 +104,7 @@ test("secrets panel renders handles without exposing returned secret material", 
 
   const rendered = harness.render();
   const scalars = collectScalars(rendered);
+  assert.ok(collectScalars({ props: { "data-secret": sensitive } }).includes(sensitive));
   assert.ok(scalars.includes("openai_api_key"));
   assert.ok(!scalars.includes(sensitive));
   assert.ok(findByTestId(rendered, "admin-secret-row", "openai_api_key"));
@@ -157,9 +161,54 @@ test("secrets panel exposes loading and sanitized failure states", () => {
   assert.ok(collectScalars(loading).includes("admin.user.secrets.loading"));
 
   const failed = createHarness({
-    mutationError: { message: "request failed" },
+    putError: { message: "request failed" },
   }).render();
   assert.ok(
     collectScalars(failed).includes("admin.user.secrets.actionFailed:request failed"),
   );
+});
+
+test("secrets panel keeps delete failures in the confirmation modal", () => {
+  const harness = createHarness({
+    secrets: [{ handle: "github_token" }],
+    deleteError: { message: "delete failed" },
+  });
+  let rendered = harness.render();
+  assert.ok(!collectScalars(rendered).includes("admin.user.secrets.actionFailed:delete failed"));
+
+  findByTestId(rendered, "admin-secret-delete", "github_token").props.onClick();
+  rendered = harness.render();
+  assert.ok(findByTestId(rendered, "admin-secret-delete-dialog"));
+  assert.ok(
+    collectScalars(rendered).includes("admin.user.secrets.actionFailed:delete failed"),
+  );
+});
+
+test("secrets panel resets stale errors and prevents concurrent mutations", () => {
+  for (const pendingState of [{ isSaving: true }, { isDeleting: true }]) {
+    const harness = createHarness({
+      secrets: [{ handle: "github_token" }],
+      ...pendingState,
+    });
+    const pending = harness.render();
+    assert.equal(
+      findByTestId(pending, "admin-secret-replace", "github_token").props.disabled,
+      true,
+    );
+    assert.equal(
+      findByTestId(pending, "admin-secret-delete", "github_token").props.disabled,
+      true,
+    );
+    assert.equal(findByTestId(pending, "admin-secret-save").props.disabled, true);
+  }
+
+  const editable = createHarness({ secrets: [{ handle: "github_token" }] });
+  let rendered = editable.render();
+  findByTestId(rendered, "admin-secret-handle").props.onChange({
+    currentTarget: { value: "github_token" },
+  });
+  rendered = editable.render();
+  findByTestId(rendered, "admin-secret-delete", "github_token").props.onClick();
+  assert.equal(editable.calls.resetPut, 1);
+  assert.equal(editable.calls.resetDelete, 1);
 });
