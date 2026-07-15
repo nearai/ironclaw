@@ -671,13 +671,15 @@ registerPack("en", {
   "workspace.noFiles": "No files here.",
   "workspace.noMatches": "Nothing matches that filter.",
   "workspace.breadcrumbRoot": "workspace",
+  "workspace.area.home": "Home",
+  "workspace.area.memory": "Memory",
   "workspace.pickFileTitle": "Pick a file",
   "workspace.pickFileDesc": "Choose a file from the tree to preview or download it. This viewer is read-only.",
   "workspace.parent": "Parent: {path}",
   "workspace.download": "Download",
   "workspace.binaryPreviewUnavailable":
     "No inline preview for this file type. Download it to view the contents.",
-  "workspace.fileMeta": "{mime} · {size} bytes",
+  "workspace.fileMeta": "{mime} · {size}",
   "workspace.unableOpenDirectory": "Unable to open directory",
 
   // Jobs page

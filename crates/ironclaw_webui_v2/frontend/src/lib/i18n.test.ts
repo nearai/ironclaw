@@ -230,6 +230,21 @@ test("locale packs include skill auto-activation controls", () => {
   }
 });
 
+test("locale packs include workspace area labels and accept a formatted size", () => {
+  for (const locale of LOCALES) {
+    const pack = loadLocalePack(locale);
+    for (const key of ["workspace.area.home", "workspace.area.memory"]) {
+      assert.equal(typeof pack[key], "string", `${locale} missing ${key}`);
+      assert.notEqual(pack[key].trim(), "", `${locale} ${key} should not be empty`);
+    }
+    assert.equal(
+      pack["workspace.fileMeta"],
+      "{mime} · {size}",
+      `${locale} must not append a raw byte unit to the formatted size`,
+    );
+  }
+});
+
 test("zh-CN localizes Reborn settings copy and compact automation filters", () => {
   const pack = loadLocalePack("zh-CN");
 
