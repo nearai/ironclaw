@@ -1,6 +1,88 @@
 use super::*;
 
 #[tokio::test]
+async fn webui_event_subscription_emits_blocked_turn_before_runtime_items() {
+    let tenant_id = TenantId::new("webui-events-subscription-tenant").unwrap();
+    let user_id = UserId::new("webui-events-subscription-user").unwrap();
+    let agent_id = AgentId::new("webui-events-subscription-agent").unwrap();
+    let thread_id = ThreadId::new("webui-events-subscription-thread").unwrap();
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let run_id = TurnRunId::new();
+    let gate_ref = GateRef::new("gate:approval-subscription").unwrap();
+    let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-events-subscription-reply").unwrap(),
+    )
+    .with_turn_events(
+        Arc::new(FakeTurnEventSource {
+            events: vec![TurnLifecycleEvent {
+                cursor: TurnEventCursor(1),
+                scope: scope.clone(),
+                occurred_at: Some(chrono::Utc::now()),
+                owner_user_id: Some(user_id.clone()),
+                run_id,
+                status: TurnStatus::BlockedApproval,
+                kind: TurnEventKind::Blocked,
+                blocked_gate: Some(TurnBlockedGateMetadata {
+                    gate_ref: gate_ref.clone(),
+                    gate_kind: TurnBlockedGateKind::Approval,
+                    activity_id: None,
+                    credential_requirements: Vec::new(),
+                }),
+                sanitized_reason: Some("capability requires approval".to_string()),
+                detail: None,
+                retryable: None,
+            }],
+        }),
+        Arc::new(FakeTurnCoordinator {
+            state: TurnRunState {
+                status: TurnStatus::BlockedApproval,
+                gate_ref: Some(gate_ref.clone()),
+                ..turn_run_state(&scope, &user_id, run_id, TurnEventCursor(1))
+            },
+        }),
+    );
+
+    let mut subscription = services
+        .webui_event_stream()
+        .subscribe(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    let first = tokio::time::timeout(Duration::from_millis(100), subscription.next())
+        .await
+        .expect("blocked turn projection should be emitted without waiting for runtime items")
+        .expect("subscription should stay open")
+        .expect("projection event should succeed");
+
+    assert!(matches!(
+        first.payload(),
+        ProductOutboundPayload::ProjectionUpdate { state }
+            if state.items.iter().any(|item| matches!(
+                item,
+                ProductProjectionItem::Gate {
+                    run_id: projected_run_id,
+                    gate_kind,
+                    gate_ref: projected_gate_ref,
+                    ..
+                } if *projected_run_id == run_id
+                    && *gate_kind == ProductGateKind::Approval
+                    && projected_gate_ref == gate_ref.as_str()
+            ))
+    ));
+}
+
+#[tokio::test]
 async fn webui_event_stream_resumes_after_serialized_projection_cursor() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
