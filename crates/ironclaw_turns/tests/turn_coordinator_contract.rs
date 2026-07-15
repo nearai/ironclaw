@@ -265,6 +265,7 @@ fn subagent_capability_outcomes_round_trip_model_observation() {
             preview: Some("first bounded chunk".to_string()),
             total_bytes: Some(4_096),
             next_offset: Some(2_048),
+            item_count: None,
         },
         artifacts: Vec::new(),
         recovery: None,
@@ -468,6 +469,51 @@ async fn prepare_turn_mints_ids_without_side_effects_and_submit_binds_requested_
     collision.requested_run_id = Some(first);
     let err = coordinator.submit_turn(collision).await.unwrap_err();
     assert!(matches!(err, TurnError::Conflict { .. }));
+}
+
+#[tokio::test]
+async fn submit_turn_records_advisory_model_route_from_requested_model() {
+    let (coordinator, _store) = coordinator();
+    let mut request = submit_request("thread-model-select", "idem-model-select");
+    request.requested_model = Some("gpt-4o".to_string());
+
+    let run_id = accepted_run_id(&coordinator.submit_turn(request).await.unwrap());
+
+    let state = coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: scope("thread-model-select"),
+            run_id,
+        })
+        .await
+        .unwrap();
+    let route = state
+        .resolved_model_route
+        .expect("advisory model route recorded from requested_model");
+    assert_eq!(route.model_id, "gpt-4o");
+    assert!(
+        route.is_advisory(),
+        "a caller-requested model is an advisory route, not an operator-resolved one"
+    );
+}
+
+#[tokio::test]
+async fn submit_turn_without_requested_model_records_no_route() {
+    let (coordinator, _store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-no-model", "idem-no-model"))
+            .await
+            .unwrap(),
+    );
+
+    let state = coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: scope("thread-no-model"),
+            run_id,
+        })
+        .await
+        .unwrap();
+    assert!(state.resolved_model_route.is_none());
 }
 
 #[tokio::test]
@@ -7083,6 +7129,7 @@ async fn complete_queued_run(store: &InMemoryTurnStateStore, run_id: TurnRunId, 
 
 fn submit_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest {
     SubmitTurnRequest {
+        requested_model: None,
         scope: scope(thread),
         actor: actor(),
         accepted_message_ref: AcceptedMessageRef::new(format!("message-{thread}")).unwrap(),

@@ -1112,7 +1112,7 @@ fn composition_runtime_has_no_slack_output_policy() {
     );
 
     let aliased_multiline_policy = r#"
-        use ironclaw_loop_support::HostManagedModelGateway as ModelGateway;
+        use ironclaw_loop_host::HostManagedModelGateway as ModelGateway;
         struct SlackEntityPolicyGateway;
         impl
             ModelGateway

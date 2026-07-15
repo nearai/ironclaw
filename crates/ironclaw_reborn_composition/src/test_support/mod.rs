@@ -52,6 +52,11 @@
 //! 14. [`result_read`] — `wrap_result_read_capability_for_test`, the
 //!     production `result_read` synthetic-capability wrap, for the same
 //!     durable tool-result projection coverage (issue #5838).
+//! 15. [`slack_channel_connection`] — `build_slack_channel_connection_for_test`,
+//!     [`SlackChannelConnectionTestBundle`] — the REAL Slack channel-connection
+//!     facade over durable host state, late-bound into the extension-lifecycle
+//!     cleanup slot, plus an OAuth-callback-shaped connect for the channel
+//!     lifecycle state machine (C-SLACK-LIFECYCLE seam, issue #6105).
 
 mod automation;
 mod budget_gateway;
@@ -65,6 +70,8 @@ mod projection;
 mod refreshing_capability_port;
 mod result_read;
 mod skill_activation;
+#[cfg(feature = "slack-v2-host-beta")]
+mod slack_channel_connection;
 mod trace_capture;
 mod trigger_materializer;
 mod user_profile;
@@ -117,6 +124,11 @@ pub use result_read::{RESULT_READ_CAPABILITY_ID, wrap_result_read_capability_for
 pub use skill_activation::{
     SKILL_ACTIVATE_CAPABILITY_ID, SkillActivationTestSource,
     build_local_dev_skill_context_source_for_test,
+};
+#[cfg(all(feature = "test-support", feature = "slack-v2-host-beta"))]
+pub use slack_channel_connection::{
+    SlackChannelConnectionTestBundle, SlackChannelConnectionTestConfig,
+    build_slack_channel_connection_for_test,
 };
 #[cfg(feature = "test-support")]
 pub use trace_capture::trace_capture_turn_event_sink_for_test;

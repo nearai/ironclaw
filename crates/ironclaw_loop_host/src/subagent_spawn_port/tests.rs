@@ -3373,6 +3373,7 @@ async fn spawn_subagent_propagates_result_metadata_from_result_writer() {
             preview: Some("first bounded chunk".to_string()),
             total_bytes: Some(fixed_byte_len * 2),
             next_offset: Some(fixed_byte_len),
+            item_count: None,
         },
         artifacts: Vec::new(),
         recovery: None,

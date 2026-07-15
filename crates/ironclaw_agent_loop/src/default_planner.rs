@@ -397,6 +397,10 @@ mod tests {
                 drop_through_seq: 5,
                 preserve_tail_tokens: 1,
                 deadline_ms: 7,
+                effectiveness_baseline:
+                    crate::state::CompactionEffectivenessBaseline::PreCompactionPromptTokens {
+                        tokens: 80,
+                    },
             }
         );
     }

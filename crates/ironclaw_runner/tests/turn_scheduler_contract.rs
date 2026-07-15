@@ -2297,6 +2297,7 @@ where
 
 fn submit_turn_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest {
     SubmitTurnRequest {
+        requested_model: None,
         scope: scope(thread),
         actor: TurnActor::new(UserId::new("user1").unwrap()),
         accepted_message_ref: AcceptedMessageRef::new(format!("message-{thread}")).unwrap(),

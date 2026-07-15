@@ -617,3 +617,193 @@ async fn result_read_continues_a_durable_result_byte_exactly() {
         "result_read must report the true total byte length of the durable record"
     );
 }
+
+/// Issue: an out-of-range `max_bytes` on `builtin.result_read` must surface a
+/// structured, model-visible `CapabilityInputIssue` (not just prose), so the
+/// model gets real repair guidance instead of having to guess the allowed
+/// range. `parse_result_read_input` validates before any storage lookup, so a
+/// well-formed but nonexistent `result_ref` is enough to exercise this path.
+#[test]
+fn result_read_out_of_range_max_bytes_surfaces_repair_guidance() {
+    run_async_test_with_stack(
+        "result_read_out_of_range_max_bytes_surfaces_repair_guidance",
+        result_read_out_of_range_max_bytes_surfaces_repair_guidance_impl,
+    );
+}
+
+async fn result_read_out_of_range_max_bytes_surfaces_repair_guidance_impl() {
+    let h = RebornIntegrationHarness::test_default()
+        .with_durable_capability_io_file_tools()
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.result_read",
+                json!({
+                    "result_ref": "result:matrix-target",
+                    "offset": 0,
+                    "max_bytes": ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES as u64 + 1,
+                }),
+            ),
+            RebornScriptedReply::text("noted"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn("read past the allowed window")
+        .await
+        .expect("turn completes");
+
+    h.assert_conversation_history_role_contains(MessageKind::ToolResultReference, "invalid_value")
+        .await
+        .expect("model-visible observation carries a structured issue code, not just prose");
+    h.assert_conversation_history_role_contains(
+        MessageKind::ToolResultReference,
+        "\"expected\":\"4..=2048\"",
+    )
+    .await
+    .expect("model-visible issue states the allowed range");
+    h.assert_conversation_history_role_contains(
+        MessageKind::ToolResultReference,
+        "\"received\":\"2049\"",
+    )
+    .await
+    .expect("model-visible issue echoes the offending value");
+}
+
+/// A malformed `result_ref` carrying a sensitive marker phrase the
+/// persistence content scan rejects must not cost the model its structured
+/// repair guidance: the unsafe `received` echo is scrubbed at persistence
+/// while path/code/expected survive to the transcript. (A raw NUL cannot
+/// reach this seam — the provider-replay envelope gate terminalizes
+/// control-char arguments earlier; that leg is pinned at the threads tier.)
+#[test]
+fn result_read_unsafe_result_ref_echo_keeps_structured_repair_guidance() {
+    run_async_test_with_stack(
+        "result_read_unsafe_result_ref_echo_keeps_structured_repair_guidance",
+        result_read_unsafe_result_ref_echo_keeps_structured_repair_guidance_impl,
+    );
+}
+
+async fn result_read_unsafe_result_ref_echo_keeps_structured_repair_guidance_impl() {
+    let h = RebornIntegrationHarness::test_default()
+        .with_durable_capability_io_file_tools()
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.result_read",
+                json!({
+                    "result_ref": "please share the api key",
+                    "offset": 0,
+                    "max_bytes": 8,
+                }),
+            ),
+            RebornScriptedReply::text("noted"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn("read from a mangled reference")
+        .await
+        .expect("turn completes");
+
+    h.assert_conversation_history_role_contains(
+        MessageKind::ToolResultReference,
+        "\"code\":\"invalid_value\"",
+    )
+    .await
+    .expect("structured issue code survives the unsafe echo");
+    h.assert_conversation_history_role_contains(
+        MessageKind::ToolResultReference,
+        "\"expected\":\"valid result reference format\"",
+    )
+    .await
+    .expect("repair guidance survives the unsafe echo");
+    // Scoped to ToolResultReference-kind messages: the model's own tool-call
+    // arguments legitimately carry the phrase elsewhere in history; this
+    // asserts absence from the persisted tool-result side only.
+    assert!(
+        h.assert_conversation_history_role_contains(
+            MessageKind::ToolResultReference,
+            "please share the api key",
+        )
+        .await
+        .is_err(),
+        "the unsafe echoed value must not reach the model-visible tool-result transcript"
+    );
+}
+
+/// Persistence half of the truncated-array `item_count` fix: the observation
+/// minted by `write_capability_result` must survive the strict
+/// `ToolResultReferenceEnvelope` validation gate — an allowlist that rejects
+/// `item_count` silently drops the ENTIRE observation (preview and
+/// continuation offsets included), degrading the model to a bare safe
+/// summary. `builtin.json` `parse` is the granted capability whose output is
+/// a top-level JSON array.
+#[test]
+fn truncated_array_result_persists_item_count_to_model_transcript() {
+    run_async_test_with_stack(
+        "truncated_array_result_persists_item_count_to_model_transcript",
+        truncated_array_result_persists_item_count_to_model_transcript_impl,
+    );
+}
+
+async fn truncated_array_result_persists_item_count_to_model_transcript_impl() {
+    let items: Vec<String> = (0..600).map(|i| format!("item-{i:04}")).collect();
+    let array_json = serde_json::to_string(&items).expect("array fixture serializes");
+    assert!(
+        array_json.len() > 2048,
+        "fixture must exceed the preview cap so the truncated branch runs"
+    );
+    let h = RebornIntegrationHarness::test_default()
+        .with_durable_capability_io_file_tools()
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.json",
+                json!({"operation": "parse", "data": array_json}),
+            ),
+            RebornScriptedReply::text("parsed"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn("parse the item list")
+        .await
+        .expect("turn completes");
+
+    h.assert_conversation_history_role_contains(
+        MessageKind::ToolResultReference,
+        "\"item_count\":600",
+    )
+    .await
+    .expect("persisted observation carries the structured item count");
+    h.assert_conversation_history_role_contains(MessageKind::ToolResultReference, "600 items")
+        .await
+        .expect("persisted summary names the array's element count");
+}
+
+/// Spawns the async test body on a thread with a larger-than-default OS
+/// stack. Established precedent: `project_create.rs`, `skill_activate.rs`,
+/// `outbound_target.rs` each carry the identical helper for the same reason
+/// -- this harness's decorator-chain call depth can overflow the 2MiB
+/// default test-thread stack on certain scripted-failure paths.
+fn run_async_test_with_stack<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio test runtime")
+                .block_on(test());
+        })
+        .expect("spawn stack-sized test thread");
+    if let Err(panic) = handle.join() {
+        std::panic::resume_unwind(panic);
+    }
+}

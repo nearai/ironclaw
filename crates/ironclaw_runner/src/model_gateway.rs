@@ -1,3 +1,4 @@
+// arch-exempt: large_file, targeted model error mapping stays with the gateway adapter, plan #4088
 //! LLM provider-backed Reborn model gateway wiring.
 //!
 //! The loop-host crate owns the host-facing model gateway contract. This
@@ -49,6 +50,13 @@ use ironclaw_turns::{
     },
 };
 use tracing::debug;
+
+mod prompt_cache_activity;
+
+use prompt_cache_activity::{
+    ModelCallCacheUsage, PromptCacheActivityLog, PromptCacheCallScope,
+    system_prompt_cache_signature, tool_definitions_cache_signature,
+};
 
 use crate::{
     failure_categories::MODEL_CREDITS_EXHAUSTED_REASON_KIND,
@@ -345,6 +353,7 @@ where
     provider: Arc<P>,
     policy: LlmModelProfilePolicy,
     provider_turn_sequence: Arc<AtomicU64>,
+    prompt_cache_activity: Arc<PromptCacheActivityLog>,
 }
 
 impl<P> LlmProviderModelGateway<P>
@@ -366,7 +375,12 @@ where
             provider,
             policy,
             provider_turn_sequence: Arc::new(AtomicU64::new(1)),
+            prompt_cache_activity: Arc::new(PromptCacheActivityLog::default()),
         }
+    }
+
+    fn prompt_cache_scope(&self, run_id: TurnRunId) -> PromptCacheCallScope {
+        PromptCacheCallScope::new(Arc::clone(&self.prompt_cache_activity), run_id)
     }
 }
 
@@ -388,7 +402,14 @@ where
                     "model profile is not permitted",
                 )
             })?;
-        let model_override = request_model_override(route, self.provider.as_ref())?;
+        let model_override = request_model_override(
+            route,
+            self.provider.as_ref(),
+            request
+                .resolved_model_route
+                .as_ref()
+                .map(|snapshot| snapshot.model_id.as_str()),
+        )?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
@@ -405,6 +426,7 @@ where
             None,
             None,
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -423,7 +445,14 @@ where
                     "model profile is not permitted",
                 )
             })?;
-        let model_override = request_model_override(route, self.provider.as_ref())?;
+        let model_override = request_model_override(
+            route,
+            self.provider.as_ref(),
+            request
+                .resolved_model_route
+                .as_ref()
+                .map(|snapshot| snapshot.model_id.as_str()),
+        )?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
@@ -440,6 +469,7 @@ where
             None,
             Some(sink),
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -458,7 +488,14 @@ where
                     "model profile is not permitted",
                 )
             })?;
-        let model_override = request_model_override(route, self.provider.as_ref())?;
+        let model_override = request_model_override(
+            route,
+            self.provider.as_ref(),
+            request
+                .resolved_model_route
+                .as_ref()
+                .map(|snapshot| snapshot.model_id.as_str()),
+        )?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
@@ -479,6 +516,7 @@ where
             Some(provider_turn_scope),
             None,
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -498,7 +536,14 @@ where
                     "model profile is not permitted",
                 )
             })?;
-        let model_override = request_model_override(route, self.provider.as_ref())?;
+        let model_override = request_model_override(
+            route,
+            self.provider.as_ref(),
+            request
+                .resolved_model_route
+                .as_ref()
+                .map(|snapshot| snapshot.model_id.as_str()),
+        )?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
@@ -519,6 +564,7 @@ where
             Some(provider_turn_scope),
             Some(sink),
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -632,6 +678,7 @@ where
     provider_pool: Arc<P>,
     route_resolver: Arc<dyn ModelRouteResolver>,
     provider_turn_sequence: Arc<AtomicU64>,
+    prompt_cache_activity: Arc<PromptCacheActivityLog>,
 }
 
 impl<P> RoutedLlmProviderModelGateway<P>
@@ -643,7 +690,12 @@ where
             provider_pool,
             route_resolver,
             provider_turn_sequence: Arc::new(AtomicU64::new(1)),
+            prompt_cache_activity: Arc::new(PromptCacheActivityLog::default()),
         }
+    }
+
+    fn prompt_cache_scope(&self, run_id: TurnRunId) -> PromptCacheCallScope {
+        PromptCacheCallScope::new(Arc::clone(&self.prompt_cache_activity), run_id)
     }
 }
 
@@ -685,6 +737,7 @@ where
             None,
             None,
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -723,6 +776,7 @@ where
             None,
             Some(sink),
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -765,6 +819,7 @@ where
             Some(provider_turn_scope),
             None,
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -808,6 +863,7 @@ where
             Some(provider_turn_scope),
             Some(sink),
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -976,14 +1032,22 @@ fn host_error_to_model_gateway_error(error: AgentLoopHostError) -> LoopModelGate
 fn request_model_override<P>(
     route: &LlmModelProfileRoute,
     provider: &P,
+    requested_model: Option<&str>,
 ) -> Result<String, HostManagedModelError>
 where
     P: LlmProvider + ?Sized,
 {
-    let model_override = route
-        .model_override
-        .as_deref()
+    // A per-run caller-requested model (an advisory route hint set at submit)
+    // takes precedence over the profile default. Providers that honor
+    // per-request overrides (e.g. NEAR AI) serve the requested model; providers
+    // that bake the model at construction ignore it and fall back to their
+    // active model — the "route if the provider can serve it, else fall back"
+    // behavior, decided at the provider boundary rather than a route allowlist.
+    let model_override = requested_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
         .map(str::to_string)
+        .or_else(|| route.model_override.as_deref().map(str::to_string))
         .unwrap_or_else(|| provider.active_model_name());
     let trimmed = model_override.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default") {
@@ -1078,7 +1142,7 @@ impl CompletionStreamSink for ProviderStreamSink {
 
 #[tracing::instrument(
     level = "debug",
-    skip(provider, completion, capabilities, stream_sink, replay_identity),
+    skip(provider, completion, capabilities, stream_sink, replay_identity, cache_scope),
     fields(
         provider_id = %replay_identity.provider_id,
         provider_model_id = %replay_identity.provider_model_id,
@@ -1092,10 +1156,12 @@ async fn complete_model_request<P>(
     provider_turn_scope: Option<String>,
     stream_sink: Option<Arc<dyn HostManagedModelStreamSink>>,
     replay_identity: ProviderReplayIdentity,
+    cache_scope: Option<PromptCacheCallScope>,
 ) -> Result<HostManagedModelResponse, HostManagedModelError>
 where
     P: LlmProvider + ?Sized,
 {
+    let system_prompt_hash = system_prompt_cache_signature(&completion.messages);
     if let Some(capabilities) = capabilities {
         let tool_definitions = capabilities
             .tool_definitions()
@@ -1132,6 +1198,7 @@ where
                     provider_tool_definition_to_llm(definition)
                 })
                 .collect::<Vec<_>>();
+            let tool_definitions_hash = tool_definitions_cache_signature(&recovery_tool_names);
             let tool_request =
                 ToolCompletionRequest::from_completion_request(completion, llm_tool_definitions);
             debug!("reborn model gateway dispatching tool-capable provider request");
@@ -1166,6 +1233,13 @@ where
                     return Err(map_provider_error(error));
                 }
             };
+            if let Some(scope) = cache_scope.as_ref() {
+                scope.record(
+                    ModelCallCacheUsage::from_tool_response(&response),
+                    tool_definitions_hash,
+                    system_prompt_hash,
+                );
+            }
             let response =
                 recover_textual_tool_calls_from_tool_response(response, &recovery_tool_names)?;
             let host_response_started_at = live_latency_started_at();
@@ -1231,6 +1305,13 @@ where
                             return Err(map_provider_error(error));
                         }
                     };
+                    if let Some(scope) = cache_scope.as_ref() {
+                        scope.record(
+                            ModelCallCacheUsage::from_tool_response(&response),
+                            tool_definitions_hash,
+                            system_prompt_hash,
+                        );
+                    }
                     let mut response = recover_textual_tool_calls_from_tool_response(
                         response,
                         &recovery_tool_names,
@@ -1316,6 +1397,13 @@ where
             return Err(map_provider_error(error));
         }
     };
+    if let Some(scope) = cache_scope.as_ref() {
+        scope.record(
+            ModelCallCacheUsage::from_completion_response(&response),
+            tool_definitions_cache_signature(&[]),
+            system_prompt_hash,
+        );
+    }
     debug!(
         finish_reason = ?response.finish_reason,
         content_bytes = response.content.len(),
@@ -1919,11 +2007,12 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
         AgentLoopHostErrorKind::Unauthorized | AgentLoopHostErrorKind::PolicyDenied => {
             HostManagedModelErrorKind::PolicyDenied
         }
-        AgentLoopHostErrorKind::BudgetExceeded | AgentLoopHostErrorKind::BudgetAccountingFailed => {
-            HostManagedModelErrorKind::BudgetExceeded
-        }
+        AgentLoopHostErrorKind::BudgetExceeded => HostManagedModelErrorKind::BudgetExceeded,
         AgentLoopHostErrorKind::BudgetApprovalRequired => {
             HostManagedModelErrorKind::BudgetApprovalRequired
+        }
+        AgentLoopHostErrorKind::BudgetAccountingFailed => {
+            HostManagedModelErrorKind::BudgetAccountingFailed
         }
         AgentLoopHostErrorKind::Cancelled => HostManagedModelErrorKind::Cancelled,
         AgentLoopHostErrorKind::Invalid
@@ -2545,6 +2634,20 @@ mod tests {
         );
         let detail = mapped.detail.expect("setup hint travels on detail");
         assert!(detail.contains("no LLM provider is configured"));
+    }
+
+    #[test]
+    fn capability_budget_accounting_error_is_not_collapsed_to_budget_exceeded() {
+        let mapped = map_capability_host_error(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::BudgetAccountingFailed,
+            "resource accounting storage is unavailable",
+        ));
+
+        assert_eq!(
+            mapped.kind,
+            HostManagedModelErrorKind::BudgetAccountingFailed,
+            "accounting infrastructure failure must cross the model gateway unchanged"
+        );
     }
 
     #[test]

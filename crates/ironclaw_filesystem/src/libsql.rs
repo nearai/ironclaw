@@ -1,3 +1,4 @@
+// arch-exempt: large_file, targeted libSQL contention regression stays with its backend, plan #4088
 use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
@@ -2223,6 +2224,68 @@ mod tests {
             let timeout = handle.await.unwrap().unwrap();
             assert_eq!(timeout, 5000);
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn append_batch_surfaces_real_writer_contention_as_backend_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("append-contention-test.db");
+        let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+        let fs = Arc::new(LibSqlRootFilesystem {
+            pool: crate::libsql_pool::build_libsql_pool_with_config(
+                db,
+                2,
+                std::time::Duration::from_secs(1),
+            ),
+        });
+        fs.run_migrations().await.unwrap();
+
+        let writer = fs.connect().await.unwrap();
+        writer.execute("BEGIN IMMEDIATE", ()).await.unwrap();
+
+        // Configure the pool's only other connection to fail quickly while
+        // the first connection holds SQLite's single-writer lock.
+        let contender = fs.connect().await.unwrap();
+        let mut configured = contender
+            .query("PRAGMA busy_timeout = 1", ())
+            .await
+            .unwrap();
+        while configured.next().await.unwrap().is_some() {}
+        drop(configured);
+        let mut rows = contender.query("PRAGMA busy_timeout", ()).await.unwrap();
+        let timeout_ms: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        assert_eq!(timeout_ms, 1);
+        drop(rows);
+        drop(contender);
+
+        let path = VirtualPath::new("/resources/deltas/log").unwrap();
+        let append_fs = Arc::clone(&fs);
+        let append_path = path.clone();
+        let mut append = tokio::spawn(async move {
+            append_fs
+                .append_batch(&append_path, vec![b"delta".to_vec()])
+                .await
+        });
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), &mut append).await;
+        writer.execute("ROLLBACK", ()).await.unwrap();
+        let joined = match result {
+            Ok(joined) => joined,
+            Err(_) => {
+                append.abort();
+                panic!("contended append batch must respect its busy timeout");
+            }
+        };
+        let error = joined
+            .expect("append task must not panic")
+            .expect_err("the held writer lock must reject the append batch");
+
+        assert!(matches!(
+            error,
+            FilesystemError::BackendBusy {
+                path: error_path,
+                operation: FilesystemOperation::Append,
+            } if error_path == path
+        ));
     }
 
     #[tokio::test]

@@ -7,12 +7,12 @@ use tracing::debug;
 use crate::{family::LoopFamily, state::LoopExecutionState, strategies::TurnEndKind};
 
 use super::{
-    AgentLoopExecutorError, AssistantReplyInput, BudgetInput, BudgetStep, CancelCheck,
-    CapabilityInput, CheckpointInput, CheckpointKind, CheckpointStage, DefaultExecutorPipeline,
-    DrainInput, ExecutorStage, ExitInput, InputStep, ModelInput, ModelStep, PendingInputAck,
-    PromptInput, PromptStep, ReplyAdmissionInput, ReplyAdmissionStep, StageContext, StopInput,
-    StopObservationInput, StopObservationStep, StopStep, TurnCompletedStep,
-    UserFacingInputDrainMode, latency,
+    AgentLoopExecutorError, AssistantReplyInput, BudgetInput, BudgetStep, COMPLETION_NUDGE_LIMIT,
+    CancelCheck, CapabilityInput, CheckpointInput, CheckpointKind, CheckpointStage,
+    DefaultExecutorPipeline, DrainInput, ExecutorStage, ExitInput, InputStep, ModelInput,
+    ModelStep, PendingInputAck, PromptInput, PromptStep, ReplyAdmissionInput, ReplyAdmissionStep,
+    StageContext, StopInput, StopKind, StopObservationInput, StopObservationStep, StopStep,
+    TurnCompletedStep, UserFacingInputDrainMode, latency,
 };
 
 impl DefaultExecutorPipeline {
@@ -328,24 +328,53 @@ impl DefaultExecutorPipeline {
                         ),
                     )? {
                         StopStep::Stop {
-                            state,
+                            state: stop_state,
                             kind,
                             pending_input_ack: mut ack,
                         } => {
-                            let exit_iteration = state.iteration;
-                            let exit = latency::stage!(
-                                "exit",
-                                host.run_context(),
-                                exit_iteration,
-                                self.exit.process(ctx, ExitInput { state, kind }),
-                            )?;
-                            latency::stage!(
-                                "ack_pending_input_before_exit",
-                                host.run_context(),
-                                exit_iteration,
-                                ack.ack(host),
-                            )?;
-                            return Ok(exit);
+                            let mut stop_state = stop_state;
+                            if completion_nudge_should_fire(host, &stop_state, &kind) {
+                                // Instead of terminating, re-enter the loop for one
+                                // more iteration with the full tool surface and a
+                                // completion-nudge directive, so the model can finish
+                                // the task (e.g. write a required output file) before
+                                // answering. Mirrors the drained-follow-up continue
+                                // (defer the ack returned by stop.decide to the next
+                                // iteration) rather than the terminal, tool-free
+                                // final-answer nudge.
+                                stop_state.completion_nudges_used += 1;
+                                stop_state.completion_nudge_pending = true;
+                                stop_state.last_reply_trailed_off = false;
+                                debug!(
+                                    iteration = stop_state.iteration,
+                                    ?kind,
+                                    completion_nudges_used = stop_state.completion_nudges_used,
+                                    "agent loop issuing tools-capable completion nudge instead of stopping"
+                                );
+                                state = stop_state;
+                                pending_input_ack = ack;
+                            } else {
+                                let exit_iteration = stop_state.iteration;
+                                let exit = latency::stage!(
+                                    "exit",
+                                    host.run_context(),
+                                    exit_iteration,
+                                    self.exit.process(
+                                        ctx,
+                                        ExitInput {
+                                            state: stop_state,
+                                            kind,
+                                        },
+                                    ),
+                                )?;
+                                latency::stage!(
+                                    "ack_pending_input_before_exit",
+                                    host.run_context(),
+                                    exit_iteration,
+                                    ack.ack(host),
+                                )?;
+                                return Ok(exit);
+                            }
                         }
                         StopStep::Continue {
                             state: next,
@@ -563,5 +592,38 @@ impl DefaultExecutorPipeline {
                 }
             }
         }
+    }
+}
+
+/// Decide whether a stop should be converted into one more tools-capable
+/// completion-nudge iteration instead of terminating the run.
+///
+/// Gated by `SteeringPolicy.allow_driver_specific_nudges` (off in production
+/// unless the run profile opts in) and capped at [`COMPLETION_NUDGE_LIMIT`]
+/// nudges per run. A `NoProgressDetected` stop is already a failure terminal, so
+/// a tools-capable retry can only help; a `GracefulStop` is nudged only when the
+/// closing reply trailed off (the model announced a next step but never carried
+/// it out) — leaving genuinely complete replies untouched. Aborts are never
+/// nudged.
+fn completion_nudge_should_fire(
+    host: &(dyn AgentLoopDriverHost + Send + Sync),
+    state: &LoopExecutionState,
+    kind: &StopKind,
+) -> bool {
+    if !host
+        .run_context()
+        .resolved_run_profile
+        .steering_policy
+        .allow_driver_specific_nudges
+    {
+        return false;
+    }
+    if state.completion_nudges_used >= COMPLETION_NUDGE_LIMIT {
+        return false;
+    }
+    match kind {
+        StopKind::NoProgressDetected => true,
+        StopKind::GracefulStop => state.last_reply_trailed_off,
+        StopKind::Aborted(_) => false,
     }
 }

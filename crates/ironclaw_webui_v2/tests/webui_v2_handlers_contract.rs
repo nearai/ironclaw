@@ -245,6 +245,7 @@ struct StubServices {
     delete_thread_calls: Mutex<Vec<RebornDeleteThreadRequest>>,
     submit_turn_calls: Mutex<Vec<WebUiSendMessageRequest>>,
     get_timeline_calls: Mutex<Vec<RebornTimelineRequest>>,
+    browse_fs_calls: Mutex<Vec<RebornFsListRequest>>,
     global_auto_approve_enabled: Mutex<bool>,
     global_auto_approve_calls: Mutex<usize>,
     stall_global_auto_approve: Mutex<bool>,
@@ -640,6 +641,10 @@ impl RebornServicesApi for StubServices {
         _caller: WebUiAuthenticatedCaller,
         request: RebornFsListRequest,
     ) -> Result<RebornFsListResponse, RebornServicesError> {
+        self.browse_fs_calls
+            .lock()
+            .expect("lock")
+            .push(request.clone());
         Ok(RebornFsListResponse {
             mount: request.mount,
             path: request.path,
@@ -6350,6 +6355,31 @@ async fn browse_fs_dir_lists_mount_relative_entries() {
     assert_eq!(body["mount"], "memory");
     assert_eq!(body["entries"][0]["name"], "today.md");
     assert_eq!(body["entries"][0]["path"], "daily/today.md");
+}
+
+#[tokio::test]
+async fn browse_fs_dir_forwards_optional_project_selector() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/list?mount=memory&path=daily&project_id=project-beta")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services.browse_fs_calls.lock().expect("lock");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].project_id.as_ref().map(ProjectId::as_str),
+        Some("project-beta")
+    );
 }
 
 #[tokio::test]

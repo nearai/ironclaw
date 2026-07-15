@@ -330,6 +330,25 @@ mod tests {
     }
 
     #[test]
+    fn model_budget_accounting_failure_preserves_distinct_failure_category() {
+        let mapped = map_host_error(
+            "model",
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::BudgetAccountingFailed,
+                "resource accounting storage is unavailable",
+            ),
+        );
+
+        assert_eq!(
+            mapped,
+            AgentLoopDriverError::Failed {
+                reason_kind: "budget_accounting_failed".to_string(),
+                detail: Some("resource accounting storage is unavailable".to_string()),
+            }
+        );
+    }
+
+    #[test]
     fn non_model_stage_with_credit_reason_does_not_map_to_credits_category() {
         const CREDIT_SUMMARY: &str = "model provider account is out of credits";
         let mapped = map_host_error(

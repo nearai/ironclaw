@@ -70,6 +70,7 @@ use ironclaw_product_workflow::{
     IdempotencyLedger, InboundTurnService, ResolvedBinding,
 };
 use ironclaw_reborn_composition::build_default_budget_accountant;
+use ironclaw_reborn_composition::test_support::SlackChannelConnectionTestBundle;
 use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::{
     BudgetEventSink, BudgetGateStore, InMemoryBudgetEventSink, InMemoryBudgetGateStore,
@@ -109,6 +110,7 @@ use super::builder::{
     apply_hermetic_env, binding_request, build_storage_composite, scoped_turns_fs_composite,
     thread_scope_from_binding,
 };
+use super::doubles::RecordingSecurityAuditSink;
 use super::harness::{
     EmptyIdentityContextSource, HarnessCapabilityMode, HarnessCapabilityRecorder,
     HarnessTurnBackend, HostRuntimeCapabilityHarness, RecordingTestCapabilityPort,
@@ -173,6 +175,12 @@ pub(crate) struct GroupSharedStorage {
     /// Capability backend. Groups use `HostRuntime`; the degenerate single-shot
     /// path may use `Recording`.
     pub(crate) capability: GroupCapability,
+    /// C-SLACK-LIFECYCLE (issue #6105): the REAL Slack channel-connection
+    /// facade + OAuth-callback-shaped connect handles, built over the
+    /// capability harness's own `RebornServices` (same durable host state,
+    /// same late-bound cleanup slot `extension_remove` dispatches to).
+    /// `Some` only for `extension_lifecycle()` groups.
+    pub(crate) slack_channel_connection: Option<Arc<SlackChannelConnectionTestBundle>>,
     /// The group's single shared `TurnCoordinator`, over the ONE planned
     /// runtime built once at group construction (Option P: one
     /// scheduler/coordinator/executor over the shared turn-run queue, exactly
@@ -215,6 +223,10 @@ pub(crate) struct GroupSharedStorage {
     /// opted in (C-TRACECAP seam); `None` otherwise. Concrete type (not `Arc<dyn
     /// TurnEventSink>`) so a test can read `.events()` back directly.
     pub(crate) turn_event_sink: Option<Arc<InMemoryTurnEventSink>>,
+    /// W5-WIRING-PARITY: production local-dev always wires a security-audit
+    /// sink; the harness mirrors that shape with a recording sink so tests can
+    /// assert events emitted through real caller paths.
+    pub(crate) security_audit_sink: Arc<RecordingSecurityAuditSink>,
     /// The exact loop milestone sink wired into the group's ONE planned runtime.
     /// Retained so integration tests can assert production loop milestones
     /// without adding event-specific hooks to the runtime path.
@@ -362,6 +374,7 @@ impl RebornIntegrationGroup {
             runner_lease_ttl_override: None,
             lease_recovery_interval_override: None,
             real_gate_dispatch_services: false,
+            slack_channel_connection: None,
         }
     }
 
@@ -371,6 +384,21 @@ impl RebornIntegrationGroup {
     /// to assert an enrolled turn queued a contribution envelope.
     pub fn trace_capture_scope(&self) -> Option<&str> {
         self.shared.trace_capture_scope.as_deref()
+    }
+
+    /// C-SLACK-LIFECYCLE (issue #6105): the real Slack channel-connection
+    /// bundle for this group. `Some` only for [`Self::extension_lifecycle`]
+    /// groups.
+    pub fn slack_channel_connection(&self) -> Option<Arc<SlackChannelConnectionTestBundle>> {
+        self.shared.slack_channel_connection.clone()
+    }
+
+    /// The group-canonical binding's ACTOR user id — the identity capability
+    /// dispatch stamps as `authenticated_actor_user_id` on execution contexts
+    /// (loop-host capability port reads `run_context.actor()`), and therefore
+    /// the caller identity extension-removal channel cleanup disconnects.
+    pub fn canonical_actor_user(&self) -> UserId {
+        self.shared.canonical_binding.actor_user_id.clone()
     }
 
     /// Create a per-thread *workflow* builder for `conversation_id`, over the
@@ -564,6 +592,11 @@ pub struct RebornIntegrationGroupBuilder {
     /// keeps the `Rejecting*InteractionService` stubs, matching today's
     /// behavior byte-for-byte).
     real_gate_dispatch_services: bool,
+    /// C-SLACK-LIFECYCLE (issue #6105): the real Slack channel-connection
+    /// bundle built over the capability harness's own `RebornServices`.
+    /// Set by `extension_lifecycle()` before `into_group`; `None` for every
+    /// other constructor.
+    slack_channel_connection: Option<Arc<SlackChannelConnectionTestBundle>>,
 }
 
 impl RebornIntegrationGroupBuilder {
@@ -811,6 +844,10 @@ impl RebornIntegrationGroupBuilder {
         } else {
             (None, None, None)
         };
+        let security_audit_sink: Arc<RecordingSecurityAuditSink> =
+            Arc::new(RecordingSecurityAuditSink::default());
+        let hook_security_audit_sink: Arc<dyn ironclaw_events::SecurityAuditSink> =
+            security_audit_sink.clone();
 
         // W5-WIRING-PARITY: bind the literal to a local before consuming it so
         // `harness_planned_runtime_parts_shape` can read the REAL Some/None
@@ -899,9 +936,10 @@ impl RebornIntegrationGroupBuilder {
             // C-COMMCTX: delivery-preference / connected-channel provider (Some
             // only when `communication_context_provider()` was set).
             communication_context_provider: self.communication_context_provider,
-            // No RecordingSecurityAuditSink double exists yet (nearai/ironclaw#5640);
-            // wiring_parity.rs's ALLOWED_DIVERGENCES tracks this field by name, not line.
-            hook_security_audit_sink: None,
+            // W5-WIRING-PARITY: production local-dev always wires
+            // TracingSecurityAuditSink; the harness mirrors the shape with a
+            // recorder so integration tests can assert emitted events.
+            hook_security_audit_sink: Some(hook_security_audit_sink),
             turn_event_sink: composed_turn_event_sink,
             attachment_read_port: capability_recorder
                 .attachment_test_support()
@@ -926,12 +964,14 @@ impl RebornIntegrationGroupBuilder {
                 capability_recorder,
                 user_profile_source,
                 turn_event_sink: self.turn_event_sink,
+                security_audit_sink,
                 milestone_sink: milestone_sink_for_assertions,
                 trace_capture_scope: trace_capture.map(|(_, scope)| scope),
                 budget_governor,
                 budget_account,
                 planned_runtime_parts_shape,
                 real_gate_dispatch_services: self.real_gate_dispatch_services,
+                slack_channel_connection: self.slack_channel_connection,
             }),
         })
     }
@@ -1180,6 +1220,7 @@ impl<'g> RebornThreadBuilder<'g> {
         let baseline_result_count = capability_recorder.capability_results().len();
         let baseline_process_count = capability_recorder.recorded_process_commands().len();
         let baseline_network_count = capability_recorder.network_http_requests().len();
+        let baseline_security_audit_count = shared.security_audit_sink.events().len();
         let baseline_turn_event_count = shared
             .turn_event_sink
             .as_ref()
@@ -1273,6 +1314,7 @@ impl<'g> RebornThreadBuilder<'g> {
             baseline_result_count,
             baseline_process_count,
             baseline_network_count,
+            baseline_security_audit_count,
             baseline_turn_event_count,
             baseline_milestone_count,
         })

@@ -1985,6 +1985,7 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
         let submit = turn_store
             .submit_turn(
                 SubmitTurnRequest {
+                    requested_model: None,
                     scope: turn_scope.clone(),
                     actor: TurnActor::new(user_id),
                     accepted_message_ref: AcceptedMessageRef::new("accepted-libsql-restart")
@@ -3589,6 +3590,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
     let SubmitTurnResponse::Accepted { run_id, status, .. } = composition
         .coordinator
         .submit_turn(SubmitTurnRequest {
+            requested_model: None,
             scope: fixture.context.scope.clone(),
             actor: TurnActor::new(UserId::new("user-text-host").unwrap()),
             accepted_message_ref: AcceptedMessageRef::new("accepted-runtime-planned").unwrap(),
@@ -3761,6 +3763,7 @@ async fn pre_minted_scheduler_wake_wiring_drives_scheduler_on_coordinator_submit
     let SubmitTurnResponse::Accepted { run_id, .. } = composition
         .coordinator
         .submit_turn(SubmitTurnRequest {
+            requested_model: None,
             scope: fixture.context.scope.clone(),
             actor: TurnActor::new(UserId::new("user-preminted-wake").unwrap()),
             accepted_message_ref: AcceptedMessageRef::new("accepted-preminted").unwrap(),
@@ -4576,6 +4579,39 @@ async fn text_only_host_factory_rejects_persisted_model_route_snapshot_without_r
         error
             .to_string()
             .contains("model route resolver is required")
+    );
+}
+
+#[tokio::test]
+async fn text_only_host_factory_passes_advisory_model_route_snapshot_without_resolver() {
+    // A caller-requested model reaches the default (resolver-less) product
+    // runtime as an *advisory* snapshot. Unlike an operator route, it must pass
+    // through unvalidated so the non-routed gateway can honor the requested
+    // model id, rather than failing closed the way an operator route does.
+    let fixture = HostFixture::new("thread-host-advisory-no-resolver", "hello routed host").await;
+    let advisory_snapshot =
+        LoopModelRouteSnapshot::advisory("gpt-4o").expect("valid advisory model");
+    let context = fixture
+        .context
+        .clone()
+        .with_resolved_model_route(advisory_snapshot.clone());
+    let mut claimed = fixture.claimed.clone();
+    claimed.state.resolved_model_route = Some(advisory_snapshot.clone());
+
+    let host = fixture
+        .factory()
+        .build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: claimed,
+            loop_run_context: context,
+        })
+        .await
+        .expect("advisory snapshot passes through a resolver-less host");
+
+    let host_dyn: &(dyn AgentLoopDriverHost + Send + Sync) = &host;
+    assert_eq!(
+        host_dyn.run_context().resolved_model_route,
+        Some(advisory_snapshot),
+        "the advisory model id must survive on the run context for the gateway to honor it"
     );
 }
 
@@ -8699,6 +8735,7 @@ async fn queue_fixture_turn(
     let submit = turn_store
         .submit_turn(
             SubmitTurnRequest {
+                requested_model: None,
                 scope: fixture.context.scope.clone(),
                 actor: TurnActor::new(UserId::new("user-text-host").unwrap()),
                 accepted_message_ref: AcceptedMessageRef::new(format!(

@@ -249,7 +249,7 @@ impl RebornIntegrationGroupBuilder {
     }
 
     /// Build an extension-lifecycle group. See [`RebornIntegrationGroup::extension_lifecycle`].
-    pub async fn extension_lifecycle(self) -> HarnessResult<RebornIntegrationGroup> {
+    pub async fn extension_lifecycle(mut self) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
         // Lifecycle ownership is caller-derived. Align the shared capability
         // harness with the group's canonical binding subject so install and
@@ -259,6 +259,33 @@ impl RebornIntegrationGroupBuilder {
             &base,
         )
         .await?;
+        // C-SLACK-LIFECYCLE (issue #6105): wire the REAL Slack channel-connection
+        // facade over this harness's own `RebornServices`, mirroring the
+        // production `build_webui_services_with_slack_host_beta_mounts` slot
+        // fill — so `builtin.extension_remove("slack")` runs the real
+        // personal-connection cleanup instead of failing closed on an unset
+        // facade slot. Identities come from the group's single-source dispatch
+        // scope so the facade's tenant check matches dispatch-time callers.
+        let scope = &base.product_harness.scope;
+        let slack =
+            ironclaw_reborn_composition::test_support::build_slack_channel_connection_for_test(
+                host_runtime
+                    .reborn_services_for_test()
+                    .ok_or("extension_lifecycle harness is missing its RebornServices bundle")?,
+                ironclaw_reborn_composition::test_support::SlackChannelConnectionTestConfig {
+                    tenant_id: scope.tenant_id.as_str().to_string(),
+                    host_user_id: scope.user_id.as_str().to_string(),
+                    agent_id: scope
+                        .agent_id
+                        .as_ref()
+                        .map(|agent| agent.as_str().to_string())
+                        .ok_or("group product scope is missing an agent id")?,
+                    installation_id: "itest-slack-install".to_string(),
+                    team_id: "T-ITEST".to_string(),
+                    api_app_id: "A-ITEST".to_string(),
+                },
+            )?;
+        self.slack_channel_connection = Some(Arc::new(slack));
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.into_group(base, capability).await
     }

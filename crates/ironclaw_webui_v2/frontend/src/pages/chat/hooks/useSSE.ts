@@ -51,6 +51,10 @@ function isEventSourceOpen(source) {
   return source?.readyState === openState;
 }
 
+function isBrowserOffline() {
+  return typeof navigator !== "undefined" && navigator.onLine === false;
+}
+
 export function useSSE({ threadId, onEvent, enabled }) {
   const [status, setStatus] = React.useState<ConnectionStatus>(
     CONNECTION_STATUS.IDLE,
@@ -123,7 +127,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
         return;
       }
       setStatus(
-        reconnectAttempts > 0
+        isBrowserOffline() || reconnectAttempts > 0
           ? CONNECTION_STATUS.RECONNECTING
           : CONNECTION_STATUS.CONNECTING,
       );
@@ -203,11 +207,38 @@ export function useSSE({ threadId, onEvent, enabled }) {
       }
     }
 
+    function handleNetworkOffline() {
+      setStatus(CONNECTION_STATUS.RECONNECTING);
+    }
+
+    function handleNetworkOnline() {
+      if (es && isEventSourceOpen(es)) {
+        clearReconnectWatchdog();
+        reconnectAttempts = 0;
+        setStatus(CONNECTION_STATUS.CONNECTED);
+        return;
+      }
+      setStatus(CONNECTION_STATUS.RECONNECTING);
+      if (es) {
+        scheduleNativeReconnectWatchdog(es);
+        return;
+      }
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      connect();
+    }
+
     connect();
     document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("offline", handleNetworkOffline);
+    window.addEventListener("online", handleNetworkOnline);
 
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("offline", handleNetworkOffline);
+      window.removeEventListener("online", handleNetworkOnline);
       if (reconnectTimer) clearTimeout(reconnectTimer);
       clearReconnectWatchdog();
       if (es) es.close();
