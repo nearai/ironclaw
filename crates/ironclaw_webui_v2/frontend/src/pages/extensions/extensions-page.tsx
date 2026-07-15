@@ -94,7 +94,13 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     [activate]
   );
 
-  if (!["channels", "mcp", "registry"].includes(tab)) {
+  // `mcp` was the pre-unification name of the tools view; keep main-era deep
+  // links working while the canonical tab id is `tools` (product taxonomy —
+  // MCP is a runtime badge, never a grouping axis).
+  if (tab === "mcp") {
+    return (<Navigate to="/extensions/tools" replace />);
+  }
+  if (!["channels", "tools", "registry"].includes(tab)) {
     return (<Navigate to="/extensions/registry" replace />);
   }
 

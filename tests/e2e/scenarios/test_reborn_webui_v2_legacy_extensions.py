@@ -17,136 +17,160 @@ def _package_ref(package_id: str) -> dict:
     return {"kind": "extension", "id": package_id}
 
 
+# Product taxonomy travels in `surfaces` (NEA-25): a channel is a surface an
+# extension declares, and `runtime` is an implementation badge only. The
+# retired extension `kind` wire string (`wasm_tool` / `mcp_server` /
+# `wasm_channel`) no longer exists.
+TOOL_SURFACES = [{"kind": "tool"}]
+
+
+def _channel_surfaces(**connection) -> list[dict]:
+    surface = {"kind": "channel", "inbound": True, "outbound": True}
+    if connection:
+        surface["connection"] = connection
+    return [surface]
+
+
 REGISTRY_TOOL = {
     "package_ref": _package_ref("registry-tool"),
     "display_name": "Registry Tool",
-    "kind": "wasm_tool",
+    "runtime": "wasm",
     "description": "A registry WASM tool",
     "keywords": ["search", "utility"],
     "installed": False,
+    "surfaces": TOOL_SURFACES,
 }
 
 REGISTRY_MCP = {
     "package_ref": _package_ref("registry-mcp"),
     "display_name": "Registry MCP Server",
-    "kind": "mcp_server",
+    "runtime": "mcp",
     "description": "An MCP server from the registry",
     "keywords": ["tools"],
     "installed": False,
+    "surfaces": TOOL_SURFACES,
 }
 
 ACTIVE_TOOL = {
     "package_ref": _package_ref("active-tool"),
     "display_name": "Active Tool",
-    "kind": "wasm_tool",
+    "runtime": "wasm",
     "description": "An installed WASM tool extension",
     "active": True,
     "authenticated": True,
     "has_auth": False,
     "needs_setup": False,
     "tools": ["search", "fetch"],
-    "activation_status": "active",
+    "installation_state": "active",
+    "surfaces": TOOL_SURFACES,
 }
 
 INACTIVE_MCP = {
     "package_ref": _package_ref("inactive-mcp"),
     "display_name": "Inactive MCP",
-    "kind": "mcp_server",
+    "runtime": "mcp",
     "description": "An inactive MCP server",
     "active": False,
     "authenticated": False,
     "has_auth": False,
     "needs_setup": False,
     "tools": ["lookup"],
-    "activation_status": "installed",
+    "installation_state": "installed",
+    "surfaces": TOOL_SURFACES,
 }
 
 CHANNEL_READY = {
     "package_ref": _package_ref("telegram-channel"),
     "display_name": "Telegram Channel",
-    "kind": "wasm_channel",
+    "runtime": "wasm",
     "description": "A configured messaging channel",
     "active": True,
     "authenticated": True,
     "has_auth": True,
     "needs_setup": False,
     "tools": [],
-    "activation_status": "ready",
-    "onboarding_state": "ready",
+    "installation_state": "active",
+    "surfaces": _channel_surfaces(),
 }
 
 TELEGRAM_CHANNEL_SETUP = {
     "package_ref": _package_ref("telegram"),
     "display_name": "Telegram",
-    "kind": "wasm_channel",
+    "runtime": "wasm",
     "description": "Telegram bot channel",
     "active": False,
     "authenticated": False,
     "has_auth": True,
     "needs_setup": True,
     "tools": [],
-    "activation_status": "setup_required",
+    "installation_state": "installed",
     "onboarding_state": "setup_required",
+    "surfaces": _channel_surfaces(),
 }
 
 AVAILABLE_CHANNEL = {
     "package_ref": _package_ref("slack-channel"),
     "display_name": "Slack Channel",
-    "kind": "wasm_channel",
+    "runtime": "wasm",
     "description": "A registry channel",
     "keywords": ["slack"],
     "installed": False,
+    "surfaces": _channel_surfaces(),
 }
 
 LABEL_CHANNEL_BASE = {
     "package_ref": _package_ref("label-channel"),
     "display_name": "Label Channel",
-    "kind": "wasm_channel",
+    "runtime": "wasm",
     "description": "A WASM channel used to assert card action labels.",
     "active": False,
     "authenticated": False,
     "has_auth": False,
     "needs_setup": True,
     "tools": [],
+    "surfaces": _channel_surfaces(),
 }
 
 CONFIG_TOOL = {
     "package_ref": _package_ref("config-tool"),
     "display_name": "Config Tool",
-    "kind": "wasm_tool",
+    "runtime": "wasm",
     "description": "A tool that requires manual setup.",
     "active": False,
     "authenticated": False,
     "has_auth": True,
     "needs_setup": True,
     "tools": [],
-    "activation_status": "setup_required",
+    "installation_state": "installed",
     "onboarding_state": "setup_required",
+    "surfaces": TOOL_SURFACES,
 }
 
 OAUTH_TOOL = {
     "package_ref": _package_ref("oauth-tool"),
     "display_name": "OAuth Tool",
-    "kind": "wasm_tool",
+    "runtime": "wasm",
     "description": "A tool that requires OAuth setup.",
     "active": False,
     "authenticated": False,
     "has_auth": True,
     "needs_setup": True,
     "tools": [],
-    "activation_status": "setup_required",
+    "installation_state": "installed",
     "onboarding_state": "setup_required",
+    "surfaces": TOOL_SURFACES,
 }
 
 CONFIG_TOOL_REGISTRY = {
     "package_ref": _package_ref("config-tool"),
     "display_name": "Config Tool",
-    "kind": "wasm_tool",
+    "runtime": "wasm",
     "description": "A registry tool that requires manual setup.",
     "keywords": ["config"],
     "installed": True,
     "has_auth": True,
     "needs_setup": True,
+    "surfaces": TOOL_SURFACES,
 }
 
 
@@ -257,8 +281,9 @@ async def _open_mocked_extensions_page(
                 setup_payloads_by_id.get(
                     package_id,
                     {
-                        "name": package_id,
-                        "kind": "wasm_channel",
+                        "package_ref": _package_ref(package_id),
+                        "phase": "installed",
+                        "blockers": [],
                         "secrets": [],
                         "fields": [],
                         "onboarding": None,
@@ -286,8 +311,8 @@ async def _open_mocked_extensions_page(
                     if extension.get("package_ref", {}).get("id") == package_id:
                         extension["authenticated"] = True
                         extension["needs_setup"] = False
-                        extension["activation_status"] = "configured"
-                        extension["onboarding_state"] = "configured"
+                        extension["installation_state"] = "configured"
+                        extension.pop("onboarding_state", None)
             await fulfill_json(route, response)
             return
 
@@ -323,15 +348,14 @@ async def _open_mocked_extensions_page(
                         "authenticated": False,
                         "has_auth": bool(entry.get("has_auth") or requires_setup),
                         "needs_setup": requires_setup,
-                        "activation_status": (
-                            "setup_required" if requires_setup else "installed"
-                        ),
-                        "onboarding_state": (
-                            "setup_required" if requires_setup else "installed"
-                        ),
+                        # §6.1 installation state is `installed` after install;
+                        # the onboarding axis (§6.2) carries setup_required.
+                        "installation_state": "installed",
                         "tools": entry.get("tools") or [],
                     }
                 )
+                if requires_setup:
+                    installed["onboarding_state"] = "setup_required"
                 installed.pop("installed", None)
                 installed_extensions.append(installed)
             if response.get("success") is not False and entry:
@@ -356,7 +380,8 @@ async def _open_mocked_extensions_page(
                 for extension in installed_extensions:
                     if extension.get("package_ref", {}).get("id") == package_id:
                         extension["active"] = True
-                        extension["activation_status"] = "active"
+                        extension["installation_state"] = "active"
+                        extension.pop("onboarding_state", None)
             await fulfill_json(
                 route,
                 response,
@@ -390,11 +415,9 @@ async def _open_mocked_extensions_page(
 
         await route.continue_()
 
-    async def handle_connectable_channels(route):
-        await fulfill_json(route, {"channels": []})
-
+    # Channel discovery is extension-surface data on the extensions wire —
+    # there is no separate `/channels/connectable` registry route to mock.
     await page.route("**/api/webchat/v2/extensions**", handle_extensions)
-    await page.route("**/api/webchat/v2/channels/connectable", handle_connectable_channels)
     await page.goto(f"{reborn_v2_server}/v2/extensions/{tab}?token={REBORN_V2_AUTH_TOKEN}")
     await expect(page.get_by_text("Registry").first).to_be_visible(timeout=15000)
 
@@ -424,8 +447,9 @@ def _label_channel(**overrides):
 
 def _manual_config_setup_payload() -> dict:
     return {
-        "name": "config-tool",
-        "kind": "wasm_tool",
+        "package_ref": _package_ref("config-tool"),
+        "phase": "installed",
+        "blockers": [],
         "secrets": [
             {
                 "name": "API_TOKEN",
@@ -445,17 +469,20 @@ async def _open_card_menu(card):
     return card.get_by_role("menu")
 
 
-async def _capture_next_confirm(page, *, accept: bool):
-    loop = asyncio.get_running_loop()
-    dialog_future = loop.create_future()
+async def _resolve_remove_confirmation(page, display_name: str, *, accept: bool):
+    """Drive the shared destructive-confirmation modal (replaces window.confirm).
 
-    def handle_dialog(dialog):
-        if not dialog_future.done():
-            dialog_future.set_result({"type": dialog.type, "message": dialog.message})
-        loop.create_task(dialog.accept() if accept else dialog.dismiss())
-
-    page.once("dialog", handle_dialog)
-    return dialog_future
+    Native `window.confirm` was retired for destructive actions (#6084); the
+    extension remove flow now opens the shared `ConfirmDialog`. Asserts the
+    dialog names the extension being removed, then confirms or cancels it.
+    """
+    confirmation = page.get_by_role("dialog", name=f"Remove: {display_name}")
+    await expect(confirmation).to_be_visible(timeout=5000)
+    if accept:
+        await confirmation.locator(SEL_V2["confirm_dialog_confirm"]).click()
+    else:
+        await confirmation.locator(SEL_V2["confirm_dialog_cancel"]).click()
+    await expect(confirmation).to_have_count(0)
 
 
 async def _wait_for_request_count(
@@ -600,11 +627,7 @@ async def test_reborn_legacy_extensions_catalog_failure_shows_retry(
             return
         await route.continue_()
 
-    async def handle_connectable_channels(route):
-        await fulfill_json(route, {"channels": []})
-
     await page.route("**/api/webchat/v2/extensions**", handle_extensions)
-    await page.route("**/api/webchat/v2/channels/connectable", handle_connectable_channels)
 
     try:
         await page.goto(
@@ -623,7 +646,10 @@ async def test_reborn_legacy_extensions_catalog_failure_shows_retry(
         await expect(page.get_by_text("Telegram Channel", exact=True)).to_be_visible(
             timeout=5000
         )
-        await expect(error_banner).to_contain_text("Extension catalog unavailable")
+        # A registry failure blocks only the registry tab; on the channels tab
+        # the installed data still renders and the failure stays visible (and
+        # retryable) through the partial-catalog banner.
+        await expect(error_banner).to_contain_text("Some extension data is unavailable")
 
         failed_request_count = registry_requests
         registry_available = True
@@ -961,8 +987,9 @@ async def test_reborn_legacy_install_setup_required_channel_opens_setup_modal(
         registry=[setup_channel],
         setup_payloads={
             "slack-channel": {
-                "name": "slack-channel",
-                "kind": "wasm_channel",
+                "package_ref": _package_ref("slack-channel"),
+                "phase": "installed",
+                "blockers": [],
                 "secrets": [
                     {
                         "name": "SLACK_BOT_TOKEN",
@@ -1035,11 +1062,8 @@ async def test_reborn_legacy_extensions_installed_actions(
         assert harness["activate_requests"] == ["inactive-mcp"]
 
         await active_card.get_by_label("More actions").click()
-        dialog_future = await _capture_next_confirm(page, accept=True)
         await page.get_by_role("menuitem", name="Remove").click()
-        dialog = await asyncio.wait_for(dialog_future, timeout=5)
-        assert dialog["type"] == "confirm"
-        assert "Active Tool" in dialog["message"]
+        await _resolve_remove_confirmation(page, "Active Tool", accept=True)
         await expect(page.get_by_text("Active Tool removed")).to_be_visible(timeout=5000)
         assert harness["remove_requests"] == ["active-tool"]
     finally:
@@ -1088,11 +1112,8 @@ async def test_reborn_legacy_extensions_remove_cancel_keeps_card(
         await expect(active_card).to_be_visible(timeout=5000)
 
         await active_card.get_by_label("More actions").click()
-        dialog_future = await _capture_next_confirm(page, accept=False)
         await page.get_by_role("menuitem", name="Remove").click()
-        dialog = await asyncio.wait_for(dialog_future, timeout=5)
-        assert dialog["type"] == "confirm"
-        assert "Active Tool" in dialog["message"]
+        await _resolve_remove_confirmation(page, "Active Tool", accept=False)
 
         await expect(active_card).to_be_visible(timeout=5000)
         assert harness["remove_requests"] == []
@@ -1123,11 +1144,8 @@ async def test_reborn_legacy_extensions_remove_failure_keeps_card(
         await expect(active_card.get_by_text("active", exact=True)).to_be_visible()
 
         await active_card.get_by_label("More actions").click()
-        dialog_future = await _capture_next_confirm(page, accept=True)
         await page.get_by_role("menuitem", name="Remove").click()
-        dialog = await asyncio.wait_for(dialog_future, timeout=5)
-        assert dialog["type"] == "confirm"
-        assert "Active Tool" in dialog["message"]
+        await _resolve_remove_confirmation(page, "Active Tool", accept=True)
 
         await expect(
             page.get_by_text("Active Tool is still handling an active run.")
@@ -1147,10 +1165,11 @@ async def test_reborn_legacy_extensions_remove_clears_installed_state(
     active_tool_registry_entry = {
         "package_ref": _package_ref("active-tool"),
         "display_name": "Active Tool",
-        "kind": "wasm_tool",
+        "runtime": "wasm",
         "description": "An installed WASM tool extension",
         "keywords": ["search"],
         "installed": True,
+        "surfaces": TOOL_SURFACES,
     }
     harness = await _open_mocked_extensions_page(
         reborn_v2_server,
@@ -1167,11 +1186,8 @@ async def test_reborn_legacy_extensions_remove_clears_installed_state(
         await expect(page.get_by_text("Installed", exact=True)).to_be_visible()
 
         await active_card.get_by_label("More actions").click()
-        dialog_future = await _capture_next_confirm(page, accept=True)
         await page.get_by_role("menuitem", name="Remove").click()
-        dialog = await asyncio.wait_for(dialog_future, timeout=5)
-        assert dialog["type"] == "confirm"
-        assert "Active Tool" in dialog["message"]
+        await _resolve_remove_confirmation(page, "Active Tool", accept=True)
         await expect(page.get_by_text("Active Tool removed")).to_be_visible(timeout=5000)
         assert harness["remove_requests"] == ["active-tool"]
 
@@ -1197,9 +1213,9 @@ async def test_reborn_legacy_extensions_reinstall_after_remove_requires_setup_ag
         "active": True,
         "authenticated": True,
         "needs_setup": False,
-        "activation_status": "active",
-        "onboarding_state": "ready",
+        "installation_state": "active",
     }
+    configured_tool.pop("onboarding_state", None)
     harness = await _open_mocked_extensions_page(
         reborn_v2_server,
         reborn_v2_browser,
@@ -1217,11 +1233,8 @@ async def test_reborn_legacy_extensions_reinstall_after_remove_requires_setup_ag
             page.get_by_role("menuitem", name="Reconfigure", exact=True)
         ).to_have_count(1)
 
-        dialog_future = await _capture_next_confirm(page, accept=True)
         await page.get_by_role("menuitem", name="Remove").click()
-        dialog = await asyncio.wait_for(dialog_future, timeout=5)
-        assert dialog["type"] == "confirm"
-        assert "Config Tool" in dialog["message"]
+        await _resolve_remove_confirmation(page, "Config Tool", accept=True)
         await expect(page.get_by_text("Config Tool removed")).to_be_visible(timeout=5000)
         assert harness["remove_requests"] == ["config-tool"]
 
@@ -1420,17 +1433,24 @@ async def test_reborn_legacy_channel_connect_label_depends_on_authentication(
         reborn_v2_server,
         reborn_v2_browser,
         installed=[
+            # `configured` is the honest §6.1 resting state for a channel whose
+            # operator setup is saved but which is not active yet — the old
+            # transient `activation_in_progress` never appears on the wire.
+            # `has_auth` (the channel binds a caller account) is what keeps the
+            # Connect/Reconnect affordance in the overflow menu.
             _label_channel(
                 authenticated=False,
-                activation_status="configured",
-                onboarding_state="activation_in_progress",
+                has_auth=True,
+                needs_setup=False,
+                installation_state="configured",
             ),
             _label_channel(
                 package_ref=_package_ref("label-channel-authenticated"),
                 display_name="Authenticated Label Channel",
                 authenticated=True,
-                activation_status="configured",
-                onboarding_state="activation_in_progress",
+                has_auth=True,
+                needs_setup=False,
+                installation_state="configured",
             ),
         ],
         tab="channels",
@@ -1471,7 +1491,7 @@ async def test_reborn_legacy_channel_setup_required_has_single_connect_action(
         installed=[
             _label_channel(
                 authenticated=False,
-                activation_status="installed",
+                installation_state="installed",
                 onboarding_state="setup_required",
             )
         ],
@@ -1507,14 +1527,14 @@ async def test_reborn_legacy_channel_reconnect_opens_setup_modal_without_activat
                 authenticated=True,
                 has_auth=True,
                 needs_setup=True,
-                activation_status="active",
-                onboarding_state="ready",
+                installation_state="active",
             )
         ],
         setup_payloads={
             "label-channel": {
-                "name": "label-channel",
-                "kind": "wasm_channel",
+                "package_ref": _package_ref("label-channel"),
+                "phase": "installed",
+                "blockers": [],
                 "secrets": [
                     {
                         "name": "BOT_TOKEN",
@@ -1557,13 +1577,21 @@ async def test_reborn_legacy_channel_reconnect_opens_setup_modal_without_activat
 async def test_reborn_legacy_channel_pairing_redeems_trimmed_code(
     reborn_v2_server, reborn_v2_browser
 ):
+    # Pairing is a connect affordance on the channel surface (strategy
+    # `inbound_proof_code`), not a lifecycle state: the bot token is saved
+    # (§6.1 `configured`) and the caller finishes by redeeming a proof code.
     pairing_channel = {
         **TELEGRAM_CHANNEL_SETUP,
         "active": False,
         "authenticated": True,
-        "activation_status": "pairing",
-        "onboarding_state": "pairing_required",
+        "needs_setup": False,
+        "installation_state": "configured",
+        "surfaces": _channel_surfaces(
+            channel="telegram",
+            strategy="inbound_proof_code",
+        ),
     }
+    pairing_channel.pop("onboarding_state", None)
     harness = await _open_mocked_extensions_page(
         reborn_v2_server,
         reborn_v2_browser,
@@ -1591,7 +1619,7 @@ async def test_reborn_legacy_channel_pairing_redeems_trimmed_code(
 
         card = _card_by_title(page, "Telegram")
         await expect(card).to_be_visible(timeout=5000)
-        await expect(card.get_by_text("pairing", exact=True)).to_be_visible()
+        await expect(card.get_by_text("configured", exact=True)).to_be_visible()
         await expect(card.get_by_role("button", name="Activate")).to_have_count(0)
 
         section = page.locator("[data-testid='pairing-section']").first
@@ -1612,13 +1640,21 @@ async def test_reborn_legacy_channel_pairing_redeems_trimmed_code(
 async def test_reborn_legacy_channel_pairing_enter_key_submits_code(
     reborn_v2_server, reborn_v2_browser
 ):
+    # Pairing is a connect affordance on the channel surface (strategy
+    # `inbound_proof_code`), not a lifecycle state: the bot token is saved
+    # (§6.1 `configured`) and the caller finishes by redeeming a proof code.
     pairing_channel = {
         **TELEGRAM_CHANNEL_SETUP,
         "active": False,
         "authenticated": True,
-        "activation_status": "pairing",
-        "onboarding_state": "pairing_required",
+        "needs_setup": False,
+        "installation_state": "configured",
+        "surfaces": _channel_surfaces(
+            channel="telegram",
+            strategy="inbound_proof_code",
+        ),
     }
+    pairing_channel.pop("onboarding_state", None)
     harness = await _open_mocked_extensions_page(
         reborn_v2_server,
         reborn_v2_browser,
@@ -1662,13 +1698,21 @@ async def test_reborn_legacy_channel_pairing_enter_key_submits_code(
 async def test_reborn_legacy_channel_pairing_failure_keeps_code_for_retry(
     reborn_v2_server, reborn_v2_browser
 ):
+    # Pairing is a connect affordance on the channel surface (strategy
+    # `inbound_proof_code`), not a lifecycle state: the bot token is saved
+    # (§6.1 `configured`) and the caller finishes by redeeming a proof code.
     pairing_channel = {
         **TELEGRAM_CHANNEL_SETUP,
         "active": False,
         "authenticated": True,
-        "activation_status": "pairing",
-        "onboarding_state": "pairing_required",
+        "needs_setup": False,
+        "installation_state": "configured",
+        "surfaces": _channel_surfaces(
+            channel="telegram",
+            strategy="inbound_proof_code",
+        ),
     }
+    pairing_channel.pop("onboarding_state", None)
     harness = await _open_mocked_extensions_page(
         reborn_v2_server,
         reborn_v2_browser,
@@ -1713,8 +1757,9 @@ async def test_reborn_legacy_configure_modal_saves_manual_secret_and_fields(
         installed=[CONFIG_TOOL],
         setup_payloads={
             "config-tool": {
-                "name": "config-tool",
-                "kind": "wasm_tool",
+                "package_ref": _package_ref("config-tool"),
+                "phase": "installed",
+                "blockers": [],
                 "secrets": [
                     {
                         "name": "API_TOKEN",
@@ -1791,8 +1836,9 @@ async def test_reborn_legacy_configure_modal_renders_field_variants(
         installed=[CONFIG_TOOL],
         setup_payloads={
             "config-tool": {
-                "name": "config-tool",
-                "kind": "wasm_tool",
+                "package_ref": _package_ref("config-tool"),
+                "phase": "installed",
+                "blockers": [],
                 "secrets": [
                     {
                         "name": "API_TOKEN",
@@ -1873,8 +1919,9 @@ async def test_reborn_legacy_configure_modal_setup_url_requires_https(
             installed=[CONFIG_TOOL],
             setup_payloads={
                 "config-tool": {
-                    "name": "config-tool",
-                    "kind": "wasm_tool",
+                    "package_ref": _package_ref("config-tool"),
+                    "phase": "installed",
+                    "blockers": [],
                     "secrets": [
                         {
                             "name": "API_TOKEN",
@@ -1938,8 +1985,9 @@ async def test_reborn_legacy_configure_handles_selector_sensitive_package_ids(
         installed=[quoted_tool],
         setup_payloads={
             package_id: {
-                "name": package_id,
-                "kind": "wasm_tool",
+                "package_ref": _package_ref(package_id),
+                "phase": "installed",
+                "blockers": [],
                 "secrets": [
                     {
                         "name": "API_TOKEN",
@@ -1991,17 +2039,18 @@ async def test_reborn_legacy_configure_modal_blank_existing_secret_is_not_submit
         "active": True,
         "authenticated": True,
         "needs_setup": False,
-        "activation_status": "active",
-        "onboarding_state": "ready",
+        "installation_state": "active",
     }
+    configured_tool.pop("onboarding_state", None)
     harness = await _open_mocked_extensions_page(
         reborn_v2_server,
         reborn_v2_browser,
         installed=[configured_tool],
         setup_payloads={
             "config-tool": {
-                "name": "config-tool",
-                "kind": "wasm_tool",
+                "package_ref": _package_ref("config-tool"),
+                "phase": "installed",
+                "blockers": [],
                 "secrets": [
                     {
                         "name": "API_TOKEN",
@@ -2061,8 +2110,9 @@ async def test_reborn_legacy_configure_modal_save_failure_stays_open(
         installed=[CONFIG_TOOL],
         setup_payloads={
             "config-tool": {
-                "name": "config-tool",
-                "kind": "wasm_tool",
+                "package_ref": _package_ref("config-tool"),
+                "phase": "installed",
+                "blockers": [],
                 "secrets": [
                     {
                         "name": "API_TOKEN",
@@ -2154,8 +2204,9 @@ async def test_reborn_legacy_configure_modal_auto_resolved_setup_has_no_manual_f
         installed=[auto_resolved_tool],
         setup_payloads={
             "auto-resolved-oauth-tool": {
-                "name": "auto-resolved-oauth-tool",
-                "kind": "wasm_tool",
+                "package_ref": _package_ref("auto-resolved-oauth-tool"),
+                "phase": "installed",
+                "blockers": [],
                 "secrets": [],
                 "fields": [],
                 "onboarding": None,
@@ -2279,8 +2330,9 @@ async def test_reborn_legacy_telegram_setup_preserves_token_characters(
         installed=[TELEGRAM_CHANNEL_SETUP],
         setup_payloads={
             "telegram": {
-                "name": "telegram",
-                "kind": "wasm_channel",
+                "package_ref": _package_ref("telegram"),
+                "phase": "installed",
+                "blockers": [],
                 "secrets": [
                     {
                         "name": "telegram_bot_token",
@@ -2357,8 +2409,9 @@ async def test_reborn_legacy_configure_oauth_requires_https_authorization_url(
         installed=[OAUTH_TOOL],
         setup_payloads={
             "oauth-tool": {
-                "name": "oauth-tool",
-                "kind": "wasm_tool",
+                "package_ref": _package_ref("oauth-tool"),
+                "phase": "installed",
+                "blockers": [],
                 "secrets": [
                     {
                         "name": "GOOGLE_AUTH",
@@ -2438,8 +2491,9 @@ async def test_reborn_legacy_configure_oauth_start_failure_stays_visible(
         installed=[OAUTH_TOOL],
         setup_payloads={
             "oauth-tool": {
-                "name": "oauth-tool",
-                "kind": "wasm_tool",
+                "package_ref": _package_ref("oauth-tool"),
+                "phase": "installed",
+                "blockers": [],
                 "secrets": [
                     {
                         "name": "GOOGLE_AUTH",
@@ -2527,8 +2581,9 @@ async def test_reborn_legacy_configure_oauth_accepts_uppercase_https_url(
         installed=[OAUTH_TOOL],
         setup_payloads={
             "oauth-tool": {
-                "name": "oauth-tool",
-                "kind": "wasm_tool",
+                "package_ref": _package_ref("oauth-tool"),
+                "phase": "installed",
+                "blockers": [],
                 "secrets": [
                     {
                         "name": "GOOGLE_AUTH",
@@ -2623,12 +2678,20 @@ async def test_reborn_legacy_extensions_channels_and_mcp_tabs_render(
     )
     try:
         page = harness["page"]
-        await expect(page.get_by_text("Web Gateway")).to_be_visible(timeout=5000)
-        await expect(page.get_by_text("HTTP Webhook")).to_be_visible()
-        await expect(page.get_by_text("Telegram Channel")).to_be_visible()
+        # The channels view is a product-taxonomy view over channel surfaces:
+        # installed channel extensions plus available channel registry entries.
+        # (The old static Web Gateway / HTTP Webhook rows left with the retired
+        # connectable-channel registry.)
+        await expect(page.get_by_text("Telegram Channel")).to_be_visible(timeout=5000)
         await expect(page.get_by_text("Slack Channel")).to_be_visible()
 
+        # The pre-unification `mcp` URL redirects onto the tools view — MCP is
+        # a runtime badge, not a grouping axis.
         await page.goto(f"{reborn_v2_server}/v2/extensions/mcp?token={REBORN_V2_AUTH_TOKEN}")
+        await page.wait_for_function(
+            "() => location.pathname.endsWith('/extensions/tools')",
+            timeout=5000,
+        )
         await expect(page.get_by_text("Inactive MCP", exact=True)).to_be_visible(timeout=5000)
         await expect(page.get_by_text("Registry MCP Server", exact=True)).to_be_visible()
     finally:

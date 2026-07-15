@@ -498,7 +498,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     "onboarding_state": "auth_required",
                 }
             if method == "POST" and path == "/api/reborn/product-auth/accounts/list":
-                self.assertEqual(payload["provider"], "slack_personal")
+                self.assertEqual(payload["provider"], "slack")
                 self.assertEqual(payload["requester_extension"], "slack")
                 self.assertEqual(payload["invocation_id"], "invocation-slack")
                 self.assertEqual(payload["thread_id"], "thread-slack")
@@ -506,8 +506,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     "accounts": [
                         {
                             "id": "slack-account",
-                            "provider": "slack_personal",
-                            "label": "slack_personal",
+                            "provider": "slack",
+                            "label": "slack",
                             "status": "configured",
                             "ownership": "user_reusable",
                             "secret_handle_count": 1,
@@ -515,12 +515,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     ]
                 }
             if method == "POST" and path == "/api/webchat/v2/extensions/slack/setup/oauth/start":
-                self.assertEqual(payload["provider"], "slack_personal")
+                self.assertEqual(payload["provider"], "slack")
                 self.assertEqual(payload["scopes"], [])
                 self.assertIsInstance(payload.get("invocation_id"), str)
                 self.assertIsInstance(payload.get("expires_at"), str)
                 return {
-                    "provider": "slack_personal",
+                    "provider": "slack",
                     "authorization_url": "https://slack.com/oauth/v2/authorize?user_scope=chat:write",
                     "flow_id": "flow-slack",
                     "status": "pending",
@@ -528,27 +528,53 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertEqual(method, "GET")
             if path == "/api/webchat/v2/extensions":
                 return {"extensions": []}
-            self.assertEqual(path, "/api/webchat/v2/channels/connectable")
+            self.assertEqual(path, "/api/webchat/v2/extensions/registry")
+            # Channel discovery is extension-surface data: the Slack entry's
+            # channel surface carries the connect affordance. This deployment
+            # variant reports the admin-managed strategy alongside OAuth via
+            # two channel surfaces on the same extension entry.
             return {
-                "channels": [
+                "entries": [
                     {
-                        "channel": "slack",
+                        "package_ref": {"kind": "extension", "id": "slack"},
                         "display_name": "Slack",
-                        "strategy": "admin_managed_channels",
-                        "action": {"title": "Choose Slack channel"},
-                    },
-                    {
-                        "channel": "slack",
-                        "display_name": "Slack",
-                        "strategy": "oauth",
-                        "action": {
-                            "title": "Slack account connection",
-                            "instructions": (
-                                "Connect Slack with OAuth from the extension "
-                                "configuration, then message the Slack bot directly."
-                            ),
-                        },
-                    },
+                        "runtime": "wasm",
+                        "description": "Slack workspace and personal messaging",
+                        "installed": False,
+                        "surfaces": [
+                            {
+                                "kind": "channel",
+                                "inbound": True,
+                                "outbound": True,
+                                "connection": {
+                                    "channel": "slack",
+                                    "display_name": "Slack",
+                                    "strategy": "admin_managed_channels",
+                                    "instructions": "Choose Slack channel",
+                                    "input_placeholder": "",
+                                    "submit_label": "Choose Slack channel",
+                                    "error_message": "Slack channel setup failed.",
+                                },
+                            },
+                            {
+                                "kind": "channel",
+                                "inbound": True,
+                                "outbound": True,
+                                "connection": {
+                                    "channel": "slack",
+                                    "display_name": "Slack",
+                                    "strategy": "oauth",
+                                    "instructions": (
+                                        "Connect Slack with OAuth from the extension "
+                                        "configuration, then message the Slack bot directly."
+                                    ),
+                                    "input_placeholder": "",
+                                    "submit_label": "Connect Slack",
+                                    "error_message": "Slack OAuth connection failed.",
+                                },
+                            },
+                        ],
+                    }
                 ]
             }
 
@@ -653,12 +679,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         self.assertEqual(
             result.details["slack_connect_title"],
-            "Slack account connection",
+            "Slack",
         )
         self.assertEqual(
             fetched_paths,
             [
-                "/api/webchat/v2/channels/connectable",
+                "/api/webchat/v2/extensions/registry",
                 "/api/webchat/v2/extensions",
                 "/api/webchat/v2/extensions/install",
                 "/api/reborn/product-auth/accounts/list",
@@ -677,7 +703,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         self.assertEqual(
             result.details["slack_oauth_start_provider"],
-            "slack_personal",
+            "slack",
         )
         self.assertIn(
             "https://slack.com/oauth/v2/authorize",
@@ -3481,7 +3507,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             env["IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI"],
             (
                 "http://127.0.0.1:38555"
-                "/api/reborn/product-auth/oauth/slack_personal/callback"
+                "/api/reborn/product-auth/oauth/slack/callback"
             ),
         )
 
@@ -3552,7 +3578,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             env["IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI"],
             (
                 "http://127.0.0.1:38555"
-                "/api/reborn/product-auth/oauth/slack_personal/callback"
+                "/api/reborn/product-auth/oauth/slack/callback"
             ),
         )
 
@@ -4374,7 +4400,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 dm_row = db.execute(
                     """
                     SELECT path, contents FROM root_filesystem_entries
-                    WHERE path LIKE '%/slack-personal-binding/dm-targets/%'
+                    WHERE path LIKE '%/shared/channel-dm-targets/%'
                     """
                 ).fetchone()
                 row = db.execute(
@@ -4384,10 +4410,20 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     """
                 ).fetchone()
             self.assertIsNotNone(dm_row)
+            # Generic channel DM-target store: one record per
+            # `(extension, user)` — path segments are URL-safe base64 of
+            # `slack` and `user:web`.
             self.assertEqual(
                 dm_row[0],
-                "/tenants/reborn-cli/shared/slack-personal-binding/dm-targets/"
-                "aW5zdGFsbC1hbHBoYQ/VDEyMw/dXNlcjp3ZWI.json",
+                "/tenants/reborn-cli/shared/channel-dm-targets/c2xhY2s/dXNlcjp3ZWI.json",
+            )
+            dm_record = json.loads(dm_row[1])
+            self.assertEqual(dm_record["extension_id"], "slack")
+            self.assertEqual(dm_record["user_id"], "user:web")
+            self.assertEqual(dm_record["external_actor_id"], "UQAUSER")
+            self.assertEqual(
+                dm_record["target"],
+                {"space_id": "T123", "conversation_id": "D0QA"},
             )
             self.assertIsNotNone(row)
             preference = json.loads(row[1])
@@ -5041,7 +5077,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 ).fetchone()
             self.assertIsNotNone(account_row)
             account = json.loads(account_row[0])
-            self.assertEqual(account["provider"], "slack_personal")
+            self.assertEqual(account["provider"], "slack")
             self.assertEqual(account["status"], "configured")
             self.assertEqual(account["provider_identity"]["subject"], "U123")
             self.assertEqual(account["provider_identity"]["team_id"], "T123")
@@ -5173,7 +5209,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 ),
                 {
                     "id": "account",
-                    "provider": "slack_personal",
+                    "provider": "slack",
                     "status": "configured",
                     "scope": {
                         "resource": {

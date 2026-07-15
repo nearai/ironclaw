@@ -184,6 +184,26 @@ for (const tab of ["installed", "unknown"]) {
   });
 }
 
+test("ExtensionsPage redirects the legacy mcp tab to the tools view", () => {
+  const { Navigate, rendered } = renderExtensionsPage("mcp", {
+    isExtensionsLoading: true,
+    isRegistryLoading: true,
+  });
+
+  assert.equal(rendered.values[0], Navigate);
+  assert.match(rendered.strings.join(""), /to="\/extensions\/tools"/);
+});
+
+test("ExtensionsPage renders the tools view for the tools tab", () => {
+  const { ToolsTab, rendered } = renderExtensionsPage("tools", {
+    isExtensionsLoading: false,
+    isRegistryLoading: false,
+  });
+
+  const toolsTab = findComponent(rendered, ToolsTab) || componentProps(rendered, ToolsTab)[0];
+  assert.ok(toolsTab, "the tools tab content must be rendered");
+});
+
 test("ExtensionsPage removes an extension only after confirming the shared dialog", () => {
   const harness = renderExtensionsPage("registry", { isBusy: true, isRemoving: false });
   const [registry] = componentProps(harness.rendered, harness.RegistryTab);

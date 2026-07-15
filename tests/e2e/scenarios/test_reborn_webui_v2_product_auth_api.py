@@ -22,8 +22,9 @@ PRODUCT_AUTH_PATHS = [
     "/api/reborn/product-auth/accounts/recovery",
     "/api/reborn/product-auth/accounts/refresh",
     "/api/reborn/product-auth/lifecycle/cleanup",
+    # Provider-specific start routes are retired: every provider goes through
+    # the generic `/oauth/start` recipe path (no `/oauth/google/start`).
     "/api/reborn/product-auth/oauth/start",
-    "/api/reborn/product-auth/oauth/google/start",
 ]
 
 

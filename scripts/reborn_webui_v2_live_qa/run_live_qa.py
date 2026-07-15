@@ -809,8 +809,10 @@ async def start_reborn_server(
             process_extra_env,
         )
     ):
+        # Provider id is `slack` on the unified auth engine; the per-provider
+        # callback route is `/oauth/{provider}/callback`.
         process_extra_env["IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI"] = (
-            f"{base_url}/api/reborn/product-auth/oauth/slack_personal/callback"
+            f"{base_url}/api/reborn/product-auth/oauth/slack/callback"
         )
     stdout_path = output_dir / "ironclaw-reborn-serve.stdout.log"
     stderr_path = output_dir / "ironclaw-reborn-serve.stderr.log"
@@ -3246,40 +3248,47 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
             wait_until="domcontentloaded",
         )  # type: ignore[attr-defined]
         await expect(page.locator("body")).to_contain_text("Channels", timeout=15000)  # type: ignore[attr-defined]
-        body = await _fetch_webui_json(page, "/api/webchat/v2/channels/connectable")
-        channels = body.get("channels")
-        if not isinstance(channels, list):
-            raise AssertionError(f"connectable channels body did not include a list: {body!r}")
-        slack_channels = [
-            channel
-            for channel in channels
-            if isinstance(channel, dict) and channel.get("channel") == "slack"
+        # Channel discovery is extension-surface data (NEA-25): the Slack
+        # connect affordance rides the extension's channel surface in the
+        # registry catalog — there is no separate connectable-channel registry.
+        body = await _fetch_webui_json(page, "/api/webchat/v2/extensions/registry")
+        entries = body.get("entries")
+        if not isinstance(entries, list):
+            raise AssertionError(f"extension registry body did not include entries: {body!r}")
+        slack_channel_surfaces = [
+            surface
+            for entry in entries
+            if isinstance(entry, dict)
+            and (entry.get("package_ref") or {}).get("id") == "slack"
+            for surface in (entry.get("surfaces") or [])
+            if isinstance(surface, dict) and surface.get("kind") == "channel"
         ]
-        observed["connectable_channel_count"] = len(channels)
-        observed["slack_strategy_count"] = len(slack_channels)
+        slack_connections = [
+            surface["connection"]
+            for surface in slack_channel_surfaces
+            if isinstance(surface.get("connection"), dict)
+        ]
+        observed["slack_channel_surface_count"] = len(slack_channel_surfaces)
+        observed["slack_strategy_count"] = len(slack_connections)
         observed["slack_strategies"] = [
-            channel.get("strategy")
-            for channel in slack_channels
-            if isinstance(channel, dict)
+            connection.get("strategy") for connection in slack_connections
         ]
         personal = next(
             (
-                channel
-                for channel in slack_channels
-                if isinstance(channel, dict)
-                and channel.get("strategy") == "oauth"
+                connection
+                for connection in slack_connections
+                if connection.get("strategy") == "oauth"
             ),
             None,
         )
         if not isinstance(personal, dict):
-            raise AssertionError(f"Slack oauth connect strategy missing: {channels!r}")
-        action_body = personal.get("action")
-        if not isinstance(action_body, dict):
-            raise AssertionError(f"Slack connect action missing: {personal!r}")
-        title = str(action_body.get("title") or "")
+            raise AssertionError(
+                f"Slack oauth connect strategy missing from channel surfaces: {entries!r}"
+            )
+        title = str(personal.get("display_name") or "")
         if not title:
-            raise AssertionError(f"Slack connect action title missing: {personal!r}")
-        instructions = str(action_body.get("instructions") or "")
+            raise AssertionError(f"Slack connect display name missing: {personal!r}")
+        instructions = str(personal.get("instructions") or "")
         if not _slack_connect_instructions_look_valid(instructions):
             raise AssertionError(f"unexpected Slack connect instructions: {instructions!r}")
         # Extension-scoped OAuth deliberately rejects an absent installation.
@@ -3300,7 +3309,7 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
                 "Slack personal product-auth preflight did not include an invocation_id"
             )
         accounts_request: dict[str, object] = {
-            "provider": "slack_personal",
+            "provider": "slack",
             "requester_extension": "slack",
             "invocation_id": invocation_id,
             "limit": 10,
@@ -3320,7 +3329,7 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
             account
             for account in accounts
             if isinstance(account, dict)
-            and account.get("provider") == "slack_personal"
+            and account.get("provider") == "slack"
             and account.get("status") == "configured"
         ]
         if not configured_accounts:
@@ -3332,14 +3341,14 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
             "POST",
             "/api/webchat/v2/extensions/slack/setup/oauth/start",
             {
-                "provider": "slack_personal",
+                "provider": "slack",
                 "account_label": "Slack personal OAuth",
                 "scopes": [],
                 "expires_at": _slack_oauth_start_expires_at(),
                 "invocation_id": str(uuid.uuid4()),
             },
         )
-        if oauth_start.get("provider") != "slack_personal":
+        if oauth_start.get("provider") != "slack":
             raise AssertionError(f"Slack OAuth start returned unexpected provider: {oauth_start!r}")
         authorization_url = str(oauth_start.get("authorization_url") or "")
         if not authorization_url.startswith("https://slack.com/oauth/"):
@@ -3891,7 +3900,9 @@ async def _ensure_extension_authenticated_on_page(
         {
             f"{prefix}_active": match.get("active"),
             f"{prefix}_authenticated": match.get("authenticated"),
-            f"{prefix}_activation_status": match.get("activation_status"),
+            # §6.1 installation-state enum (replaces the retired
+            # `activation_status` string on the extensions wire).
+            f"{prefix}_installation_state": match.get("installation_state"),
             f"{prefix}_needs_setup": match.get("needs_setup"),
             f"{prefix}_tool_count": len(tools),
         }

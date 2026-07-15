@@ -63,7 +63,7 @@ export const SETTINGS_SUB_ROUTES = [
 export const EXTENSIONS_SUB_ROUTES = [
   { id: "registry", labelKey: "extensions.registry", icon: "plus" },
   { id: "channels", labelKey: "extensions.channels", icon: "send" },
-  { id: "mcp", labelKey: "extensions.mcp", icon: "pulse" },
+  { id: "tools", labelKey: "extensions.tools", icon: "pulse" },
 ];
 
 // Only the Users tab ships in this admin port. The dashboard and usage tabs
