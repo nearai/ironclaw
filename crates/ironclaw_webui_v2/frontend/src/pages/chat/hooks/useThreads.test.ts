@@ -5,8 +5,8 @@ import { test } from "vitest";
 import vm from "node:vm";
 
 // Load useThreads.ts into a fresh VM context with its imports stripped, the
-// same harness pattern useHistory.test.mts uses. The hook's collaborators
-// (React, react-query, the api.js requests, the query client) are injected as
+// same harness pattern useHistory.test.ts uses. The hook's collaborators
+// (React, react-query, the api.ts requests, the query client) are injected as
 // context globals so the test can drive `handleCreateThread` directly.
 function useThreadsSourceForTest() {
   const source = readFileSync(new URL("./useThreads.ts", import.meta.url), "utf8");
@@ -26,7 +26,8 @@ function useThreadsSourceForTest() {
   return `${lines.join("\n")}\nglobalThis.__testExports = { useThreads };`;
 }
 
-function createReactStub() {
+function createReactStub({ initialStateByIndex = {}, onStateChange } = {}) {
+  let stateIndex = 0;
   return {
     useCallback: (fn) => fn,
     useMemo: (fn) => fn(),
@@ -35,9 +36,14 @@ function createReactStub() {
     },
     useRef: (value) => ({ current: value }),
     useState: (initial) => {
-      let value = typeof initial === "function" ? initial() : initial;
+      const index = stateIndex;
+      stateIndex += 1;
+      let value = Object.prototype.hasOwnProperty.call(initialStateByIndex, index)
+        ? initialStateByIndex[index]
+        : typeof initial === "function" ? initial() : initial;
       return [value, (next) => {
         value = typeof next === "function" ? next(value) : next;
+        onStateChange?.(index, value);
       }];
     },
   };
@@ -75,7 +81,11 @@ function instantiate(createThreadRequest, overrides = {}) {
       const trimmed = String(title || "").trim();
       return trimmed && trimmed !== threadId ? trimmed : null;
     },
-    queryClient: { invalidateQueries: () => {} },
+    removeThreadList: (data, threadId) => ({
+      ...data,
+      threads: data.threads.filter((thread) => (thread.thread_id || thread.id) !== threadId),
+    }),
+    queryClient: { setQueryData: () => {}, invalidateQueries: () => {} },
     upsertThreadInCache: () => {},
     globalThis: {},
     ...overrides,
@@ -136,6 +146,76 @@ test("handleCreateThread upserts the created thread without refetching the list"
 
   assert.equal(await hook.createThread(), "thread-created");
   assert.deepEqual(upserted, [{ thread_id: "thread-created", title: "Created" }]);
+});
+
+test("handleDeleteThread removes the requested thread from cache before refreshing", async () => {
+  const deleted = [];
+  const invalidations = [];
+  const cacheWrites = [];
+  const stateChanges = [];
+  let cachedData = {
+    threads: [
+      { thread_id: "thread-old" },
+      { thread_id: "thread-keep" },
+    ],
+    next_cursor: "cursor-1",
+  };
+  const hook = instantiate(
+    async () => ({ thread: { thread_id: "unused" } }),
+    {
+      React: createReactStub({
+        initialStateByIndex: { 0: "thread-old" },
+        onStateChange: (index, value) => stateChanges.push({ index, value }),
+      }),
+      deleteThreadRequest: async ({ threadId }) => {
+        deleted.push(threadId);
+      },
+      queryClient: {
+        setQueryData: (queryKey, update) => {
+          cacheWrites.push([...queryKey]);
+          cachedData = update(cachedData);
+        },
+        invalidateQueries: (request) => invalidations.push([...request.queryKey]),
+      },
+    },
+  );
+
+  await hook.deleteThread("thread-old");
+
+  assert.deepEqual(deleted, ["thread-old"]);
+  assert.deepEqual(stateChanges, [{ index: 0, value: null }]);
+  assert.deepEqual(cacheWrites, [["threads"]]);
+  assert.deepEqual(cachedData, {
+    threads: [{ thread_id: "thread-keep" }],
+    next_cursor: "cursor-1",
+  });
+  assert.deepEqual(invalidations, [["threads"]]);
+});
+
+test("handleDeleteThread preserves active thread state when deletion fails", async () => {
+  const invalidations = [];
+  const stateChanges = [];
+  const hook = instantiate(
+    async () => ({ thread: { thread_id: "unused" } }),
+    {
+      React: createReactStub({
+        initialStateByIndex: { 0: "thread-old" },
+        onStateChange: (index, value) => stateChanges.push({ index, value }),
+      }),
+      deleteThreadRequest: async () => {
+        throw new Error("delete failed");
+      },
+      queryClient: {
+        setQueryData: (queryKey) => invalidations.push(["cache-write", ...queryKey]),
+        invalidateQueries: (request) => invalidations.push([...request.queryKey]),
+      },
+    },
+  );
+
+  await assert.rejects(hook.deleteThread("thread-old"), /delete failed/);
+
+  assert.deepEqual(stateChanges, []);
+  assert.deepEqual(invalidations, []);
 });
 
 test("normalizes raw thread id titles out of sidebar records", () => {

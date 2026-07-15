@@ -48,6 +48,16 @@ echo "==> WebUI frontend build"
 echo "==> clippy (all warnings)"
 cargo clippy --locked --all --benches --tests --examples --all-features -- -D warnings
 
+# Feature-matrix leg: the libsql-only build surfaces `cfg`/`dead_code` lints
+# that the all-features build hides (a variant constructed only under other
+# features reads as never-constructed here). This is the class that reds
+# `Clippy (libsql-only)` on main — e.g. the `Prebuilt` dead_code break (#5840).
+echo "==> clippy (libsql-only feature leg)"
+cargo clippy --locked --no-default-features --features libsql --all-targets -- -D warnings
+
+echo "==> static: include_str! paths + Docker COPY coverage"
+"$(git rev-parse --show-toplevel)/scripts/ci/check-include-str-paths.sh"
+
 echo "==> cargo deny"
 require_command cargo-deny "install with: cargo install cargo-deny"
 cargo deny check

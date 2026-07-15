@@ -170,7 +170,7 @@ test("groupProvidersByStatus treats non-array input as empty", () => {
 
 test("nextModelAfterFetch commits the first model when the field is empty", () => {
   // The exact Ollama bug: empty form.model + a single fetched option. The
-  // controlled <Select> shows it but never commits, so save would send empty.
+  // controlled SelectMenu shows it but never commits, so save would send empty.
   assert.equal(nextModelAfterFetch("", ["qwen3:latest"]), "qwen3:latest");
   assert.equal(nextModelAfterFetch("   ", ["llama3", "qwen2"]), "llama3");
 });

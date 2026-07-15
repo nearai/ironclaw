@@ -39,7 +39,7 @@ generic `G` exists only so tests can pass concrete gateway structs. So S2 needs
 wider for identical behavior.
 
 **S2 edit surface (prod ≈ 12 lines, default-None → byte-identical):**
-- `crates/ironclaw_loop_support/src/lib.rs` (~6 lines): add to the
+- `crates/ironclaw_loop_host/src/lib.rs` (~6 lines): add to the
   `HostManagedModelGateway` trait a default method
   `fn resolve_for_scope(&self, _scope: &TurnScope) -> Option<Arc<dyn HostManagedModelGateway>> { None }`.
   Every real gateway inherits the default → prod resolves to its own gateway.

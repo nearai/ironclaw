@@ -1,6 +1,8 @@
+import React from "react";
 import { Button } from "../../../design-system/button";
-import { Input, Select } from "../../../design-system/input";
+import { Input } from "../../../design-system/input";
 import { Modal, ModalBody, ModalFooter } from "../../../design-system/modal";
+import { SelectMenu } from "../../../design-system/select-menu";
 import { useT } from "../../../lib/i18n";
 import {
   ADAPTER_OPTIONS,
@@ -31,9 +33,16 @@ export function ProviderDialog({
     t,
   });
 
+  const { form, apiKey, models, message, busy, isBuiltin, isEditing } = formState;
+  const modelOptions = React.useMemo(() => {
+    const typedModel = String(form.model || "").trim();
+    const fetchedOptions = models.map((model) => ({ value: model, label: model }));
+    if (!typedModel || models.includes(typedModel)) return fetchedOptions;
+    return [{ value: typedModel, label: typedModel }, ...fetchedOptions];
+  }, [form.model, models]);
+
   if (!open) return null;
 
-  const { form, apiKey, models, message, busy, isBuiltin, isEditing } = formState;
   const title = isBuiltin
     ? t("llm.configureProvider", { name: provider.name || provider.id })
     : isEditing
@@ -63,12 +72,17 @@ export function ProviderDialog({
               />
             </label>
           </div>
-          <label className="block space-y-2 text-sm text-[var(--v2-text-strong)]">
-            {t("llm.adapter")}
-            <Select value={form.adapter} onChange={(e) => formState.update("adapter", e.currentTarget.value)}>
-              {ADAPTER_OPTIONS.map((item) => (<option key={item.value} value={item.value}>{item.label}</option>))}
-            </Select>
-          </label>
+          <div className="space-y-2 text-sm text-[var(--v2-text-strong)]">
+            <div>{t("llm.adapter")}</div>
+            <SelectMenu
+              value={form.adapter}
+              options={ADAPTER_OPTIONS}
+              onChange={(value) => formState.update("adapter", value)}
+              ariaLabel={t("llm.adapter")}
+              className="w-full"
+              buttonClassName="h-[44px] rounded-[14px] border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3.5 font-sans text-[13px] text-[var(--v2-text-strong)] md:h-[50px] md:rounded-[16px] md:px-4 md:text-sm"
+            />
+          </div>
           </>
         )}
 
@@ -101,9 +115,15 @@ export function ProviderDialog({
 
         {models.length > 0 &&
         (
-          <Select value={form.model} onChange={(e) => formState.update("model", e.currentTarget.value)}>
-            {models.map((model) => (<option key={model} value={model}>{model}</option>))}
-          </Select>
+          <SelectMenu
+            value={form.model}
+            options={modelOptions}
+            onChange={(value) => formState.update("model", value)}
+            ariaLabel={t("llm.defaultModel")}
+            className="w-full"
+            buttonClassName="h-[44px] rounded-[14px] border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3.5 font-sans text-[13px] text-[var(--v2-text-strong)] md:h-[50px] md:rounded-[16px] md:px-4 md:text-sm"
+            menuClassName="!top-auto bottom-[calc(100%+0.35rem)] max-h-64 overflow-y-auto"
+          />
         )}
 
         {message &&

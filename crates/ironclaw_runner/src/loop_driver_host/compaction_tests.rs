@@ -29,7 +29,7 @@ use ironclaw_turns::{
 /// passes if compaction reaches the scoped gateway.
 #[tokio::test]
 async fn build_compaction_ports_dispatches_through_scope_resolved_gateway() {
-    use ironclaw_loop_support::{
+    use ironclaw_loop_host::{
         HostManagedModelError, HostManagedModelRequest, HostManagedModelResponse,
     };
     use ironclaw_threads::{AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent};

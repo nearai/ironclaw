@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AuthContinuationEvent, AuthFlowId, AuthProductError, AuthProviderId, CredentialAccountId,
-    OAuthProviderExchange, scope::AuthProductScope,
+    CredentialSecretFingerprint, OAuthProviderExchange, scope::AuthProductScope,
 };
 
 /// Lifecycle event that drives credential/session cleanup.
@@ -43,6 +43,24 @@ pub struct OAuthExchangeCleanupRequest {
     pub scope: AuthProductScope,
     pub flow_id: AuthFlowId,
     pub exchange: OAuthProviderExchange,
+}
+
+/// Exact OAuth credential generation to revoke after continuation side effects
+/// fail. Unlike lifecycle uninstall, this must never select by provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthCompletionCompensationRequest {
+    pub scope: AuthProductScope,
+    pub flow_id: AuthFlowId,
+    pub provider: AuthProviderId,
+    pub credential_account_id: CredentialAccountId,
+    pub expected_secret_fingerprint: CredentialSecretFingerprint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OAuthCompletionCompensationOutcome {
+    Compensated,
+    Superseded,
+    AlreadyAbsent,
 }
 
 /// Redacted cleanup report. It carries account ids only, never secret handles or
@@ -91,6 +109,11 @@ pub trait SecretCleanupService: Send + Sync {
         &self,
         request: OAuthExchangeCleanupRequest,
     ) -> Result<CredentialAccountId, AuthProductError>;
+
+    async fn compensate_oauth_completion(
+        &self,
+        request: OAuthCompletionCompensationRequest,
+    ) -> Result<OAuthCompletionCompensationOutcome, AuthProductError>;
 
     async fn cleanup_for_lifecycle(
         &self,

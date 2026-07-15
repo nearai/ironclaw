@@ -509,12 +509,16 @@ fn project_fs_download_response(file: ProjectFsFile) -> Result<Response, WebUiV2
 
 /// Query parameters for the standalone filesystem-browser read routes. `mount`
 /// selects which logical mount to read (memory/workspace/…); `path` is a
-/// mount-relative path (absent/blank means the mount root for listing).
+/// mount-relative path (absent/blank means the mount root for listing), and
+/// `project_id` optionally selects an authorized project scope.
 #[derive(Debug, Deserialize)]
 pub struct FsBrowseQuery {
     pub mount: FsMount,
     #[serde(default)]
     pub path: Option<String>,
+    /// Optional project to browse, authorized by the product-workflow facade.
+    #[serde(default)]
+    pub project_id: Option<ironclaw_host_api::ProjectId>,
 }
 
 /// `GET /api/webchat/v2/fs/mounts`
@@ -528,7 +532,7 @@ pub async fn list_fs_mounts(
     Ok(Json(response))
 }
 
-/// `GET /api/webchat/v2/fs/list?mount=…&path=…`
+/// `GET /api/webchat/v2/fs/list?mount=…&path=…&project_id=…`
 ///
 /// List a directory on a browsable mount. Caller-scoped read-only navigation
 /// over the agent's internal filesystem.
@@ -544,12 +548,13 @@ pub async fn browse_fs_dir(
             .path
             .filter(|path| !path.trim().is_empty())
             .unwrap_or_default(),
+        project_id: query.project_id,
     };
     let response = state.services().browse_fs_dir(caller, request).await?;
     Ok(Json(response))
 }
 
-/// `GET /api/webchat/v2/fs/stat?mount=…&path=…`
+/// `GET /api/webchat/v2/fs/stat?mount=…&path=…&project_id=…`
 ///
 /// Return metadata for a path on a browsable mount.
 pub async fn stat_fs_path(
@@ -560,12 +565,13 @@ pub async fn stat_fs_path(
     let request = RebornFsStatRequest {
         mount: query.mount,
         path: require_fs_browse_path(query.path)?,
+        project_id: query.project_id,
     };
     let response = state.services().stat_fs_path(caller, request).await?;
     Ok(Json(response))
 }
 
-/// `GET /api/webchat/v2/fs/content?mount=…&path=…`
+/// `GET /api/webchat/v2/fs/content?mount=…&path=…&project_id=…`
 ///
 /// Download/preview a file's bytes from a browsable mount. Served as an
 /// attachment with `nosniff`, exactly like the project-file route.
@@ -577,6 +583,7 @@ pub async fn read_fs_file(
     let request = RebornFsReadRequest {
         mount: query.mount,
         path: require_fs_browse_path(query.path)?,
+        project_id: query.project_id,
     };
     let file = state.services().read_fs_file(caller, request).await?;
     project_fs_download_response(file)

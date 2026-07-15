@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt, stream};
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
     SkillBundleDescriptor, SkillBundleId, SkillBundleSource, SkillBundleSourceError,
     SkillSourceKind, sort_skill_bundle_descriptors,
@@ -504,7 +504,7 @@ where
             });
         }
         // NOTE: model messages are re-resolved by ref from a FRESH candidate
-        // build (`instruction_snippet_messages_by_ref` in ironclaw_loop_support)
+        // build (`instruction_snippet_messages_by_ref` in ironclaw_loop_host)
         // which — the recorded message having been consumed above — takes the
         // active-plan path. Both paths must therefore produce the same snippet
         // set and listing text for one run state, so listing rendering applies
@@ -1737,7 +1737,7 @@ fn content_hash(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use ironclaw_host_api::{AgentId, ProjectId, TenantId};
-    use ironclaw_loop_support::{SkillBundleId, SkillFilePath};
+    use ironclaw_loop_host::{SkillBundleId, SkillFilePath};
     use ironclaw_skills::SkillTrust;
     use ironclaw_turns::{
         TurnActor, TurnId, TurnRunId,
@@ -1812,7 +1812,7 @@ mod tests {
                 format!("{name} description"),
             )
             .with_provenance(
-                ironclaw_loop_support::SkillBundleProvenance::new(SkillSourceKind::User)
+                ironclaw_loop_host::SkillBundleProvenance::new(SkillSourceKind::User)
                     .with_content_hash("stable-test-hash"),
             );
             Self {

@@ -547,6 +547,7 @@ mod tests {
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             resolved_model_route: None,
+            model_usage: None,
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: gate_ref.map(|value| GateRef::new(value).unwrap()),
@@ -794,6 +795,7 @@ mod tests {
         let actor = TurnActor::new(UserId::new("alice").unwrap());
         let submit = coordinator
             .submit_turn(SubmitTurnRequest {
+                requested_model: None,
                 scope: scope.clone(),
                 actor: actor.clone(),
                 accepted_message_ref: AcceptedMessageRef::new("message-auth-real").unwrap(),

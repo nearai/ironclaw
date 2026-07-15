@@ -1,6 +1,7 @@
+// arch-exempt: large_file, targeted model error mapping stays with the gateway adapter, plan #4088
 //! LLM provider-backed Reborn model gateway wiring.
 //!
-//! The loop-support crate owns the host-facing model gateway contract. This
+//! The loop-host crate owns the host-facing model gateway contract. This
 //! adapter lives in the standalone Reborn composition crate because it bridges
 //! that contract to the shared `ironclaw_llm` provider abstraction.
 
@@ -23,7 +24,7 @@ use ironclaw_llm::{
     recover_codex_text_tool_calls_from_tool_names,
     vision_models::is_vision_model,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
     HostManagedModelResponse, HostManagedModelRouteSnapshot, HostManagedModelStreamSink,
@@ -37,7 +38,7 @@ use ironclaw_safety::{
 use ironclaw_threads::{ProviderToolCallReferenceEnvelope, SessionThreadService, ThreadScope};
 use ironclaw_turns::run_profile::LoopModelUsage;
 use ironclaw_turns::{
-    TurnId, TurnRunId,
+    ModelInvalidOutputDetailReason as InvalidOutputReason, TurnId, TurnRunId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
@@ -68,9 +69,6 @@ use crate::{
 const MODEL_CREDITS_EXHAUSTED_SUMMARY: &str = "model provider account is out of credits";
 const PROVIDER_TOOL_ARGUMENTS_OMITTED_MARKER: &str =
     "arguments omitted because they exceeded the host provider-tool limit";
-const PROVIDER_TOOL_ARGUMENTS_PARSE_ERROR_PREFIX: &str =
-    "failed to parse tool-call arguments JSON:";
-const PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY: &str = "model returned invalid tool-call arguments";
 const PROVIDER_TOOL_ARGUMENTS_INVALID_MARKER: &str =
     "arguments omitted because the provider emitted malformed tool-call JSON";
 const CONTEXT_SHADOW_TARGET: &str = "ironclaw::reborn::context_shadow";
@@ -404,7 +402,14 @@ where
                     "model profile is not permitted",
                 )
             })?;
-        let model_override = request_model_override(route, self.provider.as_ref())?;
+        let model_override = request_model_override(
+            route,
+            self.provider.as_ref(),
+            request
+                .resolved_model_route
+                .as_ref()
+                .map(|snapshot| snapshot.model_id.as_str()),
+        )?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
@@ -440,7 +445,14 @@ where
                     "model profile is not permitted",
                 )
             })?;
-        let model_override = request_model_override(route, self.provider.as_ref())?;
+        let model_override = request_model_override(
+            route,
+            self.provider.as_ref(),
+            request
+                .resolved_model_route
+                .as_ref()
+                .map(|snapshot| snapshot.model_id.as_str()),
+        )?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
@@ -476,7 +488,14 @@ where
                     "model profile is not permitted",
                 )
             })?;
-        let model_override = request_model_override(route, self.provider.as_ref())?;
+        let model_override = request_model_override(
+            route,
+            self.provider.as_ref(),
+            request
+                .resolved_model_route
+                .as_ref()
+                .map(|snapshot| snapshot.model_id.as_str()),
+        )?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
@@ -517,7 +536,14 @@ where
                     "model profile is not permitted",
                 )
             })?;
-        let model_override = request_model_override(route, self.provider.as_ref())?;
+        let model_override = request_model_override(
+            route,
+            self.provider.as_ref(),
+            request
+                .resolved_model_route
+                .as_ref()
+                .map(|snapshot| snapshot.model_id.as_str()),
+        )?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
@@ -1006,14 +1032,22 @@ fn host_error_to_model_gateway_error(error: AgentLoopHostError) -> LoopModelGate
 fn request_model_override<P>(
     route: &LlmModelProfileRoute,
     provider: &P,
+    requested_model: Option<&str>,
 ) -> Result<String, HostManagedModelError>
 where
     P: LlmProvider + ?Sized,
 {
-    let model_override = route
-        .model_override
-        .as_deref()
+    // A per-run caller-requested model (an advisory route hint set at submit)
+    // takes precedence over the profile default. Providers that honor
+    // per-request overrides (e.g. NEAR AI) serve the requested model; providers
+    // that bake the model at construction ignore it and fall back to their
+    // active model — the "route if the provider can serve it, else fall back"
+    // behavior, decided at the provider boundary rather than a route allowlist.
+    let model_override = requested_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
         .map(str::to_string)
+        .or_else(|| route.model_override.as_deref().map(str::to_string))
         .unwrap_or_else(|| provider.active_model_name());
     let trimmed = model_override.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default") {
@@ -1412,7 +1446,7 @@ fn recover_textual_tool_calls_from_tool_response(
             debug!("reborn model gateway rejected unrecovered textual provider tool-call syntax");
             return Err(HostManagedModelError::safe(
                 HostManagedModelErrorKind::InvalidOutput,
-                "model returned textual tool-call syntax instead of structured tool calls",
+                InvalidOutputReason::TextualToolCallSyntax.safe_summary(),
             ));
         }
         return Ok(response);
@@ -1504,6 +1538,8 @@ async fn tool_response_to_host(
             .with_usage(LoopModelUsage {
                 input_tokens: response.input_tokens,
                 output_tokens: response.output_tokens,
+                cache_read_input_tokens: response.cache_read_input_tokens,
+                cache_creation_input_tokens: response.cache_creation_input_tokens,
             }));
         }
         let advertised_tool_names = capabilities
@@ -1533,7 +1569,7 @@ async fn tool_response_to_host(
         ) {
             return Err(HostManagedModelError::safe(
                 HostManagedModelErrorKind::InvalidOutput,
-                "model returned a tool call outside the advertised capability surface",
+                InvalidOutputReason::OutsideCapabilitySurface.safe_summary(),
             ));
         }
         for provider_call in &provider_calls {
@@ -1587,6 +1623,8 @@ async fn tool_response_to_host(
         .with_usage(LoopModelUsage {
             input_tokens: response.input_tokens,
             output_tokens: response.output_tokens,
+            cache_read_input_tokens: response.cache_read_input_tokens,
+            cache_creation_input_tokens: response.cache_creation_input_tokens,
         }));
     }
 
@@ -1596,7 +1634,7 @@ async fn tool_response_to_host(
             if content.trim().is_empty() {
                 return Err(HostManagedModelError::safe(
                     HostManagedModelErrorKind::InvalidOutput,
-                    "model returned an empty assistant response",
+                    InvalidOutputReason::EmptyAssistantResponse.safe_summary(),
                 ));
             }
             debug!(
@@ -1610,6 +1648,8 @@ async fn tool_response_to_host(
             .with_usage(LoopModelUsage {
                 input_tokens: response.input_tokens,
                 output_tokens: response.output_tokens,
+                cache_read_input_tokens: response.cache_read_input_tokens,
+                cache_creation_input_tokens: response.cache_creation_input_tokens,
             }))
         }
         FinishReason::Length => Err(HostManagedModelError::safe(
@@ -1622,7 +1662,7 @@ async fn tool_response_to_host(
         )),
         FinishReason::ToolUse => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::InvalidOutput,
-            "model returned tool-use finish without tool calls",
+            InvalidOutputReason::ToolUseFinishWithoutToolCalls.safe_summary(),
         )),
         FinishReason::Unknown => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::Unavailable,
@@ -1868,7 +1908,7 @@ fn provider_tool_call_from_llm(
         debug!(%error, "reborn model gateway rejected invalid provider tool name");
         HostManagedModelError::safe(
             HostManagedModelErrorKind::InvalidOutput,
-            "model returned an invalid provider tool name",
+            InvalidOutputReason::InvalidReturnedToolName.safe_summary(),
         )
     })?;
     Ok(ProviderToolCall {
@@ -1888,12 +1928,14 @@ fn provider_tool_arguments_parse_error_summary(parse_error: &str) -> String {
     let summary_line = parse_error.lines().next().unwrap_or(parse_error);
     let sanitized = sanitize_model_visible_text(summary_line.to_string());
     let sanitized = sanitized.trim();
-    if sanitized.starts_with(PROVIDER_TOOL_ARGUMENTS_PARSE_ERROR_PREFIX)
+    if sanitized.starts_with(InvalidOutputReason::TOOL_CALL_ARGUMENTS_PARSE_ERROR_PREFIX)
         && LoopSafeSummary::new(sanitized).is_ok()
     {
         sanitized.to_string()
     } else {
-        PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY.to_string()
+        InvalidOutputReason::InvalidToolCallArguments
+            .safe_summary()
+            .to_string()
     }
 }
 
@@ -1926,6 +1968,8 @@ fn response_to_host_reply(
     let usage = LoopModelUsage {
         input_tokens: response.input_tokens,
         output_tokens: response.output_tokens,
+        cache_read_input_tokens: response.cache_read_input_tokens,
+        cache_creation_input_tokens: response.cache_creation_input_tokens,
     };
     match response.finish_reason {
         FinishReason::Stop => {
@@ -1946,7 +1990,7 @@ fn response_to_host_reply(
         )),
         FinishReason::ToolUse => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::InvalidOutput,
-            "model returned unsupported tool calls for a text-only loop",
+            InvalidOutputReason::UnsupportedToolCallsForTextOnlyLoop.safe_summary(),
         )),
         FinishReason::Unknown => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::Unavailable,
@@ -1963,11 +2007,12 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
         AgentLoopHostErrorKind::Unauthorized | AgentLoopHostErrorKind::PolicyDenied => {
             HostManagedModelErrorKind::PolicyDenied
         }
-        AgentLoopHostErrorKind::BudgetExceeded | AgentLoopHostErrorKind::BudgetAccountingFailed => {
-            HostManagedModelErrorKind::BudgetExceeded
-        }
+        AgentLoopHostErrorKind::BudgetExceeded => HostManagedModelErrorKind::BudgetExceeded,
         AgentLoopHostErrorKind::BudgetApprovalRequired => {
             HostManagedModelErrorKind::BudgetApprovalRequired
+        }
+        AgentLoopHostErrorKind::BudgetAccountingFailed => {
+            HostManagedModelErrorKind::BudgetAccountingFailed
         }
         AgentLoopHostErrorKind::Cancelled => HostManagedModelErrorKind::Cancelled,
         AgentLoopHostErrorKind::Invalid
@@ -2006,8 +2051,8 @@ fn is_repairable_provider_tool_output_error(error: &HostManagedModelError) -> bo
 }
 
 fn is_provider_tool_arguments_parse_error_summary(safe_summary: &str) -> bool {
-    safe_summary.starts_with(PROVIDER_TOOL_ARGUMENTS_PARSE_ERROR_PREFIX)
-        || safe_summary == PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY
+    safe_summary.starts_with(InvalidOutputReason::TOOL_CALL_ARGUMENTS_PARSE_ERROR_PREFIX)
+        || safe_summary == InvalidOutputReason::InvalidToolCallArguments.safe_summary()
 }
 
 fn provider_tool_repair_messages(
@@ -2292,7 +2337,7 @@ fn validate_provider_replay_identity(
     expected: &ProviderReplayIdentity,
 ) -> Result<(), HostManagedModelError> {
     provider_call.validate().map_err(|error| {
-        ironclaw_loop_support::raw_host_managed_model_error(
+        ironclaw_loop_host::raw_host_managed_model_error(
             "provider_tool_replay",
             "validate_provider_call",
             HostManagedModelErrorKind::InvalidRequest,
@@ -2592,6 +2637,20 @@ mod tests {
     }
 
     #[test]
+    fn capability_budget_accounting_error_is_not_collapsed_to_budget_exceeded() {
+        let mapped = map_capability_host_error(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::BudgetAccountingFailed,
+            "resource accounting storage is unavailable",
+        ));
+
+        assert_eq!(
+            mapped.kind,
+            HostManagedModelErrorKind::BudgetAccountingFailed,
+            "accounting infrastructure failure must cross the model gateway unchanged"
+        );
+    }
+
+    #[test]
     fn unconfigured_provider_detection_requires_the_placeholder_provider_id() {
         // A real provider whose *message* mentions configuration must keep
         // availability-class mapping; only the placeholder provider id
@@ -2821,7 +2880,7 @@ mod tests {
 
     fn user_message_with_images(
         content: &str,
-        image_parts: Vec<ironclaw_loop_support::HostManagedModelImagePart>,
+        image_parts: Vec<ironclaw_loop_host::HostManagedModelImagePart>,
     ) -> HostManagedModelMessage {
         HostManagedModelMessage {
             role: HostManagedModelMessageRole::User,
@@ -2840,7 +2899,7 @@ mod tests {
     fn convert_messages_emits_image_url_parts_for_user_image_attachments() {
         let message = user_message_with_images(
             "what is in this image?",
-            vec![ironclaw_loop_support::HostManagedModelImagePart {
+            vec![ironclaw_loop_host::HostManagedModelImagePart {
                 mime_type: "image/png".to_string(),
                 bytes: vec![1, 2, 3, 4],
             }],
@@ -2882,7 +2941,7 @@ mod tests {
         // relies on the transcript's `<attachments>` pointer.
         let message = user_message_with_images(
             "what is in this image?",
-            vec![ironclaw_loop_support::HostManagedModelImagePart {
+            vec![ironclaw_loop_host::HostManagedModelImagePart {
                 mime_type: "image/png".to_string(),
                 bytes: vec![1, 2, 3, 4],
             }],
@@ -2948,7 +3007,10 @@ mod tests {
             "raw_provider_secret api_key=sk-live-secret malformed payload",
         );
 
-        assert_eq!(summary, PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY);
+        assert_eq!(
+            summary,
+            InvalidOutputReason::InvalidToolCallArguments.safe_summary()
+        );
     }
 
     #[test]
@@ -2969,7 +3031,10 @@ mod tests {
             "failed to parse tool-call arguments JSON: expected `,` or `}` at line 1 column 2",
         );
 
-        assert_eq!(summary, PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY);
+        assert_eq!(
+            summary,
+            InvalidOutputReason::InvalidToolCallArguments.safe_summary()
+        );
     }
 
     #[test]

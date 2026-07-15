@@ -112,7 +112,7 @@ Approach: a `ReservationGuard` RAII struct that:
   before returning.
 
 This replaces the manual `in_flight.remove` + `release` pair. The
-guard lives in `crates/ironclaw_loop_support/src/budget_accountant.rs`
+guard lives in `crates/ironclaw_loop_host/src/budget_accountant.rs`
 (near the in-flight map) so the contract stays in one file.
 
 Acceptance: drop-in regression test that cancels a `stream_model`
@@ -121,7 +121,7 @@ returns to zero within one tokio tick.
 
 ### PR 4 — E1: kill the dead inner accountant
 
-`ThreadBackedLoopModelPort` (`crates/ironclaw_loop_support/src/lib.rs:731-1004`)
+`ThreadBackedLoopModelPort` (`crates/ironclaw_loop_host/src/lib.rs:731-1004`)
 carries an `Option<Arc<dyn LoopModelBudgetAccountant>>` and a
 `with_budget_accountant` builder, but the production wiring at
 `crates/ironclaw_runner/src/loop_driver_host.rs:598-617` never sets
@@ -135,7 +135,7 @@ builder, and the dead branches in `stream_model`. Update the inner
 tests to drop the now-unused setup. (Collapsing the two wrappers
 entirely is a larger refactor; not in scope for this follow-up.)
 
-Acceptance: `clippy::dead_code` clean; the `crates/ironclaw_loop_support`
+Acceptance: `clippy::dead_code` clean; the `crates/ironclaw_loop_host`
 unit + contract tests still pass; only the outer port runs accountant
 hooks.
 
@@ -217,7 +217,7 @@ Touchpoints:
 - All `LoopModelGateway` implementations: have them fill the fields
   when the provider returns them. For providers that don't (NEAR AI
   local, Ollama free), leave `None` and fall back to the estimate.
-- `crates/ironclaw_loop_support/src/budget_accountant.rs::usage_for_response`:
+- `crates/ironclaw_loop_host/src/budget_accountant.rs::usage_for_response`:
   prefer response-provided numbers; fall back to estimate only when
   `None`.
 
@@ -305,9 +305,9 @@ contract in:
 
 | # | Test(s) |
 |---|------|
-| C2 | `ironclaw_loop_support::budget_accountant::tests::post_model_call_reconciles_provider_usage_when_response_threads_real_tokens` + e2e `c1_provider_tokens_reconcile_to_actual_usd` |
+| C2 | `ironclaw_loop_host::budget_accountant::tests::post_model_call_reconciles_provider_usage_when_response_threads_real_tokens` + e2e `c1_provider_tokens_reconcile_to_actual_usd` |
 | D1 | `ironclaw_resources::tests::limit_exceeded_carries_warnings_from_other_dimensions` + e2e `d1_agent_deny_preserves_user_warn_event` |
-| C1 | `ironclaw_loop_support::budget_accountant::tests::release_in_flight_drains_orphan_reservation_on_cancellation` |
+| C1 | `ironclaw_loop_host::budget_accountant::tests::release_in_flight_drains_orphan_reservation_on_cancellation` |
 | E1 | Covered by removing the dead field + 14 pre-existing accountant tests; `clippy::dead_code` clean. |
 | Cost table | `ironclaw_runner::model_gateway::LlmModelProfilePolicy::build_cost_table` exercised by the A1 wiring + e2e `c2_unknown_model_in_cost_table_uses_default_cost_fallback`. |
 | B1 | `ironclaw_resources::filesystem_gate_store::tests::pending_gate_survives_restart_via_fresh_handle` + `list_pending_does_not_leak_across_tenants` + `terminal_gates_older_than_retention_are_pruned_on_next_write` (review feedback High #1 + Medium #7). |

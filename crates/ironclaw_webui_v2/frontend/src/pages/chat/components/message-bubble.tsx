@@ -81,6 +81,16 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
     typeof message.isFinalReply === "boolean"
       ? String(message.isFinalReply)
       : undefined;
+  const failureCategory =
+    role === CHAT_MESSAGE_ROLES.ERROR &&
+    typeof message.failureCategory === "string"
+      ? message.failureCategory
+      : undefined;
+  const failureStatus =
+    role === CHAT_MESSAGE_ROLES.ERROR &&
+    typeof message.failureStatus === "string"
+      ? message.failureStatus
+      : undefined;
   const [copied, setCopied] = React.useState(false);
   // The attachment currently open in the preview modal (null when closed).
   const [previewAttachment, setPreviewAttachment] =
@@ -165,6 +175,8 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
     <div
       data-testid={`msg-${role}`}
       data-final-reply={finalReplyState}
+      data-failure-category={failureCategory}
+      data-failure-status={failureStatus}
       className={["group flex w-full min-w-0 flex-col", isUser ? "items-end" : "items-start"].join(" ")}
     >
       <div className={["flex min-w-0 flex-col", bubbleWidthClass].join(" ")}>
@@ -228,7 +240,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
               : "self-start justify-start",
           ].join(" ")}
         >
-          {timeLabel && (<time dateTime={timestamp} className="shrink-0 font-mono text-[11px] text-iron-500">{timeLabel}</time>)}
+          {timeLabel && (<time dateTime={timestamp} className="shrink-0 font-mono text-[11px] text-[var(--v2-text-muted)]">{timeLabel}</time>)}
           {(showActions || showRetryAction) && (
             <div className="flex shrink-0 items-center gap-1">
             {showActions && (

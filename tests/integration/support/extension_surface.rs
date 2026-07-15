@@ -31,6 +31,7 @@ pub const EXTENSION_LIFECYCLE_CAPABILITY_IDS: &[&str] = &[
 pub const BUNDLED_EXTENSION_IDS: &[&str] = &[
     "github",
     "web-access",
+    "slack",
     "gmail",
     "google-calendar",
     "google-docs",
@@ -92,6 +93,14 @@ pub const BUNDLED_EXTENSION_CAPABILITY_IDS: &[&str] = &[
     "github.handle_webhook",
     "web-access.search",
     "web-access.get_content",
+    "slack.search_messages",
+    "slack.list_conversations",
+    "slack.get_conversation_info",
+    "slack.get_conversation_history",
+    "slack.get_thread_replies",
+    "slack.get_user_info",
+    "slack.whoami",
+    "slack.send_message",
     "gmail.list_messages",
     "gmail.get_message",
     "gmail.send_message",
@@ -180,10 +189,10 @@ pub const BUNDLED_EXTENSION_CAPABILITY_IDS: &[&str] = &[
 /// `crates/ironclaw_first_party_extensions/assets/`, parsed by
 /// [`bundled_extension_manifest_capability_ids`]. Excludes `github` (parsed
 /// separately by `github::capability_ids()`, which this list intentionally
-/// does not duplicate) and `slack` (not yet a modeled bundled extension in
-/// this harness).
+/// does not duplicate).
 const BUNDLED_EXTENSION_MANIFEST_ASSET_DIRS: &[&str] = &[
     "web-access",
+    "slack",
     "gmail",
     "google-calendar",
     "google-docs",

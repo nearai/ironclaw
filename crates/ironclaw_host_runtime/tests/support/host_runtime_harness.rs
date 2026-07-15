@@ -2266,6 +2266,7 @@ pub(crate) fn http_without_body_then_operation_failed_wat() -> String {
 #[cfg(feature = "libsql")]
 pub(crate) fn submit_turn_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest {
     SubmitTurnRequest {
+        requested_model: None,
         scope: TurnScope::new(
             TenantId::new("tenant1").unwrap(),
             Some(AgentId::new("agent1").unwrap()),

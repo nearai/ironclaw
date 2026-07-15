@@ -235,10 +235,16 @@ SEL_V2 = {
     "sidebar":        "#gateway-sidebar",  # app navigation sidebar
     "sidebar_button": "#gateway-sidebar button",
     "sidebar_toggle": "button[aria-label='Toggle sidebar']",
+    "thread_delete_for": (
+        "[data-testid='thread-delete'][data-thread-id='{id}']"
+    ),
     "sign_out_button": "button[title='Sign out']",
     "chat_composer":  "[data-testid='chat-composer']",  # message textarea on /chat
     "attachment_file_input": "input[type=file][multiple]",
     "typing_indicator": "[data-testid='typing-indicator']",
+    "connection_status": "[data-testid='connection-status']",
+    "connection_status_toggle": "[data-testid='connection-status-toggle']",
+    "connection_status_label": "[data-testid='connection-status-label']",
     "msg_user":       "[data-testid='msg-user']",       # user message bubble
     "msg_assistant":  "[data-testid='msg-assistant']",  # assistant message bubble
     "msg_system":     "[data-testid='msg-system']",     # system notice bubble
@@ -318,6 +324,7 @@ SEL_V2 = {
         "[data-testid='settings-tool-permission-select'] button[aria-haspopup='listbox']"
     ),
     "settings_tool_lock": "[data-testid='settings-tool-lock']",
+    "skill_action_result": "[data-testid='skill-action-result']",
     "llm_provider_card_for": (
         "[data-testid='llm-provider-card'][data-provider-id='{provider_id}']"
     ),
