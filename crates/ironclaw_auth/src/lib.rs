@@ -10,6 +10,7 @@
 //! pending maps, V1 extension manager authority, or V1 secret stores.
 
 mod cleanup;
+pub mod conformance;
 mod credential;
 pub mod domain;
 mod error;
