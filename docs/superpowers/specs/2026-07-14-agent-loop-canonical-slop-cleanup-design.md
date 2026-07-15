@@ -49,12 +49,25 @@ previously-overflowing test), clippy clean with `-D warnings`,
 `cargo test -p ironclaw_architecture` green. `canonical.rs` is now four
 focused functions instead of one ~570-line one.
 
-**Not attempted: Section 3 (event-streaming cleanup) and Section 4
-(guardrail rule file).** Time went to the Section 1/2 landing instead. Both
-remain valid, low-risk follow-ups — Section 3 in particular
-already has its ordering caveat documented below (the `PromptStage` move
-changes `BeforeModel` checkpoint semantics; a real test caught this — see
-Section 3's note).
+**Section 3 (event-streaming cleanup): found not applicable, not landed.**
+Re-verified against the shipped decomposition: `execute_prepared_turn` still
+writes the `BeforeModel` checkpoint *before* the repeated-call-warning
+mutation runs. Moving the mutation into `PromptStage` (which computes the
+triggering flag, and which runs *before* that checkpoint write) would
+silently flip checkpoint semantics from `PendingRender` to `Rendered` —
+a real behavior change the existing test
+`repeated_call_warning_checkpoint_stays_pending_until_model_request` would
+catch. The code's current placement in `execute_prepared_turn` is correct
+given that ordering invariant, not stray slop. No change made; see the
+"near-miss" writeup in the new guardrail rule file (Section 4) for the
+reasoning, so a future reader doesn't "fix" it into a regression.
+
+**Section 4 (guardrail rule file): shipped.** Added
+`.claude/rules/agent-loop-canonical-branching.md`, mirroring
+`agent-loop-capabilities.md`'s incident-driven style, with both worked
+incidents (completion nudge, latency spans), the Section 3 near-miss as a
+documented exception, and a mechanical review flag. Cross-referenced from
+`crates/ironclaw_agent_loop/CLAUDE.md`'s "Executor stage ownership" section.
 
 ## Problem
 
@@ -181,7 +194,7 @@ behavior change — the stack-overflow regression documented in
 unconfirmed. **Do not re-attempt this exact implementation without first
 understanding why it broke** `policy_denied_capability_error_honors_retry_recovery`.
 
-## Section 3 — Event-streaming cleanup (NOT ATTEMPTED)
+## Section 3 — Event-streaming cleanup (FOUND NOT APPLICABLE — see outcome above)
 
 - Move the repeated-call-warning block (`state.stop_state
   .mark_repeated_call_warning_rendered()` + the `driver_note` progress
@@ -203,7 +216,7 @@ understanding why it broke** `policy_denied_capability_error_honors_retry_recove
   top of each loop tick, which is genuinely the spine's own bookkeeping,
   not any single stage's decision.
 
-## Section 4 — Guardrail: new rule file (NOT ATTEMPTED)
+## Section 4 — Guardrail: new rule file (SHIPPED — see outcome above)
 
 Add `.claude/rules/agent-loop-canonical-branching.md`, mirroring the
 existing incident-driven style of `.claude/rules/agent-loop-capabilities.md`

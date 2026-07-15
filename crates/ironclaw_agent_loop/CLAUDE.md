@@ -51,6 +51,9 @@ canonical executor, loop execution state, and executor test support.
 - Do not add stages for pure mapping helpers or one-line wrappers.
 - Keep cancellation, checkpoint, and pending-input-ack ordering explicit at the
   stage boundary that owns the state transition.
+- See `.claude/rules/agent-loop-canonical-branching.md` for worked incidents
+  (the completion-nudge and latency-span drift this rule set exists to
+  prevent) and the mechanical review flag for spotting a repeat.
 
 ## Common mistakes
 
