@@ -417,11 +417,14 @@ async fn expired_flow_callback_rejected_then_fresh_flow_retry_succeeds() {
 /// the token exchange or minting a second account, and a subsequent fresh
 /// connect (reconnect epoch) still succeeds.
 ///
-/// Deliberate divergence from the `ironclaw_auth` in-memory contract fake,
-/// which rejects a terminal-flow callback with `FlowAlreadyTerminal`: the
-/// durable `claim_oauth_callback` short-circuits terminal flows to `Ok`
-/// (`product_auth/durable/flows.rs`) so the hosted, unauthenticated callback
-/// route stays replay-safe. This test pins the production (durable) shape.
+/// NOT a fake-vs-durable divergence (both impls agree at every
+/// `AuthFlowManager` method — see `ironclaw_auth::conformance`): the
+/// replay-safety split is between SEAMS. `claim_oauth_callback` is
+/// idempotent on terminal flows in both impls, and `handle_oauth_callback`
+/// (this wrapper, the hosted unauthenticated callback route's entry)
+/// short-circuits at that claim — while trait-level
+/// `complete_oauth_callback` stays fail-closed (`FlowAlreadyTerminal`) in
+/// both. This test pins the wrapper's replay-idempotent shape.
 #[tokio::test]
 async fn replayed_callback_is_idempotent_then_fresh_flow_reconnects() {
     let bundle = build_oauth_product_auth_for_test();
