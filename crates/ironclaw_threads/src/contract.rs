@@ -459,7 +459,7 @@ pub struct PutToolResultRecordRequest {
 }
 
 /// Maximum byte window returned by one durable tool-result read.
-pub const TOOL_RESULT_RECORD_READ_MAX_BYTES: usize = 2 * 1024;
+pub const TOOL_RESULT_RECORD_READ_MAX_BYTES: usize = 2816;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadToolResultRecordRequest {

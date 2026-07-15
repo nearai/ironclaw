@@ -2151,12 +2151,12 @@ async fn append_tool_result_reference_persists_model_observation_in_envelope() {
 }
 
 /// Issue #5838: `ironclaw_reborn_composition::local_dev` inlines a first-look
-/// result preview up to `TOOL_RESULT_RECORD_READ_MAX_BYTES` (2048 bytes) into
-/// the `result_reference` observation. This pins that a full-size,
-/// JSON-braces-heavy 2048-byte preview survives this crate's own
-/// `validate_model_observation` boundary (whole-envelope cap 4096 bytes) —
-/// the preview is not dropped, and it appears in the replayed model-visible
-/// content.
+/// result preview up to `TOOL_RESULT_RECORD_READ_MAX_BYTES` into the
+/// `result_reference` observation. This pins that a full-size,
+/// JSON-braces-heavy preview at exactly the production preview cap survives
+/// this crate's own `validate_model_observation` boundary (whole-envelope cap
+/// 4096 bytes) — the preview is not dropped, and it appears in the replayed
+/// model-visible content.
 #[tokio::test]
 async fn append_tool_result_reference_retains_full_size_result_preview() {
     let service = InMemorySessionThreadService::default();
@@ -2172,24 +2172,26 @@ async fn append_tool_result_reference_retains_full_size_result_preview() {
         .await
         .unwrap();
 
-    // JSON-braces-heavy text repeated to exactly 2048 bytes, matching the
-    // production preview cap.
+    // JSON-braces-heavy text repeated to exactly the production preview cap,
+    // derived from the constant rather than a frozen literal so this test
+    // tracks any future change to TOOL_RESULT_RECORD_READ_MAX_BYTES.
     let unit = r#"{"id":1,"value":"x"},"#;
-    let mut preview = unit.repeat(2048 / unit.len() + 1);
-    preview.truncate(2048);
-    assert_eq!(preview.len(), 2048);
+    let cap = TOOL_RESULT_RECORD_READ_MAX_BYTES;
+    let mut preview = unit.repeat(cap / unit.len() + 1);
+    preview.truncate(cap);
+    assert_eq!(preview.len(), cap);
 
     let observation = serde_json::json!({
         "schema_version": 1,
         "status": "success",
-        "summary": "Tool completed; preview truncated, use result_read with the result reference and offset 2048 for more output.",
+        "summary": format!("Tool completed; preview truncated, use result_read with the result reference and offset {cap} for more output."),
         "detail": {
             "kind": "result_reference",
             "result_ref": "result:full-size-result-preview-tool",
             "byte_len": 9000,
             "preview": preview,
             "total_bytes": 9000,
-            "next_offset": 2048
+            "next_offset": cap
         },
         "artifacts": [{
             "artifact_ref": "result:full-size-result-preview-tool",

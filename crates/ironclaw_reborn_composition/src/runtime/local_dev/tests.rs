@@ -1348,17 +1348,15 @@ mod tests {
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
 
-        // A multi-byte character straddling the 2048-byte preview boundary:
-        // the serialized JSON string (leading `"` + 2046 ASCII bytes) puts the
-        // 3-byte '日' character at bytes [2047, 2050), so byte 2048 (the raw
-        // cap) falls inside it and must round down.
-        let content = format!("{}{}{}", "a".repeat(2046), '日', "a".repeat(100));
+        // A multi-byte character straddling the preview boundary: the
+        // serialized JSON string (leading `"` + (cap - 2) ASCII bytes) puts
+        // the 3-byte '日' character at bytes [cap - 1, cap + 2), so byte `cap`
+        // (the raw cap) falls inside it and must round down.
+        let cap = ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES;
+        let content = format!("{}{}{}", "a".repeat(cap - 2), '日', "a".repeat(100));
         let output = serde_json::Value::String(content);
         let full_text = serde_json::to_string(&output).expect("serialize reference output");
-        assert!(
-            full_text.len() > 2048,
-            "fixture must exceed the preview cap"
-        );
+        assert!(full_text.len() > cap, "fixture must exceed the preview cap");
 
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -1405,7 +1403,7 @@ mod tests {
             "preview must end on a UTF-8 char boundary"
         );
         assert!(
-            next_offset < 2048,
+            next_offset < cap as u64,
             "the multi-byte char must round the boundary down below the raw cap"
         );
         assert_eq!(
@@ -1475,7 +1473,7 @@ mod tests {
                     serde_json::json!({
                         "result_ref": write_result.result_ref.as_str(),
                         "offset": next_offset,
-                        "max_bytes": 2048,
+                        "max_bytes": cap,
                     }),
                 ),
             ))
@@ -1684,7 +1682,8 @@ mod tests {
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
 
-        let content = "a".repeat(2046 + 100);
+        let cap = ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES;
+        let content = "a".repeat(cap - 2 + 100);
         let output = serde_json::Value::String(content);
 
         let input_ref = capability_io
@@ -1775,7 +1774,7 @@ mod tests {
                     serde_json::json!({
                         "result_ref": write_result.result_ref.as_str(),
                         "offset": next_offset,
-                        "max_bytes": 2048,
+                        "max_bytes": cap,
                     }),
                 ),
             ))
