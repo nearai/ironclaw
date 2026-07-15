@@ -2425,7 +2425,7 @@ async fn graceful_stop_self_verify_supersedes_reply_when_gate_enabled_and_tool_a
             ctx,
             ExitInput {
                 state,
-                kind: StopKind::GracefulStop,
+                kind: StopKind::GracefulStopPendingVerification,
             },
         )
         .await
@@ -2464,9 +2464,49 @@ async fn graceful_stop_self_verify_supersedes_reply_when_gate_enabled_and_tool_a
 
 #[tokio::test]
 async fn graceful_stop_skips_self_verify_when_gate_disabled() {
-    // Gate OFF: even with prior tool activity and a reply queued, no
-    // verification call is issued and the original reply stands unchanged.
+    // Strategy says verification-eligible (`GracefulStopPendingVerification`)
+    // but the gate is OFF: no verification call is issued and the original
+    // reply stands unchanged.
     let host = MockHost::new(vec![reply_response_with_text("unused")]);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = state_with_prior_reply_and_tool_activity(&host);
+
+    let exit = ExitStage
+        .process(
+            ctx,
+            ExitInput {
+                state,
+                kind: StopKind::GracefulStopPendingVerification,
+            },
+        )
+        .await
+        .expect("exit stage");
+
+    assert!(
+        host.model_requests().is_empty(),
+        "no verification call when gate disabled"
+    );
+    match exit {
+        LoopExit::Completed(completed) => {
+            assert_eq!(completed.reply_message_refs, vec![message_ref("msg:original-reply")]);
+        }
+        other => panic!("expected completed exit with original reply, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn plain_graceful_stop_never_attempts_self_verify() {
+    // A plain `GracefulStop` (the strategy's decision for idle-chat replies,
+    // or any turn that isn't verification-eligible — see `stop.rs`) never
+    // attempts verification, even with the gate on and prior tool activity
+    // in state: the executor trusts the stop kind it was given rather than
+    // re-deriving eligibility itself.
+    let host = MockHost::new(vec![reply_response_with_text("unused")])
+        .with_driver_nudges_enabled();
     let family = crate::families::default();
     let ctx = StageContext {
         planner: family.planner(),
@@ -2487,45 +2527,7 @@ async fn graceful_stop_skips_self_verify_when_gate_disabled() {
 
     assert!(
         host.model_requests().is_empty(),
-        "no verification call when gate disabled"
-    );
-    match exit {
-        LoopExit::Completed(completed) => {
-            assert_eq!(completed.reply_message_refs, vec![message_ref("msg:original-reply")]);
-        }
-        other => panic!("expected completed exit with original reply, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn graceful_stop_skips_self_verify_when_no_prior_tool_activity() {
-    // Gate ON but this run made no capability calls (idle chat) — the
-    // heuristic must not spend an extra model call on answers that never
-    // touched a tool.
-    let host = MockHost::new(vec![reply_response_with_text("unused")])
-        .with_driver_nudges_enabled();
-    let family = crate::families::default();
-    let ctx = StageContext {
-        planner: family.planner(),
-        host: &host,
-    };
-    let mut state = LoopExecutionState::initial_for_run(host.run_context());
-    state.assistant_refs.push(message_ref("msg:original-reply"));
-
-    let exit = ExitStage
-        .process(
-            ctx,
-            ExitInput {
-                state,
-                kind: StopKind::GracefulStop,
-            },
-        )
-        .await
-        .expect("exit stage");
-
-    assert!(
-        host.model_requests().is_empty(),
-        "no verification call when no prior capability activity this run"
+        "plain GracefulStop must never attempt verification"
     );
     match exit {
         LoopExit::Completed(completed) => {
@@ -2554,7 +2556,7 @@ async fn self_verify_respects_one_shot_cap() {
             ctx,
             ExitInput {
                 state,
-                kind: StopKind::GracefulStop,
+                kind: StopKind::GracefulStopPendingVerification,
             },
         )
         .await
@@ -2596,7 +2598,7 @@ async fn self_verify_model_failure_falls_back_to_original_reply() {
             ctx,
             ExitInput {
                 state,
-                kind: StopKind::GracefulStop,
+                kind: StopKind::GracefulStopPendingVerification,
             },
         )
         .await

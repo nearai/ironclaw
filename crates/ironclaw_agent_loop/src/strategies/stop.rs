@@ -191,6 +191,13 @@ pub(crate) enum StopOutcome {
 pub(crate) enum StopKind {
     /// Strategy is satisfied; the executor maps this to graceful completion.
     GracefulStop,
+    /// Strategy is satisfied AND this turn's reply followed real tool-based
+    /// work this run that hasn't been independently re-checked yet. The
+    /// executor gives the driver-specific self-verification pass one gated,
+    /// best-effort chance to re-derive the answer before finalizing it;
+    /// on any non-success path (gate off, host call fails, model declines a
+    /// clean reply) this resolves identically to plain `GracefulStop`.
+    GracefulStopPendingVerification,
     /// Safety-net escape for specific no-progress evidence such as repeated
     /// call signatures or typed no-change capability results. The executor
     /// resolves this to one of two honest terminals: if the driver-specific
@@ -315,10 +322,20 @@ impl StopConditionStrategy for DefaultStopConditionStrategy {
     ) -> StopOutcome {
         // (a) reply completion: the executor already drained queued follow-up
         // input before asking the stop strategy, so a reply-only turn is
-        // terminal for the default family.
+        // terminal for the default family. If this run made at least one
+        // capability call earlier and the one-shot self-verification pass
+        // hasn't fired yet, flag it as verification-eligible — the executor
+        // decides whether to actually spend that pass (host policy, host call
+        // success) when it resolves this stop kind.
         if just_completed.kind == TurnEndKind::ReplyOnly {
+            let verification_eligible = !state.recent_call_signatures.is_empty()
+                && state.self_verification_used == 0;
             return StopOutcome::Stop {
-                kind: StopKind::GracefulStop,
+                kind: if verification_eligible {
+                    StopKind::GracefulStopPendingVerification
+                } else {
+                    StopKind::GracefulStop
+                },
             };
         }
 
@@ -797,6 +814,71 @@ mod tests {
             match outcome {
                 StopOutcome::Stop { kind } => {
                     assert_eq!(state.stop_state.turns_completed, 1);
+                    assert_eq!(kind, StopKind::GracefulStop);
+                }
+                other => panic!("expected Stop GracefulStop, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn reply_only_with_prior_tool_activity_returns_pending_verification() {
+            // This run made a capability call earlier and hasn't spent its
+            // one-shot self-verification pass — the reply-completion escape
+            // must flag it as verification-eligible rather than plain
+            // GracefulStop, so the executor gets a chance to give the model
+            // one gated check before finalizing.
+            use ironclaw_host_api::CapabilityId;
+
+            let strategy = DefaultStopConditionStrategy::default();
+            let mut state = LoopExecutionState::initial_for_run(&test_run_context());
+            let signature = CapabilityCallSignature::from_call(
+                CapabilityId::new("demo.echo").expect("valid"),
+                &serde_json::json!({"x": 1}),
+            )
+            .expect("valid call signature");
+            state.recent_call_signatures.push(signature);
+
+            let (_state, outcome) = observe_and_decide(
+                &strategy,
+                state,
+                TurnSummary::reply_only(LoopMessageRef::new("msg:default-stop").expect("valid")),
+            )
+            .await;
+
+            match outcome {
+                StopOutcome::Stop { kind } => {
+                    assert_eq!(kind, StopKind::GracefulStopPendingVerification);
+                }
+                other => panic!("expected Stop GracefulStopPendingVerification, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn reply_only_with_verification_already_used_returns_plain_graceful_stop() {
+            // Same prior tool activity as above, but the one-shot pass is
+            // already spent this run — must fall back to plain GracefulStop,
+            // not re-flag for another verification attempt.
+            use ironclaw_host_api::CapabilityId;
+
+            let strategy = DefaultStopConditionStrategy::default();
+            let mut state = LoopExecutionState::initial_for_run(&test_run_context());
+            let signature = CapabilityCallSignature::from_call(
+                CapabilityId::new("demo.echo").expect("valid"),
+                &serde_json::json!({"x": 1}),
+            )
+            .expect("valid call signature");
+            state.recent_call_signatures.push(signature);
+            state.self_verification_used = 1;
+
+            let (_state, outcome) = observe_and_decide(
+                &strategy,
+                state,
+                TurnSummary::reply_only(LoopMessageRef::new("msg:default-stop").expect("valid")),
+            )
+            .await;
+
+            match outcome {
+                StopOutcome::Stop { kind } => {
                     assert_eq!(kind, StopKind::GracefulStop);
                 }
                 other => panic!("expected Stop GracefulStop, got {other:?}"),

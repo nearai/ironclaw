@@ -153,20 +153,21 @@ pub(super) async fn try_final_answer_nudge(
     }
 }
 
-/// Driver-specific self-verification pass: when the loop is about to complete
-/// a turn gracefully AND this run has made at least one capability call
-/// (`state.recent_call_signatures` non-empty — i.e. the answer followed real
-/// tool-based work, not idle chat), issue ONE extra **tool-free** model call
-/// asking the model to independently re-derive its just-given answer before
-/// it's finalized. If the model reconsiders and gives a different answer, the
-/// new one supersedes the original; if it reconfirms, the restated answer
-/// still supersedes it (so the accounting/token bookkeeping is uniform).
+/// Driver-specific self-verification pass: the executor's half of resolving
+/// `StopKind::GracefulStopPendingVerification` (see `stop.rs` for the
+/// eligibility decision — prior tool activity this run, pass unused). Issues
+/// ONE extra **tool-free** model call asking the model to independently
+/// re-derive its just-given answer before it's finalized. If the model
+/// reconsiders and gives a different answer, the new one supersedes the
+/// original; if it reconfirms, the restated answer still supersedes it (so
+/// the accounting/token bookkeeping is uniform).
 ///
 /// Gated by the same `SteeringPolicy.allow_driver_specific_nudges` flag as
-/// `try_final_answer_nudge` (off in production) and capped at one pass per
-/// run via `state.self_verification_used`. Returns `Ok(None)` when disabled,
-/// capped, no prior tool activity, or the model declines to give a clean
-/// reply — callers then keep the original, already-finalized answer as-is.
+/// `try_final_answer_nudge` (off in production); the one-shot cap is
+/// re-checked here too since this function owns incrementing
+/// `state.self_verification_used`. Returns `Ok(None)` when disabled, capped,
+/// or the model declines to give a clean reply — callers then keep the
+/// original, already-finalized answer as-is.
 pub(super) async fn try_self_verification_pass(
     ctx: StageContext<'_>,
     state: &mut LoopExecutionState,
@@ -181,12 +182,6 @@ pub(super) async fn try_self_verification_pass(
         return Ok(None);
     }
     if state.self_verification_used >= 1 {
-        return Ok(None);
-    }
-    // Only verify answers that followed real tool-based work — cheap chit-chat
-    // replies don't benefit from a forced re-derivation and shouldn't pay for
-    // an extra model call.
-    if state.recent_call_signatures.is_empty() {
         return Ok(None);
     }
 
@@ -328,13 +323,21 @@ impl ExitStage {
     ) -> Result<LoopExit, AgentLoopExecutorError> {
         match kind {
             StopKind::GracefulStop => {
+                let checked = CheckpointStage
+                    .write(ctx, state, CheckpointKind::Final)
+                    .await?;
+                completed_exit(ctx.host, checked.state, Some(checked.checkpoint_id))
+            }
+            StopKind::GracefulStopPendingVerification => {
+                // The strategy has already established this turn's reply
+                // followed real tool-based work and the one-shot pass is
+                // unused — the executor's only job here is to spend it
+                // (subject to host policy) and supersede the reply on
+                // success. On any non-success path (gate off, host call
+                // fails, model declines a clean reply) this is a no-op and
+                // the original, already-finalized reply stands unchanged —
+                // identical to a plain `GracefulStop`.
                 let mut state = state;
-                // Best-effort: if this answer followed real tool-based work,
-                // give the model one gated chance to catch its own mistake
-                // before the loop commits to it. On any non-success path
-                // (disabled, capped, no prior tool use, or the model declines
-                // a clean reply) this is a no-op and the original,
-                // already-finalized reply stands unchanged.
                 if let Some(reply_ref) = try_self_verification_pass(ctx, &mut state).await? {
                     // Supersede the just-finalized reply with the verified one
                     // rather than appending both to the completion result.
