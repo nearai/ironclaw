@@ -2462,3 +2462,57 @@ async fn open_close_reopen_supersedes_prior_setup_flow_across_both_start_routes(
         "a start for one provider must not cancel another provider's live flow"
     );
 }
+
+/// A live setup flow must survive a process restart. The durable
+/// `AuthFlowRecord` always did; the raw PKCE verifier did not, because the
+/// setup path stashed it in a process-local LRU hanging off the route state.
+/// A restart (or an LRU eviction from abandoned re-opens) silently dropped a
+/// LIVE flow's verifier, so the user's callback failed with
+/// `unknown_or_expired_flow` on a perfectly good flow.
+///
+/// Rebuilding the router over the SAME backing services is exactly that
+/// restart: durable auth records and the secret store persist, route-local
+/// state does not. The blocked-turn gate path already stores its verifiers
+/// through the injected `SecretStore` and survives this; the setup path must
+/// too.
+#[tokio::test]
+async fn google_oauth_callback_completes_after_restart_rebuilds_route_state() {
+    let dispatcher = Arc::new(RecordingAuthDispatcher::default());
+    let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+        Arc::new(InMemoryAuthProductServices::new()),
+        dispatcher.clone(),
+    ));
+    let app = build_app_with_product_auth_service_and_config(
+        product_auth.clone(),
+        Some(google_oauth_route_config()),
+    );
+    let (start_json, state) = start_google_oauth_flow(&app).await;
+
+    // The restart: a brand-new router and route state over the same durable
+    // services. Anything the setup path kept only in route-local memory is gone.
+    let restarted = build_app_with_product_auth_service_and_config(
+        product_auth.clone(),
+        Some(google_oauth_route_config()),
+    );
+
+    let scopes = format!("{GOOGLE_GMAIL_READONLY_SCOPE}%20{GOOGLE_CALENDAR_READONLY_SCOPE}");
+    let callback_response = restarted
+        .oneshot(callback_request(format!(
+            "/api/reborn/product-auth/oauth/google/callback?state={state}&code=google-auth-code&scope={scopes}"
+        )))
+        .await
+        .expect("oneshot");
+
+    assert_eq!(
+        callback_response.status(),
+        StatusCode::OK,
+        "a live flow's callback must still complete after a restart"
+    );
+    let callback_body = read_body_string(callback_response).await;
+    assert!(!callback_body.contains("google-auth-code"));
+    let callback_json: serde_json::Value =
+        serde_json::from_str(&callback_body).expect("callback json");
+    assert_eq!(callback_json["flow_id"], start_json["flow_id"]);
+    assert_eq!(callback_json["status"], "completed");
+    assert_eq!(dispatcher.events().len(), 1);
+}

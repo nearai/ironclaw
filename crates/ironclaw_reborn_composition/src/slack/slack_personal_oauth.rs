@@ -218,6 +218,7 @@ pub(crate) async fn start_extension_oauth_flow(
                 authorization_url: authorization_url.clone(),
                 opaque_state_hash: opaque_state_hash.clone(),
                 pkce_verifier_hash,
+                pkce_verifier: pkce_verifier_secret,
                 continuation: AuthContinuationRef::LifecycleActivation {
                     package_ref: ironclaw_auth::LifecyclePackageRef::new(
                         requester_extension.as_str(),
@@ -233,20 +234,15 @@ pub(crate) async fn start_extension_oauth_flow(
         Ok(flow) => flow,
         Err(error) => return Err(error),
     };
-    if let Err(error) = state.store_pkce_verifier(flow.id, pkce_verifier_secret, flow.expires_at) {
-        let _ = state
-            .product_auth_services()
-            .flow_manager()
-            .cancel_flow(&scope, flow.id)
-            .await;
-        return Err(error);
-    }
     if let Err(error) = binding_config
         .lifecycle_store
         .begin_connection(&connection_owner, connection_epoch, request.expires_at)
         .await
     {
-        state.remove_pkce_verifier(flow.id);
+        state
+            .product_auth_services()
+            .delete_setup_pkce_verifier(&scope, flow.id)
+            .await;
         let _ = state
             .product_auth_services()
             .flow_manager()

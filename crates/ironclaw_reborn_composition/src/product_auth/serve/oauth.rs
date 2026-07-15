@@ -48,13 +48,13 @@ pub(super) async fn oauth_start_handler(
                     .map_err(ProductAuthRouteFailure::from)?,
                 opaque_state_hash,
                 pkce_verifier_hash,
+                pkce_verifier,
                 continuation: AuthContinuationRef::SetupOnly,
                 update_binding: None,
                 expires_at: request.expires_at,
             }),
     )
     .await?;
-    state.store_pkce_verifier(flow.id, pkce_verifier, flow.expires_at)?;
     let authorization_url = compose_authorization_url(authorization_endpoint, flow.id, &scope)?;
 
     Ok(Json(OAuthStartResponse {
@@ -227,7 +227,10 @@ pub(super) async fn abort_started_extension_oauth_flow(
             .cancel_flow(&scope, response.flow_id),
     )
     .await?;
-    state.remove_pkce_verifier(response.flow_id);
+    state
+        .product_auth
+        .delete_setup_pkce_verifier(&scope, response.flow_id)
+        .await;
     Ok(())
 }
 
@@ -418,6 +421,7 @@ async fn start_google_oauth_flow(
                 authorization_url: authorization_url.clone(),
                 opaque_state_hash: opaque_state_hash.clone(),
                 pkce_verifier_hash,
+                pkce_verifier: pkce_verifier_secret,
                 continuation: requester_extension
                     .as_ref()
                     .map(extension_lifecycle_continuation)
@@ -428,7 +432,6 @@ async fn start_google_oauth_flow(
             }),
     )
     .await?;
-    state.store_pkce_verifier(flow.id, pkce_verifier_secret, flow.expires_at)?;
 
     Ok(Json(ProductOAuthStartResponse {
         flow_id: flow.id,
@@ -496,6 +499,7 @@ pub(super) async fn oauth_callback_handler(
     )
     .await?;
 
+    let cleanup_scope = scope.clone();
     let response = match run_with_backend_timeout(state.product_auth.handle_oauth_callback(
         RebornOAuthCallbackRequest {
             scope,
@@ -507,12 +511,18 @@ pub(super) async fn oauth_callback_handler(
     .await
     {
         Ok(response) => {
-            state.remove_pkce_verifier(flow_id);
+            state
+                .product_auth
+                .delete_setup_pkce_verifier(&cleanup_scope, flow_id)
+                .await;
             response
         }
         Err(error) => {
             if should_forget_pkce_verifier(error.body.code) {
-                state.remove_pkce_verifier(flow_id);
+                state
+                    .product_auth
+                    .delete_setup_pkce_verifier(&cleanup_scope, flow_id)
+                    .await;
             }
             return Err(error);
         }
@@ -744,7 +754,10 @@ async fn oauth_provider_callback_attempt(
             RebornOAuthCallbackFailureStage::Terminal,
         )
         .await;
-        state.remove_pkce_verifier(flow_id);
+        state
+            .product_auth
+            .delete_setup_pkce_verifier(callback_scope, flow_id)
+            .await;
         return oauth_callback_route_result_response(headers, response);
     }
 
@@ -757,7 +770,10 @@ async fn oauth_provider_callback_attempt(
     {
         Ok(provider) => provider,
         Err(error) => {
-            state.remove_pkce_verifier(flow_id);
+            state
+                .product_auth
+                .delete_setup_pkce_verifier(callback_scope, flow_id)
+                .await;
             return Err(error);
         }
     };
@@ -783,7 +799,10 @@ async fn oauth_provider_callback_attempt(
         )? {
             CallbackScopeOutcome::Scopes(scopes) => scopes,
             CallbackScopeOutcome::ProviderDenied => {
-                state.remove_pkce_verifier(flow_id);
+                state
+                    .product_auth
+                    .delete_setup_pkce_verifier(callback_scope, flow_id)
+                    .await;
                 callback_owned_by_service = true;
                 let response = run_with_backend_timeout(state.product_auth.handle_oauth_callback(
                     RebornOAuthCallbackRequest {
@@ -839,7 +858,10 @@ async fn oauth_provider_callback_attempt(
                 ),
         )
         .await?;
-        state.remove_pkce_verifier(flow_id);
+        state
+            .product_auth
+            .delete_setup_pkce_verifier(callback_scope, flow_id)
+            .await;
         Ok(oauth_callback_response(headers, response))
     }
     .await;
@@ -855,7 +877,10 @@ async fn oauth_provider_callback_attempt(
                 | RebornOAuthCallbackFailureStage::ContinuationRetryable
                 | RebornOAuthCallbackFailureStage::ContinuationCompensation
         ) {
-            state.remove_pkce_verifier(flow_id);
+            state
+                .product_auth
+                .delete_setup_pkce_verifier(callback_scope, flow_id)
+                .await;
         }
         if !terminal_failure_hook_attempted
             && !matches!(
@@ -1194,17 +1219,13 @@ async fn pkce_verifier_for_known_callback_flow(
     provider: &AuthProviderId,
     flow_id: AuthFlowId,
 ) -> Result<SecretString, ProductAuthRouteFailure> {
-    let cache_error = match state.pkce_verifier_for_callback(flow_id) {
-        Ok(verifier) => return Ok(verifier),
-        Err(error) => error,
-    };
     run_with_backend_timeout(
         state
             .product_auth
             .oauth_pkce_verifier_for_flow(scope, provider, flow_id),
     )
     .await?
-    .ok_or(cache_error)
+    .ok_or_else(ProductAuthRouteFailure::unknown_or_expired_flow)
 }
 
 fn validate_google_callback_query_fields(
@@ -2977,12 +2998,20 @@ mod tests {
         )
         .await
         .expect("terminal provider failure must not block immediate reconnect");
-        state.remove_pkce_verifier(third_start.flow_id);
         let state_value = Url::parse(third_start.authorization_url.as_str())
             .expect("authorization url")
             .query_pairs()
             .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
             .expect("oauth state");
+        let third_callback_state =
+            OAuthCallbackState::decode(OAuthCallbackStateKind::SLACK_PERSONAL, &state_value)
+                .expect("decode third callback state");
+        // Simulate the verifier being gone at callback time (consumed by an
+        // earlier redelivery, or expired) by deleting it from the durable
+        // store the setup path now uses.
+        product_auth
+            .delete_setup_pkce_verifier(third_callback_state.scope(), third_start.flow_id)
+            .await;
         let encoded_state =
             url::form_urlencoded::byte_serialize(state_value.as_bytes()).collect::<String>();
         let uri = format!(
@@ -3000,9 +3029,6 @@ mod tests {
         .await
         .expect_err("known callback without PKCE must fail");
         assert_eq!(error.body.code, AuthErrorCode::UnknownOrExpiredFlow);
-        let third_callback_state =
-            OAuthCallbackState::decode(OAuthCallbackStateKind::SLACK_PERSONAL, &state_value)
-                .expect("decode third callback state");
         assert_eq!(
             product_auth
                 .flow_record_for_status(third_callback_state.scope(), third_start.flow_id)
