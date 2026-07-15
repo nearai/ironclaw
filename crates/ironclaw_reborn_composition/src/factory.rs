@@ -1,8 +1,8 @@
 // arch-exempt: large_file, needs Reborn composition helper extraction, plan #4469
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
     sync::atomic::AtomicBool,
+    sync::{Arc, OnceLock},
 };
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -97,6 +97,8 @@ use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRu
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 use ironclaw_outbound::{InMemoryDeliveredGateRouteStore, InMemoryTriggeredRunDeliveryStore};
 use ironclaw_processes::ProcessServices;
+#[cfg(any(feature = "slack-v2-host-beta", test))]
+use ironclaw_product_workflow::ChannelConnectionFacade;
 use ironclaw_product_workflow::{
     LifecycleProductSurfaceContext, ProductAuthTurnGateResumeDispatcher, ProjectService,
 };
@@ -123,7 +125,8 @@ use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_threads::SessionThreadService;
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
-    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerError, TriggerRecord, TriggerRepository,
+    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerActiveRunLookup, TriggerError, TriggerRecord,
+    TriggerRepository,
 };
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 #[cfg(feature = "test-support")]
@@ -151,7 +154,7 @@ use ironclaw_turns::{InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore};
 
 use crate::RebornProductAuthServicePorts;
 use crate::extension_host::lifecycle::{
-    RebornLocalSkillManagementPort, build_local_skill_management_port,
+    RebornLocalLifecycleFacade, RebornLocalSkillManagementPort, build_local_skill_management_port,
 };
 use crate::extension_host::mcp::hosted_http_mcp_runtime;
 use crate::extension_host::{
@@ -170,6 +173,9 @@ use crate::extension_host::{
     },
 };
 use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput};
+use crate::lifecycle_auth_continuation::{
+    LifecycleAuthContinuationDispatcher, LifecycleProductFacadeSlot,
+};
 use crate::local_dev_authorization::{StoreApprovalSettingsProvider, local_dev_authorizer};
 use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
 use crate::local_dev_mounts::{
@@ -1374,6 +1380,21 @@ impl RebornProductionRuntimeServices {
             Self::Postgres(graph) => Arc::clone(&graph.trigger_repository),
         }
     }
+
+    /// Turn-state snapshot source from the active production store graph.
+    /// Pairs with [`Self::trigger_repository`] so the automations facade
+    /// derives active-hold projections from the same runtime's run state
+    /// (#5886).
+    pub(crate) fn turn_run_snapshot_source(
+        &self,
+    ) -> Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource> {
+        match self {
+            #[cfg(feature = "libsql")]
+            Self::LibSql(graph) => Arc::clone(&graph.turn_state) as _,
+            #[cfg(feature = "postgres")]
+            Self::Postgres(graph) => Arc::clone(&graph.turn_state) as _,
+        }
+    }
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1495,11 +1516,12 @@ fn auth_continuation_dispatcher(
     blocked_auth_snapshot_source: Option<
         Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>,
     >,
+    lifecycle: LifecycleProductFacadeSlot,
 ) -> Arc<dyn RebornAuthContinuationDispatcher> {
     let single_run: Arc<dyn RebornAuthContinuationDispatcher> = Arc::new(
         ProductAuthTurnGateResumeDispatcher::new(Arc::clone(&turn_coordinator)),
     );
-    match blocked_auth_snapshot_source {
+    let turn_dispatcher = match blocked_auth_snapshot_source {
         // Local paths fan a completed flow out to the caller's other
         // provider-blocked runs (pair/authorize once, all waiting chats
         // continue). Production-shaped builders pass None until their
@@ -1512,7 +1534,11 @@ fn auth_continuation_dispatcher(
             ))
         }
         None => single_run,
-    }
+    };
+    Arc::new(LifecycleAuthContinuationDispatcher::new(
+        turn_dispatcher,
+        lifecycle,
+    ))
 }
 
 struct ProductAuthServicesCompositionInput {
@@ -1543,7 +1569,7 @@ fn compose_product_auth_services(
         None => ports,
     };
     let mut services = ports.into_services(
-        auth_continuation_dispatcher(turn_coordinator, blocked_auth_snapshot_source),
+        auth_continuation_dispatcher(turn_coordinator, blocked_auth_snapshot_source, lifecycle),
         secret_store,
     );
     if let Some(sink) = security_audit_sink {
@@ -1932,6 +1958,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     let security_audit_sink = services.security_audit_sink();
     let nearai_mcp_host_managed_scope =
         AuthProductScope::new(nearai_mcp_owner_scope.clone(), AuthSurface::Api);
+    let lifecycle_auth_continuation_slot: LifecycleProductFacadeSlot = Arc::new(OnceLock::new());
     let product_auth = match product_auth_ports {
         Some(ports) => compose_product_auth_services(ProductAuthServicesCompositionInput {
             ports,
@@ -1975,6 +2002,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                             as Arc<
                                 dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource,
                             >),
+                        Arc::clone(&lifecycle_auth_continuation_slot),
                     ),
                     Arc::clone(&secret_store),
                 )
@@ -2005,6 +2033,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                             as Arc<
                                 dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource,
                             >),
+                        Arc::clone(&lifecycle_auth_continuation_slot),
                     ));
                 let services = match provider_composition.client.clone() {
                     Some(provider_client) => services.with_provider_client(provider_client),
@@ -2168,9 +2197,19 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         });
     }
     let trigger_create_hook = local_dev_trigger_create_hook(&store_graph.local_runtime);
+    // Built from the same turn-state store the WebUI automations panel reads
+    // (`crate::webui::facade`), so both `trigger_list` and the panel agree on
+    // which fires are blocked (#5886).
+    let trigger_active_run_lookup: Arc<dyn TriggerActiveRunLookup> = Arc::new(
+        crate::automation::trigger_poller::SnapshotActiveRunLookup::new(Arc::clone(
+            &store_graph.local_runtime.turn_state,
+        )
+            as Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>),
+    );
     let mut first_party_registry = builtin_first_party_registry_with_trigger_create_hook(
         Arc::clone(&store_graph.trigger_repository),
         trigger_create_hook,
+        trigger_active_run_lookup,
     )?;
     register_bundled_gsuite_first_party_handlers(
         &mut first_party_registry,
@@ -4042,22 +4081,29 @@ fn production_builtin_extension_registry(
 fn builtin_first_party_registry_with_trigger_create_hook(
     trigger_repository: Arc<dyn TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
 ) -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
-    builtin_first_party_handlers_with_trigger_create_hook(trigger_repository, trigger_create_hook)
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("built-in first-party handlers are invalid: {error}"),
-        })
+    builtin_first_party_handlers_with_trigger_create_hook(
+        trigger_repository,
+        trigger_create_hook,
+        active_run_lookup,
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("built-in first-party handlers are invalid: {error}"),
+    })
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn production_first_party_registry_with_trigger_create_hook(
     trigger_repository: Arc<dyn TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
     process_backend: ProcessBackendKind,
 ) -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend(
         trigger_repository,
         trigger_create_hook,
+        active_run_lookup,
         process_backend,
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
@@ -4938,9 +4984,17 @@ where
         audit_log,
     });
     let production_runtime = production_runtime_services(production_runtime_graph);
+    // Same store-backed lookup the WebUI automations panel builds via
+    // `RebornProductionRuntimeServices::turn_run_snapshot_source` (#5886).
+    let trigger_active_run_lookup: Arc<dyn TriggerActiveRunLookup> = Arc::new(
+        crate::automation::trigger_poller::SnapshotActiveRunLookup::new(
+            production_runtime.turn_run_snapshot_source(),
+        ),
+    );
     let mut first_party_registry = production_first_party_registry_with_trigger_create_hook(
         trigger_repository,
         trigger_create_hook,
+        trigger_active_run_lookup,
         process_backend,
     )?;
     let product_auth_filesystem = Arc::clone(&stores.scoped_filesystem);

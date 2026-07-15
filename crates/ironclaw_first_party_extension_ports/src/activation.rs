@@ -35,6 +35,17 @@ const MAX_ACTIVATION_CACHE_ENTRIES: usize = 1024;
 const MAX_ACTIVE_PLAN_ENTRIES: usize = 1024;
 const MAX_FEEDBACK_SKILL_NAME_CHARS: usize = 64;
 
+/// Synthetic candidate name carrying the one-line available-skills listing in
+/// [`SkillInjectionMode::Listing`].
+const SKILL_LISTING_CANDIDATE_NAME: &str = "available-skills";
+/// `~` (0x7E) sorts after the digit-prefixed per-skill ordering keys produced
+/// by [`descriptor_context_ordering_key`], so the listing renders after any
+/// loaded skill bodies.
+const SKILL_LISTING_ORDERING_KEY: &str = "~available-skills";
+const SKILL_LISTING_HEADER: &str = include_str!("../prompts/skill_listing_header.md");
+const MAX_LISTED_SKILLS: usize = 100;
+const MAX_LISTING_DESCRIPTION_CHARS: usize = 250;
+
 /// Typed request produced by first-party skill activation selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillActivationRequest {
@@ -67,6 +78,19 @@ pub enum SkillActivationMode {
     ModelSelected,
 }
 
+/// How skill instructions reach the model context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillInjectionMode {
+    /// Legacy behavior: criteria-selected (keyword/regex-scored) skill bodies
+    /// inject directly into model context by score alone.
+    Full,
+    /// Non-activated skills contribute only a one-line `- name: description`
+    /// listing; full bodies inject only for explicit `$name`/`/name` mentions
+    /// and model-selected (`skill_activate`) activations. The keyword-scoring
+    /// pipeline still runs and ranks the listing.
+    Listing,
+}
+
 /// Selector limits for conversation-driven first-party skill activation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillActivationSelectorConfig {
@@ -74,6 +98,7 @@ pub struct SkillActivationSelectorConfig {
     pub max_context_tokens: usize,
     pub selection_mode: SkillActivationSelectionMode,
     pub regex_activation_enabled: bool,
+    pub injection_mode: SkillInjectionMode,
 }
 
 /// How recorded user messages are allowed to activate skills.
@@ -90,6 +115,11 @@ impl Default for SkillActivationSelectorConfig {
             max_context_tokens: DEFAULT_MAX_SKILL_CONTEXT_TOKENS,
             selection_mode: SkillActivationSelectionMode::ExplicitAndCriteria,
             regex_activation_enabled: true,
+            // Library default stays the legacy full-body contract; the Reborn
+            // composition seam opts into `Listing` (see
+            // `ironclaw_reborn_composition::runtime::local_dev_selector_config`
+            // and the `IRONCLAW_REBORN_SKILL_INJECTION` env switch).
+            injection_mode: SkillInjectionMode::Full,
         }
     }
 }
@@ -112,6 +142,11 @@ impl SkillActivationSelectorConfig {
 
     pub fn set_regex_activation_enabled(mut self, regex_activation_enabled: bool) -> Self {
         self.regex_activation_enabled = regex_activation_enabled;
+        self
+    }
+
+    pub fn set_injection_mode(mut self, injection_mode: SkillInjectionMode) -> Self {
+        self.injection_mode = injection_mode;
         self
     }
 }
@@ -365,10 +400,15 @@ where
             .load_named_activation_candidate_set(run_context, skill_names)
             .await?;
         // Account for already-active skills so repeated activate calls respect max_active_skills
-        // across the merged set, not just each individual call.
+        // across the merged set, not just each individual call. Under `Listing`,
+        // criteria selections only rank the listing (no body injected), so they
+        // must not consume the model's activation budget.
         let already_active = self
             .active_plan(run_context)?
-            .map(|p| p.activated_bundles().len())
+            .map(|plan| match self.config.injection_mode {
+                SkillInjectionMode::Full => plan.activated_bundles().len(),
+                SkillInjectionMode::Listing => body_eligible_bundle_ids(&plan).len(),
+            })
             .unwrap_or(0);
         let effective_config = SkillActivationSelectorConfig {
             max_active_skills: self.config.max_active_skills.saturating_sub(already_active),
@@ -463,23 +503,69 @@ where
                 feedback: plan.selection.feedback.clone(),
             });
         }
-        if plan.selection.activations.is_empty() {
-            return Ok(Vec::new());
+        // NOTE: model messages are re-resolved by ref from a FRESH candidate
+        // build (`instruction_snippet_messages_by_ref` in ironclaw_loop_host)
+        // which — the recorded message having been consumed above — takes the
+        // active-plan path. Both paths must therefore produce the same snippet
+        // set and listing text for one run state, so listing rendering applies
+        // uniformly here (including the execution-capture path, whose captured
+        // plan/asset semantics are unchanged) and ranking derives from the
+        // merged plan, not from transient message state.
+        if self.config.injection_mode == SkillInjectionMode::Full {
+            if plan.selection.activations.is_empty() {
+                return Ok(Vec::new());
+            }
+            return Ok(context_candidates_for_plan(&plan, candidates));
         }
-        Ok(context_candidates_for_plan(&plan, candidates))
+        Ok(listing_context_candidates(&plan, candidates))
     }
 
     async fn active_plan_candidates(
         &self,
         run_context: &LoopRunContext,
     ) -> Result<Vec<HostSkillContextCandidate>, SkillActivationSelectionError> {
-        let Some(plan) = self.active_plan(run_context)? else {
-            return Ok(Vec::new());
+        let plan = self.active_plan(run_context)?;
+        if self.config.injection_mode == SkillInjectionMode::Full {
+            let Some(plan) = plan else {
+                return Ok(Vec::new());
+            };
+            let candidate_set = self
+                .load_active_plan_candidate_set(run_context, &plan)
+                .await?;
+            return Ok(context_candidates_for_plan(&plan, candidate_set.candidates));
+        }
+        // Listing mode: full bodies only for explicitly-mentioned or
+        // model-selected activations; every other visible skill contributes a
+        // one-line listing entry (no body read). Ranking and body-eligibility
+        // both derive from the merged active plan, so this build reproduces
+        // the message-path build of the same run state exactly.
+        let descriptors = self.load_activation_descriptors(run_context).await?;
+        let (body_eligible, ranked_bundles) = match plan.as_ref() {
+            Some(plan) => (
+                body_eligible_bundle_ids(plan),
+                criteria_ranked_bundle_ids(plan),
+            ),
+            None => (HashSet::new(), Vec::new()),
         };
-        let candidate_set = self
-            .load_active_plan_candidate_set(run_context, &plan)
-            .await?;
-        Ok(context_candidates_for_plan(&plan, candidate_set.candidates))
+        let (eligible_descriptors, listed_descriptors): (Vec<_>, Vec<_>) = descriptors
+            .into_iter()
+            .partition(|descriptor| body_eligible.contains(descriptor.id()));
+        let mut candidates: Vec<HostSkillContextCandidate> = self
+            .load_activation_candidates(run_context, &eligible_descriptors)
+            .await?
+            .into_iter()
+            .map(ActivationCandidate::into_context_candidate)
+            .collect();
+        let entries = ranked_listing_entries(
+            &ranked_bundles,
+            listed_descriptors
+                .iter()
+                .filter(|descriptor| descriptor.visibility() == Some(&SkillVisibility::Visible)),
+        );
+        if let Some(listing) = skill_listing_candidate(&entries) {
+            candidates.push(listing);
+        }
+        Ok(candidates)
     }
 
     async fn resolve_activation_plan(
@@ -822,6 +908,22 @@ where
             if selected.insert(bundle_id.clone()) {
                 activated_bundles.push(bundle_id);
                 selection.activations.push(activation);
+                continue;
+            }
+            // Mode-priority merge: a criteria (keyword/regex) selection only
+            // ranks the listing under `SkillInjectionMode::Listing`, so a later
+            // explicit/model-selected activation of the same bundle must
+            // UPGRADE the existing entry in place — dropping it would leave the
+            // mode at `ActivationCriteria` forever and the body would never
+            // become injection-eligible. Never downgrade a body-eligible mode.
+            if activation.mode == SkillActivationMode::ActivationCriteria {
+                continue;
+            }
+            if let Some(existing) = selection.activations.iter_mut().find(|existing| {
+                existing.bundle_id.as_ref() == Some(&bundle_id)
+                    && existing.mode == SkillActivationMode::ActivationCriteria
+            }) {
+                existing.mode = activation.mode;
             }
         }
         selection.feedback.extend(next.selection.feedback);
@@ -1027,6 +1129,132 @@ fn context_candidates_for_plan(
         .filter(|candidate| active_bundles.contains(candidate.descriptor.id()))
         .map(ActivationCandidate::into_context_candidate)
         .collect()
+}
+
+/// Bundles whose full SKILL.md body may inject into model context under
+/// [`SkillInjectionMode::Listing`]: explicit `$name`/`/name` mentions and
+/// model-selected (`skill_activate`) activations. Criteria (keyword/regex)
+/// selections stay listing-only — score alone no longer injects a body.
+fn body_eligible_bundle_ids(plan: &SkillActivationPlan) -> HashSet<SkillBundleId> {
+    plan.selection
+        .activations
+        .iter()
+        .filter(|activation| activation.mode != SkillActivationMode::ActivationCriteria)
+        .filter_map(|activation| activation.bundle_id.clone())
+        .collect()
+}
+
+#[derive(Debug, Clone)]
+struct SkillListingEntry {
+    name: String,
+    description: String,
+}
+
+fn listing_entry_for_descriptor(descriptor: &SkillBundleDescriptor) -> SkillListingEntry {
+    SkillListingEntry {
+        name: descriptor.id().name().to_string(),
+        description: single_line_truncated(descriptor.description(), MAX_LISTING_DESCRIPTION_CHARS),
+    }
+}
+
+fn single_line_truncated(text: &str, max_chars: usize) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(max_chars)
+        .collect()
+}
+
+/// Compose the one-line available-skills listing as a single discoverable
+/// candidate. Trust is pinned to `Installed` so downstream snapshot
+/// construction can never disclose prompt content through this entry.
+fn skill_listing_candidate(entries: &[SkillListingEntry]) -> Option<HostSkillContextCandidate> {
+    if entries.is_empty() {
+        return None;
+    }
+    let mut listing = String::from(SKILL_LISTING_HEADER.trim_end());
+    listing.push('\n');
+    for entry in entries.iter().take(MAX_LISTED_SKILLS) {
+        listing.push_str("\n- ");
+        listing.push_str(&entry.name);
+        listing.push_str(": ");
+        listing.push_str(&entry.description);
+    }
+    Some(
+        HostSkillContextCandidate::discoverable(
+            SKILL_LISTING_CANDIDATE_NAME,
+            listing,
+            Some(SkillTrust::Installed),
+            Some(SkillVisibility::Visible),
+        )
+        .with_ordering_key(SKILL_LISTING_ORDERING_KEY),
+    )
+}
+
+/// Criteria (keyword/regex) selections from the merged plan, in selection
+/// order — the keyword-scoring pipeline's output, reused as the listing
+/// ranking under [`SkillInjectionMode::Listing`].
+fn criteria_ranked_bundle_ids(plan: &SkillActivationPlan) -> Vec<SkillBundleId> {
+    plan.selection
+        .activations
+        .iter()
+        .filter(|activation| activation.mode == SkillActivationMode::ActivationCriteria)
+        .filter_map(|activation| activation.bundle_id.clone())
+        .collect()
+}
+
+/// Order listing entries: criteria-ranked bundles first (in ranking order),
+/// then the rest in the deterministic descriptor order they arrive in.
+fn ranked_listing_entries<'a>(
+    ranked_bundles: &[SkillBundleId],
+    descriptors: impl IntoIterator<Item = &'a SkillBundleDescriptor>,
+) -> Vec<SkillListingEntry> {
+    let mut ranked_entries: Vec<Option<SkillListingEntry>> = vec![None; ranked_bundles.len()];
+    let mut unranked_entries = Vec::new();
+    for descriptor in descriptors {
+        let entry = listing_entry_for_descriptor(descriptor);
+        match ranked_bundles
+            .iter()
+            .position(|bundle_id| bundle_id == descriptor.id())
+        {
+            Some(position) => ranked_entries[position] = Some(entry),
+            None => unranked_entries.push(entry),
+        }
+    }
+    ranked_entries
+        .into_iter()
+        .flatten()
+        .chain(unranked_entries)
+        .collect()
+}
+
+/// [`SkillInjectionMode::Listing`] shape of the message-path context: full
+/// bodies for body-eligible activations, plus one listing candidate covering
+/// every other visible skill. Criteria-ranked skills lead the listing (the
+/// keyword-scoring pipeline stays the ranking); the rest follow in the
+/// deterministic descriptor order.
+fn listing_context_candidates(
+    plan: &SkillActivationPlan,
+    candidates: Vec<ActivationCandidate>,
+) -> Vec<HostSkillContextCandidate> {
+    let body_eligible = body_eligible_bundle_ids(plan);
+    let ranked_bundles = criteria_ranked_bundle_ids(plan);
+    let (eligible, listed): (Vec<_>, Vec<_>) = candidates
+        .into_iter()
+        .partition(|candidate| body_eligible.contains(candidate.descriptor.id()));
+    let mut loaded: Vec<HostSkillContextCandidate> = eligible
+        .into_iter()
+        .map(ActivationCandidate::into_context_candidate)
+        .collect();
+    let entries = ranked_listing_entries(
+        &ranked_bundles,
+        listed.iter().map(|candidate| &candidate.descriptor),
+    );
+    if let Some(listing) = skill_listing_candidate(&entries) {
+        loaded.push(listing);
+    }
+    loaded
 }
 
 fn loaded_skill_from_candidate(
@@ -1921,6 +2149,248 @@ mod tests {
                 .expect("skill context")
                 .contains("CODE_REVIEW_SENTINEL")
         );
+    }
+
+    fn listing_config() -> SkillActivationSelectorConfig {
+        SkillActivationSelectorConfig::default().set_injection_mode(SkillInjectionMode::Listing)
+    }
+
+    fn two_skill_source() -> Arc<StaticSkillBundleSource> {
+        Arc::new(StaticSkillBundleSource::new(vec![
+            (
+                SkillSourceKind::System,
+                "code-review",
+                &skill_md(
+                    "code-review",
+                    "Review code",
+                    &["review"],
+                    "CODE_REVIEW_SENTINEL",
+                ),
+            ),
+            (
+                SkillSourceKind::User,
+                "spreadsheet",
+                &skill_md(
+                    "spreadsheet",
+                    "Spreadsheet work",
+                    &["sheet"],
+                    "SHEET_SENTINEL",
+                ),
+            ),
+        ]))
+    }
+
+    fn listing_text(candidates: &[HostSkillContextCandidate]) -> String {
+        candidates
+            .iter()
+            .filter_map(HostSkillContextCandidate::discoverable_metadata)
+            .find(|(name, _)| *name == SKILL_LISTING_CANDIDATE_NAME)
+            .map(|(_, listing)| listing.to_string())
+            .expect("available-skills listing candidate")
+    }
+
+    #[tokio::test]
+    async fn listing_mode_lists_criteria_matched_skill_without_injecting_body() {
+        let selectable = SelectableSkillContextSource::new(two_skill_source(), listing_config());
+        let context = run_context().await;
+        selectable
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "please review this PR",
+            )
+            .expect("record message");
+
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("selection succeeds");
+
+        assert!(
+            selected
+                .iter()
+                .all(|candidate| candidate.loaded_skill_md().is_none()),
+            "no skill body may inject by score alone in listing mode"
+        );
+        let listing = listing_text(&selected);
+        assert!(
+            listing.contains("builtin.skill_activate"),
+            "listing header must explain activation: {listing}"
+        );
+        assert!(listing.contains("- code-review: code-review description"));
+        assert!(listing.contains("- spreadsheet: spreadsheet description"));
+        assert!(!listing.contains("CODE_REVIEW_SENTINEL"));
+        let review_at = listing.find("- code-review:").expect("code-review line");
+        let sheet_at = listing.find("- spreadsheet:").expect("spreadsheet line");
+        assert!(
+            review_at < sheet_at,
+            "criteria-scored skill must rank first in the listing"
+        );
+    }
+
+    #[tokio::test]
+    async fn listing_mode_explicit_mention_still_injects_body_and_lists_rest() {
+        let selectable = SelectableSkillContextSource::new(two_skill_source(), listing_config());
+        let context = run_context().await;
+        selectable
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "$code-review this PR",
+            )
+            .expect("record message");
+
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("selection succeeds");
+
+        assert!(
+            selected.iter().any(|candidate| {
+                candidate
+                    .loaded_skill_md()
+                    .is_some_and(|skill_md| skill_md.contains("CODE_REVIEW_SENTINEL"))
+            }),
+            "explicit mention must still inject the full body"
+        );
+        let listing = listing_text(&selected);
+        assert!(listing.contains("- spreadsheet:"));
+        assert!(
+            !listing.contains("- code-review:"),
+            "an activated skill must not repeat in the listing"
+        );
+    }
+
+    #[tokio::test]
+    async fn listing_mode_model_selected_activation_injects_body_on_later_prompt_builds() {
+        let selectable = SelectableSkillContextSource::new(two_skill_source(), listing_config());
+        let context = run_context().await;
+        // No recorded message: the coordinator path builds context from the
+        // active plan. Before activation only the listing is visible.
+        let before = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("pre-activation load succeeds");
+        assert!(
+            before
+                .iter()
+                .all(|candidate| candidate.loaded_skill_md().is_none())
+        );
+        assert!(listing_text(&before).contains("- code-review:"));
+
+        selectable
+            .activate_skills_for_run(&context, &["code-review".to_string()])
+            .await
+            .expect("model-selected activation succeeds");
+
+        let after = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("post-activation load succeeds");
+        assert!(
+            after.iter().any(|candidate| {
+                candidate
+                    .loaded_skill_md()
+                    .is_some_and(|skill_md| skill_md.contains("CODE_REVIEW_SENTINEL"))
+            }),
+            "model-selected skill body must inject on the next prompt build"
+        );
+        let listing = listing_text(&after);
+        assert!(listing.contains("- spreadsheet:"));
+        assert!(!listing.contains("- code-review:"));
+    }
+
+    #[tokio::test]
+    async fn listing_mode_skill_activate_upgrades_criteria_listed_skill_and_injects_body() {
+        let selectable = SelectableSkillContextSource::new(two_skill_source(), listing_config());
+        let context = run_context().await;
+        // Turn 1: a criteria (keyword) match only ranks the listing — the
+        // merged active plan now holds an `ActivationCriteria` entry for the
+        // code-review bundle.
+        selectable
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "please review this PR",
+            )
+            .expect("record message");
+        let before = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("criteria selection succeeds");
+        assert!(
+            before
+                .iter()
+                .all(|candidate| candidate.loaded_skill_md().is_none()),
+            "criteria match must stay listing-only before activation"
+        );
+        assert!(listing_text(&before).contains("- code-review:"));
+
+        // Turn 2: the model activates the same skill via `skill_activate`. The
+        // merge must UPGRADE the existing criteria entry to `ModelSelected`
+        // instead of dropping the later activation.
+        let plan = selectable
+            .activate_skills_for_run(&context, &["code-review".to_string()])
+            .await
+            .expect("model-selected activation succeeds");
+        assert!(
+            plan.selection.activations.iter().any(|activation| {
+                activation.name == "code-review"
+                    && activation.mode == SkillActivationMode::ModelSelected
+            }),
+            "merged plan must upgrade the criteria-listed skill to ModelSelected: {:?}",
+            plan.selection.activations
+        );
+
+        let after = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("post-activation load succeeds");
+        assert!(
+            after.iter().any(|candidate| {
+                candidate
+                    .loaded_skill_md()
+                    .is_some_and(|skill_md| skill_md.contains("CODE_REVIEW_SENTINEL"))
+            }),
+            "skill_activate on a criteria-listed skill must inject the body on the next prompt build"
+        );
+        let listing = listing_text(&after);
+        assert!(listing.contains("- spreadsheet:"));
+        assert!(
+            !listing.contains("- code-review:"),
+            "an upgraded activation must leave the listing"
+        );
+    }
+
+    #[tokio::test]
+    async fn listing_mode_truncates_descriptions_and_collapses_newlines() {
+        let long_description = format!("line one\nline two {}", "x".repeat(400));
+        let id = SkillBundleId::new(SkillSourceKind::User, "verbose").unwrap();
+        let descriptor = SkillBundleDescriptor::new(
+            id,
+            Some(SkillTrust::Trusted),
+            Some(SkillVisibility::Visible),
+            long_description,
+        );
+
+        let entry = listing_entry_for_descriptor(&descriptor);
+
+        assert_eq!(entry.description.chars().count(), 250);
+        assert!(entry.description.starts_with("line one line two "));
+        assert!(!entry.description.contains('\n'));
+
+        // The composed listing is bounded: at most MAX_LISTED_SKILLS entries.
+        let entries: Vec<SkillListingEntry> = (0..MAX_LISTED_SKILLS + 5)
+            .map(|index| SkillListingEntry {
+                name: format!("skill-{index:03}"),
+                description: "listed".to_string(),
+            })
+            .collect();
+        let candidate = skill_listing_candidate(&entries).expect("listing candidate");
+        let (_, listing) = candidate
+            .discoverable_metadata()
+            .expect("listing is discoverable");
+        assert_eq!(listing.matches("\n- ").count(), MAX_LISTED_SKILLS);
     }
 
     #[tokio::test]

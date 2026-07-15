@@ -35,6 +35,7 @@ mod factory;
 mod failure_lane;
 mod failure_summary;
 mod input;
+mod lifecycle_auth_continuation;
 mod llm_admin;
 mod local_dev_authorization;
 mod local_dev_capability_policy;

@@ -184,6 +184,22 @@ impl AuthFlowManager for RecordingFlowManager {
         Err(AuthProductError::BackendUnavailable)
     }
 
+    async fn claim_continuation_dispatch(
+        &self,
+        _scope: &AuthProductScope,
+        _input: ironclaw_auth::AuthContinuationDispatchClaimInput,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        Err(AuthProductError::BackendUnavailable)
+    }
+
+    async fn settle_continuation_dispatch(
+        &self,
+        _scope: &AuthProductScope,
+        _input: ironclaw_auth::AuthContinuationDispatchSettlementInput,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        Err(AuthProductError::BackendUnavailable)
+    }
+
     async fn cancel_flow(
         &self,
         scope: &AuthProductScope,
@@ -1807,6 +1823,7 @@ fn auth_flow(
             gate_ref: AuthGateRef::new(gate_ref.as_str()).unwrap(),
         },
         credential_account_id,
+        credential_secret_fingerprint: None,
         update_binding: Option::<CredentialAccountUpdateBinding>::None,
         opaque_state_hash: None,
         pkce_verifier_hash: None,

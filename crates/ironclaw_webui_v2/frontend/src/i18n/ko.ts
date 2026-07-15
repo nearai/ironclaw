@@ -851,6 +851,12 @@ registerPack("ko", {
   "ext.registry.importing": "가져오는 중…",
   "ext.registry.importSuccess": "도구를 가져왔습니다 — 레지스트리에서 설치하세요.",
   "ext.registry.importFailed": "가져오기 실패",
+  "ext.catalog.loadErrorTitle": "확장 카탈로그를 사용할 수 없습니다",
+  "ext.catalog.loadErrorDesc": "확장 카탈로그를 불러올 수 없습니다. 연결을 확인하고 다시 시도하세요.",
+  "ext.catalog.partialErrorTitle": "일부 확장 데이터를 사용할 수 없습니다",
+  "ext.catalog.partialErrorDesc": "사용 가능한 확장 데이터는 표시되지만 일부 세부 정보를 불러오지 못했습니다. 연결을 확인하고 다시 시도하세요.",
+  "ext.catalog.retry": "다시 시도",
+  "ext.catalog.retrying": "다시 시도하는 중…",
 
   // Chat — history
   "chat.history.loading": "로딩 중...",
@@ -1269,6 +1275,18 @@ registerPack("ko", {
   "automations.detail.thread": "스레드",
   "automations.filter.failures": "실패",
   "automations.filter.running": "실행 중",
+  "automations.hold.approval": "승인을 기다리는 중입니다",
+  "automations.hold.auth": "계정 재연결을 기다리는 중입니다",
+  "automations.hold.inProgress": "이전 실행이 아직 진행 중입니다",
+  "automations.hold.meta.inProgress":
+    "{since}에 시작됨 · 완료 후 다음 실행이 시작됩니다 · 실행 중 예정된 발생 시점 {count}개 경과",
+  "automations.hold.meta.inProgressUnknownCount":
+    "{since}에 시작됨 · 완료 후 다음 실행이 시작됩니다 · 예정된 발생 시점 경과 수를 알 수 없음",
+  "automations.hold.meta.paused":
+    "{since}부터 일시 중지됨 · 보류 중 예정된 발생 시점 {count}개 경과",
+  "automations.hold.meta.pausedUnknownCount":
+    "{since}부터 일시 중지됨 · 예정된 발생 시점 경과 수를 알 수 없음",
+  "automations.hold.other": "이전 실행이 아직 끝나지 않았습니다",
   "automations.status.needsReview": "검토 필요",
   "automations.status.running": "실행 중",
   "automations.summary.failures": "실패",

@@ -302,6 +302,22 @@ impl AuthFlowManager for FailingManualTokenFlowManager {
         unreachable!("manual-token cleanup tests do not fail OAuth callbacks")
     }
 
+    async fn claim_continuation_dispatch(
+        &self,
+        _scope: &AuthProductScope,
+        _input: ironclaw_auth::AuthContinuationDispatchClaimInput,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        unreachable!("manual-token cleanup tests do not claim continuations")
+    }
+
+    async fn settle_continuation_dispatch(
+        &self,
+        _scope: &AuthProductScope,
+        _input: ironclaw_auth::AuthContinuationDispatchSettlementInput,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        unreachable!("manual-token cleanup tests do not settle continuations")
+    }
+
     async fn mark_continuation_dispatched(
         &self,
         _scope: &AuthProductScope,

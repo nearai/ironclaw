@@ -1,3 +1,4 @@
+// arch-exempt: large_file, canonical executor regression remains with shared loop fixtures, plan #4088
 use std::collections::VecDeque;
 
 use ironclaw_host_api::{

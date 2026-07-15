@@ -152,6 +152,42 @@ fn dockerfile_reborn_builds_with_postgres_feature() {
 }
 
 #[test]
+fn dockerfile_reborn_ships_extension_ownership_migration() {
+    let dockerfile = std::fs::read_to_string(workspace_root().join("Dockerfile.reborn"))
+        .expect("Dockerfile.reborn");
+    let deps_stage = dockerfile
+        .split_once("FROM chef AS deps")
+        .and_then(|(_, stages)| stages.split_once("FROM deps AS builder"))
+        .map(|(stage, _)| stage)
+        .expect("Dockerfile.reborn should define a deps stage");
+    let builder_stage = dockerfile
+        .split_once("FROM deps AS builder")
+        .map(|(_, stage)| stage)
+        .expect("Dockerfile.reborn should define a builder stage");
+
+    assert!(
+        deps_stage.contains("--package ironclaw_reborn_migration")
+            && deps_stage.contains("--no-default-features")
+            && deps_stage.contains("--features libsql")
+            && deps_stage.contains("--recipe-path recipe.json"),
+        "Dockerfile.reborn must cache the libSQL-only extension ownership migration dependencies: {dockerfile}"
+    );
+    assert!(
+        builder_stage.contains("--package ironclaw_reborn_migration")
+            && builder_stage.contains("--no-default-features")
+            && builder_stage.contains("--features libsql")
+            && builder_stage.contains("--bin ironclaw-reborn-extension-ownership-migration"),
+        "Dockerfile.reborn must build the libSQL-only extension ownership migration binary: {dockerfile}"
+    );
+    assert!(
+        dockerfile.contains(
+            "COPY --from=builder /app/target/dist/ironclaw-reborn-extension-ownership-migration /usr/local/bin/ironclaw-reborn-extension-ownership-migration"
+        ),
+        "Dockerfile.reborn must copy the extension ownership migration into the runtime image: {dockerfile}"
+    );
+}
+
+#[test]
 fn run_reborn_webui_builds_frontend_before_cargo() {
     let launcher = std::fs::read_to_string(workspace_root().join("scripts/run-reborn-webui.sh"))
         .expect("scripts/run-reborn-webui.sh");

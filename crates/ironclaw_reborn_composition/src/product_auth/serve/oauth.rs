@@ -48,6 +48,7 @@ pub(super) async fn oauth_start_handler(
                     .map_err(ProductAuthRouteFailure::from)?,
                 opaque_state_hash,
                 pkce_verifier_hash,
+                continuation: AuthContinuationRef::SetupOnly,
                 update_binding: None,
                 expires_at: request.expires_at,
             }),
@@ -88,17 +89,146 @@ pub(super) async fn oauth_flow_status_handler(
     Path(flow_id): Path<String>,
     axum::extract::Query(query): axum::extract::Query<OAuthFlowStatusQuery>,
 ) -> Result<Json<OAuthFlowStatusResponse>, ProductAuthRouteFailure> {
-    let flow_id = AuthFlowId::from_uuid(
-        Uuid::parse_str(&flow_id).map_err(|_| ProductAuthRouteFailure::malformed_callback())?,
-    );
+    let (scope, flow_id) = oauth_flow_scope(&caller, &flow_id, query)?;
+    let flow = run_with_backend_timeout(state.product_auth.flow_record_for_status(&scope, flow_id))
+        .await?;
+    Ok(Json(OAuthFlowStatusResponse {
+        status: flow.status,
+    }))
+}
+
+/// Explicit recovery command for a durable OAuth flow.
+///
+/// Unlike [`oauth_flow_status_handler`], this route may claim and dispatch a
+/// pending lifecycle continuation or converge its exact compensation and
+/// provider-owned cleanup journals. The entire command, including terminal
+/// provider hooks, runs under one backend deadline.
+pub(super) async fn oauth_flow_reconcile_handler(
+    State(state): State<ProductAuthRouteState>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(flow_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<OAuthFlowStatusQuery>,
+) -> Result<Json<OAuthFlowStatusResponse>, ProductAuthRouteFailure> {
+    let (scope, flow_id) = oauth_flow_scope(&caller, &flow_id, query)?;
+    let status = run_with_backend_timeout(reconcile_oauth_flow(&state, &scope, flow_id)).await?;
+    Ok(Json(OAuthFlowStatusResponse { status }))
+}
+
+fn oauth_flow_scope(
+    caller: &WebUiAuthenticatedCaller,
+    flow_id: &str,
+    query: OAuthFlowStatusQuery,
+) -> Result<(AuthProductScope, AuthFlowId), ProductAuthRouteFailure> {
+    let flow_id = AuthFlowId::from_uuid(Uuid::parse_str(flow_id).map_err(|error| {
+        tracing::debug!(%error, "malformed flow id in oauth flow status/reconcile path");
+        ProductAuthRouteFailure::malformed_callback()
+    })?);
     let fields = ScopeFields {
         session_id: None,
         thread_id: None,
         invocation_id: query.invocation_id,
     };
-    let scope = scope_from_authenticated_caller_parts_requiring_invocation(&caller, &fields)?;
-    let status = run_with_backend_timeout(state.product_auth.flow_status(&scope, flow_id)).await?;
-    Ok(Json(OAuthFlowStatusResponse { status }))
+    let scope = scope_from_authenticated_caller_parts_requiring_invocation(caller, &fields)?;
+    Ok((scope, flow_id))
+}
+
+async fn reconcile_oauth_flow(
+    state: &ProductAuthRouteState,
+    scope: &AuthProductScope,
+    flow_id: AuthFlowId,
+) -> Result<AuthFlowStatus, ProductAuthRouteFailure> {
+    let before = state
+        .product_auth
+        .flow_record_for_status(scope, flow_id)
+        .await
+        .map_err(ProductAuthRouteFailure::from)?;
+    let terminal_cleanup_error = if before.status == AuthFlowStatus::Failed {
+        if let Some(descriptor) = oauth_callback_descriptor_for_provider(&before.provider) {
+            terminal_failure_hook(
+                state,
+                descriptor,
+                scope,
+                flow_id,
+                RebornOAuthCallbackFailureStage::ContinuationSideEffect,
+            )
+            .await
+            .err()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    // Credential compensation and provider-owned binding cleanup are
+    // independent journals. Always attempt both; report failure until both
+    // converge so the browser keeps polling.
+    let status = state
+        .product_auth
+        .reconcile_oauth_flow(scope, flow_id)
+        .await
+        .map_err(ProductAuthRouteFailure::from)?;
+    if status == AuthFlowStatus::Failed && before.status != AuthFlowStatus::Failed {
+        let after = state
+            .product_auth
+            .flow_record_for_status(scope, flow_id)
+            .await
+            .map_err(ProductAuthRouteFailure::from)?;
+        let provider = after.provider;
+        if let Some(descriptor) = oauth_callback_descriptor_for_provider(&provider) {
+            terminal_failure_hook(
+                state,
+                descriptor,
+                scope,
+                flow_id,
+                RebornOAuthCallbackFailureStage::ContinuationSideEffect,
+            )
+            .await?;
+        }
+    }
+    if let Some(error) = terminal_cleanup_error {
+        return Err(error);
+    }
+    Ok(status)
+}
+
+pub(super) async fn abort_started_extension_oauth_flow(
+    state: &ProductAuthRouteState,
+    response: &ProductOAuthStartResponse,
+) -> Result<(), ProductAuthRouteFailure> {
+    let mut scope = AuthProductScope::new(
+        ResourceScope {
+            tenant_id: state.tenant_id.clone(),
+            user_id: response.callback_scope.user_id.clone(),
+            agent_id: response.callback_scope.agent_id.clone(),
+            project_id: response.callback_scope.project_id.clone(),
+            mission_id: None,
+            thread_id: response.callback_scope.thread_id.clone(),
+            invocation_id: response.callback_scope.invocation_id,
+        },
+        AuthSurface::Callback,
+    );
+    if let Some(session_id) = response.callback_scope.session_id.clone() {
+        scope = scope.with_session_id(session_id);
+    }
+    if let Some(descriptor) = oauth_callback_descriptor_for_provider(&response.provider) {
+        run_terminal_failure_hook(
+            state,
+            descriptor,
+            &scope,
+            response.flow_id,
+            RebornOAuthCallbackFailureStage::Terminal,
+        )
+        .await?;
+    }
+    run_with_backend_timeout(
+        state
+            .product_auth
+            .flow_manager()
+            .cancel_flow(&scope, response.flow_id),
+    )
+    .await?;
+    state.remove_pkce_verifier(response.flow_id);
+    Ok(())
 }
 
 /// Recipe-driven extension OAuth start: the requested vendor resolves to its
@@ -347,6 +477,14 @@ async fn vendor_oauth_callback_attempt(
             },
         ))
         .await;
+        run_terminal_failure_hook_best_effort(
+            &state,
+            descriptor,
+            callback_scope,
+            flow_id,
+            RebornOAuthCallbackFailureStage::Terminal,
+        )
+        .await;
         state.remove_pkce_verifier(flow_id);
         return oauth_callback_route_result_response(headers, response);
     }
@@ -381,7 +519,26 @@ async fn vendor_oauth_callback_attempt(
             Ok(pkce_verifier) => pkce_verifier,
             Err(error) => {
                 state.remove_pkce_verifier(flow_id);
-                return Err(error);
+                callback_owned_by_service = true;
+                let response = run_with_backend_timeout(state.product_auth.handle_oauth_callback(
+                    RebornOAuthCallbackRequest {
+                        scope: callback_scope.clone(),
+                        flow_id,
+                        opaque_state_hash: state_hash.clone(),
+                        outcome: RebornOAuthCallbackOutcome::ProviderDenied,
+                    },
+                ))
+                .await;
+                terminal_failure_hook_attempted = true;
+                run_terminal_failure_hook_best_effort(
+                    &state,
+                    descriptor,
+                    callback_scope,
+                    flow_id,
+                    RebornOAuthCallbackFailureStage::Terminal,
+                )
+                .await;
+                return oauth_callback_route_result_response(headers, response);
             }
         };
     // Vendor-echoed granted scopes: when the redirect carries a scope list it
@@ -445,17 +602,25 @@ async fn vendor_oauth_callback_attempt(
     {
         Ok(response) => {
             state.remove_pkce_verifier(flow_id);
-            response
         }
-        Err(error) => {
-            if should_forget_pkce_verifier(error.body.code) {
-                state.remove_pkce_verifier(flow_id);
-            }
-            return Err(error);
+        if !terminal_failure_hook_attempted
+            && !matches!(
+                stage,
+                RebornOAuthCallbackFailureStage::ContinuationAcknowledgement
+                    | RebornOAuthCallbackFailureStage::ContinuationRetryable
+            )
+        {
+            run_terminal_failure_hook_best_effort(
+                &state,
+                descriptor,
+                callback_scope,
+                flow_id,
+                stage,
+            )
+            .await;
         }
-    };
-
-    Ok(oauth_callback_response(headers, response))
+    }
+    result
 }
 
 enum CallbackScopeOutcome {
@@ -495,6 +660,25 @@ fn resolve_callback_scopes(
     } else {
         Ok(CallbackScopeOutcome::ProviderDenied)
     }
+}
+
+async fn terminal_failure_hook(
+    state: &ProductAuthRouteState,
+    descriptor: &OAuthCallbackDescriptor,
+    callback_scope: &AuthProductScope,
+    flow_id: AuthFlowId,
+    failure_stage: RebornOAuthCallbackFailureStage,
+) -> Result<(), ProductAuthRouteFailure> {
+    if let Some(hook) = descriptor.on_terminal_failure {
+        return hook(
+            state.clone(),
+            callback_scope.clone(),
+            flow_id,
+            failure_stage,
+        )
+        .await;
+    }
+    Ok(())
 }
 
 // Formats the success shape only; `Err` propagates so the handler wrapper
@@ -755,5 +939,6 @@ pub(super) fn should_forget_pkce_verifier(code: AuthErrorCode) -> bool {
             | AuthErrorCode::CredentialMissing
             | AuthErrorCode::AccountSelectionRequired
             | AuthErrorCode::ProviderIdentityAlreadyConnected
+            | AuthErrorCode::ConnectionConflict
     )
 }

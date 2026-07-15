@@ -225,13 +225,7 @@ jobs:
             fi
 
             case "${package}" in
-<<<<<<< HEAD
-              ironclaw_first_party_extension_ports|ironclaw_host_runtime|ironclaw_loop_support|ironclaw_product_workflow|ironclaw_reborn|ironclaw_reborn_cli|ironclaw_reborn_composition|ironclaw_reborn_webui_ingress|ironclaw_wasm|ironclaw_wasm_sandbox_core)
-||||||| 8e05a3740
-              ironclaw_first_party_extension_ports|ironclaw_host_runtime|ironclaw_loop_support|ironclaw_product_workflow|ironclaw_reborn|ironclaw_reborn_cli|ironclaw_reborn_composition|ironclaw_reborn_webui_ingress|ironclaw_wasm|ironclaw_wasm_product_adapters|ironclaw_wasm_sandbox_core)
-=======
-              ironclaw_first_party_extension_ports|ironclaw_host_runtime|ironclaw_loop_host|ironclaw_product_workflow|ironclaw_runner|ironclaw_reborn_cli|ironclaw_reborn_composition|ironclaw_reborn_webui_ingress|ironclaw_wasm|ironclaw_wasm_product_adapters|ironclaw_wasm_sandbox_core)
->>>>>>> origin/main
+              ironclaw_first_party_extension_ports|ironclaw_host_runtime|ironclaw_loop_host|ironclaw_product_workflow|ironclaw_runner|ironclaw_reborn_cli|ironclaw_reborn_composition|ironclaw_reborn_webui_ingress|ironclaw_wasm)
                 sccache_dist_enabled=false
                 ;;
             esac

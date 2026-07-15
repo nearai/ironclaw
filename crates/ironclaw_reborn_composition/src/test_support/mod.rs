@@ -37,7 +37,10 @@
 //!    harness (C-TRACECAP seam).
 //! 10. [`automation`] — `local_dev_automation_product_facade_for_test`, the
 //!     production `RebornAutomationProductFacade` constructor for the
-//!     automations-cold-LIST scenario (W5-WEBUI-API-1 Enabler B.2).
+//!     automations-cold-LIST scenario (W5-WEBUI-API-1 Enabler B.2), plus
+//!     `local_dev_trigger_active_run_lookup_for_test` (the raw
+//!     `TriggerActiveRunLookup`, for wiring the `builtin.trigger_list`
+//!     capability directly rather than through the facade, #5886).
 //! 11. [`projection`] — `build_webui_event_stream_for_test`, a deliberately
 //!     narrowed `ProjectionStream` (turn-lifecycle events only) for the SSE
 //!     activity-stream scenario (W5-WEBUI-API-1 Enabler A).
@@ -65,12 +68,16 @@ mod projection;
 mod refreshing_capability_port;
 mod result_read;
 mod skill_activation;
+#[cfg(feature = "slack-v2-host-beta")]
+mod slack_channel_connection;
 mod trace_capture;
 mod trigger_materializer;
 mod user_profile;
 
 #[cfg(feature = "test-support")]
-pub use automation::local_dev_automation_product_facade_for_test;
+pub use automation::{
+    local_dev_automation_product_facade_for_test, local_dev_trigger_active_run_lookup_for_test,
+};
 pub use budget_gateway::{
     BudgetTestGateway, FailingTestGateway, ScriptedReply, assistant_reply_without_text_for_test,
 };

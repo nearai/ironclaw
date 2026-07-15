@@ -2741,6 +2741,23 @@ fn extension_search_has_ready_result(payload: Option<&LifecycleProductPayload>) 
         return false;
     };
     extensions.iter().any(|extension| {
+        matches!(extension.installation_phase, Some(LifecyclePhase::Active))
+            && !extension
+                .summary
+                .surface_kinds
+                .contains(&LifecycleExtensionSurfaceKind::ExternalChannel)
+            && extension.summary.credential_requirements.is_empty()
+            && extension.summary.onboarding.is_none()
+    })
+}
+
+fn extension_search_has_inactive_installed_result(
+    payload: Option<&LifecycleProductPayload>,
+) -> bool {
+    let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) = payload else {
+        return false;
+    };
+    extensions.iter().any(|extension| {
         matches!(
             extension.installation_phase,
             Some(InstallationState::Active)
@@ -5150,6 +5167,105 @@ mod tests {
                 .snapshot()
                 .get_extension(&ExtensionId::new("fixture").unwrap())
                 .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_skips_installation_absent_from_catalog_and_restores_valid_installation() {
+        // Regression for PR #5499 review finding: a persisted installation
+        // row whose extension id the catalog does not (yet) materialize a
+        // package for — e.g. a placeholder row written by the standalone
+        // v1->Reborn migration tool — must not abort restore for every other
+        // installation.
+        let (_dir, _storage_root, port, _active_registry, installation_store, _trust_policy) =
+            extension_management_port_fixture_with_catalog_service_and_trust(
+                AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("valid ref");
+        port.install(package_ref.clone(), &lifecycle_owner())
+            .await
+            .expect("install fixture extension");
+        port.activate_with_prechecked_credentials_for_test(
+            package_ref,
+            ExtensionActivationMode::Static,
+        )
+        .await
+        .expect("activate fixture extension");
+
+        let orphan_extension_id = ExtensionId::new("orphan_migrated").expect("valid extension id");
+        let orphan_installation_id =
+            ExtensionInstallationId::new("orphan_migrated").expect("valid installation");
+        installation_store
+            .upsert_manifest(fixture_manifest_record_with_source(
+                &orphan_migrated_manifest(),
+                ManifestSource::InstalledLocal,
+                None,
+            ))
+            .await
+            .expect("upsert orphan manifest absent from the catalog");
+        installation_store
+            .upsert_installation(
+                ExtensionInstallation::new(
+                    orphan_installation_id.clone(),
+                    orphan_extension_id.clone(),
+                    ExtensionActivationState::Enabled,
+                    ExtensionManifestRef::new(orphan_extension_id.clone(), None),
+                    Vec::new(),
+                    chrono::Utc::now(),
+                    InstallationOwner::Tenant,
+                )
+                .expect("orphan installation"),
+            )
+            .await
+            .expect("upsert orphan installation absent from the catalog");
+
+        let restored_catalog =
+            AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]);
+        let restored_lifecycle = Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        )));
+        let restored_active_registry =
+            Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let restored_trust_policy = test_extension_trust_policy();
+        let restored_active_extensions = test_active_extension_publisher(
+            Arc::clone(&restored_active_registry),
+            Arc::clone(&restored_trust_policy),
+        );
+        let installation_store: Arc<dyn ExtensionInstallationStore> = installation_store;
+
+        restore_extension_lifecycle_state(
+            &restored_catalog,
+            &port.filesystem,
+            &installation_store,
+            &restored_lifecycle,
+            &restored_active_extensions,
+        )
+        .await
+        .expect("restore succeeds by skipping the orphan installation");
+
+        // The valid installation still restores normally.
+        assert!(
+            restored_active_registry
+                .snapshot()
+                .get_extension(&ExtensionId::new("fixture").expect("valid extension id"))
+                .is_some()
+        );
+        // The orphan row is preserved (never deleted or rewritten) for when
+        // the migration tool later materializes its catalog package.
+        assert!(
+            installation_store
+                .get_installation(&orphan_installation_id)
+                .await
+                .expect("read orphan installation")
+                .is_some()
+        );
+        assert!(
+            restored_active_registry
+                .snapshot()
+                .get_extension(&orphan_extension_id)
+                .is_none()
         );
     }
 

@@ -888,6 +888,18 @@ registerPack("en", {
   "automations.runs.showingOf": "Showing {shown} of {total} recent runs",
   "automations.status.running": "Running",
   "automations.status.needsReview": "Needs review",
+  "automations.hold.approval": "Waiting for your approval",
+  "automations.hold.auth": "Waiting for you to reconnect an account",
+  "automations.hold.inProgress": "Previous run still in progress",
+  "automations.hold.other": "Previous run hasn't finished",
+  "automations.hold.meta.paused":
+    "Paused since {since} · {count} scheduled occurrences elapsed while held",
+  "automations.hold.meta.pausedUnknownCount":
+    "Paused since {since} · scheduled occurrence count unavailable",
+  "automations.hold.meta.inProgress":
+    "Started {since} · next run starts after it finishes · {count} scheduled occurrences elapsed while held",
+  "automations.hold.meta.inProgressUnknownCount":
+    "Started {since} · next run starts after it finishes · scheduled occurrence count unavailable",
   "automations.detail.emptyTitle": "Select an automation",
   "automations.detail.emptyDescription":
     "Choose a schedule to inspect recent runs.",
@@ -926,6 +938,14 @@ registerPack("en", {
   "ext.registry.importing": "Importing…",
   "ext.registry.importSuccess": "Tool imported — install it from the registry.",
   "ext.registry.importFailed": "Import failed",
+  "ext.catalog.loadErrorTitle": "Extension catalog unavailable",
+  "ext.catalog.loadErrorDesc":
+    "The extension catalog could not be loaded. Check your connection and try again.",
+  "ext.catalog.partialErrorTitle": "Some extension data is unavailable",
+  "ext.catalog.partialErrorDesc":
+    "The available extension data is shown, but some details could not be loaded. Check your connection and try again.",
+  "ext.catalog.retry": "Retry",
+  "ext.catalog.retrying": "Retrying…",
 
   // Chat — history
   "chat.history.loading": "Loading...",

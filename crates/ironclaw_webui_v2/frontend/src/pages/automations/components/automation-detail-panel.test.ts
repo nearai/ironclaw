@@ -287,3 +287,37 @@ test("AutomationDetailPanel preserves rename drafts across same automation refre
   [input] = componentProps(rendered, harness.Input);
   assert.equal(input.value, "Draft in progress");
 });
+
+// #5886: when the presenter attaches hold_meta_label (active_hold present),
+// the detail panel must surface it near the status pill.
+test("AutomationDetailPanel renders hold_meta_label when present", () => {
+  const harness = createHarness();
+  const rendered = harness.render({
+    automation: {
+      ...automation(),
+      primary_status_label: "Waiting for your approval",
+      primary_status_tone: "warning",
+      hold_meta_label:
+        "Paused since Jul 14, 12:51 AM · 3 scheduled occurrences elapsed while held",
+    },
+  });
+
+  assert.ok(
+    collectScalars(rendered).includes(
+      "Paused since Jul 14, 12:51 AM · 3 scheduled occurrences elapsed while held",
+    ),
+    "hold_meta_label text should render in the detail panel",
+  );
+});
+
+test("AutomationDetailPanel omits hold meta text when hold_meta_label is absent", () => {
+  const harness = createHarness();
+  const rendered = harness.render();
+
+  assert.ok(
+    !collectScalars(rendered).some((value) =>
+      typeof value === "string" && value.includes("scheduled occurrences elapsed"),
+    ),
+    "no hold meta text should render when there is no active hold",
+  );
+});

@@ -851,6 +851,12 @@ registerPack("fr", {
   "ext.registry.importing": "Importation…",
   "ext.registry.importSuccess": "Outil importé — installez-le depuis le registre.",
   "ext.registry.importFailed": "Échec de l’importation",
+  "ext.catalog.loadErrorTitle": "Catalogue d’extensions indisponible",
+  "ext.catalog.loadErrorDesc": "Impossible de charger le catalogue d’extensions. Vérifiez votre connexion et réessayez.",
+  "ext.catalog.partialErrorTitle": "Certaines données d’extension sont indisponibles",
+  "ext.catalog.partialErrorDesc": "Les données d’extension disponibles sont affichées, mais certains détails n’ont pas pu être chargés. Vérifiez votre connexion et réessayez.",
+  "ext.catalog.retry": "Réessayer",
+  "ext.catalog.retrying": "Nouvelle tentative…",
 
   // Chat — history
   "chat.history.loading": "Chargement...",
@@ -1269,6 +1275,18 @@ registerPack("fr", {
   "automations.detail.thread": "conversation",
   "automations.filter.failures": "Échecs",
   "automations.filter.running": "En cours",
+  "automations.hold.approval": "En attente de votre approbation",
+  "automations.hold.auth": "En attente de la reconnexion d'un compte",
+  "automations.hold.inProgress": "L'exécution précédente est toujours en cours",
+  "automations.hold.meta.inProgress":
+    "Démarré {since} · la prochaine exécution commencera une fois celle-ci terminée · {count} occurrences planifiées écoulées pendant que l'exécution était toujours en cours",
+  "automations.hold.meta.inProgressUnknownCount":
+    "Démarré {since} · la prochaine exécution commencera une fois celle-ci terminée · nombre d'occurrences planifiées écoulées indisponible",
+  "automations.hold.meta.paused":
+    "En pause depuis {since} · {count} occurrences planifiées écoulées pendant la pause",
+  "automations.hold.meta.pausedUnknownCount":
+    "En pause depuis {since} · nombre d'occurrences planifiées écoulées indisponible",
+  "automations.hold.other": "L'exécution précédente n'est pas terminée",
   "automations.status.needsReview": "À vérifier",
   "automations.status.running": "En cours",
   "automations.summary.failures": "Échecs",

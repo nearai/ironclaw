@@ -10,6 +10,8 @@ use ironclaw_host_api::{ExtensionId, VirtualPath};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
+use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
+
 const DEFAULT_INSTALLATION_STATE_PATH: &str = "/system/extensions/.installations/state.json";
 const INSTALLATION_STATE_IO_ERROR: &str = "failed to load extension installation state";
 
@@ -30,7 +32,23 @@ impl FilesystemExtensionInstallationStore {
             Ok(bytes) => {
                 let state: WireState =
                     serde_json::from_slice(&bytes).map_err(invalid_installation_error)?;
-                state.load_into(&inner).await?;
+                let original_installations = state.installations;
+                let normalized_installations =
+                    canonicalize_installation_rows(original_installations.clone())?;
+                let needs_rewrite = normalized_installations != original_installations;
+                let normalized_state = WireState {
+                    manifests: state.manifests,
+                    installations: normalized_installations,
+                };
+
+                // Validate the complete normalized snapshot before writing it
+                // back. A malformed manifest/installation pair must leave the
+                // persisted bytes untouched and must not expose a half-loaded
+                // store.
+                normalized_state.load_into(&inner).await?;
+                if needs_rewrite {
+                    write_snapshot(&filesystem, &state_path, &normalized_state).await?;
+                }
             }
             Err(FilesystemError::NotFound { .. }) => {}
             Err(error) => {

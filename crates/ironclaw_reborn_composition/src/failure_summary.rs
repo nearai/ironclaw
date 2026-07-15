@@ -223,6 +223,9 @@ pub(crate) fn pinned_failure_summary_for_category(category: &str) -> Option<&'st
         MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY => Some(
             "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL, then try again.",
         ),
+        BUDGET_ACCOUNTING_FAILED_CATEGORY => Some(
+            "The run failed because resource accounting was temporarily unavailable. Retry the run, and contact support if it keeps happening.",
+        ),
         _ => None,
     }
 }

@@ -198,6 +198,14 @@ export function AutomationDetailPanel({
             <div className="mt-2 truncate font-mono text-[11px] uppercase tracking-[0.12em] text-iron-400">
               {automation.automation_id}
             </div>
+            {automation.hold_meta_label && (
+              <div
+                data-testid="automation-hold-meta"
+                className="mt-1 text-xs text-iron-300"
+              >
+                {automation.hold_meta_label}
+              </div>
+            )}
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <StatusPill

@@ -332,19 +332,32 @@ async def test_reborn_v2_text_turn_persists(reborn_v2_server):
         )
 
 
-async def test_reborn_v2_ui_send_renders_reply(reborn_v2_page, reborn_v2_server):
-    """Typing in the composer and pressing Enter renders the assistant reply in the SPA."""
+async def test_reborn_v2_ui_enter_submits_initial_and_follow_up_messages(
+    reborn_v2_page,
+):
+    """Enter submits both an initial message and a follow-up after success."""
     composer = reborn_v2_page.locator(SEL_V2["chat_composer"])
     await composer.fill("hello there")
     await composer.press("Enter")
 
     # The user bubble and the streamed assistant reply both render in the shell.
-    await expect(reborn_v2_page.locator(SEL_V2["msg_user"]).first).to_contain_text(
+    user_messages = reborn_v2_page.locator(SEL_V2["msg_user"])
+    assistant_messages = reborn_v2_page.locator(SEL_V2["msg_assistant"])
+    await expect(user_messages.first).to_contain_text(
         "hello there", timeout=15000
     )
-    await expect(reborn_v2_page.locator(SEL_V2["msg_assistant"]).first).to_contain_text(
+    await expect(assistant_messages.first).to_contain_text(
         "Hello", timeout=30000
     )
+    await expect(composer).to_have_attribute("data-send-disabled", "false", timeout=15000)
+
+    await composer.fill("follow-up right away")
+    await composer.press("Enter")
+
+    await expect(user_messages).to_have_count(2, timeout=15000)
+    await expect(user_messages.last).to_contain_text("follow-up right away")
+    await expect(assistant_messages).to_have_count(2, timeout=30000)
+    await expect(assistant_messages.last).to_contain_text("I understand your request.")
 
 
 async def test_reborn_v2_automation_rename_persists_from_ui(

@@ -851,6 +851,12 @@ registerPack("hi", {
   "ext.registry.importing": "आयात हो रहा है…",
   "ext.registry.importSuccess": "टूल आयात हो गया — इसे रजिस्ट्री से इंस्टॉल करें।",
   "ext.registry.importFailed": "आयात विफल",
+  "ext.catalog.loadErrorTitle": "एक्सटेंशन कैटलॉग उपलब्ध नहीं है",
+  "ext.catalog.loadErrorDesc": "एक्सटेंशन कैटलॉग लोड नहीं हो सका। अपना कनेक्शन जाँचें और फिर कोशिश करें।",
+  "ext.catalog.partialErrorTitle": "कुछ एक्सटेंशन डेटा उपलब्ध नहीं है",
+  "ext.catalog.partialErrorDesc": "उपलब्ध एक्सटेंशन डेटा दिखाया गया है, लेकिन कुछ विवरण लोड नहीं हो सके। अपना कनेक्शन जाँचें और फिर कोशिश करें।",
+  "ext.catalog.retry": "फिर कोशिश करें",
+  "ext.catalog.retrying": "फिर कोशिश की जा रही है…",
 
   // Chat — history
   "chat.history.loading": "लोड हो रहा है...",
@@ -1269,6 +1275,18 @@ registerPack("hi", {
   "automations.detail.thread": "थ्रेड",
   "automations.filter.failures": "विफलताएं",
   "automations.filter.running": "चल रहा है",
+  "automations.hold.approval": "आपकी स्वीकृति की प्रतीक्षा है",
+  "automations.hold.auth": "आपके किसी खाते को फिर से कनेक्ट करने की प्रतीक्षा है",
+  "automations.hold.inProgress": "पिछला रन अभी भी चल रहा है",
+  "automations.hold.meta.inProgress":
+    "{since} को शुरू हुआ · अगला रन इसके पूरा होने के बाद शुरू होगा · इसके चलते रहने के दौरान {count} निर्धारित अवसर बीत गए",
+  "automations.hold.meta.inProgressUnknownCount":
+    "{since} को शुरू हुआ · अगला रन इसके पूरा होने के बाद शुरू होगा · बीते हुए निर्धारित अवसरों की संख्या उपलब्ध नहीं है",
+  "automations.hold.meta.paused":
+    "{since} से रुका हुआ · रुके रहने के दौरान {count} निर्धारित अवसर बीत गए",
+  "automations.hold.meta.pausedUnknownCount":
+    "{since} से रुका हुआ · बीते हुए निर्धारित अवसरों की संख्या उपलब्ध नहीं है",
+  "automations.hold.other": "पिछला रन अभी पूरा नहीं हुआ है",
   "automations.status.needsReview": "समीक्षा चाहिए",
   "automations.status.running": "चल रहा है",
   "automations.summary.failures": "विफलताएं",

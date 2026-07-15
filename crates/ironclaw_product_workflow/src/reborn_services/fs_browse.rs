@@ -10,8 +10,9 @@
 //! Design notes:
 //!
 //! - **Mount, not thread.** The browse scope is derived by the facade from the
-//!   authenticated caller (tenant/user/agent/project), never from a thread id or
-//!   the request body. A [`FsMount`] selects *which* virtual mount to read;
+//!   authenticated caller (tenant/user/agent/project). An optional typed
+//!   project selector is authorized through the project service before it is
+//!   adopted; it never directly supplies a filesystem scope. A [`FsMount`] selects *which* virtual mount to read;
 //!   paths are mount-relative (`""`/`"/"` is the mount root) so a host or
 //!   virtual path is never serialized across the boundary.
 //! - **Substrate-free.** Like the project-fs port, this re-uses the coarse
@@ -24,7 +25,7 @@
 //!   sole mutation path.
 
 use async_trait::async_trait;
-use ironclaw_host_api::ResourceScope;
+use ironclaw_host_api::{ProjectId, ResourceScope};
 use serde::{Deserialize, Serialize};
 
 use super::project_fs::{ProjectFsEntry, ProjectFsError, ProjectFsFile, ProjectFsStat};
@@ -89,6 +90,10 @@ pub struct RebornFsListRequest {
     pub mount: FsMount,
     #[serde(default)]
     pub path: String,
+    /// Optional project selector. When absent, the authenticated caller's
+    /// default project scope is preserved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<ProjectId>,
 }
 
 /// Directory listing response. Echoes the requested `mount`/`path` so the
@@ -107,6 +112,10 @@ pub struct RebornFsStatRequest {
     pub mount: FsMount,
     #[serde(default)]
     pub path: String,
+    /// Optional project selector. The facade authorizes it before resolving
+    /// the browse scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<ProjectId>,
 }
 
 /// Path metadata response.
@@ -121,6 +130,10 @@ pub struct RebornFsReadRequest {
     pub mount: FsMount,
     #[serde(default)]
     pub path: String,
+    /// Optional project selector. The facade authorizes it before resolving
+    /// the browse scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<ProjectId>,
 }
 
 /// Read-only navigation + download access to the agent's internal filesystem

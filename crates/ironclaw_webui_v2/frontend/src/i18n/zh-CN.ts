@@ -851,6 +851,12 @@ registerPack("zh-CN", {
   "ext.registry.importing": "正在导入…",
   "ext.registry.importSuccess": "工具已导入 — 请从注册表安装。",
   "ext.registry.importFailed": "导入失败",
+  "ext.catalog.loadErrorTitle": "扩展目录暂不可用",
+  "ext.catalog.loadErrorDesc": "无法加载扩展目录。请检查网络连接后重试。",
+  "ext.catalog.partialErrorTitle": "部分扩展数据暂不可用",
+  "ext.catalog.partialErrorDesc": "已显示当前可用的扩展数据，但有些详细信息无法加载。请检查网络连接后重试。",
+  "ext.catalog.retry": "重试",
+  "ext.catalog.retrying": "正在重试…",
 
   // Chat — history
   "chat.history.loading": "加载中...",
@@ -1269,6 +1275,18 @@ registerPack("zh-CN", {
   "automations.detail.thread": "会话",
   "automations.filter.failures": "失败",
   "automations.filter.running": "运行中",
+  "automations.hold.approval": "等待您的批准",
+  "automations.hold.auth": "等待您重新连接账户",
+  "automations.hold.inProgress": "上一次运行仍在进行中",
+  "automations.hold.meta.inProgress":
+    "于{since}开始 · 下一次运行将在此次完成后开始 · 运行期间已过去 {count} 次计划执行时刻",
+  "automations.hold.meta.inProgressUnknownCount":
+    "于{since}开始 · 下一次运行将在此次完成后开始 · 已过去的计划执行次数不可用",
+  "automations.hold.meta.paused":
+    "自{since}起已暂停 · 暂停期间已过去 {count} 次计划执行时刻",
+  "automations.hold.meta.pausedUnknownCount":
+    "自{since}起已暂停 · 已过去的计划执行次数不可用",
+  "automations.hold.other": "上一次运行尚未完成",
   "automations.status.needsReview": "需要审核",
   "automations.status.running": "运行中",
   "automations.summary.failures": "失败",

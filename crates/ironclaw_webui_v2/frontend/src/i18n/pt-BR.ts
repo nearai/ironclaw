@@ -851,6 +851,12 @@ registerPack("pt-BR", {
   "ext.registry.importing": "Importando…",
   "ext.registry.importSuccess": "Ferramenta importada — instale-a pelo registro.",
   "ext.registry.importFailed": "Falha na importação",
+  "ext.catalog.loadErrorTitle": "Catálogo de extensões indisponível",
+  "ext.catalog.loadErrorDesc": "Não foi possível carregar o catálogo de extensões. Verifique sua conexão e tente novamente.",
+  "ext.catalog.partialErrorTitle": "Alguns dados de extensões não estão disponíveis",
+  "ext.catalog.partialErrorDesc": "Os dados de extensões disponíveis são exibidos, mas não foi possível carregar alguns detalhes. Verifique sua conexão e tente novamente.",
+  "ext.catalog.retry": "Tentar novamente",
+  "ext.catalog.retrying": "Tentando novamente…",
 
   // Chat — history
   "chat.history.loading": "Carregando...",
@@ -1269,6 +1275,18 @@ registerPack("pt-BR", {
   "automations.detail.thread": "conversa",
   "automations.filter.failures": "Falhas",
   "automations.filter.running": "Em execução",
+  "automations.hold.approval": "Aguardando sua aprovação",
+  "automations.hold.auth": "Aguardando você reconectar uma conta",
+  "automations.hold.inProgress": "A execução anterior ainda está em andamento",
+  "automations.hold.meta.inProgress":
+    "Iniciado {since} · a próxima execução começa após esta terminar · {count} ocorrências programadas transcorreram enquanto esta execução estava em andamento",
+  "automations.hold.meta.inProgressUnknownCount":
+    "Iniciado {since} · a próxima execução começa após esta terminar · contagem de ocorrências programadas transcorridas indisponível",
+  "automations.hold.meta.paused":
+    "Pausado desde {since} · {count} ocorrências programadas transcorreram enquanto pausado",
+  "automations.hold.meta.pausedUnknownCount":
+    "Pausado desde {since} · contagem de ocorrências programadas transcorridas indisponível",
+  "automations.hold.other": "A execução anterior ainda não terminou",
   "automations.status.needsReview": "Precisa de revisão",
   "automations.status.running": "Em execução",
   "automations.summary.failures": "Falhas",

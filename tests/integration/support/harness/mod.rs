@@ -160,7 +160,11 @@ struct OutboundTargetToolsParts {
 }
 
 pub(crate) struct HostRuntimeCapabilityHarness {
-    runtime: Arc<dyn HostRuntime>,
+    /// Interior-mutable (not a plain `Arc`) so `install_trigger_active_run_lookup_for_test`
+    /// (#5886) can re-wrap it with `TriggerActiveRunLookupHostRuntime` AFTER
+    /// this harness is already `Arc`'d — the same chicken-and-egg constraint
+    /// `io`/`result_writer_io` document above `install_durable_capability_io`.
+    runtime: Mutex<Arc<dyn HostRuntime>>,
     approval_parts: Option<RebornLocalDevApprovalTestParts>,
     auto_approve_settings: Option<Arc<dyn ironclaw_approvals::AutoApproveSettingStore>>,
     pending_approval_scopes: Arc<Mutex<HashMap<ApprovalRequestId, ResourceScope>>>,
@@ -298,6 +302,11 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// harnesses; `None` for the lower-level constructors and the Echo backend.
     /// Read via `reborn_services_for_test`.
     reborn_services: Option<ironclaw_reborn_composition::RebornServices>,
+    /// Set from `HostRuntimeHarnessOptions::with_trigger_active_run_lookup_for_test()`
+    /// (#5886) at construction; read by `HarnessCapabilityMode::into_parts` to
+    /// decide whether to call `install_trigger_active_run_lookup_for_test` once
+    /// the caller's real shared turn-state store is available.
+    trigger_active_run_lookup_requested: bool,
 }
 
 impl HostRuntimeCapabilityHarness {
@@ -700,7 +709,7 @@ impl HostRuntimeCapabilityHarness {
             Arc::clone(&pending_approval_scopes),
         ));
         Ok(Self {
-            runtime,
+            runtime: Mutex::new(runtime),
             approval_parts,
             auto_approve_settings,
             pending_approval_scopes,
@@ -738,6 +747,7 @@ impl HostRuntimeCapabilityHarness {
             persistent_approval_policies,
             trigger_repository,
             reborn_services: Some(services),
+            trigger_active_run_lookup_requested,
         })
     }
 
@@ -749,7 +759,11 @@ impl HostRuntimeCapabilityHarness {
     /// runtime), so parking sits outside the existing recorder at the same
     /// `HostRuntime` trait-object seam.
     pub(crate) fn park_capability_dispatch(mut self, gate: ParkingCapabilityGate) -> Self {
-        self.runtime = Arc::new(ParkingHostRuntime::new(self.runtime, gate));
+        let inner = self
+            .runtime
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.runtime = Mutex::new(Arc::new(ParkingHostRuntime::new(inner, gate)));
         self
     }
 

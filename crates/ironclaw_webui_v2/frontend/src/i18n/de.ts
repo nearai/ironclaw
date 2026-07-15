@@ -851,6 +851,12 @@ registerPack("de", {
   "ext.registry.importing": "Wird importiert…",
   "ext.registry.importSuccess": "Tool importiert — installiere es aus der Registry.",
   "ext.registry.importFailed": "Import fehlgeschlagen",
+  "ext.catalog.loadErrorTitle": "Erweiterungskatalog nicht verfügbar",
+  "ext.catalog.loadErrorDesc": "Der Erweiterungskatalog konnte nicht geladen werden. Prüfe deine Verbindung und versuche es erneut.",
+  "ext.catalog.partialErrorTitle": "Einige Erweiterungsdaten sind nicht verfügbar",
+  "ext.catalog.partialErrorDesc": "Die verfügbaren Erweiterungsdaten werden angezeigt, einige Details konnten jedoch nicht geladen werden. Prüfe deine Verbindung und versuche es erneut.",
+  "ext.catalog.retry": "Erneut versuchen",
+  "ext.catalog.retrying": "Erneuter Versuch…",
 
   // Chat — history
   "chat.history.loading": "Laden...",
@@ -1269,6 +1275,18 @@ registerPack("de", {
   "automations.detail.thread": "Thread",
   "automations.filter.failures": "Fehler",
   "automations.filter.running": "Läuft",
+  "automations.hold.approval": "Wartet auf Ihre Genehmigung",
+  "automations.hold.auth": "Wartet darauf, dass Sie ein Konto erneut verbinden",
+  "automations.hold.inProgress": "Vorheriger Lauf läuft noch",
+  "automations.hold.meta.inProgress":
+    "Gestartet {since} · nächster Lauf startet, sobald dieser abgeschlossen ist · {count} geplante Vorkommen während der laufenden Ausführung verstrichen",
+  "automations.hold.meta.inProgressUnknownCount":
+    "Gestartet {since} · nächster Lauf startet, sobald dieser abgeschlossen ist · Anzahl verstrichener geplanter Vorkommen nicht verfügbar",
+  "automations.hold.meta.paused":
+    "Pausiert seit {since} · {count} geplante Vorkommen während der Pause verstrichen",
+  "automations.hold.meta.pausedUnknownCount":
+    "Pausiert seit {since} · Anzahl verstrichener geplanter Vorkommen nicht verfügbar",
+  "automations.hold.other": "Vorheriger Lauf ist noch nicht abgeschlossen",
   "automations.status.needsReview": "Prüfung erforderlich",
   "automations.status.running": "Läuft",
   "automations.summary.failures": "Fehler",
