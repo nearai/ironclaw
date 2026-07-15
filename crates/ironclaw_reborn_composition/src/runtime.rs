@@ -5160,7 +5160,8 @@ output_schema_ref = "schemas/write.output.json"
     use ironclaw_skills::SkillTrust;
     use ironclaw_threads::{
         AppendToolResultReferenceRequest, EnsureThreadRequest, LoadContextMessagesRequest,
-        MessageKind, MessageStatus, ThreadHistoryRequest, ThreadScope, ToolResultSafeSummary,
+        MessageKind, MessageStatus, TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadHistoryRequest,
+        ThreadScope, ToolResultSafeSummary,
     };
     use ironclaw_turns::{
         AcceptedMessageRef, AllowAllTurnAdmissionPolicy, BlockedReason, GetRunStateRequest,
@@ -5461,14 +5462,19 @@ output_schema_ref = "schemas/write.output.json"
         }
     }
 
-    /// A long echo argument (well over the safe-preview 512-byte string cap) so
-    /// the default-observer test can prove the payload is truncated before the
-    /// observer sees it.
+    /// A long echo argument, sized well over `TOOL_RESULT_RECORD_READ_MAX_BYTES`
+    /// (not just the old hardcoded 2KiB), so the default-observer test can
+    /// prove the payload is truncated before the observer sees it.
     const LARGE_ECHO_MESSAGE: &str = "PAYLOAD0123456789ABCDEF_";
     const LARGE_ECHO_TAIL: &str = "UNREPLAYED_RAW_TOOL_RESULT_TAIL";
 
     fn large_echo_message() -> String {
-        format!("{}{}", LARGE_ECHO_MESSAGE.repeat(100), LARGE_ECHO_TAIL)
+        let repeat_count = TOOL_RESULT_RECORD_READ_MAX_BYTES / LARGE_ECHO_MESSAGE.len() + 1;
+        format!(
+            "{}{}",
+            LARGE_ECHO_MESSAGE.repeat(repeat_count),
+            LARGE_ECHO_TAIL
+        )
     }
 
     #[derive(Debug, Default)]
