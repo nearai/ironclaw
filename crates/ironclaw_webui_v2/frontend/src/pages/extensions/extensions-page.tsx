@@ -1,12 +1,13 @@
 import { Navigate, useParams } from "react-router";
 import React from "react";
+import { ConfirmDialog } from "../../design-system/confirm-dialog";
+import { useT } from "../../lib/i18n";
 import { ActionToast } from "./components/action-toast";
 import { ChannelsTab } from "./components/channels-tab";
 import { ConfigureModal } from "./components/configure-modal";
 import { McpTab } from "./components/mcp-tab";
 import { RegistryTab } from "./components/registry-tab";
 import { useExtensions } from "./hooks/useExtensions";
-import { useT } from "../../lib/i18n";
 
 function CatalogErrorBanner({ isPartial = false, isRefetching, onRetry }) {
   const t = useT();
@@ -40,8 +41,10 @@ function CatalogErrorBanner({ isPartial = false, isRefetching, onRetry }) {
 }
 
 export function ExtensionsPage({ isAdmin = false } = {}) {
+  const t = useT();
   const { tab = "registry" } = useParams();
   const [configuring, setConfiguring] = React.useState(null);
+  const [extensionToRemove, setExtensionToRemove] = React.useState(null);
 
   const {
     status,
@@ -62,6 +65,7 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     install,
     activate,
     remove,
+    isRemoving,
     importTool,
     isImporting,
     invalidate,
@@ -74,6 +78,12 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
   );
   const handleImport = React.useCallback((file) => importTool({ file }), [importTool]);
   const handleCloseModal = React.useCallback(() => setConfiguring(null), []);
+  const handleConfirmRemove = React.useCallback(() => {
+    if (!extensionToRemove) return;
+    remove(extensionToRemove, {
+      onSettled: () => setExtensionToRemove(null),
+    });
+  }, [extensionToRemove, remove]);
   const handleSaved = React.useCallback(() => invalidate(), [invalidate]);
   const handleActivateFromModal = React.useCallback(
     (extension) => {
@@ -132,7 +142,7 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
       channelRegistry={channelRegistry}
       onActivate={activate}
       onConfigure={handleConfigure}
-      onRemove={remove}
+      onRemove={setExtensionToRemove}
       onInstall={handleInstall}
       isBusy={isBusy}
     />),
@@ -141,7 +151,7 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
       mcpRegistry={mcpRegistry}
       onActivate={activate}
       onConfigure={handleConfigure}
-      onRemove={remove}
+      onRemove={setExtensionToRemove}
       onInstall={handleInstall}
       isBusy={isBusy}
     />),
@@ -150,7 +160,7 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
       onInstall={handleInstall}
       onActivate={activate}
       onConfigure={handleConfigure}
-      onRemove={remove}
+      onRemove={setExtensionToRemove}
       onImport={handleImport}
       isAdmin={isAdmin}
       isImporting={isImporting}
@@ -188,6 +198,18 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
           onSaved={handleSaved}
         />
       )}
+      <ConfirmDialog
+        open={Boolean(extensionToRemove)}
+        title={`${t("common.remove")}: ${
+          extensionToRemove?.displayName ||
+          extensionToRemove?.packageRef?.id ||
+          t("extensions.defaultName")
+        }`}
+        confirmLabel={t("common.remove")}
+        isConfirming={isRemoving}
+        onConfirm={handleConfirmRemove}
+        onCancel={() => setExtensionToRemove(null)}
+      />
     </div>
   );
 }

@@ -1,5 +1,6 @@
 import React from "react";
 import { Button } from "../../../design-system/button";
+import { ConfirmDialog } from "../../../design-system/confirm-dialog";
 import { Icon } from "../../../design-system/icons";
 import { Input } from "../../../design-system/input";
 import { EmptyPanel, Panel, StatusPill } from "../../../design-system/primitives";
@@ -46,11 +47,13 @@ export function AutomationDetailPanel({
   const [isEditingName, setIsEditingName] = React.useState(false);
   const [draftName, setDraftName] = React.useState("");
   const [nameError, setNameError] = React.useState("");
+  const [deleteDialogOpen, setDeleteDialogOpen] = React.useState(false);
 
   React.useEffect(() => {
     setIsEditingName(false);
     setDraftName(automation?.display_name || "");
     setNameError("");
+    setDeleteDialogOpen(false);
   }, [automation?.automation_id]);
 
   if (!automation) {
@@ -83,9 +86,10 @@ export function AutomationDetailPanel({
   };
   const deleteTitle = `${t("common.delete")}: ${automation.display_name}`;
   const handleDelete = () => {
-    if (window.confirm(deleteTitle)) {
-      onDeleteAutomation?.(automation.automation_id);
-    }
+    setDeleteDialogOpen(true);
+  };
+  const handleConfirmDelete = () => {
+    onDeleteAutomation?.(automation.automation_id);
   };
   const handleRenameStart = () => {
     setDraftName(automation.display_name);
@@ -286,6 +290,14 @@ export function AutomationDetailPanel({
               )}
         </div>
       </div>
+      <ConfirmDialog
+        open={deleteDialogOpen}
+        title={deleteTitle}
+        confirmLabel={t("common.delete")}
+        isConfirming={isMutating}
+        onConfirm={handleConfirmDelete}
+        onCancel={() => setDeleteDialogOpen(false)}
+      />
     </Panel>
   );
 }

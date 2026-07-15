@@ -243,10 +243,12 @@ SEL_V2 = {
     "admin_create_token_button_name": "Create token",
     "sidebar":        "#gateway-sidebar",  # app navigation sidebar
     "sidebar_button": "#gateway-sidebar button",
-    "sidebar_toggle": "button[aria-label='Toggle sidebar']",
     "thread_delete_for": (
-        "[data-testid='thread-delete'][data-thread-id='{id}']"
+        '[data-testid="thread-delete"][data-thread-id="{id}"]'
     ),
+    "confirm_dialog_cancel": '[data-testid="confirm-dialog-cancel"]',
+    "confirm_dialog_confirm": '[data-testid="confirm-dialog-confirm"]',
+    "sidebar_toggle": "button[aria-label='Toggle sidebar']",
     "sign_out_button": "button[title='Sign out']",
     "chat_composer":  "[data-testid='chat-composer']",  # message textarea on /chat
     "attachment_file_input": "input[type=file][multiple]",

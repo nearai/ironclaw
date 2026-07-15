@@ -439,7 +439,9 @@ mod tests {
         assert!(detail_panel.contains("automation.state === \"scheduled\""));
         assert!(detail_panel.contains("primary_status_label"));
         assert!(detail_panel.contains("primary_status_tone"));
-        assert!(detail_panel.contains("window.confirm"));
+        assert!(detail_panel.contains("import { ConfirmDialog }"));
+        assert!(detail_panel.contains("<ConfirmDialog"));
+        assert!(!detail_panel.contains("window.confirm"));
 
         let app_bundle = bundled_javascript();
         let app_bundle_contains_encoded_automation_route = |suffix: &str| {
