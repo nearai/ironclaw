@@ -23,6 +23,9 @@ or listed as a conscious drop.
   it acts *as you*. Modeled on the existing Slack prompt docs.
 - Schemas are JSON Schema draft-07, `additionalProperties:false`, and `$ref` the
   shared types in §1 as `types.v1#/$defs/<Type>`.
+- **Thread params:** the `thread` field on send_message / read_history appears in
+  an extension's expanded schema **only** when it declares `supports_threads`. The
+  model never sees an unusable thread param, so descriptions carry no conditional.
 
 ---
 
@@ -122,7 +125,8 @@ carries an explicit `display_name` mapping rule. `email` is deliberately **not**
 > asked you to take toward others (e.g. "DM Sergey the plan"). Never use it to
 > answer the user or report results back to them; the host delivers your reply on
 > the channel after the turn. Takes a conversation id from list_conversations or
-> an inbound message.
+> an inbound message. You can't message yourself — the host blocks a send
+> addressed to the user.
 
 **Prompt doc** (`prompts/messaging/send_message.md`):
 > Send a message as you to a conversation. The message appears to come from your
@@ -149,7 +153,7 @@ carries an explicit `display_name` mapping rule. `email` is deliberately **not**
   "properties": {
     "conversation": { "type": "string", "description": "Target conversation id (from list_conversations or an inbound message). Some adapters also accept a channel name like \"#general\"." },
     "text":         { "type": "string", "description": "Message body as Markdown; the adapter renders to the vendor dialect and splits to the vendor length limit." },
-    "thread":       { "type": "string", "description": "Reply inside this thread id. Accepted only when the extension declares supports_threads." },
+    "thread":       { "type": "string", "description": "Reply inside this thread id." },
     "reply_to":     { "type": "string", "description": "Message id (within `conversation`) to reply to." }
   }
 }
@@ -170,9 +174,11 @@ architecture doc): a send to the owner is blocked.
 ## 3. `read_history` (core) — `ironclaw.messaging.read_history.v1`
 
 **Description:**
-> Read recent messages from a conversation you can access, newest first. Each
-> message comes with its author already resolved to a name. Page older with the
-> returned `cursor`.
+> Read recent messages from a conversation you can access, newest first — each
+> with its author already resolved to a name (no get_user needed). Give a
+> `conversation` id; bound with `limit`, and page to older messages with the
+> returned `cursor`. For the latest messages of a known conversation, prefer this
+> over search_messages, which is keyword-indexed and unreliable for recency.
 
 **Prompt doc** (`prompts/messaging/read_history.md`):
 > Read message history from a conversation by its id. Returns messages newest-first
@@ -189,10 +195,10 @@ architecture doc): a send to the owner is blocked.
   "required": ["conversation"],
   "additionalProperties": false,
   "properties": {
-    "conversation": { "type": "string" },
+    "conversation": { "type": "string", "description": "Target conversation id (from list_conversations or an inbound message). Some adapters also accept a channel name like \"#general\"." },
     "limit":        { "type": "integer", "minimum": 1, "maximum": 200, "default": 50, "description": "Maximum messages to return." },
-    "before":       { "type": "string", "description": "Opaque cursor; returns messages older than it (page backward)." },
-    "after":        { "type": "string", "description": "Opaque cursor; returns messages newer than it (bound the window forward)." },
+    "cursor":       { "type": "string", "description": "Opaque page cursor from a prior read_history response (its `cursor`); returns the next older page. An opaque token — NOT a date/timestamp." },
+    "after":        { "type": "string", "description": "Opaque cursor from a prior response; bounds the window forward (messages newer than it). NOT a date — for date-bounded lookups use search_messages." },
     "thread":       { "type": "string", "description": "Restrict to this thread." }
   }
 }
@@ -206,12 +212,13 @@ architecture doc): a send to the owner is blocked.
   "properties": {
     "messages": { "type": "array", "items": { "$ref": "types.v1#/$defs/Message" } },
     "has_more": { "type": "boolean" },
-    "cursor":   { "type": "string", "description": "Pass as `before` to page older." }
+    "cursor":   { "type": "string", "description": "Opaque token; pass back as `cursor` to page to older messages." }
   }
 }
 ```
-**Slack mapping:** `conversation`←`channel`; `before`←`latest`, `after`←`oldest`;
-`conversations.history`; each `Message.author` is resolved via cached `users.info`
+**Slack mapping:** `conversation`←`channel`;
+`conversations.history` (`cursor`←`latest`, `after`←`oldest`); each
+`Message.author` is resolved via cached `users.info`
 (folds the old `get_user_info` round-trip); `Message.ref.id`←`ts`,
 `created_at`←`ts`, `thread`←`thread_ts`; `has_more`←`has_more`. **Audit:** old
 `limit` max 1000/default 50 → 200/50 here (raised from the sketch's 100/20);
@@ -228,9 +235,11 @@ architecture doc): a send to the owner is blocked.
 > `query`.
 
 **Prompt doc** (`prompts/messaging/list_conversations.md`):
-> List conversations you belong to. Use it to discover a conversation id (e.g. the
-> DM with a person, or a channel by name) before read_history or send_message.
-> Filter by `kinds` (dm/group/channel) or a name `query`; page with `cursor`.
+> List conversations you can access. Use it to discover a conversation id (e.g.
+> the DM with a person, or a channel by name) before read_history or send_message
+> — to message a person by name, find their DM here (query their name), then
+> send_message. Filter by `kinds` (dm/group/channel) or a name `query`; page with
+> `cursor`.
 
 **Input:**
 ```json
@@ -270,9 +279,10 @@ folded into `title` (resolved). **Effects:** `network, use_secret`; `ask`.
 ## 5. `get_user` (core) — `ironclaw.messaging.get_user.v1`
 
 **Description:**
-> Look up a user by id and get their resolved profile (display name, handle).
-> Usually unnecessary — messages already carry a resolved author — but useful to
-> resolve an id you hold in isolation.
+> Look up a user by id → resolved profile (display name, handle, is_bot). Use it
+> when you hold a bare user id — e.g. from an @mention in message text — and need
+> the name behind it. (read_history and search_messages already include a resolved
+> author, so you rarely need this for those.)
 
 **Prompt doc** (`prompts/messaging/get_user.md`):
 > Resolve a user id to a profile (display name, handle, whether it's a bot). Note
@@ -282,8 +292,8 @@ folded into `title` (resolved). **Effects:** `network, use_secret`; `ask`.
 
 **Input:**
 ```json
-{ "type": "object", "required": ["user"], "additionalProperties": false,
-  "properties": { "user": { "type": "string", "description": "Opaque user id (e.g. from a Message author or a mention)." } } }
+{ "type": "object", "required": ["user_id"], "additionalProperties": false,
+  "properties": { "user_id": { "type": "string", "description": "Opaque user id (e.g. from a Message author or an @mention)." } } }
 ```
 **Output:**
 ```json
@@ -325,7 +335,7 @@ collapse per the mapping rule. **Effects:** `network, use_secret`; `ask`.
   "required": ["query"],
   "additionalProperties": false,
   "properties": {
-    "query":        { "type": "string", "description": "Keyword query. Some vendors (Slack) support search operators — see the prompt doc." },
+    "query":        { "type": "string", "description": "Keyword query. Vendors may support inline operators (Slack: from:me for your own messages — NOT from:@me — from:@user, in:#channel, after:2024-01-01, has:link; combine with keywords). Full list in the prompt doc." },
     "conversation": { "type": "string", "description": "Restrict to one conversation; omit for a global search." },
     "sort":         { "type": "string", "enum": ["relevance", "recency"], "default": "relevance", "description": "Order matches by relevance (default) or recency." },
     "limit":        { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
@@ -352,24 +362,39 @@ inline `channel_name` dropped (use `ref.conversation`). **Effects:**
 
 ## 7. `edit_message` / `delete_message` (optional)
 
-`ironclaw.messaging.edit_message.v1` — **Description:** "Edit a message you sent,
-as you." `ironclaw.messaging.delete_message.v1` — **Description:** "Delete a
-message you sent, as you." Both `ask`, `external_write`, and act as you.
+**`edit_message`** (`ironclaw.messaging.edit_message.v1`) — **Description:**
+> Edit a message you previously sent, replacing its full text — posted as you.
+> Works only on your own messages (platforms reject editing others'). Pass the
+> `conversation` id, the target `message` id, and the new Markdown `text`; the new
+> text replaces the old entirely. To add a new message instead, use send_message.
+
+**`delete_message`** (`ironclaw.messaging.delete_message.v1`) — **Description:**
+> Delete a message you previously sent — as you, and irreversibly. Works only on
+> your own messages. Pass the `conversation` id and the `message` id (its
+> MessageRef.id from read_history/search_messages). There is no undo — use it only
+> when the user explicitly asked to remove something you posted.
+
+**Prompt doc** (`prompts/messaging/edit_message.md`, `delete_message.md`): the
+`message` id is a `Message.ref.id` from a prior read_history/search_messages
+result; you can only edit or delete your **own** messages; a delete is permanent.
+Both are `ask`, `external_write`, and act as you.
 
 ```json
 // edit_message input
 { "type": "object", "required": ["conversation", "message", "text"], "additionalProperties": false,
   "properties": {
-    "conversation": { "type": "string" },
-    "message":      { "type": "string", "description": "MessageRef.id within `conversation`." },
-    "text":         { "type": "string", "description": "New body (Markdown)." } } }
+    "conversation": { "type": "string", "description": "Conversation the message is in." },
+    "message":      { "type": "string", "description": "MessageRef.id within `conversation` (from read_history/search_messages) — must be your own message." },
+    "text":         { "type": "string", "description": "New body (Markdown); replaces the old text entirely." } } }
 // edit_message output
 { "type": "object", "required": ["message"], "additionalProperties": false,
   "properties": { "message": { "$ref": "types.v1#/$defs/MessageRef" } } }
 
 // delete_message input
 { "type": "object", "required": ["conversation", "message"], "additionalProperties": false,
-  "properties": { "conversation": { "type": "string" }, "message": { "type": "string" } } }
+  "properties": {
+    "conversation": { "type": "string", "description": "Conversation the message is in." },
+    "message":      { "type": "string", "description": "MessageRef.id (from read_history/search_messages) of your own message to delete. Permanent." } } }
 // delete_message output
 { "type": "object", "required": ["deleted"], "additionalProperties": false,
   "properties": { "deleted": { "type": "boolean" } } }
@@ -380,16 +405,25 @@ message you sent, as you." Both `ask`, `external_write`, and act as you.
 
 ## 8. `add_reaction` / `remove_reaction` (optional)
 
-`ironclaw.messaging.add_reaction.v1` / `…remove_reaction.v1` — **Descriptions:**
-"React to a message, as you." / "Remove your reaction from a message." Both `ask`,
-`external_write`.
+**`add_reaction`** (`ironclaw.messaging.add_reaction.v1`) — **Description:**
+> Add an emoji reaction to a message, as you — the reaction appears under your own
+> account. Pass the `conversation` id, the target `message` id, and a Unicode
+> `emoji` (the adapter maps it to the platform's format). Use for lightweight
+> acknowledgement; to actually reply, use send_message.
+
+**`remove_reaction`** (`ironclaw.messaging.remove_reaction.v1`) — **Description:**
+> Remove a reaction you previously added to a message, as you — only your own
+> reaction, and only the emoji you name. Provide the `conversation` id, the
+> `message` id, and the Unicode `emoji` to remove.
+
+Both `ask`, `external_write`, and act as you.
 
 ```json
 // add_reaction / remove_reaction input (identical)
 { "type": "object", "required": ["conversation", "message", "emoji"], "additionalProperties": false,
   "properties": {
-    "conversation": { "type": "string" },
-    "message":      { "type": "string" },
+    "conversation": { "type": "string", "description": "Conversation the message is in." },
+    "message":      { "type": "string", "description": "MessageRef.id (from read_history/search_messages) of the message to react to." },
     "emoji":        { "type": "string", "description": "Unicode emoji; the adapter maps to the vendor's reaction format." } } }
 // output
 { "type": "object", "required": ["ok"], "additionalProperties": false,

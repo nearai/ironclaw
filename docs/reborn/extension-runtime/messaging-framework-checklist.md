@@ -233,3 +233,9 @@ Rules — kept short on purpose (same discipline as `checklist.md`):
   the user and never delivers the final reply (§5.1).
 - [ ] DOC-4 Open questions (§16) are tracked; D1–D3 defaults are recorded with
   their revisit triggers.
+- [ ] DOC-5 Tool descriptions pass the description audit (industry-benchmark +
+  adversarial usability): the four optional write tools carry full descriptions +
+  prompt docs (delete flags irreversibility); `read_history` paging is
+  `cursor`-in/`cursor`-out (symmetric with list/search); selection-time guidance
+  (recency-vs-search, Slack query operators) lives in the always-on descriptions;
+  `get_user` takes `user_id`.
