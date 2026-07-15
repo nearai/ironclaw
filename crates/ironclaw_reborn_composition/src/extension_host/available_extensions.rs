@@ -843,7 +843,7 @@ where
     })?;
     let record = ExtensionManifestRecord::from_toml(
         manifest_toml,
-        ManifestSource::HostBundled,
+        ManifestSource::InstalledLocal,
         host_ports,
         None,
         contracts,
@@ -873,7 +873,16 @@ where
             package.id.as_str(),
         )?,
         manifest_toml: record.raw_toml().to_string(),
-        source: ManifestSource::HostBundled,
+        // Everything discovered on the filesystem is `InstalledLocal`, per
+        // the `ManifestSource` contract ("Locally installed extension under
+        // `/system/extensions/`"). `HostBundled` — the only tier eligible
+        // for first-party/system trust — is reserved for extensions
+        // compiled into the host binary (`from_first_party_assets`), whose
+        // reserved ids the scan skips above. Uploaded tool bundles
+        // materialize under this root, so stamping discovery `HostBundled`
+        // would let a process restart launder an untrusted upload into
+        // first-party trust (#5459 review: import → restart → install).
+        source: ManifestSource::InstalledLocal,
         package,
         cleanup_requirements: Vec::new(),
         surface_kinds,

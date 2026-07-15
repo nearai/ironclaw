@@ -152,11 +152,15 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     /// personal vendor credential → vendor cleanup → delete identity
     /// bindings) at this single convergence point, so `builtin.extension_remove`
     /// and the WebUI remove route cannot drift apart (issue #6091 shape).
-    /// A still-empty slot skips the disconnect: identity bindings are only
-    /// written through compositions that fill the slot (runtime composition
-    /// in `build_reborn_runtime`, or the channel-connection test bundle), so
-    /// an empty slot has no binding to disconnect. `new` defaults to a fresh
-    /// unshared (never-filled) slot for focused tests.
+    /// Fail-closed contract: removing such an extension with an authenticated
+    /// actor while the slot is still empty FAILS the removal with a typed
+    /// retryable error instead of skipping the disconnect — an unobservable
+    /// binding is treated as a live one, and a removal that cannot run the
+    /// per-caller disconnect must not report success. Compositions that
+    /// legitimately remove channel extensions fill the slot (runtime
+    /// composition in `build_reborn_runtime`, or the channel-connection test
+    /// bundle). `new` defaults to a fresh unshared (never-filled) slot for
+    /// focused tests.
     channel_disconnect_slot: Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionFacade>>>,
 }
 
@@ -1558,36 +1562,42 @@ impl RebornLocalExtensionManagementPort {
             // retryable, mirroring the credential cleanup below.
             if removes_connectable_channel && let Some(actor_user_id) = authenticated_actor_user_id
             {
-                if let Some(channel_connection) = self.channel_disconnect_slot.get() {
-                    channel_connection
-                        .disconnect_channel_for_caller(
-                            WebUiAuthenticatedCaller::new(
-                                removal_scope.tenant_id.clone(),
-                                actor_user_id.clone(),
-                                removal_scope.agent_id.clone(),
-                                removal_scope.project_id.clone(),
-                            ),
+                // Fail closed on an empty slot: a channel surface backed by
+                // an auth vendor may hold per-caller identity bindings, and a
+                // composition that gives this path no facade to disconnect
+                // them through must not report the removal as successful.
+                // Surface the same typed retryable error a failing disconnect
+                // does; compositions that legitimately remove channel
+                // extensions fill the slot (runtime composition in
+                // `build_reborn_runtime`, the channel-connection test bundle).
+                let Some(channel_connection) = self.channel_disconnect_slot.get() else {
+                    return Err(ProductWorkflowError::Transient {
+                        reason: format!(
+                            "channel connection cleanup is unavailable for extension {}: no \
+                             channel connection facade is composed; retry removal once the \
+                             host wires channel connections",
+                            extension_id.as_str()
+                        ),
+                    });
+                };
+                channel_connection
+                    .disconnect_channel_for_caller(
+                        WebUiAuthenticatedCaller::new(
+                            removal_scope.tenant_id.clone(),
+                            actor_user_id.clone(),
+                            removal_scope.agent_id.clone(),
+                            removal_scope.project_id.clone(),
+                        ),
+                        extension_id.as_str(),
+                    )
+                    .await
+                    .map_err(|error| ProductWorkflowError::Transient {
+                        reason: format!(
+                            "channel connection cleanup did not complete for extension {}: {:?}; retry removal",
                             extension_id.as_str(),
-                        )
-                        .await
-                        .map_err(|error| ProductWorkflowError::Transient {
-                            reason: format!(
-                                "channel connection cleanup did not complete for extension {}: {:?}; retry removal",
-                                extension_id.as_str(),
-                                error.code
-                            ),
-                        })?;
-                } else {
-                    // No facade composed: this composition wired no surface
-                    // that can write an identity binding (the slot is filled
-                    // by exactly the compositions that wire the binding-write
-                    // hook), so there is no binding to disconnect.
-                    tracing::debug!(
-                        extension_id = extension_id.as_str(),
-                        "channel connection facade slot is empty; extension removal proceeds \
-                         without a per-caller channel disconnect"
-                    );
-                }
+                            error.code
+                        ),
+                    })?;
             }
             // Actor-scoped credential cleanup completes while an installed row
             // still proves who owns the retry. The operation is idempotent.
@@ -3808,13 +3818,24 @@ access_token = "/access_token"
 account_id = "/authed_user/id"
 team_id = "/team/id"
 "#;
-        let manifest = ExtensionManifest::parse(
+        // Parse through the production version-dispatching entry point
+        // (`ExtensionManifestRecord::from_toml`, the same seam
+        // `bundled_extension_package` uses for the bundled v3 manifests);
+        // `ExtensionManifest::parse` is the v2-only reader and rejects the
+        // deliberate v3 shape above.
+        let record = ExtensionManifestRecord::from_toml(
             manifest_toml,
             ManifestSource::HostBundled,
             &ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
+            None,
             &product_extension_host_api_contract_registry().expect("host API contracts"),
         )
         .expect("connectable channel fixture manifest");
+        let manifest: ExtensionManifest = record
+            .manifest()
+            .clone()
+            .try_into()
+            .expect("connectable channel fixture manifest lowers to a package manifest");
         fixture_extension_package_from_parsed_manifest(manifest_toml, "acmechat", manifest)
     }
 
@@ -3889,8 +3910,8 @@ team_id = "/team/id"
     /// §6.4 / issue #6091: removing a channel+auth extension runs the REAL
     /// per-caller disconnect through the late-bound facade slot, with the
     /// authenticated caller's identity, before teardown — and an empty slot
-    /// (a composition with no binding-write surface) skips it while removal
-    /// still converges.
+    /// fails the removal closed (typed retryable error, installation kept)
+    /// instead of skipping the disconnect.
     #[tokio::test]
     async fn extension_remove_of_connectable_channel_disconnects_the_caller() {
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "acmechat")
@@ -3941,8 +3962,11 @@ team_id = "/team/id"
             "the removal itself completed"
         );
 
-        // Empty slot: no composition surface can have written a binding, so
-        // removal proceeds without a disconnect instead of failing closed.
+        // Empty slot: fail closed. A channel surface backed by an auth vendor
+        // may hold per-caller identity bindings, and a composition that gives
+        // the removal path no facade to disconnect them through must not
+        // report the removal as successful — the typed retryable error keeps
+        // the installation authoritative for a retry.
         let (_dir2, _storage_root2, unwired_facade, _registry2, unwired_store) =
             connectable_channel_removal_fixture(None);
         unwired_facade
@@ -3954,13 +3978,21 @@ team_id = "/team/id"
             )
             .await
             .expect("alice installs acmechat without a facade slot");
-        unwired_facade
+        let error = unwired_facade
             .execute(
                 lifecycle_surface_context_for_user("alice"),
                 LifecycleProductAction::ExtensionRemove { package_ref },
             )
             .await
-            .expect("removal without a composed facade proceeds");
+            .expect_err("removal without a composed channel-connection facade must fail closed");
+        assert!(
+            matches!(
+                &error,
+                ProductWorkflowError::Transient { reason }
+                    if reason.contains("channel connection cleanup")
+            ),
+            "empty-slot removal surfaces the typed retryable cleanup error: {error:?}"
+        );
         assert!(
             unwired_store
                 .get_installation(
@@ -3968,7 +4000,8 @@ team_id = "/team/id"
                 )
                 .await
                 .expect("installation lookup")
-                .is_none()
+                .is_some(),
+            "fail-closed removal must keep the installation for a retry"
         );
     }
 
@@ -8804,7 +8837,13 @@ trust = "first_party_requested"
 kind = "wasm"
 module = "wasm/github.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "github.read"
 description = "Read GitHub data"
 effects = ["network", "use_secret"]

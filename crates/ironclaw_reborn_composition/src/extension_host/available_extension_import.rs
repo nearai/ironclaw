@@ -661,7 +661,16 @@ prompt_doc_ref = "prompts/run.md"
                 .to_vec(),
         )])
         .expect_err("first-party trust claims must be rejected");
-        assert!(format!("{error}").contains("not allowed to assert trust"));
+        // The bundled github manifest is v3, so the rejection comes from the
+        // v3 reader's source/trust gate ("trust `FirstPartyRequested` is not
+        // allowed for this manifest source"); the v2 wording is "not allowed
+        // to assert trust". Pin the shared semantic: the error names trust
+        // and ties the rejection to the manifest source.
+        let message = format!("{error}");
+        assert!(
+            message.contains("trust") && message.contains("not allowed for this manifest source"),
+            "import must reject the first-party trust claim for an InstalledLocal source: {error}"
+        );
     }
 
     #[test]

@@ -1316,10 +1316,11 @@ pub(crate) struct RebornLocalRuntimeServices {
     /// once the facade's serving tenant is known — by runtime composition
     /// (`build_reborn_runtime`, via
     /// `RebornRuntime::generic_channel_connection_facade`) or by the
-    /// channel-connection test bundle over a services-only harness. Stays
-    /// empty (removal skips the disconnect) only in compositions that never
-    /// build the facade — which are also the compositions with no production
-    /// surface that could have written an identity binding.
+    /// channel-connection test bundle over a services-only harness.
+    /// Fail-closed contract: a composition that leaves the slot empty cannot
+    /// remove a channel+auth extension — the removal path surfaces a typed
+    /// retryable error instead of skipping the per-caller disconnect (see
+    /// `RebornLocalExtensionManagementPort::channel_disconnect_slot`).
     pub(crate) channel_disconnect_slot:
         Arc<std::sync::OnceLock<Arc<dyn ironclaw_product_workflow::ChannelConnectionFacade>>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,

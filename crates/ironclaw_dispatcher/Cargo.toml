@@ -16,8 +16,6 @@ serde_json = "1"
 tracing = "0.1"
 
 [dev-dependencies]
-ironclaw_extensions = { path = "../ironclaw_extensions" }
-ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt"] }
 tracing-test = { version = "0.2", features = ["no-env-filter"] }
