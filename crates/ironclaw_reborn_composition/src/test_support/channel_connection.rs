@@ -140,14 +140,20 @@ pub fn build_channel_connection_for_test(
     // Same assembly as `RebornRuntime::channel_identity_binding_config`: the
     // generic post-OAuth binding hook over the same installation + identity
     // stores, with DM-target provisioning when the composition can deliver.
+    let snapshot_updates = local_runtime
+        .extension_management
+        .as_ref()
+        .and_then(|management| management.generic_host())
+        .map(|host| host.snapshot_watch().subscribe());
     let post_bind_factory = match (
         services.channel_delivery_resolver(),
         local_runtime.channel_dm_target_store.clone(),
+        snapshot_updates,
     ) {
-        (Some(delivery), Some(store)) => {
-            Some(Arc::new(ChannelDmTargetProvisioning::new(delivery, store))
-                as Arc<dyn ChannelIdentityPostBindFactory>)
-        }
+        (Some(delivery), Some(store), Some(snapshot_updates)) => Some(Arc::new(
+            ChannelDmTargetProvisioning::new(delivery, store, snapshot_updates),
+        )
+            as Arc<dyn ChannelIdentityPostBindFactory>),
         _ => None,
     };
     let identity_binding = ChannelIdentityBindingConfig {

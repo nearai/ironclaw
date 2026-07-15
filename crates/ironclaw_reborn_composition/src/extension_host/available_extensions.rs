@@ -650,6 +650,7 @@ fn bundled_extension_package(
             reason: format!("bundled {label} extension package is invalid: {error}"),
         },
     )?;
+    validate_bundled_package_assets(label, &package, &assets)?;
     Ok(AvailableExtensionPackage {
         package_ref,
         manifest_toml: record.raw_toml().to_string(),
@@ -663,6 +664,73 @@ fn bundled_extension_package(
         onboarding_override: None,
         oauth_setup_override: None,
     })
+}
+
+/// Fail catalog construction before a package can be installed when its
+/// manifest points at a static file the bundle does not carry. Dynamic hosted
+/// MCP schemas are inlined at discovery time and are the only intentional
+/// non-file references.
+fn validate_bundled_package_assets(
+    label: &str,
+    package: &ExtensionPackage,
+    assets: &[AvailableExtensionAsset],
+) -> Result<(), ProductWorkflowError> {
+    let has_asset = |path: &str| assets.iter().any(|asset| asset.path == path);
+    let dynamic_schema_prefix = format!("schemas/{}/dynamic/", package.id.as_str());
+    let is_inline_dynamic_schema_ref = |field: &str, path: &str| {
+        crate::extension_host::mcp_discovery::is_hosted_http_mcp_package(package)
+            && matches!(field, "input_schema_ref" | "output_schema_ref")
+            && path
+                .strip_prefix(&dynamic_schema_prefix)
+                .is_some_and(|suffix| !suffix.is_empty())
+    };
+    let require_asset = |field: &str, path: &str| {
+        if has_asset(path) {
+            Ok(())
+        } else {
+            Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "bundled {label} extension {field} references missing package asset {path}"
+                ),
+            })
+        }
+    };
+
+    require_asset("manifest", "manifest.toml")?;
+    if let ExtensionRuntime::Wasm { module } = &package.manifest.runtime {
+        require_asset("runtime.module", module.as_str())?;
+    }
+
+    for capability in &package.manifest.capabilities {
+        let refs = [
+            (
+                "input_schema_ref",
+                Some(capability.input_schema_ref.as_str()),
+            ),
+            (
+                "output_schema_ref",
+                capability
+                    .output_schema_ref
+                    .as_ref()
+                    .map(|path| path.as_str()),
+            ),
+            (
+                "prompt_doc_ref",
+                capability.prompt_doc_ref.as_ref().map(|path| path.as_str()),
+            ),
+        ];
+        for (field, path) in refs {
+            let Some(path) = path else { continue };
+            if is_inline_dynamic_schema_ref(field, path) {
+                continue;
+            }
+            require_asset(
+                &format!("capability {} {field}", capability.id.as_str()),
+                path,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn surface_kinds_from_manifest_record(
@@ -1044,23 +1112,31 @@ mod tests {
                 .map(|asset| asset.path.as_str())
                 .collect::<HashSet<_>>();
 
-            // Synthetic inline-dynamic refs ("schemas/{id}/dynamic/…", e.g. the
-            // hosted-MCP connection template's input schema) ship NO package
-            // asset on purpose: discovered/dynamic schemas are inlined at
-            // discovery time, not packaged files.
-            let is_dynamic_ref = |schema_ref: &str| schema_ref.contains("/dynamic/");
-
+            assert!(
+                assets.contains("manifest.toml"),
+                "{extension_id} missing packaged manifest.toml"
+            );
             if let ExtensionRuntime::Wasm { module } = &package.package.manifest.runtime {
                 assert!(
                     assets.contains(module.as_str()),
-                    "{extension_id} missing wasm runtime module asset {}",
+                    "{extension_id} missing WASM module asset {}",
                     module.as_str()
                 );
             }
 
+            // Hosted-MCP inline schemas under this package's exact dynamic
+            // prefix ship no package asset; every other ref remains static.
+            let dynamic_schema_prefix = format!("schemas/{extension_id}/dynamic/");
+            let is_dynamic_schema_ref = |schema_ref: &str| {
+                crate::extension_host::mcp_discovery::is_hosted_http_mcp_package(&package.package)
+                    && schema_ref
+                        .strip_prefix(&dynamic_schema_prefix)
+                        .is_some_and(|suffix| !suffix.is_empty())
+            };
+
             for capability in &package.package.manifest.capabilities {
                 assert!(
-                    is_dynamic_ref(capability.input_schema_ref.as_str())
+                    is_dynamic_schema_ref(capability.input_schema_ref.as_str())
                         || assets.contains(capability.input_schema_ref.as_str()),
                     "{extension_id} capability {} missing input schema asset {}",
                     capability.id,
@@ -1068,7 +1144,7 @@ mod tests {
                 );
                 if let Some(output_schema_ref) = &capability.output_schema_ref {
                     assert!(
-                        is_dynamic_ref(output_schema_ref.as_str())
+                        is_dynamic_schema_ref(output_schema_ref.as_str())
                             || assets.contains(output_schema_ref.as_str()),
                         "{extension_id} capability {} missing output schema asset {}",
                         capability.id,
@@ -1077,8 +1153,7 @@ mod tests {
                 }
                 if let Some(prompt_doc_ref) = &capability.prompt_doc_ref {
                     assert!(
-                        is_dynamic_ref(prompt_doc_ref.as_str())
-                            || assets.contains(prompt_doc_ref.as_str()),
+                        assets.contains(prompt_doc_ref.as_str()),
                         "{extension_id} capability {} missing prompt doc asset {}",
                         capability.id,
                         prompt_doc_ref.as_str()
@@ -1086,6 +1161,116 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn bundled_extension_package_rejects_missing_static_capability_assets() {
+        const MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "missing-assets"
+name = "Missing Assets"
+version = "0.1.0"
+description = "A package with a dangling schema reference."
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/missing-assets.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "missing-assets.run"
+description = "Run"
+effects = []
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/missing-assets/run.input.v1.json"
+"#;
+        let assets = vec![
+            bytes_asset("manifest.toml", MANIFEST.as_bytes()),
+            bytes_asset("wasm/missing-assets.wasm", b"wasm"),
+        ];
+
+        let error = bundled_extension_package("missing-assets", "Missing Assets", MANIFEST, assets)
+            .expect_err("a dangling static capability reference must fail catalog construction");
+        let ProductWorkflowError::InvalidBindingRequest { reason } = error else {
+            panic!("expected invalid binding request");
+        };
+        assert!(
+            reason.contains("schemas/missing-assets/run.input.v1.json"),
+            "error should name the missing package asset: {reason}"
+        );
+
+        let dynamic_manifest = MANIFEST.replace(
+            "schemas/missing-assets/run.input.v1.json",
+            "schemas/missing-assets/dynamic/run.input.v1.json",
+        );
+        let dynamic_assets = vec![
+            bytes_asset("manifest.toml", dynamic_manifest.as_bytes()),
+            bytes_asset("wasm/missing-assets.wasm", b"wasm"),
+        ];
+        let error = bundled_extension_package(
+            "missing-assets",
+            "Missing Assets",
+            &dynamic_manifest,
+            dynamic_assets,
+        )
+        .expect_err("a WASM schema cannot claim the hosted-MCP dynamic exemption");
+        let ProductWorkflowError::InvalidBindingRequest { reason } = error else {
+            panic!("expected invalid binding request");
+        };
+        assert!(
+            reason.contains("schemas/missing-assets/dynamic/run.input.v1.json"),
+            "error should name the invalid dynamic package ref: {reason}"
+        );
+    }
+
+    #[test]
+    fn bundled_static_mcp_package_cannot_claim_dynamic_schema_exemption() {
+        const MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "static-mcp"
+name = "Static MCP"
+version = "0.1.0"
+description = "A stdio MCP package with a dangling dynamic-shaped schema reference."
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "stdio"
+command = "static-mcp-server"
+args = ["--stdio"]
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "static-mcp.run"
+description = "Run"
+effects = ["dispatch_capability"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
+"#;
+        let assets = vec![bytes_asset("manifest.toml", MANIFEST.as_bytes())];
+
+        let error = bundled_extension_package("static-mcp", "Static MCP", MANIFEST, assets)
+            .expect_err("a non-hosted MCP package must carry dynamic-shaped schema refs");
+        let ProductWorkflowError::InvalidBindingRequest { reason } = error else {
+            panic!("expected invalid binding request");
+        };
+        assert!(
+            reason.contains("schemas/static-mcp/dynamic/run.input.v1.json"),
+            "error should name the missing static MCP schema asset: {reason}"
+        );
     }
 
     #[test]
@@ -1736,8 +1921,13 @@ flags = ["inbound_messages"]
 handle = "web_token"
 "#;
 
-        let package = bundled_extension_package("web-product", "Web Product", MANIFEST, Vec::new())
-            .expect("valid package");
+        let package = bundled_extension_package(
+            "web-product",
+            "Web Product",
+            MANIFEST,
+            vec![bytes_asset("manifest.toml", MANIFEST.as_bytes())],
+        )
+        .expect("valid package");
 
         assert_eq!(package.summary().surface_kinds, Vec::new());
     }
@@ -1821,9 +2011,13 @@ handle = "web_token"
         // The connection credential's audience is not rendered into the TOML;
         // it derives from the [mcp].server host automatically when the
         // manifest is parsed.
-        let package =
-            bundled_extension_package(NEARAI_EXTENSION_ID, "NEAR AI", &manifest_toml, Vec::new())
-                .expect("patched NEAR AI manifest parses");
+        let package = bundled_extension_package(
+            NEARAI_EXTENSION_ID,
+            "NEAR AI",
+            &manifest_toml,
+            nearai_mcp_assets(&manifest_toml),
+        )
+        .expect("patched NEAR AI manifest parses");
         let template = package
             .package
             .manifest
