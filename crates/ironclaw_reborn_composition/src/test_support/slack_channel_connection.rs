@@ -61,6 +61,7 @@ pub struct SlackChannelConnectionTestConfig {
 /// See the module doc for the production call sites each method mirrors.
 pub struct SlackChannelConnectionTestBundle {
     tenant_id: TenantId,
+    host_user_id: UserId,
     agent_id: AgentId,
     installation_id: ironclaw_product_adapters::AdapterInstallationId,
     team_id: SlackTeamId,
@@ -106,7 +107,7 @@ pub fn build_slack_channel_connection_for_test(
     let state = Arc::new(FilesystemSlackHostState::new(
         Arc::clone(&local_runtime.host_state_filesystem),
         tenant_id.clone(),
-        host_user_id,
+        host_user_id.clone(),
         agent_id.clone(),
         None,
     ));
@@ -160,6 +161,7 @@ pub fn build_slack_channel_connection_for_test(
     }
     Ok(SlackChannelConnectionTestBundle {
         tenant_id,
+        host_user_id,
         agent_id,
         installation_id,
         team_id,
@@ -221,6 +223,44 @@ impl SlackChannelConnectionTestBundle {
     /// [`ChannelConnectionFacade`] surface.
     pub fn facade(&self) -> Arc<dyn ChannelConnectionFacade> {
         Arc::clone(&self.facade)
+    }
+
+    /// Restart-survival probe (T5 of issue #6105): read the SAME active-state
+    /// identity-binding predicate as
+    /// [`Self::has_any_active_identity_binding`], but through a FRESH
+    /// `FilesystemSlackHostState` over a FRESH local-dev root filesystem
+    /// reopened at `storage_root` — fully independent of the live runtime's
+    /// in-memory handles. This is the integration-tier approximation of a
+    /// process restart: it proves the durable binding is reconstructible the
+    /// way production reconstructs it on boot (`build_reborn_services` →
+    /// `local_dev_slack_host_state_filesystem` → Slack host-state mounts).
+    /// Tests only.
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    pub async fn has_active_identity_binding_after_reopen(
+        &self,
+        storage_root: &std::path::Path,
+        user_id: &UserId,
+    ) -> Result<bool, String> {
+        let host_state_filesystem =
+            crate::factory::open_local_dev_slack_host_state_filesystem_for_test(storage_root)
+                .await
+                .map_err(|error| error.to_string())?;
+        let state = Arc::new(FilesystemSlackHostState::new(
+            host_state_filesystem,
+            self.tenant_id.clone(),
+            self.host_user_id.clone(),
+            self.agent_id.clone(),
+            None,
+        ));
+        let lookup: Arc<dyn RebornUserIdentityLookup> = state;
+        lookup
+            .user_has_provider_binding_with_provider_user_id_prefix(
+                SLACK_IDENTITY_PROVIDER,
+                user_id,
+                None,
+            )
+            .await
+            .map_err(|error| error.to_string())
     }
 
     /// Surface (a) of the extensions page: what

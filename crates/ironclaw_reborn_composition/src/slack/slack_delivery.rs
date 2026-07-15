@@ -3742,16 +3742,104 @@ mod tests {
         let record = wait_for_delivery_record(&delivery_store, run_id).await;
 
         // Egress should have been called for chat.postMessage.
+        let post = egress
+            .calls()
+            .into_iter()
+            .find(|c| c.path == "/api/chat.postMessage")
+            .expect("expected chat.postMessage egress call");
+
+        // Right-target pin (#5943/#5877 shape, T1 of #6105): the posted body
+        // must carry the DM conversation id decoded from the saved
+        // preference's binding ref — not the run's current channel or another
+        // user's target.
+        let body = String::from_utf8(post.body).expect("postMessage body is UTF-8 JSON");
+        assert!(
+            body.contains(r#""channel":"D456""#),
+            "chat.postMessage must target the preference binding's DM conversation; body: {body}"
+        );
+
+        // Outcome should be Delivered.
+        assert_eq!(record.outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+    }
+
+    /// Delivery-honesty pin (#5944 shape, T1 of #6105): the RUN completed, but
+    /// Slack rejected the post (`200 {"ok":false,...}`). The delivery record
+    /// must say `Failed` — a `Delivered` here is exactly the "delivery
+    /// silently fails but run reports success" bug: run status alone cannot
+    /// distinguish the two, only this record can.
+    #[tokio::test]
+    async fn driver_slack_api_rejection_records_failed_not_delivered() {
+        let install = "test-install";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+        let binding_ref =
+            test_slack_binding_ref(install, scope.agent_id.as_ref().expect("agent").as_str());
+
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::Completed,
+        ));
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        seed_finalized_assistant_message(&thread_service, &scope, run_id, "Hello from Ironclaw")
+            .await;
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        seed_personal_preference(&outbound, &scope, binding_ref).await;
+
+        // Slack accepts the HTTP call but rejects the post — the classic
+        // silent-failure shape (revoked channel, kicked bot, archived DM).
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                serde_json::json!({"ok": false, "error": "channel_not_found"})
+                    .to_string()
+                    .into_bytes(),
+            )),
+        );
+
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let services = make_services(
+            coordinator,
+            thread_service,
+            egress.clone(),
+            outbound,
+            install,
+        );
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        let fire = minimal_trigger_fire(None);
+        driver.on_trigger_submitted(fire, run_id, scope).await;
+        let record = wait_for_delivery_record(&delivery_store, run_id).await;
+
+        // The post WAS attempted (this is not a skip/no-target case)…
         assert!(
             egress
                 .calls()
                 .iter()
                 .any(|c| c.path == "/api/chat.postMessage"),
-            "expected chat.postMessage egress call"
+            "expected the rejected chat.postMessage egress call"
         );
-
-        // Outcome should be Delivered.
-        assert_eq!(record.outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+        // …and the rejection must be recorded as Failed, never Delivered.
+        assert_eq!(
+            record.outcome,
+            TriggeredRunDeliveryOutcomeKind::Failed,
+            "a Slack-rejected post on a Completed run must record Failed (#5944 honesty pair)"
+        );
     }
 
     #[tokio::test]

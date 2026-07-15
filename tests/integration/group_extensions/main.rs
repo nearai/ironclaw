@@ -20,10 +20,12 @@ mod support;
 // Modules are alphabetical (rustfmt reorders `mod` decls); execution order is
 // set by the `report.record(...)` sequence below, not declaration order.
 mod scenario_activate_then_active_cross_thread;
+mod scenario_credential_extension_lifecycle_state_machine;
 mod scenario_install_then_visible_cross_thread;
 mod scenario_install_unknown_extension_id_fails_safely;
 mod scenario_remove_then_absent_cross_thread;
 mod scenario_slack_channel_lifecycle_state_machine;
+mod scenario_slack_state_survives_reopen;
 mod scenario_uninstalled_tool_call_denied_until_activated;
 
 use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
@@ -81,6 +83,25 @@ async fn extensions_group_e2e() {
     report.record(
         "slack_channel_lifecycle_state_machine",
         scenario_slack_channel_lifecycle_state_machine::run(&g).await,
+    );
+
+    // Scenario 7 (issue #6105, T3): exit edges for a credential-injection
+    // extension — activate → use → remove (#6029's wedged edge) → surfaces
+    // flip → reconfigure + reactivate → use again. Reuses "github" AFTER
+    // every other scenario that reads it has run (scenario 1 leaves it
+    // installed), so its install exercises the idempotent-reinstall arm.
+    report.record(
+        "credential_extension_lifecycle_state_machine",
+        scenario_credential_extension_lifecycle_state_machine::run(&g).await,
+    );
+
+    // Scenario 8 (issue #6105, T5): restart survival — the connected/installed
+    // Slack state scenario 6 left behind reads back through FRESH store
+    // handles reopened at the same on-disk storage_root (what a process
+    // restart reconstructs). Depends on scenario 6's end state.
+    report.record(
+        "slack_state_survives_reopen",
+        scenario_slack_state_survives_reopen::run(&g).await,
     );
 
     report.assert_all_passed();
