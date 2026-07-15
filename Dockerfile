@@ -51,10 +51,6 @@ ENV CARGO_PROFILE_DIST_PANIC=abort \
     CARGO_PROFILE_DIST_CODEGEN_UNITS=1
 
 COPY --from=planner /app/recipe.json recipe.json
-COPY crates/ironclaw_webui_v2/frontend/ crates/ironclaw_webui_v2/frontend/
-WORKDIR /app/crates/ironclaw_webui_v2/frontend
-RUN pnpm install --frozen-lockfile
-WORKDIR /app
 RUN cargo chef cook \
     --profile dist \
     --package ironclaw_reborn_cli \
@@ -98,11 +94,12 @@ RUN cargo build \
     --features libsql \
     --bin ironclaw-reborn-extension-ownership-migration
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS runtime
 
 RUN apt-get -o Acquire::Retries=3 update \
     && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
         ca-certificates \
+        curl \
         postgresql-client \
         sqlite3 \
     && rm -rf /var/lib/apt/lists/*
@@ -127,6 +124,9 @@ RUN useradd -m -d /home/ironclaw -u 1000 ironclaw \
 WORKDIR /workspace
 
 EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD curl --fail --silent --show-error --max-time 5 "http://127.0.0.1:${PORT:-3000}/api/health" >/dev/null || exit 1
 
 USER ironclaw
 

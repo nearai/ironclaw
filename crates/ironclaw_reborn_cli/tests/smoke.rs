@@ -158,6 +158,16 @@ fn dockerfile_reborn_builds_with_postgres_feature() {
 fn default_dockerfile_targets_reborn_runtime() {
     let dockerfile =
         std::fs::read_to_string(workspace_root().join("Dockerfile")).expect("Dockerfile");
+    let deps_stage = dockerfile
+        .split_once("FROM chef AS deps")
+        .and_then(|(_, stages)| stages.split_once("FROM deps AS builder"))
+        .map(|(stage, _)| stage)
+        .expect("Dockerfile should define a deps stage");
+    let builder_stage = dockerfile
+        .split_once("FROM deps AS builder")
+        .and_then(|(_, stages)| stages.split_once("FROM debian:bookworm-slim"))
+        .map(|(stage, _)| stage)
+        .expect("Dockerfile should define a builder stage");
 
     assert!(
         dockerfile.contains("--package ironclaw_reborn_cli")
@@ -171,6 +181,23 @@ fn default_dockerfile_targets_reborn_runtime() {
             && !dockerfile.contains("ENTRYPOINT [\"ironclaw\"]")
             && !dockerfile.contains("/usr/local/bin/ironclaw\n"),
         "default Dockerfile must not build or run the legacy root ironclaw binary: {dockerfile}"
+    );
+    assert!(
+        dockerfile.contains(
+            "FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS runtime"
+        ),
+        "default Dockerfile must pin the shipped runtime base image: {dockerfile}"
+    );
+    assert!(
+        !deps_stage.contains("pnpm install --frozen-lockfile")
+            && builder_stage.contains("pnpm install --frozen-lockfile"),
+        "default Dockerfile must install frontend dependencies only in the builder stage: {dockerfile}"
+    );
+    assert!(
+        dockerfile.contains("curl \\")
+            && dockerfile.contains("HEALTHCHECK --interval=30s")
+            && dockerfile.contains("http://127.0.0.1:${PORT:-3000}/api/health"),
+        "default Dockerfile must include a local HTTP healthcheck for the Reborn service: {dockerfile}"
     );
 }
 
@@ -192,6 +219,25 @@ fn release_workflows_target_reborn_tags() {
         !release.contains("ironclaw-v[0-9]+.[0-9]+.[0-9]+*")
             && !rebuild.contains("EXPECTED_REF=\"ironclaw-v${EXPECTED_TAG}\""),
         "release workflows must not trigger from the legacy root tag family"
+    );
+}
+
+#[test]
+fn docker_workflow_uses_existing_reborn_runtime_target() {
+    let workflow = std::fs::read_to_string(workspace_root().join(".github/workflows/docker.yml"))
+        .expect("docker workflow");
+
+    assert!(
+        workflow.contains("echo \"target=runtime\" >> \"$GITHUB_OUTPUT\""),
+        "docker workflow must build the Dockerfile's existing runtime target: {workflow}"
+    );
+    assert!(
+        !workflow.contains("runtime-staging"),
+        "docker workflow must not reference the removed runtime-staging target: {workflow}"
+    );
+    assert!(
+        workflow.contains("contains(steps.tags.outputs.tags, ':staging')"),
+        "docker workflow should keep staging skip checks tied to staging tags: {workflow}"
     );
 }
 
