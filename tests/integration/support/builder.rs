@@ -172,7 +172,12 @@ impl RebornIntegrationHarnessBuilder {
     /// `tests/fixtures/llm_traces/reborn_qa/`) instead of hand-written
     /// `RebornScriptedReply`s — same vendor-SDK seam, realistic reply content.
     /// Mutually exclusive with `.script(...)`: the last call wins (see
-    /// `ReplySource`).
+    /// `ReplySource`). Only replays `steps` (reply content) — a caller wanting
+    /// the fixture's `http_exchanges` to also drive realistic tool output must
+    /// separately wire them into `.with_keyed_http_responses(...)`, as
+    /// `tests/integration/tool_call.rs::runs_qa_fixture_trace_through_builtin_http_tools`
+    /// does; see that test's doc comment for why `expected_tool_results` and
+    /// multi-turn `TraceExpects` have no consumer.
     pub fn script_from_trace(mut self, trace: LlmTrace) -> Self {
         self.reply_source = ReplySource::Trace(Box::new(trace));
         self
