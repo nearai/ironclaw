@@ -230,6 +230,37 @@ test("locale packs include skill auto-activation controls", () => {
   }
 });
 
+test("locale packs include admin write-only secret management copy", () => {
+  const requiredKeys = [
+    "admin.user.secrets.title",
+    "admin.user.secrets.description",
+    "admin.user.secrets.loading",
+    "admin.user.secrets.loadFailed",
+    "admin.user.secrets.empty",
+    "admin.user.secrets.handle",
+    "admin.user.secrets.value",
+    "admin.user.secrets.writeOnlyHint",
+    "admin.user.secrets.replace",
+    "admin.user.secrets.delete",
+    "admin.user.secrets.save",
+    "admin.user.secrets.saving",
+    "admin.user.secrets.saved",
+    "admin.user.secrets.deleted",
+    "admin.user.secrets.actionFailed",
+    "admin.user.secrets.deleteTitle",
+    "admin.user.secrets.deleteDesc",
+    "admin.user.secrets.deleting",
+  ];
+
+  for (const locale of LOCALES) {
+    const pack = loadLocalePack(locale);
+    for (const key of requiredKeys) {
+      assert.equal(typeof pack[key], "string", `${locale} missing ${key}`);
+      assert.notEqual(pack[key].trim(), "", `${locale} ${key} should not be empty`);
+    }
+  }
+});
+
 test("locale packs include workspace labels and accept a formatted size", () => {
   for (const locale of LOCALES) {
     const pack = loadLocalePack(locale);
