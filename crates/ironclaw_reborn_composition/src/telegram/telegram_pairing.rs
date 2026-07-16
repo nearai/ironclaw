@@ -210,8 +210,7 @@ impl std::fmt::Debug for TelegramPairingService {
 }
 
 impl TelegramPairingService {
-    // arch-exempt: too_many_args, mirrors the slack binder construction shape
-    // until the telegram host mounts bundle owns the aggregation, plan #6116
+    // arch-exempt: too_many_args, mirrors the slack binder shape until the telegram host mounts bundle owns the aggregation, plan #6116
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         tenant_id: TenantId,

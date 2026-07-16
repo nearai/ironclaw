@@ -130,9 +130,7 @@ pub(crate) struct TelegramSetupService {
 }
 
 impl TelegramSetupService {
-    // arch-exempt: too_many_args, mirrors SlackSetupService::new plus the two
-    // telegram-only inputs (bot api port + public base URL) until they fold
-    // into the telegram host runtime config bundle, plan #6116
+    // arch-exempt: too_many_args, mirrors SlackSetupService::new (+ bot api port and public base URL) until the host runtime config bundle aggregates these, plan #6116
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         tenant_id: TenantId,
@@ -610,6 +608,7 @@ fn secret_handle_for_installation(
     revision: u64,
 ) -> Result<SecretHandle, ironclaw_host_api::HostApiError> {
     let digest = sha256_hex(&secret_handle_key_material(tenant_id, installation_key));
+    // safety: sha256_hex output is ASCII hex, so a byte slice cannot split a character.
     SecretHandle::new(format!(
         "{prefix}_{}_v{revision}",
         &digest[..INSTALLATION_HANDLE_HASH_LEN]
