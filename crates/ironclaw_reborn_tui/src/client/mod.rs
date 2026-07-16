@@ -31,7 +31,10 @@ pub enum ClientError {
     NotFound,
     #[error("rate limited")]
     RateLimited,
-    #[error("server error {status}: {body}")]
+    // Keep the response body available to callers that explicitly route it
+    // through redacted diagnostics, but never include it in Display: Display
+    // is rendered directly in the TUI status bar.
+    #[error("server error {status}")]
     Server { status: u16, body: String },
     #[error("invalid response: {0}")]
     Decode(#[from] serde_json::Error),
@@ -39,6 +42,8 @@ pub enum ClientError {
     ReconnectBudgetExhausted { attempts: u8, window_secs: u64 },
     #[error("SSE stream parse error: {0}")]
     StreamParse(String),
+    #[error("SSE stream protocol error: {0}")]
+    StreamProtocol(&'static str),
 }
 
 pub struct ApiClient {
@@ -113,5 +118,21 @@ impl ApiClient {
     ) -> Result<(), ClientError> {
         self.send(builder).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ClientError;
+
+    #[test]
+    fn server_error_display_does_not_expose_response_body() {
+        let error = ClientError::Server {
+            status: 500,
+            body: "secret backend detail".to_string(),
+        };
+
+        assert_eq!(error.to_string(), "server error 500");
+        assert!(!error.to_string().contains("secret backend detail"));
     }
 }

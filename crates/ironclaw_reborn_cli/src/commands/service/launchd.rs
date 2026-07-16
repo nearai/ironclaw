@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use crate::context::RebornCliContext;
 use crate::serve_invocation::ServeInvocation;
 
-use super::{SERVICE_LABEL, home_dir, run_capture, run_checked};
+use super::{OsServiceCommandRunner, SERVICE_LABEL, ServiceCommandRunner, home_dir};
 
 // ── Escaping ────────────────────────────────────────────────────
 
@@ -88,9 +88,13 @@ fn plist_path() -> Result<PathBuf> {
 // ── Status matching ─────────────────────────────────────────────
 
 fn service_running(launchctl_list_output: &str) -> bool {
-    launchctl_list_output
-        .lines()
-        .any(|line| line.contains(SERVICE_LABEL))
+    launchctl_list_output.lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        fields.next().is_some()
+            && fields.next().is_some()
+            && fields.next() == Some(SERVICE_LABEL)
+            && fields.next().is_none()
+    })
 }
 
 // ── Verb bodies ─────────────────────────────────────────────────
@@ -112,15 +116,19 @@ pub(super) fn install(context: &RebornCliContext, invocation: &ServeInvocation) 
 }
 
 pub(super) fn start() -> Result<()> {
+    start_with_runner(&mut OsServiceCommandRunner)
+}
+
+fn start_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
     let plist = plist_path()?;
     if !plist.exists() {
         bail!("Service not installed. Run `ironclaw-reborn service install` first.");
     }
-    run_checked(
+    runner.run_checked(
         "launchctl load",
         Command::new("launchctl").arg("load").arg("-w").arg(&plist),
     )?;
-    run_checked(
+    runner.run_checked(
         "launchctl start",
         Command::new("launchctl").arg("start").arg(SERVICE_LABEL),
     )?;
@@ -129,26 +137,43 @@ pub(super) fn start() -> Result<()> {
 }
 
 pub(super) fn stop() -> Result<()> {
+    stop_with_runner(&mut OsServiceCommandRunner)
+}
+
+fn stop_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
     let plist = plist_path()?;
-    run_checked(
+    if !plist.exists() {
+        println!("Service stopped");
+        return Ok(());
+    }
+    let list =
+        runner.run_capture_checked("launchctl list", Command::new("launchctl").arg("list"))?;
+    if !service_running(&list) {
+        println!("Service stopped");
+        return Ok(());
+    }
+    runner.run_checked(
         "launchctl stop",
         Command::new("launchctl").arg("stop").arg(SERVICE_LABEL),
-    )
-    .ok();
-    run_checked(
+    )?;
+    runner.run_checked(
         "launchctl unload",
         Command::new("launchctl")
             .arg("unload")
             .arg("-w")
             .arg(&plist),
-    )
-    .ok();
+    )?;
     println!("Service stopped");
     Ok(())
 }
 
 pub(super) fn status() -> Result<()> {
-    let out = run_capture("launchctl list", Command::new("launchctl").arg("list"))?;
+    status_with_runner(&mut OsServiceCommandRunner)
+}
+
+fn status_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
+    let out =
+        runner.run_capture_checked("launchctl list", Command::new("launchctl").arg("list"))?;
     println!(
         "Service: {}",
         if service_running(&out) {
@@ -162,7 +187,34 @@ pub(super) fn status() -> Result<()> {
 }
 
 pub(super) fn uninstall() -> Result<()> {
+    uninstall_with_runner(&mut OsServiceCommandRunner)
+}
+
+pub(super) fn uninstall_with_runner(runner: &mut dyn ServiceCommandRunner) -> Result<()> {
     let file = plist_path()?;
+    let list =
+        runner.run_capture_checked("launchctl list", Command::new("launchctl").arg("list"))?;
+    if service_running(&list) {
+        // `stop` alone is insufficient for a KeepAlive agent: launchd
+        // immediately restarts it. Target the registered label so a loaded
+        // job left behind by an older broken uninstall can still be removed
+        // even when its plist path is already absent.
+        runner.run_checked(
+            "launchctl stop",
+            Command::new("launchctl").arg("stop").arg(SERVICE_LABEL),
+        )?;
+        let uid = runner
+            .run_capture_checked("id -u", Command::new("id").arg("-u"))?
+            .trim()
+            .parse::<u32>()
+            .context("parse numeric uid from `id -u`")?;
+        runner.run_checked(
+            "launchctl bootout",
+            Command::new("launchctl")
+                .arg("bootout")
+                .arg(format!("gui/{uid}/{SERVICE_LABEL}")),
+        )?;
+    }
     if file.exists() {
         std::fs::remove_file(&file).with_context(|| format!("remove {}", file.display()))?;
     }
@@ -173,6 +225,61 @@ pub(super) fn uninstall() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct RecordingRunner {
+        labels: Vec<String>,
+        args: Vec<Vec<String>>,
+        launchctl_list: String,
+        fail_args: Option<Vec<&'static str>>,
+        fail_capture_args: Option<Vec<&'static str>>,
+    }
+
+    impl ServiceCommandRunner for RecordingRunner {
+        fn run_checked(&mut self, label: &str, command: &mut Command) -> Result<()> {
+            self.labels.push(label.to_string());
+            self.args.push(
+                command
+                    .get_args()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect(),
+            );
+            if self.fail_args.as_ref().is_some_and(|expected| {
+                command
+                    .get_args()
+                    .map(|arg| arg.to_string_lossy())
+                    .eq(expected.iter().copied())
+            }) {
+                anyhow::bail!("injected argv failure: {label}");
+            }
+            Ok(())
+        }
+
+        fn run_capture_checked(&mut self, label: &str, command: &mut Command) -> Result<String> {
+            self.labels.push(label.to_string());
+            self.args.push(
+                command
+                    .get_args()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect(),
+            );
+            if self.fail_capture_args.as_ref().is_some_and(|expected| {
+                command
+                    .get_args()
+                    .map(|arg| arg.to_string_lossy())
+                    .eq(expected.iter().copied())
+            }) {
+                anyhow::bail!("injected argv capture failure: {label}");
+            }
+            let program = command.get_program().to_string_lossy();
+            let args = self.args.last().cloned().unwrap_or_default();
+            match (program.as_ref(), args.as_slice()) {
+                ("launchctl", [arg]) if arg == "list" => Ok(self.launchctl_list.clone()),
+                ("id", [arg]) if arg == "-u" => Ok("501\n".to_string()),
+                _ => anyhow::bail!("unexpected capture argv: {program} {args:?}"),
+            }
+        }
+    }
 
     fn sample_invocation() -> ServeInvocation {
         ServeInvocation {
@@ -294,7 +401,7 @@ mod tests {
 
     #[test]
     fn service_running_matches_only_the_label_line() {
-        let output = "com.apple.something\t0\t0\ncom.ironclaw.reborn.daemon\t-\t0\n";
+        let output = "-\t0\tcom.apple.something\n123\t0\tcom.ironclaw.reborn.daemon\n";
         assert!(service_running(output));
     }
 
@@ -302,5 +409,231 @@ mod tests {
     fn service_running_false_when_label_absent() {
         let output = "com.apple.something\t0\t0\n";
         assert!(!service_running(output));
+        assert!(!service_running(&format!(
+            "123\t0\t{SERVICE_LABEL}.helper\n"
+        )));
+    }
+
+    #[test]
+    fn uninstall_boots_out_loaded_keepalive_job_before_removing_plist() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let file = plist_path().expect("plist path");
+        std::fs::create_dir_all(file.parent().expect("plist parent")).expect("create parent");
+        std::fs::write(&file, "plist").expect("write plist");
+        let mut runner = RecordingRunner {
+            launchctl_list: format!("-\t0\t{SERVICE_LABEL}\n"),
+            ..RecordingRunner::default()
+        };
+        let result = uninstall_with_runner(&mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        result.expect("uninstall succeeds");
+        assert!(!file.exists());
+        assert_eq!(
+            runner.labels,
+            [
+                "launchctl list",
+                "launchctl stop",
+                "id -u",
+                "launchctl bootout"
+            ]
+        );
+        assert_eq!(runner.args[1], ["stop", SERVICE_LABEL]);
+        assert_eq!(runner.args[2], ["-u"]);
+        assert_eq!(
+            runner.args[3],
+            [
+                "bootout".to_string(),
+                "gui/501/com.ironclaw.reborn.daemon".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn uninstall_bootout_failure_preserves_plist() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let file = plist_path().expect("plist path");
+        std::fs::create_dir_all(file.parent().expect("plist parent")).expect("create parent");
+        std::fs::write(&file, "plist").expect("write plist");
+        let mut runner = RecordingRunner {
+            launchctl_list: format!("123\t0\t{SERVICE_LABEL}\n"),
+            fail_args: Some(vec!["bootout", "gui/501/com.ironclaw.reborn.daemon"]),
+            ..RecordingRunner::default()
+        };
+        let result = uninstall_with_runner(&mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        assert!(result.is_err());
+        assert!(file.exists(), "failed bootout must not remove the plist");
+    }
+
+    #[test]
+    fn uninstall_is_idempotent_when_plist_is_absent() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let mut runner = RecordingRunner::default();
+        let result = uninstall_with_runner(&mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        result.expect("repeated uninstall succeeds");
+        assert_eq!(runner.labels, ["launchctl list"]);
+    }
+
+    #[test]
+    fn uninstall_boots_out_loaded_label_when_plist_is_absent() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let mut runner = RecordingRunner {
+            launchctl_list: format!("123\t0\t{SERVICE_LABEL}\n"),
+            ..RecordingRunner::default()
+        };
+        let result = uninstall_with_runner(&mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        result.expect("loaded orphan uninstall succeeds");
+        assert_eq!(
+            runner.args,
+            [
+                vec!["list"],
+                vec!["stop", SERVICE_LABEL],
+                vec!["-u"],
+                vec!["bootout", "gui/501/com.ironclaw.reborn.daemon"]
+            ]
+        );
+    }
+
+    #[test]
+    fn uninstall_preserves_plist_when_launchctl_list_fails() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let file = plist_path().expect("plist path");
+        std::fs::create_dir_all(file.parent().expect("plist parent")).expect("create parent");
+        std::fs::write(&file, "plist").expect("write plist");
+        let mut runner = RecordingRunner {
+            fail_capture_args: Some(vec!["list"]),
+            ..RecordingRunner::default()
+        };
+        let result = uninstall_with_runner(&mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        assert!(result.is_err());
+        assert!(file.exists(), "failed list must not delete the plist");
+        assert_eq!(runner.labels, ["launchctl list"]);
+    }
+
+    #[test]
+    fn stop_is_idempotent_when_plist_is_absent() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let mut runner = RecordingRunner::default();
+        let result = stop_with_runner(&mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        result.expect("absent stop succeeds");
+        assert!(runner.labels.is_empty());
+    }
+
+    #[test]
+    fn status_propagates_launchctl_list_failure() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", "/home/op") };
+        let mut runner = RecordingRunner {
+            fail_capture_args: Some(vec!["list"]),
+            ..RecordingRunner::default()
+        };
+        let result = status_with_runner(&mut runner);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn status_classifies_loaded_and_not_loaded_from_exact_list_command() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let prior = std::env::var_os("HOME");
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var("HOME", "/home/op") };
+        for output in [
+            format!("123\t0\t{SERVICE_LABEL}\n"),
+            "123\t0\tcom.apple.other\n".to_string(),
+        ] {
+            let mut runner = RecordingRunner {
+                launchctl_list: output,
+                ..RecordingRunner::default()
+            };
+            status_with_runner(&mut runner).expect("status succeeds");
+            assert_eq!(runner.args, [vec!["list"]]);
+        }
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
     }
 }

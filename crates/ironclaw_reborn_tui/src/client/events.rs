@@ -24,6 +24,10 @@ use super::{ApiClient, ClientError};
 
 const RECONNECT_MAX_ATTEMPTS: usize = 3;
 const RECONNECT_WINDOW: Duration = Duration::from_secs(60);
+const RECONNECT_INITIAL_DELAY: Duration = Duration::from_secs(1);
+const MAX_SSE_LINE_BYTES: usize = 64 * 1024;
+const MAX_SSE_EVENT_BYTES: usize = 1024 * 1024;
+const MAX_PENDING_FRAMES: usize = 64;
 
 type ByteStream = Pin<Box<dyn Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>;
 
@@ -33,9 +37,9 @@ type ByteStream = Pin<Box<dyn Stream<Item = reqwest::Result<bytes::Bytes>> + Sen
 /// re-opening the connection.
 struct OpenConnection {
     byte_stream: ByteStream,
-    buffer: String,
+    buffer: Vec<u8>,
     block_id: Option<String>,
-    block_data: String,
+    block_data: Vec<u8>,
 }
 
 struct SubscribeState {
@@ -45,6 +49,7 @@ struct SubscribeState {
     thread_id: String,
     last_event_id: Option<String>,
     reconnect_attempts: VecDeque<Instant>,
+    reconnect_delay: Option<Duration>,
     pending: VecDeque<Result<WebChatV2EventFrame, ClientError>>,
     exhausted: bool,
     connection: Option<OpenConnection>,
@@ -62,6 +67,7 @@ pub fn subscribe(
         thread_id: thread_id.to_string(),
         last_event_id,
         reconnect_attempts: VecDeque::new(),
+        reconnect_delay: None,
         pending: VecDeque::new(),
         exhausted: false,
         connection: None,
@@ -75,6 +81,9 @@ pub fn subscribe(
                 return None;
             }
             if state.connection.is_none() {
+                if let Some(delay) = state.reconnect_delay.take() {
+                    tokio::time::sleep(delay).await;
+                }
                 match open_connection(&mut state).await {
                     Ok(connection) => {
                         state.connection = Some(connection);
@@ -87,7 +96,7 @@ pub fn subscribe(
                     }
                     Err(other) => {
                         state.pending.push_back(Err(other));
-                        exhaust_or_record_reconnect(&mut state);
+                        schedule_reconnect(&mut state);
                         continue;
                     }
                 }
@@ -125,12 +134,17 @@ pub fn subscribe(
                     // Body ended cleanly (server-side lifetime cap, or the
                     // scripted end in tests) — reconnect if budget allows.
                     state.connection = None;
-                    exhaust_or_record_reconnect(&mut state);
+                    schedule_reconnect(&mut state);
+                }
+                Err(error @ ClientError::StreamProtocol(_)) => {
+                    state.connection = None;
+                    state.exhausted = true;
+                    state.pending.push_back(Err(error));
                 }
                 Err(error) => {
                     state.connection = None;
                     state.pending.push_back(Err(error));
-                    exhaust_or_record_reconnect(&mut state);
+                    schedule_reconnect(&mut state);
                 }
             }
         }
@@ -141,20 +155,24 @@ pub fn subscribe(
 /// exhausted and queues the terminal error. Shared by every place a
 /// connection attempt (fresh or reconnect) ends without yielding an
 /// unrecoverable error of its own.
-fn exhaust_or_record_reconnect(state: &mut SubscribeState) {
-    if !record_reconnect_attempt(state) {
-        state.exhausted = true;
-        state
-            .pending
-            .push_back(Err(ClientError::ReconnectBudgetExhausted {
-                attempts: RECONNECT_MAX_ATTEMPTS as u8,
-                window_secs: RECONNECT_WINDOW.as_secs(),
-            }));
+fn schedule_reconnect(state: &mut SubscribeState) {
+    match record_reconnect_attempt(state) {
+        Some(delay) => state.reconnect_delay = Some(delay),
+        None => {
+            state.exhausted = true;
+            state
+                .pending
+                .push_back(Err(ClientError::ReconnectBudgetExhausted {
+                    attempts: RECONNECT_MAX_ATTEMPTS as u8,
+                    window_secs: RECONNECT_WINDOW.as_secs(),
+                }));
+        }
     }
 }
 
-/// Returns `false` when the reconnect budget is exhausted (caller must stop).
-fn record_reconnect_attempt(state: &mut SubscribeState) -> bool {
+/// Returns the bounded exponential delay before the next attempt, or `None`
+/// when the reconnect budget is exhausted.
+fn record_reconnect_attempt(state: &mut SubscribeState) -> Option<Duration> {
     let now = Instant::now();
     while let Some(front) = state.reconnect_attempts.front() {
         if now.duration_since(*front) > RECONNECT_WINDOW {
@@ -164,10 +182,11 @@ fn record_reconnect_attempt(state: &mut SubscribeState) -> bool {
         }
     }
     if state.reconnect_attempts.len() >= RECONNECT_MAX_ATTEMPTS {
-        return false;
+        return None;
     }
     state.reconnect_attempts.push_back(now);
-    true
+    let exponent = state.reconnect_attempts.len().saturating_sub(1) as u32;
+    Some(RECONNECT_INITIAL_DELAY.saturating_mul(1_u32 << exponent))
 }
 
 /// Opens one connection and wraps the response body as a boxed byte stream,
@@ -198,9 +217,9 @@ async fn open_connection(state: &mut SubscribeState) -> Result<OpenConnection, C
 
     Ok(OpenConnection {
         byte_stream: Box::pin(response.bytes_stream()),
-        buffer: String::new(),
+        buffer: Vec::new(),
         block_id: None,
-        block_data: String::new(),
+        block_data: Vec::new(),
     })
 }
 
@@ -222,22 +241,27 @@ async fn read_next_chunk(
         return Ok(false);
     };
     let chunk = chunk?;
-    connection.buffer.push_str(&String::from_utf8_lossy(&chunk));
+    connection.buffer.extend_from_slice(&chunk);
 
-    while let Some(newline) = connection.buffer.find('\n') {
-        let line: String = connection.buffer.drain(..=newline).collect();
-        let line = line.trim_end_matches(['\n', '\r']);
+    while let Some(newline) = connection.buffer.iter().position(|byte| *byte == b'\n') {
+        if newline > MAX_SSE_LINE_BYTES {
+            return Err(ClientError::StreamProtocol("SSE line exceeds size limit"));
+        }
+        let mut line: Vec<u8> = connection.buffer.drain(..=newline).collect();
+        line.pop();
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        let line = std::str::from_utf8(&line)
+            .map_err(|_| ClientError::StreamProtocol("SSE line is not valid UTF-8"))?;
         if line.is_empty() {
             if !connection.block_data.is_empty() {
                 if let Some(id) = connection.block_id.take() {
                     *last_event_id = Some(id);
                 }
-                match serde_json::from_str::<WebChatV2EventFrame>(&connection.block_data) {
-                    Ok(frame) => pending.push_back(Ok(frame)),
-                    Err(error) => {
-                        pending.push_back(Err(ClientError::StreamParse(error.to_string())))
-                    }
-                }
+                let item = serde_json::from_slice::<WebChatV2EventFrame>(&connection.block_data)
+                    .map_err(|error| ClientError::StreamParse(error.to_string()));
+                push_pending(pending, item)?;
             }
             connection.block_data.clear();
             continue;
@@ -250,14 +274,38 @@ async fn read_next_chunk(
         } else if let Some(rest) = line.strip_prefix("id:") {
             connection.block_id = Some(rest.trim_start().to_string());
         } else if let Some(rest) = line.strip_prefix("data:") {
-            if !connection.block_data.is_empty() {
-                connection.block_data.push('\n');
+            let additional =
+                rest.trim_start().len() + usize::from(!connection.block_data.is_empty());
+            if connection.block_data.len().saturating_add(additional) > MAX_SSE_EVENT_BYTES {
+                return Err(ClientError::StreamProtocol("SSE event exceeds size limit"));
             }
-            connection.block_data.push_str(rest.trim_start());
+            if !connection.block_data.is_empty() {
+                connection.block_data.push(b'\n');
+            }
+            connection
+                .block_data
+                .extend_from_slice(rest.trim_start().as_bytes());
         }
         // `retry:` / comment lines (`:`) intentionally ignored — MVP has
         // no server-advertised retry interval and no comment-based
         // keepalive parsing beyond the blank-line block boundary.
     }
+    if connection.buffer.len() > MAX_SSE_LINE_BYTES {
+        return Err(ClientError::StreamProtocol("SSE line exceeds size limit"));
+    }
     Ok(true)
+}
+
+fn push_pending(
+    pending: &mut VecDeque<Result<WebChatV2EventFrame, ClientError>>,
+    item: Result<WebChatV2EventFrame, ClientError>,
+) -> Result<(), ClientError> {
+    // Reserve one slot for the terminal protocol error queued by `subscribe`.
+    if pending.len() >= MAX_PENDING_FRAMES.saturating_sub(1) {
+        return Err(ClientError::StreamProtocol(
+            "too many SSE frames buffered in one read",
+        ));
+    }
+    pending.push_back(item);
+    Ok(())
 }

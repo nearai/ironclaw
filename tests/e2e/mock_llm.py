@@ -1382,6 +1382,12 @@ def _explicit_canned_response(content: str) -> str | None:
     (e.g. the post-tool-call summary) without collapsing every unmatched
     conversation into the default response.
     """
+    scroll_turn = re.search(
+        r"\bhello scroll (?P<turn>\d{3})\b", content, re.IGNORECASE
+    )
+    if scroll_turn is not None:
+        return f"Scroll turn {scroll_turn.group('turn')} complete."
+
     for pattern, response in CANNED_RESPONSES:
         if pattern.search(content):
             return response

@@ -123,10 +123,6 @@ impl ServicePlatform {
     }
 
     fn uninstall(&self) -> Result<()> {
-        // Shared across platforms: best-effort stop before removing the
-        // unit file, so an uninstall never leaves a running process
-        // behind. Errors ignored — the service may not be loaded/active.
-        self.stop().ok();
         match self {
             Self::MacOs => launchd::uninstall(),
             Self::Linux => systemd::uninstall(),
@@ -195,24 +191,59 @@ fn run_checked(label: &str, command: &mut Command) -> Result<()> {
     Ok(())
 }
 
-/// Run `command` and capture its stdout, falling back to stderr when
-/// stdout is empty (some tools, e.g. `systemctl is-active`, print
-/// their result on stdout only on success). `label` names the
-/// operation for the spawn-failure error message.
-fn run_capture(label: &str, command: &mut Command) -> Result<String> {
+fn run_capture_checked(label: &str, command: &mut Command) -> Result<String> {
     let output = command
         .output()
         .with_context(|| format!("failed to spawn command for {label}"))?;
-    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
-    if text.trim().is_empty() {
-        text = String::from_utf8_lossy(&output.stderr).to_string();
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("{label} failed: {}", stderr.trim());
     }
-    Ok(text)
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Injectable command boundary for service-manager lifecycle operations.
+///
+/// Production uses [`OsServiceCommandRunner`]. Tests provide a recorder so
+/// failure propagation and command ordering are verified without reaching the
+/// host's real launchd/systemd instance.
+trait ServiceCommandRunner {
+    fn run_checked(&mut self, label: &str, command: &mut Command) -> Result<()>;
+    fn run_capture_checked(&mut self, label: &str, command: &mut Command) -> Result<String>;
+}
+
+struct OsServiceCommandRunner;
+
+impl ServiceCommandRunner for OsServiceCommandRunner {
+    fn run_checked(&mut self, label: &str, command: &mut Command) -> Result<()> {
+        run_checked(label, command)
+    }
+
+    fn run_capture_checked(&mut self, label: &str, command: &mut Command) -> Result<String> {
+        run_capture_checked(label, command)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct SuccessfulServiceCommandRunner;
+
+    impl ServiceCommandRunner for SuccessfulServiceCommandRunner {
+        fn run_checked(&mut self, _label: &str, _command: &mut Command) -> Result<()> {
+            Ok(())
+        }
+
+        fn run_capture_checked(&mut self, label: &str, _command: &mut Command) -> Result<String> {
+            match label {
+                "launchctl list" => Ok(String::new()),
+                "id -u" => Ok("501\n".to_string()),
+                _ => Ok(String::new()),
+            }
+        }
+    }
 
     #[test]
     fn detect_returns_a_supported_platform_on_this_test_host() {
@@ -247,20 +278,20 @@ mod tests {
     }
 
     #[test]
-    fn run_capture_reads_stdout() {
-        let out = run_capture("test echo", Command::new("sh").args(["-c", "echo hello"]))
+    fn run_capture_checked_reads_stdout() {
+        let out = run_capture_checked("test echo", Command::new("sh").args(["-c", "echo hello"]))
             .expect("stdout capture should succeed");
         assert_eq!(out.trim(), "hello");
     }
 
     #[test]
-    fn run_capture_falls_back_to_stderr() {
-        let out = run_capture(
-            "test warn",
-            Command::new("sh").args(["-c", "echo warn 1>&2"]),
+    fn run_capture_checked_rejects_non_zero_exit() {
+        let error = run_capture_checked(
+            "test capture",
+            Command::new("sh").args(["-c", "echo warn 1>&2; exit 17"]),
         )
-        .expect("stderr capture should succeed");
-        assert_eq!(out.trim(), "warn");
+        .expect_err("non-zero capture must fail");
+        assert!(error.to_string().contains("test capture failed: warn"));
     }
 
     #[test]
@@ -325,14 +356,9 @@ mod tests {
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
         let _home = TempHomeGuard::set(tmp.path());
-        let context = RebornCliContext::from_boot_config(
-            ironclaw_reborn_config::RebornBootConfig::resolve_from_env()
-                .expect("boot config must resolve under temp HOME"),
-        );
-
-        ServicePlatform::Linux
-            .install(&context)
-            .expect("install must succeed");
+        let invocation = serve_invocation().expect("serve invocation");
+        let mut runner = SuccessfulServiceCommandRunner;
+        systemd::install_with_runner(&invocation, &mut runner).expect("install must succeed");
         let unit_path = tmp
             .path()
             .join(".config/systemd/user/ironclaw-reborn.service");
@@ -342,14 +368,10 @@ mod tests {
         assert!(contents.contains("IRONCLAW_REBORN_HOME="));
 
         // Idempotent reinstall: overwrites cleanly, no fail or duplicate.
-        ServicePlatform::Linux
-            .install(&context)
-            .expect("reinstall must succeed");
+        systemd::install_with_runner(&invocation, &mut runner).expect("reinstall must succeed");
         assert!(unit_path.exists());
 
-        ServicePlatform::Linux
-            .uninstall()
-            .expect("uninstall must succeed");
+        systemd::uninstall_with_runner(&mut runner).expect("uninstall must succeed");
         assert!(!unit_path.exists(), "unit file must be removed");
     }
 
@@ -381,12 +403,8 @@ mod tests {
             .expect("reinstall must succeed");
         assert!(plist_path.exists());
 
-        // NOTE: uninstall() calls stop() first, which shells `launchctl`
-        // against the real label — harmless if not loaded (errors ignored
-        // via `.ok()`), but the test still exercises the real code path.
-        ServicePlatform::MacOs
-            .uninstall()
-            .expect("uninstall must succeed");
+        let mut runner = SuccessfulServiceCommandRunner;
+        launchd::uninstall_with_runner(&mut runner).expect("uninstall must succeed");
         assert!(!plist_path.exists(), "plist file must be removed");
     }
 }

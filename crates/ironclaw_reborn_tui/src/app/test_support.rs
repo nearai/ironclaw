@@ -5,6 +5,7 @@
 //! are dev-dependencies ONLY (see `app/mod.rs`'s module doc): production
 //! code in this crate never names those types, but constructing a valid
 //! `GatePromptView`/`CapabilityActivityView`/… test fixture requires them.
+#![cfg(test)]
 #![allow(dead_code)]
 
 use chrono::Utc;

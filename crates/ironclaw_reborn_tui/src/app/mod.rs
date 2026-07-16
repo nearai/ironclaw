@@ -1,7 +1,7 @@
 //! Reborn TUI application state — a pure reducer.
 //!
 //! [`reduce`] turns one [`AppEvent`] into a state mutation plus a list of
-//! [`Effect`]s the runtime (`lib.rs`, a later task) executes. Nothing in this
+//! [`Effect`]s the runtime (`lib.rs`) executes. Nothing in this
 //! module or its submodules performs I/O: HTTP calls, terminal I/O, and the
 //! `crossterm`/SSE event sources all live outside `app/`.
 //!

@@ -98,6 +98,7 @@ async fn budget_exhaustion_yields_reconnect_budget_exhausted_after_three_empty_r
 
     let client = server.client();
     let mut stream = std::pin::pin!(subscribe(&client, "thread-1", None));
+    let started = tokio::time::Instant::now();
 
     let error = stream
         .next()
@@ -115,6 +116,10 @@ async fn budget_exhaustion_yields_reconnect_budget_exhausted_after_three_empty_r
         stream.next().await.is_none(),
         "stream must end after budget exhaustion"
     );
+    assert!(
+        tokio::time::Instant::now().duration_since(started) >= Duration::from_secs(7),
+        "the three reconnects must be paced at 1s, 2s, and 4s"
+    );
 
     let event_requests = server
         .requests()
@@ -123,6 +128,188 @@ async fn budget_exhaustion_yields_reconnect_budget_exhausted_after_three_empty_r
         .count();
     // 1 initial connect + 3 reconnects = 4 total attempts.
     assert_eq!(event_requests, 4);
+}
+
+/// Raw chunked-HTTP server for parser-boundary regressions. Each entry is
+/// written as its own HTTP chunk with a scheduler yield between chunks, so
+/// reqwest exposes realistic transport boundaries rather than one String
+/// body assembled by the axum fixture.
+async fn spawn_chunked_sse_server(chunks: Vec<Vec<u8>>) -> std::net::SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind chunked SSE server");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        let Ok((mut socket, _)) = listener.accept().await else {
+            return;
+        };
+        let mut request = Vec::new();
+        let mut buf = [0_u8; 1024];
+        loop {
+            let Ok(read) = socket.read(&mut buf).await else {
+                return;
+            };
+            if read == 0 {
+                return;
+            }
+            request.extend_from_slice(&buf[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+
+        let header = b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n";
+        if socket.write_all(header).await.is_err() {
+            return;
+        }
+        for chunk in chunks {
+            let prefix = format!("{:x}\r\n", chunk.len());
+            if socket.write_all(prefix.as_bytes()).await.is_err()
+                || socket.write_all(&chunk).await.is_err()
+                || socket.write_all(b"\r\n").await.is_err()
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        let _ = socket.write_all(b"0\r\n\r\n").await;
+    });
+    addr
+}
+
+async fn spawn_unauthorized_sse_server() -> std::net::SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind unauthorized SSE server");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        let Ok((mut socket, _)) = listener.accept().await else {
+            return;
+        };
+        let mut buf = [0_u8; 1024];
+        let _ = socket.read(&mut buf).await;
+        let _ = socket
+            .write_all(b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n")
+            .await;
+    });
+    addr
+}
+
+#[tokio::test]
+async fn unauthorized_sse_response_is_terminal_without_reconnect() {
+    let addr = spawn_unauthorized_sse_server().await;
+    let client = ApiClient::new(format!("http://{addr}"), "bad-token".to_string());
+    let mut stream = std::pin::pin!(subscribe(&client, "thread-1", None));
+
+    let error = stream
+        .next()
+        .await
+        .expect("terminal unauthorized item")
+        .expect_err("401 must be classified as unauthorized");
+    assert!(matches!(
+        error,
+        ironclaw_reborn_tui::client::ClientError::Unauthorized
+    ));
+    assert!(stream.next().await.is_none(), "401 must not reconnect");
+}
+
+#[tokio::test]
+async fn split_multibyte_utf8_across_http_chunks_is_decoded_losslessly() {
+    let cursor = "cursor:café";
+    let data = serde_json::to_string(&keep_alive_frame(cursor)).expect("serialize frame");
+    let block = format!("event: keep_alive\nid: \"{cursor}\"\ndata: {data}\n\n");
+    let bytes = block.into_bytes();
+    let split = bytes
+        .windows("é".len())
+        .position(|window| window == "é".as_bytes())
+        .expect("unicode marker in block")
+        + 1;
+    let addr =
+        spawn_chunked_sse_server(vec![bytes[..split].to_vec(), bytes[split..].to_vec()]).await;
+    let client = ApiClient::new(format!("http://{addr}"), "test-token".to_string());
+    let mut stream = std::pin::pin!(subscribe(&client, "thread-1", None));
+
+    let frame = stream
+        .next()
+        .await
+        .expect("stream item")
+        .expect("valid split UTF-8 frame");
+    assert_eq!(frame.cursor().as_str(), cursor);
+}
+
+#[tokio::test]
+async fn oversized_incomplete_sse_line_is_rejected() {
+    let oversized = vec![b'x'; 64 * 1024 + 1];
+    let addr = spawn_chunked_sse_server(vec![oversized]).await;
+    let client = ApiClient::new(format!("http://{addr}"), "test-token".to_string());
+    let mut stream = std::pin::pin!(subscribe(&client, "thread-1", None));
+
+    let error = stream
+        .next()
+        .await
+        .expect("stream item")
+        .expect_err("oversized line must fail closed");
+    assert!(matches!(
+        error,
+        ironclaw_reborn_tui::client::ClientError::StreamProtocol(_)
+    ));
+    assert!(
+        stream.next().await.is_none(),
+        "protocol failure is terminal"
+    );
+}
+
+#[tokio::test]
+async fn oversized_sse_event_is_rejected_before_json_decode() {
+    let data_line = format!("data: {}\n", "x".repeat(64 * 1024 - 16));
+    let mut block = Vec::new();
+    for _ in 0..17 {
+        block.extend_from_slice(data_line.as_bytes());
+    }
+    block.push(b'\n');
+    let addr = spawn_chunked_sse_server(vec![block]).await;
+    let client = ApiClient::new(format!("http://{addr}"), "test-token".to_string());
+    let mut stream = std::pin::pin!(subscribe(&client, "thread-1", None));
+
+    let error = stream
+        .next()
+        .await
+        .expect("stream item")
+        .expect_err("oversized event must fail closed");
+    assert!(matches!(
+        error,
+        ironclaw_reborn_tui::client::ClientError::StreamProtocol(_)
+    ));
+}
+
+#[tokio::test]
+async fn one_read_cannot_queue_an_unbounded_number_of_sse_frames() {
+    let mut chunk = Vec::new();
+    for index in 0..65 {
+        let data = serde_json::to_string(&keep_alive_frame(&format!("cursor:{index}")))
+            .expect("serialize frame");
+        chunk.extend_from_slice(format!("data: {data}\n\n").as_bytes());
+    }
+    let addr = spawn_chunked_sse_server(vec![chunk]).await;
+    let client = ApiClient::new(format!("http://{addr}"), "test-token".to_string());
+    let mut stream = std::pin::pin!(subscribe(&client, "thread-1", None));
+
+    let mut frames = 0;
+    loop {
+        match stream.next().await.expect("bounded stream item") {
+            Ok(_) => frames += 1,
+            Err(ironclaw_reborn_tui::client::ClientError::StreamProtocol(_)) => break,
+            Err(other) => panic!("unexpected stream error: {other}"),
+        }
+    }
+    assert!(
+        frames < 64,
+        "one read queued {frames} frames before failing"
+    );
+    assert!(
+        stream.next().await.is_none(),
+        "protocol failure is terminal"
+    );
 }
 
 /// Hand-rolled, `support::MockServer`-independent raw TCP + chunked-HTTP

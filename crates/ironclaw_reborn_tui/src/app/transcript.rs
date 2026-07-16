@@ -239,9 +239,14 @@ fn apply_projection_item(state: &mut AppState, item: ProductProjectionItem) -> V
             // still has the concrete wire types in scope from this match's
             // destructure, before crossing into `gate`.
             let is_auth = wire_label(&gate_kind) == "auth";
-            let (challenge_kind, authorization_url) = match auth_context {
-                Some(ctx) => (Some(wire_label(&ctx.challenge_kind)), ctx.authorization_url),
-                None => (None, None),
+            let (challenge_kind, provider, account_label, authorization_url) = match auth_context {
+                Some(ctx) => (
+                    Some(wire_label(&ctx.challenge_kind)),
+                    ctx.provider,
+                    ctx.account_label,
+                    ctx.authorization_url,
+                ),
+                None => (None, None, None, None),
             };
             gate::apply_projection_gate(
                 state,
@@ -253,6 +258,8 @@ fn apply_projection_item(state: &mut AppState, item: ProductProjectionItem) -> V
                     allow_always,
                     is_auth,
                     challenge_kind,
+                    provider,
+                    account_label,
                     authorization_url,
                 },
             )
@@ -365,6 +372,9 @@ fn upsert_preview(state: &mut AppState, preview: CapabilityDisplayPreviewView) {
 #[cfg(test)]
 mod tests {
     use ironclaw_host_api::InvocationId;
+    use ironclaw_product_adapters::{
+        AuthPromptChallengeKind, AuthPromptContextView, ProductGateKind,
+    };
     use ironclaw_product_workflow::webchat_schema::WebChatV2Event;
     use ironclaw_product_workflow::{
         CapabilityActivityStatusView, ProductProjectionItem, ProductWorkSummaryPhase,
@@ -372,9 +382,10 @@ mod tests {
     use ironclaw_turns::{EventCursor, TurnRunId, TurnStatus};
 
     use super::super::test_support::{
-        activity_view, final_reply_view, final_reply_view_for_run, frame, projection_gate,
+        activity_view, final_reply_view, final_reply_view_for_run, frame, key, projection_gate,
         projection_run_status, projection_state, projection_text, run_state_with_failure,
     };
+    use super::super::{AppEvent, reduce};
     use super::*;
 
     /// Pins Defect E's fix at the reducer level: a `FinalReply` carrying a
@@ -637,6 +648,72 @@ mod tests {
             ),
             "first arrival (the projection item) wins; the later raw frame is a no-op"
         );
+    }
+
+    #[test]
+    fn projected_auth_context_survives_dedup_into_manual_token_effect() {
+        let mut state = AppState::default().set_thread_id("t-1");
+        let run_id = TurnRunId::new();
+        let gate_ref = "auth-gate-1";
+        let auth_gate = |auth_context| ProductProjectionItem::Gate {
+            run_id,
+            gate_kind: ProductGateKind::Auth,
+            gate_ref: gate_ref.to_string(),
+            invocation_id: None,
+            headline: "Connect GitHub".to_string(),
+            body: Some("Paste a personal access token.".to_string()),
+            allow_always: false,
+            auth_context,
+        };
+
+        let context = AuthPromptContextView::new(
+            AuthPromptChallengeKind::ManualToken,
+            Some("github".to_string()),
+            Some("GitHub PAT".to_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("valid auth projection context");
+        reduce(
+            &mut state,
+            AppEvent::Server(Box::new(frame(WebChatV2Event::ProjectionUpdate {
+                state: projection_state("t-1", vec![auth_gate(Some(context))]),
+            }))),
+        );
+
+        // A replay/update for the same gate without context must not replace
+        // the richer first arrival at the shared gate-dedup seam.
+        reduce(
+            &mut state,
+            AppEvent::Server(Box::new(frame(WebChatV2Event::ProjectionUpdate {
+                state: projection_state("t-1", vec![auth_gate(None)]),
+            }))),
+        );
+
+        reduce(
+            &mut state,
+            AppEvent::Key(key(crossterm::event::KeyCode::Char('t'))),
+        );
+        for character in "secret".chars() {
+            reduce(
+                &mut state,
+                AppEvent::Key(key(crossterm::event::KeyCode::Char(character))),
+            );
+        }
+        let effects = reduce(
+            &mut state,
+            AppEvent::Key(key(crossterm::event::KeyCode::Enter)),
+        );
+
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::Api(ApiCall::SubmitManualToken {
+                provider,
+                account_label,
+                ..
+            })] if provider == "github" && account_label == "GitHub PAT"
+        ));
     }
 
     #[test]

@@ -35,17 +35,16 @@ impl TuiCommand {
         let base_url = match self.base_url {
             Some(url) => url,
             None => {
-                let host: IpAddr = webui_section
+                let configured_host = webui_section
                     .and_then(|s| s.listen_host.as_deref())
                     .map(IpAddr::from_str)
                     .transpose()
-                    .map_err(|err| anyhow!("[webui].listen_host invalid: {err}"))?
-                    .unwrap_or_else(|| {
-                        // safety: crate-local const known to be valid
-                        IpAddr::from_str(DEFAULT_SERVE_HOST).expect(
-                            "DEFAULT_SERVE_HOST is a crate-local literal that parses as IpAddr",
-                        )
-                    });
+                    .map_err(|err| anyhow!("[webui].listen_host invalid: {err}"))?;
+                let host: IpAddr = match configured_host {
+                    Some(host) => host,
+                    None => IpAddr::from_str(DEFAULT_SERVE_HOST)
+                        .map_err(|err| anyhow!("compiled default serve host invalid: {err}"))?,
+                };
                 let port = webui_section
                     .and_then(|s| s.listen_port)
                     .unwrap_or(DEFAULT_SERVE_PORT);

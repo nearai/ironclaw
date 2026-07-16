@@ -36,12 +36,8 @@ pub enum PendingGate {
         challenge_kind: Option<String>,
         authorization_url: Option<String>,
         /// Provider id (e.g. `"google"`) the manual-token flow submits
-        /// alongside the raw token — from `AuthPromptView::provider`.
-        /// `None` for gates that arrive via `apply_projection_gate` (the
-        /// projection item's `auth_context` carries no provider field
-        /// today); [`submit_token`] falls back to an empty string in that
-        /// case, same posture as the rest of this crate degrading rather
-        /// than panicking on an absent field.
+        /// alongside the raw token — from `AuthPromptView::provider` or the
+        /// projection item's `AuthPromptContextView::provider`.
         provider: Option<String>,
         /// From `AuthPromptView::account_label`; [`submit_token`] falls
         /// back to `"{provider} credential"` when absent, mirroring
@@ -138,6 +134,8 @@ pub(crate) struct ProjectionGateFields {
     pub(crate) allow_always: bool,
     pub(crate) is_auth: bool,
     pub(crate) challenge_kind: Option<String>,
+    pub(crate) provider: Option<String>,
+    pub(crate) account_label: Option<String>,
     pub(crate) authorization_url: Option<String>,
 }
 
@@ -169,6 +167,8 @@ pub(crate) fn apply_projection_gate(
         allow_always,
         is_auth,
         challenge_kind,
+        provider,
+        account_label,
         authorization_url,
     } = fields;
     let candidate = if is_auth {
@@ -179,13 +179,8 @@ pub(crate) fn apply_projection_gate(
             body,
             challenge_kind,
             authorization_url,
-            // The projection item's `auth_context` (`AuthPromptContextView`)
-            // carries no provider/account_label field today — see this
-            // variant's field doc. `apply_gate_prompt`/`apply_auth_prompt`
-            // (the raw `auth_required` frame) is the path that populates
-            // these from the real `AuthPromptView`.
-            provider: None,
-            account_label: None,
+            provider,
+            account_label,
             token_input: None,
         }
     } else {

@@ -455,7 +455,9 @@ fn set_local_error(state: &mut AppState, action: &str, err: ClientError) {
 
 fn apply_threads_list(state: &mut AppState, threads: Vec<client::ThreadSummary>) {
     if let Some(Modal::Threads(modal)) = &mut state.modal {
-        modal.selected = modal.selected.min(threads.len().saturating_sub(1));
+        // Selection indexes the rendered rows: 0 is the pinned "+ new" row,
+        // and 1..=threads.len() are real threads.
+        modal.selected = modal.selected.min(threads.len());
         modal.threads = threads;
         modal.loading = false;
     }
@@ -544,6 +546,18 @@ fn apply_timeline_page(state: &mut AppState, page: client::TimelinePage) {
     state.settled_run_ids = page
         .messages
         .iter()
+        // A submitted user message can already carry the active run id while
+        // that run is blocked on a gate. Finalized assistant messages and
+        // their canonical redacted/deleted tombstones are terminal outcomes:
+        // the latter deliberately retain the run identity while hiding the
+        // content, so replay must not resurrect the removed reply or gates.
+        .filter(|message| {
+            message.kind == "assistant"
+                && matches!(
+                    message.status.as_str(),
+                    "finalized" | "redacted" | "deleted"
+                )
+        })
         .filter_map(|m| m.turn_run_id.clone())
         .collect();
     state.transcript = page
@@ -585,9 +599,10 @@ mod tests {
     use tokio::net::TcpListener;
 
     use chrono::Utc;
-    use ironclaw_product_workflow::FinalReplyView;
-    use ironclaw_product_workflow::ProjectionCursor;
     use ironclaw_product_workflow::webchat_schema::WebChatV2Event;
+    use ironclaw_product_workflow::{
+        AuthPromptView, FinalReplyView, GatePromptView, ProjectionCursor,
+    };
     use ironclaw_turns::TurnRunId;
 
     use super::*;
@@ -850,6 +865,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_threads_keeps_the_only_thread_selected_after_the_pinned_new_row() {
+        let stub = StubServer::start().await;
+        stub.ok(
+            "GET /api/webchat/v2/threads",
+            serde_json::json!({"threads": [{"thread_id": "t-1"}]}),
+        );
+        let mut state = AppState::default().set_modal(Some(Modal::Threads(ThreadsModalState {
+            selected: 1,
+            loading: true,
+            ..ThreadsModalState::default()
+        })));
+
+        execute_effect(
+            &stub.client(),
+            &mut state,
+            Effect::Api(ApiCall::ListThreads),
+        )
+        .await;
+
+        assert!(matches!(&state.modal, Some(Modal::Threads(m)) if m.selected == 1));
+        let effects = app::reduce(
+            &mut state,
+            AppEvent::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            )),
+        );
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::Api(ApiCall::LoadTimeline { thread_id, .. })] if thread_id == "t-1"
+        ));
+    }
+
+    #[tokio::test]
+    async fn list_threads_clamps_to_the_last_thread_after_the_pinned_new_row() {
+        let stub = StubServer::start().await;
+        stub.ok(
+            "GET /api/webchat/v2/threads",
+            serde_json::json!({
+                "threads": [{"thread_id": "t-1"}, {"thread_id": "t-2"}]
+            }),
+        );
+        let mut state = AppState::default().set_modal(Some(Modal::Threads(ThreadsModalState {
+            selected: usize::MAX,
+            loading: true,
+            ..ThreadsModalState::default()
+        })));
+
+        execute_effect(
+            &stub.client(),
+            &mut state,
+            Effect::Api(ApiCall::ListThreads),
+        )
+        .await;
+
+        assert!(matches!(&state.modal, Some(Modal::Threads(m)) if m.selected == 2));
+        let effects = app::reduce(
+            &mut state,
+            AppEvent::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            )),
+        );
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::Api(ApiCall::LoadTimeline { thread_id, .. })] if thread_id == "t-2"
+        ));
+    }
+
+    #[tokio::test]
     async fn list_threads_error_degrades_to_local_error_not_panic() {
         let stub = StubServer::start().await;
         stub.error("GET /api/webchat/v2/threads", 500);
@@ -946,6 +1031,151 @@ mod tests {
                 .transcript
                 .iter()
                 .any(|i| i.as_error_text() == Some("stale"))
+        );
+    }
+
+    #[tokio::test]
+    async fn submitted_user_message_does_not_hide_replayed_gate_for_blocked_run() {
+        let stub = StubServer::start().await;
+        let blocked_run_id = TurnRunId::new();
+        stub.ok(
+            "GET /api/webchat/v2/threads/t-1/timeline",
+            serde_json::json!({
+                "thread": {"thread_id": "t-1"},
+                "messages": [{
+                    "message_id": "m-1",
+                    "sequence": 1,
+                    "kind": "user",
+                    "status": "submitted",
+                    "content": "write the file",
+                    "turn_run_id": blocked_run_id.to_string(),
+                }],
+            }),
+        );
+        let mut state = AppState::default().set_thread_id("t-1");
+
+        execute_effect(
+            &stub.client(),
+            &mut state,
+            Effect::Api(ApiCall::LoadTimeline {
+                thread_id: "t-1".to_string(),
+                limit: 50,
+                cursor: None,
+            }),
+        )
+        .await;
+        assert!(
+            !state.settled_run_ids.contains(&blocked_run_id.to_string()),
+            "a submitted user row is not a terminal run outcome"
+        );
+
+        let prompt = GatePromptView {
+            turn_run_id: blocked_run_id,
+            gate_ref: "gate-blocked-run".to_string(),
+            invocation_id: None,
+            headline: "Approve action".to_string(),
+            body: "Review the requested action.".to_string(),
+            allow_always: false,
+            approval_context: None,
+        };
+        app::reduce(
+            &mut state,
+            AppEvent::Server(Box::new(WebChatV2EventFrame {
+                cursor: ProjectionCursor::new("cursor:tui:test:blocked-run").expect("valid cursor"),
+                event: WebChatV2Event::Gate { prompt },
+            })),
+        );
+
+        assert!(matches!(
+            state.pending_gate,
+            Some(PendingGate::Approval { ref gate_ref, .. }) if gate_ref == "gate-blocked-run"
+        ));
+    }
+
+    #[tokio::test]
+    async fn redacted_assistant_tombstone_suppresses_replayed_reply_gate_and_auth() {
+        let stub = StubServer::start().await;
+        let redacted_run_id = TurnRunId::new();
+        stub.ok(
+            "GET /api/webchat/v2/threads/t-1/timeline",
+            serde_json::json!({
+                "thread": {"thread_id": "t-1"},
+                "messages": [{
+                    "message_id": "m-redacted",
+                    "sequence": 1,
+                    "kind": "assistant",
+                    "status": "redacted",
+                    "content": null,
+                    "turn_run_id": redacted_run_id.to_string(),
+                }],
+            }),
+        );
+        let mut state = AppState::default().set_thread_id("t-1");
+
+        execute_effect(
+            &stub.client(),
+            &mut state,
+            Effect::Api(ApiCall::LoadTimeline {
+                thread_id: "t-1".to_string(),
+                limit: 50,
+                cursor: None,
+            }),
+        )
+        .await;
+
+        assert!(state.settled_run_ids.contains(&redacted_run_id.to_string()));
+        let transcript_len = state.transcript.len();
+
+        replay_final_reply(&mut state, redacted_run_id, "must stay redacted");
+
+        let gate = GatePromptView {
+            turn_run_id: redacted_run_id,
+            gate_ref: "gate-redacted-run".to_string(),
+            invocation_id: None,
+            headline: "stale approval".to_string(),
+            body: "must not reappear".to_string(),
+            allow_always: false,
+            approval_context: None,
+        };
+        app::reduce(
+            &mut state,
+            AppEvent::Server(Box::new(WebChatV2EventFrame {
+                cursor: ProjectionCursor::new("cursor:tui:test:redacted-gate")
+                    .expect("valid cursor"),
+                event: WebChatV2Event::Gate { prompt: gate },
+            })),
+        );
+
+        let auth = AuthPromptView {
+            turn_run_id: redacted_run_id,
+            auth_request_ref: "auth-redacted-run".to_string(),
+            invocation_id: None,
+            headline: "stale auth".to_string(),
+            body: "must not reappear".to_string(),
+            challenge_kind: None,
+            provider: Some("github".to_string()),
+            account_label: Some("default".to_string()),
+            authorization_url: None,
+            expires_at: None,
+            connection: None,
+        };
+        app::reduce(
+            &mut state,
+            AppEvent::Server(Box::new(WebChatV2EventFrame {
+                cursor: ProjectionCursor::new("cursor:tui:test:redacted-auth")
+                    .expect("valid cursor"),
+                event: WebChatV2Event::AuthRequired { prompt: auth },
+            })),
+        );
+
+        assert_eq!(
+            state.transcript.len(),
+            transcript_len,
+            "a replayed FinalReply must not restore redacted assistant content"
+        );
+        assert!(
+            state.pending_gate.is_none(),
+            "replayed Gate/AuthRequired events for a redacted run must stay suppressed"
         );
     }
 

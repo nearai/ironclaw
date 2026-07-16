@@ -367,10 +367,9 @@ async def test_reborn_tui_scroll_auto_follow_and_page_navigation(
     (user + assistant) each, 40 total — comfortably overflowing the pane's
     ~34-row visible item budget (`ui/transcript.rs::visible_window`, fixed
     120x40 pty). Each turn's user text is unique ("hello scroll NNN") so a
-    specific turn's visibility can be asserted; the mock's `\\bhello\\b`
-    canned reply (mock_llm.py CANNED_RESPONSES, already relied on by the
-    happy-path test above) keeps every round trip deterministic — no new
-    mock response needed for this scenario.
+    specific turn's visibility can be asserted. The mock returns a unique
+    `Scroll turn NNN complete.` reply for each input, so every iteration can
+    wait for that exact assistant completion before starting the next turn.
 
     Order independence: this module's server/thread is shared across every
     scenario in the file (see `_spawn_tui`'s docstring), so this test may
@@ -394,12 +393,13 @@ async def test_reborn_tui_scroll_auto_follow_and_page_navigation(
             marker = f"hello scroll {i:03d}"
             child.send(marker)
             child.send("\r")
-            # Unique per turn, and only rendered once the run settles and
-            # `ApiCall::LoadTimeline` refetches the transcript from the
-            # server (see `lib.rs`'s `apply_run_status`) — so this also
-            # doubles as "wait for turn i to fully complete" before typing
-            # the next one, keeping every turn strictly sequential.
-            screen.wait_for(marker, timeout=30)
+            # Waiting for the user marker is insufficient: it appears in the
+            # composer before Enter is processed and in the local transcript
+            # before the model run settles. The mock's reply is unique per
+            # turn, and the status-bar absence then confirms the run left its
+            # working state before the next message is entered.
+            screen.wait_for(f"assistant: Scroll turn {i:03d} complete.", timeout=30)
+            screen.wait_for_absence("working…", timeout=15)
 
         first_marker = "hello scroll 001"
         last_marker = f"hello scroll {SCROLL_TURN_COUNT:03d}"
