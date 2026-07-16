@@ -39,7 +39,6 @@ export function ThemeOption({ checked, icon, label, onSelect }) {
       type="button"
       role="radio"
       aria-checked={checked}
-      aria-label={label}
       onClick={onSelect}
       className={[
         "flex items-center gap-3 rounded-xl border px-4 py-3 text-left transition",
@@ -95,13 +94,16 @@ export function AppearanceTab({
   return (
     <div className="space-y-5">
       <Card padding="md">
-        <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">
+        <h2
+          id="appearance-theme-title"
+          className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]"
+        >
           {title}
-        </h3>
+        </h2>
         <div
           className="grid gap-3 sm:grid-cols-2"
           role="radiogroup"
-          aria-label={title}
+          aria-labelledby="appearance-theme-title"
         >
           <ThemeOption
             checked={theme === "light"}
