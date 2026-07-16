@@ -51,20 +51,75 @@ struct ActionableNotification {
     gate_ref_for_routing: Option<String>,
 }
 
-/// RAII guard that removes a `run_id` from `active_delivery_run_ids` on
-/// drop. Acquired before the delivery semaphore permit so a concurrent ack
+/// Bound on the delivered-run memory. Evicted oldest-first; an evicted entry
+/// only weakens dedup for a run whose final reply was delivered more than
+/// `DELIVERED_RUNS_CAP` deliveries ago — duplicate acks arrive within the
+/// same inbound exchange, not that far apart.
+const DELIVERED_RUNS_CAP: usize = 1024;
+
+/// Single-mutex ledger behind the per-run delivery dedup. `active` is the
+/// single-flight set (at most one live delivery loop per run); `delivered` is
+/// a bounded memory of runs whose FINAL reply was already posted, so a
+/// gate-resolution ack that lands after the original loop delivered and
+/// exited does not start a second loop and re-post the final reply. One
+/// mutex, one atomic skip/proceed decision — two separate locks would
+/// reintroduce the sequential-redelivery TOCTOU this exists to close.
+#[derive(Default)]
+struct DeliveryRunLedger {
+    active: HashSet<TurnRunId>,
+    delivered: HashSet<TurnRunId>,
+    delivered_order: std::collections::VecDeque<TurnRunId>,
+}
+
+impl DeliveryRunLedger {
+    /// Atomically decide whether a new delivery loop may start for `run_id`.
+    fn try_claim(&mut self, run_id: TurnRunId) -> DeliveryClaim {
+        if self.delivered.contains(&run_id) {
+            return DeliveryClaim::AlreadyDelivered;
+        }
+        if !self.active.insert(run_id) {
+            return DeliveryClaim::AlreadyActive;
+        }
+        DeliveryClaim::Claimed
+    }
+
+    fn record_delivered(&mut self, run_id: TurnRunId) {
+        self.active.remove(&run_id);
+        if self.delivered.insert(run_id) {
+            self.delivered_order.push_back(run_id);
+            while self.delivered_order.len() > DELIVERED_RUNS_CAP {
+                if let Some(evicted) = self.delivered_order.pop_front() {
+                    self.delivered.remove(&evicted);
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DeliveryClaim {
+    Claimed,
+    AlreadyActive,
+    AlreadyDelivered,
+}
+
+/// RAII guard that removes a `run_id` from the ledger's active set on drop
+/// (failure/cancel path — success is recorded through
+/// [`DeliveryRunLedger::record_delivered`], after which this drop is a
+/// no-op). Acquired before the delivery semaphore permit so a concurrent ack
 /// for the same run is rejected immediately, without a TOCTOU window on the
 /// permit. Panic-safe: `Drop` tolerates a poisoned mutex.
 struct RunDeliveryGuard<'a> {
-    set: &'a Mutex<HashSet<TurnRunId>>,
+    ledger: &'a Mutex<DeliveryRunLedger>,
     run_id: TurnRunId,
 }
 
 impl Drop for RunDeliveryGuard<'_> {
     fn drop(&mut self) {
-        self.set
+        self.ledger
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+            .active
             .remove(&self.run_id);
     }
 }
@@ -81,11 +136,13 @@ pub struct RunDeliveryObserver {
     /// Per-observer throttle: at most one busy-thread hint per
     /// (conversation fingerprint, external_event_id) pair.
     hint_seen: HintSeenSet,
-    /// Single-flight guard: at most one live delivery loop per run id. A
-    /// gate-resolution ack carries the same submitted run id as the original
-    /// user-message ack (it resumes the run), and the original loop posts
-    /// the next gate exactly once — resolution-ack loops are redundant.
-    active_delivery_run_ids: Mutex<HashSet<TurnRunId>>,
+    /// Per-run delivery dedup: at most one live delivery loop per run id
+    /// (single-flight), plus a bounded memory of runs whose final reply was
+    /// already delivered. A gate-resolution ack carries the same submitted
+    /// run id as the original user-message ack (it resumes the run); whether
+    /// it lands while the original loop is still polling or just after that
+    /// loop delivered and exited, it must not re-post the final reply.
+    delivery_runs: Mutex<DeliveryRunLedger>,
 }
 
 impl RunDeliveryObserver {
@@ -99,7 +156,7 @@ impl RunDeliveryObserver {
             settings,
             delivery_permits: Arc::new(Semaphore::new(settings.max_concurrent_deliveries.get())),
             hint_seen: Mutex::new((std::collections::VecDeque::new(), HashSet::new())),
-            active_delivery_run_ids: Mutex::new(HashSet::new()),
+            delivery_runs: Mutex::new(DeliveryRunLedger::default()),
         }
     }
 
@@ -128,28 +185,32 @@ impl RunDeliveryObserver {
             return;
         }
         let _delivery_guard = if let Some(run_id) = submitted_run_id(&ack) {
-            let already_delivering = {
-                let mut guard = self
-                    .active_delivery_run_ids
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                if guard.contains(&run_id) {
-                    true
-                } else {
-                    guard.insert(run_id);
-                    false
+            let claim = self
+                .delivery_runs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .try_claim(run_id);
+            match claim {
+                DeliveryClaim::AlreadyActive => {
+                    tracing::debug!(
+                        target = "ironclaw::reborn::run_delivery",
+                        %run_id,
+                        "skipping redundant delivery loop: a loop is already watching this run"
+                    );
+                    return;
                 }
-            };
-            if already_delivering {
-                tracing::debug!(
-                    target = "ironclaw::reborn::run_delivery",
-                    %run_id,
-                    "skipping redundant delivery loop: a loop is already watching this run"
-                );
-                return;
+                DeliveryClaim::AlreadyDelivered => {
+                    tracing::debug!(
+                        target = "ironclaw::reborn::run_delivery",
+                        %run_id,
+                        "skipping redundant delivery loop: this run's final reply was already delivered"
+                    );
+                    return;
+                }
+                DeliveryClaim::Claimed => {}
             }
             Some(RunDeliveryGuard {
-                set: &self.active_delivery_run_ids,
+                ledger: &self.delivery_runs,
                 run_id,
             })
         } else {
@@ -369,6 +430,14 @@ impl RunDeliveryObserver {
             }
 
             let Some(marker) = next_blocked_marker else {
+                // Terminal notification delivered — record it so a late
+                // duplicate ack for this run (a gate-resolution ack racing
+                // this loop's exit) skips instead of re-posting the final
+                // reply.
+                self.delivery_runs
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .record_delivered(run_id);
                 if let Some(message) = working_message.take() {
                     self.services
                         .retract_message(scope.clone(), Some(run_id), message)

@@ -613,6 +613,66 @@ async fn observer_delivers_final_reply_through_the_coordinator() {
     );
 }
 
+/// Regression (the channel-host e2e race, made deterministic): a
+/// gate-resolution ack carries the same submitted run id as the original
+/// user-message ack. When it lands AFTER the original delivery loop already
+/// posted the final reply and exited, the observer's delivered-run ledger
+/// must skip it — the in-flight single-flight set alone cannot (the loop's
+/// guard is gone by then), and the duplicate loop would immediately see the
+/// run `Completed` and re-post the final reply.
+#[tokio::test]
+async fn observer_skips_resolution_ack_after_final_reply_was_delivered() {
+    let harness = build_harness(
+        vec![
+            scripted_state(TurnStatus::Completed, None),
+            scripted_state(TurnStatus::Completed, None),
+        ],
+        false,
+        None,
+        Duration::from_secs(5),
+    );
+    let run_id = TurnRunId::new();
+    seed_final_message(&harness.threads, run_id, "approved and finished").await;
+
+    // The original user-message loop delivers the final reply and exits,
+    // releasing its single-flight claim.
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-user-msg"),
+            accepted_ack(run_id),
+        )
+        .await;
+    assert_eq!(
+        harness.adapter.texts(),
+        vec!["approved and finished".to_string()]
+    );
+
+    // The approval-resolution ack for the SAME run arrives after that exit.
+    // Without the delivered-run ledger this spawned a second loop that saw
+    // `Completed` and re-posted the final reply.
+    let approve_envelope = envelope(
+        ProductInboundPayload::ApprovalResolution(
+            ironclaw_product_adapters::ApprovalResolutionPayload::new(
+                "gate-1",
+                ironclaw_product_adapters::ApprovalDecision::ApproveOnce,
+            )
+            .expect("payload"),
+        ),
+        "evt-approve",
+    );
+    harness
+        .observer
+        .observe_ack(approve_envelope, accepted_ack(run_id))
+        .await;
+
+    assert_eq!(
+        harness.adapter.texts(),
+        vec!["approved and finished".to_string()],
+        "a resolution ack landing after delivery must not re-post the final reply"
+    );
+}
+
 #[tokio::test]
 async fn observer_posts_working_indicator_and_retracts_it_after_final_reply() {
     let harness = build_harness(
