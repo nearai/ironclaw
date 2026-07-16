@@ -5096,6 +5096,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_reborn_tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum 0.8.9",
+ "crossterm 0.29.0",
+ "futures",
+ "ironclaw_product_workflow",
+ "ratatui",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower 0.5.3",
+]
+
+[[package]]
 name = "ironclaw_reborn_webui_ingress"
 version = "0.1.0"
 dependencies = [
