@@ -3997,6 +3997,7 @@ dependencies = [
  "ironclaw_reborn_webui_ingress",
  "reqwest 0.12.28",
  "secrecy",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.11.0",

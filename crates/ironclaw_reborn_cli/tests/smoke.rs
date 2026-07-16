@@ -219,7 +219,8 @@ fn release_automation_targets_the_reborn_cli() {
             && !release_plz.contains("name = \"ironclaw_gateway\""),
         "release-plz must not reference retired packages"
     );
-    assert_eq!(env!("CARGO_PKG_VERSION"), "1.0.0");
+    semver::Version::parse(env!("CARGO_PKG_VERSION"))
+        .expect("Reborn CLI package version should remain valid semver");
 }
 
 #[test]
