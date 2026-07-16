@@ -474,37 +474,28 @@ mod tests {
         );
     }
 
-    /// Pins the CURRENT end-to-end mediated behavior: the host-runtime
-    /// `PathPlaceholder` injector substitutes only whole path segments with
-    /// RFC3986-unreserved values, so the Bot API's `bot{token}` in-segment
-    /// shape (shared with `HostEgressTelegramBotApi` since the T2 setup
-    /// pipeline) fails closed at the credential stage — before any network
-    /// dispatch and without leaking token material. Outbound Telegram sends
-    /// (and setup-time `getMe`/`setWebhook`) need an in-segment-capable
-    /// substitution mode in `ironclaw_host_runtime` before they work against
-    /// the real port; flip this test to a success-path assertion when that
-    /// lands.
+    /// End-to-end mediated success path: the host-runtime `PathPlaceholder`
+    /// injector substitutes the braced in-segment `bot{telegram_bot_token}`
+    /// shape (Telegram tokens carry `:`, a legal pchar), so the send reaches
+    /// the network layer with the real token in the dispatched URL path and
+    /// the placeholder — never raw token material — in every runtime-visible
+    /// request field.
     #[tokio::test]
-    async fn telegram_protocol_http_egress_fails_closed_at_substitution_without_network_dispatch() {
+    async fn telegram_protocol_http_egress_substitutes_token_and_dispatches() {
         let (egress, recorded) =
             telegram_egress_with_network(RecordingNetworkHttpEgress::ok(), "12345:secret-token");
 
-        let error = egress
+        let response = egress
             .send(telegram_request(telegram_handle()))
             .await
-            .expect_err("in-segment placeholder substitution is not yet supported by host egress");
+            .expect("in-segment placeholder substitution dispatches");
+        assert_eq!(response.status(), 200);
 
-        assert!(
-            matches!(error, ProtocolHttpEgressError::Network(_)),
-            "credential-stage failures map to a redacted network error: {error:?}"
-        );
-        assert!(
-            !format!("{error:?}").contains("secret-token"),
-            "token material must never appear in the error"
-        );
-        assert!(
-            recorded.lock().expect("network requests lock").is_empty(),
-            "no network dispatch may happen when substitution fails"
+        let requests = recorded.lock().expect("network requests lock");
+        assert_eq!(requests.len(), 1, "exactly one network dispatch");
+        assert_eq!(
+            requests[0].url, "https://api.telegram.org/bot12345:secret-token/sendMessage",
+            "the dispatched URL carries the substituted token"
         );
     }
 
