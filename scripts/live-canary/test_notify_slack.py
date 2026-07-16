@@ -697,13 +697,19 @@ class RebornQaSlackReportTests(unittest.TestCase):
             "content": [
                 {
                     "type": "text",
-                    "text": json.dumps({"status": "pass"}),
+                    "text": json.dumps(
+                        {
+                            "status": "pass",
+                            "reason": "Haiku replaced the authoritative exit reason",
+                        }
+                    ),
                 }
             ]
         }
         with mock.patch.object(notify, "post_json", return_value=haiku_response):
             notify.run_haiku("anthropic-test-key", report)
         self.assertEqual(report.status, "fail")
+        self.assertEqual(report.reason, "lane exited with status 1")
 
     def test_haiku_can_classify_genuinely_unstructured_lane(self):
         report = notify.LaneReport(
@@ -715,7 +721,12 @@ class RebornQaSlackReportTests(unittest.TestCase):
             "content": [
                 {
                     "type": "text",
-                    "text": json.dumps({"status": "pass"}),
+                    "text": json.dumps(
+                        {
+                            "status": "pass",
+                            "reason": "Haiku classified an unstructured lane",
+                        }
+                    ),
                 }
             ]
         }
@@ -726,6 +737,10 @@ class RebornQaSlackReportTests(unittest.TestCase):
         self.assertFalse(report.structured_results)
         self.assertFalse(report.junit_status_authoritative)
         self.assertEqual(report.status, "pass")
+        self.assertEqual(
+            report.reason,
+            "Haiku classified an unstructured lane",
+        )
 
     def test_empty_structured_results_do_not_mask_summary_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:

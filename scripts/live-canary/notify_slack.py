@@ -689,7 +689,8 @@ def run_haiku(api_key: str, report: LaneReport) -> None:
         and not report.junit_status_authoritative
     ):
         report.status = data["status"]
-    report.reason = str(data.get("reason", ""))[:200]
+    if not report.junit_status_authoritative:
+        report.reason = str(data.get("reason", ""))[:200]
     try:
         report.tool_calls_total = int(data.get("tool_calls_total", 0))
     except (TypeError, ValueError):
