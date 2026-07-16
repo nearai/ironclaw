@@ -6574,24 +6574,28 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self,
     ):
         sensitive_error = "x" * 600
-        monotonic_values = iter([100.0, 190.0])
+        clock = types.SimpleNamespace(now=100.0)
+
+        async def search_at_deadline(_ctx, *, marker):
+            self.assertEqual(marker, "LASTSENT_GLOBAL_fixture")
+            clock.now = 190.0
+            return {
+                "checked": False,
+                "permanent": False,
+                "error": sensitive_error,
+            }
+
         with (
             patch.object(
                 run_live_qa,
                 "_slack_search_marker_hits",
-                new=AsyncMock(
-                    return_value={
-                        "checked": False,
-                        "permanent": False,
-                        "error": sensitive_error,
-                    }
-                ),
+                new=AsyncMock(side_effect=search_at_deadline),
             ) as search,
             patch.object(
                 run_live_qa,
                 "time",
                 new=types.SimpleNamespace(
-                    monotonic=lambda: next(monotonic_values),
+                    monotonic=lambda: clock.now,
                 ),
             ),
             patch.object(
@@ -6620,6 +6624,331 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         self.assertEqual(search.await_count, 1)
         sleep.assert_not_awaited()
+
+    def test_slack_search_index_error_redacts_secrets_and_slack_ids_before_truncation(
+        self,
+    ):
+        slack_token = "xoxp-123456789012-123456789012-abcdefghijklmnop"
+        bearer_token = "bearer-secret-value"
+        query_secret = "query-client-secret-value"
+        query_token = "query-token-value"
+        slack_user_id = "U0123456789"
+        slack_channel_id = "D0123456789"
+        raw_error = (
+            f"token={slack_token} Authorization: Bearer {bearer_token} "
+            "GET https://slack.com/api/search.messages?"
+            f"client_secret={query_secret}&token={query_token} "
+            f"user={slack_user_id} channel={slack_channel_id} "
+            + "tail " * 100
+        )
+        with patch.object(
+            run_live_qa,
+            "_slack_search_marker_hits",
+            new=AsyncMock(
+                return_value={
+                    "checked": False,
+                    "permanent": False,
+                    "error": raw_error,
+                }
+            ),
+        ):
+            result = asyncio.run(
+                run_live_qa._wait_for_slack_search_index(
+                    self._dummy_ctx(),
+                    marker="LASTSENT_GLOBAL_fixture",
+                    timeout=0.0,
+                )
+            )
+
+        persisted = str(result["last_error"])
+        self.assertLessEqual(len(persisted), 240)
+        for secret in (
+            slack_token,
+            bearer_token,
+            query_secret,
+            query_token,
+            slack_user_id,
+            slack_channel_id,
+        ):
+            self.assertNotIn(secret, persisted)
+
+    def test_slack_search_index_cancels_hanging_zero_timeout_observation(self):
+        search_cancelled = False
+
+        async def hanging_search(_ctx, *, marker):
+            nonlocal search_cancelled
+            self.assertEqual(marker, "LASTSENT_GLOBAL_fixture")
+            try:
+                await asyncio.Event().wait()
+            finally:
+                search_cancelled = True
+
+        async def drive():
+            with patch.object(
+                run_live_qa,
+                "_slack_search_marker_hits",
+                side_effect=hanging_search,
+            ):
+                task = asyncio.create_task(
+                    run_live_qa._wait_for_slack_search_index(
+                        self._dummy_ctx(),
+                        marker="LASTSENT_GLOBAL_fixture",
+                        timeout=0.0,
+                    )
+                )
+                for _ in range(5):
+                    await asyncio.sleep(0)
+                    if task.done():
+                        break
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    self.fail("hanging Slack search exceeded the zero-timeout budget")
+                return await task
+
+        result = asyncio.run(drive())
+
+        self.assertFalse(result["indexed"])
+        self.assertEqual(result["attempts"], 1)
+        self.assertTrue(search_cancelled)
+
+    def test_slack_search_index_zero_timeout_still_observes_immediate_hit(self):
+        with patch.object(
+            run_live_qa,
+            "_slack_search_marker_hits",
+            new=AsyncMock(
+                return_value={
+                    "checked": True,
+                    "hits": [{"channel_id": "D0FIXTURE1"}],
+                }
+            ),
+        ) as search:
+            result = asyncio.run(
+                run_live_qa._wait_for_slack_search_index(
+                    self._dummy_ctx(),
+                    marker="LASTSENT_GLOBAL_fixture",
+                    timeout=0.0,
+                )
+            )
+
+        self.assertTrue(result["indexed"])
+        self.assertEqual(result["attempts"], 1)
+        search.assert_awaited_once()
+
+    def test_slack_search_index_caps_sleep_at_remaining_deadline(self):
+        clock = types.SimpleNamespace(now=100.0)
+
+        def monotonic():
+            return clock.now
+
+        async def search(_ctx, *, marker):
+            self.assertEqual(marker, "LASTSENT_GLOBAL_fixture")
+            if clock.now == 100.0:
+                clock.now = 189.0
+                return {"checked": True, "hits": []}
+            return {"checked": True, "hits": [{"channel_id": "D0FIXTURE1"}]}
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_slack_search_marker_hits",
+                side_effect=search,
+            ),
+            patch.object(
+                run_live_qa,
+                "time",
+                new=types.SimpleNamespace(monotonic=monotonic),
+            ),
+            patch.object(
+                run_live_qa.asyncio,
+                "sleep",
+                new=AsyncMock(),
+            ) as sleep,
+        ):
+            result = asyncio.run(
+                run_live_qa._wait_for_slack_search_index(
+                    self._dummy_ctx(),
+                    marker="LASTSENT_GLOBAL_fixture",
+                    timeout=90.0,
+                    poll_interval=5.0,
+                )
+            )
+
+        self.assertTrue(result["indexed"])
+        sleep.assert_awaited_once_with(1.0)
+
+    def test_slack_search_index_timeout_env_rejects_non_finite_or_negative_values(
+        self,
+    ):
+        for configured in ("-1", "nan", "inf", "-inf"):
+            with self.subTest(configured=configured):
+                ctx = self._dummy_ctx()
+                ctx.env = {
+                    "REBORN_WEBUI_V2_LIVE_QA_SLACK_INDEX_TIMEOUT_SECONDS": configured
+                }
+                with self.assertRaisesRegex(
+                    AssertionError,
+                    "must be a finite non-negative number",
+                ):
+                    run_live_qa._slack_search_index_timeout_seconds(ctx)
+
+    def test_slack_search_index_rejects_malformed_search_observation(self):
+        malformed_observations = (
+            None,
+            {"checked": True, "hits": "not-a-list"},
+            {"hits": []},
+        )
+        for observation in malformed_observations:
+            with (
+                self.subTest(observation=observation),
+                patch.object(
+                    run_live_qa,
+                    "_slack_search_marker_hits",
+                    new=AsyncMock(return_value=observation),
+                ),
+            ):
+                result = asyncio.run(
+                    run_live_qa._wait_for_slack_search_index(
+                        self._dummy_ctx(),
+                        marker="LASTSENT_GLOBAL_fixture",
+                        timeout=0.0,
+                    )
+                )
+                self.assertFalse(result["indexed"])
+                self.assertEqual(result["attempts"], 1)
+                self.assertIn("malformed", str(result["last_error"]).lower())
+
+    def test_slack_search_index_search_exception_is_sanitized(self):
+        slack_token = "xoxp-123456789012-123456789012-abcdefghijklmnop"
+        raw_error = (
+            f"Authorization: Bearer {slack_token} "
+            "https://slack.com/api/search.messages?token=query-secret "
+            "for U0123456789 in D0123456789"
+        )
+        with patch.object(
+            run_live_qa,
+            "_slack_search_marker_hits",
+            new=AsyncMock(side_effect=RuntimeError(raw_error)),
+        ):
+            result = asyncio.run(
+                run_live_qa._wait_for_slack_search_index(
+                    self._dummy_ctx(),
+                    marker="LASTSENT_GLOBAL_fixture",
+                    timeout=0.0,
+                )
+            )
+
+        self.assertFalse(result["indexed"])
+        persisted = json.dumps(result)
+        for secret in (
+            slack_token,
+            "query-secret",
+            "U0123456789",
+            "D0123456789",
+        ):
+            self.assertNotIn(secret, persisted)
+
+    def test_global_last_sent_preflight_exception_is_sanitized_infrastructure(self):
+        slack_token = "xoxp-123456789012-123456789012-abcdefghijklmnop"
+        raw_error = (
+            f"Authorization: Bearer {slack_token} "
+            "https://slack.com/api/search.messages?token=query-secret "
+            "for U0123456789 in D0123456789"
+        )
+        ctx = self._dummy_ctx()
+        ctx.env = {
+            "REBORN_WEBUI_V2_LIVE_QA_SLACK_INDEX_TIMEOUT_SECONDS": "0"
+        }
+        with (
+            patch.object(
+                run_live_qa,
+                "_require_slack_personal_token",
+                return_value="xoxp-unit-test",
+            ),
+            patch.object(
+                run_live_qa,
+                "_require_slack_personal_bot_dm_channel",
+                return_value="D0FIXTURE1",
+            ),
+            patch.object(
+                run_live_qa,
+                "_seed_slack_fixture_message",
+                new=AsyncMock(return_value={"ok": True}),
+            ),
+            patch.object(
+                run_live_qa,
+                "_wait_for_slack_search_index",
+                new=AsyncMock(side_effect=RuntimeError(raw_error)),
+            ),
+            patch.object(
+                run_live_qa,
+                "_slack_correctness_chat_reply",
+                new=AsyncMock(),
+            ) as chat,
+        ):
+            result = asyncio.run(
+                run_live_qa.case_qa_10g_slack_last_message_sent_global(ctx)
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.details["failure_class"], "infrastructure")
+        self.assertEqual(
+            result.details["failure_category"], "slack_search_index_stale"
+        )
+        self.assertTrue(result.details["inconclusive"])
+        persisted = json.dumps(result.details)
+        for secret in (
+            slack_token,
+            "query-secret",
+            "U0123456789",
+            "D0123456789",
+        ):
+            self.assertNotIn(secret, persisted)
+        chat.assert_not_awaited()
+
+    def test_global_last_sent_search_cancellation_propagates(self):
+        ctx = self._dummy_ctx()
+        ctx.env = {
+            "REBORN_WEBUI_V2_LIVE_QA_SLACK_INDEX_TIMEOUT_SECONDS": "0"
+        }
+        cancellation = asyncio.CancelledError("search cancelled")
+        with (
+            patch.object(
+                run_live_qa,
+                "_require_slack_personal_token",
+                return_value="xoxp-unit-test",
+            ),
+            patch.object(
+                run_live_qa,
+                "_require_slack_personal_bot_dm_channel",
+                return_value="D0FIXTURE1",
+            ),
+            patch.object(
+                run_live_qa,
+                "_seed_slack_fixture_message",
+                new=AsyncMock(return_value={"ok": True}),
+            ),
+            patch.object(
+                run_live_qa,
+                "_slack_search_marker_hits",
+                new=AsyncMock(side_effect=cancellation),
+            ),
+            patch.object(
+                run_live_qa,
+                "_slack_correctness_chat_reply",
+                new=AsyncMock(),
+            ) as chat,
+        ):
+            with self.assertRaises(asyncio.CancelledError) as raised:
+                asyncio.run(
+                    run_live_qa.case_qa_10g_slack_last_message_sent_global(ctx)
+                )
+
+        self.assertIs(raised.exception, cancellation)
+        chat.assert_not_awaited()
 
     def test_global_last_sent_skips_model_when_slack_index_is_stale(self):
         with (

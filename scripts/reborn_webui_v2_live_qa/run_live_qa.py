@@ -2579,6 +2579,65 @@ SLACK_SEARCH_INDEX_TIMEOUT_ENV = (
 )
 SLACK_SEARCH_INDEX_DEFAULT_TIMEOUT_SECONDS = 90.0
 SLACK_SEARCH_INDEX_ERROR_MAX_CHARS = 240
+SLACK_SEARCH_INDEX_QUERY_SECRET_PATTERN = re.compile(
+    r"(?i)([?&](?:api_key|client_secret|oauth_token|secret|token)=)[^&#\s]+"
+)
+
+
+def _sanitize_slack_search_index_error(error: object) -> str:
+    redacted = str(_redact_browser_diagnostic_value(error))
+    redacted = SLACK_SEARCH_INDEX_QUERY_SECRET_PATTERN.sub(
+        r"\1<REDACTED>",
+        redacted,
+    )
+    redacted = RAW_SLACK_CONVERSATION_ID_PATTERN.sub(
+        "C_REDACTED",
+        _redact_slack_user_ids_in_text(redacted),
+    )
+    return " ".join(redacted.split())[:SLACK_SEARCH_INDEX_ERROR_MAX_CHARS]
+
+
+def _slack_search_index_failure_metadata(
+    *,
+    started: float,
+    attempts: int,
+    error: object | None,
+) -> dict[str, object]:
+    result: dict[str, object] = {
+        "indexed": False,
+        "attempts": attempts,
+        "latency_ms": int(max(0.0, time.monotonic() - started) * 1000),
+    }
+    if error:
+        result["last_error"] = _sanitize_slack_search_index_error(error)
+    return result
+
+
+def _normalize_slack_search_index_metadata(metadata: object) -> dict[str, object]:
+    if not isinstance(metadata, dict):
+        raise ValueError("malformed Slack search index preflight metadata")
+    indexed = metadata.get("indexed")
+    attempts = metadata.get("attempts")
+    latency_ms = metadata.get("latency_ms")
+    if (
+        not isinstance(indexed, bool)
+        or isinstance(attempts, bool)
+        or not isinstance(attempts, int)
+        or attempts < 0
+        or isinstance(latency_ms, bool)
+        or not isinstance(latency_ms, int)
+        or latency_ms < 0
+    ):
+        raise ValueError("malformed Slack search index preflight metadata")
+    normalized: dict[str, object] = {
+        "indexed": indexed,
+        "attempts": attempts,
+        "latency_ms": latency_ms,
+    }
+    error = metadata.get("last_error")
+    if error:
+        normalized["last_error"] = _sanitize_slack_search_index_error(error)
+    return normalized
 
 
 def _slack_search_index_timeout_seconds(ctx: LiveQaContext) -> float:
@@ -2613,28 +2672,59 @@ async def _wait_for_slack_search_index(
     attempts = 0
     while True:
         attempts += 1
-        observation = await _slack_search_marker_hits(ctx, marker=marker)
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            async with asyncio.timeout(remaining):
+                observation = await _slack_search_marker_hits(ctx, marker=marker)
+        except TimeoutError:
+            return _slack_search_index_failure_metadata(
+                started=started,
+                attempts=attempts,
+                error="Slack search observation timed out",
+            )
+        except Exception as exc:
+            return _slack_search_index_failure_metadata(
+                started=started,
+                attempts=attempts,
+                error=_exc_text(exc),
+            )
+        if not isinstance(observation, dict):
+            return _slack_search_index_failure_metadata(
+                started=started,
+                attempts=attempts,
+                error="malformed Slack search observation: expected an object",
+            )
+        checked = observation.get("checked")
         hits = observation.get("hits")
+        if (
+            checked is True
+            and (
+                not isinstance(hits, list)
+                or any(not isinstance(hit, dict) for hit in hits)
+            )
+        ) or (
+            checked is False
+            and not isinstance(observation.get("error"), str)
+        ) or checked not in (True, False):
+            return _slack_search_index_failure_metadata(
+                started=started,
+                attempts=attempts,
+                error="malformed Slack search observation: invalid fields",
+            )
         now = time.monotonic()
         latency_ms = int(max(0.0, now - started) * 1000)
-        if observation.get("checked") and isinstance(hits, list) and hits:
+        if checked and hits:
             return {
                 "indexed": True,
                 "attempts": attempts,
                 "latency_ms": latency_ms,
             }
         if now >= deadline:
-            result: dict[str, object] = {
-                "indexed": False,
-                "attempts": attempts,
-                "latency_ms": latency_ms,
-            }
-            error = observation.get("error")
-            if error:
-                result["last_error"] = " ".join(str(error).split())[
-                    :SLACK_SEARCH_INDEX_ERROR_MAX_CHARS
-                ]
-            return result
+            return _slack_search_index_failure_metadata(
+                started=started,
+                attempts=attempts,
+                error=observation.get("error"),
+            )
         await asyncio.sleep(min(max(poll_interval, 0.0), deadline - now))
 
 
@@ -7348,11 +7438,23 @@ async def case_qa_10g_slack_last_message_sent_global(
             label=last_sent_marker,
             actor="personal",
         )
-        search_index = await _wait_for_slack_search_index(
-            ctx,
-            marker=last_sent_marker,
-            timeout=_slack_search_index_timeout_seconds(ctx),
-        )
+        search_timeout = _slack_search_index_timeout_seconds(ctx)
+        search_started = time.monotonic()
+        try:
+            raw_search_index = await _wait_for_slack_search_index(
+                ctx,
+                marker=last_sent_marker,
+                timeout=search_timeout,
+            )
+            search_index = _normalize_slack_search_index_metadata(
+                raw_search_index
+            )
+        except Exception as exc:
+            search_index = _slack_search_index_failure_metadata(
+                started=search_started,
+                attempts=0,
+                error=_exc_text(exc),
+            )
         details["slack_search_index"] = search_index
         if not search_index.get("indexed"):
             result = _result(
