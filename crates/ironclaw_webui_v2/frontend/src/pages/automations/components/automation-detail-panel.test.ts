@@ -130,6 +130,7 @@ function createHarness({ onRenameAutomation = () => {} } = {}) {
   let hookCursor = 0;
 
   function Button() {}
+  function ConfirmDialog() {}
   function EmptyPanel() {}
   function Icon() {}
   function Input() {}
@@ -171,6 +172,7 @@ function createHarness({ onRenameAutomation = () => {} } = {}) {
   const context = {
     globalThis: {},
     Button,
+    ConfirmDialog,
     EmptyPanel,
     Icon,
     Input,
@@ -186,13 +188,13 @@ function createHarness({ onRenameAutomation = () => {} } = {}) {
     recentRunKey: (run) => run.run_id,
     useNavigate: () => () => {},
     useT: () => t,
-    window: { confirm: () => true },
   };
 
   vm.runInNewContext(sourceForTest(), context);
   const exports = context.globalThis.__testExports;
   return {
     Button,
+    ConfirmDialog,
     Input,
     exports,
     render(overrides = {}) {
@@ -205,6 +207,32 @@ function createHarness({ onRenameAutomation = () => {} } = {}) {
     },
   };
 }
+
+test("AutomationDetailPanel deletes only after confirming the shared dialog", () => {
+  const deletions = [];
+  const harness = createHarness();
+
+  let rendered = harness.render({
+    onDeleteAutomation: (automationId) => deletions.push(automationId),
+  });
+  const deleteButton = componentProps(rendered, harness.Button).find(
+    (button) => button["aria-label"] === "Delete: Daily status",
+  );
+  assert.ok(deleteButton, "delete button should render");
+
+  deleteButton.onClick();
+  assert.deepEqual(deletions, []);
+
+  rendered = harness.render({
+    onDeleteAutomation: (automationId) => deletions.push(automationId),
+  });
+  const [dialog] = componentProps(rendered, harness.ConfirmDialog);
+  assert.equal(dialog.open, true);
+  assert.equal(dialog.title, "Delete: Daily status");
+
+  dialog.onConfirm();
+  assert.deepEqual(deletions, ["automation-alpha"]);
+});
 
 test("AutomationDetailPanel submits a trimmed rename from the inline editor", () => {
   const calls = [];
@@ -286,4 +314,38 @@ test("AutomationDetailPanel preserves rename drafts across same automation refre
 
   [input] = componentProps(rendered, harness.Input);
   assert.equal(input.value, "Draft in progress");
+});
+
+// #5886: when the presenter attaches hold_meta_label (active_hold present),
+// the detail panel must surface it near the status pill.
+test("AutomationDetailPanel renders hold_meta_label when present", () => {
+  const harness = createHarness();
+  const rendered = harness.render({
+    automation: {
+      ...automation(),
+      primary_status_label: "Waiting for your approval",
+      primary_status_tone: "warning",
+      hold_meta_label:
+        "Paused since Jul 14, 12:51 AM · 3 scheduled occurrences elapsed while held",
+    },
+  });
+
+  assert.ok(
+    collectScalars(rendered).includes(
+      "Paused since Jul 14, 12:51 AM · 3 scheduled occurrences elapsed while held",
+    ),
+    "hold_meta_label text should render in the detail panel",
+  );
+});
+
+test("AutomationDetailPanel omits hold meta text when hold_meta_label is absent", () => {
+  const harness = createHarness();
+  const rendered = harness.render();
+
+  assert.ok(
+    !collectScalars(rendered).some((value) =>
+      typeof value === "string" && value.includes("scheduled occurrences elapsed"),
+    ),
+    "no hold meta text should render when there is no active hold",
+  );
 });

@@ -7,8 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(reborn)* automations and `trigger_list` now surface why a scheduled trigger is currently held (approval/auth/in-progress) and how many scheduled occurrences elapsed while held ([#5886](https://github.com/nearai/ironclaw/issues/5886)).
+
 ### Fixed
 
+- *(webui-v2)* render the Extensions Registry as soon as catalog data arrives instead of holding the skeleton screen for slower installed-extension enrichment ([#6052](https://github.com/nearai/ironclaw/issues/6052)).
+- *(webui-v2)* submit the latest composer value when Enter follows input before React rerenders, avoiding intermittently dropped follow-up messages ([#6044](https://github.com/nearai/ironclaw/issues/6044)).
 - *(reborn)* recover the filesystem resource governor after transient libSQL writer contention without bypassing durable accounting, reject stale authority writes during recovery, and distinguish accounting outages from provider budget failures.
 - *(reborn)* `builtin.result_read` input errors now carry a structured, model-visible `CapabilityInputIssue` (field path, issue code, expected/received) with model-controlled echoes secret-redacted, and truncated previews of top-level JSON-array results report the array's `item_count` — persisted end-to-end through the observation validator ([#6059](https://github.com/nearai/ironclaw/pull/6059)).
 - *(reborn)* ride out transient model-provider outages with cancellation-aware availability retries, fail fast when no provider is configured, and preserve actionable shell/coding failure reasons for the model ([#5959](https://github.com/nearai/ironclaw/pull/5959)).

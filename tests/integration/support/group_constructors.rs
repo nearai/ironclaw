@@ -121,6 +121,14 @@ impl RebornIntegrationGroup {
         Self::builder().triggers().await
     }
 
+    /// Trigger verbs plus `builtin.write_file` on one runtime (#5886
+    /// blocked-trigger visibility). Auto-approve is ON so the verbs dispatch
+    /// gate-free; a scenario gates the write via
+    /// `set_ask_each_time_override_for_test`.
+    pub async fn triggers_with_gated_write() -> HarnessResult<Self> {
+        Self::builder().triggers_with_gated_write().await
+    }
+
     /// Group whose ONLY capability is `builtin.skill_activate` (E-SKILL seam).
     /// A system-scoped `greet` skill is seeded for the run; a scripted
     /// `builtin.skill_activate` call for `greet` dispatches the synthetic
@@ -382,6 +390,15 @@ impl RebornIntegrationGroupBuilder {
     pub async fn triggers(self) -> HarnessResult<RebornIntegrationGroup> {
         let host_runtime =
             super::super::harness::profiles::trigger::trigger_management_tools().await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.build_with_capability(capability).await
+    }
+
+    /// Build a triggers-plus-gated-write group. See
+    /// [`RebornIntegrationGroup::triggers_with_gated_write`].
+    pub async fn triggers_with_gated_write(self) -> HarnessResult<RebornIntegrationGroup> {
+        let host_runtime =
+            super::super::harness::profiles::trigger::trigger_management_with_gated_write().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await
     }

@@ -1447,6 +1447,7 @@ fn automation_info(
         }],
         is_active: true,
         created_at: Some("2026-06-02T18:00:00Z".parse().expect("created at")),
+        active_hold: None,
     }
 }
 
@@ -6795,6 +6796,7 @@ async fn get_timeline_succeeds_for_own_automation_trigger_thread() {
             }],
             is_active: true,
             created_at: None,
+            active_hold: None,
         }])
         .with_resolve_scope_for_thread(
             trigger_thread_id.clone(),
@@ -6909,6 +6911,7 @@ async fn read_attachment_reads_trigger_thread_bytes_under_creator_scope() {
             }],
             is_active: true,
             created_at: None,
+            active_hold: None,
         }])
         .with_resolve_scope_for_thread(
             trigger_thread_id.clone(),
@@ -7365,6 +7368,7 @@ fn automation_facade_with_trigger_thread(
             }],
             is_active: true,
             created_at: None,
+            active_hold: None,
         }])
         .with_resolve_scope_for_thread(
             trigger_thread_id.clone(),
@@ -7847,6 +7851,7 @@ async fn get_timeline_rejects_thread_id_absent_from_callers_automations() {
             }],
             is_active: true,
             created_at: None,
+            active_hold: None,
         }]), // resolve_scope is None — the facade does not recognise the requested thread.
     );
 

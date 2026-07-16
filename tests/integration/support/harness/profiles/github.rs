@@ -147,7 +147,7 @@ fn github_issue_tools_with_credential_result(
     let mounts = workspace_mounts(MountPermissions::read_write_list_delete())?;
     let (io, result_writer_io) = super::super::default_capability_io_pair();
     Ok(HostRuntimeCapabilityHarness {
-        runtime,
+        runtime: Mutex::new(runtime),
         approval_parts: None,
         auto_approve_settings: None,
         pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
@@ -185,5 +185,6 @@ fn github_issue_tools_with_credential_result(
         persistent_approval_policies: None,
         trigger_repository: None,
         reborn_services: None,
+        trigger_active_run_lookup_requested: false,
     })
 }
