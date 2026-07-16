@@ -51,6 +51,17 @@ pub struct ThreadMessageSummary {
     pub actor_id: Option<String>,
     #[serde(default)]
     pub created_at: Option<String>,
+    /// Present on an `assistant` row: the run that produced it. The wire
+    /// `ThreadMessageRecord` always carries this field (server-side, it's
+    /// how a retried draft is deduped against its run — see
+    /// `ThreadMessageRecord::turn_run_id` at `ironclaw_threads::contract`);
+    /// this crate previously dropped it as an unused subtraction (serde
+    /// silently ignores unknown fields), but it is the stable id `lib.rs`'s
+    /// `apply_timeline_page` and `app/transcript.rs`'s `FinalReply` handling
+    /// now share to dedupe an SSE replay against an already-loaded timeline
+    /// snapshot — see `app/mod.rs`'s `AppState::known_reply_ids` doc.
+    #[serde(default)]
+    pub turn_run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

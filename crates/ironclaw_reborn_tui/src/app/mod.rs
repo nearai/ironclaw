@@ -31,6 +31,8 @@ pub mod transcript;
 #[cfg(test)]
 mod test_support;
 
+use std::collections::HashSet;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ironclaw_product_workflow::webchat_schema::WebChatV2EventFrame;
 use ironclaw_product_workflow::{CapabilityActivityView, CapabilityDisplayPreviewView};
@@ -267,6 +269,18 @@ pub struct AppState {
     /// without this crate storing a typed `TurnRunId` (see the module
     /// doc's boundary note).
     pub active_run_id: Option<String>,
+    /// `turn_run_id`s of every assistant reply currently represented in
+    /// `transcript` — either from the last `LoadTimeline` snapshot
+    /// (`lib.rs`'s `apply_timeline_page` rebuilds this set alongside
+    /// `transcript` on every load) or from a live `FinalReply` this session
+    /// already appended. `app/transcript.rs`'s `FinalReply` handling checks
+    /// this before pushing: a cursor-less SSE resubscribe (fired on every
+    /// thread switch, see `lib.rs`'s `run_event_loop`) replays the whole
+    /// thread's event history, which would otherwise re-append every
+    /// already-loaded reply on top of the timeline snapshot. `HashSet` (not
+    /// a `Vec`) because membership, not order, is all a dedup check needs —
+    /// display order is exactly `transcript`'s own order.
+    pub known_reply_ids: HashSet<String>,
 }
 
 impl AppState {

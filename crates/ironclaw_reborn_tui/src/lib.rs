@@ -128,11 +128,7 @@ async fn run_event_loop(
         .timeline(&initial_thread.thread_id, INITIAL_TIMELINE_LIMIT, None)
         .await
     {
-        state.transcript = page
-            .messages
-            .iter()
-            .map(transcript_item_from_message)
-            .collect();
+        apply_timeline_page(&mut state, page);
     }
 
     let mut subscribed_thread_id = initial_thread.thread_id;
@@ -293,13 +289,7 @@ async fn execute_api_call(client: &ApiClient, state: &mut AppState, call: ApiCal
             limit,
             cursor,
         } => match client.timeline(&thread_id, limit, cursor).await {
-            Ok(page) => {
-                state.transcript = page
-                    .messages
-                    .iter()
-                    .map(transcript_item_from_message)
-                    .collect();
-            }
+            Ok(page) => apply_timeline_page(state, page),
             Err(err) => set_local_error(state, "load timeline", err),
         },
         ApiCall::SendMessage { thread_id, text } => {
@@ -518,6 +508,27 @@ fn apply_llm_test_result(state: &mut AppState, result: LlmProbeResult) {
     }
 }
 
+/// Replaces `state.transcript` from a freshly-fetched timeline page, and
+/// rebuilds `state.known_reply_ids` (the set of assistant-reply
+/// `turn_run_id`s the transcript now represents) alongside it — the one
+/// place that mutates both together, called from TUI startup and the
+/// `ApiCall::LoadTimeline` arm below. Keeping the two in lockstep is what
+/// lets `app/transcript.rs`'s `FinalReply` handling correctly recognize an
+/// SSE-replayed reply as already-loaded rather than appending a duplicate —
+/// see `AppState::known_reply_ids`'s doc.
+fn apply_timeline_page(state: &mut AppState, page: client::TimelinePage) {
+    state.known_reply_ids = page
+        .messages
+        .iter()
+        .filter_map(|m| m.turn_run_id.clone())
+        .collect();
+    state.transcript = page
+        .messages
+        .iter()
+        .map(transcript_item_from_message)
+        .collect();
+}
+
 /// `ThreadMessageSummary::kind` is the raw wire string (see
 /// `client/threads.rs`'s doc comment for the full enumeration); only
 /// `user`/`assistant` map to their own `TranscriptItem` variant, everything
@@ -549,11 +560,36 @@ mod tests {
     use axum::response::{IntoResponse, Response};
     use tokio::net::TcpListener;
 
+    use chrono::Utc;
+    use ironclaw_product_workflow::FinalReplyView;
     use ironclaw_product_workflow::ProjectionCursor;
     use ironclaw_product_workflow::webchat_schema::WebChatV2Event;
+    use ironclaw_turns::TurnRunId;
 
     use super::*;
     use app::{AutomationsModalState, PendingGate, ThreadsModalState};
+
+    /// Builds the `AppEvent::Server` a real SSE-replayed `FinalReply` would
+    /// produce, and feeds it straight through the reducer — the exact path
+    /// `run_event_loop`'s `map_sse_item`/`Ok(frame)` arm drives in
+    /// production, minus the network. Shared by the Defect E dedup tests
+    /// below.
+    fn replay_final_reply(state: &mut AppState, turn_run_id: TurnRunId, text: &str) {
+        app::reduce(
+            state,
+            AppEvent::Server(Box::new(WebChatV2EventFrame {
+                cursor: ProjectionCursor::new(format!("cursor:tui:test:{turn_run_id}"))
+                    .expect("valid cursor"),
+                event: WebChatV2Event::FinalReply {
+                    reply: FinalReplyView {
+                        turn_run_id,
+                        text: text.to_string(),
+                        generated_at: Utc::now(),
+                    },
+                },
+            })),
+        );
+    }
 
     /// A minimal, content-agnostic frame: these tests exercise `map_sse_item`'s
     /// connection-bookkeeping (does a `Connected` event get prepended, does
@@ -848,6 +884,144 @@ mod tests {
                 .transcript
                 .iter()
                 .any(|i| i.as_error_text() == Some("stale"))
+        );
+    }
+
+    /// Defect E, driven through the real production seam: a `LoadTimeline`
+    /// `ApiCall` (as `run_event_loop`'s startup and thread-switch paths both
+    /// fire) followed by the SSE stream replaying the same turn's
+    /// `FinalReply` — exactly what a cursor-less resubscribe does on every
+    /// thread switch (`handlers.rs::stream_events` drains from origin on
+    /// first connect) — must not duplicate the already-loaded message, while
+    /// a genuinely new reply still appends.
+    #[tokio::test]
+    async fn sse_replay_of_an_already_loaded_reply_does_not_duplicate_the_transcript() {
+        let stub = StubServer::start().await;
+        let run_id = TurnRunId::new();
+        stub.ok(
+            "GET /api/webchat/v2/threads/t-1/timeline",
+            serde_json::json!({
+                "thread": {"thread_id": "t-1"},
+                "messages": [
+                    {"message_id": "m-1", "sequence": 1, "kind": "user", "status": "accepted", "content": "hi"},
+                    {"message_id": "m-2", "sequence": 2, "kind": "assistant", "status": "finalized", "content": "hello", "turn_run_id": run_id.to_string()},
+                ],
+            }),
+        );
+        let mut state = AppState::default().set_thread_id("t-1");
+
+        execute_effect(
+            &stub.client(),
+            &mut state,
+            Effect::Api(ApiCall::LoadTimeline {
+                thread_id: "t-1".to_string(),
+                limit: 50,
+                cursor: None,
+            }),
+        )
+        .await;
+        assert_eq!(
+            state.transcript.len(),
+            2,
+            "timeline snapshot loads both rows"
+        );
+
+        replay_final_reply(&mut state, run_id, "hello");
+        assert_eq!(
+            state.transcript.len(),
+            2,
+            "replaying the already-loaded reply's turn_run_id must not duplicate it"
+        );
+
+        replay_final_reply(&mut state, TurnRunId::new(), "a brand new reply");
+        assert_eq!(
+            state.transcript.len(),
+            3,
+            "a reply for a genuinely new turn_run_id must still append"
+        );
+    }
+
+    /// Two thread switches in a row: each `LoadTimeline` wholesale-replaces
+    /// the transcript (and `known_reply_ids` alongside it, via
+    /// `apply_timeline_page`), so thread A's SSE stream replaying its own
+    /// history after the switch to B must not resurrect A's messages, and B's
+    /// own replay must not duplicate B's snapshot either.
+    #[tokio::test]
+    async fn two_consecutive_thread_switches_do_not_duplicate_the_transcript() {
+        let stub = StubServer::start().await;
+        let run_a = TurnRunId::new();
+        let run_b = TurnRunId::new();
+        stub.ok(
+            "GET /api/webchat/v2/threads/t-a/timeline",
+            serde_json::json!({
+                "thread": {"thread_id": "t-a"},
+                "messages": [
+                    {"message_id": "a-1", "sequence": 1, "kind": "user", "status": "accepted", "content": "hi a"},
+                    {"message_id": "a-2", "sequence": 2, "kind": "assistant", "status": "finalized", "content": "hello a", "turn_run_id": run_a.to_string()},
+                ],
+            }),
+        );
+        stub.ok(
+            "GET /api/webchat/v2/threads/t-b/timeline",
+            serde_json::json!({
+                "thread": {"thread_id": "t-b"},
+                "messages": [
+                    {"message_id": "b-1", "sequence": 1, "kind": "user", "status": "accepted", "content": "hi b"},
+                    {"message_id": "b-2", "sequence": 2, "kind": "assistant", "status": "finalized", "content": "hello b", "turn_run_id": run_b.to_string()},
+                ],
+            }),
+        );
+        let mut state = AppState::default().set_thread_id("t-a");
+
+        // Switch 1: load thread A, then A's own SSE stream replays A's history.
+        execute_effect(
+            &stub.client(),
+            &mut state,
+            Effect::Api(ApiCall::LoadTimeline {
+                thread_id: "t-a".to_string(),
+                limit: 50,
+                cursor: None,
+            }),
+        )
+        .await;
+        replay_final_reply(&mut state, run_a, "hello a");
+        assert_eq!(
+            state.transcript.len(),
+            2,
+            "thread A's own replay must not duplicate its snapshot"
+        );
+
+        // Switch 2: load thread B (replaces the transcript wholesale), then
+        // B's own SSE stream replays B's history.
+        execute_effect(
+            &stub.client(),
+            &mut state,
+            Effect::Api(ApiCall::LoadTimeline {
+                thread_id: "t-b".to_string(),
+                limit: 50,
+                cursor: None,
+            }),
+        )
+        .await;
+        replay_final_reply(&mut state, run_b, "hello b");
+
+        assert_eq!(
+            state.transcript.len(),
+            2,
+            "the second switch's replay must not duplicate, nor leave A's rows behind"
+        );
+        assert!(
+            state
+                .transcript
+                .iter()
+                .any(|i| i.as_final_text() == Some("hello b"))
+        );
+        assert!(
+            !state
+                .transcript
+                .iter()
+                .any(|i| i.as_final_text() == Some("hello a")),
+            "thread A's messages must not leak into thread B's transcript"
         );
     }
 

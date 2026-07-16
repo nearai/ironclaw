@@ -104,8 +104,16 @@ pub(crate) fn activity_view(
 }
 
 pub(crate) fn final_reply_view(text: &str) -> FinalReplyView {
+    final_reply_view_for_run(TurnRunId::new(), text)
+}
+
+/// Like [`final_reply_view`], but with a caller-chosen `turn_run_id` — needed
+/// by the `FinalReply` SSE-replay dedup tests, which must construct two
+/// `FinalReplyView`s that share the same run id (a fresh `TurnRunId::new()`
+/// per call, as the plain `final_reply_view` above does, can never collide).
+pub(crate) fn final_reply_view_for_run(turn_run_id: TurnRunId, text: &str) -> FinalReplyView {
     FinalReplyView {
-        turn_run_id: TurnRunId::new(),
+        turn_run_id,
         text: text.to_string(),
         generated_at: Utc::now(),
     }

@@ -62,10 +62,20 @@ pub(crate) fn apply_server_event(state: &mut AppState, frame: WebChatV2EventFram
         }
         WebChatV2Event::Gate { prompt } => gate::apply_gate_prompt(state, prompt),
         WebChatV2Event::AuthRequired { prompt } => gate::apply_auth_prompt(state, prompt),
+        // `HashSet::insert` returns `true` only the first time a given
+        // `turn_run_id` is seen: a genuinely new reply appends (and is
+        // recorded), while a replayed one — the SSE resubscribe on a thread
+        // switch has no cursor, so it re-delivers every past event,
+        // including this one, on top of the timeline snapshot `lib.rs`'s
+        // `apply_timeline_page` already loaded it from — is a no-op here.
+        // `state.running` still clears either way: a stale replay finding
+        // the run no longer active is the correct outcome, not a bug.
         WebChatV2Event::FinalReply { reply } => {
-            state
-                .transcript
-                .push(TranscriptItem::final_text(reply.text));
+            if state.known_reply_ids.insert(reply.turn_run_id.to_string()) {
+                state
+                    .transcript
+                    .push(TranscriptItem::final_text(reply.text));
+            }
             state.running = false;
             Vec::new()
         }
@@ -283,10 +293,61 @@ mod tests {
     use ironclaw_turns::{EventCursor, TurnRunId, TurnStatus};
 
     use super::super::test_support::{
-        activity_view, final_reply_view, frame, projection_gate, projection_run_status,
-        projection_state, projection_text, run_state_with_failure,
+        activity_view, final_reply_view, final_reply_view_for_run, frame, projection_gate,
+        projection_run_status, projection_state, projection_text, run_state_with_failure,
     };
     use super::*;
+
+    /// Pins Defect E's fix at the reducer level: a `FinalReply` carrying a
+    /// `turn_run_id` already in `state.known_reply_ids` (as it would be
+    /// after a cursor-less SSE resubscribe replays a reply the timeline
+    /// snapshot already loaded — see `lib.rs`'s `apply_timeline_page`) must
+    /// upsert-skip rather than append a second transcript row, while a
+    /// reply for a genuinely unseen run still appends normally.
+    #[test]
+    fn final_reply_dedupes_by_turn_run_id_but_a_new_run_id_still_appends() {
+        let mut state = AppState::default();
+        let run_id = TurnRunId::new();
+
+        apply_server_event(
+            &mut state,
+            frame(WebChatV2Event::FinalReply {
+                reply: final_reply_view_for_run(run_id, "hello"),
+            }),
+        );
+        // Simulates the SSE replay: same run_id, same text, arriving again.
+        apply_server_event(
+            &mut state,
+            frame(WebChatV2Event::FinalReply {
+                reply: final_reply_view_for_run(run_id, "hello"),
+            }),
+        );
+
+        assert_eq!(
+            state
+                .transcript
+                .iter()
+                .filter(|i| i.as_final_text() == Some("hello"))
+                .count(),
+            1,
+            "a replayed FinalReply for an already-known turn_run_id must not duplicate"
+        );
+
+        let other_run = TurnRunId::new();
+        apply_server_event(
+            &mut state,
+            frame(WebChatV2Event::FinalReply {
+                reply: final_reply_view_for_run(other_run, "goodbye"),
+            }),
+        );
+        assert!(
+            state
+                .transcript
+                .iter()
+                .any(|i| i.as_final_text() == Some("goodbye")),
+            "a reply for a genuinely new run_id must still append"
+        );
+    }
 
     #[test]
     fn capability_activity_upserts_by_invocation_id() {
