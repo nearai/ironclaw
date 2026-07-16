@@ -132,6 +132,12 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     /// not re-derive admin-ness.
     tenant_operator_user_id: UserId,
     removal_cleanup: Arc<ExtensionRemovalCleanupRegistry>,
+    /// Per-user Telegram pairedness probe; filled by the telegram host mounts
+    /// at serve time. Unfilled = the deployment never enabled the Telegram
+    /// host, so telegram activation fails closed instead of parking a run no
+    /// pairing surface could ever resume.
+    #[cfg(feature = "telegram-v2-host-beta")]
+    telegram_paired_source: crate::telegram::telegram_channel_connection::TelegramPairedStatusSlot,
 }
 
 /// Concurrent `import_bundle` decodes allowed before further uploads wait.
@@ -324,7 +330,17 @@ impl RebornLocalExtensionManagementPort {
             import_decode_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORT_DECODES)),
             tenant_operator_user_id,
             removal_cleanup: Arc::new(ExtensionRemovalCleanupRegistry::empty()),
+            #[cfg(feature = "telegram-v2-host-beta")]
+            telegram_paired_source: Default::default(),
         }
+    }
+
+    /// The slot the telegram host mounts fill with the pairedness probe.
+    #[cfg(feature = "telegram-v2-host-beta")]
+    pub(crate) fn telegram_paired_status_slot(
+        &self,
+    ) -> crate::telegram::telegram_channel_connection::TelegramPairedStatusSlot {
+        self.telegram_paired_source.clone()
     }
 
     pub(crate) fn with_removal_cleanup_registry(
@@ -539,6 +555,46 @@ impl RebornLocalExtensionManagementPort {
         ensure_caller_may_operate(&installation, caller)?;
         let package = self.lifecycle_package(&extension_id).await?;
         let requirements = package_runtime_credential_auth_requirements(&package);
+        #[cfg(feature = "telegram-v2-host-beta")]
+        let requirements = self
+            .with_telegram_pairing_requirement(package_ref, &package, caller, requirements)
+            .await?;
+        Ok(requirements)
+    }
+
+    /// In-chat `extension_activate` parks BlockedAuth on ANY missing
+    /// requirement; Telegram's per-user "credential" is the pairing binding,
+    /// so an unpaired caller gets a synthesized provider="telegram" Pairing
+    /// requirement here. The resumed run recomputes this list — a paired
+    /// caller yields no requirement and activation proceeds (the
+    /// self-correcting BlockedAuth shape the fanout relies on).
+    #[cfg(feature = "telegram-v2-host-beta")]
+    async fn with_telegram_pairing_requirement(
+        &self,
+        package_ref: &LifecyclePackageRef,
+        package: &ExtensionPackage,
+        caller: &UserId,
+        mut requirements: Vec<RuntimeCredentialAuthRequirement>,
+    ) -> Result<Vec<RuntimeCredentialAuthRequirement>, ProductWorkflowError> {
+        use crate::extension_host::available_extensions::TELEGRAM_EXTENSION_ID;
+        if package_ref.id.as_str() != TELEGRAM_EXTENSION_ID
+            || !package_declares_inbound_product_adapter(package)
+        {
+            return Ok(requirements);
+        }
+        let Some(source) = self.telegram_paired_source.get() else {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: "the Telegram channel is not enabled on this deployment".to_string(),
+            });
+        };
+        let paired = source.telegram_paired(caller).await.map_err(|error| {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("telegram pairing status unavailable: {error}"),
+            }
+        })?;
+        if !paired {
+            requirements.push(telegram_pairing_auth_requirement()?);
+        }
         Ok(requirements)
     }
 
@@ -2156,6 +2212,12 @@ fn activation_success_message(
     visible_capability_ids: &[String],
 ) -> String {
     if package_declares_inbound_product_adapter(package) {
+        #[cfg(feature = "telegram-v2-host-beta")]
+        if package_ref.id.as_str()
+            == crate::extension_host::available_extensions::TELEGRAM_EXTENSION_ID
+        {
+            return "Telegram is installed as an inbound entrypoint. If WebChat shows a Telegram pairing panel, tell the user to pair via the link, the QR code, or by sending the shown code to the bot in Telegram — nothing is pasted into this chat. Once paired the user can DM the bot directly. Telegram exposes no tools and cannot read messages or send on the user's behalf.".to_string();
+        }
         if package_ref.id.as_str() == "slack_bot" {
             return "Slack is installed as an inbound entrypoint. If WebChat shows a Slack account connection panel, tell the user to configure Slack OAuth for this extension rather than pasting anything into normal chat. If the user's Slack account is already connected, continue the user's original request; Slack DMs and WebUI chat can use the same user-scoped Slack tools.".to_string();
         }
@@ -2191,6 +2253,17 @@ pub(crate) fn channel_connection_requirement(
     channel_id: &str,
     display_name: &str,
 ) -> ChannelConnectionRequirement {
+    #[cfg(feature = "telegram-v2-host-beta")]
+    if channel_id == crate::extension_host::available_extensions::TELEGRAM_EXTENSION_ID {
+        return ChannelConnectionRequirement {
+            channel: "telegram".to_string(),
+            strategy: RebornChannelConnectStrategy::WebGeneratedCode,
+            instructions: "Pair your Telegram account: tap the link or scan the QR in the pairing panel, or send the shown code to the bot in Telegram.".to_string(),
+            input_placeholder: String::new(),
+            submit_label: "Open pairing".to_string(),
+            error_message: "Telegram pairing failed. Get a fresh code and try again.".to_string(),
+        };
+    }
     if channel_id == "slack_bot" {
         ChannelConnectionRequirement {
             channel: "slack".to_string(),
@@ -2213,6 +2286,30 @@ pub(crate) fn channel_connection_requirement(
             error_message: "Pairing failed. Check the code and try again.".to_string(),
         }
     }
+}
+
+/// The synthesized requirement an unpaired caller must satisfy: provider
+/// `telegram`, setup `Pairing`. The provider string is what the
+/// BlockedAuthResumeFanout matches against the pairing-completion event.
+#[cfg(feature = "telegram-v2-host-beta")]
+pub(crate) fn telegram_pairing_auth_requirement()
+-> Result<RuntimeCredentialAuthRequirement, ProductWorkflowError> {
+    use crate::extension_host::available_extensions::TELEGRAM_EXTENSION_ID;
+    Ok(RuntimeCredentialAuthRequirement {
+        provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new(
+            crate::telegram::telegram_actor_identity::TELEGRAM_IDENTITY_PROVIDER,
+        )
+        .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+            reason: error.to_string(),
+        })?,
+        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::Pairing,
+        requester_extension: ExtensionId::new(TELEGRAM_EXTENSION_ID).map_err(|error| {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: error.to_string(),
+            }
+        })?,
+        provider_scopes: Vec::new(),
+    })
 }
 
 fn package_declares_inbound_product_adapter(package: &ExtensionPackage) -> bool {
@@ -8407,5 +8504,35 @@ output_schema_ref = "schemas/search.output.json"
             LifecycleReadinessBlocker::Runtime { ref_id: Some(ref_id) }
                 if ref_id.as_str() == expected_ref
         )));
+    }
+}
+
+#[cfg(all(test, feature = "telegram-v2-host-beta"))]
+mod telegram_gate_tests {
+    use super::*;
+
+    #[test]
+    fn telegram_connection_requirement_is_web_generated_code_with_no_input() {
+        let requirement = channel_connection_requirement("telegram", "Telegram");
+        assert_eq!(requirement.channel, "telegram");
+        assert_eq!(
+            requirement.strategy,
+            RebornChannelConnectStrategy::WebGeneratedCode
+        );
+        assert!(
+            requirement.input_placeholder.is_empty(),
+            "WebGeneratedCode displays a code; it never collects one"
+        );
+    }
+
+    #[test]
+    fn telegram_pairing_requirement_matches_the_fanout_contract() {
+        let requirement = telegram_pairing_auth_requirement().expect("requirement builds");
+        assert_eq!(requirement.provider.as_str(), "telegram");
+        assert_eq!(
+            requirement.setup,
+            ironclaw_host_api::RuntimeCredentialAccountSetup::Pairing
+        );
+        assert_eq!(requirement.requester_extension.as_str(), "telegram");
     }
 }
