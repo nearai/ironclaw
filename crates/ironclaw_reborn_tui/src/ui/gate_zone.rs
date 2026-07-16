@@ -49,8 +49,28 @@ fn describe(gate: &PendingGate) -> (String, String, String) {
             body,
             challenge_kind,
             authorization_url,
+            token_input,
             ..
         } => {
+            // Token-input sub-mode takes over the whole zone: a masked
+            // echo of what's been typed plus its own hint line, in place of
+            // the normal body/options. Mirrors `app::gate::dispatch_gate_key`
+            // routing every key to `dispatch_token_input_key` while active.
+            if let Some(buf) = token_input {
+                let masked = "*".repeat(buf.chars().count());
+                let mut body_text = body.clone();
+                if !body_text.is_empty() {
+                    body_text.push('\n');
+                }
+                body_text.push_str("token: ");
+                body_text.push_str(&masked);
+                return (
+                    headline.clone(),
+                    body_text,
+                    "[enter] submit  [esc] cancel".to_string(),
+                );
+            }
+
             let mut body_text = body.clone();
             if let Some(url) = authorization_url {
                 if !body_text.is_empty() {
@@ -68,11 +88,12 @@ fn describe(gate: &PendingGate) -> (String, String, String) {
             }
             // `[o] open` only applies when there's a URL to open (mirrors
             // `app::gate::dispatch_gate_key`'s `o` handler, which is a no-op
-            // without `authorization_url`).
+            // without `authorization_url`). `[t] enter token` always
+            // applies — the sub-mode itself is what actually submits.
             let options = if authorization_url.is_some() {
-                "[o] open  [esc] cancel".to_string()
+                "[o] open  [t] enter token  [esc] cancel".to_string()
             } else {
-                "[esc] cancel".to_string()
+                "[t] enter token  [esc] cancel".to_string()
             };
             (headline.clone(), body_text, options)
         }
@@ -99,6 +120,29 @@ mod tests {
         buffer_text(terminal.backend().buffer())
     }
 
+    /// `PendingGate::Auth` fixture — a plain helper fn rather than a base
+    /// value tests apply `..` functional-update syntax to: enum struct
+    /// variants don't support `..base` (E0436, "requires a struct"), only
+    /// plain structs do. Each test passes only the fields it varies;
+    /// everything else takes the same default every other test uses.
+    fn auth_gate(
+        authorization_url: Option<&str>,
+        challenge_kind: Option<&str>,
+        token_input: Option<&str>,
+    ) -> PendingGate {
+        PendingGate::Auth {
+            turn_run_id: "run-stub".to_string(),
+            gate_ref: "gate-stub".to_string(),
+            headline: "Connect Gmail".to_string(),
+            body: "Sign in to continue.".to_string(),
+            challenge_kind: challenge_kind.map(str::to_string),
+            authorization_url: authorization_url.map(str::to_string),
+            provider: None,
+            account_label: None,
+            token_input: token_input.map(str::to_string),
+        }
+    }
+
     #[test]
     fn gate_zone_renders_headline_and_options_when_pending() {
         let state = AppState::default()
@@ -114,35 +158,61 @@ mod tests {
 
     #[test]
     fn auth_gate_with_url_renders_open_and_cancel_hints() {
-        let state = AppState::default().set_pending_gate(Some(PendingGate::Auth {
-            turn_run_id: "run-stub".to_string(),
-            gate_ref: "gate-stub".to_string(),
-            headline: "Connect Gmail".to_string(),
-            body: "Sign in to continue.".to_string(),
-            challenge_kind: Some("oauth_url".to_string()),
-            authorization_url: Some("https://example.com/oauth".to_string()),
-        }));
+        let state = AppState::default().set_pending_gate(Some(auth_gate(
+            Some("https://example.com/oauth"),
+            Some("oauth_url"),
+            None,
+        )));
         let content = draw(&state);
         assert!(content.contains("Connect Gmail"));
         assert!(content.contains("https://example.com/oauth"));
         assert!(content.contains("[o] open"));
+        assert!(content.contains("[t] enter token"));
         assert!(content.contains("[esc] cancel"));
         assert!(!content.contains("[a] allow"));
     }
 
     #[test]
-    fn auth_gate_without_url_omits_open_hint() {
-        let state = AppState::default().set_pending_gate(Some(PendingGate::Auth {
-            turn_run_id: "run-stub".to_string(),
-            gate_ref: "gate-stub".to_string(),
-            headline: "Enter token".to_string(),
-            body: "Paste your token.".to_string(),
-            challenge_kind: Some("manual_token".to_string()),
-            authorization_url: None,
-        }));
+    fn auth_gate_without_url_omits_open_hint_but_keeps_token_hint() {
+        let state =
+            AppState::default().set_pending_gate(Some(auth_gate(None, Some("manual_token"), None)));
         let content = draw(&state);
         assert!(!content.contains("[o] open"));
+        assert!(content.contains("[t] enter token"));
         assert!(content.contains("[esc] cancel"));
+    }
+
+    #[test]
+    fn token_input_sub_mode_renders_masked_buffer_and_submit_cancel_hints() {
+        let state = AppState::default().set_pending_gate(Some(auth_gate(
+            None,
+            Some("manual_token"),
+            Some("sekret"),
+        )));
+        let content = draw(&state);
+        assert!(
+            content.contains("******"),
+            "typed token must render masked, not in the clear: {content}"
+        );
+        assert!(!content.contains("sekret"), "raw token must never render");
+        assert!(content.contains("[enter] submit"));
+        assert!(content.contains("[esc] cancel"));
+        assert!(
+            !content.contains("[a] allow") && !content.contains("[o] open"),
+            "sub-mode replaces the normal gate options entirely"
+        );
+    }
+
+    #[test]
+    fn token_input_sub_mode_with_empty_buffer_renders_no_mask_characters() {
+        let state = AppState::default().set_pending_gate(Some(auth_gate(
+            None,
+            Some("manual_token"),
+            Some(""),
+        )));
+        let content = draw(&state);
+        assert!(content.contains("token: "));
+        assert!(content.contains("[enter] submit"));
     }
 
     #[test]
