@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
-workflow="${1:-.github/workflows/e2e.yml}"
+workflow="${1:-.github/workflows/reborn-playwright.yml}"
 
 if [[ "${workflow}" != /* ]]; then
   workflow="${repo_root}/${workflow}"
@@ -60,7 +60,7 @@ if not paths:
 missing = sorted(path for path in paths if not (repo_root / path).is_file())
 if missing:
     print(
-        "Missing E2E scenario files referenced by .github/workflows/e2e.yml:",
+        f"Missing E2E scenario files referenced by {workflow}:",
         file=sys.stderr,
     )
     for path in missing:

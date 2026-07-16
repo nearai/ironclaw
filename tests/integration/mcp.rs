@@ -15,8 +15,8 @@ mod support;
 
 use reborn_support::assertions::ToolErrorClass;
 use reborn_support::builder::RebornIntegrationHarness;
+use reborn_support::mock_mcp_server::{MockMcpServer, MockToolResponse, start_mock_mcp_server};
 use reborn_support::reply::RebornScriptedReply;
-use support::mock_mcp_server::{MockMcpServer, MockToolResponse, start_mock_mcp_server};
 
 /// Asserts the mock MCP server actually received a `tools/call` request naming
 /// `expected_tool` with a `query` argument equal to `expected_query`. Mirrors

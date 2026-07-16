@@ -59,10 +59,10 @@ Expected evidence:
 
 ### 2. Existing-path hardening
 
-Edits to a path that runs today — either legacy v1 (`src/`) or an
-already-shipped Reborn surface — for a bug fix, refactor, or safety
-improvement. This is the highest-risk category precisely because it is not
-gated behind an off-by-default profile.
+Edits to a path that runs today — Reborn runtime, product workflow, platform
+substrate, or an already-shipped product surface — for a bug fix, refactor, or
+safety improvement. This is the highest-risk category precisely because it is
+not gated behind an off-by-default profile.
 
 Expected evidence:
 

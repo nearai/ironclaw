@@ -40,17 +40,13 @@ Reborn should not grow:
 - separate subagent execution machinery outside the normal runner/driver loop;
 - local-dev shortcuts that silently become hosted or production behavior.
 
-### Relationship to the legacy v1 engine
+### Relationship to the retired v1 runtime
 
-`crates/ironclaw_engine` ("engine v2") is the **v1 monolith's** agent loop — a
-complete parallel machinery with its own capability registry, lease manager,
-and policy engine, consumed only by the root `ironclaw` crate through
-`src/bridge/`. It is **not part of Reborn**: the dependency-boundary tests
-forbid Reborn crates from importing it, and nothing else in this document
-describes it. Do not build new Reborn behavior on it; it retires with the
-monolith. `ironclaw_tui`, `ironclaw_gateway`, and `ironclaw_embeddings` are
-in the same v1-only category despite living in `crates/`. The v1 loopback
-OAuth transport is folded into `ironclaw_auth::oauth` until v1 retires.
+The former root `ironclaw` package, root `src/` tree, v1 engine, v1 gateway,
+v1 TUI, and v1 embedding provider crate have been retired. They are **not part
+of Reborn** and must not be reintroduced as alternate runtime machinery.
+Dependency-boundary tests pin that cleanup so new work enters through the
+Reborn crates described below.
 
 ## Mental Model
 

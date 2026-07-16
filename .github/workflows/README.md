@@ -8,7 +8,7 @@ a check belongs to exactly one tier on purpose.
 | PR feedback | `pull_request` | Fast, scoped signal for the author. May run slim matrices and path-scoped subsets. |
 | **Production gate** | `merge_group` (merge queue) | The authority on what reaches `main`. Runs deterministic checks in the **same shape as push** on the merged state. |
 | Post-merge confirm | `push` to `main` | Confirms the queue's verdict, warms shared caches, feeds Codecov/canaries. Should never be the first place a deterministic failure appears. |
-| Deep / scheduled | `schedule` (nightly) | Exhaustive suites too slow for the queue: legacy v1 matrix, full browser E2E, stress scans. |
+| Deep / scheduled | `schedule` (nightly) | Exhaustive suites too slow for the queue: Reborn/platform matrices, browser coverage, stress scans. |
 
 ## The invariant
 
@@ -63,9 +63,8 @@ Rules for a roll-up job that is (or may become) required:
 
 `nightly-deep-ci.yml` (04:00 UTC) reuses `platform-and-compat.yml`,
 `reborn-tests.yml`, and `reborn-e2e.yml` via `workflow_call` at full scope.
-The legacy v1 suite (`test.yml`) is deliberately not invoked — see the
-freeze note in `nightly-deep-ci.yml`. Two hard-won gotchas are encoded in
-the configuration:
+The retired v1 suite (`test.yml`) and root `src/` tree no longer exist. Two
+hard-won gotchas are encoded in the configuration:
 
 - **`github.event_name` in a reusable workflow is the caller's event** — it is
   never `workflow_call`. Conditions written as `github.event_name ==
@@ -101,7 +100,7 @@ own run on a startup_failure and can never see a cron that didn't fire.
 
 `main-ci-slack-alerts.yml` watches completed `workflow_run` events for the
 current `push` to `main` workflows: Code Style, Tests (Reborn), Reborn E2E,
-Platform & Compat, Replay Snapshot Gate, Code Coverage,
+Platform & Compat, Code Coverage,
 nearai-bench dispatcher tests, and Release-plz. Any watched run that concludes
 `failure`, `timed_out`, `action_required`, or `startup_failure` posts a Slack
 message with the workflow, conclusion, failed job names, commit, actor, and run
@@ -124,20 +123,14 @@ When adding a new workflow that runs on `push` to `main`, add its workflow
 - **Benchmark compilation** (`cargo bench --no-run`) runs on push and nightly
   only, and the clippy lanes do not pass `--benches`. Bench targets exist only
   in `crates/ironclaw_safety` today.
-- **Replay Snapshot Gate** runs on push + via the nightly legacy suite; it
-  covers the retiring v1 engine.
-- **The legacy v1 suites are deliberately invoked nowhere** — v1 (`src/`) is
-  frozen pending removal. `test.yml` (the only place the root `ironclaw`
-  package's tests run) is no longer called by nightly, and the former
-  `nightly-e2e.yml` scheduler for the v1 browser suite (`e2e.yml` full mode)
-  is deleted — it had zero successful runs in retained history. Until `src/`
-  is deleted, a v1 bug fix that must land should temporarily restore the
-  `deterministic-deep-tests` call in `nightly-deep-ci.yml` (and/or dispatch
-  `e2e.yml` manually). Delete `test.yml` and `e2e.yml` together with `src/`.
+- **The legacy v1 suites are gone** — v1 (`src/`) has been retired, along
+  with `test.yml`, `e2e.yml`, and `replay-gate.yml`. The root package is a
+  non-shipping Reborn integration-test harness, and Reborn replay/trace
+  evidence lives in the Reborn test and E2E workflows.
 - **Full-path extension↔provider coverage has no scheduler on any stack**:
   the Emulate-backed full-path tests (`test_reborn_emulate_full_path.py`)
-  boot the legacy binary (see `tests/e2e/CLAUDE.md`, Reborn E2E coverage
-  gate) and were frozen with it. A Reborn-native port — same
+  previously booted the retired v1 binary (see `tests/e2e/CLAUDE.md`, Reborn
+  E2E coverage gate) and were frozen with it. A Reborn-native port — same
   install → OAuth → tool call → provider-mutation contract through
   `ironclaw-reborn serve` — is the follow-up that restores this tier.
 - **Scope classifiers** (`scripts/ci/classify-test-scope.sh` and per-workflow

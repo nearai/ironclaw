@@ -10,7 +10,7 @@ assert_scope() {
   local expected="$3"
   local actual
 
-  actual="$(printf '%s\n' "$files" | "$classifier" | sort)"
+  actual="$(printf '%s\n' "$files" | "$classifier" | grep -v '^has_runtime_heavy_risk=' | sort)"
 
   if [ "$actual" != "$expected" ]; then
     printf 'FAIL %s\n' "$name" >&2
@@ -28,7 +28,7 @@ assert_scope_no_trailing_newline() {
   local expected="$3"
   local actual
 
-  actual="$(printf '%s' "$files" | "$classifier" | sort)"
+  actual="$(printf '%s' "$files" | "$classifier" | grep -v '^has_runtime_heavy_risk=' | sort)"
 
   if [ "$actual" != "$expected" ]; then
     printf 'FAIL %s\n' "$name" >&2
@@ -44,7 +44,7 @@ assert_empty_scope() {
   local expected="$1"
   local actual
 
-  actual="$(printf '' | "$classifier" | sort)"
+  actual="$(printf '' | "$classifier" | grep -v '^has_runtime_heavy_risk=' | sort)"
 
   if [ "$actual" != "$expected" ]; then
     printf 'FAIL empty input\n' >&2
@@ -55,6 +55,39 @@ assert_empty_scope() {
 
   printf 'PASS empty input\n'
 }
+
+assert_runtime_heavy_risk() {
+  local name="$1"
+  local files="$2"
+  local expected="$3"
+  local actual
+
+  actual="$(printf '%s\n' "$files" | "$classifier" | grep '^has_runtime_heavy_risk=')"
+
+  if [ "$actual" != "has_runtime_heavy_risk=$expected" ]; then
+    printf 'FAIL %s\n' "$name" >&2
+    printf 'Expected: has_runtime_heavy_risk=%s\n' "$expected" >&2
+    printf 'Actual: %s\n' "$actual" >&2
+    exit 1
+  fi
+
+  printf 'PASS %s\n' "$name"
+}
+
+assert_runtime_heavy_risk \
+  "Reborn crate prefixes select the runtime-heavy lane" \
+  "crates/ironclaw_reborn_migration/src/target.rs" \
+  "true"
+
+assert_runtime_heavy_risk \
+  "product crate prefixes select the runtime-heavy lane" \
+  "crates/ironclaw_product_workflow/src/lib.rs" \
+  "true"
+
+assert_runtime_heavy_risk \
+  "unrelated documentation skips the runtime-heavy lane" \
+  "docs/operations.md" \
+  "false"
 
 assert_scope \
   "reborn binary crate" \
@@ -108,7 +141,7 @@ assert_scope \
   "reborn root tests and support" \
   "tests/reborn_qa_smoke_scenarios_e2e.rs
 tests/integration/support/harness/mod.rs
-tests/e2e/scenarios/test_reborn_gateway_smoke.py" \
+tests/e2e/scenarios/test_reborn_webui_v2_smoke.py" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
@@ -131,16 +164,8 @@ has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
-  "legacy e2e scenario" \
-  "tests/e2e/scenarios/test_live_flow.py" \
-  "docs_only=false
-has_core_code=true
-has_legacy_tests=true
-has_reborn_tests=false"
-
-assert_scope \
-  "mixed legacy and reborn root tests" \
-  "tests/e2e_live.rs
+  "mixed platform and reborn root tests" \
+  "tests/trace_format.rs
 tests/reborn_trace_first_party_tool_coverage.rs" \
   "docs_only=false
 has_core_code=true
@@ -148,8 +173,8 @@ has_legacy_tests=true
 has_reborn_tests=true"
 
 assert_scope \
-  "legacy root runtime" \
-  "src/agent/session.rs" \
+  "standalone helper crate" \
+  "crates/ironclaw_silk_decoder/src/main.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
@@ -220,7 +245,7 @@ has_legacy_tests=true
 has_reborn_tests=true"
 
 assert_scope \
-  "legacy code style workflow" \
+  "code style workflow" \
   ".github/workflows/code_style.yml" \
   "docs_only=false
 has_core_code=true
@@ -258,8 +283,8 @@ has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
-  "mixed legacy and reborn" \
-  "src/agent/session.rs
+  "mixed helper and reborn" \
+  "crates/ironclaw_silk_decoder/src/main.rs
 crates/ironclaw_reborn_composition/src/lib.rs" \
   "docs_only=false
 has_core_code=true

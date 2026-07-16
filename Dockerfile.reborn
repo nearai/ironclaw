@@ -4,7 +4,9 @@
 #   docker build -f Dockerfile.reborn -t ironclaw-reborn:latest .
 #
 # Run locally:
-#   docker run --rm --env-file .env.reborn -p 127.0.0.1:3000:3000 ironclaw-reborn:latest
+#   docker run --rm --env-file .env.reborn \
+#     -e IRONCLAW_REBORN_SERVE_HOST=0.0.0.0 \
+#     -p 127.0.0.1:3000:3000 ironclaw-reborn:latest
 #
 # Railway:
 #   Set Dockerfile path to Dockerfile.reborn and IRONCLAW_REBORN_SERVE_HOST=0.0.0.0.

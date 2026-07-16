@@ -10,7 +10,8 @@ IronClaw now has two complementary regression systems:
 
 The implementation lives in:
 
-- `.github/workflows/test.yml` for the normal blocking test lanes;
+- `.github/workflows/reborn-tests.yml` and `.github/workflows/reborn-e2e.yml`
+  for normal blocking/advisory deterministic lanes;
 - `.github/workflows/live-canary.yml` for scheduled and manual live lanes;
 - `scripts/live-canary/run.sh` for lane dispatch;
 - `scripts/live-canary/scrub-artifacts.sh` for artifact scanning;
@@ -35,7 +36,7 @@ account guide rather than introducing another bespoke runner layout.
 
 | Lane | Scope | Runner | Trigger | Blocking |
 | --- | --- | --- | --- | --- |
-| `deterministic-replay` | Replays `tests/e2e_live*.rs` fixtures without live LLM calls | GitHub-hosted | PR/staging via `test.yml`; manual via `live-canary.yml` | Yes in `test.yml` |
+| `deterministic-replay` | Replays committed trace fixtures without live LLM calls | GitHub-hosted | PR/staging via Reborn deterministic workflows; manual via `live-canary.yml` | Yes in Reborn deterministic workflows |
 | `public-smoke` | Real LLM plus public tools such as `zizmor_scan` and mission digest | GitHub-hosted | Daily and manual | Opens issue on scheduled failure |
 | `persona-rotating` | Real LLM multi-turn persona workflow, one persona per day | GitHub-hosted | Daily and manual | Opens issue on scheduled failure |
 | `private-oauth` | Google Drive auth gate and transparent refresh against a dedicated test account | Self-hosted `ironclaw-live` runner | Manual; scheduled only when enabled | Opens issue on scheduled failure |

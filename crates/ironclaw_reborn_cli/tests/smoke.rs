@@ -202,27 +202,6 @@ fn default_dockerfile_targets_reborn_runtime() {
 }
 
 #[test]
-fn release_workflows_keep_existing_ironclaw_tags() {
-    let release = std::fs::read_to_string(workspace_root().join(".github/workflows/release.yml"))
-        .expect("release workflow");
-    let rebuild = std::fs::read_to_string(
-        workspace_root().join(".github/workflows/rebuild-release-image.yml"),
-    )
-    .expect("rebuild release image workflow");
-
-    assert!(
-        release.contains("ironclaw-v[0-9]+.[0-9]+.[0-9]+*")
-            && rebuild.contains("EXPECTED_REF=\"ironclaw-v${EXPECTED_TAG}\""),
-        "release workflows must keep the existing IronClaw tag family"
-    );
-    assert!(
-        !release.contains("ironclaw-reborn-v[0-9]+.[0-9]+.[0-9]+*")
-            && !rebuild.contains("EXPECTED_REF=\"ironclaw-reborn-v${EXPECTED_TAG}\""),
-        "release workflows must not introduce a second Reborn tag family"
-    );
-}
-
-#[test]
 fn reborn_release_artifacts_use_shipping_features() {
     let manifest =
         std::fs::read_to_string(workspace_root().join("crates/ironclaw_reborn_cli/Cargo.toml"))
@@ -287,6 +266,55 @@ fn docker_workflow_uses_existing_reborn_runtime_target() {
         workflow.contains("contains(steps.tags.outputs.tags, ':staging')"),
         "docker workflow should keep staging skip checks tied to staging tags: {workflow}"
     );
+}
+
+#[test]
+fn release_automation_targets_the_reborn_cli() {
+    let root = workspace_root();
+    let release = std::fs::read_to_string(workspace_root().join(".github/workflows/release.yml"))
+        .expect("release workflow");
+    let rebuild = std::fs::read_to_string(root.join(".github/workflows/rebuild-release-image.yml"))
+        .expect("rebuild release image workflow");
+    let docker = std::fs::read_to_string(root.join(".github/workflows/docker.yml"))
+        .expect("Docker workflow");
+    let release_plz =
+        std::fs::read_to_string(root.join("release-plz.toml")).expect("release-plz config");
+    assert!(
+        release.contains("ironclaw/v[0-9]+.[0-9]+.[0-9]+*")
+            && rebuild.contains("EXPECTED_REF=\"ironclaw/v${EXPECTED_TAG}\""),
+        "release workflows must use cargo-dist-compatible branded unified tags"
+    );
+    assert!(
+        !release.contains("ironclaw-reborn-v[0-9]+.[0-9]+.[0-9]+*")
+            && !rebuild.contains("EXPECTED_REF=\"ironclaw-reborn-v${EXPECTED_TAG}\"")
+            && !release.contains("ironclaw-v[0-9]+.[0-9]+.[0-9]+*")
+            && !rebuild.contains("EXPECTED_REF=\"ironclaw-v${EXPECTED_TAG}\""),
+        "release workflows must not use tag forms cargo-dist cannot map to the Reborn package"
+    );
+    assert!(
+        docker.contains("VERSION_MANIFEST=\"crates/ironclaw_reborn_cli/Cargo.toml\"")
+            && rebuild.contains("VERSION_MANIFEST=\"crates/ironclaw_reborn_cli/Cargo.toml\""),
+        "Docker release workflows must read the shipping Reborn CLI version"
+    );
+    assert!(
+        !docker.contains("grep '^version' Cargo.toml")
+            && !rebuild.contains("grep '^version' Cargo.toml"),
+        "release workflows must not read the non-dist root harness version"
+    );
+    assert!(
+        release_plz.contains("name = \"ironclaw_reborn_cli\"")
+            && release_plz.contains("git_only = true")
+            && release_plz.contains("git_tag_name = \"ironclaw/v{{ version }}\""),
+        "release-plz must version and tag the shipping Reborn CLI"
+    );
+    assert!(
+        !release_plz.contains("name = \"ironclaw\"")
+            && !release_plz.contains("name = \"ironclaw_tui\"")
+            && !release_plz.contains("name = \"ironclaw_gateway\""),
+        "release-plz must not reference retired packages"
+    );
+    semver::Version::parse(env!("CARGO_PKG_VERSION"))
+        .expect("Reborn CLI package version should remain valid semver");
 }
 
 #[test]

@@ -1,7 +1,7 @@
 // arch-exempt: large_file, crate layer boundary gate stays with existing architecture suite, plan #5852
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
 };
 
@@ -79,7 +79,7 @@ fn reborn_workspace_crates_declare_layers_and_follow_layer_matrix() {
     assert!(
         invalid_workspace_package_names.is_empty(),
         "Workspace packages must follow the IronClaw naming convention \
-         (`ironclaw` or `ironclaw_*`). Invalid packages:\n{}",
+         (`ironclaw_*`). Invalid packages:\n{}",
         invalid_workspace_package_names.join("\n")
     );
     assert!(
@@ -184,6 +184,83 @@ fn reborn_workspace_crates_declare_layers_and_follow_layer_matrix() {
         stale_exceptions.is_empty(),
         "Stale IronClaw crate layer matrix exceptions:\n{}",
         stale_exceptions.join("\n")
+    );
+}
+
+#[test]
+fn retired_v1_runtime_stays_removed() {
+    let root = workspace_root();
+    let metadata = cargo_metadata();
+    let packages = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata must include packages");
+    let package_names = packages
+        .iter()
+        .filter_map(|package| package["name"].as_str())
+        .collect::<BTreeSet<_>>();
+
+    assert!(
+        !package_names.contains("ironclaw"),
+        "the retired v1 root runtime package must not be reintroduced"
+    );
+    let root_src_files = non_hidden_files_under(&root.join("src"));
+    assert!(
+        root_src_files.is_empty(),
+        "the retired v1 root src/ tree must stay removed; found files: {:?}",
+        root_src_files
+    );
+
+    for retired_dir in [
+        "crates/ironclaw_engine",
+        "crates/ironclaw_gateway",
+        "crates/ironclaw_tui",
+        "crates/ironclaw_embeddings",
+    ] {
+        assert!(
+            !root.join(retired_dir).exists(),
+            "retired v1-only crate directory must stay removed: {retired_dir}"
+        );
+    }
+
+    let mut legacy_layers = Vec::new();
+    let mut forbidden_deps = Vec::new();
+    for package in packages {
+        let Some(name) = package["name"].as_str() else {
+            continue;
+        };
+        if package_layer(package) == Some("legacy") {
+            let manifest_path = package["manifest_path"]
+                .as_str()
+                .unwrap_or("<unknown manifest>");
+            legacy_layers.push(format!("{name} at {manifest_path}"));
+        }
+
+        for dependency in workspace_dependency_names(package) {
+            let Some(dependency_name) = dependency["name"].as_str() else {
+                continue;
+            };
+            if matches!(
+                dependency_name,
+                "ironclaw"
+                    | "ironclaw_engine"
+                    | "ironclaw_gateway"
+                    | "ironclaw_tui"
+                    | "ironclaw_embeddings"
+            ) {
+                forbidden_deps.push(format!("{name} -> {dependency_name}"));
+            }
+        }
+    }
+
+    assert!(
+        legacy_layers.is_empty(),
+        "workspace packages must not declare the retired legacy layer:\n{}",
+        legacy_layers.join("\n")
+    );
+    assert!(
+        forbidden_deps.is_empty(),
+        "workspace packages must not depend on retired v1 packages:\n{}",
+        forbidden_deps.join("\n")
     );
 }
 
@@ -794,19 +871,19 @@ fn reborn_turns_public_surface_keeps_runner_api_explicit() {
 #[test]
 fn reborn_runner_llm_wiring_stays_out_of_root_src() {
     let root = workspace_root();
-    let root_lib =
-        std::fs::read_to_string(root.join("src/lib.rs")).expect("root src/lib.rs must be readable");
+    let root_src_files = non_hidden_files_under(&root.join("src"));
     assert!(
-        !root_lib.contains("pub mod reborn_loop_support;"),
-        "retired Reborn loop-support wiring must not return to root src/lib.rs"
+        root_src_files.is_empty(),
+        "retired v1 root src/ files must stay deleted; found files: {:?}",
+        root_src_files
+    );
+    assert!(
+        !root.join("src/lib.rs").exists(),
+        "retired root src/lib.rs must stay deleted; do not reintroduce root product wiring"
     );
     assert!(
         !root.join("src/reborn_loop_support.rs").exists(),
         "retired Reborn loop-support wiring must not return under root src/"
-    );
-    assert!(
-        !root_lib.contains("pub mod reborn_loop_host;"),
-        "Reborn loop-host wiring must live under crates/ironclaw_loop_host, not root src/lib.rs"
     );
     assert!(
         !root.join("src/reborn_loop_host.rs").exists(),
@@ -2773,13 +2850,10 @@ struct BoundaryRule {
 fn boundary_rules() -> Vec<BoundaryRule> {
     vec![
         BoundaryRule {
-            // The v1→Reborn migration tool is an intentional one-way bridge:
-            // it reads through the root `ironclaw` crate and writes through the
-            // Reborn state substrate + composition's `migration-support` seam.
-            // That bridge must stay a *state* converter — it must not grow
-            // direct deps on the serving/runtime/engine layers (gateway, engine,
-            // runtime lanes, dispatcher, webui) or it would quietly become a
-            // second live entry point into Reborn.
+            // The Reborn migration crate is an operator-only utility. It must
+            // not grow deps on serving/runtime/engine layers (runtime lanes,
+            // dispatcher, webui) or it would quietly become a second live entry
+            // point into Reborn.
             crate_name: "ironclaw_reborn_migration",
             forbidden: vec![
                 "ironclaw_dispatcher",
@@ -3852,7 +3926,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
     ]
 }
 
-const IRONCLAW_CRATE_LAYERS: [&str; 8] = [
+const IRONCLAW_CRATE_LAYERS: [&str; 7] = [
     "contracts",
     "substrates",
     "runtimes",
@@ -3860,7 +3934,6 @@ const IRONCLAW_CRATE_LAYERS: [&str; 8] = [
     "loops",
     "products",
     "app",
-    "legacy",
 ];
 
 struct LayerMatrixException {
@@ -4026,13 +4099,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         removes_in: "W3.6",
         reason: "webui ingress still reaches composition until the composition webui module is folded into ingress and runtime handles are inverted",
     },
-    LayerMatrixException {
-        crate_name: "ironclaw_reborn_migration",
-        dependency_name: "ironclaw",
-        introduced: "2026-07-09",
-        removes_in: "Tier B",
-        reason: "the migration app intentionally reads v1 state until the legacy root is retired",
-    },
 ];
 
 fn layer_matrix_exception(
@@ -4053,7 +4119,7 @@ fn package_layer(package: &Value) -> Option<&str> {
 }
 
 fn is_ironclaw_workspace_package(name: &str) -> bool {
-    name == "ironclaw" || name.starts_with("ironclaw_")
+    name.starts_with("ironclaw_")
 }
 
 fn layer_allows_dependency(crate_layer: &str, dependency_layer: &str) -> bool {
@@ -4077,10 +4143,6 @@ fn layer_allows_dependency(crate_layer: &str, dependency_layer: &str) -> bool {
             dependency_layer,
             "contracts" | "substrates" | "runtimes" | "kernel" | "loops" | "products" | "app"
         ),
-        // The v1 package/crates may still depend on Reborn while parity work
-        // is in flight, but Reborn layers are intentionally not allowed to
-        // depend back on legacy.
-        "legacy" => true,
         _ => false,
     }
 }
@@ -4113,6 +4175,31 @@ fn workspace_root() -> PathBuf {
         .and_then(|path| path.parent())
         .expect("architecture crate must live under crates/ironclaw_architecture")
         .to_path_buf()
+}
+
+fn non_hidden_files_under(root: &Path) -> Vec<PathBuf> {
+    fn visit(dir: &Path, files: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            if file_name.to_string_lossy().starts_with('.') {
+                continue;
+            }
+            let path = entry.path();
+            if path.is_dir() {
+                visit(&path, files);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    visit(root, &mut files);
+    files.sort();
+    files
 }
 
 fn extract_virtual_roots_const(source: &str) -> BTreeSet<String> {

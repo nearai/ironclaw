@@ -1,9 +1,8 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-/// A single message in a conversation. Re-exported from the legacy
-/// `ironclaw::history::ConversationMessage`; the monolith now re-exports
-/// this type so both names refer to the same struct.
+/// A single message in a conversation, retained as a Trace Commons compatibility
+/// DTO for historical IronClaw trace payloads.
 #[derive(Debug, Clone)]
 pub struct ConversationMessage {
     pub id: Uuid,

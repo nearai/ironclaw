@@ -56,16 +56,28 @@ jobs:
           echo "sha=${SOURCE_SHA}" >> "$GITHUB_OUTPUT"
           echo "Source commit: ${SOURCE_SHA}"
 
-      - name: Extract version from Cargo.toml
+      - name: Extract Reborn CLI version
         id: version
         run: |
-          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          VERSION_MANIFEST="crates/ironclaw_reborn_cli/Cargo.toml"
+          VERSION="$(
+            python3 - "${VERSION_MANIFEST}" <<'PY'
+          import sys
+          import tomllib
+
+          with open(sys.argv[1], "rb") as manifest:
+              version = tomllib.load(manifest).get("package", {}).get("version")
+          if not isinstance(version, str):
+              raise SystemExit(f"missing [package].version in {sys.argv[1]}")
+          print(version)
+          PY
+          )"
           if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::Extracted version '${VERSION}' must match MAJOR.MINOR.PATCH[-prerelease] (Docker tags forbid '+')"
             exit 1
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Detected version: ${VERSION}"
+          echo "Detected Reborn CLI version: ${VERSION}"
 
       - name: Determine tags
         id: tags

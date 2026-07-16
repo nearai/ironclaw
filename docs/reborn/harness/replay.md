@@ -10,7 +10,7 @@ Current replay assets include:
 
 - `tests/fixtures/llm_traces/README.md`;
 - `scripts/replay-snap.sh`;
-- `.github/workflows/replay-gate.yml`;
+- `reborn-tests.yml` and `reborn-e2e.yml`;
 - `tests/snapshots/`;
 - `tests/support/LIVE_TESTING.md`.
 

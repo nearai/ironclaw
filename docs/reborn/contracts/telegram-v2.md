@@ -115,14 +115,12 @@ Webhook responses for duplicates remain 200 OK with no side effects.
 
 ## Default-off behavior
 
-`REBORN_TELEGRAM_V2_ENABLED=false` (default) keeps the legacy v1 Telegram
-WASM channel (`channels-src/telegram`) running unchanged through the v1
-channel manager.
+`REBORN_TELEGRAM_V2_ENABLED=false` (default) keeps Telegram ingress inactive in
+the Reborn binary.
 
-`REBORN_TELEGRAM_V2_ENABLED=true` requires the legacy v1 Telegram channel
-to be inactive for the same installation. The host calls
-`ironclaw::config::validate_telegram_v1_v2_exclusivity` at startup and
-fails closed when both are active.
+`REBORN_TELEGRAM_V2_ENABLED=true` enables the Telegram v2 product adapter for
+the configured installation. The retired v1 Telegram WASM channel and root v1
+channel manager are no longer available.
 
 ## Test coverage (issue #3285 acceptance criteria)
 

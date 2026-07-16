@@ -54,7 +54,7 @@ function isImageMime(mime) {
 
 // Mimes we never try to render as text — skip the sniff fetch and offer a
 // download straight away. Everything else (including `application/octet-stream`,
-// which is what an unknown extension like `Dockerfile.worker` resolves to) is
+// which is what an unknown extension like `artifact.bin` resolves to) is
 // sniffed, so extensionless/unknown text files still preview.
 function isLikelyBinaryMime(mime) {
   const value = String(mime || "").toLowerCase();
@@ -168,8 +168,8 @@ export async function readWorkspaceFile(qualifiedPath) {
 
   // Otherwise fetch the bytes once and decide by content, not extension: a
   // text-like mime is trusted as text, and anything else (notably
-  // `application/octet-stream` from an unknown extension like
-  // `Dockerfile.worker`) is sniffed so real text still previews. Read through
+  // `application/octet-stream` from an unknown extension like `artifact.bin`)
+  // is sniffed so real text still previews. Read through
   // the authed blob path (not apiFetch) so JSON/text bodies aren't auto-parsed.
   const blob = await fetchAttachmentBlob(download);
   const bytes = new Uint8Array(await blob.arrayBuffer());

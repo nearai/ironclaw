@@ -170,6 +170,25 @@ fn reborn_dockerfile_uses_feature_matched_cache_and_loopback_default() {
 }
 
 #[test]
+fn docker_local_run_commands_bind_the_container_listener() {
+    let expected_host_override = "-e IRONCLAW_REBORN_SERVE_HOST=0.0.0.0";
+
+    for path in ["Dockerfile", "Dockerfile.reborn"] {
+        let dockerfile = read_repo_file(path);
+        assert!(
+            dockerfile.contains(expected_host_override),
+            "{path} local run command must bind the listener to the container interface"
+        );
+    }
+
+    let deployment_docs = read_repo_file("docs/reborn/deploy-reborn-cli-docker.md");
+    assert!(
+        deployment_docs.contains("--env IRONCLAW_REBORN_SERVE_HOST=0.0.0.0"),
+        "Docker deployment docs must override the loopback image default"
+    );
+}
+
+#[test]
 fn reborn_runtime_image_includes_sql_debug_clients() {
     let dockerfile = read_repo_file("Dockerfile.reborn");
 

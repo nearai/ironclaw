@@ -126,21 +126,21 @@ scripts/reborn-e2e-rust.sh substrates
 
 The script expands to the dedicated `reborn_e2e_gate.rs` tests plus the current Reborn boundary, host-runtime, capability-host, dispatcher, WASM, Script, MCP, process, event, filesystem, network, secret, resource, run-state, approval, and authorization contract tests. Use the script as the source of truth for local/CI parity rather than copying individual `cargo test` commands.
 
-Run the gateway smoke test:
+Run the WebChat v2 smoke test:
 
 ```bash
-cargo build --no-default-features --features libsql
+cargo build -p ironclaw_reborn_cli --features webui-v2-beta,openai-compat-beta,slack-v2-host-beta --bin ironclaw-reborn
 cd tests/e2e
 pip install -e .
 playwright install --with-deps chromium  # on Linux CI; local macOS can omit --with-deps
-pytest scenarios/test_reborn_gateway_smoke.py -v --timeout=120
+pytest scenarios/test_reborn_webui_v2_smoke.py -v --timeout=120
 ```
 
 ## CI ownership
 
-`reborn-e2e.yml` is intentionally separate from `e2e.yml`:
+`reborn-e2e.yml` is intentionally focused on Reborn:
 
 - Reborn changes can run a focused architecture gate without destabilizing the main browser E2E matrix.
 - The workflow is advisory by default and intentionally does not run on `merge_group`; add a merge-queue trigger only after the gate proves stable and is deliberately promoted to branch protection.
 - The Rust jobs should stay deterministic and avoid live providers.
-- The gateway job should remain a smoke test, not a second full browser matrix.
+- The WebChat v2 job should remain a smoke test, not a second full browser matrix.

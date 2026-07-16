@@ -26,10 +26,10 @@ use crate::provider::{
 
 /// Read a fresh `claude login` OAuth token from the OS credential store.
 ///
-/// Mirrors `ironclaw::config::ClaudeCodeConfig::extract_oauth_token` but is
-/// inlined here so this crate doesn't depend on the main binary. Used to
-/// retry once after a 401 if the user's OAuth token has been rotated by
-/// Claude Code's background refresh.
+/// Mirrors Claude Code's credential extraction shape but is inlined here so
+/// this crate does not depend on a product binary. Used to retry once after a
+/// 401 if the user's OAuth token has been rotated by Claude Code's background
+/// refresh.
 fn refresh_claude_oauth_token() -> Option<String> {
     if cfg!(target_os = "macos") {
         match std::process::Command::new("security")

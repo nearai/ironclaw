@@ -170,26 +170,12 @@ fn extension_host_cluster_stays_internal() {
 }
 
 #[test]
-fn legacy_main_does_not_compose_reborn_runtime() {
+fn retired_root_main_stays_removed() {
     let root = workspace_root();
-    let legacy_main =
-        std::fs::read_to_string(root.join("src/main.rs")).expect("legacy main.rs readable");
-
-    for forbidden in [
-        "ironclaw_reborn_composition",
-        "ironclaw_reborn_cli",
-        "build_reborn_runtime",
-        "build_reborn_services",
-        "RebornBuildInput",
-        "RebornRuntimeInput",
-        "RebornCompositionProfile",
-    ] {
-        assert!(
-            !legacy_main.contains(forbidden),
-            "legacy src/main.rs must stay on the v1/AppBuilder path and must not compose \
-             Reborn runtime startup directly; found `{forbidden}`"
-        );
-    }
+    assert!(
+        !root.join("src/main.rs").exists(),
+        "retired root src/main.rs must not be reintroduced; Reborn startup lives in crates/ironclaw_reborn_cli"
+    );
 }
 
 #[test]

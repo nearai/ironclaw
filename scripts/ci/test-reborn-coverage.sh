@@ -359,7 +359,7 @@ assert_contains "A9: non-crates/-prefixed exemption module reports the validatio
 # (never `entry["module"]` — that key doesn't exist on this entry shape, the
 # structural regression this case pins).
 cat > "${fixtures_dir}/a10_two_crates.lcov" <<'EOF'
-SF:/work/ironclaw/crates/ironclaw_embeddings/src/a.rs
+SF:/work/ironclaw/crates/ironclaw_fixture_exempt/src/a.rs
 LF:10
 LH:0
 end_of_record
@@ -370,16 +370,16 @@ end_of_record
 EOF
 cat > "${fixtures_dir}/a10_crate_exemption.toml" <<'TOML'
 [[exemption]]
-crate = "ironclaw_embeddings"
-reason = "v1-only: consumed exclusively by the root ironclaw package"
+crate = "ironclaw_fixture_exempt"
+reason = "fixture crate exempted for whole-crate coverage regression"
 issue = "https://github.com/nearai/ironclaw/issues/1"
 TOML
 capture "${summary_sh}" "${fixtures_dir}/a10_two_crates.lcov" "${fixtures_dir}/a10_crate_exemption.toml"
 assert_exit_code "A10: whole-crate exemption exits 0 (no KeyError on missing 'module')" 0 "${CAP_RC}"
-assert_not_contains "A10: exempted crate dropped from the per-crate table" "${CAP_OUT}" "| \`ironclaw_embeddings\` |"
+assert_not_contains "A10: exempted crate dropped from the per-crate table" "${CAP_OUT}" "| \`ironclaw_fixture_exempt\` |"
 assert_contains "A10: exempted crate kept out of the table, other crate still reported" "${CAP_OUT}" \
   "| \`ironclaw_runner\` | 50% | 5 / 10 |"
-assert_contains "A10: whole-crate exemption listed under its 'crate: X' label" "${CAP_OUT}" "\`crate: ironclaw_embeddings\`"
+assert_contains "A10: whole-crate exemption listed under its 'crate: X' label" "${CAP_OUT}" "\`crate: ironclaw_fixture_exempt\`"
 assert_contains "A10: aggregate excludes the exempted crate's lines (5/10, not 5/20)" "${CAP_OUT}" \
   '**Line coverage (Reborn crates): 50%** — 5 / 10 lines'
 
@@ -392,14 +392,14 @@ reason = "per-file exemption"
 issue = "https://github.com/nearai/ironclaw/issues/2"
 
 [[exemption]]
-crate = "ironclaw_embeddings"
+crate = "ironclaw_fixture_exempt"
 reason = "whole-crate exemption"
 issue = "https://github.com/nearai/ironclaw/issues/1"
 TOML
 capture "${summary_sh}" "${fixtures_dir}/a10_two_crates.lcov" "${fixtures_dir}/a11_mixed_forms.toml"
 assert_exit_code "A11: mixed module+crate manifest exits 0" 0 "${CAP_RC}"
 assert_contains "A11: per-file form still rendered by its module path" "${CAP_OUT}" "\`crates/ironclaw_runner/src/a.rs\`"
-assert_contains "A11: whole-crate form still rendered by its 'crate: X' label" "${CAP_OUT}" "\`crate: ironclaw_embeddings\`"
+assert_contains "A11: whole-crate form still rendered by its 'crate: X' label" "${CAP_OUT}" "\`crate: ironclaw_fixture_exempt\`"
 assert_contains "A11: both exemptions fully drain the table (no data left)" "${CAP_OUT}" \
   "No Reborn crate coverage data found"
 
@@ -408,7 +408,7 @@ assert_contains "A11: both exemptions fully drain the table (no data left)" "${C
 cat > "${fixtures_dir}/a12_both_keys.toml" <<'TOML'
 [[exemption]]
 module = "crates/ironclaw_runner/src/a.rs"
-crate = "ironclaw_embeddings"
+crate = "ironclaw_fixture_exempt"
 reason = "ambiguous"
 issue = "https://github.com/nearai/ironclaw/issues/1"
 TOML
@@ -470,7 +470,7 @@ assert_eq "B3: empty lcov --zero-crates emits nothing" "" "${CAP_OUT}"
 
 # B4: a whole-crate `crate =` exemption drops its zero-covered crate from
 # --zero-crates too, not just from the report-mode table (A10 only covers
-# report mode; reuses that fixture — ironclaw_embeddings is 0/10, exempted).
+# report mode; reuses that fixture — ironclaw_fixture_exempt is 0/10, exempted).
 capture "${summary_sh}" --zero-crates "${fixtures_dir}/a10_two_crates.lcov" "${fixtures_dir}/a10_crate_exemption.toml"
 assert_exit_code "B4: --zero-crates with a whole-crate exemption exits 0" 0 "${CAP_RC}"
 assert_eq "B4: exempted zero-covered crate is excluded from --zero-crates output" "" "${CAP_OUT}"
@@ -727,7 +727,7 @@ fi
 
 # C9: a zero-covered crate excluded by a whole-crate exemption must not surface
 # in the sticky comment's 0-coverage callout (reuses the A10/B4 fixture pair —
-# ironclaw_embeddings is 0/10 but exempted, ironclaw_runner is 5/10 not zero).
+# ironclaw_fixture_exempt is 0/10 but exempted, ironclaw_runner is 5/10 not zero).
 c9_log="${tmp_root}/c9-gh.log"
 capture env \
   GH_TOKEN="fake-token" \

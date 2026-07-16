@@ -220,10 +220,9 @@ The production host egress path:
 
 Telegram v2 (and any other future v2 product adapter) is enabled by an
 explicit feature flag (`REBORN_TELEGRAM_V2_ENABLED=true` for Telegram).
-Default is off; legacy v1 Telegram (`channels-src/telegram`) runs
-unchanged. The host fails closed at startup when v1 and v2 are both
-configured for the same installation; see
-`ironclaw::config::validate_telegram_v1_v2_exclusivity`.
+Default is off; the retired v1 Telegram channel and root v1 channel manager
+are no longer available. Hosts should fail closed on duplicate adapter
+configuration for the same installation.
 
 ## Status
 
