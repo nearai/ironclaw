@@ -587,9 +587,14 @@ impl RebornLocalExtensionManagementPort {
                 reason: "the Telegram channel is not enabled on this deployment".to_string(),
             });
         };
+        // An unfilled slot above is a configuration fault (invalid request);
+        // a pairing-status READ failure is an availability fault — classify
+        // it transient/retryable and keep the store error out of the
+        // product-facing reason (debug diagnostic only).
         let paired = source.telegram_paired(caller).await.map_err(|error| {
-            ProductWorkflowError::InvalidBindingRequest {
-                reason: format!("telegram pairing status unavailable: {error}"),
+            tracing::debug!(%error, "telegram pairing status read failed during activation");
+            ProductWorkflowError::Transient {
+                reason: "telegram pairing status is temporarily unavailable".to_string(),
             }
         })?;
         if !paired {
@@ -4177,6 +4182,63 @@ output_schema_ref = "schemas/run.output.json"
         assert_eq!(
             scopes.iter().cloned().collect::<BTreeSet<_>>(),
             expected_scopes
+        );
+    }
+
+    /// A pairing-status store outage during telegram activation preflight is
+    /// an availability fault: it must classify as retryable `Transient` (not
+    /// the non-retryable `InvalidBindingRequest` reserved for the unfilled
+    /// slot / configuration fault) and must not leak the store error text
+    /// into the product-facing reason.
+    #[cfg(feature = "telegram-v2-host-beta")]
+    #[tokio::test]
+    async fn telegram_pairing_status_outage_is_transient_through_activation_requirements() {
+        #[derive(Debug)]
+        struct FailingPairedSource;
+
+        #[async_trait::async_trait]
+        impl crate::telegram::telegram_channel_connection::TelegramPairedStatusSource
+            for FailingPairedSource
+        {
+            async fn telegram_paired(
+                &self,
+                _user_id: &UserId,
+            ) -> Result<bool, crate::telegram::telegram_pairing::TelegramPairingError> {
+                Err(
+                    crate::telegram::telegram_pairing::TelegramPairingError::StoreUnavailable {
+                        reason: "test pairing store outage".to_string(),
+                    },
+                )
+            }
+        }
+
+        let (_dir, _storage_root, port, _active_registry, _installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let telegram_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
+            .expect("telegram ref");
+        port.install(telegram_ref.clone(), &lifecycle_owner())
+            .await
+            .expect("install telegram extension");
+        assert!(
+            port.telegram_paired_status_slot()
+                .fill(Arc::new(FailingPairedSource)),
+            "slot fills once"
+        );
+
+        let error = port
+            .activation_credential_requirements(&telegram_ref, &lifecycle_owner())
+            .await
+            .expect_err("a status outage is an error, not an empty requirement list");
+        assert!(
+            matches!(error, ProductWorkflowError::Transient { .. }),
+            "availability faults must stay retryable, got {error:?}"
+        );
+        assert!(
+            !error.to_string().contains("test pairing store outage"),
+            "store error text must not reach the product-facing reason"
         );
     }
 

@@ -9,6 +9,7 @@
 //! with the n-th rotated code still resumes it via the standard
 //! auth-continuation fan-out.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -86,8 +87,10 @@ pub(crate) trait TelegramPairingStore: Send + Sync + std::fmt::Debug {
         record: TelegramPairingRecord,
     ) -> Result<(), TelegramPairingError>;
 
-    /// Live (unexpired, unconsumed) record for an uppercased code.
-    async fn live_pairing_for_code(
+    /// Record for an uppercased code regardless of liveness. A consumed
+    /// record still serves as the completion receipt for the already-bound
+    /// sender (see [`TelegramPairingService::consume`]'s repair path).
+    async fn pairing_for_code(
         &self,
         code: &str,
     ) -> Result<Option<TelegramPairingRecord>, TelegramPairingError>;
@@ -97,7 +100,14 @@ pub(crate) trait TelegramPairingStore: Send + Sync + std::fmt::Debug {
         user_id: &UserId,
     ) -> Result<Option<TelegramPairingRecord>, TelegramPairingError>;
 
-    async fn mark_consumed(&self, code: &str) -> Result<(), TelegramPairingError>;
+    /// Atomically claim a live code (single consumer): transition it to
+    /// consumed and return it. `None` when the code is unknown, expired, or
+    /// already consumed — including losing a concurrent claim race. Exactly
+    /// one concurrent caller may receive `Some` for a given code.
+    async fn claim_pairing(
+        &self,
+        code: &str,
+    ) -> Result<Option<TelegramPairingRecord>, TelegramPairingError>;
 
     async fn invalidate_for_user(&self, user_id: &UserId) -> Result<(), TelegramPairingError>;
 }
@@ -115,12 +125,15 @@ pub(crate) trait TelegramUserBindingStore: Send + Sync + std::fmt::Debug {
         epoch: &str,
     ) -> Result<(), TelegramBindingError>;
 
-    /// Remove every binding for `user_id` under the installation prefix.
-    /// Returns the removed provider user ids.
+    /// Remove every binding for `user_id`. `installation` scopes removal to
+    /// one installation's identity namespace (exact segment match — never a
+    /// raw string prefix, so `tg-bot-1` cannot bleed into `tg-bot-10`);
+    /// `None` removes the user's bindings across every installation. Returns
+    /// the removed provider user ids.
     async fn unbind_telegram_users_for_user(
         &self,
         user_id: &UserId,
-        installation_prefix: &str,
+        installation: Option<&AdapterInstallationId>,
     ) -> Result<Vec<String>, TelegramBindingError>;
 
     /// The bound user for a provider id, if any (conflict checks + consume).
@@ -197,9 +210,9 @@ impl std::fmt::Debug for TelegramPairingService {
 }
 
 impl TelegramPairingService {
+    // arch-exempt: too_many_args, mirrors the slack binder construction shape
+    // until the telegram host mounts bundle owns the aggregation, plan #6116
     #[allow(clippy::too_many_arguments)]
-    // arch-exempt: too_many_args, mirrors the slack binder construction shape;
-    // folds into the telegram host mounts bundle, cleanup rides the #6116 port.
     pub(crate) fn new(
         tenant_id: TenantId,
         agent_id: AgentId,
@@ -282,6 +295,14 @@ impl TelegramPairingService {
     }
 
     /// Consume a code arriving over the verified webhook from a private chat.
+    ///
+    /// Ordering is claim-first: the code is atomically consumed (single
+    /// winner) BEFORE any identity/target side effect, so two concurrent
+    /// consumers of one code can never both bind. Completion (DM target +
+    /// continuation dispatch) is idempotently repairable: a sender already
+    /// bound to the code's user re-runs the completion effects — including on
+    /// an already-consumed code — so a consume that failed after the claim is
+    /// recovered by re-sending a code instead of stranding the blocked run.
     pub(crate) async fn consume(
         &self,
         raw_code: &str,
@@ -296,21 +317,27 @@ impl TelegramPairingService {
         {
             return Ok(PairingConsumeOutcome::ExpiredOrUnknown);
         }
-        let Some(record) = self.pairing_store.live_pairing_for_code(&code).await? else {
+        let Some(record) = self.pairing_store.pairing_for_code(&code).await? else {
             return Ok(PairingConsumeOutcome::ExpiredOrUnknown);
         };
-        if !record.is_live(Utc::now()) {
-            return Ok(PairingConsumeOutcome::ExpiredOrUnknown);
-        }
         let provider_user_id =
             telegram_user_identity_provider_user_id(&record.installation_id, telegram_user_id);
         match self.binding_store.bound_user_for(&provider_user_id).await {
-            Ok(Some(existing)) if existing != record.user_id => {
-                return Ok(PairingConsumeOutcome::AlreadyBoundToOtherUser);
+            Ok(Some(existing)) if existing == record.user_id => {
+                // Repair path: burn the code if it is still live (whoever
+                // wins — the sender is already bound), then re-run completion.
+                let _already_burned = self.pairing_store.claim_pairing(&code).await?;
+                return self
+                    .complete_pairing(&record, chat_id)
+                    .await
+                    .map(|()| PairingConsumeOutcome::AlreadyPairedSameUser { user_id: existing });
             }
-            Ok(Some(existing)) => {
-                self.pairing_store.mark_consumed(&code).await?;
-                return Ok(PairingConsumeOutcome::AlreadyPairedSameUser { user_id: existing });
+            Ok(Some(_other)) => {
+                if !record.is_live(Utc::now()) {
+                    return Ok(PairingConsumeOutcome::ExpiredOrUnknown);
+                }
+                // Refusal keeps the live code intact for its owner.
+                return Ok(PairingConsumeOutcome::AlreadyBoundToOtherUser);
             }
             Ok(None) => {}
             Err(error) => {
@@ -319,6 +346,11 @@ impl TelegramPairingService {
                 });
             }
         }
+        // Single-consumer claim BEFORE identity/target writes: exactly one
+        // concurrent consumer of a live code proceeds past this point.
+        let Some(record) = self.pairing_store.claim_pairing(&code).await? else {
+            return Ok(PairingConsumeOutcome::ExpiredOrUnknown);
+        };
         match self
             .binding_store
             .bind_telegram_user(&provider_user_id, &record.user_id, &code)
@@ -334,6 +366,20 @@ impl TelegramPairingService {
                 });
             }
         }
+        self.complete_pairing(&record, chat_id).await?;
+        Ok(PairingConsumeOutcome::Paired {
+            user_id: record.user_id,
+        })
+    }
+
+    /// The idempotent completion tail shared by first-time pairing and the
+    /// repair path: record the DM delivery target and dispatch the blocked-run
+    /// continuation.
+    async fn complete_pairing(
+        &self,
+        record: &TelegramPairingRecord,
+        chat_id: i64,
+    ) -> Result<(), TelegramPairingError> {
         self.dm_target_store
             .upsert_dm_target(
                 &record.installation_id,
@@ -343,33 +389,51 @@ impl TelegramPairingService {
                 },
             )
             .await?;
-        self.pairing_store.mark_consumed(&code).await?;
-        self.dispatch_pairing_completion(&record.user_id).await?;
-        Ok(PairingConsumeOutcome::Paired {
-            user_id: record.user_id,
-        })
+        self.dispatch_pairing_completion(&record.user_id).await
     }
 
-    /// Unpair the caller: bindings + DM target removed, pending code
+    /// Unpair the caller: bindings + DM targets removed, pending code
     /// invalidated. Only this user is affected; history is retained.
+    ///
+    /// Deliberately independent of the current bot setup: an admin clearing
+    /// the deployment must not orphan a user's durable bindings — those would
+    /// silently resurrect the connection when the same bot is reconfigured
+    /// even though the user disconnected. Bindings are removed across every
+    /// installation, and DM targets are derived from the removed provider ids
+    /// plus the current setup (when one exists).
     pub(crate) async fn unpair(&self, caller: &UserId) -> Result<(), TelegramPairingError> {
         self.pairing_store.invalidate_for_user(caller).await?;
-        let Some(setup) = self.setup.current_setup().await? else {
-            return Ok(());
-        };
-        let installation_id = setup
-            .installation_id()
-            .map_err(TelegramPairingError::from)?;
-        let prefix = format!("{}:", installation_id.as_str());
-        self.binding_store
-            .unbind_telegram_users_for_user(caller, &prefix)
+        let removed = self
+            .binding_store
+            .unbind_telegram_users_for_user(caller, None)
             .await
             .map_err(|error| TelegramPairingError::StoreUnavailable {
                 reason: error.to_string(),
             })?;
-        self.dm_target_store
-            .delete_dm_target_for_user(&installation_id, caller)
-            .await?;
+        let mut installations: BTreeSet<String> = removed
+            .iter()
+            .filter_map(|provider_user_id| provider_user_id.split_once(':'))
+            .map(|(installation, _)| installation.to_string())
+            .collect();
+        if let Some(setup) = self.setup.current_setup().await? {
+            installations.insert(
+                setup
+                    .installation_id()
+                    .map_err(TelegramPairingError::from)?
+                    .as_str()
+                    .to_string(),
+            );
+        }
+        for installation in installations {
+            let installation_id = AdapterInstallationId::new(installation).map_err(|error| {
+                TelegramPairingError::StoreUnavailable {
+                    reason: format!("stored telegram binding installation invalid: {error}"),
+                }
+            })?;
+            self.dm_target_store
+                .delete_dm_target_for_user(&installation_id, caller)
+                .await?;
+        }
         Ok(())
     }
 
@@ -468,17 +532,16 @@ mod tests {
             Ok(())
         }
 
-        async fn live_pairing_for_code(
+        async fn pairing_for_code(
             &self,
             code: &str,
         ) -> Result<Option<TelegramPairingRecord>, TelegramPairingError> {
-            let now = Utc::now();
             Ok(self
                 .records
                 .lock()
                 .expect("lock")
                 .iter()
-                .find(|record| record.code.eq_ignore_ascii_case(code) && record.is_live(now))
+                .find(|record| record.code.eq_ignore_ascii_case(code))
                 .cloned())
         }
 
@@ -496,20 +559,74 @@ mod tests {
                 .cloned())
         }
 
-        async fn mark_consumed(&self, code: &str) -> Result<(), TelegramPairingError> {
+        async fn claim_pairing(
+            &self,
+            code: &str,
+        ) -> Result<Option<TelegramPairingRecord>, TelegramPairingError> {
             let mut records = self.records.lock().expect("lock");
+            let now = Utc::now();
             for record in records.iter_mut() {
                 if record.code.eq_ignore_ascii_case(code) {
-                    record.consumed_at = Some(Utc::now());
+                    if !record.is_live(now) {
+                        return Ok(None);
+                    }
+                    record.consumed_at = Some(now);
+                    return Ok(Some(record.clone()));
                 }
             }
-            Ok(())
+            Ok(None)
         }
 
         async fn invalidate_for_user(&self, user_id: &UserId) -> Result<(), TelegramPairingError> {
             let mut records = self.records.lock().expect("lock");
             records.retain(|record| &record.user_id != user_id);
             Ok(())
+        }
+    }
+
+    /// Decorator forcing the racing interleaving: both consumers read the
+    /// still-live record before either reaches the claim, so the test pins
+    /// the single-winner property deterministically.
+    #[derive(Debug)]
+    struct ReadBarrierPairingStore {
+        inner: InMemoryPairingStore,
+        read_barrier: tokio::sync::Barrier,
+    }
+
+    #[async_trait]
+    impl TelegramPairingStore for ReadBarrierPairingStore {
+        async fn upsert_pending_pairing(
+            &self,
+            record: TelegramPairingRecord,
+        ) -> Result<(), TelegramPairingError> {
+            self.inner.upsert_pending_pairing(record).await
+        }
+
+        async fn pairing_for_code(
+            &self,
+            code: &str,
+        ) -> Result<Option<TelegramPairingRecord>, TelegramPairingError> {
+            let record = self.inner.pairing_for_code(code).await;
+            self.read_barrier.wait().await;
+            record
+        }
+
+        async fn live_pairing_for_user(
+            &self,
+            user_id: &UserId,
+        ) -> Result<Option<TelegramPairingRecord>, TelegramPairingError> {
+            self.inner.live_pairing_for_user(user_id).await
+        }
+
+        async fn claim_pairing(
+            &self,
+            code: &str,
+        ) -> Result<Option<TelegramPairingRecord>, TelegramPairingError> {
+            self.inner.claim_pairing(code).await
+        }
+
+        async fn invalidate_for_user(&self, user_id: &UserId) -> Result<(), TelegramPairingError> {
+            self.inner.invalidate_for_user(user_id).await
         }
     }
 
@@ -542,13 +659,17 @@ mod tests {
         async fn unbind_telegram_users_for_user(
             &self,
             user_id: &UserId,
-            installation_prefix: &str,
+            installation: Option<&AdapterInstallationId>,
         ) -> Result<Vec<String>, TelegramBindingError> {
             let mut bindings = self.bindings.lock().expect("lock");
             let removed: Vec<String> = bindings
                 .iter()
                 .filter(|(key, (bound, _))| {
-                    bound == user_id && key.starts_with(installation_prefix)
+                    bound == user_id
+                        && installation.is_none_or(|installation| {
+                            crate::telegram::telegram_actor_identity::
+                                provider_user_id_in_installation(key, installation)
+                        })
                 })
                 .map(|(key, _)| key.clone())
                 .collect();
@@ -625,6 +746,16 @@ mod tests {
     #[derive(Debug, Default)]
     struct RecordingDispatcher {
         events: StdMutex<Vec<AuthContinuationEvent>>,
+        fail_remaining: std::sync::atomic::AtomicUsize,
+    }
+
+    impl RecordingDispatcher {
+        fn failing_once() -> Self {
+            Self {
+                events: StdMutex::new(Vec::new()),
+                fail_remaining: std::sync::atomic::AtomicUsize::new(1),
+            }
+        }
     }
 
     #[async_trait]
@@ -633,6 +764,17 @@ mod tests {
             &self,
             event: AuthContinuationEvent,
         ) -> Result<(), AuthProductError> {
+            if self
+                .fail_remaining
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |remaining| remaining.checked_sub(1),
+                )
+                .is_ok()
+            {
+                return Err(AuthProductError::BackendUnavailable);
+            }
             self.events.lock().expect("lock").push(event);
             Ok(())
         }
@@ -709,10 +851,24 @@ mod tests {
     struct Fixture {
         service: TelegramPairingService,
         dispatcher: Arc<RecordingDispatcher>,
+        binding_store: Arc<InMemoryBindingStore>,
         setup: Arc<TelegramSetupService>,
     }
 
     async fn fixture(configured: bool) -> Fixture {
+        fixture_with(
+            configured,
+            Arc::new(InMemoryPairingStore::default()),
+            Arc::new(RecordingDispatcher::default()),
+        )
+        .await
+    }
+
+    async fn fixture_with(
+        configured: bool,
+        pairing_store: Arc<dyn TelegramPairingStore>,
+        dispatcher: Arc<RecordingDispatcher>,
+    ) -> Fixture {
         let tenant_id = TenantId::new("tenant-a").expect("tenant");
         let agent_id = AgentId::new("agent-a").expect("agent");
         let setup = Arc::new(TelegramSetupService::new(
@@ -734,20 +890,21 @@ mod tests {
                 .await
                 .expect("setup saves");
         }
-        let dispatcher = Arc::new(RecordingDispatcher::default());
+        let binding_store = Arc::new(InMemoryBindingStore::default());
         let service = TelegramPairingService::new(
             tenant_id,
             agent_id,
             None,
             Arc::clone(&setup),
-            Arc::new(InMemoryPairingStore::default()),
-            Arc::new(InMemoryBindingStore::default()),
+            pairing_store,
+            Arc::clone(&binding_store) as Arc<dyn TelegramUserBindingStore>,
             Arc::new(InMemoryDmTargetStore::default()),
             Arc::clone(&dispatcher) as Arc<dyn RebornAuthContinuationDispatcher>,
         );
         Fixture {
             service,
             dispatcher,
+            binding_store,
             setup,
         }
     }
@@ -921,6 +1078,99 @@ mod tests {
         );
     }
 
+    /// Two concurrent consumers of the same live code, from different
+    /// Telegram accounts, both read the record before either claims it (the
+    /// barrier pins that interleaving). Exactly one may bind: the claim is
+    /// single-consumer and happens before any identity/target side effect.
+    #[tokio::test]
+    async fn concurrent_consume_of_one_code_binds_exactly_one_winner() {
+        let fixture = fixture_with(
+            true,
+            Arc::new(ReadBarrierPairingStore {
+                inner: InMemoryPairingStore::default(),
+                read_barrier: tokio::sync::Barrier::new(2),
+            }),
+            Arc::new(RecordingDispatcher::default()),
+        )
+        .await;
+        let ben = user("ben");
+        let issue = fixture.service.issue_or_rotate(&ben).await.expect("issue");
+
+        let (first, second) = tokio::join!(
+            fixture.service.consume(&issue.code, "tg-attacker", 111),
+            fixture.service.consume(&issue.code, "tg-victim", 222),
+        );
+        let outcomes = [first.expect("consume"), second.expect("consume")];
+
+        let paired = outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, PairingConsumeOutcome::Paired { .. }))
+            .count();
+        let refused = outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, PairingConsumeOutcome::ExpiredOrUnknown))
+            .count();
+        assert_eq!(paired, 1, "exactly one concurrent consumer may pair");
+        assert_eq!(refused, 1, "the claim loser is refused");
+        assert_eq!(
+            fixture.binding_store.bindings.lock().expect("lock").len(),
+            1,
+            "the loser must not leave a binding behind"
+        );
+        assert_eq!(
+            fixture.dispatcher.events.lock().expect("lock").len(),
+            1,
+            "exactly one continuation dispatch"
+        );
+    }
+
+    /// A continuation dispatch that fails after the code was claimed must not
+    /// strand the blocked run: re-sending the (already consumed) code from the
+    /// now-bound account repairs completion — DM target upserted and the
+    /// continuation dispatched.
+    #[tokio::test]
+    async fn resend_after_failed_continuation_dispatch_repairs_completion() {
+        let fixture = fixture_with(
+            true,
+            Arc::new(InMemoryPairingStore::default()),
+            Arc::new(RecordingDispatcher::failing_once()),
+        )
+        .await;
+        let ben = user("ben");
+        let issue = fixture.service.issue_or_rotate(&ben).await.expect("issue");
+
+        let error = fixture
+            .service
+            .consume(&issue.code, "tg-100", 555)
+            .await
+            .expect_err("first consume surfaces the dispatch failure");
+        assert!(matches!(
+            error,
+            TelegramPairingError::ContinuationDispatch { .. }
+        ));
+        assert!(
+            fixture.dispatcher.events.lock().expect("lock").is_empty(),
+            "failed dispatch recorded no continuation"
+        );
+
+        let outcome = fixture
+            .service
+            .consume(&issue.code, "tg-100", 555)
+            .await
+            .expect("resend repairs");
+        assert_eq!(
+            outcome,
+            PairingConsumeOutcome::AlreadyPairedSameUser {
+                user_id: ben.clone()
+            }
+        );
+        let events = fixture.dispatcher.events.lock().expect("lock").clone();
+        assert_eq!(events.len(), 1, "repair re-dispatches the continuation");
+        assert_eq!(events[0].scope.resource.user_id, ben);
+        let status = fixture.service.status_for(&ben).await.expect("status");
+        assert!(status.connected, "DM target present after repair");
+    }
+
     #[tokio::test]
     async fn unpair_removes_binding_target_and_pending_code() {
         let fixture = fixture(true).await;
@@ -942,5 +1192,49 @@ mod tests {
             .expect("re-pair after unpair");
         assert!(matches!(outcome, PairingConsumeOutcome::Paired { .. }));
         drop(fixture.setup);
+    }
+
+    /// Unpair must not depend on the current bot setup: after an admin clears
+    /// the deployment, a user's disconnect still removes their durable
+    /// binding — reconfiguring the same bot must not silently resurrect the
+    /// connection they explicitly severed.
+    #[tokio::test]
+    async fn unpair_after_admin_cleared_setup_still_removes_the_binding() {
+        let fixture = fixture(true).await;
+        let ben = user("ben");
+        let issue = fixture.service.issue_or_rotate(&ben).await.expect("issue");
+        fixture
+            .service
+            .consume(&issue.code, "tg-100", 1)
+            .await
+            .expect("pair");
+
+        fixture.setup.clear().await.expect("admin clears setup");
+        fixture.service.unpair(&ben).await.expect("unpair");
+        assert!(
+            fixture
+                .binding_store
+                .bindings
+                .lock()
+                .expect("lock")
+                .is_empty(),
+            "unpair without a current setup must still remove the binding"
+        );
+
+        // Reconfigure the same bot: the disconnected user must NOT come back
+        // paired, and their old Telegram account is unbound.
+        fixture
+            .setup
+            .save_with_previous(TelegramInstallationSetupUpdate {
+                bot_token: Some(SecretString::from("123:abc".to_string())),
+                webhook_url_override: None,
+            })
+            .await
+            .expect("same bot reconfigures");
+        let status = fixture.service.status_for(&ben).await.expect("status");
+        assert!(
+            !status.connected,
+            "clear-setup → unpair → reconfigure must not resurrect the pairing"
+        );
     }
 }

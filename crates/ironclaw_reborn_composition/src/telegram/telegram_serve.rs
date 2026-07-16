@@ -213,6 +213,11 @@ pub(crate) enum TelegramIngressError {
     Runner(#[from] RunnerError),
     #[error("no configured Telegram installation matched the request")]
     InstallationNotFound,
+    /// Host-side availability fault (setup/secret store outage, workflow
+    /// build failure) — retryable, so Telegram redelivers once the host
+    /// recovers, unlike the authentication-shaped `InstallationNotFound`.
+    #[error("Telegram installation resolution temporarily unavailable")]
+    TemporarilyUnavailable,
     #[error(
         "Telegram installation rate limit exceeded for tenant {tenant_id} installation {adapter_installation_id}"
     )]
@@ -308,11 +313,15 @@ impl DynamicTelegramInstallationResolver {
         // Read setup before consulting the live holder so WebUI changes take
         // effect on the next webhook; the holder exists for dispatcher
         // lifecycle/drain ownership, not to hide setup-store I/O.
+        // Only Ok(None) — genuinely unconfigured — is the 401 shape; a store
+        // outage stays retryable (503) so Telegram redelivers on recovery.
         let setup = self
             .setup_service
             .current_setup()
             .await
-            .map_err(map_setup_error_to_ingress_not_found("read Telegram setup"))?
+            .map_err(map_setup_error_to_ingress_unavailable(
+                "read Telegram setup",
+            ))?
             .ok_or(TelegramIngressError::InstallationNotFound)?;
         let revision = setup.revision;
         if let Some(live) = self.live_for_revision(revision).await {
@@ -348,7 +357,7 @@ impl DynamicTelegramInstallationResolver {
         let installation_id =
             setup
                 .installation_id()
-                .map_err(map_setup_error_to_ingress_not_found(
+                .map_err(map_setup_error_to_ingress_unavailable(
                     "derive Telegram installation id",
                 ))?;
         // `webhook_secret()` re-reads the current setup record; a save racing
@@ -359,7 +368,7 @@ impl DynamicTelegramInstallationResolver {
             .setup_service
             .webhook_secret()
             .await
-            .map_err(map_setup_error_to_ingress_not_found(
+            .map_err(map_setup_error_to_ingress_unavailable(
                 "resolve Telegram webhook secret",
             ))?
             .ok_or(TelegramIngressError::InstallationNotFound)?;
@@ -369,11 +378,11 @@ impl DynamicTelegramInstallationResolver {
             subject: installation_id.as_str().to_string(),
         };
         let adapter_id = ProductAdapterId::new(TELEGRAM_V2_ADAPTER_ID).map_err(
-            map_build_reason_to_ingress_not_found("build Telegram adapter id"),
+            map_build_reason_to_ingress_unavailable("build Telegram adapter id"),
         )?;
         let egress_credential_handle =
             EgressCredentialHandle::new(TELEGRAM_BOT_TOKEN_EGRESS_HANDLE).map_err(
-                map_build_reason_to_ingress_not_found("build Telegram bot token handle"),
+                map_build_reason_to_ingress_unavailable("build Telegram bot token handle"),
             )?;
         let adapter: Arc<dyn ProductAdapter> =
             Arc::new(TelegramV2Adapter::new(TelegramV2AdapterConfig {
@@ -393,7 +402,7 @@ impl DynamicTelegramInstallationResolver {
         let revision_workflow = self
             .revision_workflows
             .build_revision_workflow(&setup)
-            .map_err(map_build_reason_to_ingress_not_found(
+            .map_err(map_build_reason_to_ingress_unavailable(
                 "build Telegram revision workflow",
             ))?;
         let runner = Arc::new(NativeProductAdapterRunner::with_config(
@@ -841,6 +850,17 @@ fn ingress_error_response(error: TelegramIngressError) -> Response {
                 TelegramWebhookErrorCategory::Authentication,
             )
         }
+        TelegramIngressError::TemporarilyUnavailable => {
+            tracing::debug!(
+                target = "ironclaw::reborn::telegram_updates",
+                reason = "unavailable",
+                "Telegram updates installation resolution temporarily unavailable"
+            );
+            error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                TelegramWebhookErrorCategory::TemporarilyUnavailable,
+            )
+        }
         TelegramIngressError::InstallationRateLimited {
             tenant_id,
             adapter_installation_id,
@@ -912,7 +932,7 @@ fn error_response(status: StatusCode, category: TelegramWebhookErrorCategory) ->
     (status, Json(TelegramWebhookErrorBody { error: category })).into_response()
 }
 
-fn map_setup_error_to_ingress_not_found(
+fn map_setup_error_to_ingress_unavailable(
     context: &'static str,
 ) -> impl FnOnce(TelegramSetupError) -> TelegramIngressError {
     move |error| {
@@ -922,11 +942,11 @@ fn map_setup_error_to_ingress_not_found(
             context,
             "Telegram setup unavailable for dynamic ingress"
         );
-        TelegramIngressError::InstallationNotFound
+        TelegramIngressError::TemporarilyUnavailable
     }
 }
 
-fn map_build_reason_to_ingress_not_found<E: std::fmt::Display>(
+fn map_build_reason_to_ingress_unavailable<E: std::fmt::Display>(
     context: &'static str,
 ) -> impl FnOnce(E) -> TelegramIngressError {
     move |error| {
@@ -936,7 +956,7 @@ fn map_build_reason_to_ingress_not_found<E: std::fmt::Display>(
             context,
             "Telegram installation build failed for dynamic ingress"
         );
-        TelegramIngressError::InstallationNotFound
+        TelegramIngressError::TemporarilyUnavailable
     }
 }
 
@@ -1311,6 +1331,61 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert_error_body(response, "authentication").await;
+    }
+
+    /// A setup-store outage is an availability fault, not an authentication
+    /// decision: the webhook answers a retryable 503 (Telegram redelivers
+    /// once the store recovers). Only `Ok(None)` — genuinely unconfigured —
+    /// is the 401 shape.
+    #[tokio::test]
+    async fn telegram_updates_handler_returns_503_when_setup_store_is_down() {
+        #[derive(Debug)]
+        struct FailingSetupStore;
+
+        #[async_trait::async_trait]
+        impl crate::telegram::telegram_setup::TelegramInstallationSetupStore for FailingSetupStore {
+            async fn get_telegram_installation_setup(
+                &self,
+            ) -> Result<Option<TelegramInstallationSetup>, TelegramSetupError> {
+                Err(TelegramSetupError::StoreUnavailable)
+            }
+
+            async fn put_telegram_installation_setup(
+                &self,
+                _setup: &TelegramInstallationSetup,
+            ) -> Result<(), TelegramSetupError> {
+                Err(TelegramSetupError::StoreUnavailable)
+            }
+
+            async fn delete_telegram_installation_setup(&self) -> Result<(), TelegramSetupError> {
+                Err(TelegramSetupError::StoreUnavailable)
+            }
+        }
+
+        let setup = Arc::new(TelegramSetupService::new(
+            TenantId::new("tenant-a").expect("tenant"),
+            ironclaw_host_api::AgentId::new("agent-a").expect("agent"),
+            None,
+            ironclaw_host_api::UserId::new("operator").expect("user"),
+            Arc::new(FailingSetupStore),
+            Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+            Arc::new(RecordingBotApi::default()),
+            Some("https://ironclaw.example".to_string()),
+        ));
+        let pairing = pairing_service_with(Arc::clone(&setup));
+        let resolver = Arc::new(DynamicTelegramInstallationResolver::new(
+            setup,
+            pairing,
+            Arc::new(FakeIdentityLookup::default()) as Arc<dyn RebornUserIdentityLookup>,
+            Arc::new(FakeRevisionWorkflowBuilder::default())
+                as Arc<dyn TelegramRevisionWorkflowBuilder>,
+        ));
+        let state = TelegramUpdatesRouteState::from_resolver(resolver);
+
+        let response = post_to_state(&state, r#"{"update_id":1}"#.to_string(), Vec::new()).await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_error_body(response, "temporarily_unavailable").await;
     }
 
     #[tokio::test]

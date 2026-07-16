@@ -339,17 +339,16 @@ where
         Ok(())
     }
 
-    async fn live_pairing_for_code(
+    async fn pairing_for_code(
         &self,
         code: &str,
     ) -> Result<Option<TelegramPairingRecord>, TelegramPairingError> {
         let path = Self::pairing_code_path(code).map_err(map_fs_pairing)?;
-        let record = self
+        Ok(self
             .read_record::<TelegramPairingRecord>(&path)
             .await
             .map_err(map_fs_pairing)?
-            .map(|(record, _)| record);
-        Ok(record.filter(|record| record.is_live(Utc::now())))
+            .map(|(record, _)| record))
     }
 
     async fn live_pairing_for_user(
@@ -364,23 +363,38 @@ where
         else {
             return Ok(None);
         };
-        self.live_pairing_for_code(&pointer.code).await
+        Ok(self
+            .pairing_for_code(&pointer.code)
+            .await?
+            .filter(|record| record.is_live(Utc::now())))
     }
 
-    async fn mark_consumed(&self, code: &str) -> Result<(), TelegramPairingError> {
+    async fn claim_pairing(
+        &self,
+        code: &str,
+    ) -> Result<Option<TelegramPairingRecord>, TelegramPairingError> {
         let path = Self::pairing_code_path(code).map_err(map_fs_pairing)?;
         let Some((mut record, version)) = self
             .read_record::<TelegramPairingRecord>(&path)
             .await
             .map_err(map_fs_pairing)?
         else {
-            return Ok(());
+            return Ok(None);
         };
+        if !record.is_live(Utc::now()) {
+            return Ok(None);
+        }
         record.consumed_at = Some(Utc::now());
-        self.write_record(&path, &record, CasExpectation::Version(version))
+        // Version-CAS makes the claim single-consumer: a concurrent claimer
+        // (or rotation) that wrote first wins and this caller loses cleanly.
+        match self
+            .write_record(&path, &record, CasExpectation::Version(version))
             .await
-            .map_err(map_fs_pairing)?;
-        Ok(())
+        {
+            Ok(_) => Ok(Some(record)),
+            Err(FilesystemError::VersionMismatch { .. }) => Ok(None),
+            Err(error) => Err(map_fs_pairing(error)),
+        }
     }
 
     async fn invalidate_for_user(&self, user_id: &UserId) -> Result<(), TelegramPairingError> {
@@ -463,7 +477,7 @@ where
     async fn unbind_telegram_users_for_user(
         &self,
         user_id: &UserId,
-        installation_prefix: &str,
+        installation: Option<&AdapterInstallationId>,
     ) -> Result<Vec<String>, TelegramBindingError> {
         let index_path = Self::binding_user_index_path(user_id).map_err(map_fs_binding)?;
         let Some((index, _)) = self
@@ -476,7 +490,13 @@ where
         let mut removed = Vec::new();
         let mut retained = Vec::new();
         for provider_user_id in index.provider_user_ids {
-            if !provider_user_id.starts_with(installation_prefix) {
+            let in_scope = installation.is_none_or(|installation| {
+                crate::telegram::telegram_actor_identity::provider_user_id_in_installation(
+                    &provider_user_id,
+                    installation,
+                )
+            });
+            if !in_scope {
                 retained.push(provider_user_id);
                 continue;
             }
@@ -592,10 +612,24 @@ where
         };
         Ok(index.provider_user_ids.iter().any(|candidate| {
             provider_user_id_prefix
-                .map(|prefix| candidate.starts_with(prefix))
+                .map(|prefix| provider_user_id_matches_installation_prefix(candidate, prefix))
                 .unwrap_or(true)
         }))
     }
+}
+
+/// Installation scoping for `{installation}:{telegram_user_id}` provider ids:
+/// the prefix (with or without its trailing `:`) must match the installation
+/// segment exactly — `tg-bot-1` can never satisfy a `tg-bot-10:…` binding,
+/// even if a caller forgets the delimiter.
+fn provider_user_id_matches_installation_prefix(candidate: &str, prefix: &str) -> bool {
+    let installation = prefix.strip_suffix(':').unwrap_or(prefix);
+    if installation.is_empty() {
+        return true;
+    }
+    candidate
+        .split_once(':')
+        .is_some_and(|(candidate_installation, _)| candidate_installation == installation)
 }
 
 #[async_trait]
@@ -640,5 +674,168 @@ where
             Err(FilesystemError::NotFound { .. }) => Ok(()),
             Err(error) => Err(map_fs_pairing(error)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Duration;
+    use ironclaw_filesystem::InMemoryBackend;
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+
+    use super::*;
+
+    fn state() -> FilesystemTelegramHostState<InMemoryBackend> {
+        let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(InMemoryBackend::default()),
+            MountView::new(vec![MountGrant::new(
+                MountAlias::new("/tenant-shared").unwrap(),
+                VirtualPath::new("/tenants/tenant-alpha/shared").unwrap(),
+                MountPermissions::read_write_list_delete(),
+            )])
+            .unwrap(),
+        ));
+        FilesystemTelegramHostState::new(
+            scoped,
+            TenantId::new("tenant-alpha").unwrap(),
+            user("operator"),
+            AgentId::new("agent-alpha").unwrap(),
+            None,
+        )
+    }
+
+    fn user(value: &str) -> UserId {
+        UserId::new(value).unwrap()
+    }
+
+    fn installation(value: &str) -> AdapterInstallationId {
+        AdapterInstallationId::new(value).unwrap()
+    }
+
+    fn live_record(code: &str, user_id: &str) -> TelegramPairingRecord {
+        let now = Utc::now();
+        TelegramPairingRecord {
+            code: code.to_string(),
+            tenant_id: TenantId::new("tenant-alpha").unwrap(),
+            user_id: user(user_id),
+            installation_id: installation("tg-bot-1"),
+            created_at: now,
+            expires_at: now + Duration::minutes(15),
+            consumed_at: None,
+        }
+    }
+
+    /// The durable claim is single-consumer: the first claim consumes the
+    /// record, every later claim of the same code loses, and the consumed
+    /// record stays readable as the repair-path receipt.
+    #[tokio::test]
+    async fn claim_pairing_is_single_consumer_and_keeps_the_receipt() {
+        let state = state();
+        state
+            .upsert_pending_pairing(live_record("ABCD2345", "ben"))
+            .await
+            .expect("upsert");
+
+        let claimed = state
+            .claim_pairing("ABCD2345")
+            .await
+            .expect("claim")
+            .expect("first claim wins");
+        assert!(claimed.consumed_at.is_some());
+        assert!(
+            state
+                .claim_pairing("ABCD2345")
+                .await
+                .expect("second claim")
+                .is_none(),
+            "a consumed code cannot be claimed again"
+        );
+        let receipt = state
+            .pairing_for_code("ABCD2345")
+            .await
+            .expect("read")
+            .expect("consumed record remains readable");
+        assert!(receipt.consumed_at.is_some());
+        assert!(
+            state
+                .live_pairing_for_user(&user("ben"))
+                .await
+                .expect("live read")
+                .is_none(),
+            "a consumed code is no longer live for its user"
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_pairing_refuses_expired_codes() {
+        let state = state();
+        let mut record = live_record("EFGH6789", "ben");
+        record.expires_at = Utc::now() - Duration::seconds(1);
+        state.upsert_pending_pairing(record).await.expect("upsert");
+
+        assert!(
+            state
+                .claim_pairing("EFGH6789")
+                .await
+                .expect("claim")
+                .is_none()
+        );
+    }
+
+    /// Installation scoping is exact-segment, never raw string prefix: a
+    /// binding in installation `tg-bot-10` must not satisfy (or be removed
+    /// by) an operation scoped to `tg-bot-1` — with or without the trailing
+    /// colon a caller might forget.
+    #[tokio::test]
+    async fn installation_scope_matching_is_exact_never_prefix_overlap() {
+        let state = state();
+        let ben = user("ben");
+        state
+            .bind_telegram_user("tg-bot-10:555", &ben, "EPOCH111")
+            .await
+            .expect("bind");
+
+        for overlapping_prefix in ["tg-bot-1:", "tg-bot-1"] {
+            assert!(
+                !state
+                    .user_has_provider_binding_with_provider_user_id_prefix(
+                        crate::telegram::telegram_actor_identity::TELEGRAM_IDENTITY_PROVIDER,
+                        &ben,
+                        Some(overlapping_prefix),
+                    )
+                    .await
+                    .expect("lookup"),
+                "a tg-bot-10 binding must not match installation scope {overlapping_prefix}"
+            );
+        }
+        assert!(
+            state
+                .user_has_provider_binding_with_provider_user_id_prefix(
+                    crate::telegram::telegram_actor_identity::TELEGRAM_IDENTITY_PROVIDER,
+                    &ben,
+                    Some("tg-bot-10:"),
+                )
+                .await
+                .expect("lookup"),
+            "the exact installation still matches"
+        );
+
+        // Scoped unbind must not cross installations either.
+        let removed = state
+            .unbind_telegram_users_for_user(&ben, Some(&installation("tg-bot-1")))
+            .await
+            .expect("scoped unbind");
+        assert!(
+            removed.is_empty(),
+            "tg-bot-1 scope must not remove tg-bot-10 bindings"
+        );
+        assert_eq!(
+            state
+                .unbind_telegram_users_for_user(&ben, None)
+                .await
+                .expect("unscoped unbind"),
+            vec!["tg-bot-10:555".to_string()],
+            "None scope removes the user's bindings across installations"
+        );
     }
 }

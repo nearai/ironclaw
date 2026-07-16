@@ -41,11 +41,49 @@ pub(crate) enum TelegramBotApiError {
     #[error("telegram bot api unavailable: {reason}")]
     Unavailable { reason: String },
     /// Telegram answered `ok: false` (invalid token, rejected webhook URL, …).
-    #[error("telegram bot api rejected the request: {description}")]
-    Rejected { description: String },
+    /// Carries a stable category only — the provider-controlled `description`
+    /// text never enters this error's `Display` (it flows toward the admin
+    /// surface via `TelegramSetupError`); the bounded raw text goes to a
+    /// `debug!` diagnostic at the parse site instead.
+    #[error("telegram bot api rejected the request: {kind}")]
+    Rejected { kind: TelegramBotApiRejection },
     /// Telegram answered 2xx but the body did not match the expected shape.
     #[error("telegram bot api returned an invalid response: {reason}")]
     InvalidResponse { reason: String },
+}
+
+/// Stable, sanitized rejection categories derived from the HTTP status —
+/// never from Telegram's free-text `description`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TelegramBotApiRejection {
+    /// 401/404 — invalid or revoked bot token.
+    Unauthorized,
+    /// 403 — the bot is blocked or lacks access.
+    Forbidden,
+    /// 429 — Telegram rate limit.
+    RateLimited,
+    /// 400 and other request rejections.
+    InvalidRequest,
+}
+
+impl std::fmt::Display for TelegramBotApiRejection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            TelegramBotApiRejection::Unauthorized => "unauthorized (check the bot token)",
+            TelegramBotApiRejection::Forbidden => "forbidden",
+            TelegramBotApiRejection::RateLimited => "rate limited",
+            TelegramBotApiRejection::InvalidRequest => "invalid request",
+        })
+    }
+}
+
+fn classify_rejection(status: u16) -> TelegramBotApiRejection {
+    match status {
+        401 | 404 => TelegramBotApiRejection::Unauthorized,
+        403 => TelegramBotApiRejection::Forbidden,
+        429 => TelegramBotApiRejection::RateLimited,
+        _ => TelegramBotApiRejection::InvalidRequest,
+    }
 }
 
 /// The hermetic seam for every Telegram Bot API call the host makes outside
@@ -190,6 +228,8 @@ struct BotApiEnvelope {
     description: Option<String>,
 }
 
+const REJECTION_DIAGNOSTIC_MAX_CHARS: usize = 160;
+
 fn parse_bot_api_response(
     status: u16,
     body: &[u8],
@@ -199,11 +239,22 @@ fn parse_bot_api_response(
             reason: format!("non-json bot api response (status {status})"),
         })?;
     if !envelope.ok {
-        return Err(TelegramBotApiError::Rejected {
-            description: envelope
-                .description
-                .unwrap_or_else(|| format!("bot api error (status {status})")),
-        });
+        let kind = classify_rejection(status);
+        // The raw provider description stays an internal diagnostic —
+        // bounded, char-safe, debug-only. It never rides the error type.
+        let description: String = envelope
+            .description
+            .unwrap_or_default()
+            .chars()
+            .take(REJECTION_DIAGNOSTIC_MAX_CHARS)
+            .collect();
+        tracing::debug!(
+            status,
+            %kind,
+            description,
+            "telegram bot api rejected the request"
+        );
+        return Err(TelegramBotApiError::Rejected { kind });
     }
     Ok(envelope.result.unwrap_or(serde_json::Value::Null))
 }
@@ -288,13 +339,32 @@ mod tests {
     }
 
     #[test]
-    fn parse_not_ok_envelope_is_rejected_with_description() {
-        let error = parse_bot_api_response(401, br#"{"ok":false,"description":"Unauthorized"}"#)
-            .expect_err("not-ok envelope rejects");
+    fn parse_not_ok_envelope_maps_to_stable_rejection_category() {
+        let error = parse_bot_api_response(
+            401,
+            br#"{"ok":false,"description":"Unauthorized: <a href=\"x\">attacker markup</a>"}"#,
+        )
+        .expect_err("not-ok envelope rejects");
         assert_eq!(
             error,
             TelegramBotApiError::Rejected {
-                description: "Unauthorized".to_string()
+                kind: TelegramBotApiRejection::Unauthorized
+            }
+        );
+        assert!(
+            !error.to_string().contains("attacker"),
+            "provider description text must never reach the error Display"
+        );
+
+        let bad_request = parse_bot_api_response(
+            400,
+            br#"{"ok":false,"description":"Bad Request: bad webhook"}"#,
+        )
+        .expect_err("bad request rejects");
+        assert_eq!(
+            bad_request,
+            TelegramBotApiError::Rejected {
+                kind: TelegramBotApiRejection::InvalidRequest
             }
         );
     }

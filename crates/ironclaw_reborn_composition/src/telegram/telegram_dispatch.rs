@@ -489,7 +489,7 @@ pub(crate) mod test_fixtures {
                 .push((chat_id, text.to_string()));
             if self.fail_sends.load(Ordering::SeqCst) {
                 return Err(TelegramBotApiError::Rejected {
-                    description: "test send failure".to_string(),
+                    kind: crate::telegram::telegram_bot_api::TelegramBotApiRejection::Forbidden,
                 });
             }
             Ok(())
@@ -542,17 +542,16 @@ pub(crate) mod test_fixtures {
             Ok(())
         }
 
-        async fn live_pairing_for_code(
+        async fn pairing_for_code(
             &self,
             code: &str,
         ) -> Result<Option<TelegramPairingRecord>, TelegramPairingError> {
-            let now = Utc::now();
             Ok(self
                 .records
                 .lock()
                 .expect("lock")
                 .iter()
-                .find(|record| record.code.eq_ignore_ascii_case(code) && record.is_live(now))
+                .find(|record| record.code.eq_ignore_ascii_case(code))
                 .cloned())
         }
 
@@ -570,14 +569,22 @@ pub(crate) mod test_fixtures {
                 .cloned())
         }
 
-        async fn mark_consumed(&self, code: &str) -> Result<(), TelegramPairingError> {
+        async fn claim_pairing(
+            &self,
+            code: &str,
+        ) -> Result<Option<TelegramPairingRecord>, TelegramPairingError> {
             let mut records = self.records.lock().expect("lock");
+            let now = Utc::now();
             for record in records.iter_mut() {
                 if record.code.eq_ignore_ascii_case(code) {
-                    record.consumed_at = Some(Utc::now());
+                    if !record.is_live(now) {
+                        return Ok(None);
+                    }
+                    record.consumed_at = Some(now);
+                    return Ok(Some(record.clone()));
                 }
             }
-            Ok(())
+            Ok(None)
         }
 
         async fn invalidate_for_user(&self, user_id: &UserId) -> Result<(), TelegramPairingError> {
@@ -616,13 +623,17 @@ pub(crate) mod test_fixtures {
         async fn unbind_telegram_users_for_user(
             &self,
             user_id: &UserId,
-            installation_prefix: &str,
+            installation: Option<&AdapterInstallationId>,
         ) -> Result<Vec<String>, TelegramBindingError> {
             let mut bindings = self.bindings.lock().expect("lock");
             let removed: Vec<String> = bindings
                 .iter()
                 .filter(|(key, (bound, _))| {
-                    bound == user_id && key.starts_with(installation_prefix)
+                    bound == user_id
+                        && installation.is_none_or(|installation| {
+                            crate::telegram::telegram_actor_identity::
+                                provider_user_id_in_installation(key, installation)
+                        })
                 })
                 .map(|(key, _)| key.clone())
                 .collect();

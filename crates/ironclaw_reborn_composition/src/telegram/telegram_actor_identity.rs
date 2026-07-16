@@ -117,3 +117,262 @@ pub(crate) fn telegram_user_identity_provider_user_id(
 ) -> String {
     format!("{}:{telegram_user_id}", installation_id.as_str())
 }
+
+/// Whether a `{installation}:{telegram_user_id}` provider id belongs to the
+/// given installation — exact segment match, never a raw string prefix, so
+/// `tg-bot-1` can never bleed into a `tg-bot-10:…` binding.
+pub(crate) fn provider_user_id_in_installation(
+    provider_user_id: &str,
+    installation_id: &AdapterInstallationId,
+) -> bool {
+    provider_user_id
+        .split_once(':')
+        .is_some_and(|(candidate, _)| candidate == installation_id.as_str())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Mutex as StdMutex;
+
+    use ironclaw_conversations::ExternalActorBindingEpoch;
+    use ironclaw_host_api::UserId;
+    use ironclaw_product_adapters::{ExternalActorRef, ProductAdapterId};
+    use ironclaw_product_workflow::ProductActorUserResolutionRequest;
+
+    use super::*;
+
+    /// Epoch-aware lookup fake keyed by `(provider, provider_user_id)`.
+    #[derive(Debug, Default)]
+    struct EpochLookup {
+        bindings: StdMutex<HashMap<(String, String), (UserId, Option<String>)>>,
+    }
+
+    impl EpochLookup {
+        fn bind(&self, provider: &str, provider_user_id: &str, user: &str, epoch: Option<&str>) {
+            self.bindings.lock().expect("lock").insert(
+                (provider.to_string(), provider_user_id.to_string()),
+                (UserId::new(user).expect("user"), epoch.map(str::to_string)),
+            );
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RebornUserIdentityLookup for EpochLookup {
+        async fn resolve_user_identity(
+            &self,
+            provider: &str,
+            provider_user_id: &str,
+        ) -> Result<Option<UserId>, crate::channel_identity::RebornUserIdentityLookupError>
+        {
+            Ok(self
+                .resolve_user_identity_with_binding_epoch(provider, provider_user_id)
+                .await?
+                .map(|(user_id, _)| user_id))
+        }
+
+        async fn resolve_user_identity_with_binding_epoch(
+            &self,
+            provider: &str,
+            provider_user_id: &str,
+        ) -> Result<
+            Option<(UserId, Option<ExternalActorBindingEpoch>)>,
+            crate::channel_identity::RebornUserIdentityLookupError,
+        > {
+            Ok(self
+                .bindings
+                .lock()
+                .expect("lock")
+                .get(&(provider.to_string(), provider_user_id.to_string()))
+                .map(|(user_id, epoch)| {
+                    (
+                        user_id.clone(),
+                        epoch.as_deref().map(|epoch| {
+                            ExternalActorBindingEpoch::new(epoch).expect("valid epoch")
+                        }),
+                    )
+                }))
+        }
+
+        async fn user_has_provider_binding(
+            &self,
+            provider: &str,
+            user_id: &UserId,
+        ) -> Result<bool, crate::channel_identity::RebornUserIdentityLookupError> {
+            Ok(self.bindings.lock().expect("lock").iter().any(
+                |((bound_provider, _), (bound, _))| bound_provider == provider && bound == user_id,
+            ))
+        }
+    }
+
+    fn request(
+        adapter_id: &str,
+        actor_kind: &str,
+        telegram_user_id: &str,
+    ) -> ProductActorUserResolutionRequest {
+        ProductActorUserResolutionRequest {
+            adapter_id: ProductAdapterId::new(adapter_id).expect("adapter id"),
+            installation_id: AdapterInstallationId::new("tg-bot-4242").expect("installation"),
+            external_actor_ref: ExternalActorRef::new(actor_kind, telegram_user_id, None::<String>)
+                .expect("actor ref"),
+        }
+    }
+
+    fn resolver_with(lookup: EpochLookup) -> TelegramUserIdentityActorResolver {
+        TelegramUserIdentityActorResolver::new(Arc::new(lookup))
+    }
+
+    #[tokio::test]
+    async fn resolver_gates_on_adapter_id_and_actor_kind() {
+        use ironclaw_product_workflow::ProductActorUserResolver;
+
+        let lookup = EpochLookup::default();
+        lookup.bind(TELEGRAM_IDENTITY_PROVIDER, "tg-bot-4242:555", "ben", None);
+        let resolver = resolver_with(lookup);
+
+        let resolved = resolver
+            .resolve_product_actor_user(request("other_adapter", "telegram_user", "555"))
+            .await
+            .expect("resolution runs");
+        assert!(resolved.is_none(), "foreign adapters must not resolve");
+
+        let resolved = resolver
+            .resolve_product_actor_user(request(TELEGRAM_V2_ADAPTER_ID, "slack_user", "555"))
+            .await
+            .expect("resolution runs");
+        assert!(resolved.is_none(), "foreign actor kinds must not resolve");
+
+        assert!(
+            !resolver
+                .resolved_product_actor_user_is_current(
+                    &request("other_adapter", "telegram_user", "555"),
+                    &ironclaw_product_workflow::ResolvedProductActorUser::new(
+                        UserId::new("ben").expect("user")
+                    ),
+                )
+                .await
+                .expect("is_current runs"),
+            "gated requests are never current"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolver_maps_installation_scoped_provider_id_and_carries_epoch() {
+        use ironclaw_product_workflow::ProductActorUserResolver;
+
+        let lookup = EpochLookup::default();
+        lookup.bind(
+            TELEGRAM_IDENTITY_PROVIDER,
+            "tg-bot-4242:555",
+            "ben",
+            Some("EPOCH111"),
+        );
+        let resolver = resolver_with(lookup);
+
+        let resolved = resolver
+            .resolve_product_actor_user(request(
+                TELEGRAM_V2_ADAPTER_ID,
+                ironclaw_telegram_v2_adapter::TELEGRAM_USER_ACTOR_KIND,
+                "555",
+            ))
+            .await
+            .expect("resolution runs")
+            .expect("bound actor resolves");
+        assert_eq!(resolved.user_id.as_str(), "ben");
+        assert_eq!(
+            resolved
+                .binding_epoch
+                .as_ref()
+                .map(ExternalActorBindingEpoch::as_str),
+            Some("EPOCH111")
+        );
+
+        let unbound = resolver
+            .resolve_product_actor_user(request(
+                TELEGRAM_V2_ADAPTER_ID,
+                ironclaw_telegram_v2_adapter::TELEGRAM_USER_ACTOR_KIND,
+                "999",
+            ))
+            .await
+            .expect("resolution runs");
+        assert!(unbound.is_none(), "unknown telegram accounts stay unbound");
+    }
+
+    /// The `is_current` recheck is the revocation observation point: a stale
+    /// epoch (unpair/re-pair rotated it) must read as not-current so
+    /// mid-flight messages fail closed.
+    #[tokio::test]
+    async fn resolver_is_current_tracks_the_binding_epoch() {
+        use ironclaw_product_workflow::{ProductActorUserResolver, ResolvedProductActorUser};
+
+        let lookup = EpochLookup::default();
+        lookup.bind(
+            TELEGRAM_IDENTITY_PROVIDER,
+            "tg-bot-4242:555",
+            "ben",
+            Some("EPOCH222"),
+        );
+        let resolver = resolver_with(lookup);
+        let request = request(
+            TELEGRAM_V2_ADAPTER_ID,
+            ironclaw_telegram_v2_adapter::TELEGRAM_USER_ACTOR_KIND,
+            "555",
+        );
+
+        let current = ResolvedProductActorUser::with_binding_epoch(
+            UserId::new("ben").expect("user"),
+            ExternalActorBindingEpoch::new("EPOCH222").expect("epoch"),
+        );
+        assert!(
+            resolver
+                .resolved_product_actor_user_is_current(&request, &current)
+                .await
+                .expect("is_current runs")
+        );
+
+        let stale = ResolvedProductActorUser::with_binding_epoch(
+            UserId::new("ben").expect("user"),
+            ExternalActorBindingEpoch::new("EPOCH111").expect("epoch"),
+        );
+        assert!(
+            !resolver
+                .resolved_product_actor_user_is_current(&request, &stale)
+                .await
+                .expect("is_current runs"),
+            "a rotated epoch invalidates in-flight resolution"
+        );
+
+        let wrong_user = ResolvedProductActorUser::with_binding_epoch(
+            UserId::new("illia").expect("user"),
+            ExternalActorBindingEpoch::new("EPOCH222").expect("epoch"),
+        );
+        assert!(
+            !resolver
+                .resolved_product_actor_user_is_current(&request, &wrong_user)
+                .await
+                .expect("is_current runs"),
+            "a different bound user is never current"
+        );
+    }
+
+    #[test]
+    fn provider_user_id_formatting_and_installation_matching_are_inverse() {
+        let installation = AdapterInstallationId::new("tg-bot-1").expect("installation");
+        let provider_user_id = telegram_user_identity_provider_user_id(&installation, "555");
+        assert_eq!(provider_user_id, "tg-bot-1:555");
+        assert!(provider_user_id_in_installation(
+            &provider_user_id,
+            &installation
+        ));
+        // Exact segment match: a longer installation id sharing the prefix
+        // must not claim the binding, and vice versa.
+        assert!(!provider_user_id_in_installation(
+            "tg-bot-10:555",
+            &installation
+        ));
+        assert!(!provider_user_id_in_installation(
+            &provider_user_id,
+            &AdapterInstallationId::new("tg-bot-10").expect("installation")
+        ));
+    }
+}

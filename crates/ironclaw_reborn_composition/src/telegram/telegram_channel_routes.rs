@@ -307,12 +307,12 @@ fn scan_admin_field(
 ) -> Result<(), TelegramRouteError> {
     let validation = config.safety_layer.validate_input(value);
     if !validation.is_valid {
-        tracing::warn!(field, "telegram setup field failed safety validation");
+        tracing::debug!(field, "telegram setup field failed safety validation");
         return Err(TelegramRouteError::BadRequest);
     }
     let sanitized = config.safety_layer.sanitize_tool_output(field, value);
     if !sanitized.warnings.is_empty() {
-        tracing::warn!(
+        tracing::debug!(
             field,
             warnings = sanitized.warnings.len(),
             "telegram setup field failed injection scan"

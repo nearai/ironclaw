@@ -130,11 +130,10 @@ pub(crate) struct TelegramSetupService {
 }
 
 impl TelegramSetupService {
-    #[allow(clippy::too_many_arguments)]
     // arch-exempt: too_many_args, mirrors SlackSetupService::new plus the two
-    // telegram-only inputs (bot api port + public base URL); folds into the
-    // telegram host runtime config bundle at the #6116 port, plan follows the
-    // slack cleanup.
+    // telegram-only inputs (bot api port + public base URL) until they fold
+    // into the telegram host runtime config bundle, plan #6116
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         tenant_id: TenantId,
         agent_id: AgentId,
@@ -257,17 +256,129 @@ impl TelegramSetupService {
             .set_webhook(&bot_token, &webhook_url, &webhook_secret)
             .await?;
 
-        let record = self.build_record(&identity, webhook_url, revision)?;
-        self.put_secret(record.bot_token_handle.clone(), bot_token)
+        // From here Telegram already points at the new registration; a local
+        // persistence failure must compensate the provider side (restore the
+        // previous registration, or delete the fresh one) so the durable
+        // record and the remote webhook cannot diverge.
+        match self
+            .persist_saved_record(
+                &identity,
+                webhook_url,
+                revision,
+                &bot_token,
+                &webhook_secret,
+            )
+            .await
+        {
+            Ok(record) => Ok((previous, record)),
+            Err(error) => {
+                self.compensate_remote_webhook(&bot_token, identity.id, previous.as_ref())
+                    .await;
+                Err(error)
+            }
+        }
+    }
+
+    /// The local persistence tail of a save: secrets under revision-suffixed
+    /// handles, then the durable record. Each failure cleans up the secrets
+    /// already written for this revision (best-effort) before surfacing.
+    async fn persist_saved_record(
+        &self,
+        identity: &TelegramBotIdentity,
+        webhook_url: String,
+        revision: u64,
+        bot_token: &SecretString,
+        webhook_secret: &SecretString,
+    ) -> Result<TelegramInstallationSetup, TelegramSetupError> {
+        let record = self.build_record(identity, webhook_url, revision)?;
+        self.put_secret(record.bot_token_handle.clone(), bot_token.clone())
             .await?;
-        self.put_secret(record.webhook_secret_handle.clone(), webhook_secret)
-            .await?;
-        self.store.put_telegram_installation_setup(&record).await?;
-        Ok((previous, record))
+        if let Err(error) = self
+            .put_secret(record.webhook_secret_handle.clone(), webhook_secret.clone())
+            .await
+        {
+            self.best_effort_delete_secret(&record.bot_token_handle)
+                .await;
+            return Err(error);
+        }
+        if let Err(error) = self.store.put_telegram_installation_setup(&record).await {
+            self.best_effort_delete_secret(&record.bot_token_handle)
+                .await;
+            self.best_effort_delete_secret(&record.webhook_secret_handle)
+                .await;
+            return Err(error);
+        }
+        Ok(record)
+    }
+
+    /// Best-effort provider-side compensation once `setWebhook` has already
+    /// mutated Telegram but the local save (or its post-save activation)
+    /// failed: a same-bot save restores the previous registration so the
+    /// restored record keeps verifying webhooks; a different (or first) bot's
+    /// fresh registration is deleted so Telegram stops delivering to a
+    /// deployment that never persisted it. Compensation failures are logged
+    /// and never mask the original error — the admin sees the save failure
+    /// and retries.
+    async fn compensate_remote_webhook(
+        &self,
+        bot_token: &SecretString,
+        new_bot_id: i64,
+        previous: Option<&TelegramInstallationSetup>,
+    ) {
+        match previous {
+            Some(previous_setup) if previous_setup.bot_id == new_bot_id => {
+                let previous_secret = match self
+                    .secret_material(&previous_setup.webhook_secret_handle)
+                    .await
+                {
+                    Ok(secret) => secret,
+                    Err(error) => {
+                        tracing::debug!(
+                            reason = %error,
+                            "previous telegram webhook secret unavailable; deleting the fresh registration instead"
+                        );
+                        self.best_effort_delete_webhook(bot_token).await;
+                        return;
+                    }
+                };
+                if let Err(error) = self
+                    .bot_api
+                    .set_webhook(bot_token, &previous_setup.webhook_url, &previous_secret)
+                    .await
+                {
+                    tracing::debug!(
+                        reason = %error,
+                        "telegram webhook compensation set_webhook failed"
+                    );
+                }
+            }
+            _ => self.best_effort_delete_webhook(bot_token).await,
+        }
+    }
+
+    async fn best_effort_delete_webhook(&self, bot_token: &SecretString) {
+        if let Err(error) = self.bot_api.delete_webhook(bot_token).await {
+            tracing::debug!(
+                reason = %error,
+                "telegram webhook compensation delete_webhook failed"
+            );
+        }
+    }
+
+    async fn best_effort_delete_secret(&self, handle: &SecretHandle) {
+        if let Err(error) = self.secret_store.delete(&self.secret_scope(), handle).await {
+            tracing::debug!(
+                reason = %error,
+                "orphaned telegram setup secret cleanup failed"
+            );
+        }
     }
 
     /// Restore the previous record when post-save extension activation fails,
     /// so store state and runtime never split-brain (Slack rollback contract).
+    /// The provider side rolls back too: Telegram is still registered with
+    /// the SAVED revision's URL/secret, so without compensation the restored
+    /// record would reject every subsequent webhook.
     pub(crate) async fn rollback_failed_activation_save(
         &self,
         saved: &TelegramInstallationSetup,
@@ -277,6 +388,18 @@ impl TelegramSetupService {
         let current = self.current_setup().await?;
         if current.as_ref() != Some(saved) {
             return Ok(());
+        }
+        match self.secret_material(&saved.bot_token_handle).await {
+            Ok(bot_token) => {
+                self.compensate_remote_webhook(&bot_token, saved.bot_id, previous)
+                    .await;
+            }
+            Err(error) => {
+                tracing::debug!(
+                    reason = %error,
+                    "saved telegram bot token unavailable; skipping provider-side rollback"
+                );
+            }
         }
         match previous {
             Some(previous_setup) => {
@@ -522,6 +645,14 @@ mod tests {
     #[derive(Debug, Default)]
     struct InMemorySetupStore {
         record: StdMutex<Option<TelegramInstallationSetup>>,
+        fail_puts: std::sync::atomic::AtomicBool,
+    }
+
+    impl InMemorySetupStore {
+        fn fail_puts(&self) {
+            self.fail_puts
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     #[async_trait]
@@ -536,6 +667,9 @@ mod tests {
             &self,
             setup: &TelegramInstallationSetup,
         ) -> Result<(), TelegramSetupError> {
+            if self.fail_puts.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(TelegramSetupError::StoreUnavailable);
+            }
             *self.record.lock().expect("lock") = Some(setup.clone());
             Ok(())
         }
@@ -549,7 +683,7 @@ mod tests {
     #[derive(Debug, Clone)]
     enum BotApiCall {
         GetMe,
-        SetWebhook { url: String },
+        SetWebhook { url: String, secret: String },
         DeleteWebhook,
         SendMessage { _chat_id: i64 },
     }
@@ -557,7 +691,7 @@ mod tests {
     #[derive(Debug)]
     struct RecordingBotApi {
         calls: StdMutex<Vec<BotApiCall>>,
-        get_me: Result<TelegramBotIdentity, TelegramBotApiError>,
+        get_me: StdMutex<Result<TelegramBotIdentity, TelegramBotApiError>>,
         set_webhook: Result<(), TelegramBotApiError>,
     }
 
@@ -565,16 +699,33 @@ mod tests {
         fn ok() -> Self {
             Self {
                 calls: StdMutex::new(Vec::new()),
-                get_me: Ok(TelegramBotIdentity {
+                get_me: StdMutex::new(Ok(TelegramBotIdentity {
                     id: 4242,
                     username: "ironclaw_qa_bot".to_string(),
-                }),
+                })),
+                set_webhook: Ok(()),
+            }
+        }
+
+        fn failing_get_me(error: TelegramBotApiError) -> Self {
+            Self {
+                calls: StdMutex::new(Vec::new()),
+                get_me: StdMutex::new(Err(error)),
                 set_webhook: Ok(()),
             }
         }
 
         fn calls(&self) -> Vec<BotApiCall> {
             self.calls.lock().expect("lock").clone()
+        }
+
+        /// Point `getMe` at a different bot so the next save models a bot
+        /// swap (new installation identity).
+        fn set_identity(&self, id: i64, username: &str) {
+            *self.get_me.lock().expect("lock") = Ok(TelegramBotIdentity {
+                id,
+                username: username.to_string(),
+            });
         }
     }
 
@@ -585,20 +736,21 @@ mod tests {
             _bot_token: &SecretString,
         ) -> Result<TelegramBotIdentity, TelegramBotApiError> {
             self.calls.lock().expect("lock").push(BotApiCall::GetMe);
-            self.get_me.clone()
+            self.get_me.lock().expect("lock").clone()
         }
 
         async fn set_webhook(
             &self,
             _bot_token: &SecretString,
             url: &str,
-            _secret_token: &SecretString,
+            secret_token: &SecretString,
         ) -> Result<(), TelegramBotApiError> {
             self.calls
                 .lock()
                 .expect("lock")
                 .push(BotApiCall::SetWebhook {
                     url: url.to_string(),
+                    secret: secret_token.expose_secret().to_string(),
                 });
             self.set_webhook.clone()
         }
@@ -633,16 +785,124 @@ mod tests {
         bot_api: Arc<RecordingBotApi>,
         public_base_url: Option<&str>,
     ) -> TelegramSetupService {
+        service_with_secret_store(
+            store,
+            Arc::new(InMemorySecretStore::new()),
+            bot_api,
+            public_base_url,
+        )
+    }
+
+    fn service_with_secret_store(
+        store: Arc<InMemorySetupStore>,
+        secret_store: Arc<dyn SecretStore>,
+        bot_api: Arc<RecordingBotApi>,
+        public_base_url: Option<&str>,
+    ) -> TelegramSetupService {
         TelegramSetupService::new(
             TenantId::new("tenant-a").expect("tenant"),
             AgentId::new("agent-a").expect("agent"),
             None,
             UserId::new("operator").expect("user"),
             store,
-            Arc::new(InMemorySecretStore::new()),
+            secret_store,
             bot_api,
             public_base_url.map(str::to_string),
         )
+    }
+
+    /// Delegating secret store whose `put` can be switched to fail —
+    /// everything else forwards to a real in-memory store.
+    #[derive(Debug)]
+    struct FailingPutSecretStore {
+        inner: InMemorySecretStore,
+        fail_puts: std::sync::atomic::AtomicBool,
+    }
+
+    impl FailingPutSecretStore {
+        fn new() -> Self {
+            Self {
+                inner: InMemorySecretStore::new(),
+                fail_puts: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+
+        fn fail_puts(&self) {
+            self.fail_puts
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl ironclaw_secrets::SecretStore for FailingPutSecretStore {
+        async fn put(
+            &self,
+            scope: ResourceScope,
+            handle: SecretHandle,
+            material: SecretMaterial,
+            expires_at: Option<ironclaw_host_api::Timestamp>,
+        ) -> Result<ironclaw_secrets::SecretMetadata, SecretStoreError> {
+            if self.fail_puts.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(SecretStoreError::StoreUnavailable {
+                    reason: "test secret outage".to_string(),
+                });
+            }
+            self.inner.put(scope, handle, material, expires_at).await
+        }
+
+        async fn metadata(
+            &self,
+            scope: &ResourceScope,
+            handle: &SecretHandle,
+        ) -> Result<Option<ironclaw_secrets::SecretMetadata>, SecretStoreError> {
+            self.inner.metadata(scope, handle).await
+        }
+
+        async fn metadata_for_scope(
+            &self,
+            scope: &ResourceScope,
+        ) -> Result<Vec<ironclaw_secrets::SecretMetadata>, SecretStoreError> {
+            self.inner.metadata_for_scope(scope).await
+        }
+
+        async fn delete(
+            &self,
+            scope: &ResourceScope,
+            handle: &SecretHandle,
+        ) -> Result<bool, SecretStoreError> {
+            self.inner.delete(scope, handle).await
+        }
+
+        async fn lease_once(
+            &self,
+            scope: &ResourceScope,
+            handle: &SecretHandle,
+        ) -> Result<ironclaw_secrets::SecretLease, SecretStoreError> {
+            self.inner.lease_once(scope, handle).await
+        }
+
+        async fn consume(
+            &self,
+            scope: &ResourceScope,
+            lease_id: ironclaw_secrets::SecretLeaseId,
+        ) -> Result<SecretMaterial, SecretStoreError> {
+            self.inner.consume(scope, lease_id).await
+        }
+
+        async fn revoke(
+            &self,
+            scope: &ResourceScope,
+            lease_id: ironclaw_secrets::SecretLeaseId,
+        ) -> Result<ironclaw_secrets::SecretLease, SecretStoreError> {
+            self.inner.revoke(scope, lease_id).await
+        }
+
+        async fn leases_for_scope(
+            &self,
+            scope: &ResourceScope,
+        ) -> Result<Vec<ironclaw_secrets::SecretLease>, SecretStoreError> {
+            self.inner.leases_for_scope(scope).await
+        }
     }
 
     fn update_with_token(token: &str) -> TelegramInstallationSetupUpdate {
@@ -677,7 +937,7 @@ mod tests {
         let calls = bot_api.calls();
         assert!(matches!(calls[0], BotApiCall::GetMe));
         match &calls[1] {
-            BotApiCall::SetWebhook { url } => assert_eq!(
+            BotApiCall::SetWebhook { url, .. } => assert_eq!(
                 url, "https://ironclaw.example/webhooks/extensions/telegram/updates",
                 "setWebhook must register the derived public updates URL"
             ),
@@ -704,13 +964,11 @@ mod tests {
     #[tokio::test]
     async fn invalid_token_persists_nothing() {
         let store = Arc::new(InMemorySetupStore::default());
-        let bot_api = Arc::new(RecordingBotApi {
-            calls: StdMutex::new(Vec::new()),
-            get_me: Err(TelegramBotApiError::Rejected {
-                description: "Unauthorized".to_string(),
-            }),
-            set_webhook: Ok(()),
-        });
+        let bot_api = Arc::new(RecordingBotApi::failing_get_me(
+            TelegramBotApiError::Rejected {
+                kind: crate::telegram::telegram_bot_api::TelegramBotApiRejection::Unauthorized,
+            },
+        ));
         let service = service_with(
             Arc::clone(&store),
             bot_api,
@@ -729,12 +987,12 @@ mod tests {
         let store = Arc::new(InMemorySetupStore::default());
         let bot_api = Arc::new(RecordingBotApi {
             calls: StdMutex::new(Vec::new()),
-            get_me: Ok(TelegramBotIdentity {
+            get_me: StdMutex::new(Ok(TelegramBotIdentity {
                 id: 1,
                 username: "b".to_string(),
-            }),
+            })),
             set_webhook: Err(TelegramBotApiError::Rejected {
-                description: "bad webhook".to_string(),
+                kind: crate::telegram::telegram_bot_api::TelegramBotApiRejection::InvalidRequest,
             }),
         });
         let service = service_with(
@@ -846,18 +1104,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rollback_restores_previous_record() {
+    async fn rollback_restores_previous_record_and_previous_webhook_registration() {
         let store = Arc::new(InMemorySetupStore::default());
         let bot_api = Arc::new(RecordingBotApi::ok());
         let service = service_with(
             Arc::clone(&store),
-            bot_api,
+            Arc::clone(&bot_api),
             Some("https://ironclaw.example"),
         );
         let (_, first) = service
             .save_with_previous(update_with_token("123:abc"))
             .await
             .expect("first save");
+        let first_secret = current_webhook_secret(&service).await;
         let (previous, second) = service
             .save_with_previous(update_with_token("123:rotated"))
             .await
@@ -867,5 +1126,132 @@ mod tests {
             .await
             .expect("rollback");
         assert_eq!(service.current_setup().await.expect("read"), Some(first));
+        // Telegram was registered with the SAVED secret; the rollback must
+        // re-register the PREVIOUS one or the restored record rejects every
+        // webhook until the admin re-saves.
+        match bot_api.calls().last().expect("calls recorded") {
+            BotApiCall::SetWebhook { secret, .. } => assert_eq!(
+                secret, &first_secret,
+                "provider rollback must restore the previous webhook secret"
+            ),
+            other => panic!("expected a compensating SetWebhook, got {other:?}"),
+        }
+    }
+
+    async fn current_webhook_secret(service: &TelegramSetupService) -> String {
+        service
+            .webhook_secret()
+            .await
+            .expect("secret read")
+            .expect("secret present")
+            .expose_secret()
+            .to_string()
+    }
+
+    /// Persistence fails after `setWebhook` on a first-time configure: the
+    /// fresh provider registration must be deleted (there is no previous one
+    /// to restore) so Telegram is not left delivering to a deployment that
+    /// never persisted the setup.
+    #[tokio::test]
+    async fn failed_secret_persist_deletes_fresh_webhook_when_no_previous() {
+        let store = Arc::new(InMemorySetupStore::default());
+        let secret_store = Arc::new(FailingPutSecretStore::new());
+        secret_store.fail_puts();
+        let bot_api = Arc::new(RecordingBotApi::ok());
+        let service = service_with_secret_store(
+            Arc::clone(&store),
+            Arc::clone(&secret_store) as Arc<dyn SecretStore>,
+            Arc::clone(&bot_api),
+            Some("https://ironclaw.example"),
+        );
+
+        let error = service
+            .save_with_previous(update_with_token("123:abc"))
+            .await
+            .expect_err("save fails");
+        assert!(matches!(
+            error,
+            TelegramSetupError::SecretStoreUnavailable { .. }
+        ));
+        assert!(service.current_setup().await.expect("read").is_none());
+        assert!(
+            matches!(bot_api.calls().last(), Some(BotApiCall::DeleteWebhook)),
+            "the fresh webhook registration must be compensated away, got {:?}",
+            bot_api.calls()
+        );
+    }
+
+    /// A same-bot update whose record persist fails must restore the
+    /// PREVIOUS webhook registration at Telegram — otherwise Telegram keeps
+    /// signing with the new secret while the durable record still holds the
+    /// old one, and ingress rejects every webhook.
+    #[tokio::test]
+    async fn failed_record_persist_restores_previous_webhook_for_same_bot() {
+        let store = Arc::new(InMemorySetupStore::default());
+        let bot_api = Arc::new(RecordingBotApi::ok());
+        let service = service_with(
+            Arc::clone(&store),
+            Arc::clone(&bot_api),
+            Some("https://ironclaw.example"),
+        );
+        let (_, first) = service
+            .save_with_previous(update_with_token("123:abc"))
+            .await
+            .expect("first save");
+        let first_secret = current_webhook_secret(&service).await;
+
+        store.fail_puts();
+        let error = service
+            .save_with_previous(update_with_token("123:rotated"))
+            .await
+            .expect_err("second save fails at the record persist");
+        assert!(matches!(error, TelegramSetupError::StoreUnavailable));
+        match bot_api.calls().last().expect("calls recorded") {
+            BotApiCall::SetWebhook { url, secret } => {
+                assert_eq!(url, &first.webhook_url);
+                assert_eq!(
+                    secret, &first_secret,
+                    "compensation must re-register the previous secret"
+                );
+            }
+            other => panic!("expected a compensating SetWebhook, got {other:?}"),
+        }
+        // The surviving record still verifies with its own secret.
+        assert_eq!(current_webhook_secret(&service).await, first_secret);
+    }
+
+    /// Activation rollback after a bot swap: the OLD bot's registration was
+    /// never touched by the failed save, so the compensation deletes the NEW
+    /// bot's registration instead of re-registering anything.
+    #[tokio::test]
+    async fn rollback_after_bot_swap_deletes_the_new_bots_webhook() {
+        let store = Arc::new(InMemorySetupStore::default());
+        let bot_api = Arc::new(RecordingBotApi::ok());
+        let service = service_with(
+            Arc::clone(&store),
+            Arc::clone(&bot_api),
+            Some("https://ironclaw.example"),
+        );
+        let (_, first) = service
+            .save_with_previous(update_with_token("123:abc"))
+            .await
+            .expect("first save");
+        bot_api.set_identity(5555, "other_bot");
+        let (previous, second) = service
+            .save_with_previous(update_with_token("555:swap"))
+            .await
+            .expect("bot swap save");
+        assert_ne!(second.bot_id, first.bot_id);
+
+        service
+            .rollback_failed_activation_save(&second, previous.as_ref())
+            .await
+            .expect("rollback");
+        assert_eq!(service.current_setup().await.expect("read"), Some(first));
+        assert!(
+            matches!(bot_api.calls().last(), Some(BotApiCall::DeleteWebhook)),
+            "bot-swap rollback must delete the new bot's registration, got {:?}",
+            bot_api.calls()
+        );
     }
 }
