@@ -1,0 +1,98 @@
+/* ── Design-system Modal chrome (ironclaw_webui_v2 modal.tsx) ─────────────
+   Scrim + panel tokens: --v2-scrim, --v2-card-bg, --v2-panel-border,
+   --v2-shadow-modal, radius-2xl (24px). Loaded after surfaces. */
+
+.ui-modal-overlay,
+.modal-overlay,
+.provider-dialog-overlay,
+.configure-overlay,
+.share-overlay,
+.api-tokens-overlay,
+.restart-modal-overlay,
+.billing-reminder-overlay,
+.skills-url-overlay {
+  background: var(--v2-scrim);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  z-index: var(--v2-z-modal);
+}
+
+.ui-modal,
+.modal,
+.provider-dialog-content,
+.configure-modal,
+.share-modal,
+.api-tokens-modal,
+.restart-modal,
+.restart-modal-content,
+.billing-reminder,
+.skills-url-modal {
+  background: var(--v2-card-bg);
+  border: 1px solid var(--v2-panel-border);
+  border-radius: var(--v2-radius-2xl);
+  box-shadow: var(--v2-shadow-modal);
+  color: var(--v2-text-strong);
+}
+
+.ui-modal__header,
+.modal h3,
+.provider-dialog-header,
+.configure-modal h3,
+.share-header,
+.api-tokens-header,
+.restart-modal-header,
+.skills-url-header {
+  border-color: var(--v2-panel-border);
+}
+
+.modal h3,
+.provider-dialog-header,
+.api-tokens-header,
+.restart-modal-header,
+.skills-url-header {
+  border-bottom: 1px solid var(--v2-panel-border);
+}
+
+.ui-modal__footer,
+.modal-actions,
+.provider-dialog-footer,
+.skills-url-actions,
+.api-tokens-actions,
+.restart-modal-actions,
+.billing-reminder-actions {
+  border-top: 1px solid var(--v2-panel-border);
+}
+
+.ui-modal__close,
+.provider-dialog-close,
+.share-close,
+.api-tokens-close,
+.restart-modal-close,
+.skills-url-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--v2-control-h-md);
+  height: var(--v2-control-h-md);
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--v2-radius-md);
+  background: transparent;
+  color: var(--v2-text-muted);
+  cursor: pointer;
+  font-size: var(--v2-font-size-body-lg);
+  line-height: 1;
+  transition:
+    background var(--v2-duration-fast) var(--v2-ease-standard),
+    color var(--v2-duration-fast) var(--v2-ease-standard);
+}
+
+.ui-modal__close:hover,
+.provider-dialog-close:hover,
+.share-close:hover,
+.api-tokens-close:hover,
+.restart-modal-close:hover,
+.skills-url-close:hover {
+  background: var(--v2-surface-soft);
+  color: var(--v2-text-strong);
+}

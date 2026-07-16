@@ -146,7 +146,8 @@
 .nux-channel-btn.btn-secondary,
 .provider-dialog-footer .btn-secondary,
 .restart-modal-btn.cancel,
-.config-form-actions .btn-secondary {
+.config-form-actions .btn-secondary,
+.billing-plan-btn:not(.primary) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -173,7 +174,8 @@
 .nux-channel-btn.btn-secondary:hover:not(:disabled),
 .provider-dialog-footer .btn-secondary:hover:not(:disabled),
 .restart-modal-btn.cancel:hover:not(:disabled),
-.config-form-actions .btn-secondary:hover:not(:disabled) {
+.config-form-actions .btn-secondary:hover:not(:disabled),
+.billing-plan-btn:not(.primary):hover:not(:disabled) {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--v2-on-accent);
@@ -186,7 +188,8 @@
 .nux-channel-btn.btn-secondary:active:not(:disabled),
 .provider-dialog-footer .btn-secondary:active:not(:disabled),
 .restart-modal-btn.cancel:active:not(:disabled),
-.config-form-actions .btn-secondary:active:not(:disabled) {
+.config-form-actions .btn-secondary:active:not(:disabled),
+.billing-plan-btn:not(.primary):active:not(:disabled) {
   background: var(--v2-accent-strong);
   border-color: var(--v2-accent-strong);
   color: var(--v2-on-accent);
@@ -199,14 +202,249 @@
   font-size: var(--v2-font-size-body);
 }
 
-/* The danger flavour of .btn-secondary contexts stays red */
-.btn-danger:hover:not(:disabled) {
+/* ── Danger (transparent + danger border; soft fill on hover) ─────────── */
+.btn-danger,
+.btn-cancel,
+.btn-ext.remove,
+.approval-card .approval-actions button.deny,
+.users-table .btn-danger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--v2-space-2);
+  height: var(--v2-control-h-md);
+  padding: 0 var(--v2-control-px-md);
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--v2-danger-text) 60%, transparent);
+  border-radius: var(--v2-radius-md);
+  color: var(--v2-danger-text);
+  font-family: inherit;
+  font-size: var(--v2-font-size-body-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background var(--v2-duration-fast) var(--v2-ease-standard),
+    border-color var(--v2-duration-fast) var(--v2-ease-standard),
+    color var(--v2-duration-fast) var(--v2-ease-standard),
+    scale var(--v2-duration-fast) var(--v2-ease-standard);
+}
+
+.btn-danger:hover:not(:disabled),
+.btn-cancel:hover:not(:disabled),
+.btn-ext.remove:hover:not(:disabled),
+.approval-card .approval-actions button.deny:hover:not(:disabled),
+.users-table .btn-danger:hover:not(:disabled) {
+  background: var(--v2-danger-soft);
   box-shadow: none;
+}
+
+.btn-danger:active:not(:disabled),
+.btn-cancel:active:not(:disabled),
+.btn-ext.remove:active:not(:disabled) {
+  scale: 0.97;
+}
+
+/* ── Ghost (transparent → surface-soft) ───────────────────────────────── */
+.btn-ghost,
+.btn-back,
+.btn-browse,
+.message-copy-btn,
+.copy-btn,
+.chat-input #attach-btn,
+.chat-input .chat-model-info,
+.chat-input button.chat-model-info,
+.provider-dialog-close,
+.scroll-to-bottom-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--v2-space-2);
+  height: var(--v2-control-h-md);
+  padding: 0 var(--v2-control-px-md);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--v2-radius-md);
+  color: var(--v2-text-muted);
+  font-family: inherit;
+  font-size: var(--v2-font-size-body-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background var(--v2-duration-fast) var(--v2-ease-standard),
+    color var(--v2-duration-fast) var(--v2-ease-standard),
+    scale var(--v2-duration-fast) var(--v2-ease-standard);
+}
+
+.btn-ghost:hover:not(:disabled),
+.btn-back:hover:not(:disabled),
+.btn-browse:hover:not(:disabled),
+.message-copy-btn:hover:not(:disabled),
+.copy-btn:hover:not(:disabled),
+.chat-input #attach-btn:hover:not(:disabled),
+.chat-input .chat-model-info:hover:not(:disabled),
+.chat-input button.chat-model-info:hover:not(:disabled),
+.scroll-to-bottom-btn:hover:not(:disabled) {
+  background: var(--v2-surface-soft);
+  color: var(--v2-text-strong);
+  transform: none;
+}
+
+.btn-ghost:active:not(:disabled),
+.message-copy-btn:active:not(:disabled),
+.copy-btn:active:not(:disabled) {
+  scale: 0.97;
+}
+
+/* Icon-sm: 28×28 square (toolbars, copy, attach). */
+.message-copy-btn,
+.copy-btn,
+.chat-input #attach-btn,
+.scroll-to-bottom-btn {
+  width: var(--v2-control-h-sm);
+  height: var(--v2-control-h-sm);
+  padding: 0;
+  border-radius: var(--v2-radius-sm);
+}
+
+/* ── Secondary surface (DS "secondary" — panel border, not outline) ───── */
+.btn-tertiary,
+.ms-btn:not(.primary):not(.danger),
+.btn-small,
+.btn-ext:not(.install):not(.remove),
+.btn-restart,
+.provider-action-btn,
+.btn-fetch-models,
+.auth-social-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--v2-space-2);
+  height: var(--v2-control-h-md);
+  padding: 0 var(--v2-control-px-md);
+  background: var(--v2-surface-soft);
+  border: 1px solid var(--v2-panel-border);
+  border-radius: var(--v2-radius-md);
+  color: var(--v2-text-strong);
+  font-family: inherit;
+  font-size: var(--v2-font-size-body-sm);
+  font-weight: 500;
+  cursor: pointer;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  transition:
+    background var(--v2-duration-fast) var(--v2-ease-standard),
+    border-color var(--v2-duration-fast) var(--v2-ease-standard),
+    color var(--v2-duration-fast) var(--v2-ease-standard),
+    scale var(--v2-duration-fast) var(--v2-ease-standard);
+}
+
+.btn-tertiary:hover:not(:disabled),
+.ms-btn:not(.primary):not(.danger):hover:not(:disabled),
+.btn-small:hover:not(:disabled),
+.btn-ext:not(.install):not(.remove):hover:not(:disabled),
+.btn-restart:hover:not(:disabled),
+.provider-action-btn:hover:not(:disabled),
+.btn-fetch-models:hover:not(:disabled),
+.auth-social-btn:hover:not(:disabled) {
+  background: var(--v2-surface-muted);
+  border-color: color-mix(in srgb, var(--v2-accent) 30%, var(--v2-panel-border));
+  color: var(--v2-text-strong);
+  transform: none;
+}
+
+/* Outline activate/configure stay accent-tinted on the tertiary base. */
+.btn-ext.activate,
+.btn-ext.configure {
+  border-color: var(--v2-btn-secondary-border);
+  background: var(--v2-btn-secondary-bg);
+  color: var(--v2-text-strong);
+}
+
+.btn-ext.activate:hover:not(:disabled),
+.btn-ext.configure:hover:not(:disabled) {
+  background: var(--v2-accent);
+  border-color: var(--v2-accent);
+  color: var(--v2-on-accent);
+}
+
+/* Sm density for table-row / card-action controls.
+   Exclude .btn-ext.install — it stays on the primary md step above. */
+.btn-small,
+.btn-ext:not(.install),
+.btn-cancel,
+.btn-restart,
+.provider-action-btn,
+.btn-fetch-models,
+.ms-btn:not(.primary) {
+  height: var(--v2-control-h-sm);
+  padding: 0 var(--v2-control-px-sm);
+  border-radius: var(--v2-radius-sm);
+  font-size: var(--v2-font-size-caption);
+}
+
+/* Billing plan CTAs + social auth sit on the md/lg step. */
+.billing-plan-btn,
+.auth-social-btn {
+  height: var(--v2-control-h-md);
+  padding: 0 var(--v2-control-px-md);
+  border-radius: var(--v2-radius-md);
+  font-size: var(--v2-font-size-body-sm);
+}
+
+.billing-plan-btn.primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--v2-control-h-md);
+  padding: 0 var(--v2-control-px-md);
+  background: var(--btn-primary-bg);
+  color: var(--v2-on-accent);
+  border: 1px solid var(--v2-btn-primary-border);
+  border-radius: var(--v2-radius-md);
+  font-size: var(--v2-font-size-body-sm);
+  font-weight: 500;
+}
+
+.billing-plan-btn.primary:hover:not(:disabled) {
+  background: var(--btn-primary-bg-hover);
+  box-shadow: var(--btn-primary-shadow-hover);
+}
+
+.ms-btn.danger {
+  border-color: color-mix(in srgb, var(--v2-danger-text) 60%, transparent);
+  background: transparent;
+  color: var(--v2-danger-text);
+}
+
+.ms-btn.danger:hover:not(:disabled) {
+  background: var(--v2-danger-soft);
+}
+
+/* Approval always-allow → primary sm */
+.approval-card .approval-actions button.always {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--v2-control-h-sm);
+  padding: 0 var(--v2-control-px-sm);
+  background: var(--btn-primary-bg);
+  color: var(--v2-on-accent);
+  border: 1px solid var(--v2-btn-primary-border);
+  border-radius: var(--v2-radius-sm);
+  font-size: var(--v2-font-size-caption);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.approval-card .approval-actions button.always:hover:not(:disabled) {
+  background: var(--btn-primary-bg-hover);
+  box-shadow: var(--btn-primary-shadow-hover);
 }
 
 /* ── Pixel-face tags/badges (landing kicker language) ─────────────────────
    Small uppercase stylistic labels use Geist Pixel Square with wide
-   tracking — applied as one consistent rule set rather than ad hoc. */
+   tracking — applied as one consistent rule set rather than ad hoc.
+   Geometry/tones live in primitives/badges.css. */
 .integration-kind,
 .integration-badge,
 .skill-trust,

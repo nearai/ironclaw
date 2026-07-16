@@ -88,7 +88,8 @@ pub const APP_JS: &str = concat!(
 /// under `static/styles/`. Authoring happens in one module per surface,
 /// component, or primitive (see `static/styles/`); the served blob is
 /// the same text a monolithic `style.css` would be. Load order is
-/// base → layout → components → primitives → surfaces.
+/// base → layout → components → toast → surfaces → DS reconciliation
+/// primitives (badges/forms/tabs/cards/modals) → buttons last.
 ///
 /// A newline between each module guards against the last rule of one
 /// file running into the first selector of the next when a file ends
@@ -145,6 +146,19 @@ pub const STYLE_CSS: &str = concat!(
     include_str!("../static/styles/surfaces/tool-permissions.css"),
     "\n",
     include_str!("../static/styles/surfaces/projects.css"),
+    "\n",
+    // Design-system reconciliation: port Badge/Input/Tabs/Card/Modal
+    // visual specs onto existing gateway selectors (loaded after
+    // surfaces so one-off page CSS loses to the shared primitives).
+    include_str!("../static/styles/primitives/badges.css"),
+    "\n",
+    include_str!("../static/styles/primitives/forms.css"),
+    "\n",
+    include_str!("../static/styles/primitives/tabs.css"),
+    "\n",
+    include_str!("../static/styles/primitives/cards.css"),
+    "\n",
+    include_str!("../static/styles/primitives/modals.css"),
     "\n",
     // Loaded last on purpose: landing-page button/typography parity layer
     // that overrides per-surface button styling (see file header).

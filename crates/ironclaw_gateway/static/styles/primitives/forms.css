@@ -1,0 +1,231 @@
+/* ── Design-system Input / Select / Textarea (ironclaw_webui_v2 input.tsx) ─
+   Compact control-density scale shared with Button: sm 28 / md 32 / lg 36.
+   Loaded after surfaces so one-off form CSS inherits shared geometry. */
+
+.ui-input,
+.ui-textarea,
+.auth-card-login input,
+.auth-card .auth-token-input input,
+.discover-search input,
+.users-form input,
+.users-form select,
+.settings-input,
+.settings-select,
+.config-form-row input,
+.config-form-row select,
+.ext-install-form input,
+.pairing-code-input,
+.pairing-name-input,
+.configure-input-row input,
+.setup-input,
+.activity-input-bar input,
+.activity-toolbar select,
+.api-tokens-form input,
+.thread-title-input,
+.skill-search-box input,
+.provider-dialog-body input,
+.provider-dialog-body select,
+.memory-editor textarea {
+  width: 100%;
+  max-width: 100%;
+  height: var(--v2-control-h-md);
+  padding: 0 var(--v2-control-px-md);
+  background: var(--v2-input-bg);
+  color: var(--v2-text-strong);
+  border: 1px solid var(--v2-panel-border);
+  border-radius: var(--v2-radius-md);
+  font-family: var(--font-sans);
+  font-size: var(--v2-font-size-body-sm);
+  font-weight: 400;
+  outline: none;
+  box-sizing: border-box;
+  transition:
+    border-color var(--v2-duration-fast) var(--v2-ease-standard),
+    background-color var(--v2-duration-fast) var(--v2-ease-standard);
+}
+
+.ui-textarea,
+.memory-editor textarea {
+  height: auto;
+  min-height: 72px;
+  padding: var(--v2-space-2) var(--v2-control-px-md);
+  resize: vertical;
+  line-height: 1.45;
+}
+
+.ui-input--sm,
+.activity-toolbar select {
+  height: var(--v2-control-h-sm);
+  padding: 0 var(--v2-control-px-sm);
+  border-radius: var(--v2-radius-sm);
+  font-size: var(--v2-font-size-caption);
+}
+
+.ui-input--lg,
+.auth-card-login input {
+  height: var(--v2-control-h-lg);
+  padding: 0 var(--v2-control-px-lg);
+  font-size: var(--v2-font-size-body);
+}
+
+.ui-input::placeholder,
+.ui-textarea::placeholder,
+.auth-card-login input::placeholder,
+.discover-search input::placeholder,
+.settings-input::placeholder,
+.config-form-row input::placeholder,
+.ext-install-form input::placeholder,
+.setup-input::placeholder,
+.api-tokens-form input::placeholder,
+.skill-search-box input::placeholder {
+  color: var(--v2-text-faint);
+}
+
+.ui-input:hover:not(:focus):not(:disabled),
+.ui-textarea:hover:not(:focus):not(:disabled),
+.auth-card-login input:hover:not(:focus):not(:disabled),
+.discover-search input:hover:not(:focus):not(:disabled),
+.users-form input:hover:not(:focus):not(:disabled),
+.users-form select:hover:not(:focus):not(:disabled),
+.settings-input:hover:not(:focus):not(:disabled),
+.settings-select:hover:not(:focus):not(:disabled),
+.config-form-row input:hover:not(:focus):not(:disabled),
+.config-form-row select:hover:not(:focus):not(:disabled),
+.ext-install-form input:hover:not(:focus):not(:disabled),
+.setup-input:hover:not(:focus):not(:disabled),
+.activity-input-bar input:hover:not(:focus):not(:disabled),
+.api-tokens-form input:hover:not(:focus):not(:disabled),
+.skill-search-box input:hover:not(:focus):not(:disabled),
+.provider-dialog-body input:hover:not(:focus):not(:disabled),
+.provider-dialog-body select:hover:not(:focus):not(:disabled),
+.memory-editor textarea:hover:not(:focus):not(:disabled) {
+  border-color: color-mix(in srgb, var(--v2-accent) 25%, var(--v2-panel-border));
+}
+
+.ui-input:focus,
+.ui-textarea:focus,
+.auth-card-login input:focus,
+.discover-search input:focus,
+.users-form input:focus,
+.users-form select:focus,
+.settings-input:focus,
+.settings-select:focus,
+.config-form-row input:focus,
+.config-form-row select:focus,
+.ext-install-form input:focus,
+.setup-input:focus,
+.activity-input-bar input:focus,
+.activity-toolbar select:focus,
+.api-tokens-form input:focus,
+.thread-title-input:focus,
+.skill-search-box input:focus,
+.provider-dialog-body input:focus,
+.provider-dialog-body select:focus,
+.memory-editor textarea:focus {
+  outline: none;
+  border-color: var(--v2-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--v2-accent) 28%, transparent);
+}
+
+.ui-input:disabled,
+.ui-textarea:disabled,
+.auth-card-login input:disabled,
+.settings-input:disabled,
+.config-form-row input:disabled,
+.config-form-row select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Settings value fields keep mono for scannable config values. */
+.settings-input,
+.settings-select,
+.settings-display-value {
+  font-family: var(--font-mono);
+}
+
+/* Fixed-width settings fields — don't stretch full row. */
+.settings-input,
+.settings-select {
+  width: 240px;
+}
+
+/* Native select chevron shell (moved/extended from base.css). */
+.ui-select-wrap {
+  position: relative;
+  display: inline-flex;
+  width: auto;
+  max-width: 100%;
+}
+
+.ui-select {
+  appearance: none;
+  -webkit-appearance: none;
+  height: var(--v2-control-h-sm);
+  padding: 0 28px 0 var(--v2-control-px-sm);
+  background: var(--v2-input-bg);
+  border: 1px solid var(--v2-panel-border);
+  border-radius: var(--v2-radius-sm);
+  color: var(--v2-text-strong);
+  font-size: var(--v2-font-size-caption);
+  font-weight: 500;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  outline: none;
+  transition:
+    border-color var(--v2-duration-fast) var(--v2-ease-standard),
+    background-color var(--v2-duration-fast) var(--v2-ease-standard);
+}
+
+.ui-select--md {
+  height: var(--v2-control-h-md);
+  padding: 0 30px 0 var(--v2-control-px-md);
+  border-radius: var(--v2-radius-md);
+  font-size: var(--v2-font-size-body-sm);
+}
+
+.ui-select:hover:not(:focus):not(:disabled) {
+  border-color: color-mix(in srgb, var(--v2-accent) 25%, var(--v2-panel-border));
+}
+
+.ui-select:focus {
+  outline: none;
+  border-color: var(--v2-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--v2-accent) 28%, transparent);
+}
+
+.ui-select-wrap::after {
+  content: '';
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  margin-top: -5px;
+  border-right: 1.5px solid var(--v2-text-faint);
+  border-bottom: 1.5px solid var(--v2-text-faint);
+  transform: rotate(45deg);
+  pointer-events: none;
+}
+
+.ui-label,
+.config-form-row label,
+.users-form label,
+.auth-card-login label {
+  display: block;
+  font-size: var(--v2-font-size-body-sm);
+  font-weight: 500;
+  color: var(--v2-text-strong);
+  margin-bottom: var(--v2-space-2);
+}
+
+.ui-form-hint,
+.config-form-hint {
+  font-size: var(--v2-font-size-caption);
+  color: var(--v2-text-faint);
+}
+
+.ui-form-error {
+  font-size: var(--v2-font-size-caption);
+  color: var(--v2-danger-text);
+}

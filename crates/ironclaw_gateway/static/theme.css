@@ -130,6 +130,7 @@
   --v2-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3), 0 1px 3px rgba(0, 0, 0, 0.15);
   --v2-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4), 0 2px 4px rgba(0, 0, 0, 0.2);
   --v2-shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.5), 0 4px 12px rgba(0, 0, 0, 0.3);
+  --v2-shadow-menu: 0 4px 16px rgba(0, 0, 0, 0.35), 0 1px 2px rgba(0, 0, 0, 0.3);
   --v2-shadow-modal: 0 24px 60px rgba(0, 0, 0, 0.35);
   --v2-shadow-accent-hover: 0 24px 24px -20px rgba(76, 167, 230, 0.55);
 
@@ -142,11 +143,21 @@
   --v2-control-px-lg: 16px;
   --v2-on-accent: #ffffff;
 
+  /* Stacking ladder (design-system reconciliation) */
+  --v2-z-raised: 10;
+  --v2-z-sticky: 20;
+  --v2-z-overlay: 40;
+  --v2-z-modal: 50;
+  --v2-z-toast: 60;
+
   /* Motion */
   --v2-duration-instant: 100ms;
+  --v2-duration-exit: 120ms;
   --v2-duration-fast: 150ms;
+  --v2-duration-menu: 180ms;
   --v2-duration-base: 250ms;
   --v2-duration-slow: 400ms;
+  --v2-duration-breathe: 2s;
   --v2-ease-standard: ease;
   --v2-ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
   --v2-ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
@@ -263,7 +274,8 @@
   --btn-primary-bg: var(--v2-btn-primary-bg);
   --btn-primary-bg-hover: var(--v2-btn-primary-bg-hover);
   --btn-primary-shadow-hover: var(--v2-shadow-accent-hover);
-  --btn-radius: var(--v2-radius-lg);
+  /* DS Button uses radius-md (10px) for md/lg controls — not radius-lg. */
+  --btn-radius: var(--v2-radius-md);
   --btn-secondary-border: var(--v2-btn-secondary-border);
   --btn-secondary-bg: var(--v2-btn-secondary-bg);
   --heading-tracking: var(--v2-tracking-tight);
@@ -328,6 +340,10 @@
   --v2-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04);
   --v2-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08), 0 2px 4px rgba(0, 0, 0, 0.04);
   --v2-shadow-lg: 0 25px 50px -12px rgba(0, 0, 0, 0.1);
+  --v2-shadow-menu: 0 4px 12px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --v2-shadow-modal: 0 16px 40px -8px rgba(0, 0, 0, 0.16), 0 2px 8px rgba(0, 0, 0, 0.06);
+  --v2-scrim: rgba(0, 0, 0, 0.4);
+  --v2-scrim-soft: rgba(0, 0, 0, 0.2);
 
   /* Legacy aliases whose *mapping* differs by theme: in light, the page
      canvas is white and the secondary surface is the grey wash. */

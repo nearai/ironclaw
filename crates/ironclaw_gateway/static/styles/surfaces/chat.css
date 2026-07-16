@@ -1275,7 +1275,8 @@
   transform: none;
 }
 
-/* Send is icon-only: a round accent control on the compact scale. */
+/* Send is icon-only on the md control step (radius-md square — DS icon size).
+   Visual role is owned by components/buttons.css (loaded last). */
 #send-btn {
   display: inline-flex;
   align-items: center;
@@ -1283,7 +1284,7 @@
   width: var(--v2-control-h-md);
   height: var(--v2-control-h-md);
   padding: 0;
-  border-radius: var(--v2-radius-full);
+  border-radius: var(--v2-radius-md);
 }
 
 /* Send reads as inert until there's text (JS toggles .active on input). */

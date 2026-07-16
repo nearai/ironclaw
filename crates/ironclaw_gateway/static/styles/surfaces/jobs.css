@@ -893,10 +893,8 @@
   color: var(--text-secondary);
 }
 
-/* Job status badge pulse */
+/* Live-dot geometry; tone + breathe animation owned by primitives/badges.css. */
 .badge.in_progress {
-  background: var(--accent-soft);
-  color: var(--accent);
   position: relative;
   padding-left: 18px;
 }
@@ -910,13 +908,8 @@
   width: 6px;
   height: 6px;
   border-radius: var(--v2-radius-full);
-  background: var(--accent);
-  animation: statusPulse 2s ease-out infinite;
-}
-
-@keyframes statusPulse {
-  0% { transform: translateY(-50%) scale(0.8); opacity: 0.6; }
-  100% { transform: translateY(-50%) scale(1.8); opacity: 0; }
+  background: currentColor;
+  animation: v2-breathe var(--v2-duration-breathe) var(--v2-ease-in-out) infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {

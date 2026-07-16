@@ -1,0 +1,67 @@
+/* ── Design-system Card flat variant (ironclaw_webui_v2 card.tsx) ─────────
+   In-page list cards sit flush: --v2-card-bg + panel border, no shadow.
+   Hover may tint the border; elevation stays flat (no shadow lift). */
+
+.ui-card,
+.ui-card--flat,
+.discover-card,
+.integration-card,
+.ext-card,
+.billing-card,
+.billing-plan-card,
+.provider-card,
+.settings-group,
+.ms-card,
+.cr-card,
+.cr-mission-card {
+  background: var(--v2-card-bg);
+  border: 1px solid var(--v2-panel-border);
+  border-radius: var(--v2-radius-lg);
+  box-shadow: none;
+}
+
+.ui-card--subtle {
+  background: var(--v2-surface-soft);
+  border: 1px solid var(--v2-panel-border);
+  border-radius: var(--v2-radius-lg);
+  box-shadow: none;
+}
+
+.ui-card--inset {
+  background: var(--v2-surface-muted);
+  border: 1px solid var(--v2-panel-border);
+  border-radius: var(--v2-radius-lg);
+  box-shadow: none;
+}
+
+.ui-card--bordered {
+  background: var(--v2-card-bg);
+  border: 1px solid var(--v2-panel-border);
+  border-radius: var(--v2-radius-lg);
+  box-shadow: var(--v2-card-shadow);
+}
+
+.discover-card:hover,
+.integration-card:hover,
+.ext-card:hover,
+.billing-plan-card:hover,
+.provider-card:hover,
+.cr-card:hover {
+  border-color: var(--border-hover);
+  box-shadow: none;
+}
+
+.integration-card.connected,
+.billing-plan-card.recommended {
+  border-color: color-mix(in srgb, var(--v2-accent) 40%, var(--v2-panel-border));
+}
+
+.ui-card__label,
+.billing-card-label {
+  font-family: var(--v2-font-pixel);
+  font-size: var(--v2-font-size-label);
+  letter-spacing: var(--v2-tracking-tag);
+  text-transform: uppercase;
+  font-weight: 500;
+  color: var(--v2-text-faint);
+}

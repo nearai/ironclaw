@@ -1,0 +1,170 @@
+/* ── Design-system Badge / StatusPill (ironclaw_webui_v2 badge.tsx) ───────
+   Loaded after surfaces so one-off chip styles pick up the shared density:
+   h-24, rounded-full, 10px pixel face, 1px color-mix border, soft fill.
+   Tone map follows STATUS_CANON: running/in_progress → info (not accent). */
+
+@keyframes v2-breathe {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.35; }
+}
+
+.v2-tag-face {
+  font-family: var(--v2-font-pixel);
+  text-transform: uppercase;
+  letter-spacing: var(--v2-tracking-tag);
+  font-weight: 500;
+}
+
+.ui-badge,
+.badge,
+.status-badge,
+.integration-badge,
+.provider-badge,
+.discover-status,
+.plan-status-badge,
+.log-level,
+.ms-act-tag,
+.ms-approach-chip,
+.ms-live-tag,
+.discover-kind,
+.integration-kind,
+.card-tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: var(--v2-radius-full);
+  border: 1px solid var(--v2-panel-border);
+  background: var(--v2-surface-soft);
+  color: var(--v2-text-muted);
+  font-family: var(--v2-font-pixel);
+  font-size: 0.625rem;
+  font-weight: 500;
+  letter-spacing: var(--v2-tracking-tag);
+  text-transform: uppercase;
+  white-space: nowrap;
+  line-height: 1;
+  box-sizing: border-box;
+}
+
+/* ── Tone variants ─────────────────────────────────────────────────────── */
+
+.ui-badge--muted,
+.badge.pending,
+.badge.cancelled,
+.badge.source-direct,
+.badge.disabled,
+.integration-badge.pending,
+.provider-badge-unconfigured,
+.discover-status.pending,
+.plan-status-draft,
+.log-level-debug,
+.status-pending {
+  border-color: var(--v2-panel-border);
+  background: var(--v2-surface-soft);
+  color: var(--v2-text-muted);
+}
+
+.ui-badge--success,
+.badge.completed,
+.badge.enabled,
+.integration-badge.connected,
+.provider-badge-active,
+.discover-status.active,
+.plan-status-completed,
+.status-success {
+  border-color: color-mix(in srgb, var(--v2-positive-text) 30%, var(--v2-panel-border));
+  background: var(--v2-positive-soft);
+  color: var(--v2-positive-text);
+}
+
+.ui-badge--warning,
+.badge.stuck,
+.badge.interrupted,
+.badge.failing,
+.plan-status-executing,
+.log-level-warn,
+.discover-kind.kind-skill {
+  border-color: color-mix(in srgb, var(--v2-warning-text) 34%, var(--v2-panel-border));
+  background: var(--v2-warning-soft);
+  color: var(--v2-warning-text);
+}
+
+.ui-badge--danger,
+.badge.failed,
+.plan-status-failed,
+.status-error,
+.log-level-error {
+  border-color: color-mix(in srgb, var(--v2-danger-text) 34%, var(--v2-panel-border));
+  background: var(--v2-danger-soft);
+  color: var(--v2-danger-text);
+}
+
+.ui-badge--info,
+.badge.in_progress,
+.plan-status-approved,
+.ms-live-tag,
+.log-level-info,
+.discover-kind.kind-wasm_channel,
+.discover-kind.kind-channel,
+.discover-kind.kind-channel_relay {
+  border-color: color-mix(in srgb, var(--v2-info-text) 30%, var(--v2-panel-border));
+  background: var(--v2-info-soft);
+  color: var(--v2-info-text);
+}
+
+.ui-badge--accent,
+.badge-admin,
+.provider-badge-builtin {
+  border-color: color-mix(in srgb, var(--v2-accent-text) 30%, var(--v2-panel-border));
+  background: var(--v2-accent-soft);
+  color: var(--v2-accent-text);
+}
+
+.badge.source-sandbox,
+.discover-kind.kind-mcp_server {
+  border-color: color-mix(in srgb, var(--badge-sandbox-text) 30%, var(--v2-panel-border));
+  background: var(--badge-sandbox-bg);
+  color: var(--badge-sandbox-text);
+}
+
+/* Live / in-progress breathing dot (DS Badge success|signal live state).
+   Prefer info tone for running jobs; keep the existing ::before hook. */
+.badge.in_progress {
+  position: relative;
+  padding-left: 18px;
+}
+
+.badge.in_progress::before {
+  content: '';
+  position: absolute;
+  left: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 6px;
+  height: 6px;
+  border-radius: var(--v2-radius-full);
+  background: currentColor;
+  animation: v2-breathe var(--v2-duration-breathe) var(--v2-ease-in-out) infinite;
+}
+
+.ui-badge__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--v2-radius-full);
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+.ui-badge--live .ui-badge__dot {
+  animation: v2-breathe var(--v2-duration-breathe) var(--v2-ease-in-out) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .badge.in_progress::before,
+  .ui-badge--live .ui-badge__dot {
+    animation: none;
+  }
+}

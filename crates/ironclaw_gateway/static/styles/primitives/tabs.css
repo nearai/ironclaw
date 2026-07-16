@@ -1,0 +1,77 @@
+/* ── Design-system Tabs (ironclaw_webui_v2 tabs.tsx) ──────────────────────
+   Underline tab row: hairline baseline, 2px accent underline on active,
+   13px medium labels. Applies to true in-panel tab rows (job detail).
+   Settings sidebar subtabs stay as nav items — not migrated here. */
+
+.ui-tabs,
+.job-detail-tabs {
+  display: flex;
+  max-width: 100%;
+  align-items: stretch;
+  gap: var(--v2-space-1);
+  border-bottom: 1px solid var(--v2-panel-border);
+  margin-bottom: var(--v2-space-4);
+}
+
+.ui-tab,
+.job-detail-tabs button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: calc(var(--v2-control-h-md) + var(--v2-control-px-sm));
+  padding: 0 var(--v2-control-px-sm);
+  margin-bottom: -1px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--v2-text-muted);
+  font-family: inherit;
+  font-size: var(--v2-font-size-body-sm);
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color var(--v2-duration-fast) var(--v2-ease-standard);
+}
+
+.ui-tab:hover,
+.job-detail-tabs button:hover {
+  color: var(--v2-text-strong);
+}
+
+.ui-tab[aria-selected="true"],
+.ui-tab.active,
+.job-detail-tabs button.active {
+  color: var(--v2-text-strong);
+  border-bottom-color: var(--v2-accent);
+}
+
+.ui-tab:focus-visible,
+.job-detail-tabs button:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--v2-accent) 40%, transparent);
+}
+
+.ui-tab__count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 18px;
+  min-width: 18px;
+  padding: 0 4px;
+  border-radius: var(--v2-radius-full);
+  background: var(--v2-surface-muted);
+  color: var(--v2-text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.ui-tab[aria-selected="true"] .ui-tab__count,
+.ui-tab.active .ui-tab__count,
+.job-detail-tabs button.active .ui-tab__count {
+  background: var(--v2-accent-soft);
+  color: var(--v2-accent-text);
+}
