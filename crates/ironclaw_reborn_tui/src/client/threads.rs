@@ -20,6 +20,7 @@
 //! unknown fields, so the wire response still deserializes.
 
 use serde::Deserialize;
+use uuid::Uuid;
 
 use super::{ApiClient, ClientError};
 
@@ -80,11 +81,11 @@ impl ApiClient {
 
     pub async fn create_thread(&self) -> Result<ThreadSummary, ClientError> {
         let wire: CreateThreadWire = self
-            .send_json(
-                self.http
-                    .post(self.url("/api/webchat/v2/threads"))
-                    .json(&serde_json::json!({})),
-            )
+            .send_json(self.http.post(self.url("/api/webchat/v2/threads")).json(
+                &serde_json::json!({
+                    "client_action_id": Uuid::new_v4().to_string(),
+                }),
+            ))
             .await?;
         Ok(wire.thread)
     }

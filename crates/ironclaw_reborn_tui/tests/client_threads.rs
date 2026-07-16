@@ -50,7 +50,7 @@ async fn list_threads_maps_401_to_unauthorized() {
 }
 
 #[tokio::test]
-async fn create_thread_posts_empty_json_body_and_returns_new_thread() {
+async fn create_thread_posts_client_action_id_and_returns_new_thread() {
     let server = MockServer::start().await;
     server.queue(
         "POST /api/webchat/v2/threads",
@@ -64,7 +64,14 @@ async fn create_thread_posts_empty_json_body_and_returns_new_thread() {
     assert_eq!(thread.thread_id, "thread-new");
 
     let requests = server.requests();
-    assert_eq!(requests[0].body, Some(serde_json::json!({})));
+    let body = requests[0].body.clone().expect("body");
+    let client_action_id = body["client_action_id"]
+        .as_str()
+        .expect("client_action_id is a string");
+    assert!(
+        !client_action_id.is_empty(),
+        "client_action_id must be non-empty"
+    );
 }
 
 #[tokio::test]

@@ -17,6 +17,7 @@
 use ironclaw_product_workflow::{
     WebUiGateResolution, WebUiResolveGateRequest, WebUiSendMessageRequest,
 };
+use uuid::Uuid;
 
 use super::{ApiClient, ClientError};
 
@@ -29,6 +30,7 @@ fn resolve_gate_body(resolution: WebUiGateResolution) -> WebUiResolveGateRequest
         }
     };
     WebUiResolveGateRequest {
+        client_action_id: Some(Uuid::new_v4().to_string()),
         resolution: Some(resolution.to_string()),
         always,
         credential_ref,
@@ -42,6 +44,7 @@ impl ApiClient {
     /// contract's "(ack arrives via stream)" note.
     pub async fn send_message(&self, thread_id: &str, text: &str) -> Result<(), ClientError> {
         let body = WebUiSendMessageRequest {
+            client_action_id: Some(Uuid::new_v4().to_string()),
             content: Some(text.to_string()),
             ..Default::default()
         };
