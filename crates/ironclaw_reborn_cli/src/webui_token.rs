@@ -191,6 +191,7 @@ fn validate_token_entropy(
 mod tests {
     use super::*;
 
+    #[cfg(feature = "webui-v2-beta")]
     const VALID_TOKEN: &str = "reborn-smoke-test-token-0123456789abcdef"; // 40 bytes
 
     #[test]
