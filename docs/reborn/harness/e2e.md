@@ -129,7 +129,7 @@ The script expands to the dedicated `reborn_e2e_gate.rs` tests plus the current 
 Run the WebChat v2 smoke test:
 
 ```bash
-cargo build -p ironclaw_reborn_cli --features openai-compat-beta,slack-v2-host-beta --bin ironclaw-reborn
+cargo build -p ironclaw_reborn_cli --features webui-v2-beta,openai-compat-beta,slack-v2-host-beta --bin ironclaw-reborn
 cd tests/e2e
 pip install -e .
 playwright install --with-deps chromium  # on Linux CI; local macOS can omit --with-deps

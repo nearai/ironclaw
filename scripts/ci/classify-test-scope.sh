@@ -7,6 +7,7 @@ docs_only=true
 # means platform/compatibility lanes are in scope; the v1 test suite is gone.
 has_legacy_tests=false
 has_reborn_tests=false
+has_runtime_heavy_risk=false
 
 is_docs_only_path() {
   local path="$1"
@@ -116,6 +117,33 @@ is_code_path() {
   esac
 }
 
+is_runtime_heavy_path() {
+  local path="$1"
+  case "$path" in
+    crates/ironclaw_common/*|crates/ironclaw_safety/*|crates/ironclaw_skills/*|crates/ironclaw_host_runtime/*|crates/ironclaw_loop_host/*)
+      return 0
+      ;;
+    crates/ironclaw_runner/*|crates/ironclaw_agent_loop/*|crates/ironclaw_turns/*|crates/ironclaw_threads/*|crates/ironclaw_capabilities/*|crates/ironclaw_dispatcher/*)
+      return 0
+      ;;
+    crates/ironclaw_resources/*|crates/ironclaw_authorization/*|crates/ironclaw_approvals/*|crates/ironclaw_run_state/*|crates/ironclaw_runtime_policy/*|crates/ironclaw_hooks/*|crates/ironclaw_llm/*)
+      return 0
+      ;;
+    crates/ironclaw_reborn_*/*|crates/ironclaw_product_*/*|crates/ironclaw_webui_v2/*|crates/ironclaw_webui_v2_static/*)
+      return 0
+      ;;
+    channels-src/*|migrations/*|tests/reborn_*.rs|tests/integration/*|tests/e2e/reborn_*|tests/e2e/scenarios/test_reborn_*|tests/e2e/scenarios/test_v2_*)
+      return 0
+      ;;
+    .github/workflows/platform-and-compat.yml|.github/workflows/reborn-tests.yml|.github/workflows/reborn-e2e.yml|.github/workflows/nightly-deep-ci.yml)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 while IFS= read -r path || [ -n "$path" ]; do
   [ -n "$path" ] || continue
 
@@ -125,6 +153,10 @@ while IFS= read -r path || [ -n "$path" ]; do
 
   if is_code_path "$path"; then
     has_core_code=true
+  fi
+
+  if is_runtime_heavy_path "$path"; then
+    has_runtime_heavy_risk=true
   fi
 
   if is_shared_test_path "$path"; then
@@ -142,4 +174,5 @@ docs_only=${docs_only}
 has_core_code=${has_core_code}
 has_legacy_tests=${has_legacy_tests}
 has_reborn_tests=${has_reborn_tests}
+has_runtime_heavy_risk=${has_runtime_heavy_risk}
 EOF

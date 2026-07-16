@@ -10,7 +10,7 @@ assert_scope() {
   local expected="$3"
   local actual
 
-  actual="$(printf '%s\n' "$files" | "$classifier" | sort)"
+  actual="$(printf '%s\n' "$files" | "$classifier" | grep -v '^has_runtime_heavy_risk=' | sort)"
 
   if [ "$actual" != "$expected" ]; then
     printf 'FAIL %s\n' "$name" >&2
@@ -28,7 +28,7 @@ assert_scope_no_trailing_newline() {
   local expected="$3"
   local actual
 
-  actual="$(printf '%s' "$files" | "$classifier" | sort)"
+  actual="$(printf '%s' "$files" | "$classifier" | grep -v '^has_runtime_heavy_risk=' | sort)"
 
   if [ "$actual" != "$expected" ]; then
     printf 'FAIL %s\n' "$name" >&2
@@ -44,7 +44,7 @@ assert_empty_scope() {
   local expected="$1"
   local actual
 
-  actual="$(printf '' | "$classifier" | sort)"
+  actual="$(printf '' | "$classifier" | grep -v '^has_runtime_heavy_risk=' | sort)"
 
   if [ "$actual" != "$expected" ]; then
     printf 'FAIL empty input\n' >&2
@@ -55,6 +55,39 @@ assert_empty_scope() {
 
   printf 'PASS empty input\n'
 }
+
+assert_runtime_heavy_risk() {
+  local name="$1"
+  local files="$2"
+  local expected="$3"
+  local actual
+
+  actual="$(printf '%s\n' "$files" | "$classifier" | grep '^has_runtime_heavy_risk=')"
+
+  if [ "$actual" != "has_runtime_heavy_risk=$expected" ]; then
+    printf 'FAIL %s\n' "$name" >&2
+    printf 'Expected: has_runtime_heavy_risk=%s\n' "$expected" >&2
+    printf 'Actual: %s\n' "$actual" >&2
+    exit 1
+  fi
+
+  printf 'PASS %s\n' "$name"
+}
+
+assert_runtime_heavy_risk \
+  "Reborn crate prefixes select the runtime-heavy lane" \
+  "crates/ironclaw_reborn_migration/src/target.rs" \
+  "true"
+
+assert_runtime_heavy_risk \
+  "product crate prefixes select the runtime-heavy lane" \
+  "crates/ironclaw_product_workflow/src/lib.rs" \
+  "true"
+
+assert_runtime_heavy_risk \
+  "unrelated documentation skips the runtime-heavy lane" \
+  "docs/operations.md" \
+  "false"
 
 assert_scope \
   "reborn binary crate" \

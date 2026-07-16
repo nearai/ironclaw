@@ -111,12 +111,6 @@ jobs:
 
           printf '%s\n' "$CHANGED_FILES" | scripts/ci/classify-test-scope.sh >> "$GITHUB_OUTPUT"
 
-          if has_match '^(crates/ironclaw_(common|safety|skills|host_runtime|loop_host|runner|agent_loop|turns|threads|capabilities|dispatcher|resources|authorization|approvals|run_state|runtime_policy|hooks|llm|reborn_|product_|webui_v2|webui_v2_static|reborn_webui_ingress)/|channels-src/|migrations/|tests/reborn_.*\.rs$|tests/integration/|tests/e2e/reborn_|tests/e2e/scenarios/test_(reborn|v2)_|\.github/workflows/(platform-and-compat|reborn-tests|reborn-e2e|nightly-deep-ci)\.yml$)'; then
-            echo "has_runtime_heavy_risk=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_runtime_heavy_risk=false" >> "$GITHUB_OUTPUT"
-          fi
-
           if has_match '^(crates/ironclaw_(webui_v2|webui_v2_static|reborn_webui_ingress|reborn_composition|product_workflow)/|tests/e2e/|tests/fixtures/gateway_traces/|tests/test-pages/|\.github/workflows/(reborn-e2e|reborn-playwright|nightly-deep-ci)\.yml$)'; then
             echo "has_web_risk=true" >> "$GITHUB_OUTPUT"
           else
