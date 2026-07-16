@@ -106,17 +106,24 @@ therefore misses them.
 
 When a thread lookup misses under the caller's session scope, `RebornServices`
 falls back to `AutomationProductFacade::resolve_run_thread_scope`. That method
-is caller-scoped: it scans only the triggers visible to the authenticated caller,
-so the authorization check is embedded in the lookup. If a matching trigger run
-is found, the service reconstructs a `TurnScope` with:
+is caller-scoped: it scans only the triggers owned by the authenticated caller
+(matched on tenant_id + creator_user_id + agent_id + project_id), so the
+authorization check is embedded in the lookup. If a matching trigger run is
+found, the service reconstructs a `TurnScope` with:
 
 - `owner_user_id = Some(trigger creator_user_id)` — NOT the session caller
 - `agent_id` / `project_id` from the trigger record
 
 and substitutes the trigger creator as the `run_actor` for all downstream turn
-operations (timeline, SSE stream, gate resolve, cancel, run-state). The
-authorization model is automation visibility (`list_automations` semantics), not
-thread-owner == caller.
+operations (timeline, SSE stream, gate resolve, cancel, run-state).
+
+**Visibility for listing and thread authorization are deliberately decoupled.**
+The authorization model is caller ownership (tenant + user + agent + project),
+not `list_automations` listing eligibility. The default `list_automations`
+response excludes `Completed` triggers (soft-completed fire-once triggers) to
+keep the active panel uncluttered. But completed triggers' run threads remain
+authorized through this resolver — their history is retained user data and must
+stay accessible. `resolve_run_thread_scope` does not filter on trigger state.
 
 **No caching.** Every call revalidates automation visibility through the facade.
 A caller that loses automation visibility mid-session cannot keep accessing the

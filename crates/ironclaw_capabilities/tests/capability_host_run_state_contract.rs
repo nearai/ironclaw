@@ -1,10 +1,12 @@
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use ironclaw_approvals::*;
 use ironclaw_authorization::*;
 use ironclaw_capabilities::*;
+use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_host_api::*;
 use ironclaw_run_state::*;
 use serde_json::json;
@@ -59,6 +61,100 @@ async fn capability_host_blocks_for_approval_without_dispatch() {
                 .unwrap()
         )
     );
+}
+
+#[tokio::test]
+async fn capability_host_adds_sanitized_shell_command_to_approval_reason() {
+    let manifest_toml = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "builtin"
+name = "Builtin"
+version = "0.1.0"
+description = "Builtin test extension"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "builtin.wasm"
+
+[[capabilities]]
+id = "builtin.shell"
+description = "Runs a shell command."
+effects = ["dispatch_capability", "spawn_process", "execute_code", "network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/shell.input.v1.json"
+output_schema_ref = "schemas/shell.output.v1.json"
+"#;
+    let manifest = ExtensionManifest::parse(
+        manifest_toml,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap();
+    let package = ExtensionPackage::from_manifest(
+        manifest,
+        VirtualPath::new("/system/extensions/builtin").unwrap(),
+    )
+    .unwrap();
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    let dispatcher = RecordingDispatcher::default();
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let capability_id = CapabilityId::new("builtin.shell").unwrap();
+    let input = json!({
+        "command": "pwd && curl -H 'Authorization: Bearer sk-secret' https://example.test/path?token=secret"
+    });
+
+    let err = host
+        .invoke_json(CapabilityInvocationRequest {
+            context,
+            capability_id,
+            estimate: ResourceEstimate::default(),
+            input,
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::AuthorizationRequiresApproval { .. }
+    ));
+    let approval_id = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .approval_request_id
+        .unwrap();
+    let approval = approval_requests
+        .get(&scope, approval_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(approval.request.reason.contains("Command:\npwd && curl"));
+    assert!(
+        approval
+            .request
+            .reason
+            .contains("-H 'Authorization: [redacted]'")
+    );
+    assert!(
+        approval
+            .request
+            .reason
+            .contains("https://example.test/path?...")
+    );
+    assert!(!approval.request.reason.contains("sk-secret"));
+    assert!(!approval.request.reason.contains("token=secret"));
 }
 
 #[tokio::test]
@@ -471,7 +567,7 @@ async fn capability_host_does_not_orphan_approval_when_run_block_fails() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
     let run_state = FailBlockApprovalRunStateStore::new();
-    let approval_requests = InMemoryApprovalRequestStore::new();
+    let approval_requests = RecordingApprovalStore::new();
     let host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
@@ -502,6 +598,36 @@ async fn capability_host_does_not_orphan_approval_when_run_block_fails() {
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(run.status, RunStatus::Failed);
     assert_eq!(run.error_kind.as_deref(), Some("ApprovalBlock"));
+
+    // Regression (#5467): rollback must tombstone the approval, not delete it,
+    // so a same-id save_pending fails closed. RED pre-fix: returned Ok(..).
+    let discarded_id = approval_requests
+        .last_saved_id()
+        .expect("save_pending must have been called before the block_approval rollback");
+
+    let reused_request = ApprovalRequest {
+        id: discarded_id,
+        correlation_id: CorrelationId::new(),
+        requested_by: Principal::Extension(extension_id()),
+        action: Box::new(Action::Dispatch {
+            capability: capability_id(),
+            estimated_resources: ResourceEstimate::default(),
+        }),
+        invocation_fingerprint: None,
+        reason: "reuse attempt after rollback".to_string(),
+        reusable_scope: None,
+    };
+    let reuse_err = approval_requests
+        .save_pending(scope, reused_request)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            reuse_err,
+            RunStateError::ApprovalRequestAlreadyExists { request_id } if request_id == discarded_id
+        ),
+        "expected ApprovalRequestAlreadyExists but got {reuse_err:?}",
+    );
 }
 
 #[tokio::test]
@@ -569,7 +695,8 @@ async fn capability_host_resumes_approved_invocation_and_consumes_matching_lease
     let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
-    let context = execution_context(CapabilitySet::default());
+    let mut context = execution_context(CapabilitySet::default());
+    context.authenticated_actor_user_id = Some(UserId::new("slack-alice").unwrap());
     let scope = context.resource_scope.clone();
     let invocation_id = context.invocation_id;
     let estimate = ResourceEstimate::default();
@@ -598,13 +725,15 @@ async fn capability_host_resumes_approved_invocation_and_consumes_matching_lease
             approval_id,
             LeaseApproval {
                 issued_by: Principal::HostRuntime,
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: MountView::default(),
-                network: NetworkPolicy::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await
@@ -615,6 +744,41 @@ async fn capability_host_resumes_approved_invocation_and_consumes_matching_lease
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
+    let mut forged_context = context.clone();
+    forged_context.authenticated_actor_user_id = Some(UserId::new("slack-bob").unwrap());
+    let forged_error = resume_host
+        .resume_json(CapabilityResumeRequest {
+            context: forged_context,
+            approval_request_id: approval_id,
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        forged_error,
+        CapabilityInvocationError::AuthorizationDenied {
+            reason: DenyReason::PolicyDenied,
+            ..
+        }
+    ));
+    assert!(!dispatcher.has_request());
+    assert_eq!(
+        run_state
+            .get(&scope, invocation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        RunStatus::BlockedApproval
+    );
+    assert_eq!(
+        leases.get(&scope, lease.grant.id).await.unwrap().status,
+        CapabilityLeaseStatus::Active
+    );
+
     let result = resume_host
         .resume_json(CapabilityResumeRequest {
             context: context.clone(),
@@ -628,6 +792,14 @@ async fn capability_host_resumes_approved_invocation_and_consumes_matching_lease
         .unwrap();
 
     assert_eq!(result.dispatch.output, json!({"ok": true}));
+    assert_eq!(
+        dispatcher
+            .take_request()
+            .authenticated_actor_user_id
+            .as_ref()
+            .map(UserId::as_str),
+        Some("slack-alice")
+    );
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(run.status, RunStatus::Completed);
     let consumed = leases.get(&scope, lease.grant.id).await.unwrap();
@@ -673,13 +845,15 @@ async fn capability_host_returns_dispatch_result_when_run_completion_fails_after
             approval_id,
             LeaseApproval {
                 issued_by: Principal::HostRuntime,
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: MountView::default(),
-                network: NetworkPolicy::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await
@@ -744,13 +918,15 @@ async fn capability_host_denies_resume_when_trust_ceiling_omits_capability_effec
             approval_id,
             LeaseApproval {
                 issued_by: Principal::HostRuntime,
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: MountView::default(),
-                network: NetworkPolicy::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await
@@ -825,13 +1001,15 @@ async fn capability_host_revokes_claimed_lease_when_dispatch_fails_after_resume(
             approval_id,
             LeaseApproval {
                 issued_by: Principal::HostRuntime,
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: MountView::default(),
-                network: NetworkPolicy::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await
@@ -859,6 +1037,7 @@ async fn capability_host_revokes_claimed_lease_when_dispatch_fails_after_resume(
         CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
             safe_summary: None,
+            detail: None,
         }
     ));
     // Per PR #4236 disposition policy, the capability host no longer
@@ -912,13 +1091,15 @@ async fn capability_host_returns_dispatch_result_when_lease_consume_fails_after_
             approval_id,
             LeaseApproval {
                 issued_by: Principal::HostRuntime,
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: MountView::default(),
-                network: NetworkPolicy::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await
@@ -988,13 +1169,15 @@ async fn capability_host_does_not_overwrite_completed_run_when_concurrent_resume
             approval_id,
             LeaseApproval {
                 issued_by: Principal::HostRuntime,
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: MountView::default(),
-                network: NetworkPolicy::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await
@@ -1204,13 +1387,15 @@ async fn capability_host_rejects_resume_with_mutated_input_before_lease_claim_or
             approval_id,
             LeaseApproval {
                 issued_by: Principal::HostRuntime,
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: MountView::default(),
-                network: NetworkPolicy::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await
@@ -1260,6 +1445,7 @@ impl CapabilityDispatcher for FailingDispatcher {
     ) -> Result<CapabilityDispatchResult, DispatchError> {
         Err(DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Backend,
+            safe_summary: None,
         })
     }
 }
@@ -1688,6 +1874,83 @@ impl RunStateStore for FailBlockApprovalRunStateStore {
     }
 }
 
+/// Spy over `InMemoryApprovalRequestStore`: records the `save_pending` id,
+/// since `run_state.fail()` clears `RunRecord.approval_request_id` (#5467).
+struct RecordingApprovalStore {
+    inner: InMemoryApprovalRequestStore,
+    last_saved_id: Mutex<Option<ApprovalRequestId>>,
+}
+
+impl RecordingApprovalStore {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryApprovalRequestStore::new(),
+            last_saved_id: Mutex::new(None),
+        }
+    }
+
+    fn last_saved_id(&self) -> Option<ApprovalRequestId> {
+        *self
+            .last_saved_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+#[async_trait]
+impl ApprovalRequestStore for RecordingApprovalStore {
+    async fn save_pending(
+        &self,
+        scope: ResourceScope,
+        request: ApprovalRequest,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        *self
+            .last_saved_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(request.id);
+        self.inner.save_pending(scope, request).await
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<Option<ApprovalRecord>, RunStateError> {
+        self.inner.get(scope, request_id).await
+    }
+
+    async fn approve(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.inner.approve(scope, request_id).await
+    }
+
+    async fn deny(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.inner.deny(scope, request_id).await
+    }
+
+    async fn discard_pending(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.inner.discard_pending(scope, request_id).await
+    }
+
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<ApprovalRecord>, RunStateError> {
+        self.inner.records_for_scope(scope).await
+    }
+}
+
 struct CompleteNotifyingRunStateStore {
     inner: InMemoryRunStateStore,
     complete_notify: Arc<tokio::sync::Notify>,
@@ -1910,6 +2173,25 @@ impl CapabilityLeaseStore for CoordinatedClaimConflictLeaseStore {
         self.inner.consume(scope, lease_id).await
     }
 
+    async fn begin_dispatch_claimed(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        self.inner
+            .begin_dispatch_claimed(scope, lease_id, invocation_fingerprint)
+            .await
+    }
+
+    async fn abort_dispatch_claimed(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        self.inner.abort_dispatch_claimed(scope, lease_id).await
+    }
+
     async fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease> {
         self.inner.leases_for_scope(scope).await
     }
@@ -1972,6 +2254,25 @@ impl CapabilityLeaseStore for ConsumeFailingLeaseStore {
         Err(CapabilityLeaseError::Persistence {
             reason: format!("consume failed for {lease_id}"),
         })
+    }
+
+    async fn begin_dispatch_claimed(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        self.inner
+            .begin_dispatch_claimed(scope, lease_id, invocation_fingerprint)
+            .await
+    }
+
+    async fn abort_dispatch_claimed(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        self.inner.abort_dispatch_claimed(scope, lease_id).await
     }
 
     async fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease> {

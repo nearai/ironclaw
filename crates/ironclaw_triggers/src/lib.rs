@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
 use chrono_tz::Tz;
 use cron::Schedule;
+use ironclaw_common::{AutomationName, AutomationNameError};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
 use ironclaw_turns::TurnRunId;
 use serde::{Deserialize, Serialize};
@@ -33,7 +34,7 @@ mod worker;
 pub use trusted_submit::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerMaterializedPrompt,
-    TriggerTrustedInboundBinding,
+    TriggerTrustedInboundBinding, is_trusted_trigger_adapter_kind,
 };
 
 const MIN_FIRE_CADENCE: Duration = Duration::from_secs(60);
@@ -41,7 +42,7 @@ const MAX_DUE_TRIGGER_POLL_LIMIT: usize = 128;
 const MAX_TRIGGER_LIST_LIMIT: usize = 100;
 const MAX_TRIGGER_RUN_HISTORY_LIMIT: usize = 500;
 const MAX_TRIGGER_RUN_HISTORY_RETAINED: usize = 500;
-pub const MAX_TRIGGER_NAME_BYTES: usize = 256;
+pub const MAX_TRIGGER_NAME_BYTES: usize = ironclaw_common::MAX_AUTOMATION_NAME_BYTES;
 pub const MAX_TRIGGER_PROMPT_BYTES: usize = 32 * 1024;
 const IDENTITY_VERSION_LABEL: &str = "ironclaw.trigger-fire.v1";
 const ROUTE_THREAD_DOMAIN: &str = "route-thread";
@@ -54,17 +55,50 @@ pub enum TriggerError {
     #[error("invalid fire identity component {label}: {reason}")]
     InvalidFireIdentityComponent { label: String, reason: String },
     #[error("invalid trigger record: {reason}")]
-    InvalidRecord { reason: String },
+    InvalidRecord {
+        kind: TriggerRecordValidationKind,
+        reason: String,
+    },
     #[error("invalid trigger poller configuration: {reason}")]
     InvalidPollerConfig { reason: String },
     #[error("invalid schedule: {reason}")]
-    InvalidSchedule { reason: String },
+    InvalidSchedule {
+        kind: TriggerScheduleValidationKind,
+        reason: String,
+    },
     #[error("invalid trigger materialization: {reason}")]
     InvalidMaterialization { reason: String },
+    #[error("trigger materialization blocked: {reason}")]
+    BlockedMaterialization { reason: String },
     #[error("trigger repository backend unavailable: {reason}")]
     Backend { reason: String },
     #[error("trigger not found")]
     NotFound,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TriggerRecordValidationKind {
+    NameEmpty,
+    NameTooLong,
+    PromptEmpty,
+    PromptTooLong,
+    DeliveryTargetInvalid,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TriggerScheduleValidationKind {
+    InvalidTimezone,
+    InvalidDateTime,
+    AmbiguousDateTime,
+    NonexistentDateTime,
+    EmptyCronExpression,
+    InvalidCronFieldCount,
+    InvalidCronExpression,
+    SecondLevelCadence,
+    NoUpcomingFireTime,
+    SubMinuteCadence,
+    NoFutureFireTime,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -235,6 +269,65 @@ impl<'de> Deserialize<'de> for TriggerInboundContentRef {
     }
 }
 
+/// Opaque outbound delivery target id pinned to one trigger.
+///
+/// Carries the product-workflow outbound delivery target id (as returned by
+/// the outbound delivery target capabilities) without depending on the
+/// product layer: this crate treats it as an opaque routing token. Resolution
+/// to a concrete conversation/channel happens in composition at creation
+/// (validation) and at fire time (delivery), so a stale target fails closed
+/// there rather than here.
+///
+/// Values must be non-empty, at most 256 bytes, and free of control
+/// characters.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct TriggerDeliveryTargetId(String);
+
+impl TriggerDeliveryTargetId {
+    /// Create a validated per-trigger delivery target id.
+    pub fn new(value: impl Into<String>) -> Result<Self, TriggerError> {
+        let value = value.into();
+        validate_delivery_target_id(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl AsRef<str> for TriggerDeliveryTargetId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for TriggerDeliveryTargetId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl TryFrom<String> for TriggerDeliveryTargetId {
+    type Error = TriggerError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        validate_delivery_target_id(&value)?;
+        Ok(Self(value))
+    }
+}
+
+impl From<TriggerDeliveryTargetId> for String {
+    fn from(id: TriggerDeliveryTargetId) -> Self {
+        id.0
+    }
+}
+
 impl Serialize for TriggerRouteThreadId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -285,8 +378,13 @@ pub struct TriggerRecord {
     pub name: String,
     pub source: TriggerSourceKind,
     pub schedule: TriggerSchedule,
-    pub completion_policy: TriggerCompletionPolicy,
     pub prompt: String,
+    /// Optional per-trigger outbound delivery target. When set, fires deliver
+    /// their results to this target instead of the creator's user-global
+    /// outbound delivery preference, so one automation's routing cannot be
+    /// clobbered by another automation (or a later preference change).
+    #[serde(default)]
+    pub delivery_target: Option<TriggerDeliveryTargetId>,
     pub state: TriggerState,
     pub next_run_at: Timestamp,
     pub last_run_at: Option<Timestamp>,
@@ -299,28 +397,22 @@ pub struct TriggerRecord {
 
 impl TriggerRecord {
     pub fn validate(&self) -> Result<(), TriggerError> {
-        if self.name.trim().is_empty() {
-            return Err(TriggerError::InvalidRecord {
-                reason: "trigger name must not be empty".to_string(),
-            });
-        }
-        if self.name.len() > MAX_TRIGGER_NAME_BYTES {
-            return Err(TriggerError::InvalidRecord {
-                reason: format!("trigger name must be at most {MAX_TRIGGER_NAME_BYTES} bytes"),
-            });
-        }
+        validate_trigger_name(&self.name)?;
         if self.prompt.trim().is_empty() {
             return Err(TriggerError::InvalidRecord {
+                kind: TriggerRecordValidationKind::PromptEmpty,
                 reason: "trigger prompt must not be empty".to_string(),
             });
         }
         if self.prompt.len() > MAX_TRIGGER_PROMPT_BYTES {
             return Err(TriggerError::InvalidRecord {
+                kind: TriggerRecordValidationKind::PromptTooLong,
                 reason: format!("trigger prompt must be at most {MAX_TRIGGER_PROMPT_BYTES} bytes"),
             });
         }
         if self.active_run_ref.is_some() && self.active_fire_slot.is_none() {
             return Err(TriggerError::InvalidRecord {
+                kind: TriggerRecordValidationKind::Other,
                 reason: "active_run_ref requires active_fire_slot".to_string(),
             });
         }
@@ -337,11 +429,35 @@ impl TriggerRecord {
     }
 }
 
+pub(crate) fn validate_trigger_name(name: &str) -> Result<(), TriggerError> {
+    AutomationName::new(name.to_string())
+        .map(|_| ())
+        .map_err(trigger_name_error)
+}
+
+fn trigger_name_error(error: AutomationNameError) -> TriggerError {
+    let (kind, reason) = match error {
+        AutomationNameError::Empty => (
+            TriggerRecordValidationKind::NameEmpty,
+            "trigger name must not be empty".to_string(),
+        ),
+        AutomationNameError::TooLong => (
+            TriggerRecordValidationKind::NameTooLong,
+            format!("trigger name must be at most {MAX_TRIGGER_NAME_BYTES} bytes"),
+        ),
+    };
+    TriggerError::InvalidRecord { kind, reason }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum TriggerSchedule {
     Cron {
         expression: String,
+        timezone: String,
+    },
+    Once {
+        at: chrono::DateTime<chrono::Utc>,
         timezone: String,
     },
 }
@@ -365,6 +481,107 @@ impl TriggerSchedule {
         Ok(schedule)
     }
 
+    /// Create a one-shot schedule that fires at the given UTC timestamp.
+    pub fn once(
+        at: chrono::DateTime<chrono::Utc>,
+        timezone: impl Into<String>,
+    ) -> Result<Self, TriggerError> {
+        let schedule = Self::Once {
+            at,
+            timezone: timezone.into(),
+        };
+        schedule.validate()?;
+        Ok(schedule)
+    }
+
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    pub(crate) fn timezone_text(&self) -> &str {
+        match self {
+            Self::Cron { timezone, .. } | Self::Once { timezone, .. } => timezone.as_str(),
+        }
+    }
+
+    // Returns (kind, expression, schedule_at)
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    pub(crate) fn to_storage(&self) -> (&'static str, &str, Option<String>) {
+        match self {
+            Self::Cron { expression, .. } => ("cron", expression.as_str(), None),
+            Self::Once { at, .. } => (
+                "once",
+                "",
+                Some(at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)),
+            ),
+        }
+    }
+
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    pub(crate) fn from_storage(
+        kind: &str,
+        expression: &str,
+        schedule_at: Option<&str>,
+        timezone: &str,
+    ) -> Result<Self, TriggerError> {
+        match kind {
+            "cron" => Self::cron_with_timezone(expression, timezone),
+            "once" => {
+                let at_str = schedule_at.ok_or_else(|| TriggerError::InvalidRecord {
+                    kind: TriggerRecordValidationKind::Other,
+                    reason: "schedule_at: missing once timestamp".to_string(),
+                })?;
+                let at = chrono::DateTime::parse_from_rfc3339(at_str)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .map_err(|error| TriggerError::InvalidRecord {
+                        kind: TriggerRecordValidationKind::Other,
+                        reason: format!("schedule_at: invalid once timestamp: {error}"),
+                    })?;
+                Self::once(at, timezone)
+            }
+            other => Err(TriggerError::InvalidRecord {
+                kind: TriggerRecordValidationKind::Other,
+                reason: format!("schedule_kind: unsupported schedule kind `{other}`"),
+            }),
+        }
+    }
+
+    pub fn is_recurring(&self) -> bool {
+        matches!(self, Self::Cron { .. })
+    }
+
+    /// Parse a naive wall-clock datetime string, attach the given IANA timezone,
+    /// and convert to UTC. Rejects ambiguous (DST fall-back overlap) and
+    /// non-existent (DST spring-forward gap) local times with InvalidSchedule.
+    pub fn once_from_local(at_str: &str, timezone_str: &str) -> Result<Self, TriggerError> {
+        use chrono::TimeZone as _;
+        let tz = parse_timezone(timezone_str)?;
+        let naive = chrono::NaiveDateTime::parse_from_str(at_str, "%Y-%m-%dT%H:%M:%S").map_err(
+            |error| TriggerError::InvalidSchedule {
+                kind: TriggerScheduleValidationKind::InvalidDateTime,
+                reason: format!("invalid datetime '{at_str}': {error}"),
+            },
+        )?;
+        let local = tz.from_local_datetime(&naive);
+        let at = match local {
+            chrono::LocalResult::Single(dt) => dt.with_timezone(&chrono::Utc),
+            chrono::LocalResult::Ambiguous(_, _) => {
+                return Err(TriggerError::InvalidSchedule {
+                    kind: TriggerScheduleValidationKind::AmbiguousDateTime,
+                    reason: format!(
+                        "datetime '{at_str}' is ambiguous in timezone '{timezone_str}' (DST overlap); use an explicit UTC offset"
+                    ),
+                });
+            }
+            chrono::LocalResult::None => {
+                return Err(TriggerError::InvalidSchedule {
+                    kind: TriggerScheduleValidationKind::NonexistentDateTime,
+                    reason: format!(
+                        "datetime '{at_str}' does not exist in timezone '{timezone_str}' (DST gap); use an adjacent time"
+                    ),
+                });
+            }
+        };
+        Self::once(at, timezone_str)
+    }
+
     pub fn validate(&self) -> Result<(), TriggerError> {
         match self {
             Self::Cron {
@@ -373,6 +590,10 @@ impl TriggerSchedule {
             } => {
                 parse_timezone(timezone)?;
                 parse_cron_schedule(expression)?;
+                Ok(())
+            }
+            Self::Once { timezone, .. } => {
+                parse_timezone(timezone)?;
                 Ok(())
             }
         }
@@ -385,18 +606,88 @@ impl TriggerSchedule {
                 timezone,
             } => {
                 let tz = parse_timezone(timezone)?;
-                let next = if tz == Tz::UTC {
-                    parse_cron_schedule(expression)?.after(&after).next()
-                } else {
-                    parse_cron_schedule(expression)?
-                        .after(&after.with_timezone(&tz))
-                        .next()
-                        .map(|dt| dt.with_timezone(&Utc))
-                };
-                Ok(next)
+                let schedule = parse_cron_schedule(expression)?;
+                Ok(next_cron_slot_after(&schedule, &tz, after))
             }
+            Self::Once { at, .. } => Ok(if *at > after { Some(*at) } else { None }),
         }
     }
+
+    /// Count elapsed schedule slots in `(after, now]` — not runs the poller
+    /// attempted or skipped, just cron occurrences that have passed (#5886).
+    /// Display-only derivation; stops at `cap` and reports the truncation so
+    /// UIs can render "99+" instead of a false-exact count. `Once` schedules
+    /// have no repeat slots to count.
+    pub fn elapsed_occurrences_between(
+        &self,
+        after: Timestamp,
+        now: Timestamp,
+        cap: u32,
+    ) -> Result<ElapsedOccurrenceCount, TriggerError> {
+        let (expression, timezone) = match self {
+            Self::Once { .. } => {
+                return Ok(ElapsedOccurrenceCount {
+                    count: 0,
+                    capped: false,
+                });
+            }
+            Self::Cron {
+                expression,
+                timezone,
+            } => (expression, timezone),
+        };
+        // Parse the timezone and cron schedule once up front: the loop below
+        // can call next_slot_after up to `cap` times, and re-parsing the same
+        // loop-invariant schedule/timezone on every iteration is wasted work
+        // (#5886 follow-up).
+        let tz = parse_timezone(timezone)?;
+        let schedule = parse_cron_schedule(expression)?;
+
+        let mut count = 0u32;
+        let mut cursor = after;
+        while count < cap {
+            match next_cron_slot_after(&schedule, &tz, cursor) {
+                Some(slot) if slot <= now => {
+                    count += 1;
+                    cursor = slot;
+                }
+                _ => {
+                    return Ok(ElapsedOccurrenceCount {
+                        count,
+                        capped: false,
+                    });
+                }
+            }
+        }
+        let capped =
+            matches!(next_cron_slot_after(&schedule, &tz, cursor), Some(slot) if slot <= now);
+        Ok(ElapsedOccurrenceCount { count, capped })
+    }
+}
+
+/// Cron-branch core of [`TriggerSchedule::next_slot_after`], factored to
+/// accept an already-parsed `Schedule`/`Tz` so callers that need repeated
+/// lookups (e.g. [`TriggerSchedule::elapsed_occurrences_between`]'s loop) can
+/// parse once and reuse it instead of re-parsing the schedule string every
+/// call.
+fn next_cron_slot_after(schedule: &Schedule, tz: &Tz, after: Timestamp) -> Option<Timestamp> {
+    if *tz == Tz::UTC {
+        schedule.after(&after).next()
+    } else {
+        schedule
+            .after(&after.with_timezone(tz))
+            .next()
+            .map(|dt| dt.with_timezone(&Utc))
+    }
+}
+
+/// Result of [`TriggerSchedule::elapsed_occurrences_between`]: `capped` marks
+/// a truncated count (the real number of elapsed occurrences exceeds
+/// `count`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ElapsedOccurrenceCount {
+    pub count: u32,
+    pub capped: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -413,11 +704,14 @@ pub enum TriggerState {
     Completed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TriggerCompletionPolicy {
-    Recurring,
-    CompleteAfterFirstFire,
+fn validate_user_settable_trigger_state(state: TriggerState) -> Result<(), TriggerError> {
+    match state {
+        TriggerState::Scheduled | TriggerState::Paused => Ok(()),
+        TriggerState::Completed => Err(TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::Other,
+            reason: "completed is a terminal trigger state and cannot be set directly".to_string(),
+        }),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -441,6 +735,81 @@ pub(crate) fn trigger_run_history_status_text(value: TriggerRunHistoryStatus) ->
         TriggerRunHistoryStatus::Running => "running",
         TriggerRunHistoryStatus::Ok => "ok",
         TriggerRunHistoryStatus::Error => "error",
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub(crate) fn state_text_codec(value: TriggerState) -> &'static str {
+    match value {
+        TriggerState::Scheduled => "scheduled",
+        TriggerState::Paused => "paused",
+        TriggerState::Completed => "completed",
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub(crate) fn parse_state_codec(value: &str) -> Result<TriggerState, TriggerError> {
+    match value {
+        "scheduled" => Ok(TriggerState::Scheduled),
+        "paused" => Ok(TriggerState::Paused),
+        "completed" => Ok(TriggerState::Completed),
+        other => Err(TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::Other,
+            reason: format!("state: unsupported trigger state `{other}`"),
+        }),
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub(crate) fn source_kind_text_codec(value: TriggerSourceKind) -> &'static str {
+    match value {
+        TriggerSourceKind::Schedule => "schedule",
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub(crate) fn parse_source_kind_codec(value: &str) -> Result<TriggerSourceKind, TriggerError> {
+    match value {
+        "schedule" => Ok(TriggerSourceKind::Schedule),
+        other => Err(TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::Other,
+            reason: format!("source: unsupported trigger source `{other}`"),
+        }),
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub(crate) fn status_text_codec(value: TriggerRunStatus) -> &'static str {
+    match value {
+        TriggerRunStatus::Ok => "ok",
+        TriggerRunStatus::Error => "error",
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub(crate) fn parse_run_status_codec(value: &str) -> Result<TriggerRunStatus, TriggerError> {
+    match value {
+        "ok" => Ok(TriggerRunStatus::Ok),
+        "error" => Ok(TriggerRunStatus::Error),
+        other => Err(TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::Other,
+            reason: format!("last_status: unsupported trigger run status `{other}`"),
+        }),
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub(crate) fn parse_run_history_status_codec(
+    value: &str,
+) -> Result<TriggerRunHistoryStatus, TriggerError> {
+    match value {
+        "running" => Ok(TriggerRunHistoryStatus::Running),
+        "ok" => Ok(TriggerRunHistoryStatus::Ok),
+        "error" => Ok(TriggerRunHistoryStatus::Error),
+        other => Err(TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::Other,
+            reason: format!("status: unsupported trigger run history status `{other}`"),
+        }),
     }
 }
 
@@ -552,6 +921,10 @@ pub struct TriggerFire {
     pub agent_id: Option<AgentId>,
     pub project_id: Option<ProjectId>,
     pub prompt: String,
+    /// Per-trigger outbound delivery target carried from the record so the
+    /// delivery layer can honor it without re-reading the trigger row.
+    #[serde(default)]
+    pub delivery_target: Option<TriggerDeliveryTargetId>,
 }
 
 #[async_trait]
@@ -600,7 +973,6 @@ pub struct FireAcceptedRequest {
     /// panel can open the correct chat thread from `recent_runs[].thread_id`.
     pub thread_id: ThreadId,
     pub submitted_at: Timestamp,
-    pub next_run_at: Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -618,7 +990,6 @@ pub struct FireReplayedRequest {
     /// no chat link.
     pub thread_id: Option<ThreadId>,
     pub replayed_at: Timestamp,
-    pub next_run_at: Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -715,6 +1086,7 @@ impl TriggerSourceProvider for ScheduleTriggerSourceProvider {
             agent_id: record.agent_id.clone(),
             project_id: record.project_id.clone(),
             prompt: record.prompt.clone(),
+            delivery_target: record.delivery_target.clone(),
         }))
     }
 }
@@ -736,6 +1108,11 @@ pub trait TriggerRepository: Send + Sync {
     async fn list_triggers(&self, tenant_id: TenantId) -> Result<Vec<TriggerRecord>, TriggerError>;
 
     /// Returns caller-scoped triggers in creation order, capped for user-facing surfaces.
+    ///
+    /// `excluded_states` is a slice of states to omit from the result. Pass
+    /// `&[]` to include all states (model-facing paths) or
+    /// `&[TriggerState::Completed]` to exclude soft-completed one-shots from
+    /// user-facing panels.
     async fn list_scoped_triggers(
         &self,
         tenant_id: TenantId,
@@ -743,6 +1120,7 @@ pub trait TriggerRepository: Send + Sync {
         agent_id: Option<AgentId>,
         project_id: Option<ProjectId>,
         limit: usize,
+        excluded_states: &[TriggerState],
     ) -> Result<Vec<TriggerRecord>, TriggerError>;
 
     async fn remove_trigger(
@@ -760,6 +1138,42 @@ pub trait TriggerRepository: Send + Sync {
         project_id: Option<ProjectId>,
         trigger_id: TriggerId,
     ) -> Result<Option<TriggerRecord>, TriggerError>;
+
+    /// Sets the lifecycle state for a caller-scoped trigger.
+    ///
+    /// This user-facing mutation may only set non-terminal states
+    /// (`Scheduled` or `Paused`). A stored `Completed` trigger is terminal and
+    /// must not be moved back into the scheduler by this method; implementations
+    /// return `Ok(None)` for that case so callers do not leak trigger existence
+    /// across invalid lifecycle transitions.
+    async fn set_scoped_trigger_state(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        trigger_id: TriggerId,
+        state: TriggerState,
+    ) -> Result<Option<TriggerRecord>, TriggerError>;
+
+    /// Renames a trigger only when the full caller scope matches the stored record.
+    ///
+    /// This user-facing mutation updates only the human-readable label. It
+    /// must not alter schedule state, active-fire metadata, run history, or
+    /// prompt content.
+    async fn rename_scoped_trigger(
+        &self,
+        _tenant_id: TenantId,
+        _creator_user_id: UserId,
+        _agent_id: Option<AgentId>,
+        _project_id: Option<ProjectId>,
+        _trigger_id: TriggerId,
+        _name: AutomationName,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        Err(TriggerError::Backend {
+            reason: "rename_scoped_trigger not implemented by this repository".to_string(),
+        })
+    }
 
     /// Lists due triggers across all tenants for the trusted poller path.
     ///
@@ -925,11 +1339,14 @@ pub use libsql::LibSqlTriggerRepository;
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresTriggerRepository;
 pub use worker::{
-    TriggerActiveRunLookup, TriggerActiveRunState, TriggerActiveRunStateRequest,
+    ACTIVE_HOLD_ELAPSED_OCCURRENCES_CAP, ACTIVE_HOLD_LOOKUP_TIMEOUT, ActiveHoldProjection,
+    ActiveHoldReason, BlockedActiveRunKind, MissingTriggerActiveRunLookup,
+    NoopTriggerFireSettlementObserver, TriggerAcceptedFireSettlement, TriggerActiveRunLookup,
+    TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerFireSettlementObserver,
     TriggerPollerFailureReason, TriggerPollerFireOutcome, TriggerPollerFireReport,
     TriggerPollerTickReport, TriggerPollerWorker, TriggerPollerWorkerConfig,
     TriggerPollerWorkerDeps, TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter,
-    TrustedTriggerSubmitRequest,
+    TrustedTriggerSubmitRequest, active_hold_projection, active_holds_for_records,
 };
 
 #[derive(Clone, Default)]
@@ -1018,6 +1435,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
         agent_id: Option<AgentId>,
         project_id: Option<ProjectId>,
         limit: usize,
+        excluded_states: &[TriggerState],
     ) -> Result<Vec<TriggerRecord>, TriggerError> {
         if limit == 0 {
             return Ok(Vec::new());
@@ -1032,6 +1450,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
                     && record.creator_user_id == creator_user_id
                     && record.agent_id == agent_id
                     && record.project_id == project_id
+                    && !excluded_states.contains(&record.state)
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -1073,6 +1492,56 @@ impl TriggerRepository for InMemoryTriggerRepository {
         Ok(state.records.remove(&key))
     }
 
+    async fn set_scoped_trigger_state(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        trigger_id: TriggerId,
+        new_state: TriggerState,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        validate_user_settable_trigger_state(new_state)?;
+        let mut state = self.lock_state()?;
+        let key = TriggerRepositoryKey::new(&tenant_id, trigger_id);
+        let Some(record) = state.records.get_mut(&key) else {
+            return Ok(None);
+        };
+        if record.creator_user_id != creator_user_id
+            || record.agent_id != agent_id
+            || record.project_id != project_id
+            || record.state == TriggerState::Completed
+        {
+            return Ok(None);
+        }
+        record.state = new_state;
+        Ok(Some(record.clone()))
+    }
+
+    async fn rename_scoped_trigger(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        trigger_id: TriggerId,
+        name: AutomationName,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let mut state = self.lock_state()?;
+        let key = TriggerRepositoryKey::new(&tenant_id, trigger_id);
+        let Some(record) = state.records.get_mut(&key) else {
+            return Ok(None);
+        };
+        if record.creator_user_id != creator_user_id
+            || record.agent_id != agent_id
+            || record.project_id != project_id
+        {
+            return Ok(None);
+        }
+        record.name = name.into_inner();
+        Ok(Some(record.clone()))
+    }
+
     async fn list_due_triggers(
         &self,
         now: Timestamp,
@@ -1086,7 +1555,11 @@ impl TriggerRepository for InMemoryTriggerRepository {
         let mut selected_keys = state
             .records
             .iter()
-            .filter(|(_, record)| record.is_due_at(now) && !record.has_active_fire())
+            .filter(|(_, record)| {
+                record.state == TriggerState::Scheduled
+                    && record.is_due_at(now)
+                    && !record.has_active_fire()
+            })
             .map(|(key, record)| {
                 (
                     record.next_run_at,
@@ -1217,11 +1690,13 @@ impl TriggerRepository for InMemoryTriggerRepository {
                     reject_run_ref_rewrite(active_run_ref, request.run_id)?;
                     return Ok(());
                 }
-                reject_non_future_next_run_at(request.fire_slot, request.next_run_at)?;
+                if let Some(nra) = record.schedule.next_slot_after(request.fire_slot)? {
+                    reject_non_future_next_run_at(request.fire_slot, nra)?;
+                    record.next_run_at = nra;
+                }
                 record.last_run_at = Some(request.submitted_at);
                 record.last_fired_slot = Some(request.fire_slot);
                 record.last_status = Some(TriggerRunStatus::Ok);
-                record.next_run_at = request.next_run_at;
                 record.active_fire_slot = Some(request.fire_slot);
                 record.active_run_ref = Some(request.run_id);
                 Ok(())
@@ -1254,11 +1729,13 @@ impl TriggerRepository for InMemoryTriggerRepository {
                     reject_run_ref_rewrite(active_run_ref, request.original_run_id)?;
                     return Ok(());
                 }
-                reject_non_future_next_run_at(request.fire_slot, request.next_run_at)?;
+                if let Some(nra) = record.schedule.next_slot_after(request.fire_slot)? {
+                    reject_non_future_next_run_at(request.fire_slot, nra)?;
+                    record.next_run_at = nra;
+                }
                 record.last_run_at = Some(request.replayed_at);
                 record.last_fired_slot = Some(request.fire_slot);
                 record.last_status = Some(TriggerRunStatus::Ok);
-                record.next_run_at = request.next_run_at;
                 record.active_fire_slot = Some(request.fire_slot);
                 record.active_run_ref = Some(request.original_run_id);
                 Ok(())
@@ -1288,8 +1765,11 @@ impl TriggerRepository for InMemoryTriggerRepository {
             request.fire_slot,
             |record| {
                 reject_failed_result_after_active_run(record.active_run_ref)?;
-                if record.next_run_at > request.fire_slot {
+                if matches!(record.schedule, TriggerSchedule::Cron { .. })
+                    && record.next_run_at > request.fire_slot
+                {
                     return Err(TriggerError::InvalidRecord {
+                        kind: TriggerRecordValidationKind::Other,
                         reason: "retryable fire failure must leave next_run_at at or before the failed fire slot"
                             .to_string(),
                     });
@@ -1391,8 +1871,17 @@ impl TriggerRepository for InMemoryTriggerRepository {
         {
             return Ok(None);
         }
+        let next = record.schedule.next_slot_after(request.fire_slot)?;
         record.active_fire_slot = None;
         record.active_run_ref = None;
+        if let Some(t) = next {
+            record.next_run_at = t;
+        }
+        record.state = if next.is_some() {
+            record.state
+        } else {
+            TriggerState::Completed
+        };
         let record = record.clone();
         let completed_at = Utc::now();
         state
@@ -1623,6 +2112,7 @@ pub(crate) fn reject_non_future_next_run_at(
         return Ok(());
     }
     Err(TriggerError::InvalidRecord {
+        kind: TriggerRecordValidationKind::Other,
         reason: "fire result next_run_at must be after the claimed fire slot".to_string(),
     })
 }
@@ -1635,6 +2125,7 @@ pub(crate) fn reject_run_ref_rewrite(
         return Ok(());
     }
     Err(TriggerError::InvalidRecord {
+        kind: TriggerRecordValidationKind::Other,
         reason: "fire result must not rewrite an existing active_run_ref".to_string(),
     })
 }
@@ -1646,12 +2137,14 @@ pub(crate) fn reject_failed_result_after_active_run(
         return Ok(());
     }
     Err(TriggerError::InvalidRecord {
+        kind: TriggerRecordValidationKind::Other,
         reason: "fire failure result must not clear an accepted active_run_ref".to_string(),
     })
 }
 
 fn parse_timezone(timezone: &str) -> Result<Tz, TriggerError> {
     timezone.parse::<Tz>().map_err(|_| TriggerError::InvalidSchedule {
+        kind: TriggerScheduleValidationKind::InvalidTimezone,
         reason: format!(
             "invalid timezone '{timezone}': must be a valid IANA timezone name (e.g. 'America/New_York', 'UTC')"
         ),
@@ -1662,6 +2155,7 @@ fn normalize_cron_expression(expression: &str) -> Result<String, TriggerError> {
     let trimmed = expression.trim();
     if trimmed.is_empty() {
         return Err(TriggerError::InvalidSchedule {
+            kind: TriggerScheduleValidationKind::EmptyCronExpression,
             reason: "cron expression must not be empty".to_string(),
         });
     }
@@ -1677,6 +2171,7 @@ fn normalize_cron_expression(expression: &str) -> Result<String, TriggerError> {
             Ok(trimmed.to_string())
         }
         count => Err(TriggerError::InvalidSchedule {
+            kind: TriggerScheduleValidationKind::InvalidCronFieldCount,
             reason: format!("expected 5, 6, or 7 cron fields, got {count}"),
         }),
     }
@@ -1686,6 +2181,7 @@ fn parse_cron_schedule(expression: &str) -> Result<Schedule, TriggerError> {
     let normalized = normalize_cron_expression(expression)?;
     let schedule =
         Schedule::from_str(&normalized).map_err(|error| TriggerError::InvalidSchedule {
+            kind: TriggerScheduleValidationKind::InvalidCronExpression,
             reason: format!("invalid cron expression: {error}"),
         })?;
     reject_sub_minute_cadence(&schedule)?;
@@ -1697,6 +2193,7 @@ fn reject_sub_minute_seconds_field(field: &str) -> Result<(), TriggerError> {
         return Ok(());
     }
     Err(TriggerError::InvalidSchedule {
+        kind: TriggerScheduleValidationKind::SecondLevelCadence,
         reason: "cron schedules must not use second-level cadence; use second field `0`"
             .to_string(),
     })
@@ -1706,6 +2203,7 @@ fn reject_sub_minute_cadence(schedule: &Schedule) -> Result<(), TriggerError> {
     let mut upcoming = schedule.upcoming(Utc);
     let Some(first) = upcoming.next() else {
         return Err(TriggerError::InvalidSchedule {
+            kind: TriggerScheduleValidationKind::NoUpcomingFireTime,
             reason: "cron expression has no upcoming fire time".to_string(),
         });
     };
@@ -1714,6 +2212,7 @@ fn reject_sub_minute_cadence(schedule: &Schedule) -> Result<(), TriggerError> {
     };
     if (second - first).num_seconds() < MIN_FIRE_CADENCE.as_secs() as i64 {
         return Err(TriggerError::InvalidSchedule {
+            kind: TriggerScheduleValidationKind::SubMinuteCadence,
             reason: "schedule can fire more frequently than once per minute".to_string(),
         });
     }
@@ -1732,6 +2231,25 @@ fn validate_lower_hex_identifier(label: &str, value: String) -> Result<String, T
         label: label.to_string(),
         reason: "must be 64 lowercase hex characters".to_string(),
     })
+}
+
+fn validate_delivery_target_id(value: &str) -> Result<(), TriggerError> {
+    let invalid = |reason: &str| TriggerError::InvalidRecord {
+        kind: TriggerRecordValidationKind::DeliveryTargetInvalid,
+        reason: reason.to_string(),
+    };
+    if value.is_empty() {
+        return Err(invalid("delivery target id must not be empty"));
+    }
+    if value.len() > 256 {
+        return Err(invalid("delivery target id must be at most 256 bytes"));
+    }
+    if value.chars().any(|ch| ch == '\0' || ch.is_control()) {
+        return Err(invalid(
+            "delivery target id must not contain control characters",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_inbound_content_ref(value: &str) -> Result<(), TriggerError> {
@@ -1821,8 +2339,8 @@ mod tests {
             name: "daily summary".to_string(),
             source: TriggerSourceKind::Schedule,
             schedule: TriggerSchedule::cron("0 8 * * *").expect("valid cron"),
-            completion_policy: TriggerCompletionPolicy::Recurring,
             prompt: "summarize unread mail".to_string(),
+            delivery_target: None,
             state: TriggerState::Scheduled,
             next_run_at,
             last_run_at: None,
@@ -1950,10 +2468,6 @@ mod tests {
             to_value(TriggerState::Scheduled).unwrap(),
             json!("scheduled")
         );
-        assert_eq!(
-            to_value(TriggerCompletionPolicy::CompleteAfterFirstFire).unwrap(),
-            json!("complete_after_first_fire")
-        );
         assert_eq!(to_value(TriggerRunStatus::Ok).unwrap(), json!("ok"));
         assert_eq!(
             from_value::<TriggerRunStatus>(json!("error")).unwrap(),
@@ -2002,7 +2516,10 @@ mod tests {
     #[tokio::test]
     async fn schedule_provider_emits_due_fire_only() {
         let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
-        let record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_200));
+        let mut record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_200));
+        record.delivery_target = Some(
+            TriggerDeliveryTargetId::new("slack:personal-dm:T123:user-a").expect("delivery target"),
+        );
         let provider = ScheduleTriggerSourceProvider;
 
         assert!(
@@ -2020,6 +2537,30 @@ mod tests {
         assert_eq!(fire.identity.trigger_id, trigger_id);
         assert_eq!(fire.identity.fire_slot, record.next_run_at);
         assert_eq!(fire.prompt, record.prompt);
+        // Per-trigger delivery routing must survive record -> fire so the
+        // delivery layer can honor it without re-reading the record.
+        assert_eq!(fire.delivery_target, record.delivery_target);
+    }
+
+    #[test]
+    fn trigger_delivery_target_id_is_opaque_and_validated() {
+        let target = TriggerDeliveryTargetId::new("slack:personal-dm:T123:user-a")
+            .expect("valid delivery target id");
+        assert_eq!(target.as_str(), "slack:personal-dm:T123:user-a");
+        assert_eq!(
+            to_value(&target).unwrap(),
+            json!("slack:personal-dm:T123:user-a")
+        );
+        assert_eq!(
+            from_value::<TriggerDeliveryTargetId>(json!("slack:personal-dm:T123:user-a")).unwrap(),
+            target
+        );
+        assert!(TriggerDeliveryTargetId::new("x".repeat(256)).is_ok());
+
+        assert!(TriggerDeliveryTargetId::new("").is_err());
+        assert!(TriggerDeliveryTargetId::new("target\nid").is_err());
+        assert!(TriggerDeliveryTargetId::new("x".repeat(257)).is_err());
+        assert!(from_value::<TriggerDeliveryTargetId>(json!("")).is_err());
     }
 
     #[test]
@@ -2476,7 +3017,6 @@ mod tests {
                 thread_id: ThreadId::new("01890f0f-test-7000-8000-000000000002")
                     .expect("valid thread id"),
                 submitted_at: fire_slot,
-                next_run_at: ts(1_704_067_260),
             })
             .await
             .expect_err("poisoned mutex maps to backend through accepted-result API");
@@ -2499,7 +3039,6 @@ mod tests {
                     .expect("valid run"),
                 thread_id: None,
                 replayed_at: fire_slot,
-                next_run_at: ts(1_704_067_260),
             })
             .await
             .expect_err("poisoned mutex maps to backend through replayed-result API");
@@ -2543,10 +3082,234 @@ mod tests {
         assert!(matches!(error, TriggerError::Backend { .. }));
     }
 
+    #[tokio::test]
+    async fn fire_once_trigger_completes_after_clear_active_fire() {
+        let repo = InMemoryTriggerRepository::default();
+        let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let fire_slot = ts(1_704_067_200);
+        let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("valid run");
+        // Insert a fire-once trigger with an active fire already in progress.
+        let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+        record.schedule = TriggerSchedule::once(fire_slot, "UTC").expect("valid once");
+        record.active_fire_slot = Some(fire_slot);
+        record.active_run_ref = Some(run_id);
+        repo.upsert_trigger(record).await.expect("insert");
+
+        // Clearing the active fire must transition state to Completed for fire-once.
+        let cleared = repo
+            .clear_active_fire(ClearActiveFireRequest {
+                tenant_id: tenant("tenant-a"),
+                trigger_id,
+                fire_slot,
+                run_id,
+                status: TriggerRunHistoryStatus::Ok,
+            })
+            .await
+            .expect("clear_active_fire succeeds")
+            .expect("record returned");
+        assert_eq!(cleared.state, TriggerState::Completed);
+        assert_eq!(cleared.active_fire_slot, None);
+        assert_eq!(cleared.active_run_ref, None);
+
+        // Persisted record must also be Completed.
+        let persisted = repo
+            .get_trigger(tenant("tenant-a"), trigger_id)
+            .await
+            .expect("load")
+            .expect("record present");
+        assert_eq!(persisted.state, TriggerState::Completed);
+    }
+
+    #[tokio::test]
+    async fn fire_once_trigger_not_due_after_completing() {
+        let repo = InMemoryTriggerRepository::default();
+        let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let fire_slot = ts(1_704_067_200);
+        let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("valid run");
+        // Insert fire-once trigger with an active fire.
+        let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+        record.schedule = TriggerSchedule::once(fire_slot, "UTC").expect("valid once");
+        record.active_fire_slot = Some(fire_slot);
+        record.active_run_ref = Some(run_id);
+        repo.upsert_trigger(record).await.expect("insert");
+
+        // Clear the fire to move trigger to Completed.
+        repo.clear_active_fire(ClearActiveFireRequest {
+            tenant_id: tenant("tenant-a"),
+            trigger_id,
+            fire_slot,
+            run_id,
+            status: TriggerRunHistoryStatus::Ok,
+        })
+        .await
+        .expect("clear_active_fire succeeds");
+
+        // Trigger must not appear in the due list — is_due_at requires state == Scheduled.
+        let due_records = repo
+            .list_due_triggers(fire_slot, 10)
+            .await
+            .expect("list due");
+        assert!(
+            due_records.iter().all(|r| r.trigger_id != trigger_id),
+            "completed fire-once trigger must not be due"
+        );
+    }
+
+    #[tokio::test]
+    async fn recurring_trigger_reschedules_after_clear_active_fire() {
+        // Regression guard: clear_active_fire must NOT transition Recurring triggers to Completed.
+        let repo = InMemoryTriggerRepository::default();
+        let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let fire_slot = ts(1_704_067_200);
+        let next_slot = ts(1_704_067_260);
+        let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("valid run");
+        let mut record = sample_record(trigger_id, tenant("tenant-a"), next_slot);
+        record.active_fire_slot = Some(fire_slot);
+        record.active_run_ref = Some(run_id);
+        repo.upsert_trigger(record).await.expect("insert");
+
+        let cleared = repo
+            .clear_active_fire(ClearActiveFireRequest {
+                tenant_id: tenant("tenant-a"),
+                trigger_id,
+                fire_slot,
+                run_id,
+                status: TriggerRunHistoryStatus::Ok,
+            })
+            .await
+            .expect("clear_active_fire succeeds")
+            .expect("record returned");
+
+        // Recurring triggers must stay Scheduled so the next slot can fire.
+        assert_eq!(cleared.state, TriggerState::Scheduled);
+        assert_eq!(cleared.active_fire_slot, None);
+        assert_eq!(cleared.active_run_ref, None);
+    }
+
     #[test]
     fn cron_schedule_rejects_invalid_timezone() {
         let error = TriggerSchedule::cron_with_timezone("0 9 * * *", "Not/A/Timezone")
             .expect_err("invalid timezone rejected");
+        assert!(
+            error.to_string().contains("invalid timezone"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn elapsed_occurrences_between_counts_cron_slots_exactly() {
+        let schedule = TriggerSchedule::cron("* * * * *").expect("valid cron");
+        let after = Utc.with_ymd_and_hms(2025, 6, 1, 9, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2025, 6, 1, 9, 16, 0).unwrap();
+        let elapsed = schedule
+            .elapsed_occurrences_between(after, now, 99)
+            .expect("count");
+        assert_eq!(
+            elapsed,
+            ElapsedOccurrenceCount {
+                count: 16,
+                capped: false
+            }
+        );
+    }
+
+    #[test]
+    fn elapsed_occurrences_between_reports_cap_truncation() {
+        let schedule = TriggerSchedule::cron("* * * * *").expect("valid cron");
+        let after = Utc.with_ymd_and_hms(2025, 6, 1, 9, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2025, 6, 1, 10, 0, 0).unwrap();
+        let elapsed = schedule
+            .elapsed_occurrences_between(after, now, 5)
+            .expect("count");
+        assert_eq!(
+            elapsed,
+            ElapsedOccurrenceCount {
+                count: 5,
+                capped: true
+            }
+        );
+    }
+
+    #[test]
+    fn elapsed_occurrences_between_exact_cap_window_is_not_capped() {
+        let schedule = TriggerSchedule::cron("* * * * *").expect("valid cron");
+        let after = Utc.with_ymd_and_hms(2025, 6, 1, 9, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2025, 6, 1, 9, 5, 0).unwrap();
+        let elapsed = schedule
+            .elapsed_occurrences_between(after, now, 5)
+            .expect("count");
+        assert_eq!(
+            elapsed,
+            ElapsedOccurrenceCount {
+                count: 5,
+                capped: false
+            }
+        );
+    }
+
+    #[test]
+    fn elapsed_occurrences_between_zero_window_and_once_schedules_elapse_nothing() {
+        let after = Utc.with_ymd_and_hms(2025, 6, 1, 9, 0, 0).unwrap();
+        let cron = TriggerSchedule::cron("* * * * *").expect("valid cron");
+        let none = cron
+            .elapsed_occurrences_between(after, after, 99)
+            .expect("count");
+        assert_eq!(
+            none,
+            ElapsedOccurrenceCount {
+                count: 0,
+                capped: false
+            }
+        );
+        let once =
+            TriggerSchedule::once(Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap(), "UTC")
+                .expect("valid once");
+        let now = Utc.with_ymd_and_hms(2025, 6, 2, 9, 0, 0).unwrap();
+        let elapsed = once
+            .elapsed_occurrences_between(after, now, 99)
+            .expect("count");
+        assert_eq!(
+            elapsed,
+            ElapsedOccurrenceCount {
+                count: 0,
+                capped: false
+            }
+        );
+    }
+
+    #[test]
+    fn once_schedule_next_slot_after_returns_some_when_future() {
+        let at = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
+        let schedule = TriggerSchedule::once(at, "UTC").expect("valid once");
+        let before = Utc.with_ymd_and_hms(2025, 6, 1, 11, 0, 0).unwrap();
+        let next = schedule
+            .next_slot_after(before)
+            .expect("next slot")
+            .expect("some");
+        assert_eq!(next, at);
+    }
+
+    #[test]
+    fn once_schedule_next_slot_after_returns_none_when_past() {
+        let at = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
+        let schedule = TriggerSchedule::once(at, "UTC").expect("valid once");
+        let after = Utc.with_ymd_and_hms(2025, 6, 1, 13, 0, 0).unwrap();
+        let next = schedule.next_slot_after(after).expect("next slot");
+        assert!(next.is_none());
+    }
+
+    #[test]
+    fn once_schedule_next_slot_after_returns_none_when_equal() {
+        let at = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
+        let schedule = TriggerSchedule::once(at, "UTC").expect("valid once");
+        let next = schedule.next_slot_after(at).expect("next slot");
+        assert!(next.is_none());
+    }
+
+    #[test]
+    fn once_schedule_rejects_invalid_timezone() {
+        let at = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
+        let error = TriggerSchedule::once(at, "Not/A/Timezone").expect_err("invalid tz rejected");
         assert!(
             error.to_string().contains("invalid timezone"),
             "unexpected error: {error}"
@@ -2582,5 +3345,101 @@ mod tests {
         let _ = schedule
             .next_slot_after(before_gap)
             .expect("no error during DST gap");
+    }
+
+    #[test]
+    fn once_from_local_valid_time_converts_to_utc() {
+        // 2026-01-15 09:00:00 America/New_York = EST = UTC-5 => 14:00:00 UTC
+        let schedule = TriggerSchedule::once_from_local("2026-01-15T09:00:00", "America/New_York")
+            .expect("valid local time");
+        let expected = Utc.with_ymd_and_hms(2026, 1, 15, 14, 0, 0).unwrap();
+        match schedule {
+            TriggerSchedule::Once { at, .. } => assert_eq!(at, expected),
+            _ => panic!("expected Once schedule"),
+        }
+    }
+
+    #[test]
+    fn once_from_local_ambiguous_dst_overlap_rejected() {
+        // 2026-11-01 01:30:00 America/New_York is ambiguous (clocks fall back at 2am)
+        let error = TriggerSchedule::once_from_local("2026-11-01T01:30:00", "America/New_York")
+            .expect_err("ambiguous DST time rejected");
+        assert!(
+            error.to_string().contains("ambiguous"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn once_from_local_dst_gap_rejected() {
+        // 2026-03-08 02:30:00 America/New_York is in the DST gap (clocks spring forward from 2am to 3am)
+        let error = TriggerSchedule::once_from_local("2026-03-08T02:30:00", "America/New_York")
+            .expect_err("DST gap time rejected");
+        assert!(
+            error.to_string().contains("does not exist"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn once_from_local_rejects_malformed_datetime() {
+        let error = TriggerSchedule::once_from_local("not-a-date", "America/New_York")
+            .expect_err("malformed datetime must be rejected");
+        match error {
+            TriggerError::InvalidSchedule { reason, .. } => {
+                assert!(
+                    reason.contains("not-a-date"),
+                    "reason should name the bad input: {reason}"
+                );
+            }
+            other => panic!("expected InvalidSchedule, got {other:?}"),
+        }
+    }
+
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    #[test]
+    fn once_schedule_storage_round_trip_uses_schedule_at_column() {
+        let at = Utc.with_ymd_and_hms(2026, 6, 15, 10, 0, 0).unwrap();
+        let schedule = TriggerSchedule::once(at, "UTC").expect("valid once");
+        let (kind, expression, schedule_at) = schedule.to_storage();
+        assert_eq!(kind, "once");
+        assert_eq!(expression, ""); // schedule_expression is empty for Once
+        assert!(schedule_at.is_some(), "Once must populate schedule_at");
+        // Round-trip via from_storage
+        let restored =
+            TriggerSchedule::from_storage(kind, expression, schedule_at.as_deref(), "UTC")
+                .expect("from_storage round-trip");
+        assert_eq!(restored, schedule);
+    }
+
+    #[tokio::test]
+    async fn exhausted_finite_cron_transitions_to_completed_on_clear_active_fire() {
+        let repo = InMemoryTriggerRepository::default();
+        let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let fire_slot = ts(1_704_067_200);
+        let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("valid run");
+        let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+        record.schedule = TriggerSchedule::once(fire_slot, "UTC").expect("valid once");
+        record.active_fire_slot = Some(fire_slot);
+        record.active_run_ref = Some(run_id);
+        repo.upsert_trigger(record).await.expect("insert");
+
+        let cleared = repo
+            .clear_active_fire(ClearActiveFireRequest {
+                tenant_id: tenant("tenant-a"),
+                trigger_id,
+                fire_slot,
+                run_id,
+                status: TriggerRunHistoryStatus::Ok,
+            })
+            .await
+            .expect("clear succeeds")
+            .expect("record returned");
+
+        assert_eq!(
+            cleared.state,
+            TriggerState::Completed,
+            "exhausted schedule must transition to Completed"
+        );
     }
 }

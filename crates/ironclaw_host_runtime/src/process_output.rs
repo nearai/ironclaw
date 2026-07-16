@@ -12,7 +12,13 @@ use uuid::Uuid;
 use crate::{RuntimeProcessError, sandbox_process::RebornSandboxScopeKey};
 
 /// Maximum model-facing process output preview before middle truncation.
-pub(crate) const COMMAND_MAX_OUTPUT_SIZE: usize = 64 * 1024;
+///
+/// Lowered 64KB -> 16KB: shell/command output is fresh (non-cached) prompt
+/// tokens re-sent on every subsequent turn, so oversized previews dominate cost
+/// on data/log tasks. 16KB keeps enough head+tail context for the model to act
+/// on (full output is still saved and referenceable) while cutting the per-turn
+/// cost of large results. Measured no accuracy regression on data tasks.
+pub(crate) const COMMAND_MAX_OUTPUT_SIZE: usize = 16 * 1024;
 const COMMAND_PREVIEW_HALF_SIZE: usize = COMMAND_MAX_OUTPUT_SIZE / 2;
 const COMMAND_MAX_SAVED_STREAM_SIZE: usize = 16 * 1024 * 1024;
 const COMMAND_OUTPUT_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
@@ -106,7 +112,9 @@ impl ScratchOutputPath {
 
 impl Drop for ScratchOutputPath {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+        if let Err(error) = fs::remove_file(&self.0) {
+            tracing::debug!(?error, "best-effort cleanup of scratch output file failed");
+        }
     }
 }
 
@@ -190,7 +198,9 @@ where
                     .await
                     .map_err(file_error("write saved stream output"))
                 {
-                    let _ = fs::remove_file(path);
+                    if let Err(cleanup_error) = fs::remove_file(path) {
+                        tracing::debug!(error = ?cleanup_error, "best-effort cleanup of partial saved stream output failed");
+                    }
                     return Err(error);
                 }
                 saved_bytes = output.len();
@@ -378,7 +388,9 @@ fn write_final_saved_output(
 ) -> Result<PathBuf, RuntimeProcessError> {
     let (path, mut file) = create_private_temp_file(scope, COMMAND_OUTPUT_TEMP_PREFIX)?;
     if let Err(error) = file.write_all(content) {
-        let _ = fs::remove_file(&path);
+        if let Err(cleanup_error) = fs::remove_file(&path) {
+            tracing::debug!(error = ?cleanup_error, "best-effort cleanup of partial saved command output failed");
+        }
         return Err(file_error("write sanitized command output")(error));
     }
     Ok(path)
@@ -427,7 +439,11 @@ fn sanitize_command_output_bytes(content: &[u8], raw_preview: String) -> Sanitiz
 
 async fn cleanup_stale_command_outputs_async(scope: &ResourceScope) {
     let scope = scope.clone();
-    let _ = tokio::task::spawn_blocking(move || cleanup_stale_command_outputs(&scope)).await;
+    if let Err(error) =
+        tokio::task::spawn_blocking(move || cleanup_stale_command_outputs(&scope)).await
+    {
+        tracing::debug!(?error, "stale command-output cleanup task failed to join");
+    }
 }
 
 /// Walk only the current scope's saved-output directory and remove files older
@@ -461,8 +477,9 @@ fn cleanup_stale_command_outputs(scope: &ResourceScope) {
         if now
             .duration_since(modified)
             .is_ok_and(|age| age > COMMAND_OUTPUT_RETENTION)
+            && let Err(error) = fs::remove_file(path)
         {
-            let _ = fs::remove_file(path);
+            tracing::debug!(?error, "best-effort cleanup of stale command output failed");
         }
     }
 }
@@ -505,7 +522,12 @@ fn ensure_scoped_output_dir(scope: &ResourceScope) -> Result<PathBuf, RuntimePro
             let mut perms = metadata.permissions();
             if perms.mode() & 0o777 != 0o700 {
                 perms.set_mode(0o700);
-                let _ = fs::set_permissions(&dir, perms);
+                if let Err(error) = fs::set_permissions(&dir, perms) {
+                    tracing::debug!(
+                        ?error,
+                        "best-effort tightening of saved-output dir permissions failed"
+                    );
+                }
             }
         }
     }
@@ -628,6 +650,8 @@ mod tests {
             .expect("saved stream path")
             .to_path_buf();
         let saved = fs::read_to_string(&saved_path).expect("saved stream readable");
+        #[allow(clippy::let_underscore_must_use)]
+        // best-effort test teardown; cleanup failure is irrelevant
         let _ = fs::remove_file(&saved_path);
 
         assert!(output.inline_output().is_empty());
@@ -677,6 +701,8 @@ mod tests {
             .expect("capture succeeds");
         let saved_output = output.saved_output.expect("saved output metadata");
         let saved = fs::read_to_string(&saved_output.path).expect("saved output readable");
+        #[allow(clippy::let_underscore_must_use)]
+        // best-effort test teardown; cleanup failure is irrelevant
         let _ = fs::remove_file(&saved_output.path);
 
         assert!(output.preview.contains("... [truncated "));
@@ -699,6 +725,8 @@ mod tests {
             .expect("capture succeeds");
         let saved_output = output.saved_output.expect("saved output metadata");
         let saved = fs::read_to_string(&saved_output.path).expect("saved output readable");
+        #[allow(clippy::let_underscore_must_use)]
+        // best-effort test teardown; cleanup failure is irrelevant
         let _ = fs::remove_file(&saved_output.path);
 
         assert_eq!(
@@ -720,6 +748,8 @@ mod tests {
             .expect("capture succeeds");
         let saved_output = output.saved_output.expect("saved output metadata");
         let saved = fs::read(&saved_output.path).expect("saved output readable");
+        #[allow(clippy::let_underscore_must_use)]
+        // best-effort test teardown; cleanup failure is irrelevant
         let _ = fs::remove_file(&saved_output.path);
 
         assert_eq!(saved, raw);
@@ -743,6 +773,8 @@ mod tests {
             .permissions()
             .mode()
             & 0o777;
+        #[allow(clippy::let_underscore_must_use)]
+        // best-effort test teardown; cleanup failure is irrelevant
         let _ = fs::remove_file(&saved_output.path);
 
         assert_eq!(mode, 0o600);
@@ -797,6 +829,8 @@ mod tests {
         let dir = ensure_scoped_output_dir(&scope).expect("ensure dir");
         let mode = fs::metadata(&dir).expect("metadata").permissions().mode() & 0o777;
         assert_eq!(mode, 0o700, "scoped save dir must be owner-only");
+        #[allow(clippy::let_underscore_must_use)]
+        // best-effort test teardown; cleanup failure is irrelevant
         let _ = fs::remove_dir_all(&dir);
     }
 }

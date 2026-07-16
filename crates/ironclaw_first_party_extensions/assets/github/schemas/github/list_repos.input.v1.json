@@ -4,16 +4,9 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "username": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 100,
-      "description": "GitHub username."
-    },
     "page": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 100,
       "default": 1
     },
     "limit": {
@@ -21,9 +14,18 @@
       "minimum": 1,
       "maximum": 100,
       "default": 30
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "all",
+        "owner",
+        "public",
+        "private",
+        "member"
+      ],
+      "description": "Repository visibility/affiliation filter for the authenticated GitHub user repositories endpoint."
     }
   },
-  "required": [
-    "username"
-  ]
+  "required": []
 }

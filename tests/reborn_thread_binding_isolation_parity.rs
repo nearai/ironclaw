@@ -1,13 +1,17 @@
 #[allow(dead_code)]
-#[path = "support/reborn/mod.rs"]
+#[path = "support/reborn_parity_qa/mod.rs"]
+mod parity_qa_support;
+#[allow(dead_code)]
+#[path = "integration/support/mod.rs"]
 mod reborn_support;
 mod support;
 
-use ironclaw_loop_support::HostManagedModelResponse;
+use ironclaw_loop_host::HostManagedModelResponse;
 use ironclaw_threads::{MessageKind, MessageStatus, ThreadMessageRecord};
 use ironclaw_turns::TurnStatus;
-use reborn_support::harness::{RebornBinaryE2EHarness, RecordingTestCapabilityPort};
-use reborn_support::model_replay::RebornTraceReplayModelGateway;
+use parity_qa_support::binary_e2e::RebornBinaryE2EHarness;
+use parity_qa_support::model_replay::RebornTraceReplayModelGateway;
+use reborn_support::harness::RecordingTestCapabilityPort;
 
 #[tokio::test]
 async fn reborn_thread_binding_isolation_parity() {
@@ -15,7 +19,7 @@ async fn reborn_thread_binding_isolation_parity() {
         HostManagedModelResponse::assistant_reply("alpha isolated reply"),
         HostManagedModelResponse::assistant_reply("beta isolated reply"),
     ]);
-    let mut harness = RebornBinaryE2EHarness::with_model_gateway_unscoped_worker(
+    let mut harness = RebornBinaryE2EHarness::with_model_gateway(
         "room-thread-alpha",
         model_gateway,
         RecordingTestCapabilityPort::echo(),

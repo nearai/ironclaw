@@ -1,5 +1,7 @@
 #![cfg(feature = "postgres")]
 
+#[path = "support/postgres.rs"]
+mod postgres_support;
 mod support;
 
 use std::{sync::Arc, time::Duration};
@@ -20,6 +22,7 @@ use ironclaw_reborn_composition::{
 };
 use ironclaw_reborn_event_store::RebornEventStoreConfig;
 use ironclaw_turns::{TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError};
+use postgres_support::assert_postgres_accepts_connections;
 use secrecy::SecretString;
 use support::production_readiness::{
     assert_required_backend_readiness_diagnostics, required_backend_parity_config,
@@ -101,6 +104,7 @@ async fn postgres_substrate_builder_rejects_invalid_secret_master_key() {
                 url: SecretString::from(database_url),
                 tls_options: Default::default(),
             },
+            process_local_resource_governor_singleton: true,
             secret_master_key: Some(SecretString::from("too-short")),
             trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
             runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
@@ -139,6 +143,7 @@ async fn postgres_substrate_builder_rejects_weak_env_secret_master_key() {
                 url: SecretString::from(database_url),
                 tls_options: Default::default(),
             },
+            process_local_resource_governor_singleton: true,
             secret_master_key: None,
             trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
             runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
@@ -156,6 +161,38 @@ async fn postgres_substrate_builder_rejects_weak_env_secret_master_key() {
         Err(RebornCompositionError::Secret(
             ironclaw_secrets::SecretError::InvalidMasterKey
         ))
+    ));
+}
+
+#[tokio::test]
+async fn postgres_substrate_builder_rejects_without_singleton_resource_governor_authority() {
+    let Some((_container, pool, database_url)) = postgres_pool_or_skip().await else {
+        return;
+    };
+
+    let result =
+        build_postgres_production_host_runtime_services(PostgresProductionSubstrateConfig {
+            pool,
+            event_store: RebornEventStoreConfig::Postgres {
+                url: SecretString::from(database_url),
+                tls_options: Default::default(),
+            },
+            process_local_resource_governor_singleton: false,
+            secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),
+            trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
+            runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
+                production_runtime_policy(),
+                sandbox_process_port(),
+            )
+            .unwrap(),
+            turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
+            surface_version: CapabilitySurfaceVersion::new("test-surface").unwrap(),
+        })
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(RebornCompositionError::InvalidConfig { reason }) if reason.contains("singleton or elected resource-governor owner")
     ));
 }
 
@@ -183,6 +220,7 @@ async fn build_postgres_test_services(
             url: SecretString::from(database_url),
             tls_options: Default::default(),
         },
+        process_local_resource_governor_singleton: true,
         secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),
         trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
         runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
@@ -230,6 +268,7 @@ async fn postgres_pool_or_skip() -> Option<(
     String,
 )> {
     let (container, database_url) = start_postgres_container().await?;
+    assert_postgres_accepts_connections(&database_url).await;
     let config: tokio_postgres::Config = database_url
         .parse()
         .expect("testcontainer database URL must parse");
@@ -238,10 +277,6 @@ async fn postgres_pool_or_skip() -> Option<(
         .max_size(4)
         .build()
         .expect("Postgres pool must build");
-    let _connection = pool
-        .get()
-        .await
-        .expect("Postgres testcontainer must accept connections");
     Some((container, pool, database_url))
 }
 

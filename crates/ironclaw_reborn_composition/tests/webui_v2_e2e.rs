@@ -32,42 +32,75 @@ use ironclaw_host_api::runtime_policy::{
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
 use ironclaw_host_api::{
-    AgentId, CapabilityId, InvocationId, ResourceScope, SecretHandle, TenantId, UserId,
+    AgentId, CapabilityId, InvocationId, ProviderToolName, ResourceScope, SecretHandle, TenantId,
+    UserId,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
+    HostManagedModelStreamSink,
 };
 use ironclaw_reborn_composition::{
     PollSettings, RebornBuildInput, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
     WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, build_reborn_runtime,
     build_webui_services, webui_v2_app,
 };
-use ironclaw_turns::run_profile::{LoopCapabilityPort, ProviderToolCall};
+use ironclaw_turns::run_profile::{
+    CapabilityCallCandidate, LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
+};
 use serde_json::{Value, json};
+use tokio::sync::oneshot;
 use tower::ServiceExt;
 
 // ─── identities ───────────────────────────────────────────────────────
 
 const VALID_TOKEN: &str = "valid-e2e-token";
+const USER_B_TOKEN: &str = "valid-e2e-token-b";
 const TENANT: &str = "e2e-tenant";
 const USER: &str = "e2e-owner";
+const USER_B: &str = "e2e-viewer-b";
 const AGENT: &str = "e2e-agent";
 const SENSITIVE_TOOL_SENTINEL: &str = "sk-e2e-progress-secret";
+const MEMORY_ISOLATION_MARKER: &str = "webui-memory-owner-a-secret-5460";
 
 // ─── auth stub ────────────────────────────────────────────────────────
 
-struct OnlyValidToken;
+struct ValidTokenForUser {
+    user_id: UserId,
+}
+
+impl ValidTokenForUser {
+    fn new(user_id: &str) -> Self {
+        Self {
+            user_id: UserId::new(user_id).expect("valid user id"),
+        }
+    }
+}
 
 #[async_trait]
-impl WebuiAuthenticator for OnlyValidToken {
+impl WebuiAuthenticator for ValidTokenForUser {
     async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
         if token == VALID_TOKEN {
-            Some(WebuiAuthentication::user(
-                UserId::new(USER).expect("user id"),
-            ))
+            Some(WebuiAuthentication::user(self.user_id.clone()))
         } else {
             None
+        }
+    }
+}
+
+struct TwoUserTokens;
+
+#[async_trait]
+impl WebuiAuthenticator for TwoUserTokens {
+    async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
+        match token {
+            VALID_TOKEN => Some(WebuiAuthentication::user(
+                UserId::new(USER).expect("valid user id"),
+            )),
+            USER_B_TOKEN => Some(WebuiAuthentication::user(
+                UserId::new(USER_B).expect("valid user id"),
+            )),
+            _ => None,
         }
     }
 }
@@ -93,6 +126,18 @@ fn local_dev_effective_policy() -> EffectiveRuntimePolicy {
     }
 }
 
+/// Local trusted-laptop policy with minimal approvals, so an in-workspace
+/// `write_file` auto-proceeds instead of parking on a destructive-write gate.
+/// Used by the file-production test, which is about download — not approval.
+fn local_yolo_effective_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        requested_profile: RuntimeProfile::LocalYolo,
+        resolved_profile: RuntimeProfile::LocalYolo,
+        approval_policy: ApprovalPolicy::Minimal,
+        ..local_dev_effective_policy()
+    }
+}
+
 // ─── scripted tool-calling gateway ────────────────────────────────────
 
 /// Two-step LLM stand-in:
@@ -105,9 +150,42 @@ fn local_dev_effective_policy() -> EffectiveRuntimePolicy {
 ///    visible in the request transcript, then return a plain assistant
 ///    reply that the timeline endpoint will surface as the final user-
 ///    visible message.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct ToolCallingGateway {
     call_count: StdMutex<usize>,
+    tool_message: String,
+    // When true, the scripted tool argument embeds `SENSITIVE_TOOL_SENTINEL`
+    // (secret-shaped text), which the durable model-observation validator
+    // (`normalized_model_observation` in
+    // `ironclaw_threads::tool_result_reference`) is designed to strip from
+    // the inline preview while preserving the opaque result reference. The
+    // follow-up assertion below flips accordingly: it checks the sentinel
+    // was NOT hydrated back to the model, instead of checking that it was.
+    expect_redacted_preview: bool,
+}
+
+impl Default for ToolCallingGateway {
+    fn default() -> Self {
+        Self {
+            call_count: StdMutex::new(0),
+            tool_message: "hello from e2e tool".to_string(),
+            expect_redacted_preview: false,
+        }
+    }
+}
+
+impl ToolCallingGateway {
+    /// Scripted tool argument embeds a secret-shaped sentinel so the caller
+    /// can assert the sensitive text never reaches the model's own tool
+    /// result content or any user-facing SSE/timeline surface, matching the
+    /// intended graceful preview-drop behavior.
+    fn with_sensitive_tool_message() -> Self {
+        Self {
+            tool_message: format!("hello from e2e tool {SENSITIVE_TOOL_SENTINEL}"),
+            expect_redacted_preview: true,
+            ..Self::default()
+        }
+    }
 }
 
 #[async_trait]
@@ -147,11 +225,19 @@ impl HostManagedModelGateway for ToolCallingGateway {
                 .iter()
                 .find(|m| m.role == HostManagedModelMessageRole::ToolResult)
                 .expect("follow-up model call must include a tool_result message");
-            assert!(
-                tool_result.content.contains("hello from e2e tool"),
-                "follow-up model call should see hydrated echo output, got: {}",
-                tool_result.content,
-            );
+            if self.expect_redacted_preview {
+                assert!(
+                    !tool_result.content.contains(SENSITIVE_TOOL_SENTINEL),
+                    "follow-up model call must not see the redacted secret-shaped preview, got: {}",
+                    tool_result.content,
+                );
+            } else {
+                assert!(
+                    tool_result.content.contains(&self.tool_message),
+                    "follow-up model call should see hydrated echo output, got: {}",
+                    tool_result.content,
+                );
+            }
             return Ok(HostManagedModelResponse::assistant_reply("e2e tool ok"));
         }
 
@@ -169,17 +255,17 @@ impl HostManagedModelGateway for ToolCallingGateway {
             .expect("builtin.echo must be visible in local-dev capability surface");
 
         let candidate = capabilities
-            .register_provider_tool_call(ProviderToolCall {
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
                 provider_id: "e2e-provider".to_string(),
                 provider_model_id: "e2e-model".to_string(),
                 turn_id: Some("e2e-turn-1".to_string()),
                 id: "e2e-call-1".to_string(),
                 name: echo_tool.name,
-                arguments: json!({"message": format!("hello from e2e tool {SENSITIVE_TOOL_SENTINEL}")}),
+                arguments: json!({"message": self.tool_message.clone()}),
                 response_reasoning: None,
                 reasoning: None,
                 signature: None,
-            })
+            }))
             .await
             .map_err(|err| {
                 HostManagedModelError::safe(
@@ -195,6 +281,280 @@ impl HostManagedModelGateway for ToolCallingGateway {
     }
 }
 
+#[derive(Debug)]
+struct DelayedStreamingTextGateway {
+    first_update: StdMutex<Option<oneshot::Sender<()>>>,
+    release: StdMutex<Option<oneshot::Receiver<()>>>,
+}
+
+impl DelayedStreamingTextGateway {
+    fn new(first_update: oneshot::Sender<()>, release: oneshot::Receiver<()>) -> Self {
+        Self {
+            first_update: StdMutex::new(Some(first_update)),
+            release: StdMutex::new(Some(release)),
+        }
+    }
+
+    async fn stream_with_progress(
+        &self,
+        sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        sink.safe_text_update("Hel".to_string()).await;
+        if let Some(first_update) = self
+            .first_update
+            .lock()
+            .expect("first update lock poisoned")
+            .take()
+        {
+            let _ = first_update.send(());
+        }
+
+        let release = self
+            .release
+            .lock()
+            .expect("release lock poisoned")
+            .take()
+            .expect("delayed streaming gateway should be called once");
+        let _ = release.await;
+
+        sink.safe_text_update("Hello".to_string()).await;
+        Ok(HostManagedModelResponse::assistant_reply("Hello"))
+    }
+}
+
+#[async_trait]
+impl HostManagedModelGateway for DelayedStreamingTextGateway {
+    async fn stream_model(
+        &self,
+        _request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidRequest,
+            "DelayedStreamingTextGateway requires a progress sink",
+        ))
+    }
+
+    async fn stream_model_with_progress(
+        &self,
+        _request: HostManagedModelRequest,
+        sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        self.stream_with_progress(sink).await
+    }
+
+    async fn stream_model_with_capabilities_and_progress(
+        &self,
+        _request: HostManagedModelRequest,
+        _capabilities: Arc<dyn LoopCapabilityPort>,
+        sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        self.stream_with_progress(sink).await
+    }
+}
+
+// ─── file-producing gateway ───────────────────────────────────────────
+
+const CSV_PATH: &str = "/workspace/report.csv";
+const PDF_PATH: &str = "/workspace/report.pdf";
+const CSV_BODY: &str = "name,score\nalice,90\nbob,85\n";
+// A minimal, byte-stable PDF. The download mime is derived from the `.pdf`
+// extension (not content sniffing), so the bytes only need to round-trip
+// write -> read exactly; they are not rendered.
+const PDF_BODY: &str = "%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n";
+
+/// Scripted gateway that drives the agent to produce two downloadable files —
+/// a CSV then a PDF — via `builtin.write_file`, then emit a final reply that
+/// references both `/workspace` paths. Exercises the full "agent produces a
+/// file the user can download" flow against the real loop + capability host.
+#[derive(Debug, Default)]
+struct WriteFileGateway {
+    call_count: StdMutex<usize>,
+}
+
+#[derive(Debug, Default)]
+struct MemoryWriteGateway {
+    call_count: StdMutex<usize>,
+}
+
+async fn register_write(
+    capabilities: &Arc<dyn LoopCapabilityPort>,
+    tool_name: ProviderToolName,
+    call_id: &str,
+    path: &str,
+    content: &str,
+) -> Result<CapabilityCallCandidate, HostManagedModelError> {
+    capabilities
+        .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
+            provider_id: "e2e-provider".to_string(),
+            provider_model_id: "e2e-model".to_string(),
+            turn_id: Some("e2e-write-turn".to_string()),
+            id: call_id.to_string(),
+            name: tool_name,
+            arguments: json!({"path": path, "content": content}),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        }))
+        .await
+        .map_err(|err| {
+            HostManagedModelError::safe(
+                HostManagedModelErrorKind::InvalidRequest,
+                format!("register_provider_tool_call(write_file) failed: {err}"),
+            )
+        })
+}
+
+#[async_trait]
+impl HostManagedModelGateway for WriteFileGateway {
+    async fn stream_model(
+        &self,
+        _request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidRequest,
+            "WriteFileGateway requires the capability-aware model path",
+        ))
+    }
+
+    async fn stream_model_with_capabilities(
+        &self,
+        _request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let call_index = {
+            let mut count = self
+                .call_count
+                .lock()
+                .expect("write gateway call lock poisoned");
+            let index = *count;
+            *count += 1;
+            index
+        };
+
+        let write_id = CapabilityId::new("builtin.write_file").expect("write_file capability id");
+        let write_tool = capabilities
+            .tool_definitions()
+            .map_err(|err| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    format!("tool_definitions failed: {err}"),
+                )
+            })?
+            .into_iter()
+            .find(|def| def.capability_id == write_id)
+            .expect("builtin.write_file must be visible in local-dev capability surface");
+
+        // One tool round writes both files (mirrors the single-round shape the
+        // echo gateway proves), then the follow-up call emits the final reply.
+        if call_index == 0 {
+            let csv = register_write(
+                &capabilities,
+                write_tool.name.clone(),
+                "e2e-write-csv",
+                CSV_PATH,
+                CSV_BODY,
+            )
+            .await?;
+            let pdf = register_write(
+                &capabilities,
+                write_tool.name,
+                "e2e-write-pdf",
+                PDF_PATH,
+                PDF_BODY,
+            )
+            .await?;
+            return Ok(HostManagedModelResponse::capability_calls(
+                vec![csv, pdf],
+                "",
+            ));
+        }
+        Ok(HostManagedModelResponse::assistant_reply(format!(
+            "Saved {CSV_PATH} and {PDF_PATH} — both are ready to download."
+        )))
+    }
+}
+
+#[async_trait]
+impl HostManagedModelGateway for MemoryWriteGateway {
+    async fn stream_model(
+        &self,
+        _request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidRequest,
+            "MemoryWriteGateway requires the capability-aware model path",
+        ))
+    }
+
+    async fn stream_model_with_capabilities(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let call_index = {
+            let mut count = self
+                .call_count
+                .lock()
+                .expect("memory gateway call lock poisoned");
+            let index = *count;
+            *count += 1;
+            index
+        };
+        if call_index > 0 {
+            let tool_result = request
+                .messages
+                .iter()
+                .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
+                .expect("follow-up model call must include memory_write result");
+            assert!(
+                tool_result.content.contains("written")
+                    && tool_result.content.contains("MEMORY.md"),
+                "memory_write must persist MEMORY.md before the browser isolation assertion, got: {}",
+                tool_result.content
+            );
+            return Ok(HostManagedModelResponse::assistant_reply("memory saved"));
+        }
+
+        let memory_write_id =
+            CapabilityId::new("builtin.memory_write").expect("memory_write capability id");
+        let memory_write_tool = capabilities
+            .tool_definitions()
+            .map_err(|err| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    format!("tool_definitions failed: {err}"),
+                )
+            })?
+            .into_iter()
+            .find(|def| def.capability_id == memory_write_id)
+            .expect("builtin.memory_write must be visible in local-dev capability surface");
+        let write = capabilities
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
+                provider_id: "e2e-provider".to_string(),
+                provider_model_id: "e2e-model".to_string(),
+                turn_id: Some("e2e-memory-turn".to_string()),
+                id: "e2e-memory-write".to_string(),
+                name: memory_write_tool.name,
+                arguments: json!({
+                    "target": "memory",
+                    "content": format!("owner A private memory: {MEMORY_ISOLATION_MARKER}"),
+                    "append": false
+                }),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            }))
+            .await
+            .map_err(|err| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    format!("register_provider_tool_call(memory_write) failed: {err}"),
+                )
+            })?;
+        Ok(HostManagedModelResponse::capability_calls(vec![write], ""))
+    }
+}
+
 // ─── harness ──────────────────────────────────────────────────────────
 
 struct Harness {
@@ -204,20 +564,62 @@ struct Harness {
 }
 
 async fn build_harness() -> Harness {
+    build_harness_with_gateway(Arc::new(ToolCallingGateway::default())).await
+}
+
+async fn build_harness_with_gateway(gateway: Arc<dyn HostManagedModelGateway>) -> Harness {
+    build_harness_with_gateway_and_policy(gateway, local_dev_effective_policy()).await
+}
+
+async fn build_harness_with_gateway_and_policy(
+    gateway: Arc<dyn HostManagedModelGateway>,
+    policy: EffectiveRuntimePolicy,
+) -> Harness {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("local-dev");
-    build_harness_at(storage_root, Some(root)).await
+    build_harness_at(storage_root, Some(root), gateway, policy).await
 }
 
+// Only consumed by `webui_v2_beta_acceptance_stream_replay_restart_and_redaction`
+// (initial build and post-restart reopen), which needs the sensitive-message
+// gateway variant to exercise `assert_no_sensitive_payload`.
 async fn build_harness_on_storage(storage_root: impl AsRef<Path>) -> Harness {
-    build_harness_at(storage_root.as_ref().to_path_buf(), None).await
+    build_harness_at(
+        storage_root.as_ref().to_path_buf(),
+        None,
+        Arc::new(ToolCallingGateway::with_sensitive_tool_message()),
+        local_dev_effective_policy(),
+    )
+    .await
 }
 
-async fn build_harness_at(storage_root: PathBuf, root: Option<tempfile::TempDir>) -> Harness {
-    let gateway = Arc::new(ToolCallingGateway::default());
+async fn build_harness_at(
+    storage_root: PathBuf,
+    root: Option<tempfile::TempDir>,
+    gateway: Arc<dyn HostManagedModelGateway>,
+    policy: EffectiveRuntimePolicy,
+) -> Harness {
+    build_harness_at_with_runtime_owner_and_auth_user(
+        storage_root,
+        root,
+        gateway,
+        policy,
+        USER,
+        USER,
+    )
+    .await
+}
+
+async fn build_harness_at_with_runtime_owner_and_auth_user(
+    storage_root: PathBuf,
+    root: Option<tempfile::TempDir>,
+    gateway: Arc<dyn HostManagedModelGateway>,
+    policy: EffectiveRuntimePolicy,
+    runtime_owner_id: &str,
+    authenticated_user_id: &str,
+) -> Harness {
     let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev(USER, storage_root)
-            .with_runtime_policy(local_dev_effective_policy()),
+        RebornBuildInput::local_dev(runtime_owner_id, storage_root).with_runtime_policy(policy),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: TENANT.to_string(),
@@ -232,10 +634,33 @@ async fn build_harness_at(storage_root: PathBuf, root: Option<tempfile::TempDir>
     .with_model_gateway_override(gateway);
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    // The Tools-settings global auto-approve switch is authoritative for
+    // first-party tool dispatch; enable it for the e2e dispatch scope so
+    // scripted tool calls complete instead of parking on the per-tool approval
+    // gate (which would otherwise leave the turn without an assistant reply).
+    runtime
+        .services()
+        .local_dev_auto_approve_settings_for_test()
+        .expect("local-dev exposes auto-approve settings for test")
+        .set(ironclaw_approvals::AutoApproveSettingInput {
+            updated_by: ironclaw_host_api::Principal::User(UserId::new(USER).expect("user")),
+            scope: ResourceScope {
+                tenant_id: TenantId::new(TENANT).expect("tenant"),
+                user_id: UserId::new(USER).expect("user"),
+                agent_id: Some(AgentId::new(AGENT).expect("agent")),
+                project_id: None,
+                mission_id: None,
+                thread_id: None,
+                invocation_id: InvocationId::new(),
+            },
+            enabled: true,
+        })
+        .await
+        .expect("enable global auto-approve for e2e dispatch");
     let bundle = build_webui_services(&runtime, None).expect("webui bundle");
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
-        Arc::new(OnlyValidToken),
+        Arc::new(ValidTokenForUser::new(authenticated_user_id)),
         // CORS allowlist is unused in oneshot tests (no Origin header
         // is set), but the WebuiServeConfig constructor rejects an
         // empty Vec to keep production deployments fail-closed. Any
@@ -250,6 +675,63 @@ async fn build_harness_at(storage_root: PathBuf, root: Option<tempfile::TempDir>
         runtime,
         router,
         _root: root,
+    }
+}
+
+async fn build_two_user_harness(
+    gateway: Arc<dyn HostManagedModelGateway>,
+    policy: EffectiveRuntimePolicy,
+) -> Harness {
+    let root = tempfile::tempdir().expect("tempdir");
+    let storage_root = root.path().join("local-dev");
+    let input = RebornRuntimeInput::from_services(
+        RebornBuildInput::local_dev(USER, storage_root).with_runtime_policy(policy),
+    )
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: TENANT.to_string(),
+        agent_id: AGENT.to_string(),
+        source_binding_id: "e2e-source".to_string(),
+        reply_target_binding_id: "e2e-reply".to_string(),
+    })
+    .with_poll_settings(PollSettings {
+        interval: Duration::from_millis(10),
+        max_total: Duration::from_secs(10),
+    })
+    .with_model_gateway_override(gateway);
+
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    runtime
+        .services()
+        .local_dev_auto_approve_settings_for_test()
+        .expect("local-dev exposes auto-approve settings for test")
+        .set(ironclaw_approvals::AutoApproveSettingInput {
+            updated_by: ironclaw_host_api::Principal::User(UserId::new(USER).expect("user")),
+            scope: ResourceScope {
+                tenant_id: TenantId::new(TENANT).expect("tenant"),
+                user_id: UserId::new(USER).expect("user"),
+                agent_id: Some(AgentId::new(AGENT).expect("agent")),
+                project_id: None,
+                mission_id: None,
+                thread_id: None,
+                invocation_id: InvocationId::new(),
+            },
+            enabled: true,
+        })
+        .await
+        .expect("enable global auto-approve for user A");
+    let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+    let config = WebuiServeConfig::new(
+        TenantId::new(TENANT).expect("tenant"),
+        Arc::new(TwoUserTokens),
+        vec![HeaderValue::from_static("http://localhost:0")],
+    )
+    .with_default_agent_id(AgentId::new(AGENT).expect("agent"));
+    let router = webui_v2_app(bundle, config).expect("webui v2 app");
+
+    Harness {
+        runtime,
+        router,
+        _root: Some(root),
     }
 }
 
@@ -272,6 +754,15 @@ fn bearer_post(uri: &str, body: Value) -> Request<Body> {
 
 fn bearer_get(uri: &str) -> Request<Body> {
     bearer_get_with_last_event_id(uri, None)
+}
+
+fn bearer_get_with_token(uri: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .expect("bearer GET request")
 }
 
 fn bearer_get_with_last_event_id(uri: &str, last_event_id: Option<&str>) -> Request<Body> {
@@ -456,6 +947,24 @@ fn assert_timeline_has_tool_result_reference(timeline: &Value) {
     );
 }
 
+fn assert_timeline_has_capability_display_preview(timeline: &Value) {
+    let messages = timeline["messages"]
+        .as_array()
+        .expect("timeline.messages must be an array");
+    let preview_seen = messages.iter().any(|message| {
+        message.get("kind").and_then(Value::as_str) == Some("capability_display_preview")
+            && message
+                .get("tool_result_ref")
+                .and_then(Value::as_str)
+                .is_some_and(|reference| reference.starts_with("result:"))
+    });
+    assert!(
+        preview_seen,
+        "timeline must include a durable capability display preview for the builtin.echo \
+         invocation, but the messages array was: {messages:#?}",
+    );
+}
+
 fn assert_no_sensitive_payload(label: &str, bytes_or_json: impl AsRef<[u8]>) {
     let text = String::from_utf8_lossy(bytes_or_json.as_ref());
     assert!(
@@ -469,6 +978,23 @@ fn event_ids(events: &[ParsedSseEvent]) -> Vec<String> {
         .iter()
         .filter_map(|event| event.id.clone())
         .collect::<Vec<_>>()
+}
+
+fn event_payload_without_cursor(event: &ParsedSseEvent) -> Value {
+    let mut payload = event_payload_json(event);
+    if let Some(object) = payload.as_object_mut() {
+        object.remove("cursor");
+    }
+    payload
+}
+
+fn replay_payload_signatures<'a>(
+    events: impl Iterator<Item = &'a ParsedSseEvent>,
+) -> Vec<(Option<String>, Value)> {
+    events
+        .filter(|event| event.id.is_some())
+        .map(|event| (event.event.clone(), event_payload_without_cursor(event)))
+        .collect()
 }
 
 fn has_browser_visible_progress(events: &[ParsedSseEvent]) -> bool {
@@ -497,6 +1023,59 @@ fn events_include_final_reply(bytes: &[u8]) -> bool {
     parse_sse_events(bytes)
         .iter()
         .any(|event| event.event.as_deref() == Some("final_reply"))
+}
+
+fn event_has_assistant_text_update(event: &ParsedSseEvent, needle: &str) -> bool {
+    if event.event.as_deref() != Some("projection_update") {
+        return false;
+    }
+    let payload = event_payload_json(event);
+    payload["state"]["items"].as_array().is_some_and(|items| {
+        items.iter().any(|item| {
+            item["text"]["body"]
+                .as_str()
+                .is_some_and(|body| body.contains(needle))
+        })
+    })
+}
+
+fn event_has_exact_assistant_text_update(event: &ParsedSseEvent, expected: &str) -> bool {
+    if event.event.as_deref() != Some("projection_update") {
+        return false;
+    }
+    let payload = event_payload_json(event);
+    payload["state"]["items"].as_array().is_some_and(|items| {
+        items.iter().any(|item| {
+            item["text"]["body"]
+                .as_str()
+                .is_some_and(|body| body == expected)
+        })
+    })
+}
+
+fn event_has_completed_run_status(event: &ParsedSseEvent) -> bool {
+    if !matches!(
+        event.event.as_deref(),
+        Some("projection_update") | Some("projection_snapshot")
+    ) {
+        return false;
+    }
+    let payload = event_payload_json(event);
+    payload["state"]["items"].as_array().is_some_and(|items| {
+        items.iter().any(|item| {
+            item["run_status"]["status"]
+                .as_str()
+                .is_some_and(|status| matches!(status, "completed" | "succeeded"))
+        })
+    })
+}
+
+fn events_include_completed_status_and_assistant_text(bytes: &[u8], needle: &str) -> bool {
+    let events = parse_sse_events(bytes);
+    events.iter().any(event_has_completed_run_status)
+        && events
+            .iter()
+            .any(|event| event_has_assistant_text_update(event, needle))
 }
 
 fn cursor_scopes_thread(cursor: &str, thread_id: &str) -> bool {
@@ -612,6 +1191,33 @@ async fn webui_v2_http_list_automations_uses_composed_runtime_facade() {
         .expect("runtime shutdown clean");
 }
 
+#[tokio::test]
+async fn webui_v2_timeline_persists_display_preview_under_authenticated_owner() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let storage_root = root.path().join("local-dev");
+    let harness = build_harness_at_with_runtime_owner_and_auth_user(
+        storage_root,
+        Some(root),
+        Arc::new(ToolCallingGateway::default()),
+        local_dev_effective_policy(),
+        "e2e-runtime-owner",
+        USER,
+    )
+    .await;
+
+    let thread_id = create_thread(&harness.router, "e2e-preview-owner-create").await;
+    send_message(&harness.router, &thread_id, "e2e-preview-owner-send").await;
+
+    let timeline = wait_for_final_timeline(&harness.router, &thread_id).await;
+    assert_timeline_has_capability_display_preview(&timeline);
+
+    harness
+        .runtime
+        .shutdown()
+        .await
+        .expect("runtime shutdown clean");
+}
+
 /// Beta scoreboard acceptance for issue #3613: drive the WebUI/WebChat
 /// v2 API from the browser side, stream live Reborn projections over
 /// SSE, replay with `Last-Event-ID`, verify final durable timeline
@@ -675,12 +1281,17 @@ async fn webui_v2_beta_acceptance_stream_replay_restart_and_redaction() {
         replay_ids.iter().all(|id| id != &replay_from),
         "Last-Event-ID replay must resume after the provided cursor, got: {replay_ids:?}"
     );
+    let original_replayable_payloads = replay_payload_signatures(events.iter().skip(1));
+    let replayed_payloads = replay_payload_signatures(replay_events.iter());
     assert!(
-        replay_ids
+        replayed_payloads
             .iter()
-            .any(|id| ids.iter().skip(1).any(|seen| seen == id)),
-        "Last-Event-ID replay should include an event already observed after the first cursor; \
-         original ids: {ids:?}, replay ids: {replay_ids:?}"
+            .any(|replayed| original_replayable_payloads
+                .iter()
+                .any(|seen| seen == replayed)),
+        "Last-Event-ID replay should include a payload already observed after the first cursor; \
+         original ids: {ids:?}, replay ids: {replay_ids:?}, \
+         original payloads: {original_replayable_payloads:?}, replay payloads: {replayed_payloads:?}"
     );
 
     let timeline = wait_for_final_timeline(&harness.router, &thread_id).await;
@@ -726,6 +1337,129 @@ async fn webui_v2_beta_acceptance_stream_replay_restart_and_redaction() {
         .shutdown()
         .await
         .expect("reopened runtime shutdown clean");
+}
+
+#[tokio::test]
+async fn webui_v2_sse_streams_assistant_text_before_terminal_completion() {
+    let harness = build_harness().await;
+
+    let thread_id = create_thread(&harness.router, "e2e-streaming-text-create").await;
+    let response = open_sse(&harness.router, &thread_id, None).await;
+    let mut body = response.into_body();
+
+    send_message(&harness.router, &thread_id, "e2e-streaming-text-send").await;
+
+    let sse_bytes = collect_sse_until(&mut body, Duration::from_secs(10), |bytes| {
+        events_include_completed_status_and_assistant_text(bytes, "e2e tool ok")
+    })
+    .await;
+    drop(body);
+
+    assert_no_sensitive_payload("assistant text SSE stream", &sse_bytes);
+    let events = parse_sse_events(&sse_bytes);
+    let text_index = events
+        .iter()
+        .position(|event| event_has_assistant_text_update(event, "e2e tool ok"))
+        .unwrap_or_else(|| {
+            panic!(
+                "SSE stream never emitted assistant text projection before timeout; events={events:?}; raw={}",
+                String::from_utf8_lossy(&sse_bytes)
+            )
+        });
+    let completed_index = events
+        .iter()
+        .position(event_has_completed_run_status)
+        .unwrap_or_else(|| {
+            panic!(
+                "SSE stream never emitted terminal completed status before timeout; events={events:?}; raw={}",
+                String::from_utf8_lossy(&sse_bytes)
+            )
+        });
+    assert!(
+        text_index < completed_index,
+        "assistant text projection must be observable before terminal completion; events={events:?}; raw={}",
+        String::from_utf8_lossy(&sse_bytes)
+    );
+
+    harness
+        .runtime
+        .shutdown()
+        .await
+        .expect("runtime shutdown clean");
+}
+
+#[tokio::test]
+async fn webui_v2_sse_streams_first_assistant_text_update_before_model_completion() {
+    let (first_update_tx, first_update_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let harness = build_harness_with_gateway(Arc::new(DelayedStreamingTextGateway::new(
+        first_update_tx,
+        release_rx,
+    )))
+    .await;
+
+    let thread_id = create_thread(&harness.router, "e2e-first-token-create").await;
+    let response = open_sse(&harness.router, &thread_id, None).await;
+    let mut body = response.into_body();
+
+    send_message(&harness.router, &thread_id, "e2e-first-token-send").await;
+    tokio::time::timeout(Duration::from_secs(20), first_update_rx)
+        .await
+        .expect("model gateway should emit its first text update")
+        .expect("first text update signal should be sent");
+
+    let first_bytes = collect_sse_until(&mut body, Duration::from_secs(5), |bytes| {
+        parse_sse_events(bytes)
+            .iter()
+            .any(|event| event_has_exact_assistant_text_update(event, "Hel"))
+    })
+    .await;
+    let first_events = parse_sse_events(&first_bytes);
+    assert!(
+        first_events
+            .iter()
+            .any(|event| event_has_exact_assistant_text_update(event, "Hel")),
+        "SSE stream must expose the first assistant text update before the model completes; events={first_events:?}; raw={}",
+        String::from_utf8_lossy(&first_bytes)
+    );
+    assert!(
+        !first_events
+            .iter()
+            .any(|event| event_has_exact_assistant_text_update(event, "Hello")),
+        "SSE stream delivered the final accumulated text before the model was released; events={first_events:?}; raw={}",
+        String::from_utf8_lossy(&first_bytes)
+    );
+    assert!(
+        !first_events.iter().any(event_has_completed_run_status),
+        "SSE stream delivered terminal completion before the model was released; events={first_events:?}; raw={}",
+        String::from_utf8_lossy(&first_bytes)
+    );
+
+    release_tx.send(()).expect("release delayed model");
+    let final_bytes = collect_sse_until(&mut body, Duration::from_secs(10), |bytes| {
+        events_include_completed_status_and_assistant_text(bytes, "Hello")
+    })
+    .await;
+    drop(body);
+    let final_events = parse_sse_events(&final_bytes);
+    assert!(
+        final_events
+            .iter()
+            .any(|event| event_has_exact_assistant_text_update(event, "Hello")),
+        "SSE stream must expose the accumulated assistant text after the model completes; events={final_events:?}; raw={}",
+        String::from_utf8_lossy(&final_bytes)
+    );
+    assert!(
+        final_events.iter().any(event_has_completed_run_status),
+        "SSE stream must still finalize the run after the model completes; events={final_events:?}; raw={}",
+        String::from_utf8_lossy(&final_bytes)
+    );
+
+    harness
+        .runtime
+        .shutdown()
+        .await
+        .expect("runtime shutdown clean");
 }
 
 #[tokio::test]
@@ -1150,6 +1884,292 @@ mod operator_llm_config {
             .await
             .expect("runtime shutdown clean");
     }
+}
+
+fn header_str(headers: &axum::http::HeaderMap, name: header::HeaderName) -> String {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string()
+}
+
+async fn read_body_bytes(response: axum::response::Response) -> Vec<u8> {
+    to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("download body within 1 MiB cap")
+        .to_vec()
+}
+
+fn files_uri(thread_id: &str, suffix: &str, path: &str) -> String {
+    // test-only: `path` is interpolated raw into the query string, so paths used
+    // here must not contain URL-special characters (`&`, `#`, `?`, spaces). All
+    // current callers pass fixed `/workspace/...` constants that satisfy this; a
+    // future test needing special chars should URL-encode `path` first.
+    format!("/api/webchat/v2/threads/{thread_id}/files{suffix}?path={path}")
+}
+
+async fn download_file(
+    router: &axum::Router,
+    thread_id: &str,
+    path: &str,
+) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(bearer_get(&files_uri(thread_id, "/content", path)))
+        .await
+        .expect("download oneshot")
+}
+
+/// Wait until the agent's turn has finalized by polling the timeline for an
+/// assistant reply containing `needle`. Polls at a cadence under the read-route
+/// rate limit (120/min) so the wait itself never trips a 429.
+async fn wait_for_assistant_reply(router: &axum::Router, thread_id: &str, needle: &str) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut timeline = Value::Null;
+    while Instant::now() < deadline {
+        let response = router
+            .clone()
+            .oneshot(bearer_get(&format!(
+                "/api/webchat/v2/threads/{thread_id}/timeline"
+            )))
+            .await
+            .expect("timeline oneshot");
+        assert_eq!(response.status(), StatusCode::OK, "timeline read");
+        timeline = read_json(response).await;
+        let found = timeline["messages"].as_array().is_some_and(|messages| {
+            messages.iter().any(|message| {
+                extract_assistant_text(message).is_some_and(|text| text.contains(needle))
+            })
+        });
+        if found {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    panic!("turn never produced an assistant reply containing {needle:?}; timeline={timeline:#?}");
+}
+
+#[tokio::test]
+async fn webui_filesystem_memory_mount_is_scoped_to_authenticated_user() {
+    let harness = build_two_user_harness(
+        Arc::new(MemoryWriteGateway::default()),
+        local_dev_effective_policy(),
+    )
+    .await;
+    let router = &harness.router;
+
+    let thread_id = create_thread(router, "e2e-memory-isolation-create").await;
+    send_message(router, &thread_id, "e2e-memory-isolation-save").await;
+    wait_for_assistant_reply(router, &thread_id, "memory saved").await;
+
+    let owner_raw_memory_path =
+        format!("tenants/{TENANT}/users/{USER}/agents/{AGENT}/projects/_none/MEMORY.md");
+    let response = router
+        .clone()
+        .oneshot(bearer_get_with_token(
+            &format!("/api/webchat/v2/fs/content?mount=memory&path={owner_raw_memory_path}"),
+            USER_B_TOKEN,
+        ))
+        .await
+        .expect("user B memory read oneshot");
+    let status = response.status();
+    let body = String::from_utf8_lossy(&read_body_bytes(response).await).to_string();
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "user B must not read user A's memory document through the WebUI filesystem browser; body={body}"
+    );
+    assert!(
+        !body.contains(MEMORY_ISOLATION_MARKER),
+        "user B response body leaked user A's memory marker: {body}"
+    );
+
+    let response = router
+        .clone()
+        .oneshot(bearer_get_with_token(
+            "/api/webchat/v2/fs/list?mount=memory",
+            USER_B_TOKEN,
+        ))
+        .await
+        .expect("user B memory list oneshot");
+    assert_eq!(response.status(), StatusCode::OK, "user B memory listing");
+    let listing = read_json(response).await;
+    let entries = listing["entries"]
+        .as_array()
+        .expect("memory list response carries entries");
+    assert!(
+        entries.iter().all(|entry| {
+            let name = entry["name"].as_str().unwrap_or_default();
+            let path = entry["path"].as_str().unwrap_or_default();
+            name != "tenants" && name != "MEMORY.md" && !path.contains(USER)
+        }),
+        "user B memory root must not expose user A's document or the raw memory tree: {listing:#?}"
+    );
+
+    let response = router
+        .clone()
+        .oneshot(bearer_get_with_token(
+            "/api/webchat/v2/fs/list?mount=memory",
+            VALID_TOKEN,
+        ))
+        .await
+        .expect("user A memory list oneshot");
+    assert_eq!(response.status(), StatusCode::OK, "user A memory listing");
+    let owner_listing = read_json(response).await;
+    assert!(
+        owner_listing["entries"].as_array().is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry["name"].as_str() == Some("MEMORY.md")
+                    && entry["path"].as_str() == Some("MEMORY.md")
+            })
+        }),
+        "user A should see her own memory document: {owner_listing:#?}"
+    );
+
+    let response = router
+        .clone()
+        .oneshot(bearer_get_with_token(
+            "/api/webchat/v2/fs/content?mount=memory&path=MEMORY.md",
+            VALID_TOKEN,
+        ))
+        .await
+        .expect("user A memory read oneshot");
+    assert_eq!(response.status(), StatusCode::OK, "user A memory read");
+    let body = String::from_utf8_lossy(&read_body_bytes(response).await).to_string();
+    assert!(
+        body.contains(MEMORY_ISOLATION_MARKER),
+        "user A should read her own memory marker through the WebUI filesystem browser: {body}"
+    );
+
+    let response = router
+        .clone()
+        .oneshot(bearer_get_with_token(
+            "/api/webchat/v2/fs/content?mount=memory&path=MEMORY.md",
+            USER_B_TOKEN,
+        ))
+        .await
+        .expect("user B canonical memory read oneshot");
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "user B must not read user A's canonical memory document"
+    );
+    let body = String::from_utf8_lossy(&read_body_bytes(response).await).to_string();
+    assert!(
+        !body.contains(MEMORY_ISOLATION_MARKER),
+        "user B canonical memory response body leaked user A's memory marker: {body}"
+    );
+
+    harness
+        .runtime
+        .shutdown()
+        .await
+        .expect("runtime shutdown clean");
+}
+
+/// End-to-end: the agent writes a CSV and a PDF into its project workspace via
+/// `write_file`, and both are then listable and downloadable through the v2
+/// project-filesystem endpoints with the right mime, attachment disposition,
+/// and exact bytes — while a path outside the workspace is refused.
+#[tokio::test]
+async fn agent_produced_workspace_files_are_listable_and_downloadable() {
+    let harness = build_harness_with_gateway_and_policy(
+        Arc::new(WriteFileGateway::default()),
+        local_yolo_effective_policy(),
+    )
+    .await;
+    let router = &harness.router;
+
+    let thread_id = create_thread(router, "e2e-files-thread").await;
+    send_message(router, &thread_id, "e2e-files-send").await;
+
+    // Wait for the turn to finalize (both files written), then download once.
+    wait_for_assistant_reply(router, &thread_id, "ready to download").await;
+
+    // CSV: registry-derived mime, attachment disposition + nosniff, exact bytes.
+    let csv = download_file(router, &thread_id, CSV_PATH).await;
+    assert_eq!(csv.status(), StatusCode::OK);
+    let csv_headers = csv.headers().clone();
+    assert!(
+        header_str(&csv_headers, header::CONTENT_TYPE).starts_with("text/csv"),
+        "csv content-type: {:?}",
+        csv_headers.get(header::CONTENT_TYPE)
+    );
+    let disposition = header_str(&csv_headers, header::CONTENT_DISPOSITION);
+    assert!(
+        disposition.contains("attachment") && disposition.contains("report.csv"),
+        "csv content-disposition: {disposition}"
+    );
+    assert_eq!(
+        header_str(&csv_headers, header::X_CONTENT_TYPE_OPTIONS),
+        "nosniff"
+    );
+    assert_eq!(read_body_bytes(csv).await, CSV_BODY.as_bytes());
+
+    // PDF: application/pdf mime + exact bytes.
+    let pdf = download_file(router, &thread_id, PDF_PATH).await;
+    assert_eq!(pdf.status(), StatusCode::OK);
+    assert!(
+        header_str(pdf.headers(), header::CONTENT_TYPE).starts_with("application/pdf"),
+        "pdf content-type: {:?}",
+        pdf.headers().get(header::CONTENT_TYPE)
+    );
+    assert_eq!(read_body_bytes(pdf).await, PDF_BODY.as_bytes());
+
+    // Directory listing surfaces both files under the workspace root.
+    let listing = router
+        .clone()
+        .oneshot(bearer_get(&format!(
+            "/api/webchat/v2/threads/{thread_id}/files?path=/workspace"
+        )))
+        .await
+        .expect("list oneshot");
+    assert_eq!(listing.status(), StatusCode::OK);
+    let listing = read_json(listing).await;
+    let names: Vec<&str> = listing["entries"]
+        .as_array()
+        .expect("entries array")
+        .iter()
+        .filter_map(|entry| entry["name"].as_str())
+        .collect();
+    assert!(
+        names.contains(&"report.csv") && names.contains(&"report.pdf"),
+        "workspace listing must include both files, got: {names:?}"
+    );
+
+    // Stat reports the written size.
+    let stat = router
+        .clone()
+        .oneshot(bearer_get(&files_uri(&thread_id, "/stat", CSV_PATH)))
+        .await
+        .expect("stat oneshot");
+    assert_eq!(stat.status(), StatusCode::OK);
+    let stat = read_json(stat).await;
+    assert_eq!(
+        stat["stat"]["size_bytes"].as_u64(),
+        Some(CSV_BODY.len() as u64)
+    );
+    // The extension-derived MIME drives the WebUI preview mode and mirrors the
+    // download Content-Type.
+    assert_eq!(stat["stat"]["mime_type"].as_str(), Some("text/csv"));
+
+    // A path outside the workspace mount is refused.
+    let denied = download_file(router, &thread_id, "/secrets/master.key").await;
+    assert!(
+        matches!(
+            denied.status(),
+            StatusCode::FORBIDDEN | StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND
+        ),
+        "out-of-workspace path must be refused, got {}",
+        denied.status()
+    );
+
+    harness
+        .runtime
+        .shutdown()
+        .await
+        .expect("runtime shutdown clean");
 }
 
 /// Walks a `ThreadMessageRecord` JSON object and returns the rendered

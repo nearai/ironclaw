@@ -21,6 +21,10 @@ pub enum AuthErrorCode {
     AccountSelectionRequired,
     #[error("backend_unavailable")]
     BackendUnavailable,
+    #[error("provider_identity_already_connected")]
+    ProviderIdentityAlreadyConnected,
+    #[error("connection_conflict")]
+    ConnectionConflict,
     #[error("malformed_config")]
     MalformedConfig,
     #[error("malformed_callback")]
@@ -49,12 +53,18 @@ pub enum AuthProductError {
     TokenExchangeFailed,
     #[error("token refresh failed")]
     RefreshFailed,
+    /// The provider returned `error: invalid_grant` — the refresh token is
+    /// revoked or permanently expired. This is a non-retryable reauth signal.
+    #[error("OAuth refresh token revoked (invalid_grant)")]
+    InvalidGrant,
     #[error("credential is missing")]
     CredentialMissing,
     #[error("account selection required")]
     AccountSelectionRequired,
     #[error("backend unavailable")]
     BackendUnavailable,
+    #[error("provider identity is already connected")]
+    ProviderIdentityAlreadyConnected,
     #[error("auth backend configuration is malformed")]
     MalformedConfig,
     /// A compare-and-swap precondition failed; the caller should re-read and
@@ -84,9 +94,13 @@ impl AuthProductError {
             Self::ProviderDenied => AuthErrorCode::ProviderDenied,
             Self::TokenExchangeFailed => AuthErrorCode::TokenExchangeFailed,
             Self::RefreshFailed => AuthErrorCode::RefreshFailed,
+            Self::InvalidGrant => AuthErrorCode::RefreshFailed,
             Self::CredentialMissing => AuthErrorCode::CredentialMissing,
             Self::AccountSelectionRequired => AuthErrorCode::AccountSelectionRequired,
             Self::BackendUnavailable => AuthErrorCode::BackendUnavailable,
+            Self::ProviderIdentityAlreadyConnected => {
+                AuthErrorCode::ProviderIdentityAlreadyConnected
+            }
             Self::MalformedConfig => AuthErrorCode::MalformedConfig,
             // CAS conflicts are an infrastructure detail; surface as BackendUnavailable
             // at all stable product boundaries.

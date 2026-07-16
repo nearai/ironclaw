@@ -18,9 +18,8 @@ use ironclaw_llm::{
     ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
 };
 
-// Re-export shared types from recording module so existing test code can
-// still import them from here.
-// Re-export all shared types so downstream test files can import from here.
+// Re-export shared types from `recording` so downstream test files can
+// import them from here.
 #[allow(unused_imports)]
 pub use ironclaw_llm::recording::{
     ExpectedToolResult, HttpExchange, HttpExchangeRequest, HttpExchangeResponse,
@@ -467,6 +466,16 @@ impl TraceLlm {
         self.captured_tool_definitions.lock().unwrap().clone()
     }
 
+    /// Enqueue one more step at the back of the FIFO. For scenarios where a
+    /// later scripted call needs a server-minted value (e.g. a durable
+    /// `result_ref`) only discoverable after an earlier turn completes —
+    /// the caller reads that value back from persisted state, then pushes
+    /// the dependent step before the next `submit_turn`. The template
+    /// substitution in `next_step` still applies to pushed steps.
+    pub fn push_step(&self, step: TraceStep) {
+        self.steps.lock().unwrap().push_back(step);
+    }
+
     // -- internal helpers ---------------------------------------------------
 
     /// Pick the next step that satisfies the current request.
@@ -764,6 +773,7 @@ impl LlmProvider for TraceLlm {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 reasoning: None,
+                reasoning_details: None,
             }),
             TraceResponse::ToolCalls {
                 tool_calls,
@@ -790,6 +800,7 @@ impl LlmProvider for TraceLlm {
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                     reasoning: None,
+                    reasoning_details: None,
                 })
             }
             TraceResponse::UserInput { .. } => Err(LlmError::RequestFailed {

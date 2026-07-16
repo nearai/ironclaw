@@ -9,6 +9,7 @@
 //! `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
 #![warn(unreachable_pub)]
 
+mod attachment_context;
 mod capability_display_preview;
 mod contract;
 mod error;
@@ -18,6 +19,7 @@ mod in_memory;
 mod service;
 mod summary_artifacts;
 mod title;
+mod tool_result_records;
 mod tool_result_reference;
 
 pub use filesystem_service::FilesystemSessionThreadService;
@@ -34,19 +36,27 @@ pub use capability_display_preview::{
 pub use contract::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
-    AppendToolResultReferenceRequest, ContextMessage, ContextMessages, ContextWindow,
-    CreateSummaryArtifactRequest, EnsureThreadRequest, FinalizedAssistantMessageByRunRequest,
-    GOAL_STATEMENT_MAX_CHARS, GoalStatement, LatestThreadMessageRequest,
-    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
-    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
+    AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest,
+    ContextImageAttachment, ContextMessage, ContextMessages, ContextWindow,
+    CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
+    FinalizedAssistantMessageByRunRequest, GOAL_STATEMENT_MAX_CHARS, GoalStatement,
+    LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
+    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
+    MessageStatus, PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadRecord, SummaryArtifact, SummaryKind,
-    SummaryModelContextPolicy, ThreadGoal, ThreadHistory, ThreadHistoryRequest, ThreadMessageRange,
-    ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
-    UpdateThreadGoalRequest, UpdateToolResultReferenceRequest,
+    SummaryModelContextPolicy, TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadGoal, ThreadHistory,
+    ThreadHistoryRequest, ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord,
+    ThreadScope, ToolResultRecordChunk, UpdateAssistantDraftRequest, UpdateThreadGoalRequest,
+    UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
 };
 pub use error::SessionThreadError;
 pub use identifiers::{SummaryArtifactId, ThreadMessageId};
 pub use in_memory::InMemorySessionThreadService;
+// The attachment vocabulary lives in `ironclaw_common` (next to `AttachmentKind`
+// and `IncomingAttachment`); re-exposed here so transcript-contract consumers
+// reach `AttachmentRef` through this crate without a direct `ironclaw_common`
+// dependency.
+pub use ironclaw_common::{AttachmentKind, AttachmentRef};
 pub use service::SessionThreadService;
 pub use tool_result_reference::{
     ProviderToolCallReferenceEnvelope, ToolResultReferenceEnvelope, ToolResultSafeSummary,

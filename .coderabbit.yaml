@@ -24,6 +24,7 @@ tone_instructions: "Terse, evidence-first senior Rust review. Cite the repo inva
 reviews:
   profile: assertive # full strength for the head-to-head trial against the other AI reviewers
   request_changes_workflow: false # advisory only; merge gating stays with the ruleset's required checks
+  high_level_summary_in_walkthrough: true # keep PR descriptions owner-authored; put generated summaries in the walkthrough comment
 
   # Review everything except generated / vendored / fixture / binary content.
   path_filters:

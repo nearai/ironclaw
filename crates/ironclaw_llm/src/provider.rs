@@ -1,5 +1,7 @@
 //! LLM provider trait and types.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -44,6 +46,19 @@ impl ImageUrl {
     pub fn normalized_openai_detail(&self) -> String {
         normalize_openai_image_detail(self.detail.as_deref())
     }
+
+    /// Decode an inline base64 `data:` URL into its `(media_type, base64_data)`
+    /// parts (e.g. `"data:image/png;base64,AQIDBA=="` →
+    /// `("image/png", "AQIDBA==")`). Returns `None` for a non-`data:` URL or a
+    /// `data:` URL that is not base64-encoded — callers that only support inline
+    /// bytes (Anthropic, Gemini, Bedrock) use this to forward the image and skip
+    /// remote URLs they can't fetch. The single shared parser keeps every
+    /// provider adapter consistent with the `data:` URL the model gateway emits.
+    pub fn decode_data_url(&self) -> Option<(&str, &str)> {
+        let rest = self.url.strip_prefix("data:")?;
+        let (media_type, data) = rest.split_once(";base64,")?;
+        Some((media_type, data))
+    }
 }
 
 /// Normalize an OpenAI image detail hint, defaulting to `"auto"` when absent.
@@ -55,6 +70,87 @@ pub(crate) fn normalize_openai_image_detail(detail: Option<&str>) -> String {
     {
         Some(detail) if matches!(detail.as_str(), "auto" | "low" | "high") => detail,
         _ => "auto".to_string(),
+    }
+}
+
+/// Provider reasoning details that need exact round-trip through a follow-up
+/// request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum ReasoningDetail {
+    /// Plain reasoning text with an optional provider signature.
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
+    /// Provider-encrypted reasoning payload.
+    Encrypted(String),
+    /// Redacted reasoning payload preserved as opaque data.
+    Redacted { data: String },
+    /// Provider-generated reasoning summary text.
+    Summary(String),
+}
+
+/// Ordered provider reasoning payload with an optional provider-supplied ID.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReasoningDetails {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub content: Vec<ReasoningDetail>,
+}
+
+impl ReasoningDetails {
+    pub fn from_text(text: impl Into<String>) -> Option<Self> {
+        let text = text.into();
+        if text.trim().is_empty() {
+            return None;
+        }
+        Some(Self {
+            id: None,
+            content: vec![ReasoningDetail::Text {
+                text,
+                signature: None,
+            }],
+        })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.content.is_empty()
+            || self.content.iter().all(|detail| match detail {
+                // A Text block is non-empty when EITHER its text OR its
+                // signature carries content. Gemini 2.5+ emits
+                // `thought_signature` as a Text block with empty text but a
+                // populated signature; dropping it causes the next turn to
+                // 400 because the replay artifact is missing (#3201, #3225).
+                ReasoningDetail::Text { text, signature } => {
+                    text.trim().is_empty() && signature.as_ref().is_none_or(|s| s.trim().is_empty())
+                }
+                ReasoningDetail::Encrypted(text) | ReasoningDetail::Summary(text) => {
+                    text.trim().is_empty()
+                }
+                ReasoningDetail::Redacted { data } => data.trim().is_empty(),
+            })
+    }
+
+    pub fn display_text(&self) -> Option<String> {
+        let parts = self
+            .content
+            .iter()
+            .filter_map(|detail| match detail {
+                ReasoningDetail::Text { text, .. } | ReasoningDetail::Summary(text)
+                    if !text.trim().is_empty() =>
+                {
+                    Some(text.as_str())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("\n"))
+        }
     }
 }
 
@@ -86,6 +182,10 @@ pub struct ChatMessage {
     /// reasoning that was dropped (#3201, #3225).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    /// Typed provider reasoning payloads used when an upstream client requires
+    /// exact encrypted/redacted/summary replay rather than plain text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_details: Option<ReasoningDetails>,
 }
 
 impl ChatMessage {
@@ -99,6 +199,7 @@ impl ChatMessage {
             name: None,
             tool_calls: None,
             reasoning: None,
+            reasoning_details: None,
         }
     }
 
@@ -112,6 +213,7 @@ impl ChatMessage {
             name: None,
             tool_calls: None,
             reasoning: None,
+            reasoning_details: None,
         }
     }
 
@@ -127,6 +229,7 @@ impl ChatMessage {
             name: None,
             tool_calls: None,
             reasoning: None,
+            reasoning_details: None,
         }
     }
 
@@ -140,6 +243,7 @@ impl ChatMessage {
             name: None,
             tool_calls: None,
             reasoning: None,
+            reasoning_details: None,
         }
     }
 
@@ -160,6 +264,7 @@ impl ChatMessage {
                 Some(tool_calls)
             },
             reasoning: None,
+            reasoning_details: None,
         }
     }
 
@@ -174,6 +279,24 @@ impl ChatMessage {
     /// don't send `reasoning_content: ""` and trip strict-mode validators.
     pub fn with_reasoning(mut self, reasoning: Option<String>) -> Self {
         self.reasoning = reasoning.filter(|r| !r.trim().is_empty());
+        if self.reasoning_details.is_none() {
+            self.reasoning_details = self
+                .reasoning
+                .as_ref()
+                .and_then(|reasoning| ReasoningDetails::from_text(reasoning.clone()));
+        }
+        self
+    }
+
+    /// Attach provider-emitted typed reasoning artifacts to an assistant
+    /// message. The legacy string field is populated only with displayable text
+    /// or summary blocks; encrypted/redacted payloads stay opaque.
+    pub fn with_reasoning_details(mut self, details: Option<ReasoningDetails>) -> Self {
+        self.reasoning_details = details.filter(|details| !details.is_empty());
+        self.reasoning = self
+            .reasoning_details
+            .as_ref()
+            .and_then(ReasoningDetails::display_text);
         self
     }
 
@@ -191,6 +314,7 @@ impl ChatMessage {
             name: Some(name.into()),
             tool_calls: None,
             reasoning: None,
+            reasoning_details: None,
         }
     }
 }
@@ -479,6 +603,9 @@ pub struct ToolCompletionResponse {
     /// for the next turn — otherwise the provider rejects the follow-up with
     /// HTTP 400 (#3201, #3225). `None` when the model produced no reasoning.
     pub reasoning: Option<String>,
+    /// Typed provider reasoning payloads for clients that require exact
+    /// encrypted/redacted/summary round-trip rather than display text.
+    pub reasoning_details: Option<ReasoningDetails>,
 }
 
 /// Metadata about a model returned by the provider's API.
@@ -501,11 +628,33 @@ pub trait LlmProvider: Send + Sync {
     /// Complete a chat conversation.
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError>;
 
+    /// Complete a chat conversation while publishing provider text deltas as
+    /// they arrive. Providers that do not support streaming inherit the normal
+    /// request/response implementation.
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        _sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        self.complete(request).await
+    }
+
     /// Complete with tool use support.
     async fn complete_with_tools(
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError>;
+
+    /// Complete a tool-capable chat conversation while publishing provider text
+    /// deltas as they arrive. The final response remains authoritative for tool
+    /// calls, finish reason, and usage accounting.
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        _sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.complete_with_tools(request).await
+    }
 
     /// List available models from the provider.
     /// Default implementation returns empty list.
@@ -570,6 +719,11 @@ pub trait LlmProvider: Send + Sync {
     fn cache_read_discount(&self) -> Decimal {
         Decimal::ONE
     }
+}
+
+#[async_trait]
+pub trait CompletionStreamSink: Send + Sync {
+    async fn text_delta(&self, delta: String);
 }
 
 #[cfg(test)]
@@ -1075,5 +1229,49 @@ mod tests {
         strip_unsupported_tool_params(&unsupported, &mut req);
 
         assert!(req.stop_sequences.is_none()); // safety: test assertion for explicit strip behavior
+    }
+
+    /// Regression: a Text block with empty text but a non-empty signature must
+    /// NOT be treated as empty. Gemini 2.5+ emits `thought_signature` as a Text
+    /// block with blank text and a populated signature; the old `..` wildcard
+    /// ignored the signature, causing it to be filtered out by
+    /// `with_reasoning_details` and `rig_reasoning_to_iron`, breaking the next
+    /// turn with HTTP 400 (#3201, #3225).
+    #[test]
+    fn reasoning_details_is_empty_false_for_signature_only_text_block() {
+        let details = ReasoningDetails {
+            id: None,
+            content: vec![ReasoningDetail::Text {
+                text: String::new(),
+                signature: Some("sig-abc".to_string()),
+            }],
+        };
+        assert!(
+            !details.is_empty(),
+            "Text block with non-empty signature must not be treated as empty"
+        );
+    }
+
+    #[test]
+    fn reasoning_details_is_empty_true_for_blank_text_and_absent_signature() {
+        // Empty text + no signature → empty.
+        let no_sig = ReasoningDetails {
+            id: None,
+            content: vec![ReasoningDetail::Text {
+                text: String::new(),
+                signature: None,
+            }],
+        };
+        assert!(no_sig.is_empty());
+
+        // Empty text + whitespace-only signature → still empty.
+        let whitespace_sig = ReasoningDetails {
+            id: None,
+            content: vec![ReasoningDetail::Text {
+                text: String::new(),
+                signature: Some("   ".to_string()),
+            }],
+        };
+        assert!(whitespace_sig.is_empty());
     }
 }

@@ -11,11 +11,14 @@ use ironclaw_host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
 use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, SecretMode,
 };
+use ironclaw_host_api::{AgentId, TenantId};
 #[cfg(all(test, feature = "slack-v2-host-beta"))]
 use ironclaw_host_runtime::HostRuntimeHttpEgressPort;
 use ironclaw_host_runtime::TenantSandboxProcessPort;
+#[cfg(any(test, feature = "test-support"))]
+use ironclaw_network::NetworkHttpEgress;
 use ironclaw_trust::HostTrustPolicy;
-use ironclaw_turns::TurnRunWakeNotifier;
+use ironclaw_turns::{InMemoryTurnStateStoreLimits, TurnRunWakeNotifier};
 use secrecy::SecretString;
 
 #[cfg(feature = "postgres")]
@@ -25,16 +28,23 @@ use ironclaw_reborn_event_store::{PostgresPoolTlsOptions, RebornPostgresSslMode}
 
 #[cfg(feature = "postgres")]
 use crate::RebornBuildError;
-use crate::google_oauth::google_provider_spec;
-use crate::notion_oauth::notion_provider_spec;
-use crate::oauth_dcr::OAuthDcrProviderConfig;
-use crate::oauth_provider_client::HostOAuthProviderSpec;
+use crate::product_auth::oauth::google_oauth::google_provider_spec;
+use crate::product_auth::oauth::notion_oauth::notion_provider_spec;
+use crate::product_auth::oauth::oauth_dcr::OAuthDcrProviderConfig;
+use crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderSpec;
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::slack::slack_setup::SlackPersonalSetupServiceSlot;
 use crate::{RebornCompositionProfile, RebornProductAuthServicePorts};
 
 #[cfg(feature = "postgres")]
 const DEFAULT_REBORN_POSTGRES_URL_ENV: &str = "IRONCLAW_REBORN_POSTGRES_URL";
 #[cfg(feature = "postgres")]
 const DEFAULT_REBORN_SECRET_MASTER_KEY_ENV: &str = "IRONCLAW_REBORN_SECRET_MASTER_KEY";
+#[cfg(feature = "postgres")]
+const REBORN_POSTGRES_POOL_MAX_SIZE_ENV: &str = "IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE";
+#[cfg(feature = "postgres")]
+const REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON_ENV: &str =
+    "IRONCLAW_REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON";
 #[cfg(feature = "postgres")]
 const DATABASE_SSLMODE_ENV: &str = "DATABASE_SSLMODE";
 #[cfg(feature = "postgres")]
@@ -168,6 +178,7 @@ impl RebornRuntimeProcessBinding {
 pub struct RebornBuildInput {
     pub(crate) profile: RebornCompositionProfile,
     pub(crate) owner_id: String,
+    pub(crate) local_runtime_identity: Option<RebornLocalRuntimeIdentity>,
     pub(crate) storage: RebornStorageInput,
     pub(crate) production_trust_policy: Option<Arc<HostTrustPolicy>>,
     pub(crate) runtime_policy: Option<EffectiveRuntimePolicy>,
@@ -178,10 +189,24 @@ pub struct RebornBuildInput {
     pub(crate) require_wasm_credentials: bool,
     #[cfg(all(test, feature = "slack-v2-host-beta"))]
     pub(crate) host_runtime_http_egress_for_test: Option<Option<HostRuntimeHttpEgressPort>>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) network_http_egress_for_test: Option<Arc<dyn NetworkHttpEgress>>,
     pub(crate) product_auth_ports: Option<RebornProductAuthServicePorts>,
     pub(crate) oauth_provider_configs: Vec<OAuthProviderBackendConfig>,
     pub(crate) oauth_dcr_provider_configs: Vec<OAuthDcrProviderBackendConfig>,
-    pub(crate) nearai_mcp_bootstrap_config: Option<crate::nearai_mcp::NearAiMcpBootstrapConfig>,
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) slack_personal_oauth_lazy_slot: Option<SlackPersonalSetupServiceSlot>,
+    pub(crate) nearai_mcp_bootstrap_config:
+        Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
+    /// Concurrency limits applied to the in-memory turn-state store.
+    /// Defaults to no limits (all caps `None` / unlimited).
+    pub(crate) turn_state_store_limits: InMemoryTurnStateStoreLimits,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RebornLocalRuntimeIdentity {
+    pub(crate) tenant_id: TenantId,
+    pub(crate) agent_id: AgentId,
 }
 
 pub(crate) enum RebornStorageInput {
@@ -191,12 +216,22 @@ pub(crate) enum RebornStorageInput {
         workspace_root: Option<PathBuf>,
         host_home_root: Option<PathBuf>,
     },
+    #[cfg(feature = "postgres")]
+    HostedSingleTenantPostgres {
+        root: PathBuf,
+        workspace_root: Option<PathBuf>,
+        host_home_root: Option<PathBuf>,
+        pool: deadpool_postgres::Pool,
+        secret_master_key: ironclaw_secrets::SecretMaterial,
+        process_local_resource_governor_singleton: bool,
+    },
     #[cfg(feature = "libsql")]
     Libsql {
         db: Arc<libsql::Database>,
         path_or_url: String,
         auth_token: Option<ironclaw_secrets::SecretMaterial>,
         secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
+        process_local_resource_governor_singleton: bool,
     },
     #[cfg(feature = "postgres")]
     Postgres {
@@ -204,6 +239,7 @@ pub(crate) enum RebornStorageInput {
         url: ironclaw_secrets::SecretMaterial,
         tls_options: PostgresPoolTlsOptions,
         secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
+        process_local_resource_governor_singleton: bool,
     },
 }
 
@@ -219,6 +255,11 @@ impl RebornBuildInput {
         &self.owner_id
     }
 
+    #[cfg(feature = "root-llm-provider")]
+    pub(crate) fn has_nearai_mcp_bootstrap_config(&self) -> bool {
+        self.nearai_mcp_bootstrap_config.is_some()
+    }
+
     /// Override the owner id after construction.
     ///
     /// The WebChat v2 serve path uses this to pin the runtime owner to the
@@ -228,6 +269,16 @@ impl RebornBuildInput {
     /// wrote to.
     pub fn with_owner_id(mut self, owner_id: impl Into<String>) -> Self {
         self.owner_id = owner_id.into();
+        self
+    }
+
+    /// Override the local runtime tenant/agent identity used by command-style
+    /// facades that need a surface context before a full runtime exists.
+    pub fn with_local_runtime_identity(mut self, tenant_id: TenantId, agent_id: AgentId) -> Self {
+        self.local_runtime_identity = Some(RebornLocalRuntimeIdentity {
+            tenant_id,
+            agent_id,
+        });
         self
     }
 
@@ -248,10 +299,7 @@ impl RebornBuildInput {
         owner_id: impl Into<String>,
         root: PathBuf,
     ) -> Self {
-        debug_assert!(matches!(
-            profile,
-            RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo
-        ));
+        debug_assert!(profile.uses_local_dev_storage_input());
         Self::new(
             profile,
             owner_id,
@@ -263,32 +311,150 @@ impl RebornBuildInput {
         )
     }
 
-    pub fn with_local_dev_workspace_root(mut self, workspace_root: PathBuf) -> Self {
-        if let RebornStorageInput::LocalDev {
-            workspace_root: root,
+    #[cfg(feature = "postgres")]
+    pub fn hosted_single_tenant_postgres(
+        profile: RebornCompositionProfile,
+        owner_id: impl Into<String>,
+        root: PathBuf,
+        pool: deadpool_postgres::Pool,
+        secret_master_key: ironclaw_secrets::SecretMaterial,
+    ) -> Result<Self, RebornBuildError> {
+        if profile != RebornCompositionProfile::HostedSingleTenant {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "hosted single-tenant Postgres storage requires profile=hosted-single-tenant; got profile={profile}"
+                ),
+            });
+        }
+        Ok(Self::new(
+            profile,
+            owner_id,
+            RebornStorageInput::HostedSingleTenantPostgres {
+                root,
+                workspace_root: None,
+                host_home_root: None,
+                pool,
+                secret_master_key,
+                process_local_resource_governor_singleton: true,
+            },
+        ))
+    }
+
+    #[cfg(feature = "postgres")]
+    pub fn hosted_single_tenant_postgres_from_config_and_env(
+        profile: RebornCompositionProfile,
+        owner_id: impl Into<String>,
+        root: PathBuf,
+        config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+    ) -> Result<Self, RebornBuildError> {
+        if profile != RebornCompositionProfile::HostedSingleTenant {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "hosted single-tenant Postgres storage requires profile=hosted-single-tenant; got profile={profile}"
+                ),
+            });
+        }
+        let ResolvedPostgresStorage {
+            pool,
+            secret_master_key,
+            process_local_resource_governor_singleton,
             ..
-        } = &mut self.storage
-        {
-            *root = Some(workspace_root);
+        } = resolve_postgres_storage_from_config_and_env(profile, config_file)?;
+        Ok(Self::new(
+            profile,
+            owner_id,
+            RebornStorageInput::HostedSingleTenantPostgres {
+                root,
+                workspace_root: None,
+                host_home_root: None,
+                pool,
+                secret_master_key,
+                process_local_resource_governor_singleton,
+            },
+        ))
+    }
+
+    /// Open the hosted-single-tenant trigger access store from this build
+    /// input's already-resolved PostgreSQL storage.
+    #[cfg(all(feature = "webui-v2-beta", feature = "postgres"))]
+    pub async fn open_hosted_single_tenant_trigger_access_store(
+        &self,
+    ) -> Result<Arc<dyn crate::LocalTriggerAccessStore>, crate::RebornLocalTriggerAccessStoreError>
+    {
+        let RebornStorageInput::HostedSingleTenantPostgres { pool, .. } = &self.storage else {
+            return Err(crate::RebornLocalTriggerAccessStoreError::Backend(
+                "hosted-single-tenant trigger access requires PostgreSQL-backed runtime storage"
+                    .to_string(),
+            ));
+        };
+        let filesystem = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(
+            pool.clone(),
+        ));
+        filesystem.run_migrations().await.map_err(|error| {
+            crate::RebornLocalTriggerAccessStoreError::Backend(error.to_string())
+        })?;
+        let scoped = crate::wrap_scoped(filesystem);
+        Ok(Arc::new(
+            crate::RebornFilesystemLocalTriggerAccessStore::new(scoped),
+        ))
+    }
+
+    pub fn with_local_runtime_workspace_root(mut self, workspace_root: PathBuf) -> Self {
+        match &mut self.storage {
+            RebornStorageInput::LocalDev {
+                workspace_root: root,
+                ..
+            } => {
+                *root = Some(workspace_root);
+            }
+            #[cfg(feature = "postgres")]
+            RebornStorageInput::HostedSingleTenantPostgres {
+                workspace_root: root,
+                ..
+            } => {
+                *root = Some(workspace_root);
+            }
+            _ => {}
         }
         self
     }
 
-    pub fn with_local_dev_confirmed_host_home_root(mut self, host_home_root: PathBuf) -> Self {
-        if let RebornStorageInput::LocalDev {
-            host_home_root: root,
-            ..
-        } = &mut self.storage
-        {
-            *root = Some(host_home_root);
+    pub fn with_local_dev_workspace_root(self, workspace_root: PathBuf) -> Self {
+        self.with_local_runtime_workspace_root(workspace_root)
+    }
+
+    pub fn with_local_runtime_confirmed_host_home_root(mut self, host_home_root: PathBuf) -> Self {
+        match &mut self.storage {
+            RebornStorageInput::LocalDev {
+                host_home_root: root,
+                ..
+            } => {
+                *root = Some(host_home_root);
+            }
+            #[cfg(feature = "postgres")]
+            RebornStorageInput::HostedSingleTenantPostgres {
+                host_home_root: root,
+                ..
+            } => {
+                *root = Some(host_home_root);
+            }
+            _ => {}
         }
         self
     }
 
-    pub fn requires_local_dev_confirmed_host_home_root(&self) -> bool {
+    pub fn with_local_dev_confirmed_host_home_root(self, host_home_root: PathBuf) -> Self {
+        self.with_local_runtime_confirmed_host_home_root(host_home_root)
+    }
+
+    pub fn requires_local_runtime_confirmed_host_home_root(&self) -> bool {
         self.runtime_policy.as_ref().is_some_and(|policy| {
             policy.filesystem_backend == FilesystemBackendKind::HostWorkspaceAndHome
         })
+    }
+
+    pub fn requires_local_dev_confirmed_host_home_root(&self) -> bool {
+        self.requires_local_runtime_confirmed_host_home_root()
     }
 
     pub fn grants_trusted_laptop_access(&self) -> bool {
@@ -316,6 +482,7 @@ impl RebornBuildInput {
                 path_or_url: path_or_url.into(),
                 auth_token,
                 secret_master_key: Some(secret_master_key),
+                process_local_resource_governor_singleton: true,
             },
         )
     }
@@ -336,6 +503,7 @@ impl RebornBuildInput {
                 path_or_url: path_or_url.into(),
                 auth_token,
                 secret_master_key: None,
+                process_local_resource_governor_singleton: true,
             },
         )
     }
@@ -356,6 +524,7 @@ impl RebornBuildInput {
                 url,
                 tls_options: PostgresPoolTlsOptions::default(),
                 secret_master_key: Some(secret_master_key),
+                process_local_resource_governor_singleton: true,
             },
         )
     }
@@ -375,6 +544,7 @@ impl RebornBuildInput {
                 url,
                 tls_options: PostgresPoolTlsOptions::default(),
                 secret_master_key: None,
+                process_local_resource_governor_singleton: true,
             },
         )
     }
@@ -385,56 +555,13 @@ impl RebornBuildInput {
         owner_id: impl Into<String>,
         config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
     ) -> Result<Self, RebornBuildError> {
-        let storage = config_file
-            .and_then(|file| file.storage.as_ref())
-            .ok_or_else(|| RebornBuildError::InvalidConfig {
-                reason: format!(
-                    "profile={profile} requires [storage] backend = \"postgres\" with url_env naming \
-                     an environment variable such as {DEFAULT_REBORN_POSTGRES_URL_ENV}"
-                ),
-            })?;
-        match storage.backend.as_ref() {
-            Some(StorageBackend::Postgres) => {}
-            Some(StorageBackend::Unknown(backend)) => {
-                return Err(RebornBuildError::InvalidConfig {
-                    reason: format!(
-                        "production storage supports only [storage].backend = \"postgres\" in this slice; got `{backend}`"
-                    ),
-                });
-            }
-            None => {
-                return Err(RebornBuildError::InvalidConfig {
-                    reason: format!("profile={profile} requires [storage].backend = \"postgres\""),
-                });
-            }
-        }
-        let url_env = storage
-            .url_env
-            .as_deref()
-            .unwrap_or(DEFAULT_REBORN_POSTGRES_URL_ENV);
-        let secret_master_key_env = storage
-            .secret_master_key_env
-            .as_deref()
-            .unwrap_or(DEFAULT_REBORN_SECRET_MASTER_KEY_ENV);
-        let database_url = required_production_url_env(
-            url_env,
-            "Reborn production PostgreSQL URL",
-            "storage.url_env",
-        )?;
-        let secret_master_key = required_production_key_env(
-            secret_master_key_env,
-            "Reborn production secret master key",
-            "storage.secret_master_key_env",
-        )?;
-        let pool_max_size = storage
-            .pool_max_size
-            .unwrap_or(ironclaw_reborn_event_store::DEFAULT_POSTGRES_POOL_MAX_SIZE);
-        let tls_options = postgres_pool_tls_options_from_env()?;
-        let pool = ironclaw_reborn_event_store::open_postgres_pool_with_tls_options(
-            database_url.clone(),
-            pool_max_size,
+        let ResolvedPostgresStorage {
+            pool,
+            url,
             tls_options,
-        )?;
+            secret_master_key,
+            process_local_resource_governor_singleton,
+        } = resolve_postgres_storage_from_config_and_env(profile, config_file)?;
         let runtime_policy = resolve_production_runtime_policy(profile, config_file)?;
         let trust_policy = crate::builtin_first_party_trust_policy()?;
 
@@ -443,9 +570,10 @@ impl RebornBuildInput {
             owner_id,
             RebornStorageInput::Postgres {
                 pool,
-                url: database_url,
+                url,
                 tls_options,
                 secret_master_key: Some(secret_master_key),
+                process_local_resource_governor_singleton,
             },
         )
         .with_production_trust_policy(Arc::new(trust_policy))
@@ -508,7 +636,7 @@ impl RebornBuildInput {
 
     pub fn with_nearai_mcp_bootstrap_config(
         mut self,
-        config: crate::nearai_mcp::NearAiMcpBootstrapConfig,
+        config: crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig,
     ) -> Self {
         self.nearai_mcp_bootstrap_config = Some(config);
         self
@@ -516,7 +644,7 @@ impl RebornBuildInput {
 
     pub fn with_optional_nearai_mcp_bootstrap_config(
         mut self,
-        config: Option<crate::nearai_mcp::NearAiMcpBootstrapConfig>,
+        config: Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
     ) -> Self {
         self.nearai_mcp_bootstrap_config = config;
         self
@@ -528,6 +656,17 @@ impl RebornBuildInput {
         egress: Option<HostRuntimeHttpEgressPort>,
     ) -> Self {
         self.host_runtime_http_egress_for_test = Some(egress);
+        self
+    }
+
+    /// Override local-dev host HTTP egress for fixture recording and replay.
+    ///
+    /// This is compiled only for tests/test-support so Reborn QA harnesses can
+    /// route host-mediated integration calls through trace record/replay
+    /// adapters without changing production composition.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_network_http_egress_for_test(mut self, egress: Arc<dyn NetworkHttpEgress>) -> Self {
+        self.network_http_egress_for_test = Some(egress);
         self
     }
 
@@ -561,6 +700,15 @@ impl RebornBuildInput {
         self
     }
 
+    /// Register the lazy Slack personal OAuth slot so the provider client
+    /// fetches credentials from the setup service at request time rather than
+    /// from env vars at startup.
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub fn with_slack_personal_oauth_lazy(mut self, slot: SlackPersonalSetupServiceSlot) -> Self {
+        self.slack_personal_oauth_lazy_slot = Some(slot);
+        self
+    }
+
     /// Enable Dynamic Client Registration for the bundled Notion MCP OAuth provider.
     ///
     /// Callers provide the public origin that serves the Reborn product-auth
@@ -579,6 +727,19 @@ impl RebornBuildInput {
             scopes: Vec::new(),
         });
         Ok(self)
+    }
+
+    /// Set concurrency limits for the in-memory turn-state store.
+    ///
+    /// Called by `build_reborn_runtime` after mapping from `TurnRunnerSettings` so the
+    /// factory can apply them when constructing the store. Callers should use
+    /// `RebornRuntimeInput::with_runner_settings` rather than calling this directly.
+    pub(crate) fn with_turn_state_store_limits(
+        mut self,
+        limits: InMemoryTurnStateStoreLimits,
+    ) -> Self {
+        self.turn_state_store_limits = limits;
+        self
     }
 
     fn push_oauth_provider_config(
@@ -620,6 +781,7 @@ impl RebornBuildInput {
         Self {
             profile,
             owner_id: owner_id.into(),
+            local_runtime_identity: None,
             storage,
             production_trust_policy: None,
             runtime_policy: None,
@@ -630,12 +792,95 @@ impl RebornBuildInput {
             require_wasm_credentials: false,
             #[cfg(all(test, feature = "slack-v2-host-beta"))]
             host_runtime_http_egress_for_test: None,
+            #[cfg(any(test, feature = "test-support"))]
+            network_http_egress_for_test: None,
             product_auth_ports: None,
             oauth_provider_configs: Vec::new(),
             oauth_dcr_provider_configs: Vec::new(),
+            #[cfg(feature = "slack-v2-host-beta")]
+            slack_personal_oauth_lazy_slot: None,
             nearai_mcp_bootstrap_config: None,
+            turn_state_store_limits: InMemoryTurnStateStoreLimits::default(),
         }
     }
+}
+
+#[cfg(feature = "postgres")]
+struct ResolvedPostgresStorage {
+    pool: deadpool_postgres::Pool,
+    url: ironclaw_secrets::SecretMaterial,
+    tls_options: PostgresPoolTlsOptions,
+    secret_master_key: ironclaw_secrets::SecretMaterial,
+    process_local_resource_governor_singleton: bool,
+}
+
+#[cfg(feature = "postgres")]
+fn resolve_postgres_storage_from_config_and_env(
+    profile: RebornCompositionProfile,
+    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+) -> Result<ResolvedPostgresStorage, RebornBuildError> {
+    let storage = config_file
+        .and_then(|file| file.storage.as_ref())
+        .ok_or_else(|| RebornBuildError::InvalidConfig {
+            reason: format!(
+                "profile={profile} requires [storage] backend = \"postgres\" with url_env naming \
+                 an environment variable such as {DEFAULT_REBORN_POSTGRES_URL_ENV}"
+            ),
+        })?;
+    match storage.backend.as_ref() {
+        Some(StorageBackend::Postgres) => {}
+        Some(StorageBackend::Unknown(backend)) => {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "PostgreSQL-backed Reborn storage supports only [storage].backend = \"postgres\" in this slice; got `{backend}`"
+                ),
+            });
+        }
+        None => {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!("profile={profile} requires [storage].backend = \"postgres\""),
+            });
+        }
+    }
+    let url_env = storage
+        .url_env
+        .as_deref()
+        .unwrap_or(DEFAULT_REBORN_POSTGRES_URL_ENV);
+    let secret_master_key_env = storage
+        .secret_master_key_env
+        .as_deref()
+        .unwrap_or(DEFAULT_REBORN_SECRET_MASTER_KEY_ENV);
+    let database_url =
+        required_production_url_env(url_env, "Reborn PostgreSQL URL", "storage.url_env")?;
+    let secret_master_key = required_production_key_env(
+        secret_master_key_env,
+        "Reborn secret master key",
+        "storage.secret_master_key_env",
+    )?;
+    let process_local_resource_governor_singleton =
+        require_postgres_resource_governor_singleton_env()?;
+    let (pool_max_size, pool_max_size_source) =
+        resolve_postgres_pool_max_size(storage.pool_max_size)?;
+    tracing::debug!(
+        %profile,
+        pool_max_size,
+        pool_max_size_source,
+        "resolved Reborn PostgreSQL pool size"
+    );
+    let tls_options = postgres_pool_tls_options_from_env()?;
+    let pool = ironclaw_reborn_event_store::open_postgres_pool_with_tls_options(
+        database_url.clone(),
+        pool_max_size,
+        tls_options,
+    )?;
+
+    Ok(ResolvedPostgresStorage {
+        pool,
+        url: database_url,
+        tls_options,
+        secret_master_key,
+        process_local_resource_governor_singleton,
+    })
 }
 
 #[cfg(feature = "postgres")]
@@ -687,6 +932,40 @@ fn resolve_production_runtime_policy(
 }
 
 #[cfg(feature = "postgres")]
+fn resolve_postgres_pool_max_size(
+    configured: Option<usize>,
+) -> Result<(usize, &'static str), RebornBuildError> {
+    match std::env::var(REBORN_POSTGRES_POOL_MAX_SIZE_ENV) {
+        Ok(raw) => {
+            let trimmed = raw.trim();
+            let parsed = trimmed
+                .parse::<usize>()
+                .map_err(|_| RebornBuildError::InvalidConfig {
+                    reason: format!(
+                        "{REBORN_POSTGRES_POOL_MAX_SIZE_ENV} must be a positive integer"
+                    ),
+                })?;
+            if parsed == 0 {
+                return Err(RebornBuildError::InvalidConfig {
+                    reason: format!("{REBORN_POSTGRES_POOL_MAX_SIZE_ENV} must be greater than 0"),
+                });
+            }
+            Ok((parsed, "env"))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(configured.map_or(
+            (
+                ironclaw_reborn_event_store::DEFAULT_POSTGRES_POOL_MAX_SIZE,
+                "default",
+            ),
+            |value| (value, "config"),
+        )),
+        Err(std::env::VarError::NotUnicode(_)) => Err(RebornBuildError::InvalidConfig {
+            reason: format!("{REBORN_POSTGRES_POOL_MAX_SIZE_ENV} must be valid Unicode"),
+        }),
+    }
+}
+
+#[cfg(feature = "postgres")]
 fn required_production_url_env(
     env_name: &str,
     description: &str,
@@ -726,6 +1005,35 @@ fn required_production_key_env(
 }
 
 #[cfg(feature = "postgres")]
+fn require_postgres_resource_governor_singleton_env() -> Result<bool, RebornBuildError> {
+    match std::env::var(REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON_ENV) {
+        Ok(value) => match parse_bool_opt_in(&value) {
+            Some(true) => Ok(true),
+            Some(false) => Err(RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "{REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON_ENV} must be true when this process is the singleton or elected resource-governor authority for the shared Postgres database"
+                ),
+            }),
+            None => Err(RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "{REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON_ENV} must be one of true, false, 1, 0, yes, no, on, or off"
+                ),
+            }),
+        },
+        Err(std::env::VarError::NotPresent) => Err(RebornBuildError::InvalidConfig {
+            reason: format!(
+                "{REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON_ENV} must be set to true when this process is the singleton or elected resource-governor authority for the shared Postgres database"
+            ),
+        }),
+        Err(std::env::VarError::NotUnicode(_)) => Err(RebornBuildError::InvalidConfig {
+            reason: format!(
+                "{REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON_ENV} must be valid UTF-8"
+            ),
+        }),
+    }
+}
+
+#[cfg(feature = "postgres")]
 fn postgres_pool_tls_options_from_env() -> Result<PostgresPoolTlsOptions, RebornBuildError> {
     let ssl_mode_override = match std::env::var(DATABASE_SSLMODE_ENV) {
         Ok(value) if value.trim().is_empty() => None,
@@ -745,7 +1053,7 @@ fn postgres_pool_tls_options_from_env() -> Result<PostgresPoolTlsOptions, Reborn
         }
     };
     let allow_remote_cleartext = match std::env::var(ALLOW_REMOTE_POSTGRES_CLEAR_TEXT_ENV) {
-        Ok(value) => parse_cleartext_opt_in(&value).ok_or_else(|| {
+        Ok(value) => parse_bool_opt_in(&value).ok_or_else(|| {
             RebornBuildError::InvalidConfig {
                 reason: format!(
                     "{ALLOW_REMOTE_POSTGRES_CLEAR_TEXT_ENV} must be one of true, false, 1, 0, yes, no, on, or off"
@@ -767,7 +1075,7 @@ fn postgres_pool_tls_options_from_env() -> Result<PostgresPoolTlsOptions, Reborn
 }
 
 #[cfg(feature = "postgres")]
-fn parse_cleartext_opt_in(value: &str) -> Option<bool> {
+fn parse_bool_opt_in(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "" | "0" | "false" | "no" | "off" => Some(false),
         "1" | "true" | "yes" | "on" => Some(true),

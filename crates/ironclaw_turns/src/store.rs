@@ -1,17 +1,19 @@
+use std::collections::BTreeSet;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use ironclaw_host_api::{AgentId, ProjectId, RuntimeCredentialAuthRequirement, TenantId};
 
 use crate::{
-    AcceptedMessageRef, AdmissionRejection, CancelRunRequest, CancelRunResponse, GateRef,
-    GetRunStateRequest, IdempotencyKey, LoopCheckpointRecord, ReplyTargetBindingRef,
-    ResumeTurnRequest, ResumeTurnResponse, RunProfileResolver, SourceBindingRef,
-    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
-    TurnActiveRunRefState, TurnActor, TurnAdmissionPolicy, TurnAdmissionReservationRecord,
-    TurnCapacityResource, TurnCheckpointId, TurnError, TurnErrorCategory, TurnId, TurnLeaseToken,
-    TurnLifecycleEvent, TurnRunId, TurnRunProfile, TurnRunState, TurnRunnerId, TurnScope,
-    TurnStatus, TurnTimestamp,
+    AcceptedMessageRef, AdmissionRejection, CancelRunRequest, CancelRunResponse,
+    CapabilityActivityId, GateRef, GetRunStateRequest, IdempotencyKey, LoopCheckpointRecord,
+    ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest,
+    RetryTurnResponse, RunProfileResolver, SourceBindingRef, SubmitChildRunRequest,
+    SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActiveRunRefState, TurnActor,
+    TurnAdmissionPolicy, TurnAdmissionReservationRecord, TurnCapacityResource, TurnCheckpointId,
+    TurnError, TurnErrorCategory, TurnId, TurnLeaseToken, TurnLifecycleEvent, TurnRunId,
+    TurnRunProfile, TurnRunState, TurnRunnerId, TurnScope, TurnStatus, TurnTimestamp,
     events::EventCursor,
     run_profile::{LoopCheckpointKind, LoopCheckpointStateRef, LoopModelRouteSnapshot},
 };
@@ -30,6 +32,8 @@ pub trait TurnStateStore: Send + Sync {
         request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError>;
 
+    async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError>;
+
     async fn request_cancel(
         &self,
         request: CancelRunRequest,
@@ -41,6 +45,18 @@ pub trait TurnStateStore: Send + Sync {
     /// [`TurnError::ScopeNotFound`]. This keeps scoped lookups non-enumerating
     /// and gives higher-level helpers one canonical missing-run shape.
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError>;
+
+    /// Return run state for live cancellation-handle seeding.
+    ///
+    /// The default path is the canonical scoped lookup. Stores with an
+    /// authoritative hot cache may override this to avoid forcing durable row
+    /// materialization on the turn execution hot path.
+    async fn get_run_state_for_cancellation(
+        &self,
+        request: GetRunStateRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.get_run_state(request).await
+    }
 }
 
 /// Classify an active run reference through the shared turn-state lookup.
@@ -111,11 +127,37 @@ pub trait TurnSpawnTreeStateStore: TurnStateStore {
     ) -> Result<SpawnTreeReservation, TurnError>;
 
     /// Release descendant capacity for a root run after validating root scope.
+    ///
+    /// `idempotency_key` dedups the release against a durable per-child
+    /// record (`SpawnTreeReservation.released_children`) so a retried call
+    /// for the same child (recovery re-driving an edge stuck at
+    /// `ReservationReleaseState::Claimed`, or a rollback retry) is a no-op
+    /// rather than a second decrement — see
+    /// `docs/reborn/subagent-spawn/thread-harness-design.md` §5.5 round-5/6.
+    /// Callers pass the child's own `TurnRunId`, which never recurs (ABA-immune).
     async fn release_tree_descendants(
         &self,
         scope: &TurnScope,
         root_run_id: TurnRunId,
         delta: u32,
+        idempotency_key: TurnRunId,
+    ) -> Result<(), TurnError>;
+
+    /// Remove one child's dedup entry from `SpawnTreeReservation.released_children`
+    /// once its await-edge is about to be deleted (§5.5 round-7) — called
+    /// strictly *before* the edge's `delete_if_version`, never after, so a
+    /// crash between prune and delete just re-derives the same prune on the
+    /// next recovery pass (idempotent: pruning an absent entry is a no-op).
+    /// Without this, `released_children` grows for the tree's entire
+    /// cumulative lifetime instead of staying bounded by the live descendant
+    /// cap. Missing root is benign here (the tree may already be fully
+    /// released and its reservation record deleted) — only real backend
+    /// failures return `Err`.
+    async fn prune_released_child(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        child_run_id: TurnRunId,
     ) -> Result<(), TurnError>;
 }
 
@@ -173,8 +215,15 @@ pub struct TurnRunRecord {
     pub profile: TurnRunProfile,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_model_route: Option<LoopModelRouteSnapshot>,
+    /// Cumulative provider-reported token usage for this run's model calls,
+    /// captured at loop exit. Rides the JSON-blob snapshot like
+    /// `resolved_model_route`; `None` when no usage was reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_usage: Option<crate::run_profile::LoopModelUsage>,
     pub checkpoint_id: Option<TurnCheckpointId>,
     pub gate_ref: Option<GateRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_activity_id: Option<CapabilityActivityId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
     pub failure: Option<crate::SanitizedFailure>,
@@ -191,6 +240,14 @@ pub struct TurnRunRecord {
     pub subagent_depth: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawn_tree_root_run_id: Option<TurnRunId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product_context: Option<crate::ProductTurnContext>,
+    #[serde(
+        rename = "auth_resume_disposition",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub resume_disposition: Option<crate::GateResumeDisposition>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -219,6 +276,13 @@ pub struct SpawnTreeReservation {
     pub scope: TurnScope,
     pub root_run_id: TurnRunId,
     pub descendant_count: u64,
+    /// Per-child dedup record for `release_tree_descendants`'s idempotency
+    /// key (§5.5 round-5/6) — present only for children whose release has
+    /// been recorded but whose await-edge hasn't finished closing yet
+    /// (pruned in lockstep with edge deletion, so this stays bounded by the
+    /// live descendant cap, never the tree's cumulative lifetime count).
+    #[serde(default)]
+    pub released_children: BTreeSet<TurnRunId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -268,6 +332,7 @@ pub struct TurnCheckpointRecord {
 pub enum TurnIdempotencyOperationKind {
     Submit,
     Resume,
+    Retry,
     Cancel,
 }
 
@@ -278,6 +343,7 @@ pub enum TurnIdempotencyOutcomeKind {
     ThreadBusy,
     AdmissionRejected,
     Resumed,
+    Retried,
     CancelRecorded,
     ScopeNotFound,
     Unauthorized,
@@ -298,8 +364,10 @@ impl TurnIdempotencyOutcomeKind {
             TurnError::Unavailable { .. } => Self::Unavailable,
             TurnError::CapacityExceeded { .. } => Self::CapacityExceeded,
             TurnError::Conflict { .. }
+            | TurnError::RunNotRetryable { .. }
             | TurnError::InvalidTransition { .. }
             | TurnError::LeaseMismatch => Self::Conflict,
+            TurnError::InvalidRunOriginAdapter => Self::InvalidRequest,
         }
     }
 }
@@ -310,6 +378,8 @@ pub enum TurnIdempotencyReplay {
     SubmitThreadBusy(ThreadBusy),
     SubmitAdmissionRejected(AdmissionRejection),
     ResumeSucceeded(ResumeTurnResponse),
+    RetrySucceeded(RetryTurnResponse),
+    RetryThreadBusy(ThreadBusy),
     CancelRecorded(CancelRunResponse),
     Error(TurnIdempotencyErrorReplay),
 }
@@ -431,6 +501,23 @@ impl TurnIdempotencyRecord {
             _ => None,
         }
     }
+
+    pub fn replay_retry(&self) -> Option<Result<RetryTurnResponse, TurnError>> {
+        if self.operation != TurnIdempotencyOperationKind::Retry {
+            return None;
+        }
+        match &self.replay {
+            TurnIdempotencyReplay::RetrySucceeded(response) => Some(Ok(response.clone())),
+            // Same-thread busy is a transient lock state, not an idempotent retry outcome.
+            TurnIdempotencyReplay::RetryThreadBusy(_) => None,
+            TurnIdempotencyReplay::Error(error)
+                if self.operation == TurnIdempotencyOperationKind::Retry =>
+            {
+                Some(Err(error.to_error()))
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -450,4 +537,129 @@ pub struct TurnPersistenceSnapshot {
     pub admission_reservations: Vec<TurnAdmissionReservationRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub spawn_tree_reservations: Vec<SpawnTreeReservation>,
+}
+
+impl TurnPersistenceSnapshot {
+    pub fn set_runs(mut self, runs: Vec<TurnRunRecord>) -> Self {
+        self.runs = runs;
+        self
+    }
+
+    pub fn set_checkpoints(mut self, checkpoints: Vec<TurnCheckpointRecord>) -> Self {
+        self.checkpoints = checkpoints;
+        self
+    }
+
+    pub fn set_events(mut self, events: Vec<TurnLifecycleEvent>) -> Self {
+        self.events = events;
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        AcceptedMessageRef, EventCursor, GateResumeDisposition, ReplyTargetBindingRef,
+        SourceBindingRef, TurnRunId, TurnRunRecord, TurnScope, TurnStatus,
+    };
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+
+    fn minimal_turn_run_record() -> TurnRunRecord {
+        // Build a TurnRunRecord by serializing a struct-literal then
+        // deserializing back so serde fills in all optional defaults.
+        // We construct the profile via the same JSON shortcut used elsewhere
+        // in test helpers (no ResolvedRunProfile needed).
+        let scope = TurnScope::new(
+            TenantId::new("tenant-store-test").unwrap(),
+            Some(AgentId::new("agent-store-test").unwrap()),
+            Some(ProjectId::new("project-store-test").unwrap()),
+            ThreadId::new("thread-store-test").unwrap(),
+        );
+        let profile: crate::TurnRunProfile = serde_json::from_value(serde_json::json!({
+            "id": "default",
+            "version": 1,
+            "allow_steering": false,
+            "auto_queue_followups": false,
+        }))
+        .expect("profile deserialization");
+        TurnRunRecord {
+            run_id: TurnRunId::new(),
+            turn_id: crate::TurnId::new(),
+            scope,
+            accepted_message_ref: AcceptedMessageRef::new("accepted-store-test").unwrap(),
+            source_binding_ref: SourceBindingRef::new("source-store-test").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-store-test").unwrap(),
+            status: TurnStatus::Completed,
+            profile,
+            resolved_model_route: None,
+            model_usage: None,
+            checkpoint_id: None,
+            gate_ref: None,
+            blocked_activity_id: None,
+            credential_requirements: vec![],
+            failure: None,
+            event_cursor: EventCursor(0),
+            runner_id: None,
+            lease_token: None,
+            lease_expires_at: None,
+            last_heartbeat_at: None,
+            claim_count: 0,
+            received_at: chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
+            product_context: None,
+            resume_disposition: None,
+        }
+    }
+
+    #[test]
+    fn turn_run_record_resume_disposition_defaults_to_none_when_absent() {
+        // (a) Deserialize a real TurnRunRecord JSON with auth_resume_disposition key ABSENT.
+        // This proves #[serde(default)] is in place on the field.
+        let record = minimal_turn_run_record();
+        let mut json_val =
+            serde_json::to_value(&record).expect("serialize TurnRunRecord with None disposition");
+
+        // The key must already be absent due to skip_serializing_if = "Option::is_none".
+        let obj = json_val
+            .as_object_mut()
+            .expect("TurnRunRecord must serialize to JSON object");
+        assert!(
+            !obj.contains_key("auth_resume_disposition"),
+            "auth_resume_disposition must be absent when resume_disposition is None"
+        );
+
+        // Belt-and-suspenders: forcibly remove the key then deserialize.
+        obj.remove("auth_resume_disposition");
+        let deserialized: TurnRunRecord =
+            serde_json::from_value(json_val).expect("deserialize TurnRunRecord missing key");
+        assert_eq!(
+            deserialized.resume_disposition, None,
+            "resume_disposition must default to None when the JSON key is absent"
+        );
+
+        // (b) Deserialize a real TurnRunRecord JSON carrying the LEGACY key
+        // "auth_resume_disposition": "denied". This proves the serde rename/back-compat.
+        let record2 = minimal_turn_run_record();
+        let mut json_val2 =
+            serde_json::to_value(&record2).expect("serialize TurnRunRecord for legacy key test");
+        let obj2 = json_val2
+            .as_object_mut()
+            .expect("TurnRunRecord must serialize to JSON object");
+        obj2.insert(
+            "auth_resume_disposition".to_string(),
+            serde_json::json!("denied"),
+        );
+
+        let deserialized2: TurnRunRecord =
+            serde_json::from_value(json_val2).expect("deserialize TurnRunRecord with legacy key");
+        assert_eq!(
+            deserialized2.resume_disposition,
+            Some(GateResumeDisposition::Denied),
+            "resume_disposition must be Some(Denied) when legacy key auth_resume_disposition is present"
+        );
+    }
 }

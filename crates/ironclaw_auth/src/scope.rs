@@ -53,4 +53,44 @@ impl AuthProductScope {
         self.session_id = Some(session_id);
         self
     }
+
+    /// Build an owner-granularity product-auth scope for credential-account
+    /// lookups from a runtime `resource` scope.
+    ///
+    /// Credential accounts (OAuth tokens, manual tokens, runtime credential
+    /// accounts) are owned by the tenant/user/agent/project — NOT by a single
+    /// thread or mission. A credential a user authorizes in one chat thread
+    /// must stay resolvable from every other thread of the same owner; "thread"
+    /// is not an ownership class. This drops the transient `mission_id`/
+    /// `thread_id` (via [`ResourceScope::without_thread_and_mission`]) so an
+    /// owner-scoped account read matches across the owner's threads instead of
+    /// binding the credential to the thread it was authorized in.
+    ///
+    /// This is the credential-ownership contract for the runtime-resolution
+    /// path — the single source of truth shared by every runtime credential
+    /// resolver (the host-runtime generic resolver and the first-party GSuite
+    /// resolver). Do not re-derive the strip inline — that drift is exactly
+    /// what bound Google credentials to a thread.
+    ///
+    /// [`ResourceScope::without_thread_and_mission`]: ironclaw_host_api::ResourceScope::without_thread_and_mission
+    pub fn credential_owner(
+        resource: &ironclaw_host_api::ResourceScope,
+        surface: AuthSurface,
+    ) -> Self {
+        Self::new(resource.without_thread_and_mission(), surface)
+    }
+
+    /// Owner-granularity copy of this auth scope (drops the transient
+    /// `thread_id`/`mission_id`), preserving `surface` and `session_id`.
+    ///
+    /// Use when projecting an existing [`AuthProductScope`] to credential-owner
+    /// granularity while keeping its surface/session segmentation — e.g. an
+    /// OAuth reconnect that must bind to the owner's existing account. See
+    /// [`Self::credential_owner`] for the ownership contract this enforces.
+    pub fn to_credential_owner(&self) -> Self {
+        Self {
+            resource: self.resource.without_thread_and_mission(),
+            ..self.clone()
+        }
+    }
 }

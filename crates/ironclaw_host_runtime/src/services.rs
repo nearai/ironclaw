@@ -47,13 +47,10 @@ use ironclaw_processes::{
     ProcessManager, ProcessResultStore, ProcessServices, ProcessStore,
 };
 use ironclaw_reborn_event_store::{
-    RebornEventStoreConfig, RebornEventStoreError, RebornEventStores, RebornProfile,
-    build_reborn_event_stores,
+    CoalescingEventSink, EventBatchConfig, RebornEventStoreConfig, RebornEventStoreError,
+    RebornEventStores, RebornProfile, build_reborn_event_stores,
 };
-use ironclaw_resources::{
-    FilesystemResourceGovernorStore, InMemoryResourceGovernor, PersistentResourceGovernor,
-    ResourceGovernor,
-};
+use ironclaw_resources::{FilesystemResourceGovernor, InMemoryResourceGovernor, ResourceGovernor};
 use ironclaw_run_state::{
     ApprovalRequestStore, FilesystemApprovalRequestStore, FilesystemRunStateStore,
     InMemoryApprovalRequestStore, InMemoryRunStateStore, RunStateApprovalStore, RunStateStore,
@@ -72,7 +69,7 @@ use ironclaw_turns::{
 use ironclaw_wasm::{
     DenyWasmHostHttp, EmptyWasmRuntimeCredentials, PreparedWitTool, WasmError,
     WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder,
-    WasmStagedRuntimeCredentials, WitToolHost, WitToolRequest, WitToolRuntime,
+    WasmStagedRuntimeCredentials, WitToolExecution, WitToolHost, WitToolRequest, WitToolRuntime,
     WitToolRuntimeConfig,
 };
 
@@ -87,7 +84,7 @@ use crate::{
     LocalHostProcessPort, LocalInvocationServicesResolver, PlannerError,
     ProcessObligationLifecycleStore, RuntimeBackendHealth, RuntimeProcessPort,
     RuntimeSecretMaterialStager, RuntimeSecretStageError, TenantSandboxProcessPort,
-    ToolCallHttpEgress, TurnRunExecutor, TurnRunScheduler, TurnRunSchedulerConfig, plan_capability,
+    ToolCallHttpEgress, plan_capability,
 };
 use process_executor::{HostProcessExecutor, RuntimeDispatchProcessExecutor};
 
@@ -99,6 +96,7 @@ mod production_services;
 mod production_wiring;
 mod runtime_adapters;
 mod wasm_diagnostics;
+mod wasm_execution;
 
 use production_wiring::{
     ProductionComponentType, ProductionComponentTypes, ProductionImplementationReadiness,
@@ -379,6 +377,12 @@ where
         self.security_audit_sink.clone()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn wasm_runtime_credential_provider_captured_for_test(&self) -> bool {
+        self.component_types
+            .wasm_runtime_credential_provider_captured
+    }
+
     /// Builds a runtime dispatcher with every configured runtime adapter.
     fn runtime_dispatcher(&self) -> RuntimeDispatcher<'static, F, G> {
         let mut dispatcher = RuntimeDispatcher::from_shared_registry(
@@ -397,7 +401,8 @@ where
             Arc::clone(&self.process_port),
             self.secret_store.clone(),
         )
-        .with_tool_call_http_egress(tool_call_http_egress(&self.tool_call_http_egress));
+        .with_tool_call_http_egress(tool_call_http_egress(&self.tool_call_http_egress))
+        .with_runtime_secret_material_stager(Some(self.runtime_secret_material_stager()));
         if let Some(audit_sink) = &self.audit_sink {
             invocation_services_resolver =
                 invocation_services_resolver.with_audit_sink(Arc::clone(audit_sink));
@@ -583,6 +588,13 @@ where
         }
         if let Some(policies) = &self.persistent_approval_policies {
             runtime = runtime.with_persistent_approval_policies(Arc::clone(policies));
+        }
+        // Wire the credential pre-flight store from the same secret_store used by
+        // the obligation handler (below). This ensures that contract tests driving
+        // host_runtime_for_local_testing() with .with_secret_store(...) genuinely
+        // exercise the pre-flight path, not just the dispatch-time obligation check.
+        if let Some(secret_store) = &self.secret_store {
+            runtime = runtime.with_credential_preflight_store(Arc::clone(secret_store));
         }
         runtime.with_obligation_handler(Arc::new(self.builtin_obligation_handler()))
     }

@@ -8,15 +8,19 @@ use ironclaw_turns::{
 };
 
 use crate::{
-    state::{CheckpointKind, LoopExecutionState, PendingApprovalResume, PendingAuthResume},
+    state::{
+        CheckpointKind, LoopExecutionState, PendingApprovalResume, PendingAuthResume,
+        PendingExternalToolResume,
+    },
     strategies::{GateKind, GateOutcome},
 };
 
 use super::{
-    AgentLoopExecutorError, BatchStep, CancelCheck, CheckpointStage, ExecutorStage, StageContext,
-    append_capability_result_ref, append_capability_safe_summary_ref, blocked_kind,
-    clear_matching_pending_auth_resume, exit_id, failed_exit, gate_tool_result_summary,
-    loop_gate_kind, push_completed_result,
+    AgentLoopExecutorError, BatchStep, CancelCheck, CheckpointStage, ExecutorStage,
+    FailedExitDetails, StageContext, append_capability_result_ref,
+    append_capability_safe_summary_ref, attach_failure_explanation, blocked_kind,
+    clear_matching_pending_auth_resume, clear_matching_pending_external_tool_resume, exit_id,
+    failed_exit, gate_tool_result_summary, loop_gate_kind, push_completed_result,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -32,6 +36,7 @@ pub(super) struct GateInput {
     pub(super) gate_ref: ironclaw_turns::LoopGateRef,
     pub(super) credential_requirements: Vec<ironclaw_host_api::RuntimeCredentialAuthRequirement>,
     pub(super) approval_resume: Option<CapabilityApprovalResume>,
+    pub(super) auth_resume: Option<ironclaw_turns::run_profile::CapabilityAuthResume>,
 }
 
 pub(super) struct AwaitDependentRunGateInput {
@@ -62,21 +67,43 @@ impl ExecutorStage<GateInput> for GateStage {
             GateOutcome::Block { gate } => {
                 state.gate_state = gate;
                 state.last_gate = Some(gate_ref.clone());
-                state.pending_approval_resume =
-                    input.approval_resume.map(|resume| PendingApprovalResume {
-                        gate_ref: gate_ref.clone(),
-                        capability_id: call.capability_id.clone(),
-                        approval_request_id: resume.approval_request_id,
-                        resume_token: resume.resume_token,
-                        correlation_id: resume.correlation_id,
-                        surface_version: call.surface_version.clone(),
-                        input_ref: resume.input_ref,
-                        effective_capability_ids: call.effective_capability_ids.clone(),
-                        provider_replay: call.provider_replay.clone(),
-                        input: resume.input,
-                        estimate: resume.estimate,
+                let auth_resume = input.auth_resume.as_ref();
+                let auth_resume_token = auth_resume.map(|r| r.resume_token.clone());
+                let auth_replay = auth_resume.and_then(|r| r.replay.clone());
+                let auth_prior_approval = auth_resume.and_then(|r| r.prior_approval.clone());
+                if matches!(kind, GateKind::Approval) {
+                    let approval_resume = input.approval_resume;
+                    state.pending_approval_resume = approval_resume.map(|resume| {
+                        PendingApprovalResume {
+                            gate_ref: gate_ref.clone(),
+                            capability_id: call.capability_id.clone(),
+                            approval_request_id: resume.approval_request_id,
+                            resume_token: resume.resume_token,
+                            activity_id: call.activity_id,
+                            correlation_id: resume.correlation_id,
+                            surface_version: call.surface_version.clone(),
+                            input_ref: resume.input_ref,
+                            effective_capability_ids: call.effective_capability_ids.clone(),
+                            provider_replay: call.provider_replay.clone(),
+                            input: resume.input,
+                            estimate: resume.estimate,
+                            // Disposition is stamped by PlannedDriver at resume time;
+                            // GateStage writes the initial (blocking) checkpoint where
+                            // no denial has occurred yet.
+                            disposition: None,
+                        }
                     });
+                } else if matches!(kind, GateKind::Auth) {
+                    // Auth gates fold any prior approval identity into
+                    // pending_auth_resume.prior_approval below. Keeping a
+                    // pending approval slot for the same gate makes resume
+                    // disposition stamping ambiguous and can re-dispatch the
+                    // approval path before the auth denial is consumed.
+                    state.pending_approval_resume = None;
+                }
                 if matches!(kind, GateKind::Auth) {
+                    // CapabilityStage shapes auth-resume metadata; GateStage
+                    // only persists it at the blocking checkpoint.
                     state.pending_auth_resume = Some(PendingAuthResume {
                         gate_ref: gate_ref.clone(),
                         capability_id: call.capability_id.clone(),
@@ -84,6 +111,26 @@ impl ExecutorStage<GateInput> for GateStage {
                         input_ref: call.input_ref.clone(),
                         effective_capability_ids: call.effective_capability_ids.clone(),
                         provider_replay: call.provider_replay.clone(),
+                        resume_token: auth_resume_token,
+                        activity_id: call.activity_id,
+                        prior_approval: auth_prior_approval,
+                        replay: auth_replay,
+                        disposition: None,
+                    });
+                }
+                if matches!(kind, GateKind::ExternalTool) {
+                    // Park the client-tool call so resume re-dispatches it; the
+                    // host decorator completes it from the catalog's submitted
+                    // output. Disposition is stamped by PlannedDriver on resume.
+                    state.pending_external_tool_resume = Some(PendingExternalToolResume {
+                        gate_ref: gate_ref.clone(),
+                        capability_id: call.capability_id.clone(),
+                        activity_id: call.activity_id,
+                        surface_version: call.surface_version.clone(),
+                        input_ref: call.input_ref.clone(),
+                        effective_capability_ids: call.effective_capability_ids.clone(),
+                        provider_replay: call.provider_replay.clone(),
+                        disposition: None,
                     });
                 }
                 // Non-auth blocks do not invalidate a pending auth resume: a resource or
@@ -109,6 +156,7 @@ impl ExecutorStage<GateInput> for GateStage {
                 Ok(BatchStep::Exit(LoopExit::Blocked(LoopBlocked {
                     kind: blocked_kind(kind),
                     gate_ref,
+                    blocked_activity_id: Some(call.activity_id),
                     credential_requirements: input.credential_requirements,
                     checkpoint_id: checked.checkpoint_id,
                     state_ref: checked.state_ref,
@@ -121,6 +169,7 @@ impl ExecutorStage<GateInput> for GateStage {
                 // pending_auth_resume for this call would survive and trigger an
                 // infinite re-dispatch loop on the next prompt iteration.
                 clear_matching_pending_auth_resume(&mut state, &call);
+                clear_matching_pending_external_tool_resume(&mut state, &call);
                 append_capability_safe_summary_ref(
                     ctx.host,
                     &mut state,
@@ -139,6 +188,7 @@ impl ExecutorStage<GateInput> for GateStage {
                 // Clear any pending auth resume so a stale record does not persist
                 // into the Final checkpoint for an aborted capability.
                 clear_matching_pending_auth_resume(&mut state, &call);
+                clear_matching_pending_external_tool_resume(&mut state, &call);
                 append_capability_safe_summary_ref(
                     ctx.host,
                     &mut state,
@@ -150,6 +200,8 @@ impl ExecutorStage<GateInput> for GateStage {
                     CancelCheck::Continue(next) => state = *next,
                     CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
                 }
+                let explanation_message_ref =
+                    attach_failure_explanation(ctx, &mut state, failure_kind).await?;
                 let checked = CheckpointStage
                     .write(ctx, state, CheckpointKind::Final)
                     .await?;
@@ -158,6 +210,11 @@ impl ExecutorStage<GateInput> for GateStage {
                     checked.state,
                     failure_kind,
                     Some(checked.checkpoint_id),
+                    FailedExitDetails {
+                        diagnostic_ref: None,
+                        safe_summary: None,
+                        explanation_message_ref,
+                    },
                 )?))
             }
         }
@@ -205,6 +262,7 @@ impl ExecutorStage<AwaitDependentRunGateInput> for AwaitDependentRunGateStage {
                 Ok(BatchStep::Exit(LoopExit::Blocked(LoopBlocked {
                     kind: blocked_kind(GateKind::AwaitDependentRun),
                     gate_ref,
+                    blocked_activity_id: Some(call.activity_id),
                     credential_requirements: Vec::new(),
                     checkpoint_id: checked.checkpoint_id,
                     state_ref: checked.state_ref,
@@ -234,6 +292,8 @@ impl ExecutorStage<AwaitDependentRunGateInput> for AwaitDependentRunGateStage {
                     CancelCheck::Continue(next) => state = *next,
                     CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
                 }
+                let explanation_message_ref =
+                    attach_failure_explanation(ctx, &mut state, failure_kind).await?;
                 let checked = CheckpointStage
                     .write(ctx, state, CheckpointKind::Final)
                     .await?;
@@ -242,6 +302,11 @@ impl ExecutorStage<AwaitDependentRunGateInput> for AwaitDependentRunGateStage {
                     checked.state,
                     failure_kind,
                     Some(checked.checkpoint_id),
+                    FailedExitDetails {
+                        diagnostic_ref: None,
+                        safe_summary: None,
+                        explanation_message_ref,
+                    },
                 )?))
             }
         }

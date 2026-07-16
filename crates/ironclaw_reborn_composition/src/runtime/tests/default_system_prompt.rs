@@ -6,7 +6,7 @@ use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelMessageRole,
     HostManagedModelRequest, HostManagedModelResponse,
 };
@@ -73,11 +73,38 @@ async fn local_dev_runtime_injects_default_system_prompt_into_model_request() {
         }),
         "local-dev runtime should send the editable default system prompt to the model gateway"
     );
+    // Disclosure is default-on: the system prompt must teach the model the
+    // tool_search/tool_describe/tool_call protocol, or a weak model never reaches
+    // the deferred long tail.
+    assert!(
+        recorded_requests[0].messages.iter().any(|message| {
+            message.role == HostManagedModelMessageRole::System
+                && message.content.contains("Tool Discovery")
+                && message.content.contains("tool_search")
+                && message.content.contains("tool_describe")
+                && message.content.contains("tool_call")
+        }),
+        "default-on disclosure should inject the tool-discovery protocol into the system prompt"
+    );
     assert!(
         recorded_requests[0].messages.iter().any(|message| {
             message.role == HostManagedModelMessageRole::User && message.content == "ping"
         }),
         "test should observe the real model request for the submitted user turn"
+    );
+    assert!(
+        !recorded_requests[0].messages.iter().any(|message| {
+            message.role == HostManagedModelMessageRole::System
+                && message.content.contains("Outbound delivery target:")
+        }),
+        "plain WebUI chat should not resolve an unrelated outbound delivery target"
+    );
+    assert!(
+        recorded_requests[0].messages.iter().any(|message| {
+            message.role == HostManagedModelMessageRole::System
+                && message.content.contains("Run origin: WebUI chat")
+        }),
+        "local-dev runtime send_user_message should tag WebUiChat origin in runtime context"
     );
 
     runtime.shutdown().await.expect("runtime shutdown");
@@ -109,9 +136,20 @@ async fn local_dev_runtime_uses_existing_edited_default_system_prompt() {
     assert!(
         recorded_requests[0].messages.iter().any(|message| {
             message.role == HostManagedModelMessageRole::System
-                && message.content == "custom edited runtime prompt"
+                && message.content.starts_with("custom edited runtime prompt")
         }),
         "local-dev runtime should preserve and inject the existing edited prompt"
+    );
+    // Disclosure is default-on, so the tool-search protocol is appended to the
+    // (edited) system prompt and reaches the gateway — without overwriting the
+    // user's edited base content.
+    assert!(
+        recorded_requests[0].messages.iter().any(|message| {
+            message.role == HostManagedModelMessageRole::System
+                && message.content.starts_with("custom edited runtime prompt")
+                && message.content.contains("tool_search")
+        }),
+        "default-on disclosure should append the tool-search protocol to the edited prompt"
     );
 
     runtime.shutdown().await.expect("runtime shutdown");
@@ -164,6 +202,9 @@ fn runtime_input(
         max_total: Duration::from_secs(3),
     })
     .with_model_gateway_override(gateway)
+    // Pin bridged explicitly so the disclosure-protocol assertions don't depend on
+    // the temporary default-on behavior (and won't break on the default-off revert).
+    .with_tool_disclosure(ironclaw_runner::runtime::ToolDisclosureMode::Bridged)
 }
 
 fn recorded_requests(

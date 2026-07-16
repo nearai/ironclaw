@@ -97,7 +97,6 @@ mod persona_tests {
         //     in DEV_*_CHECKS comes from the user's own message, not from
         //     API data).
         let mut builder = LiveTestHarnessBuilder::new(test_name)
-            .with_engine_v2(true)
             .with_auto_approve_tools(true)
             .with_max_tool_iterations(60)
             .with_skills_dir(repo_skills_dir());

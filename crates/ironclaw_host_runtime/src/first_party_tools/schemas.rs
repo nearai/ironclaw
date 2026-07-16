@@ -1,5 +1,7 @@
 use serde_json::{Value, json};
 
+use crate::first_party_tools::time::UNIX_MILLIS_THRESHOLD;
+
 pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value> {
     Some(match reference {
         "schemas/builtin/echo.input.v1.json" => json!({
@@ -18,10 +20,11 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                     "enum": ["now", "parse", "convert", "format", "diff"],
                     "description": "Time operation to perform. Defaults to now."
                 },
-                "input": { "type": "string", "description": "Timestamp input for parse, convert, format, or diff" },
-                "timestamp": { "type": "string", "description": "Alias for input" },
-                "timestamp2": { "type": "string", "description": "Second timestamp for diff" },
+                "input": timestamp_input_schema("Timestamp input for parse, convert, format, or diff"),
+                "timestamp": timestamp_input_schema("Alias for input"),
+                "timestamp2": timestamp_input_schema("Second timestamp for diff"),
                 "timezone": { "type": "string", "description": "IANA timezone name" },
+                "utc_offset": { "type": "string", "description": "UTC offset for now output, e.g. +03:00 or -07:00" },
                 "from_timezone": { "type": "string", "description": "IANA timezone for interpreting the input" },
                 "to_timezone": { "type": "string", "description": "IANA timezone for conversion output" },
                 "format": { "type": "string", "description": "chrono format string for format operation" },
@@ -46,10 +49,11 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         "schemas/builtin/http-save.input.v1.json" => http_schema(true),
         "schemas/builtin/memory_search.input.v1.json" => json!({
             "type": "object",
+            "description": "Searches only Reborn internal persistent memory. This does not search connected app or extension data.",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Preferred natural language search query for persistent memory"
+                    "description": "Preferred natural language search query for Reborn internal persistent memory"
                 },
                 "q": {
                     "type": "string",
@@ -147,7 +151,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         "schemas/builtin/shell.input.v1.json" => json!({
             "type": "object",
             "properties": {
-                "command": { "type": "string", "description": "Shell command to execute" },
+                "command": { "type": "string", "description": "Shell command to execute. Prefer ONE command that does the whole job: combine steps with '&&' or pipes, or write and run a single script (awk/python) — do NOT issue one command per metric/day/line, and don't re-read files you already have." },
                 "workdir": { "type": "string", "description": "Optional scoped working directory" },
                 "timeout": { "type": "integer", "minimum": 1, "description": "Timeout in seconds" }
             },
@@ -156,7 +160,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         }),
         // NOTE: this schema is published by the host_runtime first-party
         // capability registry (consumed by `surface.rs::resolve_builtin_input_schema_ref`).
-        // The decorator path (`ironclaw_loop_support::build_spawn_subagent_parameters_schema`)
+        // The decorator path (`ironclaw_loop_host::build_spawn_subagent_parameters_schema`)
         // builds an equivalent schema dynamically from the registered flavor
         // catalog and overrides the model-facing tool definition at runtime.
         // The two shapes MUST stay in sync. Long-term, route this entry
@@ -181,10 +185,102 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["subagent_type", "task"],
             "additionalProperties": false
         }),
+        "schemas/builtin/trace_commons-onboard.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "invite_url": {
+                    "type": "string",
+                    "description": "Trace Commons operator-issued invite link (https://…/onboard#CODE)"
+                },
+                "include_message_text": {
+                    "type": "boolean",
+                    "description": "Whether contributions may include redacted message text (default: false)"
+                },
+                "include_tool_payloads": {
+                    "type": "boolean",
+                    "description": "Whether contributions may include redacted tool payloads (default: false)"
+                },
+                "confirmed": {
+                    "type": "boolean",
+                    "description": "Must be true only after the user has explicitly consented in this conversation (default: false)"
+                }
+            },
+            "required": ["invite_url"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trace_commons-status.input.v1.json" => json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trace_commons-credits.input.v1.json" => json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trace_commons-profile_token.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "confirmed": {
+                    "type": "boolean",
+                    "description": "Must be true only after the user has explicitly asked to mint a manual/browser profile-management token in this conversation (default: false)"
+                }
+            },
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trace_commons-account_login_link.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "confirmed": {
+                    "type": "boolean",
+                    "description": "Must be true only after the user explicitly asked to open a Trace Commons account/profile login link in this conversation (default: false)"
+                }
+            },
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trace_commons-profile_set.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "display_handle": {
+                    "type": "string",
+                    "description": "Pseudonymous public display handle, 3-32 ASCII letters, digits, '-' or '_'"
+                },
+                "bio": {
+                    "type": "string",
+                    "description": "Optional short public bio, at most 280 bytes"
+                },
+                "confirmed": {
+                    "type": "boolean",
+                    "description": "Must be true only after the user has explicitly approved publishing this handle/bio in this conversation (default: false)"
+                }
+            },
+            "required": ["display_handle"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/profile_set.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "timezone": {
+                    "type": "string",
+                    "description": "IANA timezone name, e.g. America/Los_Angeles or Asia/Tokyo"
+                },
+                "locale": {
+                    "type": "string",
+                    "description": "BCP-47 locale tag, e.g. en-US or ja-JP",
+                    "maxLength": 35
+                },
+                "location": {
+                    "type": "string",
+                    "description": "Free-text location label, e.g. Tokyo, Japan"
+                }
+            },
+            "minProperties": 1,
+            "additionalProperties": false
+        }),
         "schemas/builtin/read_file.input.v1.json" => json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "Scoped path to read" },
+                "path": { "type": "string", "description": "Scoped path to read. Supported document files such as PDFs are returned as extracted text." },
                 "offset": { "type": "integer", "minimum": 0, "description": "1-based starting line; 0 starts at the beginning" },
                 "limit": { "type": "integer", "minimum": 0, "description": "Maximum lines to return" }
             },
@@ -246,11 +342,88 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "type": "object",
             "properties": {
                 "path": { "type": "string", "description": "Scoped file path to patch" },
-                "old_string": { "type": "string", "description": "Exact text to replace" },
-                "new_string": { "type": "string", "description": "Replacement text" },
-                "replace_all": { "type": "boolean", "description": "Replace every match instead of exactly one" }
+                "old_string": {
+                    "type": ["string", "null"],
+                    "description": "Text to replace for a single targeted edit. Exact matches are preferred; fuzzy Unicode and trailing-whitespace normalization is used when exact text is not present."
+                },
+                "new_string": { "type": ["string", "null"], "description": "Replacement text for a single targeted edit" },
+                "edits": {
+                    "description": "One or more targeted replacements matched against the original file. Prefer this for multiple disjoint edits.",
+                    "oneOf": [
+                        {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 256,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "old_string": { "type": "string", "description": "Text to replace" },
+                                    "new_string": { "type": "string", "description": "Replacement text" }
+                                },
+                                "required": ["old_string", "new_string"],
+                                "additionalProperties": false
+                            }
+                        },
+                        { "type": "null" },
+                        { "const": "null" }
+                    ]
+                },
+                "replace_all": { "type": "boolean", "description": "Replace every match instead of exactly one. Only valid with a single targeted edit." }
             },
-            "required": ["path", "old_string", "new_string"],
+            "required": ["path"],
+            "oneOf": [
+                {
+                    "properties": {
+                        "old_string": {
+                            "type": "string",
+                            "not": { "const": "null" }
+                        },
+                        "new_string": {
+                            "type": "string",
+                            "not": { "const": "null" }
+                        }
+                    },
+                    "required": ["old_string", "new_string"],
+                    "not": {
+                        "properties": {
+                            "edits": { "type": "array" }
+                        },
+                        "required": ["edits"]
+                    }
+                },
+                {
+                    "properties": {
+                        "edits": { "type": "array" },
+                        "old_string": { "enum": ["null", null] },
+                        "new_string": { "enum": ["null", null] }
+                    },
+                    "required": ["edits"]
+                }
+            ],
+            "allOf": [
+                {
+                    "if": {
+                        "properties": {
+                            "replace_all": { "const": true }
+                        },
+                        "required": ["replace_all"]
+                    },
+                    "then": {
+                        "properties": {
+                            "edits": {
+                                "oneOf": [
+                                    {
+                                        "type": "array",
+                                        "maxItems": 1
+                                    },
+                                    { "type": "null" },
+                                    { "const": "null" }
+                                ]
+                            }
+                        }
+                    }
+                }
+            ],
             "additionalProperties": false
         }),
         "schemas/builtin/extension_search.input.v1.json" => json!({
@@ -307,6 +480,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         }),
         "schemas/builtin/trigger_create.input.v1.json" => json!({
             "type": "object",
+            "description": "Create a scheduled trigger. Pass the trigger object itself with top-level fields `name`, `prompt`, and `schedule`; do not wrap the schedule in `operation`, `data`, or a parser request object.",
             "properties": {
                 "name": {
                     "type": "string",
@@ -314,12 +488,39 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "Prompt submitted when the trigger fires. Runtime validation caps UTF-8 content at 32768 bytes."
+                    "description": "Prompt submitted when the trigger fires. Write only the action performed at fire time. If delivery_target_id is set, never put a send, post, or deliver-results step for that result here; the host delivers the final reply automatically. Never tell the prompt to send results back to the requesting user — receiving results is routing, never a prompt step, even when phrased as 'send me the result' or when the requester's conversation id is known. Put messaging here only when messaging someone else is itself the task, and pin that third-party recipient while the user is present. Do not describe creating, scheduling, or configuring the trigger. Runtime validation caps UTF-8 content at 32768 bytes."
                 },
-                "cron": { "type": "string", "description": "Five-, six-, or seven-field cron expression; fire cadence must be at least one minute" },
-                "timezone": { "type": "string", "description": "IANA timezone name for cron evaluation (e.g. 'America/New_York', 'Europe/London', 'UTC'). The cron expression is evaluated in this timezone; fire times are stored and compared in UTC. If the user's timezone is already known from the conversation or their settings, use it without asking; if unknown, ask the user before creating the trigger. Never silently assume UTC — a trigger that fires at the wrong local time is worse than no trigger." }
+                "delivery_target_id": {
+                    "type": "string",
+                    "description": "Optional per-trigger outbound delivery target id from builtin__outbound_delivery_targets_list. When set, the host delivers this trigger's final results to that target. Do not also put a send, post, or deliver-results step for that result in prompt. When omitted, the user's default outbound delivery target at fire time is used. Prefer setting this whenever the user names a destination for this trigger's results."
+                },
+                "schedule": {
+                    "description": "When and how often the trigger fires. This value is the schedule object itself. For recurring triggers use {\"kind\":\"cron\",\"expression\":\"0 14 * * 2\",\"timezone\":\"America/Los_Angeles\"}. For one-time triggers use {\"kind\":\"once\",\"at\":\"2026-06-23T14:00:00\",\"timezone\":\"America/Los_Angeles\"}. Do not pass {\"operation\":\"parse\",\"data\":...}.",
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "kind": { "const": "cron" },
+                                "expression": { "type": "string", "description": "Five-, six-, or seven-field cron expression; cadence at least one minute. Example: `0 14 * * 2` for Tuesdays at 2 PM in `timezone`." },
+                                "timezone": { "type": "string", "description": "IANA timezone name (e.g. America/New_York, UTC)." }
+                            },
+                            "required": ["kind", "expression", "timezone"],
+                            "additionalProperties": false
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "kind": { "const": "once" },
+                                "at": { "type": "string", "description": "Local wall-clock datetime in `timezone`, format YYYY-MM-DDTHH:MM:SS; interpreted in the given timezone and converted to UTC." },
+                                "timezone": { "type": "string", "description": "IANA timezone name (e.g. America/New_York, UTC)." }
+                            },
+                            "required": ["kind", "at", "timezone"],
+                            "additionalProperties": false
+                        }
+                    ]
+                }
             },
-            "required": ["name", "prompt", "cron", "timezone"],
+            "required": ["name", "prompt", "schedule"],
             "additionalProperties": false
         }),
         "schemas/builtin/trigger_list.input.v1.json" => json!({
@@ -348,7 +549,35 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["trigger_id"],
             "additionalProperties": false
         }),
+        "schemas/builtin/trigger_pause.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "trigger_id": { "type": "string", "description": "Trigger id returned by trigger_create or trigger_list" }
+            },
+            "required": ["trigger_id"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trigger_resume.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "trigger_id": { "type": "string", "description": "Trigger id returned by trigger_create or trigger_list" }
+            },
+            "required": ["trigger_id"],
+            "additionalProperties": false
+        }),
         _ => return None,
+    })
+}
+
+fn timestamp_input_schema(description: &str) -> Value {
+    json!({
+        "description": format!(
+            "{description}. Accepts an ISO 8601 string, Unix seconds (including fractional Slack timestamps), or Unix milliseconds. Integer values with absolute magnitude at least {UNIX_MILLIS_THRESHOLD} are interpreted as milliseconds."
+        ),
+        "oneOf": [
+            { "type": "string" },
+            { "type": "number" }
+        ]
     })
 }
 
@@ -427,4 +656,30 @@ fn response_body_limit_schema(require_save_to: bool) -> Value {
         "default": default,
         "description": description
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_builtin_input_schema_ref;
+
+    #[test]
+    fn trigger_create_prompt_description_warns_against_self_referential_creation_prompts() {
+        // Issue #5505 (generation-time defense): the model must write the
+        // trigger's per-fire action steps, not meta-instructions describing
+        // creating/scheduling the trigger itself — otherwise a fired trigger
+        // re-invokes trigger_create instead of doing the task ("a routine
+        // that creates routines").
+        let schema =
+            resolve_builtin_input_schema_ref("schemas/builtin/trigger_create.input.v1.json")
+                .expect("trigger_create schema is registered");
+        let description = schema["properties"]["prompt"]["description"]
+            .as_str()
+            .expect("prompt description is a string");
+
+        assert!(
+            description
+                .contains("Do not describe creating, scheduling, or configuring the trigger"),
+            "prompt description must warn against self-referential creation prompts: {description}"
+        );
+    }
 }

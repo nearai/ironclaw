@@ -47,12 +47,14 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
+mod coalescing_sink;
 mod filesystem_store;
 
+pub use coalescing_sink::{CoalescingEventSink, EventBatchConfig};
 pub use filesystem_store::{FilesystemDurableAuditLog, FilesystemDurableEventLog};
 
 #[cfg(feature = "postgres")]
-pub const DEFAULT_POSTGRES_POOL_MAX_SIZE: usize = 16;
+pub const DEFAULT_POSTGRES_POOL_MAX_SIZE: usize = 2;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PostgresPoolTlsOptions {
@@ -138,6 +140,12 @@ pub enum RebornEventStoreConfig {
         url: SecretString,
         tls_options: PostgresPoolTlsOptions,
     },
+    /// PostgreSQL backend configuration using an already-opened pool.
+    ///
+    /// Hosted production uses this to avoid opening a second independent
+    /// Postgres pool for event logs when the substrate already owns a pool.
+    #[cfg(feature = "postgres")]
+    PostgresPool { pool: deadpool_postgres::Pool },
     /// libSQL backend configuration. The store opens a
     /// [`LibSqlRootFilesystem`](ironclaw_filesystem::LibSqlRootFilesystem)
     /// over the provided local path or remote URL and runs durable-log ops
@@ -253,6 +261,10 @@ pub async fn build_reborn_event_stores(
                 })
             }
         }
+        #[cfg(feature = "postgres")]
+        RebornEventStoreConfig::PostgresPool { pool } => {
+            postgres_backed::build_from_pool(pool).await
+        }
         RebornEventStoreConfig::Libsql {
             path_or_url,
             auth_token,
@@ -279,6 +291,19 @@ pub async fn build_reborn_event_stores(
 /// `/events`. Production composition reuses this on top of a libSQL /
 /// PostgreSQL `RootFilesystem` so the backend choice is a property of the
 /// filesystem rather than of the durable-log impl.
+///
+/// The caller must run any backend schema migrations before calling this
+/// helper. Config-based builders perform their own migration step.
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub fn build_reborn_event_stores_from_root_filesystem<F>(
+    root: Arc<F>,
+) -> Result<RebornEventStores, RebornEventStoreError>
+where
+    F: RootFilesystem + Send + Sync + 'static,
+{
+    wrap_root_filesystem_as_event_stores(root)
+}
+
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn wrap_root_filesystem_as_event_stores<F>(
     root: Arc<F>,
@@ -530,6 +555,7 @@ mod postgres_backed {
     //! filesystem-backed durable-log surface.
 
     use std::sync::Arc;
+    use std::time::Duration;
 
     use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
     use ironclaw_filesystem::PostgresRootFilesystem;
@@ -543,11 +569,23 @@ mod postgres_backed {
         wrap_root_filesystem_as_event_stores,
     };
 
+    /// Upper bound on how long a pool checkout (wait for a free connection,
+    /// establish a new one, or recycle an idle one) may take before it errors
+    /// instead of blocking. Chosen well under the 90s runner lease TTL so a
+    /// saturated pool surfaces a retryable error before the lease can expire.
+    const POOL_CHECKOUT_TIMEOUT: Duration = Duration::from_secs(30);
+
     pub(super) async fn build(
         url: SecretString,
         tls_options: PostgresPoolTlsOptions,
     ) -> Result<RebornEventStores, RebornEventStoreError> {
         let pool = build_pool(url, super::DEFAULT_POSTGRES_POOL_MAX_SIZE, tls_options)?;
+        build_from_pool(pool).await
+    }
+
+    pub(super) async fn build_from_pool(
+        pool: Pool,
+    ) -> Result<RebornEventStores, RebornEventStoreError> {
         let filesystem = Arc::new(PostgresRootFilesystem::new(pool));
         filesystem.run_migrations().await.map_err(|source| {
             RebornEventStoreError::backend("postgres", "run migrations", source)
@@ -604,6 +642,16 @@ mod postgres_backed {
         };
         Pool::builder(manager)
             .max_size(max_size)
+            // Deadlock guard: without a wait timeout, `Pool::get()` blocks
+            // forever once every connection is checked out. A small hosted
+            // pool can be transiently saturated by one turn's read burst, so
+            // an unbounded wait wedges the runner heartbeat and webui until the
+            // 90s runner lease expires and the turn fails `lease_expired`.
+            // Failing the checkout well under the lease converts an
+            // unrecoverable hang into a surfaced, retryable error.
+            .wait_timeout(Some(POOL_CHECKOUT_TIMEOUT))
+            .create_timeout(Some(POOL_CHECKOUT_TIMEOUT))
+            .recycle_timeout(Some(POOL_CHECKOUT_TIMEOUT))
             .runtime(Runtime::Tokio1)
             .build()
             .map_err(|source| RebornEventStoreError::backend("postgres", "build pool", source))
@@ -634,6 +682,10 @@ mod postgres_backed {
 
         for host in hosts {
             match host {
+                // `Host::Unix` only exists on unix in tokio-postgres; on Windows
+                // the enum has just `Tcp`, so gating this arm keeps the match
+                // exhaustive on both platforms (a Unix socket host is local).
+                #[cfg(unix)]
                 Host::Unix(_) => continue,
                 Host::Tcp(name) => {
                     if !is_local_host_literal(name) {

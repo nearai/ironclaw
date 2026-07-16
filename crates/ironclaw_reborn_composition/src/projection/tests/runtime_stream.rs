@@ -2,6 +2,7 @@ use super::*;
 use ironclaw_first_party_extension_ports::{
     SkillActivationMode, SkillActivationObservedEvent, SkillActivationRequest,
 };
+use ironclaw_host_api::INPUT_ENCODE_HUMAN_SUMMARY;
 use ironclaw_product_adapters::{
     PROJECTION_SKILL_ACTIVATION_MAX_ITEMS, PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
     PROJECTION_SKILL_NAME_MAX_BYTES, ProductWorkSummaryPhase,
@@ -71,6 +72,414 @@ async fn webui_event_stream_drains_run_status_projection_from_event_stream_manag
 }
 
 #[tokio::test]
+async fn runtime_capability_activity_failure_carries_error_detail() {
+    let tenant_id = TenantId::new("runtime-activity-detail-tenant").unwrap();
+    let agent_id = AgentId::new("runtime-activity-detail-agent").unwrap();
+    let thread_id = ThreadId::new("runtime-activity-detail-thread").unwrap();
+    let invocation_id = InvocationId::new();
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let capability_id = CapabilityId::new("builtin.json").unwrap();
+    let display_previews = CapabilityDisplayPreviewStore::default();
+    display_previews.record_failure_preview(
+        &invocation_id.to_string(),
+        invocation_id,
+        &capability_id,
+        INPUT_ENCODE_HUMAN_SUMMARY,
+    );
+
+    let payload = runtime_payload_from_candidate(
+        &scope,
+        &display_previews,
+        RuntimePayloadCandidate::CapabilityActivity(CapabilityActivityProjection {
+            invocation_id,
+            run_id: Some(invocation_id),
+            capability_id,
+            thread_id: Some(thread_id),
+            status: CapabilityActivityStatus::Failed,
+            provider: None,
+            runtime: Some(RuntimeKind::FirstParty),
+            process_id: None,
+            output_bytes: None,
+            error_kind: Some("invalid_input".to_string()),
+            error_detail: None,
+            first_cursor: ironclaw_events::EventCursor::new(1),
+            last_cursor: ironclaw_events::EventCursor::new(1),
+            updated_at: chrono::Utc::now(),
+        }),
+        StatePayloadKind::Update,
+    )
+    .await
+    .unwrap();
+
+    let RuntimePayloadResolution::Payload(payload) = payload else {
+        panic!("expected capability activity payload");
+    };
+    let ProductOutboundPayload::CapabilityActivity(activity) = *payload else {
+        panic!("expected capability activity");
+    };
+
+    assert_eq!(activity.status, CapabilityActivityStatusView::Failed);
+    assert_eq!(activity.error_kind.as_deref(), Some("invalid_input"));
+    assert_eq!(
+        activity.error_detail.as_deref(),
+        Some(INPUT_ENCODE_HUMAN_SUMMARY)
+    );
+}
+
+#[tokio::test]
+async fn runtime_capability_activity_failure_does_not_translate_bare_error_kind() {
+    let tenant_id = TenantId::new("runtime-activity-kind-tenant").unwrap();
+    let agent_id = AgentId::new("runtime-activity-kind-agent").unwrap();
+    let thread_id = ThreadId::new("runtime-activity-kind-thread").unwrap();
+    let invocation_id = InvocationId::new();
+    let scope = TurnScope::new(tenant_id, Some(agent_id), None, thread_id.clone());
+    let display_previews = NoopCapabilityDisplayPreviewSource;
+
+    let payload = runtime_payload_from_candidate(
+        &scope,
+        &display_previews,
+        RuntimePayloadCandidate::CapabilityActivity(CapabilityActivityProjection {
+            invocation_id,
+            run_id: Some(invocation_id),
+            capability_id: CapabilityId::new("builtin.json").unwrap(),
+            thread_id: Some(thread_id),
+            status: CapabilityActivityStatus::Failed,
+            provider: None,
+            runtime: Some(RuntimeKind::FirstParty),
+            process_id: None,
+            output_bytes: None,
+            error_kind: Some("invalid_input".to_string()),
+            error_detail: None,
+            first_cursor: ironclaw_events::EventCursor::new(1),
+            last_cursor: ironclaw_events::EventCursor::new(1),
+            updated_at: chrono::Utc::now(),
+        }),
+        StatePayloadKind::Update,
+    )
+    .await
+    .unwrap();
+
+    let RuntimePayloadResolution::Payload(payload) = payload else {
+        panic!("expected capability activity payload");
+    };
+    let ProductOutboundPayload::CapabilityActivity(activity) = *payload else {
+        panic!("expected capability activity");
+    };
+
+    assert_eq!(activity.status, CapabilityActivityStatusView::Failed);
+    assert_eq!(activity.error_kind.as_deref(), Some("invalid_input"));
+    assert_eq!(activity.error_detail, None);
+}
+
+#[tokio::test]
+async fn webui_event_stream_advances_runtime_cursor_for_empty_visible_snapshot() {
+    let tenant_id = TenantId::new("webui-empty-snapshot-tenant").unwrap();
+    let user_id = UserId::new("webui-empty-snapshot-user").unwrap();
+    let agent_id = AgentId::new("webui-empty-snapshot-agent").unwrap();
+    let target_thread_id = ThreadId::new("webui-empty-snapshot-target-thread").unwrap();
+    let other_thread_id = ThreadId::new("webui-empty-snapshot-other-thread").unwrap();
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    event_log
+        .append(RuntimeEvent::model_started(
+            resource_scope(
+                &tenant_id,
+                &user_id,
+                &agent_id,
+                &other_thread_id,
+                InvocationId::new(),
+            ),
+            CapabilityId::new("loop.model").unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    let event_log: Arc<dyn DurableEventLog> = event_log;
+    let actor = TurnActor::new(user_id);
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-empty-snapshot-reply").unwrap(),
+    );
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor,
+            scope: TurnScope::new(tenant_id, Some(agent_id), None, target_thread_id),
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        events[0].payload(),
+        ProductOutboundPayload::KeepAlive
+    ));
+    let cursor = parse_webui_projection_cursor(events[0].projection_cursor().as_str()).unwrap();
+    let runtime = cursor
+        .runtime
+        .expect("empty visible snapshot must still advance runtime cursor");
+    assert!(runtime.runtime.as_u64() > 0);
+    assert!(cursor.runtime_item.is_none());
+    assert_eq!(cursor.runtime_payloads_delivered, 0);
+}
+
+#[test]
+fn webui_projection_batch_preserves_deferred_runtime_cursor_across_turn_payloads() {
+    let tenant_id = TenantId::new("webui-interleaved-cursor-tenant").unwrap();
+    let user_id = UserId::new("webui-interleaved-cursor-user").unwrap();
+    let agent_id = AgentId::new("webui-interleaved-cursor-agent").unwrap();
+    let thread_id = ThreadId::new("webui-interleaved-cursor-thread").unwrap();
+    let turn_scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let runtime_cursor = EventProjectionCursor::for_scope(
+        runtime_projection_scope(&TurnActor::new(user_id), &turn_scope),
+        ironclaw_events::EventCursor::new(4),
+    );
+    let turn_cursor = TurnEventProjectionCursor::for_scope(turn_scope, TurnEventCursor(7));
+
+    let mut batch = WebuiProjectionBatch::new(WebuiProjectionCursor::default());
+    assert!(batch.push_runtime_cursor_advance(runtime_cursor.clone()));
+    batch.push_turn(turn_cursor.clone(), ProductOutboundPayload::KeepAlive);
+
+    let payloads = batch.into_payloads().collect::<Vec<_>>();
+    assert_eq!(payloads.len(), 2);
+    assert_eq!(payloads[0].0.turn, Some(turn_cursor));
+    assert!(payloads[0].0.runtime.is_none());
+    assert_eq!(payloads[1].0.runtime, Some(runtime_cursor));
+    assert_eq!(payloads[1].0.runtime_item, None);
+    assert_eq!(payloads[1].0.runtime_payloads_delivered, 0);
+    assert!(matches!(payloads[1].1, ProductOutboundPayload::KeepAlive));
+}
+
+#[tokio::test]
+async fn initial_runtime_items_order_live_text_before_terminal_status() {
+    let tenant_id = TenantId::new("webui-live-before-terminal-tenant").unwrap();
+    let user_id = UserId::new("webui-live-before-terminal-user").unwrap();
+    let agent_id = AgentId::new("webui-live-before-terminal-agent").unwrap();
+    let thread_id = ThreadId::new("webui-live-before-terminal-thread").unwrap();
+    let actor = TurnActor::new(user_id);
+    let scope = TurnScope::new(tenant_id, Some(agent_id), None, thread_id.clone());
+    let projection_scope = runtime_projection_scope(&actor, &scope);
+    let cursor = |value| {
+        EventProjectionCursor::for_scope(
+            projection_scope.clone(),
+            ironclaw_events::EventCursor::new(value),
+        )
+    };
+    let run_invocation = InvocationId::new();
+    let live_run = TurnRunId::new();
+    let terminal = ProjectionStreamItem::Update(Arc::new(
+        ProductProjectionEnvelope::ThreadUpdates(ProjectionReplay {
+            updates: Vec::new(),
+            capability_activity_transitions: Vec::new(),
+            runs: vec![RunStatusProjection {
+                invocation_id: run_invocation,
+                capability_id: CapabilityId::new("loop.model").unwrap(),
+                thread_id: Some(thread_id.clone()),
+                status: RunProjectionStatus::Completed,
+                provider: None,
+                runtime: None,
+                process_id: None,
+                error_kind: None,
+                last_cursor: ironclaw_events::EventCursor::new(10),
+                updated_at: chrono::Utc::now(),
+            }],
+            capability_activities: Vec::new(),
+            next_cursor: cursor(10),
+            truncated: false,
+        }),
+    ));
+    let live_text = ProjectionStreamItem::Update(Arc::new(
+        ProductProjectionEnvelope::ThreadLiveUpdate(ThreadLiveProjectionUpdate {
+            cursor: cursor(11),
+            thread_id,
+            items: vec![ironclaw_event_streams::ThreadLiveProjectionItem::Text {
+                id: format!("text:{live_run}"),
+                run_id: live_run,
+                body: "live text before terminal".to_string(),
+            }],
+        }),
+    ));
+    let display_previews = NoopCapabilityDisplayPreviewSource;
+    let mut batch = WebuiProjectionBatch::new(WebuiProjectionCursor::default());
+
+    push_ordered_initial_runtime_items(
+        &mut batch,
+        terminal,
+        vec![ProjectionStreamItem::KeepAlive, live_text],
+        &scope,
+        &display_previews,
+    )
+    .await
+    .unwrap();
+
+    let payloads = batch
+        .into_payloads()
+        .map(|(_, payload)| payload)
+        .collect::<Vec<_>>();
+    let text_index = payloads
+        .iter()
+        .position(|payload| {
+            matches!(
+                payload,
+                ProductOutboundPayload::ProjectionUpdate { state }
+                    if state.items.iter().any(|item| matches!(
+                        item,
+                        ProductProjectionItem::Text { body, .. }
+                            if body == "live text before terminal"
+                    ))
+            )
+        })
+        .expect("live text projection is emitted");
+    let completed_index = payloads
+        .iter()
+        .position(|payload| {
+            matches!(
+                payload,
+                ProductOutboundPayload::ProjectionUpdate { state }
+                    if state.items.iter().any(|item| matches!(
+                        item,
+                        ProductProjectionItem::RunStatus { status, .. }
+                            if status == "completed"
+                    ))
+            )
+        })
+        .expect("terminal run status is emitted");
+
+    assert!(
+        text_index < completed_index,
+        "buffered live text must be emitted before terminal status even when it is not the first buffered item: {payloads:#?}"
+    );
+}
+
+#[test]
+fn terminal_run_status_detection_includes_killed_runtime_status() {
+    let payload = ProductOutboundPayload::ProjectionUpdate {
+        state: ProductProjectionState::new(
+            "webui-killed-terminal-thread",
+            vec![ProductProjectionItem::RunStatus {
+                run_id: TurnRunId::new(),
+                status: run_status_wire(RunProjectionStatus::Killed).to_string(),
+                failure_category: None,
+                failure_summary: None,
+                retryable: None,
+            }],
+        )
+        .unwrap(),
+    };
+
+    assert!(outbound_payload_has_terminal_run_status(&payload));
+}
+
+#[tokio::test]
+async fn terminal_turn_events_wait_for_next_live_text_projection() {
+    let tenant_id = TenantId::new("webui-turn-terminal-live-tenant").unwrap();
+    let user_id = UserId::new("webui-turn-terminal-live-user").unwrap();
+    let agent_id = AgentId::new("webui-turn-terminal-live-agent").unwrap();
+    let thread_id = ThreadId::new("webui-turn-terminal-live-thread").unwrap();
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let run_id = TurnRunId::new();
+    let mut completed_state = turn_run_state(&scope, &user_id, run_id, TurnEventCursor(1));
+    completed_state.status = TurnStatus::Completed;
+    completed_state.gate_ref = None;
+    let completed_event =
+        TurnLifecycleEvent::from_run_state(&completed_state, TurnEventKind::Completed, None);
+    let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-turn-terminal-live-reply").unwrap(),
+    )
+    .with_turn_events(
+        Arc::new(FakeTurnEventSource {
+            events: vec![completed_event],
+        }),
+        Arc::new(FakeTurnCoordinator {
+            state: completed_state,
+        }),
+    );
+    let sink = services.with_live_progress_milestone_sink_for_publisher(
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        services.live_projection_publisher(user_id.clone()),
+    );
+    let live_scope = scope.clone();
+    let live_user_id = user_id.clone();
+    let publish_live_text = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        sink.publish_loop_milestone(LoopHostMilestone {
+            scope: live_scope,
+            actor: Some(TurnActor::new(live_user_id)),
+            turn_id: TurnId::new(),
+            run_id,
+            loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+            kind: LoopHostMilestoneKind::ModelTextDelta {
+                safe_text: "terminal waited for live text".to_string(),
+            },
+        })
+        .await
+        .unwrap();
+    });
+
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+    publish_live_text.await.unwrap();
+
+    let text_index = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event.payload(),
+                ProductOutboundPayload::ProjectionUpdate { state }
+                    if state.items.iter().any(|item| matches!(
+                        item,
+                        ProductProjectionItem::Text { body, .. }
+                            if body == "terminal waited for live text"
+                    ))
+            )
+        })
+        .expect("live text projection is emitted");
+    let completed_index = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event.payload(),
+                ProductOutboundPayload::ProjectionUpdate { state }
+                    if state.items.iter().any(|item| matches!(
+                        item,
+                        ProductProjectionItem::RunStatus { status, .. }
+                            if status == "completed"
+                    ))
+            )
+        })
+        .expect("terminal turn status is emitted");
+
+    assert!(
+        text_index < completed_index,
+        "terminal turn status must wait for the next live text projection: {events:#?}"
+    );
+}
+
+#[tokio::test]
 async fn webui_event_stream_drains_capability_activity_from_projection() {
     let tenant_id = TenantId::new("webui-activity-tenant").unwrap();
     let user_id = UserId::new("webui-activity-user").unwrap();
@@ -111,6 +520,61 @@ async fn webui_event_stream_drains_capability_activity_from_projection() {
                     && activity.thread_id.as_ref() == Some(&thread_id)
                     && activity.capability_id == capability
                     && activity.status == CapabilityActivityStatusView::Started
+        )
+    }));
+}
+
+#[tokio::test]
+async fn webui_event_stream_projects_runtime_activity_failure_summary() {
+    let tenant_id = TenantId::new("webui-activity-summary-tenant").unwrap();
+    let user_id = UserId::new("webui-activity-summary-user").unwrap();
+    let agent_id = AgentId::new("webui-activity-summary-agent").unwrap();
+    let thread_id = ThreadId::new("webui-activity-summary-thread").unwrap();
+    let invocation_id = InvocationId::new();
+    let capability = CapabilityId::new("builtin.read_file").unwrap();
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    event_log
+        .append(
+            RuntimeEvent::capability_activity_failed(
+                resource_scope(&tenant_id, &user_id, &agent_id, &thread_id, invocation_id),
+                capability.clone(),
+                Some(ExtensionId::new("builtin").unwrap()),
+                Some(RuntimeKind::FirstParty),
+                "operation_failed",
+            )
+            .with_error_summary(
+                "read_file failed for path workspace ironclaw_issues.json: file not found",
+            ),
+        )
+        .await
+        .unwrap();
+
+    let event_log: Arc<dyn DurableEventLog> = event_log;
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-activity-summary-reply").unwrap(),
+    );
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope: TurnScope::new(tenant_id, Some(agent_id), None, thread_id.clone()),
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event.payload(),
+            ProductOutboundPayload::CapabilityActivity(activity)
+                if activity.invocation_id == invocation_id
+                    && activity.thread_id.as_ref() == Some(&thread_id)
+                    && activity.capability_id == capability
+                    && activity.status == CapabilityActivityStatusView::Failed
+                    && activity.error_kind.as_deref() == Some("operation_failed")
+                    && activity.error_detail.as_deref()
+                        == Some("can't access your workspace file")
         )
     }));
 }
@@ -235,6 +699,8 @@ async fn capability_display_preview_store_redacts_unsafe_paths_and_secrets() {
             process_id: None,
             output_bytes: Some(42),
             error_kind: None,
+            error_detail: None,
+            first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
         })
@@ -397,6 +863,124 @@ async fn webui_event_stream_preserves_sanitized_capability_activity_error_kind()
                     && activity.error_kind.as_deref() == Some("Unclassified")
         )
     }));
+}
+
+// Shared setup/drive/assert helper for runtime failure-summary tests.
+//
+// Derives per-test IDs from `test_id`, appends the event returned by
+// `event_fn`, drains the WebUI event stream, and asserts that the
+// run-status failure summary equals `expected_summary`.
+async fn assert_runtime_failure_summary(
+    test_id: &str,
+    event_fn: impl FnOnce(ResourceScope) -> RuntimeEvent,
+    expected_summary: &str,
+) {
+    let tenant_id = TenantId::new(format!("webui-{test_id}-tenant")).unwrap();
+    let user_id = UserId::new(format!("webui-{test_id}-user")).unwrap();
+    let agent_id = AgentId::new(format!("webui-{test_id}-agent")).unwrap();
+    let thread_id = ThreadId::new(format!("webui-{test_id}-thread")).unwrap();
+    let invocation_id = InvocationId::new();
+
+    let scope = resource_scope(&tenant_id, &user_id, &agent_id, &thread_id, invocation_id);
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    event_log
+        .append(event_fn(scope))
+        .await
+        .expect("test event append must succeed");
+
+    let event_log: Arc<dyn DurableEventLog> = event_log;
+    let actor = TurnActor::new(user_id);
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new(format!("webui-{test_id}-reply")).unwrap(),
+    );
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor,
+            scope: TurnScope::new(tenant_id, Some(agent_id), None, thread_id),
+            after_cursor: None,
+        })
+        .await
+        .expect("event stream drain must succeed");
+
+    assert_eq!(
+        run_status_failure_summary(&events, invocation_id).as_deref(),
+        Some(expected_summary),
+        "test_id={test_id}: unexpected failure summary"
+    );
+}
+
+// `LoopFailed` error_kind values are the `LoopFailureKind` codes (e.g.
+// `model_error`); they are NOT the milestone-kind name `model_failed`. The
+// runtime failure-summary mapper therefore renders the generic copy for them.
+#[tokio::test]
+async fn webui_event_stream_renders_generic_summary_for_loop_failed_error_kind() {
+    assert_runtime_failure_summary(
+        "loop-failed",
+        |scope| {
+            RuntimeEvent::loop_failed(scope, CapabilityId::new("loop.run").unwrap(), "model_error")
+        },
+        "The run failed before producing a reply.",
+    )
+    .await;
+}
+
+// `DispatchFailed` error_kind values are the `DispatchError::event_kind()`
+// codes (e.g. `missing_runtime_backend`); they are NOT the milestone-kind name
+// `dispatch_failed`. The runtime failure-summary mapper renders the generic
+// copy for them too.
+#[tokio::test]
+async fn webui_event_stream_renders_generic_summary_for_dispatch_failed_error_kind() {
+    assert_runtime_failure_summary(
+        "dispatch-failed",
+        |scope| {
+            RuntimeEvent::dispatch_failed(
+                scope,
+                CapabilityId::new("loop.run").unwrap(),
+                Some(ExtensionId::new("script").unwrap()),
+                Some(RuntimeKind::Script),
+                "missing_runtime_backend",
+            )
+        },
+        "The run failed before producing a reply.",
+    )
+    .await;
+}
+
+// `unknown` is the one runtime error_kind that resolves to a dedicated
+// message (produced by the process-failure fallback in
+// `ironclaw_host_runtime::obligations`).
+#[tokio::test]
+async fn webui_event_stream_renders_unknown_failure_summary() {
+    assert_runtime_failure_summary(
+        "unknown",
+        |scope| RuntimeEvent::loop_failed(scope, CapabilityId::new("loop.run").unwrap(), "unknown"),
+        "The run failed for an unknown reason.",
+    )
+    .await;
+}
+
+// `ProcessFailed` error_kind values (e.g. `model_error`) fall through the
+// generic `_` arm of the failure-summary mapper; they must render the same
+// generic copy as loop_failed / dispatch_failed for non-"unknown" kinds.
+#[tokio::test]
+async fn webui_event_stream_renders_generic_summary_for_process_failed_error_kind() {
+    assert_runtime_failure_summary(
+        "process-failed",
+        |scope| {
+            RuntimeEvent::process_failed(
+                scope,
+                CapabilityId::new("loop.run").unwrap(),
+                ExtensionId::new("script").unwrap(),
+                RuntimeKind::Script,
+                ProcessId::new(),
+                "model_error",
+            )
+        },
+        "The run failed before producing a reply.",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -877,6 +1461,159 @@ async fn webui_event_stream_live_cursor_does_not_poison_runtime_failure_resume()
 }
 
 #[tokio::test]
+async fn webui_event_stream_delivers_prior_completed_activity_before_pending_approval_preview() {
+    let tenant_id = TenantId::new("webui-live-pending-preview-tenant").unwrap();
+    let user_id = UserId::new("webui-live-pending-preview-user").unwrap();
+    let agent_id = AgentId::new("webui-live-pending-preview-agent").unwrap();
+    let thread_id = ThreadId::new("webui-live-pending-preview-thread").unwrap();
+    let first_extension_invocation = InvocationId::new();
+    let second_extension_invocation = InvocationId::new();
+    let approval_invocation = InvocationId::new();
+    let extension_search = CapabilityId::new("builtin.extension_search").unwrap();
+    let web_access_search = CapabilityId::new("web-access.search").unwrap();
+    let provider = ExtensionId::new("builtin").unwrap();
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    event_log
+        .append(RuntimeEvent::dispatch_requested(
+            resource_scope(
+                &tenant_id,
+                &user_id,
+                &agent_id,
+                &thread_id,
+                first_extension_invocation,
+            ),
+            extension_search.clone(),
+        ))
+        .await
+        .unwrap();
+    event_log
+        .append(RuntimeEvent::dispatch_requested(
+            resource_scope(
+                &tenant_id,
+                &user_id,
+                &agent_id,
+                &thread_id,
+                second_extension_invocation,
+            ),
+            extension_search.clone(),
+        ))
+        .await
+        .unwrap();
+    event_log
+        .append(RuntimeEvent::dispatch_succeeded(
+            resource_scope(
+                &tenant_id,
+                &user_id,
+                &agent_id,
+                &thread_id,
+                second_extension_invocation,
+            ),
+            extension_search.clone(),
+            provider.clone(),
+            RuntimeKind::FirstParty,
+            48,
+        ))
+        .await
+        .unwrap();
+    event_log
+        .append(RuntimeEvent::dispatch_succeeded(
+            resource_scope(
+                &tenant_id,
+                &user_id,
+                &agent_id,
+                &thread_id,
+                first_extension_invocation,
+            ),
+            extension_search.clone(),
+            provider,
+            RuntimeKind::FirstParty,
+            32,
+        ))
+        .await
+        .unwrap();
+    event_log
+        .append(RuntimeEvent::dispatch_requested(
+            resource_scope(
+                &tenant_id,
+                &user_id,
+                &agent_id,
+                &thread_id,
+                approval_invocation,
+            ),
+            web_access_search.clone(),
+        ))
+        .await
+        .unwrap();
+
+    let event_log: Arc<dyn DurableEventLog> = event_log;
+    let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-live-pending-preview-reply").unwrap(),
+    )
+    .with_display_previews(display_previews);
+
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope: TurnScope::new(tenant_id, Some(agent_id), None, thread_id),
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    let activities = events
+        .iter()
+        .filter_map(|event| match event.payload() {
+            ProductOutboundPayload::CapabilityActivity(activity) => Some((
+                activity.invocation_id,
+                activity.capability_id.clone(),
+                activity.status,
+                activity.activity_order,
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        activities,
+        vec![
+            (
+                first_extension_invocation,
+                extension_search.clone(),
+                CapabilityActivityStatusView::Completed,
+                Some(1),
+            ),
+            (
+                second_extension_invocation,
+                extension_search,
+                CapabilityActivityStatusView::Completed,
+                Some(2),
+            ),
+            (
+                approval_invocation,
+                web_access_search,
+                CapabilityActivityStatusView::Started,
+                Some(5),
+            ),
+        ],
+        "a pending approval preview must not hide already completed tool activity"
+    );
+    let cursor = parse_webui_projection_cursor(
+        events
+            .last()
+            .expect("activity payloads should be delivered")
+            .projection_cursor()
+            .as_str(),
+    )
+    .unwrap();
+    assert!(cursor.runtime.is_none());
+    assert!(cursor.runtime_item.is_some());
+    assert_eq!(cursor.runtime_payloads_delivered, 4);
+}
+
+#[tokio::test]
 async fn webui_event_stream_maps_subscription_terminated_work_summary_to_context() {
     let tenant_id = TenantId::new("webui-terminated-summary-tenant").unwrap();
     let user_id = UserId::new("webui-terminated-summary-user").unwrap();
@@ -1159,6 +1896,8 @@ async fn webui_projection_snapshot_bounds_activity_fanout_before_payload_mapping
                 process_id: None,
                 output_bytes: None,
                 error_kind: None,
+                error_detail: None,
+                first_cursor: ironclaw_events::EventCursor::new(index as u64 + 1),
                 last_cursor: ironclaw_events::EventCursor::new(index as u64 + 1),
                 updated_at: chrono::Utc::now(),
             })

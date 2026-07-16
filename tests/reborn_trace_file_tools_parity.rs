@@ -1,14 +1,17 @@
 #[allow(dead_code)]
-#[path = "support/reborn/mod.rs"]
+#[path = "support/reborn_parity_qa/mod.rs"]
+mod parity_qa_support;
+#[allow(dead_code)]
+#[path = "integration/support/mod.rs"]
 mod reborn_support;
 mod support;
 
 use ironclaw_host_api::CapabilityId;
 use ironclaw_host_runtime::{READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID};
-use ironclaw_loop_support::{HostManagedModelMessageRole, HostManagedModelResponse};
+use ironclaw_loop_host::{HostManagedModelMessageRole, HostManagedModelResponse};
 use ironclaw_turns::{TurnStatus, run_profile::LoopHostMilestoneKind};
-use reborn_support::{
-    harness::{RebornBinaryE2EHarness, assert_milestone_order},
+use parity_qa_support::{
+    binary_e2e::{RebornBinaryE2EHarness, assert_milestone_order},
     model_replay::{
         RebornModelReplayStep, RebornScriptedProviderToolCall, RebornTraceReplayModelGateway,
     },

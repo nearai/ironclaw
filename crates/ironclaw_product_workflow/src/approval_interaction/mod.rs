@@ -18,7 +18,10 @@ pub use read_model::{
 };
 pub use resolver::{ApprovalLeaseTermsProvider, ApprovalResolutionPort, ApprovalResolverPort};
 pub(crate) use service::RejectingApprovalInteractionService;
-pub use service::{ApprovalInteractionService, DefaultApprovalInteractionService};
+pub use service::{
+    ApprovalInteractionService, DefaultApprovalInteractionService,
+    PersistentApprovalGranteeResolver,
+};
 pub use types::{
     ApprovalGateRecord, ApprovalInteractionActionView, ApprovalInteractionDecision,
     ApprovalInteractionRejectionKind, ApprovalInteractionScope, ListPendingApprovalsRequest,

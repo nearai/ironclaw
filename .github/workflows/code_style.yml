@@ -54,7 +54,7 @@ jobs:
         run: |
           CHANGED_FILES="$(git diff --name-only "$BASE_SHA"..."$HEAD_SHA")"
 
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(src/|crates/|channels-src/|tools-src/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile$|build\.rs$|scripts/check_no_panics\.py$|scripts/check_gateway_boundaries\.py$|\.github/workflows/code_style\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(src/|crates/|channels-src/|tools-src/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile|build\.rs$|\.gitignore$|scripts/ci/|\.githooks/|scripts/check_no_panics\.py$|scripts/check_gateway_boundaries\.py$|\.github/workflows/code_style\.yml$)'; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_code=false" >> "$GITHUB_OUTPUT"
@@ -67,7 +67,7 @@ jobs:
             echo "has_boundary_check=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/ironclaw_reborn/|crates/ironclaw_reborn_cli/|crates/ironclaw_reborn_config/|crates/ironclaw_architecture/tests/reborn_dependency_boundaries\.rs$|Cargo\.toml$|Cargo\.lock$|\.github/workflows/code_style\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/ironclaw_runner/|crates/ironclaw_reborn_cli/|crates/ironclaw_reborn_config/|crates/ironclaw_architecture/tests/reborn_dependency_boundaries\.rs$|Cargo\.toml$|Cargo\.lock$|\.github/workflows/code_style\.yml$)'; then
             echo "has_reborn_cli=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_reborn_cli=false" >> "$GITHUB_OUTPUT"
@@ -86,7 +86,11 @@ jobs:
           FULL='[{"name":"all-features","flags":"--all-features"},{"name":"default","flags":""},{"name":"libsql-only","flags":"--no-default-features --features libsql"}]'
           SLIM='[{"name":"all-features","flags":"--all-features"}]'
 
-          if [ "${{ github.event_name }}" = "pull_request" ] || [ "${{ github.event_name }}" = "merge_group" ]; then
+          # PRs get the fast single-lane matrix for quick feedback. The merge
+          # queue is the production gate: it must run the same full feature
+          # matrix as pushes to main, otherwise feature-gated lints (e.g.
+          # libsql-only dead code) pass the queue and break main post-merge.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
             echo "matrix=${SLIM}" >> "$GITHUB_OUTPUT"
           else
             echo "matrix=${FULL}" >> "$GITHUB_OUTPUT"
@@ -128,6 +132,36 @@ jobs:
           find crates/ironclaw_gateway/static/js -type f -name '*.js' \
             -exec node --check {} +
 
+  webui-v2-js-lint:
+    name: WebUI v2 JS lint (no-undef)
+    needs: changes
+    if: needs.changes.outputs.has_code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Enable pnpm
+        run: corepack enable pnpm
+      - name: Install Node.js
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: crates/ironclaw_webui_v2/frontend/pnpm-lock.yaml
+      # `no-undef` over WebUI v2 JavaScript catches production modules that reference a
+      # symbol they never imported. The VM-based component suites stub
+      # every collaborator through a `vm` context, so that class of bug (e.g. an
+      # htm `${Component}` used without an import) passes the unit tests and only
+      # surfaces at runtime — this is the gate the eval harness cannot provide.
+      - name: Install WebUI v2 frontend deps
+        working-directory: crates/ironclaw_webui_v2/frontend
+        run: pnpm install --frozen-lockfile
+      - name: Lint WebUI v2 JS
+        working-directory: crates/ironclaw_webui_v2/frontend
+        run: pnpm lint
+
   deny-check:
     name: cargo-deny
     needs: changes
@@ -141,13 +175,66 @@ jobs:
       - name: Run cargo deny
         uses: EmbarkStudios/cargo-deny-action@3fd3802e88374d3fe9159b834c7714ec57d6c979 # v2
 
+  tracked-ignored-files:
+    name: Tracked ignored files
+    needs: changes
+    if: needs.changes.outputs.has_code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Reject tracked files that match .gitignore
+        run: |
+          tracked_ignored="$(git ls-files -ci --exclude-standard)"
+          if [ -n "$tracked_ignored" ]; then
+            echo "Tracked files match .gitignore; remove them from source control or update .gitignore:"
+            printf '%s\n' "$tracked_ignored"
+            exit 1
+          fi
+
+  static-checks:
+    name: Static checks (include_str, hermetic env)
+    needs: changes
+    if: needs.changes.outputs.has_code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      # Guards the #5603 Docker-outage class: every include_str! target must
+      # exist and be present in each Dockerfile build context. Whole-repo scan,
+      # no compile — safe on a shallow checkout.
+      - name: include_str! paths + Docker COPY coverage
+        run: scripts/ci/check-include-str-paths.sh
+      # Guards the #6015 coverage-flake class on the actual PR diff (not just
+      # the synthetic self-tests below): a newly-added unguarded env mutation
+      # fails here. The checker diffs the working tree against the PR base, so
+      # fetch that base tip first (a shallow checkout lacks origin/<base>).
+      - name: Hermetic env mutation guard (PR diff)
+        env:
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            git fetch --no-tags --depth=1 origin \
+              "+refs/heads/${GITHUB_BASE_REF}:refs/remotes/origin/${GITHUB_BASE_REF}"
+          fi
+          scripts/ci/check-hermetic-env.sh
+      # Lock in the checkers' own behaviour (they build hermetic temp repos).
+      - name: Static-check self-tests
+        run: |
+          scripts/ci/test-check-include-str-paths.sh
+          scripts/ci/test-check-hermetic-env.sh
+
   clippy:
     name: Clippy (${{ matrix.name }})
     needs: [changes, clippy-matrix]
     if: needs.changes.outputs.has_code == 'true'
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.clippy-matrix.outputs.matrix) }}
     steps:
@@ -159,10 +246,41 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: clippy
+      - name: Enable pnpm for setup-node cache
+        if: contains(matrix.flags, '--all-features')
+        run: corepack enable pnpm
+      - name: Install Node.js for WebUI bundle builds
+        if: contains(matrix.flags, '--all-features')
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: crates/ironclaw_webui_v2/frontend/pnpm-lock.yaml
+      - name: Enable pnpm
+        if: contains(matrix.flags, '--all-features')
+        run: corepack enable pnpm
+      - name: Install WebUI frontend dependencies
+        if: contains(matrix.flags, '--all-features')
+        run: |
+          cd crates/ironclaw_webui_v2/frontend
+          pnpm install --frozen-lockfile
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: clippy
-          save-if: ${{ matrix.name == 'all-features' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          # Keep saves to protected-branch and merge_group runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
+          save-if: ${{ matrix.name == 'all-features' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group') }}
+      - name: Setup OVH sccache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
+          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
+          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
+          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Check lints
         run: cargo clippy --all --tests --examples ${{ matrix.flags }} -- -D warnings
 
@@ -172,7 +290,7 @@ jobs:
     if: needs.changes.outputs.has_code == 'true' && github.event_name == 'push'
     runs-on: windows-latest
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.clippy-matrix.outputs.matrix) }}
     steps:
@@ -184,6 +302,24 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: clippy
+      - name: Enable pnpm for setup-node cache
+        if: contains(matrix.flags, '--all-features')
+        run: corepack enable pnpm
+      - name: Install Node.js for WebUI bundle builds
+        if: contains(matrix.flags, '--all-features')
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: crates/ironclaw_webui_v2/frontend/pnpm-lock.yaml
+      - name: Enable pnpm
+        if: contains(matrix.flags, '--all-features')
+        run: corepack enable pnpm
+      - name: Install WebUI frontend dependencies
+        if: contains(matrix.flags, '--all-features')
+        run: |
+          cd crates/ironclaw_webui_v2/frontend
+          pnpm install --frozen-lockfile
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: windows-${{ matrix.name }}
@@ -206,14 +342,28 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: reborn-cli-smoke
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          # Keep saves to protected-branch and merge_group runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+      - name: Setup OVH sccache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          # Keep this Wasmtime-heavy smoke target cache-only. sccache-dist can
+          # corrupt generated Wasmtime/Wiggle inputs and produce bogus type
+          # resolution failures.
+          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
+          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
+          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
+          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Test Reborn boot config crate
         run: cargo test -p ironclaw_reborn_config
       - name: Test Reborn CLI binary crate
         run: cargo test -p ironclaw_reborn_cli
       - name: Test Reborn libSQL restart integration
         run: |
-          cargo test -p ironclaw_reborn \
+          cargo test -p ironclaw_runner \
             --features libsql-restart-tests \
             --test loop_driver_host \
             turn_runner_worker_completes_after_libsql_turn_and_thread_services_reopen \
@@ -270,14 +420,27 @@ jobs:
       - clippy
       - clippy-windows
       - deny-check
+      - tracked-ignored-files
+      - static-checks
       - reborn-cli-smoke
       - no-panics
       - gateway-boundaries
+      - webui-v2-js-lint
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
       - run: |
           if [[ "${{ needs.changes.outputs.has_code }}" == "false" ]]; then
             echo "No code changes — style checks skipped correctly"
             exit 0
+          fi
+
+          # shellcheck disable=SC1091
+          if ! source .github/scripts/ci-job-result-ok.sh; then
+            echo "Unable to source .github/scripts/ci-job-result-ok.sh"
+            exit 1
           fi
 
           for job_result in \
@@ -285,10 +448,13 @@ jobs:
             "gateway-js-syntax=${{ needs.gateway-js-syntax.result }}" \
             "clippy=${{ needs.clippy.result }}" \
             "deny-check=${{ needs.deny-check.result }}" \
-            "gateway-boundaries=${{ needs.gateway-boundaries.result }}"; do
+            "tracked-ignored-files=${{ needs.tracked-ignored-files.result }}" \
+            "static-checks=${{ needs.static-checks.result }}" \
+            "gateway-boundaries=${{ needs.gateway-boundaries.result }}" \
+            "webui-v2-js-lint=${{ needs.webui-v2-js-lint.result }}"; do
             name="${job_result%%=*}"
             result="${job_result##*=}"
-            if [[ "$result" != "success" ]]; then
+            if ! job_result_ok "$name" "$result" false "allow"; then
               echo "$name failed: $result"
               exit 1
             fi
@@ -300,8 +466,23 @@ jobs:
             "clippy-windows=${{ needs.clippy-windows.result }}"; do
             name="${job_result%%=*}"
             result="${job_result##*=}"
-            if [[ "$result" != "success" && "$result" != "skipped" ]]; then
+            if ! job_result_ok "$name" "$result" true "allow"; then
               echo "$name failed: $result"
+              exit 1
+            fi
+          done
+      - name: Assert the full clippy matrix ran (merge queue + push)
+        if: needs.changes.outputs.has_code == 'true' && github.event_name != 'pull_request'
+        env:
+          MATRIX_JSON: ${{ needs.clippy-matrix.outputs.matrix }}
+        run: |
+          # This roll-up is a required check. A green result must mean the full
+          # feature matrix was linted, so fail loudly if the matrix config ever
+          # regresses to the slim PR lane on a merge-queue or push run.
+          for lane in all-features default libsql-only; do
+            if ! printf '%s' "$MATRIX_JSON" | jq -e --arg lane "$lane" 'any(.[]; .name == $lane)' > /dev/null; then
+              echo "Required clippy lane missing from matrix on ${{ github.event_name }}: $lane"
+              echo "Matrix was: $MATRIX_JSON"
               exit 1
             fi
           done

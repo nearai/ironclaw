@@ -12,8 +12,6 @@ pub enum RebornBuildError {
     MissingRuntimePolicy,
     #[error("reborn composition production trust policy must contain at least one source")]
     EmptyProductionTrustPolicy,
-    #[error("reborn composition requires live turn scheduler wake notifier")]
-    MissingTurnRunWakeNotifier,
     #[error(
         "reborn production composition requires a configured or keychain-resolvable secret master key"
     )]
@@ -59,6 +57,9 @@ impl From<ironclaw_host_runtime::ProductionWiringReport> for RebornBuildError {
 impl From<crate::RebornCompositionError> for RebornBuildError {
     fn from(error: crate::RebornCompositionError) -> Self {
         match error {
+            crate::RebornCompositionError::InvalidConfig { reason } => {
+                Self::InvalidConfig { reason }
+            }
             crate::RebornCompositionError::MissingSecretMasterKey => Self::MissingSecretMasterKey,
             crate::RebornCompositionError::Mount(error) => Self::Mount(error),
             crate::RebornCompositionError::Filesystem(error) => Self::Filesystem(error),

@@ -1,6 +1,8 @@
 use std::{cmp::Ordering, collections::HashMap};
 
-use ironclaw_events::{EventLogEntry, RuntimeEvent, RuntimeEventKind, sanitize_error_kind};
+use ironclaw_events::{
+    EventLogEntry, RuntimeEvent, RuntimeEventKind, sanitize_error_kind, sanitize_error_summary,
+};
 use ironclaw_host_api::InvocationId;
 
 use crate::{
@@ -8,6 +10,7 @@ use crate::{
     RunStatusProjection,
 };
 
+#[derive(Clone)]
 pub(crate) struct RuntimeProjectionState {
     runs: HashMap<InvocationId, RunStatusProjection>,
     capability_activities: HashMap<InvocationId, CapabilityActivityProjection>,
@@ -23,12 +26,19 @@ impl RuntimeProjectionState {
         }
     }
 
-    pub(crate) fn with_capability_activity_output_limit(limit: usize) -> Self {
-        Self {
-            runs: HashMap::new(),
-            capability_activities: HashMap::new(),
-            capability_activity_output_limit: Some(limit),
-        }
+    pub(crate) fn with_output_limit(mut self, limit: usize) -> Self {
+        self.capability_activity_output_limit = Some(limit);
+        self
+    }
+
+    pub(crate) fn retain_invocations(
+        &mut self,
+        invocations: &std::collections::HashSet<InvocationId>,
+    ) {
+        self.runs
+            .retain(|invocation_id, _| invocations.contains(invocation_id));
+        self.capability_activities
+            .retain(|invocation_id, _| invocations.contains(invocation_id));
     }
 
     pub(crate) fn apply(&mut self, entry: &EventLogEntry<RuntimeEvent>) {
@@ -60,7 +70,7 @@ fn enforce_capability_activity_output_limit(
     if activities.len() > limit {
         let split_index = limit.saturating_sub(1);
         activities
-            .select_nth_unstable_by(split_index, compare_capability_activities_for_projection);
+            .select_nth_unstable_by(split_index, compare_capability_activities_for_output_window);
         activities.truncate(limit);
     }
     sort_capability_activities_for_projection(activities);
@@ -92,6 +102,18 @@ fn compare_capability_activities_for_projection(
     left: &CapabilityActivityProjection,
     right: &CapabilityActivityProjection,
 ) -> Ordering {
+    compare_projection_order_ascending(
+        left.activity_order_cursor(),
+        right.activity_order_cursor(),
+        &left.invocation_id,
+        &right.invocation_id,
+    )
+}
+
+fn compare_capability_activities_for_output_window(
+    left: &CapabilityActivityProjection,
+    right: &CapabilityActivityProjection,
+) -> Ordering {
     compare_projection_order(
         &left.updated_at,
         &right.updated_at,
@@ -118,6 +140,19 @@ fn compare_projection_order(
                 .as_uuid()
                 .cmp(&right_invocation_id.as_uuid())
         })
+}
+
+fn compare_projection_order_ascending(
+    left_cursor: ironclaw_events::EventCursor,
+    right_cursor: ironclaw_events::EventCursor,
+    left_invocation_id: &InvocationId,
+    right_invocation_id: &InvocationId,
+) -> Ordering {
+    left_cursor.cmp(&right_cursor).then_with(|| {
+        left_invocation_id
+            .as_uuid()
+            .cmp(&right_invocation_id.as_uuid())
+    })
 }
 
 fn preserve_status_on_dispatch_success<S>(
@@ -237,6 +272,7 @@ fn apply_capability_activity_event(
         return;
     };
     let sanitized_error_kind = event.error_kind.clone().map(sanitize_error_kind);
+    let sanitized_error_summary = projection_error_detail(event);
     let activity = activities
         .entry(event.scope.invocation_id)
         .or_insert_with(|| capability_activity_projection_for_entry(entry, status));
@@ -266,8 +302,10 @@ fn apply_capability_activity_event(
             | CapabilityActivityStatus::Completed
     ) {
         activity.error_kind = None;
+        activity.error_detail = None;
     } else if sanitized_error_kind.is_some() {
         activity.error_kind = sanitized_error_kind;
+        activity.error_detail = sanitized_error_summary;
     }
     activity.last_cursor = entry.cursor;
     activity.updated_at = event.timestamp;
@@ -289,9 +327,26 @@ fn capability_activity_projection_for_entry(
         process_id: event.process_id,
         output_bytes: event.output_bytes,
         error_kind: event.error_kind.clone().map(sanitize_error_kind),
+        error_detail: projection_error_detail(event),
+        first_cursor: entry.cursor,
         last_cursor: entry.cursor,
         updated_at: event.timestamp,
     }
+}
+
+fn projection_error_detail(event: &RuntimeEvent) -> Option<String> {
+    // Product-facing projections are a second channel boundary after the
+    // durable runtime log. Re-run the sanitizer here so direct in-memory
+    // construction, legacy replay payloads, or future event producers cannot
+    // surface backend-authored detail strings unless they satisfy the
+    // redacted display-summary contract. The projection field is named
+    // `error_detail` intentionally: product/WebUI consumers render it as
+    // optional per-tool failure detail, while the durable event keeps the
+    // source field name `error_summary`.
+    event
+        .error_summary
+        .as_deref()
+        .and_then(sanitize_error_summary)
 }
 
 fn capability_activity_status_for_event(

@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub update_pull_request input",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "owner": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": { "pattern": "\\.\\." }
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": { "pattern": "\\.\\." }
+    },
+    "pr_number": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Pull request number."
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 65536
+    },
+    "body": {
+      "type": "string",
+      "maxLength": 65536
+    },
+    "state": {
+      "type": "string",
+      "enum": ["open", "closed"]
+    },
+    "base": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255
+    },
+    "maintainer_can_modify": {
+      "type": "boolean"
+    }
+  },
+  "required": ["owner", "repo", "pr_number"],
+  "anyOf": [
+    { "required": ["title"] },
+    { "required": ["body"] },
+    { "required": ["state"] },
+    { "required": ["base"] },
+    { "required": ["maintainer_can_modify"] }
+  ]
+}

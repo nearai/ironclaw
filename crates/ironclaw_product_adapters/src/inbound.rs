@@ -15,6 +15,7 @@ use crate::outbound::ProjectionCursor;
 use crate::redaction::RedactedString;
 
 const USER_MESSAGE_TEXT_MAX_BYTES: usize = 64 * 1024;
+const REQUESTED_MODEL_MAX_BYTES: usize = 256;
 const COMMAND_MAX_BYTES: usize = 256;
 const COMMAND_ARGUMENTS_MAX_BYTES: usize = 64 * 1024;
 const THREAD_HINT_MAX_BYTES: usize = 512;
@@ -99,6 +100,13 @@ pub struct UserMessagePayload {
     pub text: String,
     pub attachments: Vec<ProductAttachmentDescriptor>,
     pub trigger: ProductTriggerReason,
+    /// Caller-requested model for this turn (e.g. an OpenAI-compatible client's
+    /// `model` field). A model *hint*, not authority: the coordinator routes to
+    /// it only when the operator has it configured, otherwise it falls back to
+    /// the deployment's active model. `None` for surfaces that don't select a
+    /// model (chat UI, channels).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
 }
 
 impl UserMessagePayload {
@@ -111,13 +119,25 @@ impl UserMessagePayload {
             text: text.into(),
             attachments,
             trigger,
+            requested_model: None,
         };
         payload.validate()?;
         Ok(payload)
     }
 
+    /// Attach a caller-requested model to this payload. See
+    /// [`UserMessagePayload::requested_model`].
+    pub fn with_requested_model(mut self, requested_model: Option<String>) -> Self {
+        self.requested_model = requested_model.filter(|model| !model.is_empty());
+        self
+    }
+
     pub fn validate(&self) -> Result<(), ProductAdapterError> {
-        validate_payload_string("user message text", &self.text, USER_MESSAGE_TEXT_MAX_BYTES)
+        validate_payload_string("user message text", &self.text, USER_MESSAGE_TEXT_MAX_BYTES)?;
+        if let Some(model) = &self.requested_model {
+            validate_payload_string("requested model", model, REQUESTED_MODEL_MAX_BYTES)?;
+        }
+        Ok(())
     }
 }
 
@@ -126,6 +146,8 @@ struct UserMessagePayloadWire {
     text: String,
     attachments: Vec<ProductAttachmentDescriptor>,
     trigger: ProductTriggerReason,
+    #[serde(default)]
+    requested_model: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for UserMessagePayload {
@@ -134,7 +156,14 @@ impl<'de> Deserialize<'de> for UserMessagePayload {
         D: Deserializer<'de>,
     {
         let wire = UserMessagePayloadWire::deserialize(deserializer)?;
-        Self::new(wire.text, wire.attachments, wire.trigger).map_err(serde::de::Error::custom)
+        let payload = Self::new(wire.text, wire.attachments, wire.trigger)
+            .map(|payload| payload.with_requested_model(wire.requested_model))
+            .map_err(serde::de::Error::custom)?;
+        // `new` validated the payload while `requested_model` was still `None`;
+        // re-validate the assembled value so the wire-supplied model hint is
+        // bounded like every other ingress field (bypass flagged in PR review).
+        payload.validate().map_err(serde::de::Error::custom)?;
+        Ok(payload)
     }
 }
 
@@ -714,6 +743,9 @@ pub enum ProductRejectionKind {
     InvalidRequest,
     PolicyDenied,
     AmbiguousResolution,
+    /// The approval gate was already approved or denied — it is no longer pending.
+    /// Distinct from `PolicyDenied`, which means an active policy refused the request.
+    StaleGate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -769,6 +801,9 @@ impl ProductRejectionKind {
             Self::PolicyDenied => "That request was declined by policy.",
             Self::AmbiguousResolution => {
                 "Multiple requests are pending in this conversation. Use `approve gate:<ref>` or `deny gate:<ref>` to pick one."
+            }
+            Self::StaleGate => {
+                "This approval request is no longer pending — it was already approved or denied."
             }
         }
     }
@@ -827,6 +862,10 @@ pub enum ProductInboundAck {
         accepted_message_ref: AcceptedMessageRef,
         active_run_id: TurnRunId,
     },
+    RejectedBusy {
+        accepted_message_ref: AcceptedMessageRef,
+        active_run_id: Option<TurnRunId>,
+    },
     Rejected(ProductRejection),
     CommandResult {
         command: String,
@@ -843,6 +882,7 @@ impl ProductInboundAck {
         match self {
             Self::Accepted { .. }
             | Self::DeferredBusy { .. }
+            | Self::RejectedBusy { .. }
             | Self::Duplicate { .. }
             | Self::CommandResult { .. }
             | Self::NoOp => true,
@@ -870,6 +910,73 @@ mod tests {
     use super::*;
     use crate::auth::AuthRequirement;
     use crate::external::{ExternalActorRef, ExternalConversationRef, ExternalEventId};
+
+    #[test]
+    fn user_message_payload_round_trips_and_filters_requested_model() {
+        let with_model = UserMessagePayload::new("hi", vec![], ProductTriggerReason::DirectChat)
+            .unwrap()
+            .with_requested_model(Some("gpt-4o".to_string()));
+        assert_eq!(with_model.requested_model.as_deref(), Some("gpt-4o"));
+        // Round-trips over the wire (custom Deserialize via the wire struct).
+        let decoded: UserMessagePayload =
+            serde_json::from_str(&serde_json::to_string(&with_model).unwrap()).unwrap();
+        assert_eq!(decoded.requested_model.as_deref(), Some("gpt-4o"));
+
+        // Omitted → None, and not serialized when absent.
+        let without =
+            UserMessagePayload::new("hi", vec![], ProductTriggerReason::DirectChat).unwrap();
+        assert!(without.requested_model.is_none());
+        assert!(
+            !serde_json::to_string(&without)
+                .unwrap()
+                .contains("requested_model")
+        );
+
+        // An empty requested model is filtered to None.
+        assert!(
+            UserMessagePayload::new("hi", vec![], ProductTriggerReason::DirectChat)
+                .unwrap()
+                .with_requested_model(Some(String::new()))
+                .requested_model
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn user_message_payload_bounds_requested_model_on_every_path() {
+        let over_limit = "m".repeat(REQUESTED_MODEL_MAX_BYTES + 1);
+
+        // Explicit validation after the builder rejects an over-long hint.
+        let built = UserMessagePayload::new("hi", vec![], ProductTriggerReason::DirectChat)
+            .unwrap()
+            .with_requested_model(Some(over_limit.clone()));
+        assert!(built.validate().is_err());
+
+        // Deserialization must not smuggle an unbounded hint past validation:
+        // the wire path attaches `requested_model` after `new`, so it re-validates.
+        let wire = serde_json::json!({
+            "text": "hi",
+            "attachments": [],
+            "trigger": "direct_chat",
+            "requested_model": over_limit,
+        })
+        .to_string();
+        let decoded: Result<UserMessagePayload, _> = serde_json::from_str(&wire);
+        assert!(
+            decoded.is_err(),
+            "an over-long requested_model must be rejected during deserialization"
+        );
+
+        // A hint at the cap is accepted on both paths.
+        let at_cap = "m".repeat(REQUESTED_MODEL_MAX_BYTES);
+        assert!(
+            UserMessagePayload::new("hi", vec![], ProductTriggerReason::DirectChat)
+                .unwrap()
+                .with_requested_model(Some(at_cap))
+                .validate()
+                .is_ok()
+        );
+    }
 
     fn sample_context() -> TrustedInboundContext {
         let evidence = ProtocolAuthEvidence::test_verified(
@@ -1141,5 +1248,35 @@ mod tests {
                 "{kind:?} auth hint must fall through to user_facing_hint()"
             );
         }
+    }
+
+    // BUG 3 regression: StaleGate must have a distinct hint that does NOT say
+    // "declined by policy" — it means the gate was already resolved.
+    #[test]
+    fn stale_gate_hint_is_distinct_from_policy_denied() {
+        let stale_hint = ProductRejectionKind::StaleGate.user_facing_hint();
+        let policy_hint = ProductRejectionKind::PolicyDenied.user_facing_hint();
+        assert_ne!(
+            stale_hint, policy_hint,
+            "StaleGate hint must differ from PolicyDenied hint"
+        );
+        assert!(
+            !stale_hint.contains("declined by policy"),
+            "StaleGate hint must not say 'declined by policy', got: {stale_hint}"
+        );
+        assert!(
+            stale_hint.contains("already approved or denied"),
+            "StaleGate hint must mention 'already approved or denied', got: {stale_hint}"
+        );
+    }
+
+    #[test]
+    fn policy_denied_hint_unchanged() {
+        // Regression: PolicyDenied string must remain stable — existing usages
+        // in other approval flows depend on it.
+        assert_eq!(
+            ProductRejectionKind::PolicyDenied.user_facing_hint(),
+            "That request was declined by policy."
+        );
     }
 }

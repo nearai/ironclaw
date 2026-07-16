@@ -2,6 +2,7 @@ use ironclaw_filesystem::{FileStat, FilesystemError, FilesystemOperation};
 use ironclaw_host_api::{RuntimeDispatchErrorKind, ScopedPath, VirtualPath};
 use ironclaw_safety::sensitive_paths::is_sensitive_path_str;
 use serde_json::Value;
+use tracing::debug;
 
 use super::{CodingCapabilityError, CodingCapabilityRequest};
 
@@ -41,25 +42,58 @@ fn resolve_path(
     let mounts = request
         .mounts
         .ok_or_else(|| CodingCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied))?;
+    // Name the offending path and the roots that DO exist: an agent that
+    // targeted an out-of-scope absolute path (e.g. one copied verbatim from a
+    // task description) can only correct course when the rejection says so.
+    //
+    // These summaries render paths and roots delimiter-free (`/` → space):
+    // the strict loop safe-summary validator rejects raw path delimiters, and
+    // FilesystemDenied surfaces as a Denied loop outcome whose only
+    // model-visible channel is the summary itself — a raw-path summary would
+    // silently collapse to the generic category sentence. Summaries that
+    // still fail validation (hostile file names) ride the model-visible
+    // diagnostic detail channel instead of the summary.
     let scoped_path = mounts
         .scoped_path(scoped_path_input(path))
-        .map_err(|_| input_error())?;
+        .map_err(|error| {
+            debug!(error = %error, "coding capability rejected scoped path input");
+            CodingCapabilityError::with_safe_summary(
+                RuntimeDispatchErrorKind::InputEncode,
+                format!(
+                    "{} is not under an available scoped root (available roots: {})",
+                    summary_path_hint(path),
+                    available_roots(mounts)
+                ),
+            )
+        })?;
     if is_sensitive_scoped_path(scoped_path.as_str()) {
         return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
-    let (virtual_path, grant) = mounts
-        .resolve_with_grant(&scoped_path)
-        .map_err(|_| CodingCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied))?;
+    let (virtual_path, grant) = mounts.resolve_with_grant(&scoped_path).map_err(|error| {
+        debug!(error = %error, "coding capability could not resolve scoped path");
+        CodingCapabilityError::with_safe_summary(
+            RuntimeDispatchErrorKind::FilesystemDenied,
+            format!(
+                "{} does not resolve inside an available scoped root (available roots: {})",
+                summary_path_hint(path),
+                available_roots(mounts)
+            ),
+        )
+    })?;
     if is_sensitive_resolved_path(&virtual_path) {
         return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
     if !operation_allowed(&grant.permissions, operation) {
-        return Err(CodingCapabilityError::new(
+        return Err(CodingCapabilityError::with_safe_summary(
             RuntimeDispatchErrorKind::FilesystemDenied,
+            format!(
+                "the mount for {} does not permit this operation",
+                summary_path_hint(path)
+            ),
         ));
     }
     Ok(ResolvedPath {
@@ -69,14 +103,67 @@ fn resolve_path(
     })
 }
 
+/// Delimiter-free path rendering for loop-safe failure summaries, mirroring
+/// `file.rs::safe_summary_path`: "/testbed/replacer.go" → "path testbed
+/// replacer.go". The strict summary validator bans `/` and `\`.
+fn summary_path_hint(path: &str) -> String {
+    let hint = path.trim_start_matches('/').replace(['/', '\\'], " ");
+    format!("path {hint}")
+}
+
+fn available_roots(mounts: &ironclaw_host_api::MountView) -> String {
+    let mut roots: Vec<String> = mounts
+        .mounts
+        .iter()
+        // Aliases are absolute ("/workspace"); render them without the
+        // leading delimiter so the summary stays loop-safe.
+        .map(|mount| {
+            mount
+                .alias
+                .as_str()
+                .trim_start_matches('/')
+                .replace(['/', '\\'], " ")
+        })
+        .collect();
+    roots.sort_unstable();
+    roots.join(", ")
+}
+
 fn scoped_path_input(path: &str) -> String {
     if path == "." || path.is_empty() {
         DEFAULT_SCOPED_ROOT.to_string()
     } else if path.starts_with('/') {
         path.to_string()
+    } else if let Some(scoped_workspace_path) = workspace_scoped_alias(path) {
+        scoped_workspace_path
     } else {
-        format!("{}/{}", DEFAULT_SCOPED_ROOT, path.trim_start_matches("./"))
+        let relative = path.trim_start_matches("./");
+        format!("{DEFAULT_SCOPED_ROOT}/{relative}")
     }
+}
+
+fn workspace_scoped_alias(path: &str) -> Option<String> {
+    let path = strip_leading_current_dir_segments(path);
+    if path == "workspace" {
+        return Some(DEFAULT_SCOPED_ROOT.to_string());
+    }
+
+    path.strip_prefix("workspace/")
+        .map(|relative| relative.trim_start_matches('/'))
+        .map(|relative| {
+            if relative.is_empty() {
+                DEFAULT_SCOPED_ROOT.to_string()
+            } else {
+                format!("{DEFAULT_SCOPED_ROOT}/{relative}")
+            }
+        })
+}
+
+fn strip_leading_current_dir_segments(mut path: &str) -> &str {
+    while let Some(stripped) = path.strip_prefix("./") {
+        path = stripped;
+    }
+    path
 }
 
 pub(super) fn operation_allowed(
@@ -90,7 +177,7 @@ pub(super) fn operation_allowed(
         FilesystemOperation::Stat => permissions.read || permissions.list,
         FilesystemOperation::Delete => permissions.delete,
         FilesystemOperation::CreateDirAll => permissions.write,
-        FilesystemOperation::MountLocal => false,
+        FilesystemOperation::MountLocal | FilesystemOperation::Connect => false,
         // Coding tools never use the unified record/index/txn/event surface
         // — they are bytes-only. If a future code path routes here, treat
         // record-plane reads as `read` and writes as `write` to stay
@@ -100,7 +187,8 @@ pub(super) fn operation_allowed(
         FilesystemOperation::Query => permissions.read && permissions.list,
         FilesystemOperation::EnsureIndex
         | FilesystemOperation::BeginTxn
-        | FilesystemOperation::Append => permissions.write,
+        | FilesystemOperation::Append
+        | FilesystemOperation::ReserveSeq => permissions.write,
         FilesystemOperation::Tail | FilesystemOperation::HeadSeq => permissions.read,
     }
 }

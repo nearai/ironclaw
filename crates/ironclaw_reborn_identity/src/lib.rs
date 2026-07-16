@@ -27,9 +27,13 @@
 
 mod filesystem_store;
 mod key;
+mod user_directory;
 
 pub use filesystem_store::FilesystemRebornIdentityStore;
 pub use key::{ExternalSubjectId, IdentityKeyError, ProviderInstanceId, ProviderKind};
+pub use user_directory::{
+    RebornUser, RebornUserDirectory, RebornUserProfileUpdate, RebornUserRole, RebornUserStatus,
+};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{TenantId, UserId};
@@ -100,23 +104,6 @@ pub struct ExternalIdentityKey {
     pub external_subject_id: ExternalSubjectId,
 }
 
-/// A persisted canonical user.
-///
-/// `status` and `role` are intentionally absent: the store has no typed
-/// semantics for them yet, so the `users` table carries them as columns
-/// with DB-level defaults (`active` / `member`) rather than threading
-/// stringly-typed values through this record (see `.claude/rules/types.md`
-/// — fixed small sets must be enums, not strings). Reintroduce them as
-/// `UserStatus` / `UserRole` enums when a caller actually reads them.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UserRecord {
-    pub id: UserId,
-    pub email: Option<String>,
-    pub display_name: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
 /// Failure modes of the canonical identity layer.
 #[derive(Debug, thiserror::Error)]
 pub enum RebornIdentityError {
@@ -127,6 +114,16 @@ pub enum RebornIdentityError {
     /// backend inconsistency, surfaced rather than silently dropped.
     #[error("persisted user id is invalid: {0}")]
     InvalidUserId(String),
+    /// An admin directory operation targeted a user id with no record. Distinct
+    /// from `Backend` so the product-workflow facade can map it to a 404.
+    #[error("no user record for id: {0}")]
+    UserNotFound(String),
+    /// `resolve_or_create` resolved an external identity to an existing user
+    /// whose account is suspended. Distinct from `Backend` so the SSO host
+    /// adapter can map it to a fail-closed 403 (login refused) instead of a
+    /// 503 backend fault: a suspended user must not mint a fresh session.
+    #[error("user account is suspended: {0}")]
+    UserSuspended(String),
     /// `resolve_or_create` was called for a `ChannelActor` identity. Channel
     /// actors are never mint-capable — the resolver contract routes them
     /// through [`lookup`](RebornIdentityResolver::lookup) /
@@ -192,42 +189,4 @@ pub trait RebornIdentityResolver: Send + Sync {
         identity: ResolveExternalIdentity,
         user_id: &UserId,
     ) -> Result<(), RebornIdentityError>;
-}
-
-#[async_trait]
-impl<T> RebornIdentityResolver for std::sync::Arc<T>
-where
-    T: RebornIdentityResolver + ?Sized,
-{
-    async fn resolve_or_create(
-        &self,
-        identity: ResolveExternalIdentity,
-    ) -> Result<UserId, RebornIdentityError> {
-        self.as_ref().resolve_or_create(identity).await
-    }
-
-    async fn lookup(
-        &self,
-        key: ExternalIdentityKey,
-    ) -> Result<Option<UserId>, RebornIdentityError> {
-        self.as_ref().lookup(key).await
-    }
-
-    async fn bind(
-        &self,
-        key: ExternalIdentityKey,
-        user_id: &UserId,
-    ) -> Result<(), RebornIdentityError> {
-        self.as_ref().bind(key, user_id).await
-    }
-
-    async fn adopt_migrated_identity(
-        &self,
-        identity: ResolveExternalIdentity,
-        user_id: &UserId,
-    ) -> Result<(), RebornIdentityError> {
-        self.as_ref()
-            .adopt_migrated_identity(identity, user_id)
-            .await
-    }
 }

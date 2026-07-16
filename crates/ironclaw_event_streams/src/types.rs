@@ -1,9 +1,12 @@
 use std::sync::Arc;
 
 use ironclaw_event_projections::{
-    ProjectionCursor, ProjectionReplay, ProjectionScope, ProjectionSnapshot,
+    CapabilityActivityStatus, ProjectionCursor, ProjectionReplay, ProjectionScope,
+    ProjectionSnapshot,
 };
-use ironclaw_host_api::{CapabilityId, InvocationId, MissionId, ProcessId, ThreadId};
+use ironclaw_host_api::{
+    CapabilityId, ExtensionId, InvocationId, MissionId, ProcessId, RuntimeKind, ThreadId,
+};
 use ironclaw_outbound::{OutboundPushKind, ProjectionUpdateRef};
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 use serde::{Deserialize, Serialize};
@@ -168,6 +171,11 @@ pub struct ThreadLiveProjectionUpdate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadLiveProjectionItem {
+    Text {
+        id: String,
+        run_id: TurnRunId,
+        body: String,
+    },
     Thinking {
         id: String,
         run_id: TurnRunId,
@@ -177,6 +185,21 @@ pub enum ThreadLiveProjectionItem {
         run_id: TurnRunId,
         invocation_id: InvocationId,
         capability_id: CapabilityId,
+        #[serde(default = "default_capability_activity_status")]
+        status: CapabilityActivityStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<ExtensionId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<RuntimeKind>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_bytes: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_kind: Option<String>,
+        /// Bounded, sanitized failure summary for a failed activity (e.g. a
+        /// builtin's `"invalid JSON: ..."` message). Additive; absent for
+        /// non-failures and pre-existing producers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_detail: Option<String>,
     },
     WorkSummary {
         id: String,
@@ -190,6 +213,10 @@ pub enum ThreadLiveProjectionItem {
         skill_names: Vec<String>,
         feedback: Vec<String>,
     },
+}
+
+fn default_capability_activity_status() -> CapabilityActivityStatus {
+    CapabilityActivityStatus::Started
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

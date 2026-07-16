@@ -5,22 +5,24 @@ use std::{
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
-use ironclaw_host_api::{Action, ApprovalRequest, NetworkMethod, NetworkScheme, UserId};
+use ironclaw_host_api::{
+    Action, ApprovalRequest, InvocationId, NetworkMethod, NetworkScheme, UserId,
+};
 use ironclaw_product_adapters::{
     ApprovalPromptActionView, ApprovalPromptContextView, ApprovalPromptDestinationView,
-    ApprovalPromptDetailView, ApprovalPromptScopeView, GatePromptView, ProductAdapterError,
-    ProductOutboundPayload, ProductProjectionItem, ProductProjectionState,
-    ProductWorkflowRejectionKind, RedactedString,
+    ApprovalPromptDetailView, ApprovalPromptScopeView, AuthPromptContextView, GatePromptView,
+    ProductAdapterError, ProductGateKind, ProductOutboundPayload, ProductProjectionItem,
+    ProductProjectionState, ProductWorkflowRejectionKind, RedactedString,
 };
 use ironclaw_product_workflow::{
     ApprovalInteractionScope, approval_request_id_from_gate_ref, is_approval_gate_ref,
 };
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_turns::{
-    GateRef, GetRunStateRequest, SanitizedFailure, TurnActor, TurnCoordinator, TurnError,
-    TurnEventKind, TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
-    TurnEventProjectionService, TurnEventProjectionSource, TurnLifecycleEvent, TurnRunId,
-    TurnScope, TurnStatus,
+    GateRef, GetRunStateRequest, ModelInvalidOutputDetailReason, SanitizedFailure, TurnActor,
+    TurnBlockedGateKind, TurnCoordinator, TurnError, TurnEventKind, TurnEventProjectionCursor,
+    TurnEventProjectionError, TurnEventProjectionRequest, TurnEventProjectionSource,
+    TurnEventReducerService, TurnLifecycleEvent, TurnRunId, TurnScope, TurnStatus,
     run_profile::{
         SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest,
         SystemInferenceTaskId, SystemPromptId, SystemPromptSource, SystemTaskKind,
@@ -30,9 +32,11 @@ use ironclaw_turns::{
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 
 use crate::AuthChallengeProvider;
-use crate::auth_prompt::auth_prompt_view_for_blocked_auth;
 use crate::failure_summary::{
-    pinned_failure_summary_for_category, reborn_failure_summary_for_category,
+    pinned_failure_summary_for_category, reborn_failure_summary_for_category_and_detail,
+};
+use crate::product_auth::api::auth_prompt::{
+    BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth,
 };
 
 pub(super) const WEBUI_TURN_EVENT_PAGE_LIMIT: usize = 256;
@@ -51,6 +55,13 @@ pub(super) struct TurnEventPayload {
 pub(crate) struct FailureExplanationInput {
     pub(crate) failure_category: String,
     pub(crate) fallback_summary: String,
+    /// Model-visible, secret-scrubbed raw cause carried from the failure
+    /// record (e.g. a provider HTTP status line or a missing schema-ref path).
+    /// Unlike `fallback_summary`, this is the original error text so the
+    /// explainer is given the real facts rather than only the coarse category.
+    /// Producers scrub secret VALUES before populating it; the prompt builder
+    /// re-runs [`sanitize_model_visible_text`] as defense in depth.
+    pub(crate) detail: Option<String>,
 }
 
 #[async_trait]
@@ -71,7 +82,7 @@ pub(super) enum TurnEventBridge {
     #[default]
     Disabled,
     Enabled {
-        service: Arc<TurnEventProjectionService<dyn TurnEventProjectionSource>>,
+        service: Arc<TurnEventReducerService<dyn TurnEventProjectionSource>>,
         coordinator: Arc<dyn TurnCoordinator>,
         approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
         failure_explainer: Arc<dyn FailureExplanationProvider>,
@@ -114,7 +125,7 @@ impl TurnEventBridge {
         approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
     ) -> Self {
         Self::Enabled {
-            service: Arc::new(TurnEventProjectionService::new(source)),
+            service: Arc::new(TurnEventReducerService::new(source)),
             coordinator,
             approval_requests,
             failure_explainer: Arc::new(NoopFailureExplanationProvider),
@@ -184,12 +195,28 @@ impl TurnEventBridge {
                 .await
             {
                 Ok(page) => page,
-                Err(TurnEventProjectionError::RebaseRequired { earliest, .. })
-                    if after_cursor.is_none() =>
-                {
+                Err(TurnEventProjectionError::RebaseRequired {
+                    requested,
+                    earliest,
+                }) if requested.scope == earliest.scope => {
+                    // The requested cursor sits below the projection's retention
+                    // floor, so the events it asked for are gone. The projection
+                    // still tells us the earliest replayable cursor; jump the
+                    // client forward to it instead of surfacing a retryable error.
+                    //
+                    // This applies on reconnect too (a non-`None` cursor), not
+                    // just first connect. Otherwise the browser auto-reconnects
+                    // via `Last-Event-ID` with the same stale cursor, gets the
+                    // same rebase rejection, and loops forever — appearing as a
+                    // permanently "disconnected" stream. Skipping the
+                    // unavoidably-pruned events keeps the stream alive and
+                    // self-corrects: the next drain requests `after = earliest`,
+                    // which is at/above the floor and drains normally. Any
+                    // payloads already collected this drain are returned first so
+                    // we never drop events we did read.
                     return Ok(TurnEventDrain {
                         next_cursor: Some(*earliest),
-                        payloads: Vec::new(),
+                        payloads,
                     });
                 }
                 Err(error) => return Err(map_turn_event_projection_error(error)),
@@ -231,7 +258,7 @@ async fn turn_event_payloads_for_page(
     let futures = events.into_iter().map(|event| {
         let cursor = TurnEventProjectionCursor::for_scope(event.scope.clone(), event.cursor);
         async move {
-            turn_event_payload(
+            turn_event_payloads(
                 caller_user_id,
                 coordinator,
                 failure_explainer,
@@ -241,19 +268,27 @@ async fn turn_event_payloads_for_page(
                 &event,
             )
             .await
-            .map(|payload| payload.map(|payload| TurnEventPayload { cursor, payload }))
+            .map(|payloads| {
+                payloads
+                    .into_iter()
+                    .map(|payload| TurnEventPayload {
+                        cursor: cursor.clone(),
+                        payload,
+                    })
+                    .collect::<Vec<_>>()
+            })
         }
     });
-    stream::iter(futures)
+    let payloads = stream::iter(futures)
         .buffered(16)
         .collect::<Vec<_>>()
         .await
         .into_iter()
-        .filter_map(Result::transpose)
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(payloads.into_iter().flatten().collect())
 }
 
-async fn turn_event_payload(
+async fn turn_event_payloads(
     caller_user_id: &ironclaw_host_api::UserId,
     coordinator: &dyn TurnCoordinator,
     failure_explainer: &dyn FailureExplanationProvider,
@@ -261,9 +296,10 @@ async fn turn_event_payload(
     auth_challenges: Option<&dyn AuthChallengeProvider>,
     approval_requests: Option<&dyn ApprovalRequestStore>,
     event: &TurnLifecycleEvent,
-) -> Result<Option<ProductOutboundPayload>, ProductAdapterError> {
-    if matches!(event.kind, TurnEventKind::Blocked)
-        && let Some(prompt) = blocked_prompt_payload(
+) -> Result<Vec<ProductOutboundPayload>, ProductAdapterError> {
+    let mut payloads = Vec::new();
+    let blocked_prompt = if matches!(event.kind, TurnEventKind::Blocked) {
+        blocked_prompt_payload(
             caller_user_id,
             coordinator,
             auth_challenges,
@@ -271,18 +307,21 @@ async fn turn_event_payload(
             event,
         )
         .await?
-    {
-        return Ok(Some(prompt));
-    }
+    } else {
+        None
+    };
     if projects_run_status(&event.kind) {
         let failure_details =
             failure_details_for_turn_event(failure_explainer, failure_explanation_cache, event)
                 .await;
-        return Ok(Some(ProductOutboundPayload::ProjectionUpdate {
-            state: turn_event_projection_state(event, failure_details)?,
-        }));
+        payloads.push(ProductOutboundPayload::ProjectionUpdate {
+            state: turn_event_projection_state(event, failure_details, blocked_prompt.as_ref())?,
+        });
     }
-    Ok(None)
+    if let Some(prompt) = blocked_prompt {
+        payloads.push(prompt);
+    }
+    Ok(payloads)
 }
 
 #[async_trait]
@@ -363,24 +402,31 @@ async fn blocked_prompt_payload(
     if state.status != event.status || state.event_cursor != event.cursor {
         return Ok(None);
     }
+    let blocked_invocation_id = event
+        .blocked_gate
+        .as_ref()
+        .and_then(|gate| gate.activity_id)
+        .or(state.blocked_activity_id)
+        .map(|activity_id| InvocationId::from_uuid(activity_id.as_uuid()));
     let Some(gate_ref) = state.gate_ref.as_ref() else {
         return Ok(None);
     };
     let gate_ref_str = gate_ref.as_str().to_string();
     match event.status {
         TurnStatus::BlockedAuth => {
-            let view = auth_prompt_view_for_blocked_auth(
-                event.owner_user_id.as_ref().unwrap_or(caller_user_id),
-                &event.scope,
-                event.run_id,
-                &gate_ref_str,
-                event
+            let view = auth_prompt_view_for_blocked_auth(BlockedAuthPromptRequest {
+                fallback_owner_user_id: event.owner_user_id.as_ref().unwrap_or(caller_user_id),
+                scope: &event.scope,
+                run_id: event.run_id,
+                gate_ref: &gate_ref_str,
+                invocation_id: blocked_invocation_id,
+                body: event
                     .sanitized_reason
                     .clone()
                     .unwrap_or_else(|| "Authenticate to continue this run.".to_string()),
-                &state.credential_requirements,
+                credential_requirements: &state.credential_requirements,
                 auth_challenges,
-            )
+            })
             .await?;
             Ok(Some(ProductOutboundPayload::AuthPrompt(view)))
         }
@@ -405,6 +451,10 @@ async fn blocked_prompt_payload(
         TurnStatus::Queued
         | TurnStatus::Running
         | TurnStatus::BlockedDependentRun
+        // External-tool gates are not user-clickable prompts; the OpenAI
+        // Responses surface reads them via its own projection path. No generic
+        // gate-prompt payload here.
+        | TurnStatus::BlockedExternalTool
         | TurnStatus::RecoveryRequired
         | TurnStatus::CancelRequested
         | TurnStatus::Completed
@@ -420,37 +470,73 @@ async fn approval_gate_prompt(
     gate_ref: &GateRef,
     gate_ref_string: String,
 ) -> ProductOutboundPayload {
-    let context = approval_requests.zip(approval_request_id_from_gate_ref(gate_ref).ok());
-    let context = match context {
-        Some((store, request_id)) => {
-            let owner_user_id = event.owner_user_id.as_ref().unwrap_or(caller_user_id);
-            let scope = ApprovalInteractionScope::from_turn(
-                &event.scope,
-                &TurnActor::new(owner_user_id.clone()),
-            )
-            .to_resource_scope();
-            match store.get(&scope, request_id).await {
-                Ok(Some(record)) => approval_context_for_request(&record.request),
-                Ok(None) => None,
-                Err(error) => {
-                    tracing::debug!(
-                        %error,
-                        request_id = %request_id,
-                        "approval request lookup failed during WebUI gate projection"
-                    );
-                    None
-                }
-            }
-        }
-        None => None,
-    };
+    let owner_user_id = event.owner_user_id.as_ref().unwrap_or(caller_user_id);
+    let lookup =
+        approval_prompt_lookup(approval_requests, gate_ref, owner_user_id, &event.scope).await;
     gate_prompt_with_context(
         event,
         gate_ref_string,
         "Approval required",
-        is_approval_gate_ref(gate_ref),
-        context,
+        is_approval_gate_ref(gate_ref.as_str()),
+        lookup.context,
+        lookup.invocation_id,
     )
+}
+
+/// Resolve an approval gate's request details (tool/action/reason) into the
+/// rendered context view, by looking it up in the `ApprovalRequestStore` by
+/// gate ref. Shared by the WebUI gate projection and the Slack approval prompt
+/// so both surface the *same* "what is being approved" data from one source.
+/// Returns `None` when no store is wired, the gate ref is not an approval ref,
+/// the request is missing, or the lookup fails.
+#[cfg(feature = "slack-v2-host-beta")]
+pub(crate) async fn approval_prompt_context_view(
+    approval_requests: Option<&dyn ApprovalRequestStore>,
+    gate_ref: &GateRef,
+    owner_user_id: &UserId,
+    turn_scope: &TurnScope,
+) -> Option<ApprovalPromptContextView> {
+    approval_prompt_lookup(approval_requests, gate_ref, owner_user_id, turn_scope)
+        .await
+        .context
+}
+
+#[derive(Debug, Default)]
+struct ApprovalPromptLookup {
+    context: Option<ApprovalPromptContextView>,
+    invocation_id: Option<InvocationId>,
+}
+
+async fn approval_prompt_lookup(
+    approval_requests: Option<&dyn ApprovalRequestStore>,
+    gate_ref: &GateRef,
+    owner_user_id: &UserId,
+    turn_scope: &TurnScope,
+) -> ApprovalPromptLookup {
+    let (store, request_id) =
+        match approval_requests.zip(approval_request_id_from_gate_ref(gate_ref).ok()) {
+            Some(value) => value,
+            None => return ApprovalPromptLookup::default(),
+        };
+    let scope =
+        ApprovalInteractionScope::from_turn(turn_scope, &TurnActor::new(owner_user_id.clone()))
+            .to_resource_scope();
+    match store.get(&scope, request_id).await {
+        Ok(Some(record)) => ApprovalPromptLookup {
+            context: approval_context_for_request(&record.request),
+            invocation_id: Some(record.scope.invocation_id),
+        },
+        Ok(None) => ApprovalPromptLookup::default(),
+        Err(error) => {
+            tracing::debug!(
+                %error,
+                request_id = %request_id,
+                "approval request lookup failed during gate projection"
+            );
+            // silent-ok: approval context is best-effort UI enrichment; gate prompts remain actionable without it
+            ApprovalPromptLookup::default()
+        }
+    }
 }
 
 fn approval_context_for_request(request: &ApprovalRequest) -> Option<ApprovalPromptContextView> {
@@ -590,7 +676,7 @@ fn gate_prompt(
     headline: &'static str,
     allow_always: bool,
 ) -> ProductOutboundPayload {
-    gate_prompt_with_context(event, gate_ref, headline, allow_always, None)
+    gate_prompt_with_context(event, gate_ref, headline, allow_always, None, None)
 }
 
 fn gate_prompt_with_context(
@@ -599,10 +685,12 @@ fn gate_prompt_with_context(
     headline: &'static str,
     allow_always: bool,
     approval_context: Option<ApprovalPromptContextView>,
+    invocation_id: Option<InvocationId>,
 ) -> ProductOutboundPayload {
     ProductOutboundPayload::GatePrompt(GatePromptView {
         turn_run_id: event.run_id,
         gate_ref,
+        invocation_id,
         headline: headline.to_string(),
         body: event
             .sanitized_reason
@@ -631,16 +719,118 @@ fn projects_run_status(kind: &TurnEventKind) -> bool {
 fn turn_event_projection_state(
     event: &TurnLifecycleEvent,
     failure_details: FailureProjectionDetails,
+    blocked_prompt: Option<&ProductOutboundPayload>,
 ) -> Result<ProductProjectionState, ProductAdapterError> {
-    ProductProjectionState::new(
-        event.scope.thread_id.to_string(),
-        vec![ProductProjectionItem::RunStatus {
-            run_id: event.run_id,
-            status: turn_status_wire(event.status).to_string(),
-            failure_category: failure_details.category,
-            failure_summary: failure_details.summary,
-        }],
-    )
+    let mut items = vec![ProductProjectionItem::RunStatus {
+        run_id: event.run_id,
+        status: turn_status_wire(event.status).to_string(),
+        failure_category: failure_details.category,
+        failure_summary: failure_details.summary,
+        retryable: event.retryable,
+    }];
+    if let Some(item) = gate_projection_item(event, blocked_prompt)? {
+        items.push(item);
+    }
+    ProductProjectionState::new(event.scope.thread_id.to_string(), items)
+}
+
+#[derive(Debug, Clone, Default)]
+struct GateProjectionPromptContext {
+    invocation_id: Option<InvocationId>,
+    headline: Option<String>,
+    body: Option<String>,
+    allow_always: Option<bool>,
+    auth_context: Option<AuthPromptContextView>,
+}
+
+fn gate_projection_prompt_context(
+    blocked_prompt: Option<&ProductOutboundPayload>,
+) -> Result<GateProjectionPromptContext, ProductAdapterError> {
+    let context = match blocked_prompt {
+        Some(ProductOutboundPayload::GatePrompt(prompt)) => GateProjectionPromptContext {
+            invocation_id: prompt.invocation_id,
+            headline: Some(prompt.headline.clone()),
+            body: Some(prompt.body.clone()),
+            allow_always: Some(prompt.allow_always),
+            auth_context: None,
+        },
+        // The channel-connection context (for a manual_token pairing gate)
+        // rides inside `auth_context` (`AuthPromptContextView::connection`) — the
+        // single canonical place on the gate item, no duplicate top-level field.
+        Some(ProductOutboundPayload::AuthPrompt(prompt)) => GateProjectionPromptContext {
+            invocation_id: prompt.invocation_id,
+            headline: Some(prompt.headline.clone()),
+            body: Some(prompt.body.clone()),
+            allow_always: Some(false),
+            auth_context: AuthPromptContextView::from_auth_prompt(prompt)?,
+        },
+        _ => GateProjectionPromptContext::default(),
+    };
+    Ok(context)
+}
+
+fn gate_projection_item(
+    event: &TurnLifecycleEvent,
+    blocked_prompt: Option<&ProductOutboundPayload>,
+) -> Result<Option<ProductProjectionItem>, ProductAdapterError> {
+    if !matches!(event.kind, TurnEventKind::Blocked) {
+        return Ok(None);
+    }
+    let Some(blocked_gate) = event.blocked_gate.as_ref() else {
+        return Ok(None);
+    };
+    let prompt_context = gate_projection_prompt_context(blocked_prompt)?;
+    let blocked_invocation_id = blocked_gate
+        .activity_id
+        .map(|activity_id| InvocationId::from_uuid(activity_id.as_uuid()));
+    let body = prompt_context.body.unwrap_or_else(|| {
+        event
+            .sanitized_reason
+            .clone()
+            .unwrap_or_else(|| gate_projection_body(blocked_gate.gate_kind).to_string())
+    });
+    Ok(Some(ProductProjectionItem::Gate {
+        run_id: event.run_id,
+        gate_kind: product_gate_kind(blocked_gate.gate_kind),
+        gate_ref: blocked_gate.gate_ref.as_str().to_string(),
+        invocation_id: prompt_context.invocation_id.or(blocked_invocation_id),
+        headline: prompt_context
+            .headline
+            .unwrap_or_else(|| gate_projection_headline(blocked_gate.gate_kind).to_string()),
+        body: Some(body),
+        allow_always: prompt_context.allow_always.unwrap_or(false),
+        auth_context: prompt_context.auth_context,
+    }))
+}
+
+fn product_gate_kind(kind: TurnBlockedGateKind) -> ProductGateKind {
+    match kind {
+        TurnBlockedGateKind::Approval => ProductGateKind::Approval,
+        TurnBlockedGateKind::Auth => ProductGateKind::Auth,
+        TurnBlockedGateKind::Resource => ProductGateKind::Resource,
+        TurnBlockedGateKind::AwaitDependentRun => ProductGateKind::Generic,
+        TurnBlockedGateKind::ExternalTool => ProductGateKind::Generic,
+    }
+}
+
+fn gate_projection_headline(kind: TurnBlockedGateKind) -> &'static str {
+    match kind {
+        TurnBlockedGateKind::Approval => "Approval required",
+        TurnBlockedGateKind::Auth => "Authentication required",
+        TurnBlockedGateKind::Resource => "Resource unavailable",
+        TurnBlockedGateKind::AwaitDependentRun => "Waiting for dependent run",
+        TurnBlockedGateKind::ExternalTool => "External tool call pending",
+    }
+}
+
+fn gate_projection_body(kind: TurnBlockedGateKind) -> &'static str {
+    match kind {
+        TurnBlockedGateKind::Approval => "Resolve this approval gate to continue the run.",
+        TurnBlockedGateKind::Auth => "Authenticate to continue this run.",
+        TurnBlockedGateKind::Resource => "Resolve this resource gate to continue the run.",
+        TurnBlockedGateKind::AwaitDependentRun => "Waiting for a dependent run to finish.",
+        TurnBlockedGateKind::ExternalTool => "Submit the external tool output to continue the run.",
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -695,13 +885,25 @@ async fn failure_details_for_turn_event(
     let Some(category) = failure_category_for_turn_event(event) else {
         return FailureProjectionDetails::default();
     };
-    let fallback_summary = reborn_failure_summary_for_category(Some(&category)).to_string();
+    // The model-visible raw cause for the failure travels on the failure
+    // record's detail channel, surfaced on `TurnLifecycleEvent.detail` by the
+    // upstream runner. Source it here so the explainer (and model) get the real
+    // cause instead of only the bounded category.
+    let detail = detail_for_turn_event(event, &category);
+    let invalid_output_detail =
+        ModelInvalidOutputDetailReason::from_failure_category_and_safe_summary(
+            &category,
+            detail.as_deref(),
+        );
+    let fallback_summary =
+        reborn_failure_summary_for_category_and_detail(Some(&category), invalid_output_detail)
+            .to_string();
     let cache_key = FailureExplanationCacheKey {
         run_id: event.run_id,
         category: category.clone(),
     };
     let summary = cached_failure_summary(failure_explanation_cache, cache_key, || async {
-        failure_summary_for_turn_event(failure_explainer, &category, fallback_summary).await
+        failure_summary_for_turn_event(failure_explainer, &category, fallback_summary, detail).await
     })
     .await;
     FailureProjectionDetails {
@@ -727,6 +929,7 @@ async fn failure_summary_for_turn_event(
     failure_explainer: &dyn FailureExplanationProvider,
     category: &str,
     fallback_summary: String,
+    detail: Option<String>,
 ) -> String {
     if let Some(summary) = pinned_failure_summary_for_category(category) {
         return summary.to_string();
@@ -735,9 +938,23 @@ async fn failure_summary_for_turn_event(
         .explain_failure(FailureExplanationInput {
             failure_category: category.to_string(),
             fallback_summary: fallback_summary.clone(),
+            detail,
         })
         .await
         .unwrap_or(fallback_summary)
+}
+
+/// Resolve the model-visible detail to hand the failure explainer.
+///
+/// Sources the secret-scrubbed raw cause from `TurnLifecycleEvent.detail`, the
+/// dedicated channel distinct from `sanitized_reason` (which is consumed as the
+/// `failure_category`). The detail originates on
+/// `AgentLoopHostError`/`HostManagedModelError` upstream and is threaded through
+/// the executor/driver diagnostics into the failure record and onto the event.
+/// `None` when the failed run recorded no distinct cause, in which case the
+/// explainer falls back to the category summary.
+fn detail_for_turn_event(event: &TurnLifecycleEvent, _category: &str) -> Option<String> {
+    event.detail.clone()
 }
 
 fn failure_category_for_turn_event(event: &TurnLifecycleEvent) -> Option<String> {
@@ -768,15 +985,38 @@ fn failure_explanation_request(input: &FailureExplanationInput) -> Option<System
 }
 
 fn failure_explanation_system_prompt() -> &'static str {
-    ironclaw_loop_support::FAILURE_EXPLANATION_SYSTEM_PROMPT
+    ironclaw_loop_host::FAILURE_EXPLANATION_SYSTEM_PROMPT
 }
 
-fn failure_explanation_user_prompt(input: &FailureExplanationInput) -> String {
-    format!(
+pub(super) fn failure_explanation_user_prompt(input: &FailureExplanationInput) -> String {
+    let mut prompt = format!(
         "status: failed\nfailure_category: {}\nfallback_summary: {}\n",
         sanitize_model_visible_text(&input.failure_category),
         sanitize_model_visible_text(&input.fallback_summary),
-    )
+    );
+    // Give the explainer the real cause when one survived from the failure
+    // record. Re-run the value-scrubber as defense in depth even though the
+    // producer is expected to have scrubbed secret VALUES already; skip the
+    // line entirely when the detail is absent or scrubs to empty.
+    //
+    // Unlike `failure_category`/`fallback_summary` (host-authored, derived from
+    // the category), `detail` is untrusted provider/tool/runtime error text.
+    // `sanitize_model_visible_text` redacts credential-shaped tokens but keeps
+    // newlines and instruction-like content, so appending it raw would let a
+    // crafted error (e.g. from an MCP server or provider body) inject extra
+    // prompt fields or directives — a `\nfallback_summary: ...\nIgnore previous
+    // instructions...` — into the explainer, whose output becomes the public
+    // `failure_summary`. JSON-string-escape it so it stays a single quoted data
+    // value the model reads as data, never as prompt structure.
+    if let Some(detail) = input.detail.as_deref() {
+        let scrubbed = sanitize_model_visible_text(detail);
+        if !scrubbed.trim().is_empty() {
+            let quoted = serde_json::to_string(&scrubbed)
+                .unwrap_or_else(|_| "\"<undisplayable detail>\"".to_string());
+            prompt.push_str(&format!("detail: {quoted}\n"));
+        }
+    }
+    prompt
 }
 
 pub(super) fn bounded_failure_explanation(content: &str) -> Option<String> {
@@ -795,7 +1035,7 @@ pub(super) fn bounded_failure_explanation(content: &str) -> Option<String> {
     (!truncated.is_empty()).then_some(truncated)
 }
 
-fn turn_status_wire(status: TurnStatus) -> &'static str {
+pub(super) fn turn_status_wire(status: TurnStatus) -> &'static str {
     match status {
         TurnStatus::Queued => "queued",
         TurnStatus::Running => "running",
@@ -803,6 +1043,7 @@ fn turn_status_wire(status: TurnStatus) -> &'static str {
         TurnStatus::BlockedAuth => "blocked_auth",
         TurnStatus::BlockedResource => "blocked_resource",
         TurnStatus::BlockedDependentRun => "blocked_dependent_run",
+        TurnStatus::BlockedExternalTool => "blocked_external_tool",
         TurnStatus::RecoveryRequired => "recovery_required",
         TurnStatus::CancelRequested => "cancel_requested",
         TurnStatus::Completed => "completed",

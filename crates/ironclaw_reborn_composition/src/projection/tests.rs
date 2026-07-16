@@ -1,6 +1,6 @@
 use super::turn_events::{
     FailureExplanationInput, FailureExplanationProvider, ModelFailureExplanationProvider,
-    WEBUI_TURN_EVENT_PAGE_LIMIT, bounded_failure_explanation,
+    WEBUI_TURN_EVENT_PAGE_LIMIT, bounded_failure_explanation, failure_explanation_user_prompt,
 };
 use super::*;
 
@@ -12,14 +12,14 @@ use ironclaw_event_projections::{
 use ironclaw_events::{InMemoryDurableEventLog, RuntimeEvent};
 use ironclaw_host_api::{
     Action, AgentId, ApprovalRequest, ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId,
-    InvocationId, NetworkMethod, NetworkScheme, NetworkTarget, Principal, ResourceEstimate,
-    ResourceScope, RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement,
-    RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, TenantId,
-    ThreadId, UserId,
+    InvocationId, NetworkMethod, NetworkScheme, NetworkTarget, Principal, ProcessId,
+    ResourceEstimate, ResourceScope, RuntimeCredentialAccountProviderId,
+    RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
+    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_adapters::{
-    AuthPromptChallengeKind, CapabilityActivityStatusView, ProductOutboundEnvelope,
-    ProductOutboundPayload, ProductProjectionItem,
+    AuthPromptChallengeKind, CapabilityActivityStatusView, ProductGateKind,
+    ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionItem,
 };
 use ironclaw_run_state::{
     ApprovalRecord, ApprovalRequestStore, InMemoryApprovalRequestStore, RunStateError,
@@ -88,6 +88,27 @@ fn contains_run_status(
             )
         }),
         _ => false,
+    })
+}
+
+fn run_status_failure_summary(
+    events: &[ProductOutboundEnvelope],
+    invocation_id: InvocationId,
+) -> Option<String> {
+    let expected_run_id = TurnRunId::from_uuid(invocation_id.as_uuid());
+    events.iter().find_map(|event| match event.payload() {
+        ProductOutboundPayload::ProjectionSnapshot { state }
+        | ProductOutboundPayload::ProjectionUpdate { state } => {
+            state.items.iter().find_map(|item| match item {
+                ProductProjectionItem::RunStatus {
+                    run_id,
+                    failure_summary,
+                    ..
+                } if *run_id == expected_run_id => failure_summary.clone(),
+                _ => None,
+            })
+        }
+        _ => None,
     })
 }
 
@@ -295,6 +316,13 @@ impl TurnCoordinator for FakeTurnCoordinator {
         unreachable!("projection tests only read run state")
     }
 
+    async fn retry_turn(
+        &self,
+        _request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        unreachable!("projection tests only read run state")
+    }
+
     async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
         unreachable!("projection tests only read run state")
     }
@@ -377,11 +405,15 @@ fn turn_run_state(
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
         resolved_model_route: None,
+        model_usage: None,
         received_at: chrono::Utc::now(),
         checkpoint_id: None,
         gate_ref: Some(GateRef::new("gate:auth-required").unwrap()),
+        blocked_activity_id: None,
         credential_requirements: Vec::new(),
         failure: None,
         event_cursor: cursor,
+        product_context: None,
+        resume_disposition: None,
     }
 }

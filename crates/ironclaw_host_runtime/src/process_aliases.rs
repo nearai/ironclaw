@@ -94,6 +94,66 @@ pub(crate) fn rewrite_local_host_command_aliases(
     rewritten
 }
 
+/// Rewrite real host paths in command OUTPUT back to their virtual aliases.
+///
+/// `rewrite_local_host_command_aliases` rewrites `/workspace` to the real host
+/// path *before* execution, so any program that echoes a path it was handed
+/// prints the host path — e.g. `print("saved /workspace/out.pdf")` actually runs
+/// as `print("saved /Users/alice/proj/out.pdf")`. Left untouched, that host path
+/// flows back into the model-facing output and the user-visible reply, leaking
+/// host layout and defeating `/workspace`-path download detection. This is the
+/// inverse pass: it maps the longest-matching host-path prefix in `output` back
+/// to its virtual alias so model-facing output only ever speaks in alias terms.
+pub(crate) fn rewrite_local_host_output_aliases(
+    output: &str,
+    aliases: &[LocalHostWorkdirAlias],
+) -> String {
+    if aliases.is_empty() || output.is_empty() {
+        return output.to_string();
+    }
+    // Most specific (longest host path) first: when `/workspace` nests under the
+    // same root as `/host` (host home `/Users/alice`, workspace
+    // `/Users/alice/proj`), the deeper mapping must win so `/Users/alice/proj/x`
+    // becomes `/workspace/x`, not `/host/proj/x`.
+    let mut ordered: Vec<&LocalHostWorkdirAlias> = aliases.iter().collect();
+    ordered.sort_by_key(|alias| std::cmp::Reverse(alias.host_path.as_os_str().len()));
+    let mut result = output.to_string();
+    for alias in ordered {
+        let Some(host_path) = alias.host_path.to_str() else {
+            continue;
+        };
+        result = rewrite_host_path_prefix(&result, host_path, &alias.alias);
+    }
+    result
+}
+
+/// Replace every boundary-aligned occurrence of `host_path` in `haystack` with
+/// `alias`. A match rewrites only when it starts at a path boundary and is either
+/// a whole path token or the prefix of a deeper path (next char is `/`, the end,
+/// or a non-path char) — so a sibling like `/Users/alice/proj-backup` is left
+/// alone. Boundary logic mirrors the forward command rewriter.
+fn rewrite_host_path_prefix(haystack: &str, host_path: &str, alias: &str) -> String {
+    if host_path.is_empty() {
+        return haystack.to_string();
+    }
+    let mut result = String::with_capacity(haystack.len());
+    let mut search_start = 0;
+    while let Some(rel_idx) = haystack[search_start..].find(host_path) {
+        let idx = search_start + rel_idx;
+        let end = idx + host_path.len();
+        result.push_str(&haystack[search_start..idx]);
+        if command_alias_start_boundary(haystack, idx) && command_alias_end_boundary(haystack, end)
+        {
+            result.push_str(alias);
+        } else {
+            result.push_str(host_path);
+        }
+        search_start = end;
+    }
+    result.push_str(&haystack[search_start..]);
+    result
+}
+
 fn normalize_alias(alias: String) -> Result<String, String> {
     let alias = alias.trim_end_matches('/').to_string();
     if alias.is_empty() || alias == "/" {
@@ -301,6 +361,87 @@ mod tests {
         assert_eq!(
             rewrite_local_host_command_aliases("printf \"$(cat /workspace/file)\"", &[alias]),
             "printf \"$(cat /tmp/workspace/file)\""
+        );
+    }
+
+    #[test]
+    fn output_alias_rewrite_maps_host_subpath_back_to_alias() {
+        let aliases = [alias("/workspace", "/Users/alice/proj")];
+
+        assert_eq!(
+            rewrite_local_host_output_aliases("PDF created at /Users/alice/proj/out.pdf", &aliases),
+            "PDF created at /workspace/out.pdf"
+        );
+    }
+
+    #[test]
+    fn output_alias_rewrite_maps_exact_host_path_at_boundaries() {
+        let aliases = [alias("/workspace", "/Users/alice/proj")];
+
+        // end-of-string, whitespace, and quote boundaries all rewrite the bare
+        // host path (no trailing subpath).
+        assert_eq!(
+            rewrite_local_host_output_aliases("cwd is /Users/alice/proj", &aliases),
+            "cwd is /workspace"
+        );
+        assert_eq!(
+            rewrite_local_host_output_aliases("cwd: /Users/alice/proj\nok", &aliases),
+            "cwd: /workspace\nok"
+        );
+        assert_eq!(
+            rewrite_local_host_output_aliases("\"/Users/alice/proj\"", &aliases),
+            "\"/workspace\""
+        );
+    }
+
+    #[test]
+    fn output_alias_rewrite_leaves_sibling_paths_untouched() {
+        let aliases = [alias("/workspace", "/Users/alice/proj")];
+
+        // `proj-backup` is a different directory that merely shares the prefix.
+        assert_eq!(
+            rewrite_local_host_output_aliases("/Users/alice/proj-backup/x", &aliases),
+            "/Users/alice/proj-backup/x"
+        );
+    }
+
+    #[test]
+    fn output_alias_rewrite_prefers_longest_host_path() {
+        // Host home and workspace share a root; the deeper workspace mapping wins
+        // for paths inside it, and the home mapping covers the rest.
+        let aliases = [
+            alias("/host", "/Users/alice"),
+            alias("/workspace", "/Users/alice/proj"),
+        ];
+
+        assert_eq!(
+            rewrite_local_host_output_aliases("/Users/alice/proj/out.pdf", &aliases),
+            "/workspace/out.pdf"
+        );
+        assert_eq!(
+            rewrite_local_host_output_aliases("/Users/alice/notes.txt", &aliases),
+            "/host/notes.txt"
+        );
+    }
+
+    #[test]
+    fn output_alias_rewrite_handles_multiple_occurrences() {
+        let aliases = [alias("/workspace", "/Users/alice/proj")];
+
+        assert_eq!(
+            rewrite_local_host_output_aliases(
+                "a /Users/alice/proj/x and /Users/alice/proj/y",
+                &aliases
+            ),
+            "a /workspace/x and /workspace/y"
+        );
+    }
+
+    #[test]
+    fn output_alias_rewrite_noop_without_aliases() {
+        assert_eq!(
+            rewrite_local_host_output_aliases("/Users/alice/proj/out.pdf", &[]),
+            "/Users/alice/proj/out.pdf"
         );
     }
 }

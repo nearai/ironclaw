@@ -416,6 +416,192 @@ async fn libsql_native_put_cas_version_advances_and_rejects_stale() {
     assert!(matches!(err, FilesystemError::VersionMismatch { .. }));
 }
 
+/// Mirrors `postgres_put_cas_version_on_missing_path_reports_no_found_version`:
+/// a `Version` CAS write against a path with no existing row must fail
+/// closed with `found: None` rather than panicking or reporting a stale
+/// version, so callers can distinguish "never written" from "someone
+/// else won the race" on the version-mismatch error.
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_native_put_cas_version_on_missing_path_reports_no_found_version() {
+    let filesystem = libsql_root().await;
+    let path = VirtualPath::new("/secrets/leases/L3-missing").unwrap();
+    let err = filesystem
+        .put(
+            &path,
+            Entry::bytes(vec![1]),
+            CasExpectation::Version(ironclaw_filesystem::RecordVersion::from_backend(1)),
+        )
+        .await
+        .expect_err("version CAS on a missing path must fail");
+    match err {
+        FilesystemError::VersionMismatch { found, .. } => {
+            assert!(
+                found.is_none(),
+                "missing path should report no found version, got: {found:?}"
+            );
+        }
+        other => panic!("expected VersionMismatch, got: {other:?}"),
+    }
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_delete_if_version_deletes_current_and_rejects_stale_or_missing() {
+    let filesystem = libsql_root().await;
+    let path = VirtualPath::new("/secrets/leases/CAS-DEL").unwrap();
+
+    // Missing path → NotFound (already gone, benign), never VersionMismatch.
+    let err = filesystem
+        .delete_if_version(&path, ironclaw_filesystem::RecordVersion::from_backend(1))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        FilesystemError::NotFound {
+            operation: FilesystemOperation::Delete,
+            ..
+        }
+    ));
+
+    // Simulates the state a concurrent writer would leave behind (this is a
+    // sequential script, not a real race — see concurrent_cas_storm.rs for
+    // genuine parallel coverage): the v1 the deleter read is bumped to v2
+    // before the delete lands → the stale delete loses with the observed
+    // version and the entry survives at v2.
+    let v1 = filesystem
+        .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+        .await
+        .unwrap();
+    let log_seq = filesystem.append(&path, b"kept".to_vec()).await.unwrap();
+    let v2 = filesystem
+        .put(&path, Entry::bytes(vec![2]), CasExpectation::Version(v1))
+        .await
+        .unwrap();
+    let err = filesystem.delete_if_version(&path, v1).await.unwrap_err();
+    match err {
+        FilesystemError::VersionMismatch {
+            expected, found, ..
+        } => {
+            assert_eq!(expected, Some(v1));
+            assert_eq!(found, Some(v2));
+        }
+        other => panic!("expected VersionMismatch, got {other:?}"),
+    }
+    let got = filesystem.get(&path).await.unwrap().unwrap();
+    assert_eq!(got.version, v2);
+    assert_eq!(got.entry.body, vec![2]);
+
+    // Correct version deletes exactly the entry; single-key, so the event
+    // log at the same path survives (blind `delete` sweeps it).
+    filesystem.delete_if_version(&path, v2).await.unwrap();
+    assert!(filesystem.get(&path).await.unwrap().is_none());
+    let log = filesystem.tail(&path, SeqNo::ZERO).await.unwrap();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].seq, log_seq);
+}
+
+/// Review fix (PR #5749): an `expected_version` beyond `i64::MAX` must
+/// surface `CorruptRecordVersion` (audit finding F6's overflow guard) rather
+/// than being silently truncated into a bind parameter that could never
+/// match — and the guard must fire before any DELETE runs, so the entry
+/// survives untouched.
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_delete_if_version_rejects_out_of_range_expected_version() {
+    let filesystem = libsql_root().await;
+    let path = VirtualPath::new("/secrets/leases/CAS-DEL-OVERFLOW").unwrap();
+    let v1 = filesystem
+        .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+        .await
+        .unwrap();
+
+    let err = filesystem
+        .delete_if_version(
+            &path,
+            ironclaw_filesystem::RecordVersion::from_backend(u64::MAX),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, FilesystemError::CorruptRecordVersion { .. }),
+        "expected CorruptRecordVersion, got {err:?}"
+    );
+
+    let got = filesystem.get(&path).await.unwrap().unwrap();
+    assert_eq!(got.version, v1);
+    assert_eq!(got.entry.body, vec![1]);
+}
+
+/// Round-B review: the ABA hazard `delete_if_version`'s trait doc warns
+/// about (version tokens are not generation-stable) was previously pinned
+/// only for the in-memory backend. libSQL shares the same "version
+/// restarts at 1 after a full delete" precondition — pin it here too so a
+/// future change to libSQL's version-assignment (e.g. a sequence that
+/// doesn't reset) can't silently invalidate the trait doc's warning for
+/// this backend without a test noticing.
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_delete_if_version_is_vulnerable_to_aba_across_delete_recreate_cycles() {
+    let filesystem = libsql_root().await;
+    let path = VirtualPath::new("/secrets/leases/CAS-DEL-ABA").unwrap();
+
+    let v1_first = filesystem
+        .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+        .await
+        .unwrap();
+    filesystem.delete_if_version(&path, v1_first).await.unwrap();
+    assert!(filesystem.get(&path).await.unwrap().is_none());
+
+    let v1_second = filesystem
+        .put(&path, Entry::bytes(vec![2]), CasExpectation::Absent)
+        .await
+        .unwrap();
+    assert_eq!(
+        v1_first, v1_second,
+        "version must restart after a full delete, or this ABA hazard doesn't apply"
+    );
+
+    // The stale `v1_first` token wrongly authorizes deleting the second
+    // incarnation's live data — documented hazard, not a regression.
+    filesystem.delete_if_version(&path, v1_first).await.unwrap();
+    assert!(
+        filesystem.get(&path).await.unwrap().is_none(),
+        "stale version token wrongly matched and deleted the second incarnation"
+    );
+}
+
+/// Round-C review (PR #5749): no test drove `delete_if_version` against an
+/// explicit directory row (`is_dir = TRUE`, via `create_dir_all`) to confirm
+/// the `is_dir = 0` scoping — shared with `put`'s Version arm and
+/// `current_version_libsql` — actually excludes it, the way
+/// `libsql_put_rejects_existing_directory`-style tests already pin for
+/// `put`. A directory-only path must diagnose as `NotFound` (no file-plane
+/// row at that path), never match/delete the directory row.
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_delete_if_version_excludes_explicit_directory_row() {
+    let filesystem = libsql_root().await;
+    let dir = VirtualPath::new("/secrets/leases/CAS-DEL-DIR").unwrap();
+    filesystem.create_dir_all(&dir).await.unwrap();
+
+    let err = filesystem
+        .delete_if_version(&dir, ironclaw_filesystem::RecordVersion::from_backend(1))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            FilesystemError::NotFound {
+                operation: FilesystemOperation::Delete,
+                ..
+            }
+        ),
+        "delete_if_version must not match an explicit directory row \
+         (is_dir = TRUE), got: {err:?}"
+    );
+}
+
 #[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_native_put_cas_any_increments_existing_version() {
@@ -1163,6 +1349,99 @@ async fn libsql_append_and_tail_assigns_monotonic_seqno() {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn libsql_append_batch_is_one_statement_with_contiguous_ordered_seqs() {
+    let filesystem = libsql_root().await;
+    let log = VirtualPath::new("/events/engine").unwrap();
+
+    // Seed a single append so the batch must continue the sequence.
+    let s0 = filesystem.append(&log, b"seed".to_vec()).await.unwrap();
+
+    let payloads: Vec<Vec<u8>> = (0..21u8).map(|n| vec![n]).collect();
+    let seqs = filesystem
+        .append_batch(&log, payloads.clone())
+        .await
+        .unwrap();
+    assert_eq!(seqs.len(), 21);
+    assert!(seqs[0] > s0, "batch seqs continue past the seeded append");
+    // Contiguous + monotonic in payload order.
+    for window in seqs.windows(2) {
+        assert!(window[0] < window[1]);
+    }
+
+    // Order + content preserved through the single multi-row INSERT.
+    let all = filesystem.tail(&log, SeqNo::ZERO).await.unwrap();
+    assert_eq!(all.len(), 22);
+    assert_eq!(all[0].payload, b"seed".to_vec());
+    for (offset, payload) in payloads.iter().enumerate() {
+        assert_eq!(&all[offset + 1].payload, payload);
+        assert_eq!(all[offset + 1].seq, seqs[offset]);
+    }
+
+    // Empty batch is a no-op.
+    assert!(
+        filesystem
+            .append_batch(&log, Vec::new())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_append_batch_spanning_multiple_statements_commits_atomically_in_order() {
+    // 600 > the 256-row chunk size, so this exercises the multi-statement
+    // transactional path: every chunk must commit and the seqs stay contiguous
+    // and ordered across chunk boundaries.
+    let filesystem = libsql_root().await;
+    let log = VirtualPath::new("/events/multichunk").unwrap();
+
+    let payloads: Vec<Vec<u8>> = (0..600u32).map(|n| n.to_le_bytes().to_vec()).collect();
+    let seqs = filesystem
+        .append_batch(&log, payloads.clone())
+        .await
+        .unwrap();
+    assert_eq!(seqs.len(), 600);
+    for window in seqs.windows(2) {
+        assert!(window[0] < window[1], "seqs are ordered across chunks");
+    }
+
+    let all = filesystem.tail(&log, SeqNo::ZERO).await.unwrap();
+    assert_eq!(all.len(), 600);
+    for (offset, payload) in payloads.iter().enumerate() {
+        assert_eq!(
+            &all[offset].payload, payload,
+            "order preserved across chunks"
+        );
+        assert_eq!(all[offset].seq, seqs[offset]);
+    }
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_tail_bounded_limits_records_before_materialization() {
+    let filesystem = libsql_root().await;
+    let log = VirtualPath::new("/events/bounded").unwrap();
+
+    let s1 = filesystem.append(&log, b"a".to_vec()).await.unwrap();
+    let s2 = filesystem.append(&log, b"b".to_vec()).await.unwrap();
+    let s3 = filesystem.append(&log, b"c".to_vec()).await.unwrap();
+
+    let none = filesystem.tail_bounded(&log, SeqNo::ZERO, 0).await.unwrap();
+    let first_two = filesystem.tail_bounded(&log, SeqNo::ZERO, 2).await.unwrap();
+    let after_first = filesystem.tail_bounded(&log, s1, 1).await.unwrap();
+
+    assert!(none.is_empty());
+    assert_eq!(first_two.len(), 2);
+    assert_eq!(first_two[0].seq, s1);
+    assert_eq!(first_two[1].seq, s2);
+    assert_eq!(after_first.len(), 1);
+    assert_eq!(after_first[0].seq, s2);
+    assert_eq!(filesystem.tail_bounded(&log, s3, 1).await.unwrap().len(), 0);
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn libsql_head_seq_returns_none_for_empty_path() {
     let filesystem = libsql_root().await;
     let log = VirtualPath::new("/events/empty-head").unwrap();
@@ -1240,6 +1519,76 @@ async fn libsql_capabilities_advertise_events() {
 }
 
 #[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_create_dir_all_concurrent_shared_prefixes_waits_for_writer() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir.path().join("root-filesystem.db");
+    let db = std::sync::Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let filesystem = std::sync::Arc::new(LibSqlRootFilesystem::new(db));
+    filesystem.run_migrations().await.unwrap();
+
+    let mut tasks = Vec::new();
+    for sample in 0..32 {
+        let filesystem = std::sync::Arc::clone(&filesystem);
+        tasks.push(tokio::spawn(async move {
+            let path = VirtualPath::new(format!(
+                "/engine/tenants/latency/users/libsql/runs/shared-c8/sample-{sample}/d0/d1/d2"
+            ))
+            .unwrap();
+            filesystem.create_dir_all(&path).await
+        }));
+    }
+
+    for task in tasks {
+        task.await.unwrap().unwrap();
+    }
+
+    let shared_prefix =
+        VirtualPath::new("/engine/tenants/latency/users/libsql/runs/shared-c8").unwrap();
+    assert_eq!(
+        filesystem.stat(&shared_prefix).await.unwrap().file_type,
+        FileType::Directory
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_put_concurrent_distinct_children_waits_for_writer() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir.path().join("root-filesystem.db");
+    let db = std::sync::Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let filesystem = std::sync::Arc::new(LibSqlRootFilesystem::new(db));
+    filesystem.run_migrations().await.unwrap();
+    let parent = VirtualPath::new("/engine/tenants/latency/users/libsql/runs/shared-put").unwrap();
+    filesystem.create_dir_all(&parent).await.unwrap();
+
+    let mut tasks = Vec::new();
+    for sample in 0..32 {
+        let filesystem = std::sync::Arc::clone(&filesystem);
+        tasks.push(tokio::spawn(async move {
+            let path = VirtualPath::new(format!(
+                "/engine/tenants/latency/users/libsql/runs/shared-put/record-{sample}"
+            ))
+            .unwrap();
+            filesystem
+                .put(&path, Entry::bytes(vec![sample as u8]), CasExpectation::Any)
+                .await
+        }));
+    }
+
+    for task in tasks {
+        task.await.unwrap().unwrap();
+    }
+
+    let last =
+        VirtualPath::new("/engine/tenants/latency/users/libsql/runs/shared-put/record-31").unwrap();
+    assert_eq!(
+        filesystem.get(&last).await.unwrap().unwrap().entry.body,
+        vec![31]
+    );
+}
+
+#[cfg(feature = "libsql")]
 async fn libsql_root() -> TestLibSqlRootFilesystem {
     let db_dir = tempfile::tempdir().unwrap();
     let db_path = db_dir.path().join("root-filesystem.db");
@@ -1266,9 +1615,9 @@ async fn libsql_root() -> TestLibSqlRootFilesystem {
 mod postgres_tests {
     use super::*;
     use ironclaw_filesystem::{
-        Capability, CasExpectation, Entry, FilesystemError, FilesystemOperation, Filter, IndexKey,
-        IndexKind, IndexName, IndexSpec, IndexValue, Page, PostgresRootFilesystem, RecordKind,
-        SeqNo,
+        Capability, CasExpectation, Entry, FileType, FilesystemError, FilesystemOperation, Filter,
+        IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page, PostgresRootFilesystem,
+        RecordKind, SeqNo, TxnCapability,
     };
     use ironclaw_host_api::VirtualPath;
 
@@ -1307,6 +1656,36 @@ mod postgres_tests {
 
     fn vpath(prefix: &str, leaf: &str) -> VirtualPath {
         VirtualPath::new(format!("{prefix}/{leaf}")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn postgres_append_batch_is_one_statement_with_contiguous_ordered_seqs() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        // Event-plane writes go under a per-test prefix; the events table keys
+        // on the full path, so isolation holds against a shared DB.
+        let log = VirtualPath::new(format!("{prefix}/events")).unwrap();
+
+        let s0 = fs.append(&log, b"seed".to_vec()).await.unwrap();
+
+        let payloads: Vec<Vec<u8>> = (0..21u8).map(|n| vec![n]).collect();
+        let seqs = fs.append_batch(&log, payloads.clone()).await.unwrap();
+        assert_eq!(seqs.len(), 21);
+        assert!(seqs[0] > s0);
+        for window in seqs.windows(2) {
+            assert!(window[0] < window[1]);
+        }
+
+        let all = fs.tail(&log, SeqNo::ZERO).await.unwrap();
+        assert_eq!(all.len(), 22);
+        assert_eq!(all[0].payload, b"seed".to_vec());
+        for (offset, payload) in payloads.iter().enumerate() {
+            assert_eq!(&all[offset + 1].payload, payload);
+            assert_eq!(all[offset + 1].seq, seqs[offset]);
+        }
+
+        assert!(fs.append_batch(&log, Vec::new()).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1377,6 +1756,257 @@ mod postgres_tests {
     }
 
     #[tokio::test]
+    async fn postgres_delete_if_version_deletes_current_and_rejects_stale_or_missing() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let path = vpath(&prefix, "cas_delete");
+
+        // Missing path → NotFound (already gone, benign), never VersionMismatch.
+        let err = fs
+            .delete_if_version(&path, ironclaw_filesystem::RecordVersion::from_backend(1))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FilesystemError::NotFound {
+                operation: FilesystemOperation::Delete,
+                ..
+            }
+        ));
+
+        // Simulates the state a concurrent writer would leave behind (this
+        // is a sequential script, not a real race — see
+        // concurrent_cas_storm.rs for genuine parallel coverage): the v1
+        // the deleter read is bumped to v2 before the delete lands → the
+        // stale delete loses with the observed version and the entry
+        // survives at v2.
+        let v1 = fs
+            .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+        let log_seq = fs.append(&path, b"kept".to_vec()).await.unwrap();
+        let v2 = fs
+            .put(&path, Entry::bytes(vec![2]), CasExpectation::Version(v1))
+            .await
+            .unwrap();
+        let err = fs.delete_if_version(&path, v1).await.unwrap_err();
+        match err {
+            FilesystemError::VersionMismatch {
+                expected, found, ..
+            } => {
+                assert_eq!(expected, Some(v1));
+                assert_eq!(found, Some(v2));
+            }
+            other => panic!("expected VersionMismatch, got {other:?}"),
+        }
+        let got = fs.get(&path).await.unwrap().unwrap();
+        assert_eq!(got.version, v2);
+        assert_eq!(got.entry.body, vec![2]);
+
+        // Correct version deletes exactly the entry; single-key, so the
+        // event log at the same path survives (blind `delete` sweeps it).
+        fs.delete_if_version(&path, v2).await.unwrap();
+        assert!(fs.get(&path).await.unwrap().is_none());
+        let log = fs.tail(&path, SeqNo::ZERO).await.unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].seq, log_seq);
+    }
+
+    /// Review fix (PR #5749): mirrors the libsql overflow guard. An
+    /// `expected_version` beyond `i64::MAX` must surface
+    /// `CorruptRecordVersion` before any DELETE runs, so the entry survives
+    /// untouched — never a silently-truncated bind parameter that could
+    /// never match.
+    #[tokio::test]
+    async fn postgres_delete_if_version_rejects_out_of_range_expected_version() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let path = vpath(&prefix, "cas_delete_overflow");
+        let v1 = fs
+            .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+
+        let err = fs
+            .delete_if_version(
+                &path,
+                ironclaw_filesystem::RecordVersion::from_backend(u64::MAX),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, FilesystemError::CorruptRecordVersion { .. }),
+            "expected CorruptRecordVersion, got {err:?}"
+        );
+
+        let got = fs.get(&path).await.unwrap().unwrap();
+        assert_eq!(got.version, v1);
+        assert_eq!(got.entry.body, vec![1]);
+    }
+
+    /// Round-B review: mirrors the libSQL/in-memory ABA-hazard pin. Postgres
+    /// shares the same "version restarts at 1 after a full delete"
+    /// precondition (see `put`'s Absent-insert path); pin it here too so a
+    /// future change to Postgres's version-assignment can't silently
+    /// invalidate the trait doc's ABA warning for this backend.
+    #[tokio::test]
+    async fn postgres_delete_if_version_is_vulnerable_to_aba_across_delete_recreate_cycles() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let path = vpath(&prefix, "cas_delete_aba");
+
+        let v1_first = fs
+            .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+        fs.delete_if_version(&path, v1_first).await.unwrap();
+        assert!(fs.get(&path).await.unwrap().is_none());
+
+        let v1_second = fs
+            .put(&path, Entry::bytes(vec![2]), CasExpectation::Absent)
+            .await
+            .unwrap();
+        assert_eq!(
+            v1_first, v1_second,
+            "version must restart after a full delete, or this ABA hazard doesn't apply"
+        );
+
+        // The stale `v1_first` token wrongly authorizes deleting the second
+        // incarnation's live data — documented hazard, not a regression.
+        fs.delete_if_version(&path, v1_first).await.unwrap();
+        assert!(
+            fs.get(&path).await.unwrap().is_none(),
+            "stale version token wrongly matched and deleted the second incarnation"
+        );
+    }
+
+    /// Round-C review (PR #5749): mirrors `postgres_put_rejects_existing_directory`
+    /// but for `delete_if_version` — no test drove it against an explicit
+    /// directory row to confirm the `is_dir = FALSE` scoping (shared with
+    /// `DELETE_IF_VERSION_ATOMIC_SQL`'s `locked`/`deleted` CTEs and
+    /// `postgres_current_version_with_client`) actually excludes it. A
+    /// directory-only path must diagnose as `NotFound`, never match/delete
+    /// the directory row.
+    #[tokio::test]
+    async fn postgres_delete_if_version_excludes_explicit_directory_row() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let dir = vpath(&prefix, "cas_delete_dir");
+        fs.create_dir_all(&dir).await.unwrap();
+
+        let err = fs
+            .delete_if_version(&dir, ironclaw_filesystem::RecordVersion::from_backend(1))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                FilesystemError::NotFound {
+                    operation: FilesystemOperation::Delete,
+                    ..
+                }
+            ),
+            "delete_if_version must not match an explicit directory row \
+             (is_dir = TRUE), got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_delete_if_version_reports_mismatch_under_concurrent_update_race() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let racer_pool = match postgres_pool().await {
+            Some(pool) => pool,
+            None => {
+                return;
+            }
+        };
+        let path = vpath(&prefix, "cas_delete_update_race");
+        let v1 = fs
+            .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+
+        let racer_client = racer_pool
+            .get()
+            .await
+            .expect("racer connection must be available on the same reachable Postgres");
+        let path_str = path.as_str().to_string();
+        let (updated_tx, updated_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let racer = tokio::spawn(async move {
+            racer_client.batch_execute("BEGIN").await.unwrap();
+            racer_client
+                .execute(
+                    "UPDATE root_filesystem_entries \
+                     SET version = 999, updated_at = NOW() \
+                     WHERE path = $1 AND is_dir = FALSE",
+                    &[&path_str],
+                )
+                .await
+                .unwrap();
+            // The uncommitted UPDATE holds the tuple lock. A concurrent
+            // `delete_if_version` must wait, then report the updated row as
+            // stale rather than collapsing every waited-on version change to
+            // NotFound.
+            let _ = updated_tx.send(());
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            racer_client.batch_execute("COMMIT").await.unwrap();
+        });
+
+        updated_rx
+            .await
+            .expect("racer must signal after its UPDATE runs");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let result = fs.delete_if_version(&path, v1).await;
+
+        racer.await.expect("racer task must not panic");
+
+        match result {
+            Err(FilesystemError::VersionMismatch {
+                expected, found, ..
+            }) => {
+                assert_eq!(expected, Some(v1));
+                assert_eq!(
+                    found,
+                    Some(ironclaw_filesystem::RecordVersion::from_backend(999))
+                );
+            }
+            other => panic!("expected VersionMismatch against updated row, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_put_cas_version_on_missing_path_reports_no_found_version() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let missing = vpath(&prefix, "cas_version_missing");
+        let err = fs
+            .put(
+                &missing,
+                Entry::bytes(vec![1]),
+                CasExpectation::Version(ironclaw_filesystem::RecordVersion::from_backend(1)),
+            )
+            .await
+            .expect_err("version CAS on a missing path must fail");
+        match err {
+            FilesystemError::VersionMismatch { found, .. } => {
+                assert!(
+                    found.is_none(),
+                    "missing path should report no found version, got: {found:?}"
+                );
+            }
+            other => panic!("expected VersionMismatch, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn postgres_native_put_cas_any_increments_existing_version() {
         let Some((fs, prefix)) = postgres_root().await else {
             return;
@@ -1394,6 +2024,195 @@ mod postgres_tests {
         let got = fs.get(&path).await.unwrap().unwrap();
         assert_eq!(got.version, v2);
         assert_eq!(got.entry.body, vec![2]);
+    }
+
+    #[tokio::test]
+    async fn postgres_put_cas_any_inserts_missing_path_and_returns_version() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let missing = vpath(&prefix, "cas_any_insert_missing");
+        let v1 = fs
+            .put(&missing, Entry::bytes(vec![7]), CasExpectation::Any)
+            .await
+            .expect("Any insert on a missing path must succeed");
+        assert_eq!(v1, ironclaw_filesystem::RecordVersion::from_backend(1));
+        let got = fs.get(&missing).await.unwrap().unwrap();
+        assert_eq!(got.entry.body, vec![7]);
+    }
+
+    // CAS-put directory invariant (folded into the single write statement by
+    // the round-trip fix). Mirrors the libsql `write_file` rejection tests but
+    // drives `put` directly, which is the primitive the SQL fold changed.
+
+    #[tokio::test]
+    async fn postgres_put_rejects_implicit_directory() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        // Writing a child first makes `dir` an implicit directory.
+        let dir = vpath(&prefix, "implicit");
+        let child = vpath(&prefix, "implicit/leaf");
+        fs.put(&child, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+
+        // Every CAS arm must refuse to overwrite the implicit directory.
+        for cas in [
+            CasExpectation::Absent,
+            CasExpectation::Any,
+            CasExpectation::Version(ironclaw_filesystem::RecordVersion::from_backend(1)),
+        ] {
+            let err = fs
+                .put(&dir, Entry::bytes(vec![2]), cas)
+                .await
+                .expect_err("put over an implicit directory must fail");
+            assert!(
+                matches!(
+                    err,
+                    FilesystemError::Backend {
+                        operation: FilesystemOperation::WriteFile,
+                        ..
+                    }
+                ),
+                "expected directory-write Backend error, got: {err:?}"
+            );
+        }
+        // The child is untouched.
+        assert_eq!(fs.get(&child).await.unwrap().unwrap().entry.body, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn postgres_put_rejects_existing_directory() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let dir = VirtualPath::new(format!("{prefix}/explicit")).unwrap();
+        // create_dir_all materializes explicit directory rows (is_dir = TRUE).
+        // Keep `dir` childless so the exact-path explicit-directory guard
+        // (ON CONFLICT / is_dir = FALSE) is what rejects the put, not the
+        // descendant scan (covered by postgres_put_rejects_implicit_directory).
+        fs.create_dir_all(&dir).await.unwrap();
+
+        // Every CAS arm (distinct SQL: PUT_ABSENT_SQL / PUT_VERSION_SQL /
+        // PUT_ANY_SQL) must refuse to overwrite the explicit directory.
+        for cas in [
+            CasExpectation::Absent,
+            CasExpectation::Any,
+            CasExpectation::Version(ironclaw_filesystem::RecordVersion::from_backend(1)),
+        ] {
+            let err = fs
+                .put(&dir, Entry::bytes(vec![2]), cas)
+                .await
+                .expect_err("put over an explicit directory must fail");
+            assert!(
+                matches!(
+                    err,
+                    FilesystemError::Backend {
+                        operation: FilesystemOperation::WriteFile,
+                        ..
+                    }
+                ),
+                "expected directory-write Backend error, got: {err:?}"
+            );
+        }
+        assert_eq!(fs.stat(&dir).await.unwrap().file_type, FileType::Directory);
+    }
+
+    #[tokio::test]
+    async fn postgres_create_dir_all_conflict_rolls_back_inserted_prefixes() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let parent = vpath(&prefix, "mkdir_conflict");
+        let blocking_file = vpath(&prefix, "mkdir_conflict/file");
+        let child_under_file = vpath(&prefix, "mkdir_conflict/file/child");
+
+        fs.put(
+            &blocking_file,
+            Entry::bytes(b"already a file".to_vec()),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+        let err = fs
+            .create_dir_all(&child_under_file)
+            .await
+            .expect_err("existing file prefix must reject create_dir_all");
+        match err {
+            FilesystemError::Backend {
+                path,
+                operation,
+                reason,
+            } => {
+                assert_eq!(path, blocking_file);
+                assert_eq!(operation, FilesystemOperation::CreateDirAll);
+                assert!(
+                    reason.contains("file exists where directory is required"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("expected create_dir_all Backend error, got: {other:?}"),
+        }
+        assert_eq!(
+            fs.get(&blocking_file).await.unwrap().unwrap().entry.body,
+            b"already a file"
+        );
+
+        fs.delete(&blocking_file).await.unwrap();
+        assert!(
+            matches!(
+                fs.stat(&parent).await,
+                Err(FilesystemError::NotFound {
+                    operation: FilesystemOperation::Stat,
+                    ..
+                })
+            ),
+            "failed create_dir_all must roll back explicit directory rows inserted before the conflict"
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_transaction_rollback_discards_prior_put_after_later_cas_conflict() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        assert_eq!(fs.capabilities().txn(), TxnCapability::MultiKey);
+
+        let prefix_path = VirtualPath::new(&prefix).unwrap();
+        let pending = vpath(&prefix, "txn_pending");
+        let existing = vpath(&prefix, "txn_existing");
+        fs.put(
+            &existing,
+            Entry::bytes(b"already committed".to_vec()),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+        let mut txn = fs.begin(&prefix_path).await.unwrap();
+        txn.put(
+            &pending,
+            Entry::bytes(b"must roll back".to_vec()),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+        let err = txn
+            .put(
+                &existing,
+                Entry::bytes(b"conflicting rewrite".to_vec()),
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FilesystemError::VersionMismatch { .. }));
+        txn.rollback().await;
+
+        assert!(fs.get(&pending).await.unwrap().is_none());
+        let got = fs.get(&existing).await.unwrap().unwrap();
+        assert_eq!(got.entry.body, b"already committed");
     }
 
     #[tokio::test]
@@ -1743,17 +2562,24 @@ mod postgres_tests {
         // through `fs`, so re-derive it from the same env vars.
         let pool = postgres_pool().await.expect("pool available");
         let client = pool.get().await.unwrap();
+        // Scope the read-back to THIS test's GIN FTS index. Parallel postgres
+        // tests share `current_schema()` and every one creates `idx_rfs_*`
+        // indexes, so `ORDER BY indexname DESC LIMIT 1` alone can return another
+        // test's index. The declaring prefix is uuid-unique and embedded in the
+        // partial-index predicate, so match on it and require GIN (the FTS kind).
         let row = client
             .query_one(
                 "SELECT indexdef FROM pg_indexes \
                  WHERE schemaname = current_schema() \
                    AND tablename = 'root_filesystem_entries' \
                    AND indexname LIKE 'idx_rfs_%' \
+                   AND indexdef ILIKE '%using gin%' \
+                   AND strpos(indexdef, $1) > 0 \
                  ORDER BY indexname DESC LIMIT 1",
-                &[],
+                &[&prefix],
             )
             .await
-            .expect("at least one rfs index visible");
+            .expect("the GIN FTS index for this prefix must be visible");
         let indexdef: String = row.get("indexdef");
         assert!(
             indexdef.contains(prefix.as_str()),
@@ -1882,6 +2708,30 @@ mod postgres_tests {
 
         // tail-from-last returns nothing.
         assert!(fs.tail(&log, s3).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn postgres_tail_bounded_limits_records_before_materialization() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let log = VirtualPath::new(format!("{prefix}/events_bounded")).unwrap();
+
+        let s1 = fs.append(&log, b"a".to_vec()).await.unwrap();
+        let s2 = fs.append(&log, b"b".to_vec()).await.unwrap();
+        let s3 = fs.append(&log, b"c".to_vec()).await.unwrap();
+
+        let none = fs.tail_bounded(&log, SeqNo::ZERO, 0).await.unwrap();
+        let first_two = fs.tail_bounded(&log, SeqNo::ZERO, 2).await.unwrap();
+        let after_first = fs.tail_bounded(&log, s1, 1).await.unwrap();
+
+        assert!(none.is_empty());
+        assert_eq!(first_two.len(), 2);
+        assert_eq!(first_two[0].seq, s1);
+        assert_eq!(first_two[1].seq, s2);
+        assert_eq!(after_first.len(), 1);
+        assert_eq!(after_first[0].seq, s2);
+        assert_eq!(fs.tail_bounded(&log, s3, 1).await.unwrap().len(), 0);
     }
 
     #[tokio::test]

@@ -7,14 +7,17 @@
 #![warn(unreachable_pub)]
 
 mod admission;
+mod block_persistence;
 mod checkpoint_state;
 mod coordinator;
 pub mod events;
+mod external_tool_catalog;
 mod filesystem_store;
 mod ids;
 mod lifecycle;
 pub mod loop_exit;
-mod memory;
+pub(crate) mod memory;
+mod origin;
 mod request;
 mod response;
 pub mod run_profile;
@@ -29,6 +32,7 @@ pub use admission::{
     TurnAdmissionCapacityDenial, TurnAdmissionClass, TurnAdmissionLimit,
     TurnAdmissionLimitProvider, TurnAdmissionLimitUnavailable, TurnAdmissionReservationRecord,
 };
+pub use block_persistence::TurnStateBlockPersistence;
 pub use checkpoint_state::{
     CheckpointStateMatchMetadata, CheckpointStateRecord, CheckpointStateStore,
     GetCheckpointStateRequest, GetLoopCheckpointRequest, InMemoryCheckpointStateStore,
@@ -47,14 +51,22 @@ pub use events::{
     TurnBlockedGateMetadata, TurnCommittedEventObserver, TurnEventKind, TurnEventPage,
     TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
     TurnEventProjectionService, TurnEventProjectionSnapshot, TurnEventProjectionSource,
-    TurnEventSink, TurnLifecycleEvent,
+    TurnEventReducerService, TurnEventReducerSnapshot, TurnEventSink, TurnLifecycleEvent,
+    TurnLifecycleProjectionEntry,
 };
-pub use filesystem_store::FilesystemTurnStateStore;
+pub use external_tool_catalog::{
+    ExternalToolCatalog, ExternalToolCatalogError, ExternalToolSpec, ExternalToolSpecError,
+    InMemoryExternalToolCatalog, PendingExternalCall,
+};
+pub use filesystem_store::{
+    FilesystemTurnStateBlockPersistence, FilesystemTurnStateRowStore, FilesystemTurnStateStore,
+    FilesystemTurnStateStoreKind,
+};
 pub use ids::{
     AcceptedMessageRef, CapabilityActivityId, GateRef, IdempotencyKey, LoopDiagnosticRef,
-    LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, LoopUsageSummaryRef,
-    ReplyTargetBindingRef, RunProfileId, RunProfileRequest, RunProfileVersion, SourceBindingRef,
-    TurnCheckpointId, TurnId, TurnLeaseToken, TurnRunId, TurnRunnerId,
+    LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, ReplyTargetBindingRef, RunProfileId,
+    RunProfileRequest, RunProfileVersion, SourceBindingRef, TurnCheckpointId, TurnId,
+    TurnLeaseToken, TurnRunId, TurnRunnerId,
 };
 pub use lifecycle::{
     DefaultTurnLifecycleEventBus, LifecyclePublicationErrorPort, LifecyclePublishingTurnStateStore,
@@ -68,29 +80,35 @@ pub use loop_exit::{
     LoopExitViolationKind, LoopFailed, LoopFailureKind,
 };
 pub use memory::{InMemoryTurnStateStore, InMemoryTurnStateStoreLimits};
-pub use request::{
-    CancelRunRequest, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
-    SubmitChildRunRequest, SubmitTurnRequest, TurnTimestamp,
+pub use origin::{
+    ProductTurnContext, RunOriginAdapter, TurnOriginKind, TurnOwner, TurnSurfaceType,
 };
-pub use response::{CancelRunResponse, ResumeTurnResponse, SubmitTurnResponse, ThreadBusy};
+pub use request::{
+    CancelRunRequest, GateResumeDisposition, GetRunStateRequest, ResumeTurnPrecondition,
+    ResumeTurnRequest, RetryTurnRequest, SubmitChildRunRequest, SubmitTurnRequest, TurnTimestamp,
+};
+pub use response::{
+    CancelRunResponse, ResumeTurnResponse, RetryTurnResponse, SubmitTurnResponse, ThreadBusy,
+};
 pub use run_profile::{
     AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverResumeRequest,
     AgentLoopDriverRunRequest, CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy,
-    CheckpointSchemaId, ConcurrencyClass, ContextProfileId, EmptyMemoryPromptContextService,
-    InMemoryRunProfileRegistry, InMemoryRunProfileResolver, LoopCheckpointKind,
-    LoopCheckpointStateRef, LoopDriverId, MemoryPromptContextRequest, MemoryPromptContextService,
-    ModelProfileId, PrivilegedRunProfileDimension, RedactedRunProfileProvenance,
-    RedactedRunProfileSource, ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier,
-    RunClassId, RunProfileFingerprint, RunProfileRegistryError, RunProfileRequestAuthority,
-    RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver,
-    RunProfileSourceLayer, RunProfileSourceRef, RunnerPoolId, RuntimeProfileConstraints,
-    SchedulingClass, SteeringPolicy,
+    CheckpointSchemaId, CommunicationRuntimeContext, ConcurrencyClass, ConnectedChannelSummary,
+    ConnectedChannelsState, ContextProfileId, DeliveryTargetState, DeliveryTargetSummary,
+    EmptyMemoryPromptContextService, InMemoryRunProfileRegistry, InMemoryRunProfileResolver,
+    LoopCheckpointKind, LoopCheckpointStateRef, LoopDriverId, MemoryPromptContextRequest,
+    MemoryPromptContextService, ModelProfileId, PrivilegedRunProfileDimension,
+    RedactedRunProfileProvenance, RedactedRunProfileSource, ResolvedRunProfile,
+    ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
+    RunProfileRegistryError, RunProfileRequestAuthority, RunProfileResolutionError,
+    RunProfileResolutionRequest, RunProfileResolver, RunProfileSourceLayer, RunProfileSourceRef,
+    RunnerPoolId, RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
 };
 pub use scope::{TurnActor, TurnScope};
 pub use status::{
-    AdmissionRejection, AdmissionRejectionReason, BlockedReason, SanitizedCancelReason,
-    SanitizedFailure, TurnActiveRunRefState, TurnCapacityResource, TurnError, TurnErrorCategory,
-    TurnRunProfile, TurnRunState, TurnStatus,
+    AdmissionRejection, AdmissionRejectionReason, BlockedReason, ModelInvalidOutputDetailReason,
+    SanitizedCancelReason, SanitizedFailure, TurnActiveRunRefState, TurnCapacityResource,
+    TurnError, TurnErrorCategory, TurnRunProfile, TurnRunState, TurnStatus,
 };
 pub use store::{
     SpawnTreeReservation, SpawnTreeReservationKey, TurnActiveLockKey, TurnActiveLockRecord,

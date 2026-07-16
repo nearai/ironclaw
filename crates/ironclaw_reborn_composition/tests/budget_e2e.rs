@@ -31,7 +31,7 @@
 //! `budget_background_e2e.rs` once the gate-opener and
 //! `BackgroundKind` scheduler land.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use ironclaw_host_api::TenantId;
@@ -39,7 +39,7 @@ use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
-use ironclaw_loop_support::{ModelCost, ModelCostTable, StaticModelCostTable};
+use ironclaw_loop_host::{ModelCost, ModelCostTable, StaticModelCostTable};
 use ironclaw_reborn_composition::test_support::{BudgetTestGateway, ScriptedReply};
 use ironclaw_reborn_composition::{
     BudgetEventObserver, PollSettings, RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput,
@@ -64,6 +64,15 @@ const POLL_MAX_TOTAL: Duration = Duration::from_secs(20);
 /// outer guard races the runtime's own poll budget and fires spuriously under
 /// parallel load (the turn finishes right as both deadlines elapse).
 const SEND_GUARD_TIMEOUT: Duration = Duration::from_secs(40);
+
+static BUDGET_E2E_SERIAL: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
+
+async fn budget_e2e_serial_guard() -> tokio::sync::OwnedMutexGuard<()> {
+    let gate = BUDGET_E2E_SERIAL
+        .get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+    gate.lock_owned().await
+}
 
 fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
@@ -130,6 +139,7 @@ fn build_input(
 /// token usage × cost-table price, ledger records exactly that.
 #[tokio::test]
 async fn f1_happy_path_records_actual_usd_in_ledger() {
+    let _serial = budget_e2e_serial_guard().await;
     let root = tempfile::tempdir().unwrap();
     let gateway = Arc::new(BudgetTestGateway::with_constant("ok", 10, 5));
     let cost_table = interactive_cost_table(dec!(0.001), dec!(0.002));
@@ -176,6 +186,7 @@ async fn f1_happy_path_records_actual_usd_in_ledger() {
 /// `Reserved` for this turn.
 #[tokio::test]
 async fn f2_crossing_warn_threshold_emits_warned_event() {
+    let _serial = budget_e2e_serial_guard().await;
     let root = tempfile::tempdir().unwrap();
     let gateway = Arc::new(BudgetTestGateway::with_constant("ok", 10, 10));
     // Cost-table entry with explicit `max_output_tokens` so the
@@ -211,15 +222,13 @@ async fn f2_crossing_warn_threshold_emits_warned_event() {
     governor
         .set_limit(
             user_account.clone(),
-            ResourceLimits {
-                max_usd: Some(dec!(10.00)),
-                period: BudgetPeriod::Rolling24h,
-                thresholds: BudgetThresholds {
+            ResourceLimits::default()
+                .set_max_usd(dec!(10.00))
+                .set_period(BudgetPeriod::Rolling24h)
+                .set_thresholds(BudgetThresholds {
                     warn_at: 0.5,
                     pause_at: 0.95,
-                },
-                ..ResourceLimits::default()
-            },
+                }),
         )
         .unwrap();
 
@@ -262,6 +271,7 @@ async fn f2_crossing_warn_threshold_emits_warned_event() {
 /// accountant returns `BudgetExceeded` before any provider call.
 #[tokio::test]
 async fn f6_hard_cap_denied_before_provider_call() {
+    let _serial = budget_e2e_serial_guard().await;
     let root = tempfile::tempdir().unwrap();
     let gateway = Arc::new(BudgetTestGateway::with_constant("should not reach", 10, 10));
     // High prices × default 8192-token max-output estimate easily
@@ -284,10 +294,7 @@ async fn f6_hard_cap_denied_before_provider_call() {
     governor
         .set_limit(
             user_account.clone(),
-            ResourceLimits {
-                max_usd: Some(dec!(0.000001)),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_usd(dec!(0.000001)),
         )
         .unwrap();
     let sink = runtime.budget_event_sink().expect("sink");
@@ -315,6 +322,8 @@ async fn f6_hard_cap_denied_before_provider_call() {
             .any(|e| matches!(e, BudgetEvent::Denied { .. })),
         "hard cap must emit Denied — got {events:?}"
     );
+    #[allow(clippy::let_underscore_must_use)]
+    // outcome intentionally unused; the assertions above check the side effects
     let _ = outcome;
 
     runtime.shutdown().await.expect("shutdown");
@@ -324,6 +333,7 @@ async fn f6_hard_cap_denied_before_provider_call() {
 /// to the (conservative) reservation estimate.
 #[tokio::test]
 async fn c1_provider_tokens_reconcile_to_actual_usd() {
+    let _serial = budget_e2e_serial_guard().await;
     let root = tempfile::tempdir().unwrap();
     let gateway = Arc::new(BudgetTestGateway::with_constant("ok", 3, 7));
     let cost_table = interactive_cost_table(dec!(0.05), dec!(0.10));
@@ -345,12 +355,10 @@ async fn c1_provider_tokens_reconcile_to_actual_usd() {
     governor
         .set_limit(
             user_account,
-            ResourceLimits {
-                max_usd: Some(dec!(1_000.00)),
-                period: BudgetPeriod::Rolling24h,
-                thresholds: BudgetThresholds::DISABLED,
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_usd(dec!(1_000.00))
+                .set_period(BudgetPeriod::Rolling24h)
+                .set_thresholds(BudgetThresholds::DISABLED),
         )
         .unwrap();
 
@@ -388,6 +396,7 @@ async fn c1_provider_tokens_reconcile_to_actual_usd() {
 /// reconcile to zero.
 #[tokio::test]
 async fn c2_unknown_model_in_cost_table_uses_default_cost_fallback() {
+    let _serial = budget_e2e_serial_guard().await;
     let root = tempfile::tempdir().unwrap();
     let gateway = Arc::new(BudgetTestGateway::with_constant("ok", 10, 10));
     // Empty cost table — no entry for "interactive_model".
@@ -436,6 +445,7 @@ async fn c2_unknown_model_in_cost_table_uses_default_cost_fallback() {
 /// $0.00 even with high token counts.
 #[tokio::test]
 async fn c3_zero_cost_model_records_zero_spend() {
+    let _serial = budget_e2e_serial_guard().await;
     let root = tempfile::tempdir().unwrap();
     let gateway = Arc::new(BudgetTestGateway::with_constant("ok", 1000, 2000));
     let cost_table = interactive_cost_table(Decimal::ZERO, Decimal::ZERO);
@@ -489,6 +499,7 @@ async fn c3_zero_cost_model_records_zero_spend() {
 /// High #2).
 #[tokio::test]
 async fn d3_seeding_policy_installs_default_cap_on_first_touch() {
+    let _serial = budget_e2e_serial_guard().await;
     let root = tempfile::tempdir().unwrap();
     let gateway = Arc::new(BudgetTestGateway::with_constant("ok", 5, 5));
     let cost_table = interactive_cost_table(dec!(0.01), dec!(0.02));
@@ -544,6 +555,7 @@ async fn d3_seeding_policy_installs_default_cap_on_first_touch() {
 /// render the warn signal that preceded the denial.
 #[tokio::test]
 async fn d1_agent_deny_preserves_user_warn_event() {
+    let _serial = budget_e2e_serial_guard().await;
     let root = tempfile::tempdir().unwrap();
     let gateway = Arc::new(BudgetTestGateway::with_constant("should not reach", 10, 10));
     let mut cost_entries = StaticModelCostTable::new();
@@ -573,32 +585,30 @@ async fn d1_agent_deny_preserves_user_warn_event() {
     governor
         .set_limit(
             ResourceAccount::user(tenant.clone(), user_id.clone()),
-            ResourceLimits {
-                max_usd: Some(dec!(10.00)),
-                period: BudgetPeriod::Rolling24h,
-                thresholds: BudgetThresholds {
+            ResourceLimits::default()
+                .set_max_usd(dec!(10.00))
+                .set_period(BudgetPeriod::Rolling24h)
+                .set_thresholds(BudgetThresholds {
                     warn_at: 0.5,
                     pause_at: 0.95,
-                },
-                ..ResourceLimits::default()
-            },
+                }),
         )
         .unwrap();
     // Agent cap tight enough that the same estimate hard-denies.
     governor
         .set_limit(
             ResourceAccount::agent(tenant.clone(), user_id.clone(), None, agent_id.clone()),
-            ResourceLimits {
-                max_usd: Some(dec!(0.50)),
-                period: BudgetPeriod::Rolling24h,
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_usd(dec!(0.50))
+                .set_period(BudgetPeriod::Rolling24h),
         )
         .unwrap();
     let sink = runtime.budget_event_sink().expect("sink");
     sink.drain();
 
     let conversation = runtime.new_conversation().await.expect("conversation");
+    #[allow(clippy::let_underscore_must_use)]
+    // send outcome intentionally unused; the assertion below checks the side effect
     let _ = tokio::time::timeout(
         SEND_GUARD_TIMEOUT,
         runtime.send_user_message(&conversation, "ping"),
@@ -643,6 +653,7 @@ async fn d1_agent_deny_preserves_user_warn_event() {
 /// without polling.
 #[tokio::test]
 async fn broadcast_sink_publishes_events_to_subscribers() {
+    let _serial = budget_e2e_serial_guard().await;
     let root = tempfile::tempdir().unwrap();
     let gateway = Arc::new(BudgetTestGateway::with_constant("ok", 10, 5));
     let cost_table = interactive_cost_table(dec!(0.001), dec!(0.002));
@@ -714,6 +725,7 @@ async fn broadcast_sink_publishes_events_to_subscribers() {
 /// path of `BudgetTestGateway::push`.
 #[tokio::test]
 async fn budget_test_gateway_scripted_replies_drive_per_turn_costs() {
+    let _serial = budget_e2e_serial_guard().await;
     let root = tempfile::tempdir().unwrap();
     let gateway = Arc::new(BudgetTestGateway::new());
     gateway.push(ScriptedReply::new("turn-1", 4, 6));
@@ -736,12 +748,10 @@ async fn budget_test_gateway_scripted_replies_drive_per_turn_costs() {
     governor
         .set_limit(
             user_account,
-            ResourceLimits {
-                max_usd: Some(dec!(1_000.00)),
-                period: BudgetPeriod::Rolling24h,
-                thresholds: BudgetThresholds::DISABLED,
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_usd(dec!(1_000.00))
+                .set_period(BudgetPeriod::Rolling24h)
+                .set_thresholds(BudgetThresholds::DISABLED),
         )
         .unwrap();
 
@@ -786,6 +796,7 @@ async fn budget_test_gateway_scripted_replies_drive_per_turn_costs() {
 /// `BudgetEventProjection` helper alone (per the testing rule).
 #[tokio::test]
 async fn projection_delivers_budget_events_to_installed_observer() {
+    let _serial = budget_e2e_serial_guard().await;
     use std::sync::Mutex;
 
     #[derive(Debug, Default)]

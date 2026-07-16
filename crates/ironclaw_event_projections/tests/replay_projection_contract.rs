@@ -1,10 +1,10 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_event_projections::{
-    AuditProjectionCursor, AuditProjectionError, AuditProjectionRequest, AuditProjectionService,
-    AuditProjectionStage, AuditStreamResume, CapabilityActivityStatus, EventProjectionService,
+    AuditProjectionCursor, AuditProjectionEntry, AuditProjectionError, AuditProjectionRequest,
+    AuditProjectionService, AuditStreamResume, CapabilityActivityStatus, EventProjectionService,
     EventStreamManager, MAX_PROJECTION_PAGE_LIMIT, ProjectionCursor, ProjectionError,
     ProjectionReplay, ProjectionRequest, ProjectionScope, ReplayAuditProjectionService,
     ReplayEventProjectionService, RunProjectionStatus, RuntimeStreamResume, TimelineEntryKind,
@@ -15,10 +15,36 @@ use ironclaw_events::{
     RuntimeEventId, RuntimeEventKind, UNCLASSIFIED_ERROR_KIND,
 };
 use ironclaw_host_api::{
-    Action, ActionResultSummary, ActionSummary, AgentId, AuditEnvelope, AuditStage, CapabilityId,
-    CapabilitySet, CorrelationId, DenyReason, ExtensionId, InvocationId, MountView, ProcessId,
-    ProjectId, ResourceScope, RuntimeKind, ScopedPath, TenantId, ThreadId, TrustClass, UserId,
+    Action, ActionResultSummary, ActionSummary, AgentId, AuditEnvelope, AuditEventId, AuditStage,
+    CapabilityId, CapabilitySet, CorrelationId, DenyReason, ExtensionId, InvocationId, MountView,
+    ProcessId, ProjectId, ResourceScope, RuntimeKind, ScopedPath, TenantId, ThreadId, TrustClass,
+    UserId,
 };
+
+#[test]
+fn audit_projection_stage_wire_strings_stay_compatible_with_audit_stage() {
+    for (stage, wire) in [
+        (AuditStage::Before, "before"),
+        (AuditStage::After, "after"),
+        (AuditStage::Denied, "denied"),
+        (AuditStage::ApprovalRequested, "approval_requested"),
+        (AuditStage::ApprovalResolved, "approval_resolved"),
+        (AuditStage::ResourceReserved, "resource_reserved"),
+        (AuditStage::ResourceReconciled, "resource_reconciled"),
+        (AuditStage::ResourceReleased, "resource_released"),
+    ] {
+        let entry = audit_projection_entry_for_stage(stage);
+        let value = serde_json::to_value(&entry).unwrap();
+
+        assert_eq!(value["stage"], wire);
+        assert_eq!(
+            serde_json::from_value::<AuditProjectionEntry>(value)
+                .unwrap()
+                .stage,
+            stage
+        );
+    }
+}
 
 #[tokio::test]
 async fn replay_audit_projection_preserves_valid_capability_targets() {
@@ -56,6 +82,27 @@ async fn replay_audit_projection_preserves_valid_capability_targets() {
     );
 }
 
+fn audit_projection_entry_for_stage(stage: AuditStage) -> AuditProjectionEntry {
+    AuditProjectionEntry {
+        cursor: EventCursor::new(1),
+        event_id: AuditEventId::new(),
+        timestamp: Utc::now(),
+        stage,
+        correlation_id: CorrelationId::new(),
+        invocation_id: InvocationId::new(),
+        thread_id: Some(ThreadId::new("thread-a").unwrap()),
+        process_id: None,
+        approval_request_id: None,
+        extension_id: Some(ExtensionId::new("test").unwrap()),
+        action_kind: "dispatch".to_string(),
+        action_target: Some("test.capability".to_string()),
+        decision_kind: "approved".to_string(),
+        result_status: None,
+        output_bytes: None,
+        memory: None,
+    }
+}
+
 #[tokio::test]
 async fn replay_audit_projection_does_not_expose_unsafe_action_targets() {
     let log = Arc::new(InMemoryDurableAuditLog::new());
@@ -84,7 +131,7 @@ async fn replay_audit_projection_does_not_expose_unsafe_action_targets() {
         .unwrap();
 
     assert_eq!(snapshot.entries.len(), 1);
-    assert_eq!(snapshot.entries[0].stage, AuditProjectionStage::Denied);
+    assert_eq!(snapshot.entries[0].stage, AuditStage::Denied);
     assert_eq!(snapshot.entries[0].action_kind, "read_file");
     assert_eq!(snapshot.entries[0].action_target, None);
     let serialized = serde_json::to_string(&snapshot).unwrap();
@@ -561,7 +608,7 @@ async fn event_stream_manager_audit_resume_returns_updates_for_valid_cursor() {
     match resume {
         AuditStreamResume::Updates(replay) => {
             assert_eq!(replay.entries.len(), 1);
-            assert_eq!(replay.entries[0].stage, AuditProjectionStage::Denied);
+            assert_eq!(replay.entries[0].stage, AuditStage::Denied);
         }
         other => panic!("expected audit updates resume, got {other:?}"),
     }
@@ -708,7 +755,7 @@ async fn event_stream_manager_routes_audit_projection_and_preserves_no_exposure_
         .unwrap();
 
     assert_eq!(snapshot.entries.len(), 1);
-    assert_eq!(snapshot.entries[0].stage, AuditProjectionStage::Denied);
+    assert_eq!(snapshot.entries[0].stage, AuditStage::Denied);
     assert_eq!(snapshot.entries[0].action_kind, "read_file");
     assert_eq!(snapshot.entries[0].action_target, None);
     let serialized = serde_json::to_string(&snapshot).unwrap();
@@ -843,6 +890,60 @@ async fn replay_projection_service_projects_timeline_and_run_status_by_scope() {
     assert_eq!(snapshot.runs[0].status, RunProjectionStatus::Completed);
     assert_eq!(snapshot.next_cursor.runtime, EventCursor::new(4));
     assert!(!snapshot.truncated);
+}
+
+#[tokio::test]
+async fn replay_projection_snapshot_reuses_run_state_checkpoints() {
+    let thread_id = ThreadId::new("thread-cache").unwrap();
+    let scope = scope_for_thread(thread_id);
+    let capability = capability_id();
+    let provider = provider_id();
+    let entries = vec![
+        EventLogEntry {
+            cursor: EventCursor::new(1),
+            record: RuntimeEvent::dispatch_requested(scope.clone(), capability.clone()),
+        },
+        EventLogEntry {
+            cursor: EventCursor::new(2),
+            record: RuntimeEvent::runtime_selected(
+                scope.clone(),
+                capability.clone(),
+                provider.clone(),
+                RuntimeKind::Script,
+            ),
+        },
+        EventLogEntry {
+            cursor: EventCursor::new(3),
+            record: RuntimeEvent::dispatch_succeeded(
+                scope.clone(),
+                capability,
+                provider,
+                RuntimeKind::Script,
+                0,
+            ),
+        },
+    ];
+    let log = Arc::new(CountingDurableEventLog::new(entries));
+    let service = ReplayEventProjectionService::new(Arc::clone(&log));
+    let request = ProjectionRequest {
+        scope: ProjectionScope::from_resource_scope(&scope),
+        after: None,
+        limit: 1,
+    };
+
+    service.snapshot(request.clone()).await.unwrap();
+    service.snapshot(request).await.unwrap();
+
+    let reads = log.reads();
+    let origin_reads = reads.iter().filter(|cursor| cursor.is_none()).count();
+    assert_eq!(
+        origin_reads, 3,
+        "two timeline reads plus one initial fold should start at origin; the second fold must resume from the cached head"
+    );
+    assert!(
+        reads.contains(&Some(EventCursor::new(3))),
+        "second run-state fold should probe from the cached head"
+    );
 }
 
 #[tokio::test]
@@ -1095,6 +1196,72 @@ async fn replay_projection_snapshot_bounds_capability_activity_window_to_request
 }
 
 #[tokio::test]
+async fn replay_projection_orders_capability_activities_by_first_cursor() {
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let service = ReplayEventProjectionService::new(Arc::clone(&log));
+    let thread_id = ThreadId::new("thread-tool-activity-order").unwrap();
+    let first_invocation = InvocationId::new();
+    let second_invocation = InvocationId::new();
+    let first_scope = scope_for_thread_with_invocation(thread_id.clone(), first_invocation);
+    let second_scope = scope_for_thread_with_invocation(thread_id, second_invocation);
+    let capability = capability_id();
+    let provider = provider_id();
+
+    log.append(RuntimeEvent::dispatch_requested(
+        first_scope.clone(),
+        capability.clone(),
+    ))
+    .await
+    .unwrap();
+    log.append(RuntimeEvent::dispatch_requested(
+        second_scope.clone(),
+        capability.clone(),
+    ))
+    .await
+    .unwrap();
+    log.append(RuntimeEvent::dispatch_succeeded(
+        second_scope,
+        capability.clone(),
+        provider.clone(),
+        RuntimeKind::Script,
+        20,
+    ))
+    .await
+    .unwrap();
+    log.append(RuntimeEvent::dispatch_succeeded(
+        first_scope.clone(),
+        capability,
+        provider,
+        RuntimeKind::Script,
+        10,
+    ))
+    .await
+    .unwrap();
+
+    let snapshot = service
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&first_scope),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    let activities = snapshot.capability_activities;
+    assert_eq!(
+        activities
+            .iter()
+            .map(|activity| activity.invocation_id)
+            .collect::<Vec<_>>(),
+        vec![first_invocation, second_invocation]
+    );
+    assert_eq!(activities[0].first_cursor, EventCursor::new(1));
+    assert_eq!(activities[0].last_cursor, EventCursor::new(4));
+    assert_eq!(activities[1].first_cursor, EventCursor::new(2));
+    assert_eq!(activities[1].last_cursor, EventCursor::new(3));
+}
+
+#[tokio::test]
 async fn replay_projection_updates_capability_activity_only_for_touched_invocations() {
     let log = Arc::new(InMemoryDurableEventLog::new());
     let service = ReplayEventProjectionService::new(Arc::clone(&log));
@@ -1289,6 +1456,42 @@ async fn replay_projection_capability_activity_stays_metadata_only() {
         snapshot.capability_activities[0].error_kind.as_deref(),
         Some(UNCLASSIFIED_ERROR_KIND)
     );
+}
+
+#[tokio::test]
+async fn replay_projection_preserves_safe_capability_error_detail() {
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let service = ReplayEventProjectionService::new(Arc::clone(&log));
+    let scope = scope_for_thread(ThreadId::new("thread-tool-activity-detail").unwrap());
+    let detail = "json parsing failed: unexpected comma at line 4";
+
+    log.append(
+        RuntimeEvent::capability_activity_failed(
+            scope.clone(),
+            CapabilityId::new("builtin.json").unwrap(),
+            None,
+            None,
+            "invalid_input",
+        )
+        .with_error_summary(detail),
+    )
+    .await
+    .unwrap();
+
+    let snapshot = service
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&scope),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.capability_activities.len(), 1);
+    let activity = &snapshot.capability_activities[0];
+    assert_eq!(activity.status, CapabilityActivityStatus::Failed);
+    assert_eq!(activity.error_kind.as_deref(), Some("invalid_input"));
+    assert_eq!(activity.error_detail.as_deref(), Some(detail));
 }
 
 #[tokio::test]
@@ -1760,6 +1963,85 @@ impl DurableEventLog for FailingDurableEventLog {
     }
 }
 
+struct CountingDurableEventLog {
+    entries: Vec<EventLogEntry<RuntimeEvent>>,
+    reads: Mutex<Vec<Option<EventCursor>>>,
+}
+
+impl CountingDurableEventLog {
+    fn new(entries: Vec<EventLogEntry<RuntimeEvent>>) -> Self {
+        Self {
+            entries,
+            reads: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn reads(&self) -> Vec<Option<EventCursor>> {
+        match self.reads.lock() {
+            Ok(reads) => reads.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl DurableEventLog for CountingDurableEventLog {
+    async fn append(
+        &self,
+        _event: RuntimeEvent,
+    ) -> Result<EventLogEntry<RuntimeEvent>, EventError> {
+        Err(EventError::DurableLog {
+            reason: "counting-log:append-not-supported".to_string(),
+        })
+    }
+
+    async fn read_after_cursor(
+        &self,
+        _stream: &EventStreamKey,
+        _filter: &ReadScope,
+        after: Option<EventCursor>,
+        limit: usize,
+    ) -> Result<EventReplay<RuntimeEvent>, EventError> {
+        match self.reads.lock() {
+            Ok(mut reads) => reads.push(after),
+            Err(poisoned) => poisoned.into_inner().push(after),
+        }
+        let cutoff = after.unwrap_or_else(EventCursor::origin);
+        let visible = self
+            .entries
+            .iter()
+            .filter(|entry| entry.cursor > cutoff)
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>();
+        let next_cursor = visible.last().map(|entry| entry.cursor).unwrap_or(cutoff);
+        Ok(EventReplay {
+            entries: visible,
+            next_cursor,
+        })
+    }
+
+    async fn head_cursor(
+        &self,
+        _stream: &EventStreamKey,
+        after: EventCursor,
+    ) -> Result<EventCursor, EventError> {
+        let head = self
+            .entries
+            .iter()
+            .map(|entry| entry.cursor)
+            .max()
+            .unwrap_or_else(EventCursor::origin);
+        if after.as_u64() > head.as_u64() {
+            return Err(EventError::ReplayGap {
+                requested: after,
+                earliest: head,
+            });
+        }
+        Ok(head)
+    }
+}
+
 fn scope_for_thread(thread_id: ThreadId) -> ResourceScope {
     scope_for_thread_with_invocation(thread_id, InvocationId::new())
 }
@@ -1787,6 +2069,7 @@ fn execution_context_for_scope(scope: ResourceScope) -> ironclaw_host_api::Execu
         parent_process_id: None,
         tenant_id: scope.tenant_id.clone(),
         user_id: scope.user_id.clone(),
+        authenticated_actor_user_id: None,
         agent_id: scope.agent_id.clone(),
         project_id: scope.project_id.clone(),
         mission_id: scope.mission_id.clone(),
@@ -1846,6 +2129,7 @@ async fn replay_projection_re_sanitizes_unsanitized_runtime_events_from_custom_b
         process_id: Some(ProcessId::new()),
         output_bytes: None,
         error_kind: Some(raw.to_string()),
+        error_summary: None,
         hook_id: None,
         hook_point: None,
         hook_trust_class: None,
@@ -2559,6 +2843,7 @@ async fn hook_runtime_events_project_with_sanitized_hook_metadata() {
         process_id: None,
         output_bytes: None,
         error_kind: None,
+        error_summary: None,
         hook_id: Some("0123456789abcdef".repeat(4)), // 64-char blake3 hex
         hook_point: Some("before_capability".to_string()),
         hook_trust_class: Some("installed".to_string()),
@@ -2578,6 +2863,7 @@ async fn hook_runtime_events_project_with_sanitized_hook_metadata() {
         process_id: None,
         output_bytes: None,
         error_kind: None,
+        error_summary: None,
         hook_id: Some("0123456789abcdef".repeat(4)),
         hook_point: None,
         hook_trust_class: None,
@@ -2597,6 +2883,7 @@ async fn hook_runtime_events_project_with_sanitized_hook_metadata() {
         process_id: None,
         output_bytes: None,
         error_kind: None,
+        error_summary: None,
         hook_id: Some("fedcba9876543210".repeat(4)),
         hook_point: None,
         hook_trust_class: None,
@@ -2675,6 +2962,7 @@ async fn non_hook_runtime_events_project_with_no_hook_metadata() {
         process_id: Some(ProcessId::new()),
         output_bytes: Some(42),
         error_kind: None,
+        error_summary: None,
         hook_id: None,
         hook_point: None,
         hook_trust_class: None,
@@ -2741,6 +3029,7 @@ async fn hook_runtime_events_do_not_alter_run_status_projection() {
         process_id: None,
         output_bytes: None,
         error_kind: None,
+        error_summary: None,
         hook_id: None,
         hook_point: None,
         hook_trust_class: None,
@@ -2763,6 +3052,7 @@ async fn hook_runtime_events_do_not_alter_run_status_projection() {
         process_id: None,
         output_bytes: None,
         error_kind: None,
+        error_summary: None,
         hook_id: Some("0123456789abcdef".repeat(4)),
         hook_point: None,
         hook_trust_class: None,
@@ -2782,6 +3072,7 @@ async fn hook_runtime_events_do_not_alter_run_status_projection() {
         process_id: None,
         output_bytes: None,
         error_kind: None,
+        error_summary: None,
         hook_id: Some("0123456789abcdef".repeat(4)),
         hook_point: None,
         hook_trust_class: None,
@@ -2844,6 +3135,7 @@ async fn hook_only_runtime_events_default_run_status_to_running() {
         process_id: None,
         output_bytes: None,
         error_kind: None,
+        error_summary: None,
         hook_id: Some("0123456789abcdef".repeat(4)),
         hook_point: Some("before_capability".to_string()),
         hook_trust_class: Some("installed".to_string()),

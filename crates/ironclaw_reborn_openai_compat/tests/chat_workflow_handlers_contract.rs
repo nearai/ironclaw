@@ -198,6 +198,52 @@ async fn chat_completion_rejects_oversized_raw_body_before_fingerprint_or_workfl
 }
 
 #[tokio::test]
+async fn chat_completion_rejects_invalid_model_before_product_workflow() {
+    // Each value violates a distinct `model` bound: over the 256-byte cap,
+    // a control character, and surrounding whitespace. All must reject with a
+    // sanitized 400 naming the `model` param before the product workflow runs.
+    let oversized_model = "m".repeat(257);
+    let cases = [
+        oversized_model.as_str(),
+        "gpt\u{0000}4",
+        " gpt-reborn",
+        "gpt-reborn ",
+    ];
+    for model in cases {
+        let workflow = Arc::new(FakeProductWorkflow::new());
+        let router = test_router(
+            workflow.clone(),
+            Arc::new(StaticChatProjectionReader::text("unused")),
+        );
+
+        let response = router
+            .oneshot(chat_request(
+                json!({
+                    "model": model,
+                    "messages": [{"role": "user", "content": "hello"}]
+                }),
+                None,
+            ))
+            .await
+            .expect("response");
+
+        assert_eq!(
+            response.status(),
+            http::StatusCode::BAD_REQUEST,
+            "model {model:?} must reject"
+        );
+        let body = json_body(response).await;
+        assert_eq!(body["error"]["param"], "model", "model {model:?}");
+        assert_eq!(body["error"]["code"], "invalid_request", "model {model:?}");
+        assert_eq!(
+            workflow.accepted_count(),
+            0,
+            "invalid model {model:?} must not reach the product workflow"
+        );
+    }
+}
+
+#[tokio::test]
 async fn chat_completion_rejects_invalid_idempotency_key_header() {
     let workflow = Arc::new(FakeProductWorkflow::new());
     let router = test_router(
@@ -223,6 +269,30 @@ async fn chat_completion_rejects_invalid_idempotency_key_header() {
 #[tokio::test]
 async fn chat_completion_deferred_busy_ack_returns_429() {
     let workflow = Arc::new(FixedAckWorkflow::new(deferred_busy_ack()));
+    let router = test_router_with_workflow(
+        workflow.clone(),
+        Arc::new(StaticChatProjectionReader::text("unused")),
+    );
+
+    let response = router
+        .oneshot(chat_request(
+            json!({
+                "model": "gpt-reborn",
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            None,
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(workflow.seen_count(), 1);
+    assert_eq!(workflow.read_count(), 0);
+}
+
+#[tokio::test]
+async fn chat_completion_rejected_busy_ack_returns_429() {
+    let workflow = Arc::new(FixedAckWorkflow::new(rejected_busy_ack()));
     let router = test_router_with_workflow(
         workflow.clone(),
         Arc::new(StaticChatProjectionReader::text("unused")),
@@ -981,6 +1051,8 @@ async fn model_only_tool_call_output_shape_is_preserved() {
                 prompt_tokens: 3,
                 completion_tokens: 5,
                 total_tokens: 8,
+                prompt_tokens_details: None,
+                cost: None,
             }),
             effective_model: Some("gpt-reborn-effective".to_string()),
             internal_refs: Some(
@@ -1280,6 +1352,13 @@ fn deferred_busy_ack() -> ProductInboundAck {
     ProductInboundAck::DeferredBusy {
         accepted_message_ref: AcceptedMessageRef::new("msg:busy").expect("accepted ref"),
         active_run_id: TurnRunId::new(),
+    }
+}
+
+fn rejected_busy_ack() -> ProductInboundAck {
+    ProductInboundAck::RejectedBusy {
+        accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy").expect("accepted ref"),
+        active_run_id: None,
     }
 }
 

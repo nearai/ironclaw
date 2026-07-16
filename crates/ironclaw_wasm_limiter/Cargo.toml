@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[package.metadata.ironclaw]
+layer = "runtimes"
+
 # Shared `wasmtime::ResourceLimiter` impl used by both `ironclaw_wasm`
 # (tool-WASM) and `ironclaw_hooks` (hook-WASM). Extracted from a
 # `#[path = "../../../ironclaw_wasm/src/limiter.rs"]` cross-crate file
@@ -14,4 +17,4 @@ publish = false
 
 [dependencies]
 tracing = "0.1"
-wasmtime = { version = "44.0.2", features = ["component-model"] }
+wasmtime = { workspace = true }

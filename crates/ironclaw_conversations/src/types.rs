@@ -11,6 +11,70 @@ use crate::{
     InboundMessageContentRef,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct ExternalActorBindingEpoch(String);
+
+impl ExternalActorBindingEpoch {
+    fn validate(value: &str) -> Result<(), crate::InboundTurnError> {
+        crate::ids::validate_external_id("external_actor_binding_epoch", value)
+    }
+
+    pub fn new(value: impl Into<String>) -> Result<Self, crate::InboundTurnError> {
+        let value = value.into();
+        Self::validate(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl TryFrom<String> for ExternalActorBindingEpoch {
+    type Error = crate::InboundTurnError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::validate(&value)?;
+        Ok(Self(value))
+    }
+}
+
+impl AsRef<str> for ExternalActorBindingEpoch {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for ExternalActorBindingEpoch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl From<ExternalActorBindingEpoch> for String {
+    fn from(epoch: ExternalActorBindingEpoch) -> Self {
+        epoch.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConditionalUnpairOutcome {
+    Unpaired,
+    AlreadyAbsent,
+    OwnerChanged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpectedExternalActorOwner {
+    pub user_id: UserId,
+    pub binding_epoch: Option<ExternalActorBindingEpoch>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationRouteKind {
@@ -35,6 +99,8 @@ pub struct ResolveConversationRequest {
 pub struct ConversationBindingResolution {
     pub tenant_id: TenantId,
     pub actor: TurnActor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_epoch: Option<ExternalActorBindingEpoch>,
     pub turn_scope: TurnScope,
     pub source_binding_ref: SourceBindingRef,
     pub reply_target_binding_ref: ReplyTargetBindingRef,
@@ -165,12 +231,31 @@ pub struct InboundTurnRequest {
     pub requested_run_profile: Option<RunProfileRequest>,
 }
 
+/// Whether a trusted inbound submission came from the trusted-trigger fire
+/// path. Carried as a type so origin classification never re-derives
+/// trigger-ness from the adapter-kind string (see `.claude/rules/types.md`).
+/// Only the trusted-trigger submit seam constructs `Trigger`; every other
+/// trusted ingress is `Other`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrustedInboundKind {
+    Trigger,
+    // arch-exempt: dead_code, reserved trusted non-trigger ingress — the only
+    // trusted production path today is the trigger submit seam (which builds
+    // `Trigger`); `Other` is exercised by the trusted-non-trigger inbound tests
+    // and becomes live when a trusted non-trigger ingress is added. Until then
+    // it must stay a typed variant so classification cannot silently fall back
+    // to `TrustedTrigger` for a future trusted caller.
+    #[allow(dead_code)]
+    Other,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TrustedInboundTurnRequest {
     pub(crate) request: InboundTurnRequest,
     pub(crate) trusted_agent_id: Option<AgentId>,
     pub(crate) trusted_project_id: Option<ProjectId>,
     pub(crate) trusted_owner_user_id: Option<UserId>,
+    pub(crate) kind: TrustedInboundKind,
 }
 
 impl TrustedInboundTurnRequest {
@@ -179,12 +264,14 @@ impl TrustedInboundTurnRequest {
         trusted_agent_id: Option<AgentId>,
         trusted_project_id: Option<ProjectId>,
         trusted_owner_user_id: Option<UserId>,
+        kind: TrustedInboundKind,
     ) -> Self {
         Self {
             request,
             trusted_agent_id,
             trusted_project_id,
             trusted_owner_user_id,
+            kind,
         }
     }
 }

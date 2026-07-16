@@ -10,7 +10,7 @@
 # After running, you can:
 #   cargo check           # default features (postgres + libsql)
 #   cargo test            # default test suite (uses libsql temp DB)
-#   cargo test --all-features         # full test suite
+#   cargo test --all-features         # full test suite (requires Node.js 22 + Corepack/pnpm for WebUI bundle)
 
 set -euo pipefail
 
@@ -64,10 +64,25 @@ else
 fi
 
 echo ""
+# Codebase knowledge graph (codebase-memory MCP) — powers agent code discovery.
+# Single static binary, no deps, no API keys, 100% local. See CLAUDE.md -> "Code Discovery".
+if command -v codebase-memory-mcp &>/dev/null; then
+    echo "[graph] codebase-memory-mcp found: $(command -v codebase-memory-mcp)"
+else
+    echo "[graph] Installing codebase-memory-mcp (agent code-discovery graph)..."
+    if curl -fsSL https://raw.githubusercontent.com/DeusData/codebase-memory-mcp/main/install.sh | bash; then
+        echo "  installed. The repo's .mcp.json wires it into Claude Code automatically."
+    else
+        echo "  WARN: install failed — agents will fall back to grep."
+        echo "        Install manually: https://github.com/DeusData/codebase-memory-mcp"
+    fi
+fi
+
+echo ""
 echo "=== Setup complete ==="
 echo ""
 echo "Quick start:"
 echo "  cargo run                            # Run with default features"
 echo "  cargo test                           # Test suite (libsql temp DB)"
-echo "  cargo test --all-features            # Full test suite"
-echo "  cargo clippy --all-features          # Lint all code"
+echo "  cargo test --all-features            # Full test suite (requires Node.js 22 + Corepack/pnpm for WebUI bundle)"
+echo "  cargo clippy --all-features          # Lint all code (requires Node.js 22 + Corepack/pnpm for WebUI bundle)"

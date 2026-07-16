@@ -10,8 +10,9 @@ use std::{collections::HashMap, fmt, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityDisplayOutputPreview, CapabilityId, MountView, ResourceEstimate, ResourceScope,
-    ResourceUsage, RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, SecretHandle,
+    CapabilityDisplayOutputPreview, CapabilityId, DispatchFailureDetail, DispatchInputIssue,
+    MountView, ResourceEstimate, ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement,
+    RuntimeDispatchErrorKind, SecretHandle, UserId,
 };
 use serde_json::Value;
 
@@ -27,6 +28,7 @@ use crate::InvocationServices;
 pub struct FirstPartyCapabilityRequest {
     pub capability_id: CapabilityId,
     pub scope: ResourceScope,
+    pub authenticated_actor_user_id: Option<UserId>,
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
     pub services: InvocationServices,
@@ -39,6 +41,10 @@ impl fmt::Debug for FirstPartyCapabilityRequest {
             .debug_struct("FirstPartyCapabilityRequest")
             .field("capability_id", &self.capability_id)
             .field("scope", &self.scope)
+            .field(
+                "authenticated_actor_user_id",
+                &self.authenticated_actor_user_id,
+            )
             .field("estimate", &self.estimate)
             .field("mounts", &self.mounts)
             .field("services", &self.services)
@@ -51,6 +57,7 @@ impl PartialEq for FirstPartyCapabilityRequest {
     fn eq(&self, other: &Self) -> bool {
         self.capability_id == other.capability_id
             && self.scope == other.scope
+            && self.authenticated_actor_user_id == other.authenticated_actor_user_id
             && self.estimate == other.estimate
             && self.mounts == other.mounts
             && self.input == other.input
@@ -69,12 +76,14 @@ impl FirstPartyCapabilityRequest {
         Self {
             capability_id,
             scope,
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default(),
             mounts: None,
             services: InvocationServices {
                 filesystem: Arc::new(ironclaw_filesystem::InMemoryBackend::new()),
                 runtime_http_egress,
                 tool_call_http_egress: None,
+                runtime_secret_material_stager: None,
                 process: Arc::new(crate::LocalHostProcessPort::new()),
                 secret_store: None,
                 audit_sink: None,
@@ -124,6 +133,7 @@ pub enum FirstPartyCapabilityError {
     Dispatch {
         kind: RuntimeDispatchErrorKind,
         safe_summary: Option<String>,
+        detail: Option<Box<DispatchFailureDetail>>,
         usage: Option<ResourceUsage>,
     },
     /// Dispatch was blocked because a staged credential is missing or expired.
@@ -144,6 +154,7 @@ impl FirstPartyCapabilityError {
         Self::Dispatch {
             kind,
             safe_summary: None,
+            detail: None,
             usage: None,
         }
     }
@@ -155,6 +166,19 @@ impl FirstPartyCapabilityError {
         Self::Dispatch {
             kind,
             safe_summary: Some(safe_summary.into()),
+            detail: None,
+            usage: None,
+        }
+    }
+
+    pub fn invalid_input_issues(
+        safe_summary: impl Into<String>,
+        issues: Vec<DispatchInputIssue>,
+    ) -> Self {
+        Self::Dispatch {
+            kind: RuntimeDispatchErrorKind::InputEncode,
+            safe_summary: Some(safe_summary.into()),
+            detail: Some(Box::new(DispatchFailureDetail::InvalidInput { issues })),
             usage: None,
         }
     }
@@ -196,10 +220,14 @@ impl FirstPartyCapabilityError {
     pub fn with_usage(self, usage: ResourceUsage) -> Self {
         match self {
             Self::Dispatch {
-                kind, safe_summary, ..
+                kind,
+                safe_summary,
+                detail,
+                ..
             } => Self::Dispatch {
                 kind,
                 safe_summary,
+                detail,
                 usage: Some(usage),
             },
             Self::AuthRequired {
@@ -297,6 +325,10 @@ impl FirstPartyCapabilityRegistry {
         self.handlers.insert(capability_id, handler);
     }
 
+    pub fn remove_handler(&mut self, capability_id: &CapabilityId) {
+        self.handlers.remove(capability_id);
+    }
+
     pub fn get(
         &self,
         capability_id: &CapabilityId,
@@ -318,6 +350,37 @@ mod tests {
     use super::*;
     use ironclaw_host_api::{ResourceUsage, SecretHandle};
 
+    struct TestHandler;
+
+    #[async_trait]
+    impl FirstPartyCapabilityHandler for TestHandler {
+        async fn dispatch(
+            &self,
+            _request: FirstPartyCapabilityRequest,
+        ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
+            Ok(FirstPartyCapabilityResult::new(
+                serde_json::Value::Null,
+                ResourceUsage::default(),
+            ))
+        }
+    }
+
+    #[test]
+    fn remove_handler_is_noop_for_unknown_and_removes_registered() {
+        let mut registry = FirstPartyCapabilityRegistry::new();
+        let capability_id = CapabilityId::new("builtin.shell").expect("valid test capability id");
+
+        registry.remove_handler(&capability_id);
+        assert!(!registry.contains_handler(&capability_id));
+
+        registry.insert_handler(capability_id.clone(), Arc::new(TestHandler));
+        assert!(registry.contains_handler(&capability_id));
+
+        registry.remove_handler(&capability_id);
+        assert!(!registry.contains_handler(&capability_id));
+        assert!(registry.get(&capability_id).is_none());
+    }
+
     #[test]
     fn first_party_capability_error_kind_returns_none_for_auth_required() {
         // kind() must return None for both auth_required() and auth_required_with().
@@ -333,10 +396,7 @@ mod tests {
     #[test]
     fn first_party_capability_error_with_usage_preserves_required_secrets() {
         let handle = SecretHandle::new("google-access-token").unwrap();
-        let usage = ResourceUsage {
-            network_egress_bytes: 42,
-            ..ResourceUsage::default()
-        };
+        let usage = ResourceUsage::default().set_network_egress_bytes(42);
         let error = FirstPartyCapabilityError::auth_required_with(vec![handle.clone()])
             .with_usage(usage.clone());
 
@@ -361,12 +421,8 @@ mod tests {
     #[test]
     fn first_party_capability_error_with_usage_on_dispatch_variant() {
         use ironclaw_host_api::RuntimeDispatchErrorKind;
-        let error = FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend).with_usage(
-            ResourceUsage {
-                network_egress_bytes: 10,
-                ..ResourceUsage::default()
-            },
-        );
+        let error = FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
+            .with_usage(ResourceUsage::default().set_network_egress_bytes(10));
         assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::Backend));
         assert_eq!(error.required_secrets(), None);
         assert!(!error.is_auth_required());

@@ -1,5 +1,7 @@
 ---
 paths:
+  - "crates/ironclaw_skills/**"
+  - "crates/ironclaw_reborn_composition/src/extension_host/bundled_skills.rs"
   - "src/skills/**"
   - "skills/**"
 ---
@@ -39,10 +41,26 @@ requires:
 # Skill instructions here...
 ```
 
-Only the top-level `requires:` block is supported. The legacy nested shape
+Only the top-level `requires:` block is supported. The historical nested shape
 `metadata.openclaw.requires` is unsupported and ignored by the current parser,
 so older external skills must be migrated instead of relying on silent
 compatibility.
+
+The parser supports more than the example above shows (source of truth:
+`crates/ironclaw_skills/src/types.rs` and `selector.rs`):
+
+- `requires.bins`, `requires.env`, and **`requires.config`** are gating inputs.
+- **`requires.skills`** declares companion skills that should chain-load when
+  available; missing companions do not prevent the parent skill from loading.
+- `activation.setup_marker` gates a skill on a workspace setup-marker file
+  (used by the `*-setup` skill family).
+- **Silent truncation caps**: `enforce_limits` keeps at most
+  `MAX_KEYWORDS_PER_SKILL = 20` keywords and `MAX_PATTERNS_PER_SKILL = 5`
+  patterns per skill — anything beyond is dropped without error. Keep lists
+  within those caps or your extra triggers simply don't exist.
+
+When parser behavior changes, update this file in the same PR
+(`ironclaw-reborn-skill-maintainer` rule 7).
 
 ## Selection Pipeline
 

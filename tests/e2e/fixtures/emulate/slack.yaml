@@ -1,0 +1,51 @@
+slack:
+  team:
+    name: Reborn E2E Workspace
+    domain: reborn-e2e
+  users:
+    - name: reborn-user
+      real_name: Reborn E2E User
+      email: reborn-user@example.com
+      presence: active
+    - name: qa-reviewer
+      real_name: QA Reviewer
+      email: qa-reviewer@example.com
+      presence: active
+      profile:
+        title: Release reviewer
+        status_text: Reviewing the release candidate
+        status_emoji: ":mag:"
+    - name: no-email-user
+      real_name: No Email User
+      presence: away
+  channels:
+    - name: reborn-alerts
+      topic: Reborn alert delivery
+      purpose: Delivery target for Reborn E2E Slack assertions.
+  bots:
+    - name: reborn-bot
+  tokens:
+    - token: emulate-slack-token
+      user: reborn-user
+      scopes:
+        - chat:write
+        - channels:read
+        - channels:history
+        - im:read
+        - im:write
+        - im:history
+        - users:read
+        - users.profile:read
+        - users.profile:write
+        - channels:join
+        - channels:manage
+        - files:read
+        - files:write
+        - reactions:read
+        - reactions:write
+    - token: emulate-slack-limited-token
+      user: qa-reviewer
+      scopes:
+        - users:read
+        - users.profile:read
+  strict_scopes: true

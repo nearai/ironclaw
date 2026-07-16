@@ -7,17 +7,17 @@ use super::LibSqlRootFilesystem;
 #[cfg(feature = "postgres")]
 use super::PostgresRootFilesystem;
 use super::{
-    ApprovalRequestStore, AuditSink, CapabilityLeaseStore, DurableAuditLog, DurableAuditSink,
-    DurableEventLog, DurableEventSink, EffectiveRuntimePolicy, EventSink,
-    FilesystemApprovalRequestStore, FilesystemResourceGovernorStore, FilesystemRunStateStore,
+    ApprovalRequestStore, AuditSink, CapabilityLeaseStore, CoalescingEventSink, DurableAuditLog,
+    DurableAuditSink, DurableEventLog, DurableEventSink, EffectiveRuntimePolicy, EventBatchConfig,
+    EventSink, FilesystemApprovalRequestStore, FilesystemResourceGovernor, FilesystemRunStateStore,
     FilesystemTurnStateStore, FirstPartyCapabilityRegistry, HostRuntimeServices, McpExecutor,
-    NetworkHttpEgress, PersistentResourceGovernor, ProcessBackendKind, ProcessExecutor,
-    ProcessObligationLifecycleStore, ProcessResultStore, ProcessStore, ProductionComponentType,
-    ProductionImplementationReadiness, ProductionWiringComponent, ProductionWiringIssueKind,
-    ProductionWiringReport, RebornEventStoreConfig, RebornEventStoreError, RebornEventStores,
-    RebornProfile, ResourceGovernor, RootFilesystem, RunProfileResolver, RunStateApprovalStore,
-    RunStateStore, RuntimeBackendHealth, RuntimeCredentialAccountResolver, RuntimeHttpEgress,
-    RuntimeKind, RuntimeProcessPort, ScopedFilesystem, ScriptExecutor, SecretMode, SecretStore,
+    NetworkHttpEgress, ProcessBackendKind, ProcessExecutor, ProcessObligationLifecycleStore,
+    ProcessResultStore, ProcessStore, ProductionComponentType, ProductionImplementationReadiness,
+    ProductionWiringComponent, ProductionWiringIssueKind, ProductionWiringReport,
+    RebornEventStoreConfig, RebornEventStoreError, RebornEventStores, RebornProfile,
+    ResourceGovernor, RootFilesystem, RunProfileResolver, RunStateApprovalStore, RunStateStore,
+    RuntimeBackendHealth, RuntimeCredentialAccountResolver, RuntimeHttpEgress, RuntimeKind,
+    RuntimeProcessPort, ScopedFilesystem, ScriptExecutor, SecretMode, SecretStore,
     SecurityAuditSink, SharedSecretStore, TenantSandboxProcessPort, TrustPolicy,
     TurnRunTransitionPort, TurnRunWakeNotifier, TurnStateStore, WasmError, WasmRuntimeAdapter,
     WasmRuntimeCredentialProvider, WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig,
@@ -250,26 +250,19 @@ where
         }
     }
 
-    /// Replace the in-memory governor with a filesystem-backed
-    /// [`PersistentResourceGovernor`] over the supplied
-    /// [`ScopedFilesystem`]. Backend choice (libSQL, Postgres, in-memory,
-    /// local disk) is a property of the underlying
-    /// [`RootFilesystem`](ironclaw_filesystem::RootFilesystem); see
-    /// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+    /// Replace the in-memory governor with the journaled filesystem-backed
+    /// [`FilesystemResourceGovernor`] over the supplied [`ScopedFilesystem`].
+    /// Backend choice (libSQL, Postgres, in-memory, local disk) is a property
+    /// of the underlying [`RootFilesystem`](ironclaw_filesystem::RootFilesystem);
+    /// see `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
     pub fn with_filesystem_resource_governor<FsBackend>(
         self,
         scoped_filesystem: Arc<ScopedFilesystem<FsBackend>>,
-    ) -> HostRuntimeServices<
-        F,
-        PersistentResourceGovernor<FilesystemResourceGovernorStore<FsBackend>>,
-        S,
-        R,
-    >
+    ) -> HostRuntimeServices<F, FilesystemResourceGovernor<FsBackend>, S, R>
     where
         FsBackend: RootFilesystem + 'static,
     {
-        let store = FilesystemResourceGovernorStore::new(scoped_filesystem);
-        self.with_resource_governor(Arc::new(PersistentResourceGovernor::new(store)))
+        self.with_resource_governor(Arc::new(FilesystemResourceGovernor::new(scoped_filesystem)))
     }
 
     pub fn resource_governor(&self) -> Arc<G> {
@@ -465,13 +458,14 @@ where
     /// Builds and attaches a filesystem-backed turn-state store over the
     /// supplied [`ScopedFilesystem`].
     ///
-    /// Production composition wires the `/turns` mount alias on the same
-    /// [`ScopedFilesystem`] that carries the other consumer-store aliases,
-    /// so a single handle is enough to construct this store: it takes its
-    /// alias-relative subtree through the shared `MountView`. The backend
-    /// choice (`LibSqlRootFilesystem`, `PostgresRootFilesystem`,
-    /// `InMemoryBackend`, …) happens at the [`RootFilesystem`] layer, not
-    /// here.
+    /// The turn-state store performs global snapshot operations internally, so
+    /// callers must pass a handle whose `/turns` alias is already fixed to the
+    /// owning user's subtree. Do not pass the shared dynamic invocation scoped
+    /// filesystem here: its global-operation scope would route turn state to
+    /// the system sentinel owner rather than the runtime owner. The backend
+    /// choice (`CompositeRootFilesystem` over `LibSqlRootFilesystem`,
+    /// `PostgresRootFilesystem`, `InMemoryBackend`, …) still happens at the
+    /// [`RootFilesystem`] layer, not here.
     ///
     /// Replaces the legacy `with_libsql_turn_state_store` /
     /// `with_postgres_turn_state_store` builders (deleted along with the
@@ -599,7 +593,15 @@ where
             self.component_types.audit_sink =
                 Some(ProductionComponentType::of::<DurableAuditSink>());
         }
-        self.event_sink = Some(Arc::new(DurableEventSink::new(stores.events)));
+        // Runtime events are best-effort observability whose append cursor is
+        // discarded at the sink, so route them through the write-behind
+        // coalescing sink: a per-turn burst of single-row INSERTs collapses to
+        // one multi-row INSERT per stream per drain window. The compliance
+        // audit log stays synchronous.
+        self.event_sink = Some(Arc::new(CoalescingEventSink::new(
+            stores.events,
+            EventBatchConfig::default(),
+        )));
         self.audit_sink = Some(Arc::new(DurableAuditSink::new(stores.audit)));
         self
     }

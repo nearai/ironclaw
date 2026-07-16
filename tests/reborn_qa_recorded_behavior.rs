@@ -9,14 +9,33 @@
 //!    are the only tests that spend tokens; everything else is hermetic.
 //!
 //!    ```bash
-//!    ANTHROPIC_API_KEY=... cargo test --test reborn_qa_recorded_behavior \
-//!        record_ -- --ignored --test-threads=1 --nocapture
+//!    ANTHROPIC_API_KEY=... \
+//!    IRONCLAW_REBORN_QA_CREDENTIAL_SOURCE_ROOT=/path/to/reborn/local-dev \
+//!      cargo test --test reborn_qa_recorded_behavior record_ \
+//!        -- --ignored --test-threads=1 --nocapture
 //!    ```
+//!
+//!    Fixtures that exercise auth-gated Google integrations import the
+//!    configured Google product-auth account from the local Reborn store.
+//!    By default the source is `$IRONCLAW_REBORN_HOME/local-dev` (or
+//!    `~/.ironclaw/reborn/local-dev`) using `[identity]` from
+//!    `$IRONCLAW_REBORN_HOME/config.toml`; override with
+//!    `IRONCLAW_REBORN_QA_CREDENTIAL_SOURCE_ROOT`,
+//!    `IRONCLAW_REBORN_QA_CREDENTIAL_SOURCE_TENANT`,
+//!    `IRONCLAW_REBORN_QA_CREDENTIAL_SOURCE_USER`, or
+//!    `IRONCLAW_REBORN_QA_CREDENTIAL_SOURCE_AGENT` for non-default local
+//!    setups.
 //!
 //!    Recording executes the model's chosen capabilities for real under the
 //!    local-dev yolo surface (including shell and outbound HTTP) — run it
 //!    attended, then review/scrub the fixture per
 //!    `tests/support/LIVE_TESTING.md` before committing.
+//!
+//!    Before committing updated fixtures, run:
+//!
+//!    ```bash
+//!    scripts/ci/check-reborn-qa-fixtures.sh
+//!    ```
 //!
 //! 2. **Contract tests**: parse the committed fixture and pin the agent's
 //!    tool choices for the phrase — which capability, with which key
@@ -29,25 +48,33 @@
 //!    and assert the end state, e.g. the routine actually exists with the
 //!    right cron after the routine phrases.
 //!
-//! Contract and replay tests are `#[ignore]`d until the first recording run
-//! lands fixtures; flip them on in the same commit that adds the fixtures.
+//! Contract and replay tests are hermetic and run in CI. Recorder tests stay
+//! `#[ignore]` because they spend tokens and may import live credentials.
 
 #[allow(dead_code)]
-#[path = "support/reborn/mod.rs"]
+#[path = "support/reborn_parity_qa/mod.rs"]
+mod parity_qa_support;
+#[allow(dead_code)]
+#[path = "integration/support/mod.rs"]
 mod reborn_support;
 mod support;
 
-use std::sync::Arc;
-
-use ironclaw_host_api::TenantId;
-use reborn_support::{
-    model_replay::RebornTraceReplayModelGateway,
-    qa_trace::{
-        build_qa_trace_runtime, load_qa_trace, qa_trace_tenant_id, record_qa_phrase,
-        send_qa_phrase, strip_expected_tool_results,
-    },
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
 };
-use support::trace_llm::{LlmTrace, TraceResponse};
+
+use chrono::Utc;
+use ironclaw_host_api::TenantId;
+use ironclaw_triggers::{TriggerRunStatus, TriggerState};
+use parity_qa_support::model_replay::RebornTraceReplayModelGateway;
+use parity_qa_support::qa_trace::{
+    build_qa_trace_runtime_with_http_exchanges,
+    build_qa_trace_runtime_with_http_exchanges_and_trigger_poller, canonical_recorded_tool_name,
+    load_qa_trace, qa_trace_tenant_id, record_qa_phrase, recorded_tool_calls, send_qa_phrase,
+    strip_expected_tool_results,
+};
+use support::trace_llm::{LlmTrace, TraceExpects, TraceResponse, TraceStep, TraceTurn};
 
 struct QaPhrase {
     fixture: &'static str,
@@ -60,15 +87,15 @@ const ROUTINE_HEALTH_PING: QaPhrase = QaPhrase {
 };
 const ROUTINE_MEETING_PREP: QaPhrase = QaPhrase {
     fixture: "routine_meeting_prep",
-    phrase: "Every 30 minutes, send me an email with a summary about the company from my Google Drive and the latest news about the company that I will meet.",
+    phrase: "Every 30 minutes in UTC, use my Google Calendar to find the company for my next upcoming meeting, then send the configured Email delivery target a meeting-prep summary from matching Google Drive files and the latest web news about that company.",
 };
 const ROUTINE_RELEASE_WATCH: QaPhrase = QaPhrase {
     fixture: "routine_release_watch",
-    phrase: "Every 5 minutes, check https://github.com/nearai/ironclaw for latest releases and send me a Slack message summarizing any new ones.",
+    phrase: "Every 5 minutes in UTC, create a routine that checks the public GitHub releases API for https://github.com/nearai/ironclaw and sends me a Slack message summarizing any new releases. Do not require GitHub account authorization.",
 };
 const ROUTINE_CRM_INBOX: QaPhrase = QaPhrase {
     fixture: "routine_crm_inbox",
-    phrase: "Every 30 minutes, check my inbox and add any new emails from a near.ai address to my Google Sheet called ABC.",
+    phrase: "Every 30 minutes in UTC, create a routine that checks my Gmail inbox and adds any new emails from a near.ai address to my Google Sheet called ABC. Do not run the inbox check now.",
 };
 const ROUTINE_HN_MONITOR: QaPhrase = QaPhrase {
     fixture: "routine_hn_monitor",
@@ -86,14 +113,15 @@ const WEB_HN_SEARCH: QaPhrase = QaPhrase {
     fixture: "web_hn_search",
     phrase: "search Hacker News for any recent posts mentioning 'IronClaw' or 'NEAR AI'",
 };
-const CONNECT_TELEGRAM: QaPhrase = QaPhrase {
-    fixture: "connect_telegram",
-    phrase: "connect to Telegram",
-};
 const CONNECT_GMAIL: QaPhrase = QaPhrase {
     fixture: "connect_gmail",
     phrase: "connect to Gmail",
 };
+
+const SLACK_CHANNEL_MEMBERSHIP_FIXTURE: &str = "slack_channel_membership";
+const SLACK_RECENT_MESSAGE_FIXTURE: &str = "slack_recent_message";
+const SLACK_MENTION_ENCODING_FIXTURE: &str = "slack_mention_encoding";
+const SLACK_ENTITY_HYGIENE_FIXTURE: &str = "slack_entity_hygiene";
 
 // --- Tier 1: recorders (live API, manual) ----------------------------------
 
@@ -115,29 +143,9 @@ recorder_test!(record_routine_hn_monitor, ROUTINE_HN_MONITOR);
 recorder_test!(record_web_status_check, WEB_STATUS_CHECK);
 recorder_test!(record_web_release_summary, WEB_RELEASE_SUMMARY);
 recorder_test!(record_web_hn_search, WEB_HN_SEARCH);
-recorder_test!(record_connect_telegram, CONNECT_TELEGRAM);
 recorder_test!(record_connect_gmail, CONNECT_GMAIL);
 
 // --- Tier 2: fixture contracts (hermetic) -----------------------------------
-
-/// All tool calls in the fixture as (name, serialized arguments) pairs.
-fn recorded_tool_calls(trace: &LlmTrace) -> Vec<(String, String)> {
-    trace
-        .turns
-        .iter()
-        .flat_map(|turn| turn.steps.iter())
-        .filter_map(|step| match &step.response {
-            TraceResponse::ToolCalls { tool_calls, .. } => Some(tool_calls.iter().map(|call| {
-                (
-                    call.name.clone(),
-                    serde_json::to_string(&call.arguments).unwrap_or_default(),
-                )
-            })),
-            _ => None,
-        })
-        .flatten()
-        .collect()
-}
 
 fn final_text_reply(trace: &LlmTrace) -> Option<String> {
     trace
@@ -166,6 +174,98 @@ fn assert_tool_called_with(trace: &LlmTrace, tool: &str, argument_fragments: &[&
     );
 }
 
+fn assert_tool_sequence(trace: &LlmTrace, expected: &[&str]) {
+    let calls = recorded_tool_calls(trace);
+    let actual = calls
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected, "recorded tool sequence changed");
+}
+
+fn assert_tool_not_called(trace: &LlmTrace, forbidden: &str) {
+    let calls = recorded_tool_calls(trace);
+    assert!(
+        calls.iter().all(|(name, _)| name != forbidden),
+        "recorded fixture must not call {forbidden}; recorded calls: {calls:#?}"
+    );
+}
+
+fn assert_tool_call_groups(trace: &LlmTrace, expected: &[&[&str]]) {
+    let (user_input, model_responses) = trace
+        .steps
+        .split_first()
+        .expect("recorded fixture should contain a user-input step");
+    assert!(
+        matches!(user_input.response, TraceResponse::UserInput { .. }),
+        "recorded fixture should begin with one user-input step"
+    );
+    assert_eq!(
+        model_responses.len(),
+        expected.len() + 1,
+        "recorded fixture should contain the expected tool-call response groups followed by one final text response"
+    );
+
+    for (index, (step, expected_group)) in model_responses
+        .iter()
+        .take(expected.len())
+        .zip(expected.iter())
+        .enumerate()
+    {
+        let TraceResponse::ToolCalls { tool_calls, .. } = &step.response else {
+            panic!("model response {index} should be a tool-call group");
+        };
+        let actual_group = tool_calls
+            .iter()
+            .map(|call| canonical_recorded_tool_name(&call.name))
+            .collect::<Vec<_>>();
+        let expected_group = expected_group
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual_group, expected_group,
+            "recorded tool-call grouping changed at model response {index}"
+        );
+    }
+
+    match &model_responses[expected.len()].response {
+        TraceResponse::Text { content, .. } => assert!(
+            !content.is_empty(),
+            "recorded fixture should end with a non-empty final text response"
+        ),
+        _ => panic!("recorded fixture should end with exactly one final text response"),
+    }
+}
+
+fn assert_tool_argument_string_field_eq(trace: &LlmTrace, tool: &str, field: &str, expected: &str) {
+    let matching_calls = trace
+        .steps
+        .iter()
+        .filter_map(|step| match &step.response {
+            TraceResponse::ToolCalls { tool_calls, .. } => Some(tool_calls.iter()),
+            _ => None,
+        })
+        .flatten()
+        .filter(|call| canonical_recorded_tool_name(&call.name) == tool)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matching_calls.len(),
+        1,
+        "expected exactly one recorded {tool} call before checking its arguments"
+    );
+
+    let arguments = matching_calls[0]
+        .arguments
+        .as_object()
+        .unwrap_or_else(|| panic!("recorded {tool} arguments should be a JSON object"));
+    assert_eq!(
+        arguments.get(field),
+        Some(&serde_json::Value::String(expected.to_string())),
+        "recorded {tool} argument {field:?} changed"
+    );
+}
+
 fn assert_routine_contract(case: &QaPhrase, cron_fragment: &str) {
     let trace = load_qa_trace(case.fixture);
     assert_tool_called_with(&trace, "builtin.trigger_create", &[cron_fragment]);
@@ -176,44 +276,37 @@ fn assert_routine_contract(case: &QaPhrase, cron_fragment: &str) {
 }
 
 #[tokio::test]
-#[ignore = "enable once QA fixtures are recorded"]
 async fn contract_routine_health_ping_creates_5_minute_trigger() {
     assert_routine_contract(&ROUTINE_HEALTH_PING, "*/5 * * * *");
 }
 
 #[tokio::test]
-#[ignore = "enable once QA fixtures are recorded"]
 async fn contract_routine_meeting_prep_creates_30_minute_trigger() {
     assert_routine_contract(&ROUTINE_MEETING_PREP, "*/30 * * * *");
 }
 
 #[tokio::test]
-#[ignore = "enable once QA fixtures are recorded"]
 async fn contract_routine_release_watch_creates_5_minute_trigger() {
     assert_routine_contract(&ROUTINE_RELEASE_WATCH, "*/5 * * * *");
 }
 
 #[tokio::test]
-#[ignore = "enable once QA fixtures are recorded"]
 async fn contract_routine_crm_inbox_creates_30_minute_trigger() {
     assert_routine_contract(&ROUTINE_CRM_INBOX, "*/30 * * * *");
 }
 
 #[tokio::test]
-#[ignore = "enable once QA fixtures are recorded"]
 async fn contract_routine_hn_monitor_creates_hourly_trigger() {
     assert_routine_contract(&ROUTINE_HN_MONITOR, "0 * * * *");
 }
 
 #[tokio::test]
-#[ignore = "enable once QA fixtures are recorded"]
 async fn contract_web_status_check_fetches_target_endpoint() {
     let trace = load_qa_trace(WEB_STATUS_CHECK.fixture);
     assert_tool_called_with(&trace, "builtin.http", &["api.github.com"]);
 }
 
 #[tokio::test]
-#[ignore = "enable once QA fixtures are recorded"]
 async fn contract_web_release_summary_fetches_release_data() {
     let trace = load_qa_trace(WEB_RELEASE_SUMMARY.fixture);
     assert_tool_called_with(&trace, "builtin.http", &["nearai/ironclaw"]);
@@ -225,7 +318,6 @@ async fn contract_web_release_summary_fetches_release_data() {
 }
 
 #[tokio::test]
-#[ignore = "enable once QA fixtures are recorded"]
 async fn contract_web_hn_search_queries_for_keywords() {
     let trace = load_qa_trace(WEB_HN_SEARCH.fixture);
     let calls = recorded_tool_calls(&trace);
@@ -237,19 +329,157 @@ async fn contract_web_hn_search_queries_for_keywords() {
 }
 
 #[tokio::test]
-#[ignore = "enable once QA fixtures are recorded"]
-async fn contract_connect_phrases_route_through_extension_tools() {
-    for case in [&CONNECT_TELEGRAM, &CONNECT_GMAIL] {
-        let trace = load_qa_trace(case.fixture);
-        let calls = recorded_tool_calls(&trace);
-        assert!(
-            calls
-                .iter()
-                .any(|(name, _)| name.starts_with("builtin.extension_")),
-            "{} should route through the extension lifecycle tools; recorded calls: {calls:#?}",
-            case.fixture
-        );
-    }
+async fn contract_connect_gmail_routes_through_extension_tools() {
+    let gmail = load_qa_trace(CONNECT_GMAIL.fixture);
+    assert_tool_called_with(&gmail, "builtin.extension_install", &["gmail"]);
+    assert_tool_called_with(&gmail, "builtin.extension_activate", &["gmail"]);
+}
+
+#[tokio::test]
+async fn contract_slack_channel_membership_lists_joined_conversations() {
+    let trace = load_qa_trace(SLACK_CHANNEL_MEMBERSHIP_FIXTURE);
+    assert_tool_sequence(
+        &trace,
+        &[
+            "builtin.extension_search",
+            "builtin.extension_install",
+            "builtin.extension_activate",
+            "slack.list_conversations",
+        ],
+    );
+    assert_tool_call_groups(
+        &trace,
+        &[
+            &["builtin.extension_search"][..],
+            &["builtin.extension_install"][..],
+            &["builtin.extension_activate"][..],
+            &["slack.list_conversations"][..],
+        ],
+    );
+}
+
+#[tokio::test]
+async fn contract_slack_recent_message_reads_the_synthetic_conversation() {
+    let trace = load_qa_trace(SLACK_RECENT_MESSAGE_FIXTURE);
+    assert_tool_sequence(
+        &trace,
+        &[
+            "builtin.extension_search",
+            "builtin.extension_install",
+            "builtin.extension_activate",
+            "slack.whoami",
+            "slack.get_conversation_history",
+        ],
+    );
+    assert_tool_call_groups(
+        &trace,
+        &[
+            &["builtin.extension_search"][..],
+            &["builtin.extension_install"][..],
+            &["builtin.extension_activate"][..],
+            &["slack.whoami"][..],
+            &["slack.get_conversation_history"][..],
+        ],
+    );
+    assert_tool_argument_string_field_eq(
+        &trace,
+        "slack.get_conversation_history",
+        "channel",
+        "D0CANARY",
+    );
+    assert_tool_not_called(&trace, "slack.search_messages");
+    assert_tool_not_called(&trace, "builtin.outbound_delivery_targets_list");
+}
+
+#[tokio::test]
+async fn contract_slack_mention_encoding_uses_exact_conversation_lookup() {
+    let trace = load_qa_trace(SLACK_MENTION_ENCODING_FIXTURE);
+    assert_tool_sequence(
+        &trace,
+        &[
+            "builtin.extension_search",
+            "builtin.extension_install",
+            "builtin.extension_activate",
+            "slack.get_conversation_info",
+            "slack.send_message",
+        ],
+    );
+    assert_tool_call_groups(
+        &trace,
+        &[
+            &["builtin.extension_search"][..],
+            &["builtin.extension_install"][..],
+            &["builtin.extension_activate"][..],
+            &["slack.get_conversation_info"][..],
+            &["slack.send_message"][..],
+        ],
+    );
+    assert_tool_argument_string_field_eq(
+        &trace,
+        "slack.get_conversation_info",
+        "channel",
+        "D0CANARY",
+    );
+    assert_tool_argument_string_field_eq(&trace, "slack.send_message", "channel", "D0CANARY");
+    assert_tool_called_with(
+        &trace,
+        "slack.send_message",
+        &["<@U0CANARY>", "MENTION_CANARY"],
+    );
+    assert_tool_not_called(&trace, "slack.list_conversations");
+}
+
+#[tokio::test]
+async fn contract_slack_entity_hygiene_humanizes_the_chained_user_id() {
+    let trace = load_qa_trace(SLACK_ENTITY_HYGIENE_FIXTURE);
+    assert_tool_sequence(
+        &trace,
+        &[
+            "builtin.extension_search",
+            "builtin.extension_install",
+            "builtin.extension_activate",
+            "slack.search_messages",
+            "slack.search_messages",
+            "slack.search_messages",
+            "slack.get_conversation_history",
+            "slack.get_user_info",
+        ],
+    );
+    assert_tool_call_groups(
+        &trace,
+        &[
+            &["builtin.extension_search"][..],
+            &["builtin.extension_install"][..],
+            &["builtin.extension_activate"][..],
+            &["slack.search_messages"][..],
+            &["slack.search_messages"][..],
+            &["slack.search_messages"][..],
+            &["slack.get_conversation_history"][..],
+            &["slack.get_user_info"][..],
+        ],
+    );
+    assert_tool_argument_string_field_eq(
+        &trace,
+        "slack.get_conversation_history",
+        "channel",
+        "D0CANARY",
+    );
+    assert_tool_argument_string_field_eq(&trace, "slack.get_user_info", "user_id", "U0CANARY");
+    assert_tool_not_called(&trace, "builtin.outbound_delivery_targets_list");
+
+    let reply = final_text_reply(&trace).expect("entity-hygiene fixture should end in text");
+    assert!(
+        reply.ends_with("Canary User"),
+        "entity-hygiene reply should end with the synthetic display name; reply: {reply:?}"
+    );
+    assert!(
+        !reply.contains("U0CANARY"),
+        "entity-hygiene reply leaked the synthetic raw user id: {reply:?}"
+    );
+    assert!(
+        !reply.contains("D0CANARY"),
+        "entity-hygiene reply leaked the synthetic raw conversation id: {reply:?}"
+    );
 }
 
 // --- Tier 3: runtime replay (hermetic) ---------------------------------------
@@ -258,12 +488,18 @@ async fn contract_connect_phrases_route_through_extension_tools() {
 /// assert the routine actually exists afterwards with the expected schedule.
 async fn replay_routine_phrase(case: &QaPhrase, cron_fragment: &str) {
     let mut trace = load_qa_trace(case.fixture);
+    let http_exchanges = trace.http_exchanges.clone();
     strip_expected_tool_results(&mut trace);
     let gateway =
         RebornTraceReplayModelGateway::from_trace(trace).expect("replay gateway from fixture");
 
     let root = tempfile::tempdir().expect("tempdir");
-    let runtime = build_qa_trace_runtime(&root, Arc::new(gateway.clone())).await;
+    let runtime = build_qa_trace_runtime_with_http_exchanges(
+        &root,
+        Arc::new(gateway.clone()),
+        http_exchanges,
+    )
+    .await;
     let reply = send_qa_phrase(&runtime, case.phrase).await;
     assert!(
         reply.is_successful_final_reply(),
@@ -283,8 +519,11 @@ async fn replay_routine_phrase(case: &QaPhrase, cron_fragment: &str) {
         .expect("list triggers after replay");
     assert!(
         triggers.iter().any(|record| {
-            let ironclaw_triggers::TriggerSchedule::Cron { expression, .. } = &record.schedule;
-            expression.contains(cron_fragment)
+            matches!(
+                &record.schedule,
+                ironclaw_triggers::TriggerSchedule::Cron { expression, .. }
+                    if expression.contains(cron_fragment)
+            )
         }),
         "replayed {} should create a routine scheduled {cron_fragment}; triggers: {triggers:#?}",
         case.fixture
@@ -293,14 +532,162 @@ async fn replay_routine_phrase(case: &QaPhrase, cron_fragment: &str) {
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
+fn append_fired_routine_reply(trace: &mut LlmTrace) {
+    trace.turns.push(TraceTurn {
+        user_input: "qa trigger fire".to_string(),
+        steps: vec![TraceStep {
+            request_hint: None,
+            response: TraceResponse::Text {
+                content: "qa fired routine ok".to_string(),
+                input_tokens: 1,
+                output_tokens: 1,
+            },
+            expected_tool_results: Vec::new(),
+        }],
+        expects: TraceExpects::default(),
+    });
+}
+
+/// Replay a routine-creation fixture, make the persisted trigger due, and
+/// assert the poller submits a real fired turn carrying the recorded prompt.
+async fn replay_routine_phrase_fires(case: &QaPhrase, cron_fragment: &str) {
+    let mut trace = load_qa_trace(case.fixture);
+    let http_exchanges = trace.http_exchanges.clone();
+    strip_expected_tool_results(&mut trace);
+    append_fired_routine_reply(&mut trace);
+    let gateway =
+        RebornTraceReplayModelGateway::from_trace(trace).expect("replay gateway from fixture");
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let runtime = build_qa_trace_runtime_with_http_exchanges_and_trigger_poller(
+        &root,
+        Arc::new(gateway.clone()),
+        http_exchanges,
+    )
+    .await;
+    let reply = send_qa_phrase(&runtime, case.phrase).await;
+    assert!(
+        reply.is_successful_final_reply(),
+        "replayed {} should finalize creation before firing; status {:?}",
+        case.fixture,
+        reply.status
+    );
+
+    let repo = runtime
+        .trigger_repository()
+        .expect("local-dev runtime exposes trigger repository");
+    let tenant_id = TenantId::new(qa_trace_tenant_id()).expect("tenant id");
+    let triggers = repo
+        .list_triggers(tenant_id.clone())
+        .await
+        .expect("list triggers after replay");
+    let mut trigger = triggers
+        .iter()
+        .find(|record| {
+            matches!(
+                &record.schedule,
+                ironclaw_triggers::TriggerSchedule::Cron { expression, .. }
+                    if expression.contains(cron_fragment)
+            )
+        })
+        .cloned()
+        .unwrap_or_else(|| {
+            panic!(
+                "replayed {} should create a routine scheduled {cron_fragment}; triggers: {triggers:#?}",
+                case.fixture
+            )
+        });
+    let trigger_id = trigger.trigger_id;
+    let trigger_prompt = trigger.prompt.clone();
+    assert!(
+        !trigger_prompt.trim().is_empty(),
+        "replayed {} should persist a non-empty routine prompt",
+        case.fixture
+    );
+
+    trigger.next_run_at = Utc::now() - chrono::Duration::try_seconds(120).expect("duration");
+    repo.upsert_trigger(trigger)
+        .await
+        .expect("make replayed routine due");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut settled = repo
+        .get_trigger(tenant_id.clone(), trigger_id)
+        .await
+        .expect("get trigger")
+        .expect("record present");
+    let mut prompt_seen = false;
+    while Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        settled = repo
+            .get_trigger(tenant_id.clone(), trigger_id)
+            .await
+            .expect("get trigger")
+            .expect("record present");
+        prompt_seen = gateway.requests().iter().any(|request| {
+            request
+                .messages
+                .iter()
+                .any(|message| message.content.contains(&trigger_prompt))
+        });
+        if prompt_seen && settled.last_status == Some(TriggerRunStatus::Ok) {
+            break;
+        }
+    }
+
+    runtime.shutdown().await.expect("runtime shutdown");
+
+    let captured_requests = gateway.requests();
+    assert!(
+        prompt_seen,
+        "replayed {} fired routine never submitted a turn carrying the persisted prompt; \
+         prompt: {trigger_prompt:?}; captured: {:?}",
+        case.fixture,
+        captured_requests
+            .iter()
+            .map(|request| request
+                .messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        settled.last_status,
+        Some(TriggerRunStatus::Ok),
+        "replayed {} fired routine should settle Ok; record: {settled:?}",
+        case.fixture
+    );
+    assert_eq!(
+        settled.state,
+        TriggerState::Scheduled,
+        "replayed {} recurring routine should remain scheduled; record: {settled:?}",
+        case.fixture
+    );
+    assert!(
+        settled.last_fired_slot.is_some() && settled.last_run_at.is_some(),
+        "replayed {} fired routine should record fire metadata; record: {settled:?}",
+        case.fixture
+    );
+    gateway.assert_exhausted();
+}
+
 #[tokio::test]
-#[ignore = "enable once QA fixtures are recorded"]
 async fn replay_routine_health_ping_creates_real_trigger() {
     replay_routine_phrase(&ROUTINE_HEALTH_PING, "*/5 * * * *").await;
 }
 
 #[tokio::test]
-#[ignore = "enable once QA fixtures are recorded"]
 async fn replay_routine_hn_monitor_creates_real_trigger() {
     replay_routine_phrase(&ROUTINE_HN_MONITOR, "0 * * * *").await;
+}
+
+#[tokio::test]
+async fn replay_routine_health_ping_fires_recorded_automation() {
+    replay_routine_phrase_fires(&ROUTINE_HEALTH_PING, "*/5 * * * *").await;
+}
+
+#[tokio::test]
+async fn replay_routine_hn_monitor_fires_recorded_automation() {
+    replay_routine_phrase_fires(&ROUTINE_HN_MONITOR, "0 * * * *").await;
 }

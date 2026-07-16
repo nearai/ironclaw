@@ -99,6 +99,32 @@ pub(crate) async fn matching_approval_lease(
         })
 }
 
+/// Finds a Claimed lease that was left in-flight by a prior approval-resume
+/// auth bounce.
+///
+/// Called from `auth_resume_json` when `matching_approval_lease` (Active-only)
+/// returns `None` after a `resume_json` → `AuthorizationRequiresAuth` bounce.
+/// That bounce claims the lease but skips the revoke (Part A of the fix), so
+/// the lease is Claimed rather than Active.  This helper locates it so the
+/// same invocation can continue without a second approval prompt.
+pub(crate) async fn matching_claimed_approval_lease_for_auth_resume(
+    capability_leases: &dyn CapabilityLeaseStore,
+    scope: &ResourceScope,
+    capability_id: &CapabilityId,
+    invocation_fingerprint: &InvocationFingerprint,
+) -> Option<CapabilityLease> {
+    capability_leases
+        .leases_for_scope(scope)
+        .await
+        .into_iter()
+        .find(|lease| {
+            lease.scope == *scope
+                && lease.grant.capability == *capability_id
+                && lease.invocation_fingerprint.as_ref() == Some(invocation_fingerprint)
+                && lease.status == CapabilityLeaseStatus::Claimed
+        })
+}
+
 pub(crate) async fn fail_run_if_configured(
     run_state: Option<&dyn RunStateStore>,
     scope: &ResourceScope,
@@ -250,6 +276,7 @@ pub(crate) fn approval_not_approved_error_kind(status: ApprovalStatus) -> &'stat
         ApprovalStatus::Approved => "ApprovalApproved",
         ApprovalStatus::Denied => "ApprovalDenied",
         ApprovalStatus::Expired => "ApprovalExpired",
+        ApprovalStatus::Discarded => "ApprovalDiscarded",
     }
 }
 
@@ -284,7 +311,9 @@ pub(crate) fn claim_error_may_be_concurrent_resume(error: &CapabilityLeaseError)
     matches!(
         error,
         CapabilityLeaseError::InactiveLease {
-            status: CapabilityLeaseStatus::Claimed | CapabilityLeaseStatus::Consumed,
+            status: CapabilityLeaseStatus::Claimed
+                | CapabilityLeaseStatus::Dispatching
+                | CapabilityLeaseStatus::Consumed,
             ..
         }
     )
@@ -327,6 +356,7 @@ mod tests {
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
             safe_summary: None,
+            detail: None,
         };
         assert!(error.run_state_transition().is_none());
     }
@@ -336,6 +366,7 @@ mod tests {
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
             safe_summary: None,
+            detail: None,
         };
         assert!(error.run_state_transition().is_none());
     }
@@ -345,6 +376,7 @@ mod tests {
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::UnknownCapability,
             safe_summary: None,
+            detail: None,
         };
         assert!(error.run_state_transition().is_none());
     }
@@ -377,5 +409,16 @@ mod tests {
             transition,
             CapabilityRunStateTransition::BlockAuth { .. }
         ));
+    }
+
+    /// Regression for the `ApprovalStatus::Discarded` arm added to
+    /// `approval_not_approved_error_kind`: ensures the arm maps to the
+    /// correct string constant and does not silently drift to another value.
+    #[test]
+    fn approval_not_approved_error_kind_maps_discarded_status() {
+        assert_eq!(
+            approval_not_approved_error_kind(ApprovalStatus::Discarded),
+            "ApprovalDiscarded",
+        );
     }
 }

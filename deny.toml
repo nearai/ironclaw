@@ -3,11 +3,9 @@ unmaintained = "workspace"
 yanked = "deny"
 ignore = [
     # Pre-existing advisories — tracked for upgrade in separate PRs
-    # serde_yml unsound/unmaintained — direct dep, upgrade tracked separately
-    "RUSTSEC-2025-0068",
     # tokio-tar PAX header parsing — sandbox containers only
     "RUSTSEC-2025-0111",
-    # rustls-webpki advisories — 0.102.8 remains pinned by a libsql 0.6.0 transitive dep
+    # rustls-webpki advisories — 0.102.8 remains pinned by a libsql 0.9.30 transitive dep
     # (via rustls 0.22 → hyper-rustls 0.25); keep ignored until that pin is gone.
     # RUSTSEC-2026-0104: panic on empty `onlySomeReasons` BIT STRING during CRL parsing.
     # We do not use CRLs, and the advisory explicitly notes apps that don't parse CRLs
@@ -16,17 +14,10 @@ ignore = [
     "RUSTSEC-2026-0098",
     "RUSTSEC-2026-0099",
     "RUSTSEC-2026-0104",
-    # rand unsoundness with custom logger calling rand::rng() during reseed — we don't use this pattern;
-    # revisit/remove by 2026-06-30, or when transitive deps (tower, nanoid, phf_generator) release rand ≥0.9.3 compat
-    "RUSTSEC-2026-0097",
-    # wasmtime: WASI path_open(TRUNCATE) bypasses FilePerms::WRITE host restriction
-    # (https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-2r75-cxrj-cmph).
-    # The IronClaw WASM sandbox does not grant guest modules WASI filesystem
-    # capabilities backed by host-controlled FilePerms — guests communicate via
-    # explicit host functions (see crates/ironclaw_engine and src/tools/wasm/host.rs),
-    # so the TRUNCATE bypass is not reachable from our guest surface. Remove once
-    # wasmtime is upgraded to a patched release.
-    "RUSTSEC-2026-0149",
+    # rsa Marvin timing side-channel — test-only dependency used to mint
+    # throwaway local OIDC JWT fixtures; no production network-observable
+    # private-key operation is exposed by this dependency.
+    "RUSTSEC-2023-0071",
 ]
 
 [licenses]
@@ -68,7 +59,7 @@ unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
     # Monty (Pydantic's embedded Python interpreter) — not yet on crates.io.
-    # Pulls in ruff_* crates from astral-sh/ruff at a pinned revision.
+    # Pulls in ruff_* crates from samuelcolvin/ruff at a pinned revision.
     "https://github.com/pydantic/monty.git",
-    "https://github.com/astral-sh/ruff.git",
+    "https://github.com/samuelcolvin/ruff.git",
 ]

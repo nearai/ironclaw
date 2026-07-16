@@ -4,14 +4,16 @@ use ironclaw_product_adapters::{ProductOutboundEnvelope, ProjectionCursor};
 use ironclaw_threads::{SessionThreadRecord, SummaryArtifact, ThreadMessageRecord};
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunResponse, EventCursor, GateRef, ResumeTurnResponse,
-    SanitizedFailure, TurnCheckpointId, TurnRunId, TurnRunState, TurnStatus,
+    RetryTurnResponse, SanitizedFailure, TurnCheckpointId, TurnRunId, TurnRunState, TurnStatus,
 };
 use secrecy::SecretString;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, de};
+use tokio::sync::mpsc;
 
 use crate::{
-    LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload, LifecycleReadinessBlocker,
+    LifecycleInstallScope, LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload,
+    LifecycleReadinessBlocker,
 };
 
 const OUTBOUND_DELIVERY_TARGET_ID_MAX_BYTES: usize = 512;
@@ -88,6 +90,70 @@ pub struct RebornLogQueryRequest {
     pub source: Option<String>,
     #[serde(default)]
     pub tail: bool,
+    #[serde(default)]
+    pub follow: bool,
+}
+
+impl RebornLogQueryRequest {
+    pub fn set_limit(mut self, limit: u32) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    pub fn set_cursor(mut self, cursor: impl Into<String>) -> Self {
+        self.cursor = Some(cursor.into());
+        self
+    }
+
+    pub fn set_level(mut self, level: RebornLogLevel) -> Self {
+        self.level = Some(level);
+        self
+    }
+
+    pub fn set_target(mut self, target: impl Into<String>) -> Self {
+        self.target = Some(target.into());
+        self
+    }
+
+    pub fn set_thread_id(mut self, thread_id: impl Into<String>) -> Self {
+        self.thread_id = Some(thread_id.into());
+        self
+    }
+
+    pub fn set_run_id(mut self, run_id: impl Into<String>) -> Self {
+        self.run_id = Some(run_id.into());
+        self
+    }
+
+    pub fn set_turn_id(mut self, turn_id: impl Into<String>) -> Self {
+        self.turn_id = Some(turn_id.into());
+        self
+    }
+
+    pub fn set_tool_call_id(mut self, tool_call_id: impl Into<String>) -> Self {
+        self.tool_call_id = Some(tool_call_id.into());
+        self
+    }
+
+    pub fn set_tool_name(mut self, tool_name: impl Into<String>) -> Self {
+        self.tool_name = Some(tool_name.into());
+        self
+    }
+
+    pub fn set_source(mut self, source: impl Into<String>) -> Self {
+        self.source = Some(source.into());
+        self
+    }
+
+    pub fn set_tail(mut self, tail: bool) -> Self {
+        self.tail = tail;
+        self
+    }
+
+    pub fn set_follow(mut self, follow: bool) -> Self {
+        self.follow = follow;
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,6 +243,7 @@ pub enum RebornChannelConnectStrategy {
     AdminManagedChannels,
     WebGeneratedCode,
     QrCode,
+    #[serde(rename = "oauth")]
     OAuth,
 }
 
@@ -184,7 +251,7 @@ pub enum RebornChannelConnectStrategy {
 pub struct RebornChannelConnectAction {
     pub title: String,
     pub instructions: String,
-    #[serde(rename = "input_placeholder", alias = "code_placeholder")]
+    #[serde(rename = "input_placeholder")]
     pub input_placeholder: String,
     pub submit_label: String,
     pub success_message: String,
@@ -220,12 +287,22 @@ pub enum RebornSubmitTurnResponse {
         resolved_run_profile_version: u64,
         event_cursor: EventCursor,
     },
-    DeferredBusy {
+    RejectedBusy {
         thread_id: ThreadId,
         accepted_message_ref: AcceptedMessageRef,
-        active_run_id: TurnRunId,
-        status: TurnStatus,
-        event_cursor: EventCursor,
+        /// The run that was blocking at the time of rejection.
+        ///
+        /// `Some` on a fresh `ThreadBusy` rejection (the run is known and
+        /// still queryable). `None` on an idempotent replay where the original
+        /// blocking run may have already terminated and its id cannot be
+        /// recovered from the stored message record.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_run_id: Option<TurnRunId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<TurnStatus>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_cursor: Option<EventCursor>,
+        notice: String,
     },
     AlreadySubmitted {
         thread_id: ThreadId,
@@ -256,6 +333,30 @@ pub struct RebornTimelineRequest {
     pub cursor: Option<String>,
 }
 
+impl RebornTimelineRequest {
+    pub fn new(thread_id: impl Into<String>) -> Self {
+        Self {
+            thread_id: thread_id.into(),
+            ..Self::default()
+        }
+    }
+
+    pub fn set_thread_id(mut self, thread_id: impl Into<String>) -> Self {
+        self.thread_id = thread_id.into();
+        self
+    }
+
+    pub fn set_limit(mut self, limit: u32) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    pub fn set_cursor(mut self, cursor: impl Into<String>) -> Self {
+        self.cursor = Some(cursor.into());
+        self
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornTimelineResponse {
     pub thread: SessionThreadRecord,
@@ -268,6 +369,27 @@ pub struct RebornTimelineResponse {
     pub next_cursor: Option<String>,
 }
 
+/// Request the raw bytes of one landed attachment, addressed by the thread and
+/// message that carry it plus the attachment's per-message id. The triple is
+/// required because an attachment id is only unique within its message, not
+/// across a thread. The caller's authority comes from the authenticated session
+/// (the scope is derived server-side), never from these path values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAttachmentRequest {
+    pub thread_id: String,
+    pub message_id: String,
+    pub attachment_id: String,
+}
+
+/// Raw bytes of one landed attachment plus the metadata a browser needs to
+/// render or download it. Returned by [`super::RebornServicesApi::read_attachment`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebornAttachmentBytes {
+    pub mime_type: String,
+    pub filename: Option<String>,
+    pub bytes: Vec<u8>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornStreamEventsRequest {
     pub thread_id: String,
@@ -278,6 +400,24 @@ pub struct RebornStreamEventsRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornStreamEventsResponse {
     pub events: Vec<ProductOutboundEnvelope>,
+}
+
+pub struct RebornStreamEventsSubscription {
+    receiver: mpsc::Receiver<Result<ProductOutboundEnvelope, super::RebornServicesError>>,
+}
+
+impl RebornStreamEventsSubscription {
+    pub fn new(
+        receiver: mpsc::Receiver<Result<ProductOutboundEnvelope, super::RebornServicesError>>,
+    ) -> Self {
+        Self { receiver }
+    }
+
+    pub async fn next(
+        &mut self,
+    ) -> Option<Result<ProductOutboundEnvelope, super::RebornServicesError>> {
+        self.receiver.recv().await
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -308,6 +448,23 @@ pub struct RebornResumeGateResponse {
 
 impl From<ResumeTurnResponse> for RebornResumeGateResponse {
     fn from(value: ResumeTurnResponse) -> Self {
+        Self {
+            run_id: value.run_id,
+            status: value.status,
+            event_cursor: value.event_cursor,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornRetryRunResponse {
+    pub run_id: TurnRunId,
+    pub status: TurnStatus,
+    pub event_cursor: EventCursor,
+}
+
+impl From<RetryTurnResponse> for RebornRetryRunResponse {
+    fn from(value: RetryTurnResponse) -> Self {
         Self {
             run_id: value.run_id,
             status: value.status,
@@ -371,7 +528,14 @@ impl From<TurnRunState> for RebornGetRunStateResponse {
             received_at: value.received_at,
             checkpoint_id: value.checkpoint_id,
             gate_ref: value.gate_ref,
-            failure: value.failure,
+            // Public WebUI shape: strip the model-visible `detail` so free-form
+            // backend cause text never reaches the browser. `category` (the
+            // user-facing signal) is retained. See
+            // `SanitizedFailure::public_projection`.
+            failure: value
+                .failure
+                .as_ref()
+                .map(SanitizedFailure::public_projection),
         }
     }
 }
@@ -391,6 +555,23 @@ pub struct RebornListThreadsResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornListAutomationsResponse {
     pub automations: Vec<RebornAutomationInfo>,
+    /// Whether the background trigger poller (scheduler) is running. When
+    /// `false`, listed schedule automations will never actually fire, and the
+    /// browser surfaces a "scheduling is off" notice. Defaults to `true` on the
+    /// wire so an older payload without the field is not misreported as off.
+    #[serde(default = "default_scheduler_enabled")]
+    pub scheduler_enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAutomationMutationResponse {
+    pub updated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation: Option<RebornAutomationInfo>,
+}
+
+fn default_scheduler_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -937,6 +1118,40 @@ pub struct RebornAutomationInfo {
     pub is_active: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
+    /// Present while this automation's active fire is held (gate-parked or
+    /// still running) and scheduled fires are being skipped (#5886). Derived
+    /// at read time from the active run's state; never persisted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_hold: Option<RebornAutomationActiveHold>,
+}
+
+/// Why an automation's schedule is currently held, plus elapsed-occurrence
+/// accounting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAutomationActiveHold {
+    pub reason: RebornAutomationHoldReason,
+    /// The held fire's claimed slot — when the pause effectively began.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<DateTime<Utc>>,
+    /// Scheduled occurrences elapsed while held; display-only, capped. Not a
+    /// count of runs the poller attempted — accrues from wall-clock cron
+    /// slots regardless of poller activity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_occurrences: Option<u32>,
+    /// True when `elapsed_occurrences` hit the cap — render as "N+".
+    #[serde(default)]
+    pub elapsed_occurrences_capped: bool,
+}
+
+/// Client-visible hold reason. `in_progress` = the previous run is still
+/// executing; the gate-parked reasons need the user to act.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornAutomationHoldReason {
+    Approval,
+    Auth,
+    InProgress,
+    Other,
 }
 
 /// Source discriminator for automation rows.
@@ -953,6 +1168,13 @@ pub enum RebornAutomationSource {
         /// (e.g. "America/New_York"). Always "UTC" for legacy rows.
         timezone: String,
     },
+    /// A one-time trigger that fires once at `at`, then completes.
+    Once {
+        /// One-shot fire time as an RFC3339 UTC timestamp.
+        at: String,
+        /// IANA timezone the one-shot was scheduled in (for display).
+        timezone: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -964,6 +1186,11 @@ pub struct RebornExtensionListResponse {
 pub struct RebornSkillListResponse {
     pub skills: Vec<RebornSkillInfo>,
     pub count: usize,
+    /// Global default criteria-based skill auto-activation master switch. When
+    /// `false`, skills activate only via an explicit `/name` mention. Defaults
+    /// to `true` for back-compat with producers that predate the flag.
+    #[serde(default = "default_true")]
+    pub auto_activate_learned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1016,6 +1243,14 @@ pub struct RebornSkillInfo {
     pub can_edit: bool,
     #[serde(default)]
     pub can_delete: bool,
+    /// Whether the skill auto-activates on matching requests. `false` means it
+    /// only runs when explicitly invoked with `/name`. Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub auto_activate: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1074,6 +1309,10 @@ pub struct RebornExtensionInfo {
     pub onboarding_state: Option<RebornExtensionOnboardingState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub onboarding: Option<RebornExtensionOnboardingPayload>,
+    /// Whether this install is tenant-shared or private to the caller
+    /// (#5459 P1); `None` on pre-#5459 payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_scope: Option<LifecycleInstallScope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1232,6 +1471,43 @@ pub struct RebornOperatorSetupRequest {
     pub webui_access_token: Option<SecretString>,
 }
 
+impl RebornOperatorSetupRequest {
+    pub fn set_provider_id(mut self, provider_id: impl Into<String>) -> Self {
+        self.provider_id = Some(provider_id.into());
+        self
+    }
+
+    pub fn set_adapter(mut self, adapter: impl Into<String>) -> Self {
+        self.adapter = Some(adapter.into());
+        self
+    }
+
+    pub fn set_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = Some(base_url.into());
+        self
+    }
+
+    pub fn set_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
+    pub fn set_api_key(mut self, api_key: SecretString) -> Self {
+        self.api_key = Some(api_key);
+        self
+    }
+
+    pub fn set_profile_id(mut self, profile_id: impl Into<String>) -> Self {
+        self.profile_id = Some(profile_id.into());
+        self
+    }
+
+    pub fn set_webui_access_token(mut self, webui_access_token: SecretString) -> Self {
+        self.webui_access_token = Some(webui_access_token);
+        self
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornOperatorSetupResponse {
     pub area: RebornOperatorArea,
@@ -1300,6 +1576,8 @@ pub struct RebornOperatorLogsQuery {
     pub source: Option<String>,
     #[serde(default)]
     pub tail: bool,
+    #[serde(default)]
+    pub follow: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

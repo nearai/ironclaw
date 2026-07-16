@@ -97,10 +97,26 @@ has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
+  "reborn group test runner script" \
+  "scripts/ci/run-reborn-group-tests.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
   "reborn root tests and support" \
   "tests/reborn_qa_smoke_scenarios_e2e.rs
-tests/support/reborn/harness.rs
+tests/integration/support/harness/mod.rs
 tests/e2e/scenarios/test_reborn_gateway_smoke.py" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "reborn qa trace fixture" \
+  "tests/fixtures/llm_traces/reborn_qa/routine_health_ping.json" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
@@ -172,6 +188,30 @@ has_legacy_tests=true
 has_reborn_tests=true"
 
 assert_scope \
+  "Reborn Responses E2E manifest checker" \
+  "scripts/ci/check-reborn-responses-e2e-manifest.py" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "Reborn Responses E2E manifest" \
+  "tests/e2e/reborn_responses_e2e_tests.txt" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "Reborn coverage manifest" \
+  "tests/e2e/reborn_coverage_tests.txt" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
   "shared reborn tests workflow" \
   ".github/workflows/reborn-tests.yml" \
   "docs_only=false
@@ -203,7 +243,7 @@ has_reborn_tests=false"
 
 assert_scope \
   "nested markdown is not docs only" \
-  "crates/ironclaw_reborn/CLAUDE.md" \
+  "crates/ironclaw_runner/CLAUDE.md" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
@@ -229,6 +269,70 @@ has_reborn_tests=true"
 assert_scope_no_trailing_newline \
   "final path without trailing newline" \
   "crates/ironclaw_reborn_cli/src/main.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "reborn coverage lane-run script" \
+  "scripts/ci/reborn-coverage-lane-run.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "reborn coverage merge-lcov script" \
+  "scripts/ci/reborn-coverage-merge-lcov.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "reborn coverage summary script" \
+  "scripts/ci/reborn-coverage-summary.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "reborn coverage regression suite" \
+  "scripts/ci/test-reborn-coverage.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "reborn coverage regression suite, sourced sibling (R-section split)" \
+  "scripts/ci/test-reborn-coverage-ratchet-cases.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "test suite boundaries checker script" \
+  "scripts/ci/check-test-suite-boundaries.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "test-classify-test-scope script is itself reborn-scoped" \
+  "scripts/ci/test-classify-test-scope.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=true
+has_reborn_tests=true"
+
+assert_scope \
+  "shared coverage lcov lib is reborn-scoped (gemini: PR #5718 comment)" \
+  "scripts/ci/lib/reborn_coverage_lcov.py" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false

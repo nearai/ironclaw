@@ -6,22 +6,25 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, ResourceEstimate,
+    ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, HostApiError,
+    INPUT_ENCODE_HUMAN_SUMMARY, ProviderToolName, ResourceEstimate,
     RuntimeCredentialAuthRequirement, RuntimeKind, ThreadId,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 use crate::{
-    AcceptedMessageRef, LoopDiagnosticRef, LoopGateRef, LoopMessageRef, LoopResultRef,
-    RedactedCheckpointPayload, RunProfileVersion, TurnActor, TurnCheckpointId, TurnId, TurnRunId,
-    TurnScope,
+    AcceptedMessageRef, CapabilityActivityId, LoopDiagnosticRef, LoopGateRef, LoopMessageRef,
+    LoopResultRef, ProductTurnContext, RedactedCheckpointPayload, RunProfileVersion, TurnActor,
+    TurnCheckpointId, TurnId, TurnRunId, TurnScope,
 };
 
 use super::{
     compaction::{CompactionInitiator, LoopCompactionPort},
+    content_digest::ContentDigest,
     instruction_bundle::InstructionBundleFingerprint,
     model_observation::{CapabilityFailureDetail, ModelVisibleToolObservation},
+    prompt_text::{PromptTextSurface, validate_prompt_text},
     refs::{CheckpointSchemaId, LoopDriverId, ModelProfileId},
     snapshot::ResolvedRunProfile,
     system_inference::SystemInferenceTaskId,
@@ -136,10 +139,7 @@ fn validate_loop_safe_identifier(
             ));
         }
     }
-    if lower
-        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
-        .any(|token| token.starts_with("sk-"))
-    {
+    if contains_secret_like_token(&lower) {
         return Err(format!("{label} must not contain API-key-like tokens"));
     }
     Ok(value)
@@ -147,6 +147,9 @@ fn validate_loop_safe_identifier(
 
 fn validate_loop_safe_summary(value: String) -> Result<String, String> {
     let value = validate_bounded_loop_string(value, "loop safe summary", 512)?;
+    if value == INPUT_ENCODE_HUMAN_SUMMARY {
+        return Ok(value);
+    }
     if value.chars().any(|character| {
         matches!(
             character,
@@ -159,6 +162,9 @@ fn validate_loop_safe_summary(value: String) -> Result<String, String> {
     }
 
     let lower = value.to_ascii_lowercase();
+    // Only credential markers are banned; descriptive error vocabulary
+    // ("provider error", "stack trace", "tool input", …) is allowed because
+    // the raw cause now rides the dedicated model-visible detail channel.
     for forbidden in [
         "access token",
         "api key",
@@ -166,18 +172,9 @@ fn validate_loop_safe_summary(value: String) -> Result<String, String> {
         "apikey",
         "authorization:",
         "bearer ",
-        "host path",
-        "invalid api key",
-        "invalid_api_key",
         "password",
         "passwd",
-        "provider error",
-        "raw runtime",
         "secret",
-        "stack trace",
-        "tool input",
-        "tool_input",
-        "traceback",
     ] {
         if lower.contains(forbidden) {
             return Err(format!(
@@ -185,13 +182,47 @@ fn validate_loop_safe_summary(value: String) -> Result<String, String> {
             ));
         }
     }
-    if lower
-        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
-        .any(|token| token.starts_with("sk-"))
-    {
+    if contains_secret_like_token(&lower) {
         return Err("loop safe summary must not contain API-key-like tokens".to_string());
     }
     Ok(value)
+}
+
+fn contains_secret_like_token(lower: &str) -> bool {
+    lower
+        .split(|character: char| {
+            !character.is_ascii_alphanumeric() && !matches!(character, '-' | '_' | '.')
+        })
+        .any(is_secret_like_token)
+}
+
+fn is_secret_like_token(token: &str) -> bool {
+    [
+        "sk-",
+        "sk-ant-",
+        "ghp_",
+        "github_pat_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
+        "glpat-",
+        "gcp-",
+        "ya29.",
+        "aiza",
+    ]
+    .iter()
+    .any(|prefix| token.starts_with(prefix))
+        || (token.len() >= 16 && (token.starts_with("akia") || token.starts_with("asia")))
+}
+
+fn validate_loop_inline_message_body(value: String) -> Result<String, String> {
+    validate_prompt_text(
+        value,
+        "loop inline message body",
+        PromptTextSurface::GenericModelContent,
+    )
+    .map_err(|error| error.safe_summary)
 }
 
 macro_rules! bounded_loop_ref {
@@ -385,8 +416,33 @@ impl LoopSafeSummary {
         validate_loop_safe_summary(value.into()).map(Self)
     }
 
+    /// Build a display-safe capability failure summary, replacing unsafe input
+    /// with a fixed redaction marker.
+    pub fn capability_failure_summary(value: impl Into<String>) -> Self {
+        Self::new(value).unwrap_or_else(|_| Self::tool_failure_details_redacted())
+    }
+
+    /// Fixed summary used when a capability failure detail was intentionally
+    /// redacted before reaching a user-visible or model-visible boundary.
+    pub fn tool_failure_details_redacted() -> Self {
+        Self("the tool failure details were redacted".to_string())
+    }
+
+    /// Fixed fallback for input-encoding failures when no narrower safe detail
+    /// is available.
+    pub fn tool_input_could_not_be_encoded() -> Self {
+        Self(INPUT_ENCODE_HUMAN_SUMMARY.to_string())
+    }
+
     pub fn model_gateway_failed() -> Self {
         Self("model gateway failed".to_string())
+    }
+
+    /// Sanitized summary for a primary model call that exceeded its timeout.
+    /// Infallible because the literal is known to satisfy
+    /// [`validate_loop_safe_summary`].
+    pub fn model_gateway_timed_out() -> Self {
+        Self("model gateway timed out".to_string())
     }
 
     pub fn as_str(&self) -> &str {
@@ -406,6 +462,48 @@ impl std::fmt::Display for LoopSafeSummary {
     }
 }
 
+/// Validated body for host-approved inline prompt messages.
+///
+/// Unlike [`LoopSafeSummary`], this preserves model-visible prompt formatting
+/// and uses the generic model-content validation budget.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct LoopInlineMessageBody(String);
+
+impl LoopInlineMessageBody {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        Self::try_from(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl AsRef<str> for LoopInlineMessageBody {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for LoopInlineMessageBody {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<String> for LoopInlineMessageBody {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        validate_loop_inline_message_body(value).map(Self)
+    }
+}
+
 impl<'de> Deserialize<'de> for LoopSafeSummary {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -419,6 +517,10 @@ impl<'de> Deserialize<'de> for LoopSafeSummary {
 fn origin_input_cursor_token() -> LoopInputCursorToken {
     LoopInputCursorToken("input-cursor:origin".to_string())
 }
+
+/// Placeholder component value marking a [`LoopModelRouteSnapshot`] as a
+/// caller-requested advisory hint rather than an operator-resolved route.
+const ADVISORY_MODEL_ROUTE_COMPONENT: &str = "requested";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopModelRouteSnapshot {
@@ -452,6 +554,40 @@ impl LoopModelRouteSnapshot {
         let snapshot = Self::new(provider_id, model_id, config_version, auth_version);
         snapshot.validate()?;
         Ok(snapshot)
+    }
+
+    /// Build an *advisory* route from a caller-requested model string. The
+    /// provider/config/auth components are placeholders (`"requested"`) — only
+    /// `model_id` carries meaning. Advisory routes exist so a caller (e.g. an
+    /// OpenAI-compatible client) can request a model without an operator-approved
+    /// route binding: the non-routed gateway honors the model id when its
+    /// provider supports per-request overrides and otherwise falls back to the
+    /// active model, while routed hosts still validate the route and fail closed.
+    /// Returns `None` when the model is empty or not a valid route component, so
+    /// the run falls back to the deployment's active model.
+    pub fn advisory(requested_model: &str) -> Option<Self> {
+        let model = requested_model.trim();
+        if model.is_empty() {
+            return None;
+        }
+        Self::try_new(
+            ADVISORY_MODEL_ROUTE_COMPONENT,
+            model,
+            ADVISORY_MODEL_ROUTE_COMPONENT,
+            ADVISORY_MODEL_ROUTE_COMPONENT,
+        )
+        .ok()
+    }
+
+    /// Whether this route is a caller-requested advisory hint (see
+    /// [`LoopModelRouteSnapshot::advisory`]) rather than an operator-resolved
+    /// route. A non-routed host passes an advisory snapshot through unvalidated
+    /// but fails closed on an operator route it cannot validate without a
+    /// resolver.
+    pub fn is_advisory(&self) -> bool {
+        self.provider_id == ADVISORY_MODEL_ROUTE_COMPONENT
+            && self.config_version == ADVISORY_MODEL_ROUTE_COMPONENT
+            && self.auth_version == ADVISORY_MODEL_ROUTE_COMPONENT
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -548,6 +684,8 @@ pub struct LoopRunContext {
     pub loop_driver_version: RunProfileVersion,
     pub checkpoint_schema_id: CheckpointSchemaId,
     pub checkpoint_schema_version: RunProfileVersion,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product_context: Option<ProductTurnContext>,
 }
 
 impl LoopRunContext {
@@ -575,6 +713,7 @@ impl LoopRunContext {
             loop_driver_version,
             checkpoint_schema_id,
             checkpoint_schema_version,
+            product_context: None,
         }
     }
 
@@ -596,6 +735,11 @@ impl LoopRunContext {
         self.resolved_model_route = Some(snapshot);
         self
     }
+
+    pub fn with_product_context(mut self, product_context: ProductTurnContext) -> Self {
+        self.product_context = Some(product_context);
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -612,6 +756,8 @@ pub enum AgentLoopHostErrorKind {
     /// The request payload itself is well-formed but its content is invalid in
     /// the current host state (e.g. schema id/version mismatch on checkpoint load).
     Invalid,
+    /// The model/provider output was structurally invalid for the active loop contract.
+    InvalidOutput,
     PolicyDenied,
     BudgetExceeded,
     /// The model call would push utilization past the configured pause
@@ -639,6 +785,7 @@ impl AgentLoopHostErrorKind {
             Self::StaleSurface => "stale_surface",
             Self::InvalidInvocation => "invalid_invocation",
             Self::Invalid => "invalid",
+            Self::InvalidOutput => "invalid_output",
             Self::PolicyDenied => "policy_denied",
             Self::BudgetExceeded => "budget_exceeded",
             Self::BudgetApprovalRequired => "budget_approval_required",
@@ -673,7 +820,16 @@ pub struct AgentLoopHostError {
     pub safe_summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason_kind: Option<AgentLoopHostErrorReasonKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_ref: Option<LoopGateRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic_ref: Option<LoopDiagnosticRef>,
+    /// Model-visible, secret-scrubbed raw cause. Unlike `safe_summary`, this
+    /// carries the original error text (paths, codes, schema refs) so the model
+    /// can retry or explain. Secret VALUES are redacted by the producer via
+    /// [`sanitize_model_visible_text`]; the word/delimiter ban is NOT applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 impl AgentLoopHostError {
@@ -682,12 +838,24 @@ impl AgentLoopHostError {
             kind,
             safe_summary: safe_summary.into(),
             reason_kind: None,
+            gate_ref: None,
             diagnostic_ref: None,
+            detail: None,
         }
+    }
+
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
     }
 
     pub fn with_reason_kind(mut self, reason_kind: AgentLoopHostErrorReasonKind) -> Self {
         self.reason_kind = Some(reason_kind);
+        self
+    }
+
+    pub fn with_gate_ref(mut self, gate_ref: LoopGateRef) -> Self {
+        self.gate_ref = Some(gate_ref);
         self
     }
 
@@ -924,6 +1092,8 @@ pub struct LoopModelCapabilityView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopModelRequest {
     pub messages: Vec<LoopModelMessage>,
+    #[serde(default)]
+    pub inline_messages: Vec<LoopInlineMessage>,
     pub surface_version: Option<CapabilitySurfaceVersion>,
     pub model_preference: Option<ModelProfileId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -970,14 +1140,15 @@ pub enum LoopInlineMessageRole {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopInlineMessage {
     pub role: LoopInlineMessageRole,
-    pub safe_body: LoopSafeSummary,
+    pub safe_body: LoopInlineMessageBody,
 }
 
 /// Request for a host-managed prompt bundle.
 ///
 /// The optional cursor and checkpoint refs are run-scoped and are validated by
 /// host ports before context is loaded. `max_messages` is a host budget hint;
-/// zero is rejected and oversized values may be clamped by the implementation.
+/// zero is accepted only for inline-only context-free prompts, and oversized
+/// values may be clamped by the implementation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopPromptBundleRequest {
     pub mode: PromptMode,
@@ -1145,6 +1316,40 @@ pub struct LoopModelResponse {
 pub struct LoopModelUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// Tokens read from the provider's server-side prompt cache (e.g. Anthropic
+    /// cache reads). A subset of `input_tokens`, billed at a discount. Zero when
+    /// caching is unsupported or on a cache miss.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub cache_read_input_tokens: u32,
+    /// Tokens written to the provider's server-side prompt cache. Zero when
+    /// caching is unsupported or no new prefix was cached.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub cache_creation_input_tokens: u32,
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
+impl LoopModelUsage {
+    /// Accumulate another call's usage into this running per-run total.
+    pub fn add_assign(&mut self, other: &LoopModelUsage) {
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+        self.cache_read_input_tokens = self
+            .cache_read_input_tokens
+            .saturating_add(other.cache_read_input_tokens);
+        self.cache_creation_input_tokens = self
+            .cache_creation_input_tokens
+            .saturating_add(other.cache_creation_input_tokens);
+    }
+
+    /// Total billable tokens (input + output). Cache tokens are already counted
+    /// within `input_tokens` by every provider that reports them, so they are
+    /// not added again here.
+    pub fn total_tokens(&self) -> u32 {
+        self.input_tokens.saturating_add(self.output_tokens)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1209,6 +1414,10 @@ pub struct AssistantReply {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityCallCandidate {
+    /// Stable activity identity assigned before capability dispatch. Hosts use
+    /// this as the runtime invocation identity, and tokenless gate checkpoints
+    /// persist it so terminal events can close the same activity.
+    pub activity_id: CapabilityActivityId,
     pub surface_version: CapabilitySurfaceVersion,
     pub capability_id: CapabilityId,
     pub input_ref: CapabilityInputRef,
@@ -1248,7 +1457,7 @@ pub struct ProviderToolCallReplay {
     /// Provider call id referenced by the matching tool result.
     pub provider_call_id: String,
     /// Provider-facing tool name advertised to the model.
-    pub provider_tool_name: String,
+    pub provider_tool_name: ProviderToolName,
     /// Provider-facing tool arguments captured from the model tool call.
     pub arguments: serde_json::Value,
     /// Provider response-level reasoning attached to the tool-call batch.
@@ -1260,6 +1469,22 @@ pub struct ProviderToolCallReplay {
     /// Opaque provider thought-signature metadata, not an IronClaw auth signature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
+}
+
+impl ProviderToolCallReplay {
+    pub fn from_tool_call(tool_call: ProviderToolCall, provider_turn_id: String) -> Self {
+        Self {
+            provider_id: tool_call.provider_id,
+            provider_model_id: tool_call.provider_model_id,
+            provider_turn_id,
+            provider_call_id: tool_call.id,
+            provider_tool_name: tool_call.name,
+            arguments: tool_call.arguments,
+            response_reasoning: tool_call.response_reasoning,
+            reasoning: tool_call.reasoning,
+            signature: tool_call.signature,
+        }
+    }
 }
 
 #[async_trait]
@@ -1277,6 +1502,23 @@ pub struct VisibleCapabilityRequest;
 pub struct VisibleCapabilitySurface {
     pub version: CapabilitySurfaceVersion,
     pub descriptors: Vec<CapabilityDescriptorView>,
+    /// Capability IDs the model may *invoke* this turn — the reachable authorized
+    /// catalog — as distinct from `descriptors`, which is the *advertised* subset.
+    ///
+    /// Under progressive tool disclosure the advertised set (token economy) is a
+    /// narrowed view, but the model can still reach catalog tools beyond it via
+    /// the tool-call bridge / forgiving-direct path. Call-time authorization (the
+    /// model-visible capability filter) must therefore validate against this
+    /// wider "callable" set, while advertising and prompt rendering stay narrow.
+    ///
+    /// `None` means "same as `descriptors`" — no disclosure narrowing is in
+    /// effect, so callable == advertised. `Some(_)` is an explicit callable set
+    /// that may legitimately be empty (no callable capabilities this turn),
+    /// which the sentinel-free encoding keeps distinct from the un-narrowed case.
+    /// Producers that don't narrow leave this `None`; consumers fall back to
+    /// `descriptors`.
+    #[serde(default)]
+    pub callable_capability_ids: Option<Vec<CapabilityId>>,
 }
 
 /// Concurrency hint for a capability surfaced to an agent loop driver.
@@ -1314,11 +1556,49 @@ pub struct ProviderToolDefinition {
     /// Canonical IronClaw capability id backing this provider tool.
     pub capability_id: CapabilityId,
     /// Provider-safe tool name sent to the model.
-    pub name: String,
+    pub name: ProviderToolName,
     /// Provider-safe tool description sent to the model.
     pub description: String,
     /// JSON object schema for provider tool arguments.
     pub parameters: serde_json::Value,
+}
+
+impl ProviderToolDefinition {
+    pub fn from_parts(
+        capability_id: CapabilityId,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        parameters: serde_json::Value,
+    ) -> Result<Self, AgentLoopHostError> {
+        let name = ProviderToolName::new(name.into()).map_err(provider_tool_name_error)?;
+        Ok(Self::from_typed_parts(
+            capability_id,
+            name,
+            description,
+            parameters,
+        ))
+    }
+
+    /// Builds a definition from a provider-safe name that has already passed
+    /// [`ProviderToolName`] validation. Use [`Self::from_parts`] for raw
+    /// provider names that still need validation.
+    pub fn from_typed_parts(
+        capability_id: CapabilityId,
+        name: ProviderToolName,
+        description: impl Into<String>,
+        parameters: serde_json::Value,
+    ) -> Self {
+        Self {
+            capability_id,
+            name,
+            description: description.into(),
+            parameters,
+        }
+    }
+
+    pub fn validate_name(name: &str) -> Result<ProviderToolName, AgentLoopHostError> {
+        ProviderToolName::new(name).map_err(provider_tool_name_error)
+    }
 }
 
 /// Tool call emitted by a provider-backed model.
@@ -1334,7 +1614,7 @@ pub struct ProviderToolCall {
     /// Provider call id referenced by the matching tool result.
     pub id: String,
     /// Provider-facing tool name returned by the model.
-    pub name: String,
+    pub name: ProviderToolName,
     /// Provider-facing tool arguments returned by the model.
     pub arguments: serde_json::Value,
     /// Provider response-level reasoning attached to the tool-call batch.
@@ -1346,6 +1626,40 @@ pub struct ProviderToolCall {
     /// Opaque provider thought-signature metadata, not an IronClaw auth signature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
+}
+
+impl ProviderToolCall {
+    pub fn from_parts(
+        provider_id: impl Into<String>,
+        provider_model_id: impl Into<String>,
+        turn_id: Option<String>,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+    ) -> Result<Self, AgentLoopHostError> {
+        Ok(Self {
+            provider_id: provider_id.into(),
+            provider_model_id: provider_model_id.into(),
+            turn_id,
+            id: id.into(),
+            name: ProviderToolName::new(name.into()).map_err(provider_tool_name_error)?,
+            arguments,
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        })
+    }
+}
+
+fn provider_tool_name_error(error: HostApiError) -> AgentLoopHostError {
+    let detail = match error {
+        HostApiError::InvalidId { reason, .. } => reason,
+        other => other.to_string(),
+    };
+    AgentLoopHostError::new(
+        AgentLoopHostErrorKind::InvalidInvocation,
+        format!("tool name cannot be represented as a provider tool name: {detail}"),
+    )
 }
 
 /// Durable reference to provider tool-call metadata for tool-result replay.
@@ -1360,7 +1674,7 @@ pub struct ProviderToolCallReference {
     /// Provider call id referenced by the matching tool result.
     pub provider_call_id: String,
     /// Provider-facing tool name returned by the model.
-    pub provider_tool_name: String,
+    pub provider_tool_name: ProviderToolName,
     /// Canonical IronClaw capability id backing this provider tool.
     pub capability_id: CapabilityId,
     /// Provider-facing tool arguments returned by the model.
@@ -1377,12 +1691,49 @@ pub struct ProviderToolCallReference {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterProviderToolCallRequest {
+    pub tool_call: ProviderToolCall,
+    /// Activity identity to bind to this provider call. When set, the host
+    /// must register the call with this id, rejecting if the same input_ref was
+    /// already registered with another id. When absent, the host creates an id
+    /// for the first registration and returns that same id for duplicate
+    /// registrations of the same input_ref.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_id: Option<CapabilityActivityId>,
+}
+
+impl RegisterProviderToolCallRequest {
+    pub fn new(tool_call: ProviderToolCall) -> Self {
+        Self {
+            tool_call,
+            activity_id: None,
+        }
+    }
+
+    pub fn for_activity(tool_call: ProviderToolCall, activity_id: CapabilityActivityId) -> Self {
+        Self {
+            tool_call,
+            activity_id: Some(activity_id),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityInvocation {
+    /// Stable activity identity for this invocation. Runtime hosts derive
+    /// their execution identity from it rather than minting a second id.
+    pub activity_id: CapabilityActivityId,
     pub surface_version: CapabilitySurfaceVersion,
     pub capability_id: CapabilityId,
     pub input_ref: CapabilityInputRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_resume: Option<CapabilityApprovalResume>,
+    /// Set when the invocation was previously auth-blocked and the auth
+    /// gate has now been resolved. Carries the original activity token so
+    /// re-dispatch reuses it rather than minting a new one, preserving any
+    /// prior approval lease whose scope embeds that id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_resume: Option<CapabilityAuthResume>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -1432,6 +1783,57 @@ pub struct CapabilityApprovalResume {
     pub estimate: ResourceEstimate,
 }
 
+/// Prior-approval identity carried through an auth-gate resume.
+///
+/// Both fields are semantically all-or-none: the pair is present only when
+/// the invocation previously passed a one-shot approval gate.  Modelling
+/// them as a single optional struct makes the compile-time invariant explicit —
+/// `approval_request_id` and `correlation_id` cannot be independently absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthResumeApprovalIdentity {
+    /// Identifies the prior approval request so the host can locate and
+    /// claim the matching fingerprinted lease without requiring a second
+    /// human approval for the same action.
+    pub approval_request_id: ApprovalRequestId,
+    /// Original correlation identifier from the prior approval gate.
+    /// Restored onto the invocation context so the same trace-correlation
+    /// identifier flows through the full capability lifecycle.
+    pub correlation_id: CorrelationId,
+}
+
+/// Auth-gate resume identity.
+///
+/// Carries the original activity identity (encoded as a resume token) so
+/// that re-dispatch after credential completion reuses the same activity
+/// rather than minting a fresh one.  When the prior invocation also passed
+/// an approval gate, `prior_approval` carries the approval identity so the
+/// host can claim the matching fingerprinted lease without requiring a second
+/// human approval.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityAuthResume {
+    /// Encodes the original activity identity so the host can reuse the
+    /// matching execution context after auth completes.
+    pub resume_token: CapabilityResumeToken,
+    /// Present when the invocation previously passed a one-shot approval gate.
+    /// The two sub-fields are always set together; see [`AuthResumeApprovalIdentity`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prior_approval: Option<AuthResumeApprovalIdentity>,
+    /// Original runtime input captured when the auth gate was produced.
+    ///
+    /// Capability input refs are scoped to a loop run and may be consumed by the
+    /// first dispatch before the auth gate is resolved. When present, this
+    /// replay payload lets auth-resume re-dispatch without resolving a stale or
+    /// already-consumed input ref.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<CapabilityAuthResumeReplay>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityAuthResumeReplay {
+    pub input: serde_json::Value,
+    pub estimate: ResourceEstimate,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityBatchInvocation {
     pub invocations: Vec<CapabilityInvocation>,
@@ -1459,8 +1861,18 @@ pub enum CapabilityOutcome {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
         safe_summary: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth_resume: Option<CapabilityAuthResume>,
     },
     ResourceBlocked {
+        gate_ref: LoopGateRef,
+        safe_summary: String,
+    },
+    /// The model called a client-supplied ("external") tool. The host does not
+    /// execute it: the run parks and control returns to the API client, which
+    /// resumes by submitting the tool output. Carries only the opaque gate ref
+    /// and a bounded safe summary (never the raw caller tool args or output).
+    ExternalToolPending {
         gate_ref: LoopGateRef,
         safe_summary: String,
     },
@@ -1475,6 +1887,9 @@ pub enum CapabilityOutcome {
         /// Used by ByteCapStrategy to evaluate per-capability byte caps.
         #[serde(default)]
         byte_len: u64,
+        /// Bounded model-visible metadata for the child result.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_observation: Option<ModelVisibleToolObservation>,
     },
     SpawnedChildRun {
         child_run_id: TurnRunId,
@@ -1485,6 +1900,9 @@ pub enum CapabilityOutcome {
         /// Same semantics as AwaitDependentRun.byte_len.
         #[serde(default)]
         byte_len: u64,
+        /// Bounded model-visible metadata for the child result.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_observation: Option<ModelVisibleToolObservation>,
     },
     Denied(CapabilityDenied),
     Failed(CapabilityFailure),
@@ -1497,6 +1915,7 @@ impl CapabilityOutcome {
             Self::ApprovalRequired { .. }
                 | Self::AuthRequired { .. }
                 | Self::ResourceBlocked { .. }
+                | Self::ExternalToolPending { .. }
                 | Self::AwaitDependentRun { .. }
                 | Self::SpawnedProcess(_)
         )
@@ -1521,6 +1940,14 @@ pub struct CapabilityResultMessage {
     /// Serialized output size in bytes — pure metadata, no PII.
     #[serde(default)]
     pub byte_len: u64,
+    /// Digest over normalized output content. Optional for backward
+    /// compatibility and for synthetic results that do not stage real output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_digest: Option<ContentDigest>,
+    /// Bounded, model-visible result metadata or preview. Full output remains
+    /// host-owned and is retrieved only through the result reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_observation: Option<ModelVisibleToolObservation>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1620,13 +2047,24 @@ pub struct CapabilityFailure {
     pub detail: Option<CapabilityFailureDetail>,
 }
 
-#[non_exhaustive]
+// Deliberately NOT `#[non_exhaustive]`: the `Unknown(CapabilityFailureKindValue)`
+// variant is the forward-compat / open-set escape hatch (a newer producer's
+// unrecognized wire string deserializes into `Unknown`), and the manual
+// `Serialize`/`Deserialize` impls below route every value through `as_str()` /
+// that variant. Leaving the attribute on would force callers — notably the
+// recovery classifier `capability_error_class` — to keep a wildcard `_ =>` arm,
+// which silently buckets any newly-added *named* variant (e.g. a future
+// `QuotaExceeded`) into a run-aborting class. Without the attribute, those
+// classifiers match exhaustively, so a new named variant fails to compile until
+// it is deliberately classified. See
+// `docs/plans/2026-06-28-reborn-error-recoverability-audit.md` §6.1.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CapabilityFailureKind {
     Authorization,
     Backend,
     Cancelled,
     Dispatcher,
+    GateDeclined,
     InvalidInput,
     InvalidOutput,
     MissingRuntime,
@@ -1667,6 +2105,7 @@ impl CapabilityFailureKind {
             Self::Backend => "backend",
             Self::Cancelled => "cancelled",
             Self::Dispatcher => "dispatcher",
+            Self::GateDeclined => "gate_declined",
             Self::InvalidInput => "invalid_input",
             Self::InvalidOutput => "invalid_output",
             Self::MissingRuntime => "missing_runtime",
@@ -1711,6 +2150,7 @@ impl<'de> Deserialize<'de> for CapabilityFailureKind {
             "backend" => Ok(Self::Backend),
             "cancelled" => Ok(Self::Cancelled),
             "dispatcher" => Ok(Self::Dispatcher),
+            "gate_declined" => Ok(Self::GateDeclined),
             "invalid_input" => Ok(Self::InvalidInput),
             "invalid_output" => Ok(Self::InvalidOutput),
             "missing_runtime" => Ok(Self::MissingRuntime),
@@ -1763,7 +2203,7 @@ pub trait LoopCapabilityPort: Send + Sync {
 
     async fn register_provider_tool_call(
         &self,
-        _tool_call: ProviderToolCall,
+        _request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
         Err(unsupported_host_method("register_provider_tool_call"))
     }
@@ -1772,6 +2212,12 @@ pub trait LoopCapabilityPort: Send + Sync {
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError>;
+
+    fn current_visible_capabilities(
+        &self,
+    ) -> Result<Option<VisibleCapabilitySurface>, AgentLoopHostError> {
+        Ok(None)
+    }
 
     async fn invoke_capability(
         &self,
@@ -1922,7 +2368,7 @@ pub trait LoopCheckpointPort: Send + Sync {
     /// Stage a checkpoint payload's raw bytes and return an opaque
     /// [`LoopCheckpointStateRef`] that subsequent `checkpoint(...)` calls
     /// can reference. The default impl fails closed; concrete impls live in
-    /// `ironclaw_loop_support` and wrap the host's `CheckpointStateStore`.
+    /// `ironclaw_loop_host` and wrap the host's `CheckpointStateStore`.
     ///
     /// The executor's checkpoint helper calls this method before invoking
     /// `LoopCheckpointPort::checkpoint(...)` so the metadata write references
@@ -1979,6 +2425,16 @@ pub enum LoopProgressEvent {
         denied_count: u32,
         gated_count: u32,
         failed_count: u32,
+    },
+    CapabilityActivityFailed {
+        activity_id: CapabilityActivityId,
+        capability_id: CapabilityId,
+        reason_kind: CapabilityFailureKind,
+        /// Bounded, host-authored sanitized failure summary (e.g. a builtin's
+        /// `"invalid JSON: ..."` message) so the live per-tool UI card can show
+        /// the real reason, not just the kind. Additive; `None` when no
+        /// host-authored summary is available.
+        safe_summary: Option<String>,
     },
     GateBlocked {
         iteration: u32,
@@ -2038,6 +2494,7 @@ impl LoopProgressEvent {
             Self::PromptBundleBuilt { .. } => "prompt_bundle_built",
             Self::CapabilityBatchStarted { .. } => "capability_batch_started",
             Self::CapabilityBatchCompleted { .. } => "capability_batch_completed",
+            Self::CapabilityActivityFailed { .. } => "capability_activity_failed",
             Self::GateBlocked { .. } => "gate_blocked",
             Self::CheckpointWritten { .. } => "checkpoint_written",
             Self::CompactionStarted { .. } => "compaction_started",
@@ -2067,6 +2524,7 @@ pub enum LoopGateKind {
     Auth,
     ResourceWait,
     AwaitDependentRun,
+    ExternalTool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2160,10 +2618,6 @@ impl<T> AgentLoopDriverHost for T where
 {
 }
 
-pub trait AgentLoopHost: AgentLoopDriverHost {}
-
-impl<T> AgentLoopHost for T where T: AgentLoopDriverHost + ?Sized {}
-
 fn unsupported_host_method(method: &'static str) -> AgentLoopHostError {
     AgentLoopHostError::new(
         AgentLoopHostErrorKind::Unavailable,
@@ -2174,6 +2628,33 @@ fn unsupported_host_method(method: &'static str) -> AgentLoopHostError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn advisory_model_route_carries_model_and_marks_itself_advisory() {
+        let route = LoopModelRouteSnapshot::advisory("gpt-4o").expect("valid model");
+        assert_eq!(route.model_id, "gpt-4o");
+        assert!(route.is_advisory());
+        assert!(route.validate().is_ok());
+    }
+
+    #[test]
+    fn operator_resolved_route_is_not_advisory() {
+        let route = LoopModelRouteSnapshot::new("openai", "gpt-4o", "config:v1", "auth:v1");
+        assert!(!route.is_advisory());
+    }
+
+    #[test]
+    fn advisory_model_route_trims_and_rejects_empty_or_invalid_models() {
+        assert_eq!(LoopModelRouteSnapshot::advisory("   "), None);
+        assert_eq!(LoopModelRouteSnapshot::advisory(""), None);
+        // A model id with a space is not a valid route component → falls back.
+        assert_eq!(LoopModelRouteSnapshot::advisory("gpt 4o"), None);
+        // Surrounding whitespace is trimmed before validation.
+        assert_eq!(
+            LoopModelRouteSnapshot::advisory("  claude-opus-4-6  ").map(|route| route.model_id),
+            Some("claude-opus-4-6".to_string())
+        );
+    }
 
     struct DefinitionPort {
         definitions: Vec<ProviderToolDefinition>,
@@ -2213,7 +2694,7 @@ mod tests {
             provider_model_id: "model".to_string(),
             turn_id: Some("turn".to_string()),
             id: "call".to_string(),
-            name: name.to_string(),
+            name: ProviderToolName::new(name).expect("provider tool name"),
             arguments: serde_json::json!({}),
             response_reasoning: None,
             reasoning: None,
@@ -2226,7 +2707,7 @@ mod tests {
         let port = DefinitionPort {
             definitions: vec![ProviderToolDefinition {
                 capability_id: CapabilityId::new("demo.allowed").expect("valid capability id"),
-                name: "demo__allowed".to_string(),
+                name: ProviderToolName::new("demo__allowed").expect("provider tool name"),
                 description: "allowed".to_string(),
                 parameters: serde_json::json!({"type": "object"}),
             }],
@@ -2237,5 +2718,80 @@ mod tests {
             .expect_err("unknown provider tool must fail closed");
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
+
+    #[test]
+    fn capability_failure_summary_redacts_secret_like_tokens() {
+        for raw_summary in [
+            "provider returned AKIAIOSFODNN7EXAMPLE",
+            "provider returned gcp-live-secret",
+            "provider returned sk-ant-live-secret",
+            "provider returned ghp_live_secret",
+            "provider returned github_pat_live_secret",
+        ] {
+            let summary = LoopSafeSummary::capability_failure_summary(raw_summary);
+            assert_eq!(
+                summary.as_str(),
+                "the tool failure details were redacted",
+                "summary must be redacted: {raw_summary}"
+            );
+        }
+    }
+
+    #[test]
+    fn safe_summary_accepts_ordinary_error_vocabulary() {
+        // Words that used to be banned outright are ordinary error vocabulary,
+        // not secrets, and must now be accepted.
+        for accepted in [
+            "provider error occurred during the call",
+            "stack trace was captured for diagnosis",
+            "the tool input was malformed",
+            "a traceback is available for review",
+            "host path resolution did not complete",
+            "raw runtime returned an unexpected status",
+        ] {
+            validate_loop_safe_summary(accepted.to_string())
+                .unwrap_or_else(|error| panic!("`{accepted}` should be accepted: {error}"));
+        }
+    }
+
+    #[test]
+    fn loop_safe_summary_accepts_fixed_input_encode_summary() {
+        let summary = LoopSafeSummary::new(INPUT_ENCODE_HUMAN_SUMMARY)
+            .expect("fixed host-authored input encode summary is safe");
+        assert_eq!(summary.as_str(), INPUT_ENCODE_HUMAN_SUMMARY);
+    }
+
+    #[test]
+    fn safe_summary_still_rejects_secret_markers_and_delimiters() {
+        // Credential markers must still be rejected.
+        for rejected in [
+            "leaked sk-LIVEsecretvalue token",
+            "authorization header bearer abc123",
+            "the api key was exposed",
+            "user password was logged",
+            "a secret slipped into the message",
+        ] {
+            validate_loop_safe_summary(rejected.to_string())
+                .expect_err(&format!("`{rejected}` must still be rejected"));
+        }
+
+        // Path / payload delimiters must still be rejected.
+        validate_loop_safe_summary("missing schema at /system/extensions".to_string())
+            .expect_err("path delimiter `/` must still be rejected");
+    }
+
+    #[test]
+    fn agent_loop_host_error_carries_optional_detail() {
+        let path = "missing input_schema_ref at /system/extensions/google-calendar/list_calendars.input.v1.json";
+        let error = AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "host runtime rejected capability request",
+        )
+        .with_detail(path);
+        assert_eq!(error.detail.as_deref(), Some(path));
+
+        let plain = AgentLoopHostError::new(AgentLoopHostErrorKind::Internal, "boom");
+        assert_eq!(plain.detail, None);
     }
 }

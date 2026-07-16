@@ -1,7 +1,7 @@
 ---
 description: Triage open GitHub issues — split into bugs vs features, rank by severity/opportunity, and flag under-specified issues
 disable-model-invocation: true
-allowed-tools: Bash(gh issue list:*), Bash(gh issue view:*), Bash(gh api:*), Bash(git log:*), Read, Grep, Glob, Task
+allowed-tools: Bash(gh issue list:*), Bash(gh issue view:*), Bash(gh api:*), Bash(git log:*), Read, Grep, Glob, Agent
 argument-hint: "[--label=<filter>] [--milestone=<filter>]"
 ---
 
@@ -248,7 +248,7 @@ Based on the triage, provide 3-5 concrete recommendations:
 ## Rules
 
 - Use `gh` CLI for all GitHub operations. Never guess issue state — always check.
-- For large issue lists (>20), use the Task tool to parallelize fetching issue details and comments.
+- For large issue lists (>20), use the Agent tool to parallelize fetching issue details and comments.
 - Be concise in summaries. One line per issue in tables.
 - When scoring, be honest about uncertainty. If you can't tell severity from the description, say so and rate it conservatively.
 - Factor in issue age — older unresolved bugs may indicate they're less critical than they seem, or that they're hard to fix. Note this in your assessment.

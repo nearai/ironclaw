@@ -14,7 +14,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axum::Router;
 use axum::body::{Body, to_bytes};
-use axum::http::{Method, Request, StatusCode};
+use axum::http::{HeaderName, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use ironclaw_host_api::{
     AgentId, CapabilityId, ExtensionId, InvocationId, ProjectId, RuntimeKind, TenantId, ThreadId,
@@ -27,18 +27,23 @@ use ironclaw_product_adapters::{
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 use ironclaw_product_workflow::{
-    LifecyclePackageRef, LifecyclePhase, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult,
-    LlmProbeRequest, LlmProbeResult, LlmProviderView, RebornAutomationInfo,
+    FsMount, LifecyclePackageRef, LifecyclePhase, LlmActiveSelection, LlmConfigSnapshot,
+    LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, ProjectFsEntry,
+    ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RebornAccountLoginLinkResponse,
+    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentBytes,
+    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
     RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
     RebornChannelConnectStrategy, RebornConnectableChannelInfo,
-    RebornConnectableChannelListResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
-    RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
-    RebornExtensionRegistryResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornListAutomationsResponse, RebornListThreadsResponse, RebornOperatorArea,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornConnectableChannelListResponse, RebornCreateThreadResponse, RebornDeleteProjectRequest,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornFsListRequest,
+    RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse, RebornFsReadRequest,
+    RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
+    RebornListAutomationsResponse, RebornListThreadsResponse, RebornLogQueryRequest,
+    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
     RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
     RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
@@ -47,43 +52,54 @@ use ironclaw_product_workflow::{
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
     RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
-    RebornOutboundPreferencesResponse, RebornResolveGateResponse, RebornResumeGateResponse,
-    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, rejecting_reborn_services_error,
+    RebornOutboundPreferencesResponse, RebornProjectInfo, RebornProjectMemberInfo,
+    RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole, RebornProjectState,
+    RebornRemoveMemberRequest, RebornResolveGateResponse, RebornResumeGateResponse,
+    RebornRetryRunResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornStreamEventsSubscription, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
+    SetActiveLlmRequest, UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
+    WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
+    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    rejecting_reborn_services_error,
 };
 use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
     EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion, TurnRunId, TurnStatus,
 };
 use ironclaw_webui_v2::{
-    DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State, webui_v2_router,
+    DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2RouteOptions, WebUiV2State,
+    webui_v2_router, webui_v2_router_with_options,
 };
 use serde_json::Value;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc};
 use tower::ServiceExt;
 
 fn caller() -> WebUiAuthenticatedCaller {
+    caller_for_user("user-alpha")
+}
+
+fn caller_for_user(user_id: &str) -> WebUiAuthenticatedCaller {
     WebUiAuthenticatedCaller::new(
         TenantId::new("tenant-alpha").expect("tenant"),
-        UserId::new("user-alpha").expect("user"),
+        UserId::new(user_id).expect("user"),
         Some(AgentId::new("agent-alpha").expect("agent")),
         Some(ProjectId::new("project-alpha").expect("project")),
     )
 }
 
 fn router_with(services: Arc<dyn RebornServicesApi>) -> Router {
-    router_with_capabilities(services, WebUiV2Capabilities::default())
+    router_with_caller(services, WebUiV2Capabilities::default(), caller())
 }
 
-fn router_with_capabilities(
+fn router_with_caller(
     services: Arc<dyn RebornServicesApi>,
     capabilities: WebUiV2Capabilities,
+    caller: WebUiAuthenticatedCaller,
 ) -> Router {
     webui_v2_router(WebUiV2State::new(
         services,
@@ -92,8 +108,23 @@ fn router_with_capabilities(
     // Production composition runs the bearer-token middleware that
     // constructs this `Extension`; tests bypass auth and inject the
     // caller directly so the regression target is the handler itself.
-    .layer(axum::Extension(caller()))
+    .layer(axum::Extension(caller))
     .layer(axum::Extension(capabilities))
+}
+
+fn router_with_capabilities(
+    services: Arc<dyn RebornServicesApi>,
+    capabilities: WebUiV2Capabilities,
+) -> Router {
+    router_with_caller(services, capabilities, caller())
+}
+
+fn router_with_caller_only(services: Arc<dyn RebornServicesApi>) -> Router {
+    webui_v2_router(WebUiV2State::new(
+        services,
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+    ))
+    .layer(axum::Extension(caller()))
 }
 
 fn service_unavailable_error(retryable: bool) -> RebornServicesError {
@@ -109,6 +140,7 @@ fn service_unavailable_error(retryable: bool) -> RebornServicesError {
 
 type OperatorSetupCall = (Option<String>, Option<String>, bool, bool);
 type OperatorConfigSetCall = (String, Value);
+type LogsCall = RebornLogQueryRequest;
 type OperatorLogsCall = RebornOperatorLogsQuery;
 
 fn operator_config_surface_not_wired_diagnostic() -> RebornOperatorConfigDiagnostic {
@@ -213,11 +245,32 @@ struct StubServices {
     delete_thread_calls: Mutex<Vec<RebornDeleteThreadRequest>>,
     submit_turn_calls: Mutex<Vec<WebUiSendMessageRequest>>,
     get_timeline_calls: Mutex<Vec<RebornTimelineRequest>>,
+    browse_fs_calls: Mutex<Vec<RebornFsListRequest>>,
+    global_auto_approve_enabled: Mutex<bool>,
+    global_auto_approve_calls: Mutex<usize>,
+    stall_global_auto_approve: Mutex<bool>,
+    next_global_auto_approve_error: Mutex<Option<RebornServicesError>>,
+    read_attachment_calls: Mutex<Vec<RebornAttachmentRequest>>,
+    read_attachment_response: Mutex<Option<RebornAttachmentBytes>>,
     stream_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
     cancel_run_calls: Mutex<Vec<WebUiCancelRunRequest>>,
     resolve_gate_calls: Mutex<Vec<WebUiResolveGateRequest>>,
+    retry_run_calls: Mutex<Vec<WebUiRetryRunRequest>>,
+    list_threads_calls: Mutex<Vec<WebUiListThreadsRequest>>,
     list_automations_calls: Mutex<Vec<WebUiListAutomationsRequest>>,
+    pause_automation_calls: Mutex<Vec<String>>,
+    resume_automation_calls: Mutex<Vec<String>>,
+    rename_automation_calls: Mutex<Vec<(String, WebUiRenameAutomationRequest)>>,
+    delete_automation_calls: Mutex<Vec<String>>,
+    /// Captures the authenticated caller's user id for each
+    /// `trace_account_traces` call, so the contract test can assert the handler
+    /// forwards the caller (the route is caller-scoped).
+    trace_account_traces_callers: Mutex<Vec<String>>,
+    /// Forwarded caller user-ids for each `trace_account_login_link` call.
+    trace_account_login_link_callers: Mutex<Vec<String>>,
     next_list_automations_error: Mutex<Option<RebornServicesError>>,
+    next_rename_automation_error: Mutex<Option<RebornServicesError>>,
+    next_delete_automation_error: Mutex<Option<RebornServicesError>>,
     get_outbound_preferences_calls: Mutex<usize>,
     set_outbound_preferences_calls: Mutex<Vec<RebornSetOutboundPreferencesRequest>>,
     next_set_outbound_preferences_error: Mutex<Option<RebornServicesError>>,
@@ -227,17 +280,22 @@ struct StubServices {
     get_operator_setup_calls: Mutex<usize>,
     run_operator_setup_calls: Mutex<Vec<OperatorSetupCall>>,
     list_operator_config_calls: Mutex<usize>,
+    operator_config_entries: Mutex<Vec<RebornOperatorConfigEntry>>,
     get_operator_config_key_calls: Mutex<Vec<String>>,
     set_operator_config_key_calls: Mutex<Vec<OperatorConfigSetCall>>,
     next_set_operator_config_key_error: Mutex<Option<RebornServicesError>>,
     validate_operator_config_calls: Mutex<Vec<Vec<String>>>,
     get_operator_diagnostics_calls: Mutex<usize>,
     get_operator_status_calls: Mutex<usize>,
+    query_logs_calls: Mutex<Vec<LogsCall>>,
     query_operator_logs_calls: Mutex<Vec<OperatorLogsCall>>,
     run_operator_service_lifecycle_calls: Mutex<Vec<RebornOperatorServiceLifecycleAction>>,
     list_extensions_calls: Mutex<usize>,
     list_extension_registry_calls: Mutex<usize>,
     install_extension_calls: Mutex<Vec<String>>,
+    /// Raw zip bytes each `import_extension` call forwards, so the route test
+    /// can assert the uploaded body reaches the facade intact.
+    import_extension_calls: Mutex<Vec<Vec<u8>>>,
     activate_extension_calls: Mutex<Vec<String>>,
     remove_extension_calls: Mutex<Vec<String>>,
     get_llm_config_calls: Mutex<usize>,
@@ -247,12 +305,29 @@ struct StubServices {
     test_llm_connection_calls: Mutex<Vec<String>>,
     list_llm_models_calls: Mutex<Vec<String>>,
     next_create_thread_error: Mutex<Option<RebornServicesError>>,
+    next_retry_run: Mutex<VecDeque<Result<RebornRetryRunResponse, RebornServicesError>>>,
     /// Per-call queued responses for `stream_events`. When non-empty, the
     /// front entry is popped and returned on each call so SSE tests can
     /// drive the handler through specific projection envelopes, error
     /// branches, or empty drains in a deterministic order.
     next_stream_events: Mutex<VecDeque<Result<RebornStreamEventsResponse, RebornServicesError>>>,
     stream_events_notify: Arc<Notify>,
+    stream_events_subscription_enabled: Mutex<bool>,
+    subscribe_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
+    next_stream_events_subscription: Mutex<Option<RebornStreamEventsSubscription>>,
+    /// Queued response for the next `submit_turn` call. When `Some`, the value
+    /// is taken and returned instead of the default `Submitted` response.
+    next_submit_response: Mutex<Option<RebornSubmitTurnResponse>>,
+    /// Records the `enabled` value each `set_auto_activate_learned` call passes,
+    /// so the handler test can assert the request body reaches the facade.
+    set_auto_activate_learned_calls: Mutex<Vec<bool>>,
+    // Project routes — recorded requests so path-param-override behavior can be
+    // asserted (the path id must win over any body value).
+    update_project_calls: Mutex<Vec<RebornUpdateProjectRequest>>,
+    delete_project_calls: Mutex<Vec<RebornDeleteProjectRequest>>,
+    add_project_member_calls: Mutex<Vec<RebornAddMemberRequest>>,
+    update_project_member_calls: Mutex<Vec<RebornUpdateMemberRoleRequest>>,
+    remove_project_member_calls: Mutex<Vec<RebornRemoveMemberRequest>>,
 }
 
 impl StubServices {
@@ -260,8 +335,22 @@ impl StubServices {
         *self.next_create_thread_error.lock().expect("lock") = Some(error);
     }
 
+    /// Stage the bytes `read_attachment` should return. When unset, the stub
+    /// inherits the trait default (404 not found).
+    fn set_attachment(&self, bytes: RebornAttachmentBytes) {
+        *self.read_attachment_response.lock().expect("lock") = Some(bytes);
+    }
+
     fn fail_list_automations(&self, error: RebornServicesError) {
         *self.next_list_automations_error.lock().expect("lock") = Some(error);
+    }
+
+    fn fail_delete_automation(&self, error: RebornServicesError) {
+        *self.next_delete_automation_error.lock().expect("lock") = Some(error);
+    }
+
+    fn fail_rename_automation(&self, error: RebornServicesError) {
+        *self.next_rename_automation_error.lock().expect("lock") = Some(error);
     }
 
     fn fail_set_outbound_preferences(&self, error: RebornServicesError) {
@@ -285,6 +374,13 @@ impl StubServices {
             .expect("lock") = Some(error);
     }
 
+    fn enqueue_retry_run(&self, response: Result<RebornRetryRunResponse, RebornServicesError>) {
+        self.next_retry_run
+            .lock()
+            .expect("lock")
+            .push_back(response);
+    }
+
     /// Queue one response for the next `stream_events` call. Tests use this
     /// to drive the SSE handler through programmable projection envelopes
     /// or error branches. Falls back to an empty `Ok` drain when the queue
@@ -299,6 +395,23 @@ impl StubServices {
             .push_back(response);
     }
 
+    fn enable_stream_events_subscription(
+        &self,
+        events: Vec<Result<ProductOutboundEnvelope, RebornServicesError>>,
+    ) {
+        let (sender, receiver) = mpsc::channel(events.len().max(1));
+        for event in events {
+            sender.try_send(event).expect("subscription test queue");
+        }
+        drop(sender);
+        *self
+            .stream_events_subscription_enabled
+            .lock()
+            .expect("lock") = true;
+        *self.next_stream_events_subscription.lock().expect("lock") =
+            Some(RebornStreamEventsSubscription::new(receiver));
+    }
+
     /// Triggered the first time `stream_events` is invoked. Lets the SSE
     /// test wait on the actual facade call rather than guessing at a
     /// timeout — axum's SSE body is lazy, so the handler does not run
@@ -306,10 +419,33 @@ impl StubServices {
     fn stream_events_signal(&self) -> Arc<Notify> {
         self.stream_events_notify.clone()
     }
+
+    fn set_next_submit_response(&self, response: RebornSubmitTurnResponse) {
+        *self.next_submit_response.lock().expect("lock") = Some(response);
+    }
 }
 
 #[async_trait]
 impl RebornServicesApi for StubServices {
+    async fn global_auto_approve_enabled(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<bool, RebornServicesError> {
+        *self.global_auto_approve_calls.lock().expect("lock") += 1;
+        if *self.stall_global_auto_approve.lock().expect("lock") {
+            std::future::pending::<()>().await;
+        }
+        if let Some(error) = self
+            .next_global_auto_approve_error
+            .lock()
+            .expect("lock")
+            .take()
+        {
+            return Err(error);
+        }
+        Ok(*self.global_auto_approve_enabled.lock().expect("lock"))
+    }
+
     async fn create_thread(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -339,8 +475,72 @@ impl RebornServicesApi for StubServices {
                     .as_ref()
                     .map(|id| format!("{{\"client_action_id\":\"{id}\"}}")),
                 goal: None,
+                created_at: None,
+                updated_at: None,
             },
         })
+    }
+
+    async fn update_project(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornUpdateProjectRequest,
+    ) -> Result<RebornProjectResponse, RebornServicesError> {
+        self.update_project_calls
+            .lock()
+            .expect("lock")
+            .push(request.clone());
+        Ok(RebornProjectResponse {
+            project: sample_project_info(&request.project_id),
+        })
+    }
+
+    async fn delete_project(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornDeleteProjectRequest,
+    ) -> Result<(), RebornServicesError> {
+        self.delete_project_calls
+            .lock()
+            .expect("lock")
+            .push(request);
+        Ok(())
+    }
+
+    async fn add_project_member(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornAddMemberRequest,
+    ) -> Result<RebornProjectMemberInfo, RebornServicesError> {
+        self.add_project_member_calls
+            .lock()
+            .expect("lock")
+            .push(request.clone());
+        Ok(sample_member_info(&request.user_id))
+    }
+
+    async fn update_project_member_role(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornUpdateMemberRoleRequest,
+    ) -> Result<RebornProjectMemberInfo, RebornServicesError> {
+        self.update_project_member_calls
+            .lock()
+            .expect("lock")
+            .push(request.clone());
+        Ok(sample_member_info(&request.user_id))
+    }
+
+    async fn remove_project_member(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornRemoveMemberRequest,
+    ) -> Result<(), RebornServicesError> {
+        self.remove_project_member_calls
+            .lock()
+            .expect("lock")
+            .push(request);
+        Ok(())
     }
 
     async fn submit_turn(
@@ -352,6 +552,9 @@ impl RebornServicesApi for StubServices {
             .lock()
             .expect("lock")
             .push(request.clone());
+        if let Some(next) = self.next_submit_response.lock().expect("lock").take() {
+            return Ok(next);
+        }
         Ok(RebornSubmitTurnResponse::Submitted {
             thread_id: ironclaw_host_api::ThreadId::new(
                 request.thread_id.clone().unwrap_or_default(),
@@ -406,11 +609,102 @@ impl RebornServicesApi for StubServices {
                 title: None,
                 metadata_json: None,
                 goal: None,
+                created_at: None,
+                updated_at: None,
             },
             messages: Vec::new(),
             summary_artifacts: Vec::new(),
             next_cursor: None,
         })
+    }
+
+    async fn list_fs_mounts(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornFsMountsResponse, RebornServicesError> {
+        Ok(RebornFsMountsResponse {
+            mounts: vec![
+                RebornFsMountInfo {
+                    mount: FsMount::Memory,
+                    label: "Memory".to_string(),
+                },
+                RebornFsMountInfo {
+                    mount: FsMount::Workspace,
+                    label: "Workspace files".to_string(),
+                },
+            ],
+        })
+    }
+
+    async fn browse_fs_dir(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornFsListRequest,
+    ) -> Result<RebornFsListResponse, RebornServicesError> {
+        self.browse_fs_calls
+            .lock()
+            .expect("lock")
+            .push(request.clone());
+        Ok(RebornFsListResponse {
+            mount: request.mount,
+            path: request.path,
+            entries: vec![ProjectFsEntry {
+                name: "today.md".to_string(),
+                path: "daily/today.md".to_string(),
+                kind: ProjectFsEntryKind::File,
+            }],
+        })
+    }
+
+    async fn stat_fs_path(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornFsStatRequest,
+    ) -> Result<RebornFsStatResponse, RebornServicesError> {
+        Ok(RebornFsStatResponse {
+            stat: ProjectFsStat {
+                path: request.path,
+                kind: ProjectFsEntryKind::File,
+                size_bytes: 7,
+                mime_type: "text/markdown".to_string(),
+            },
+        })
+    }
+
+    async fn read_fs_file(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornFsReadRequest,
+    ) -> Result<ProjectFsFile, RebornServicesError> {
+        Ok(ProjectFsFile {
+            path: request.path,
+            filename: Some("today.md".to_string()),
+            mime_type: "text/markdown".to_string(),
+            size_bytes: 7,
+            bytes: b"# notes".to_vec(),
+        })
+    }
+
+    async fn read_attachment(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornAttachmentRequest,
+    ) -> Result<RebornAttachmentBytes, RebornServicesError> {
+        self.read_attachment_calls
+            .lock()
+            .expect("lock")
+            .push(request);
+        match self.read_attachment_response.lock().expect("lock").clone() {
+            Some(bytes) => Ok(bytes),
+            None => Err(RebornServicesError {
+                code: RebornServicesErrorCode::NotFound,
+                kind: RebornServicesErrorKind::NotFound,
+                status_code: 404,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            }),
+        }
     }
 
     async fn stream_events(
@@ -428,6 +722,29 @@ impl RebornServicesApi for StubServices {
         }
         // Empty drain; SSE handler will keep-alive until the test drops it.
         Ok(RebornStreamEventsResponse { events: Vec::new() })
+    }
+
+    fn supports_stream_events_subscription(&self) -> bool {
+        *self
+            .stream_events_subscription_enabled
+            .lock()
+            .expect("lock")
+    }
+
+    async fn subscribe_events(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornStreamEventsRequest,
+    ) -> Result<RebornStreamEventsSubscription, RebornServicesError> {
+        self.subscribe_events_calls
+            .lock()
+            .expect("lock")
+            .push(request);
+        self.next_stream_events_subscription
+            .lock()
+            .expect("lock")
+            .take()
+            .ok_or_else(|| service_unavailable_error(true))
     }
 
     async fn get_run_state(
@@ -484,11 +801,28 @@ impl RebornServicesApi for StubServices {
         ))
     }
 
+    async fn retry_run(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: WebUiRetryRunRequest,
+    ) -> Result<RebornRetryRunResponse, RebornServicesError> {
+        self.retry_run_calls
+            .lock()
+            .expect("lock")
+            .push(request.clone());
+        self.next_retry_run
+            .lock()
+            .expect("lock")
+            .pop_front()
+            .expect("retry_run test stub called without queued response")
+    }
+
     async fn list_threads(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        _request: WebUiListThreadsRequest,
+        request: WebUiListThreadsRequest,
     ) -> Result<RebornListThreadsResponse, RebornServicesError> {
+        self.list_threads_calls.lock().expect("lock").push(request);
         Ok(RebornListThreadsResponse {
             threads: Vec::new(),
             next_cursor: None,
@@ -518,6 +852,96 @@ impl RebornServicesApi for StubServices {
                 "Daily status",
                 "0 9 * * *",
             )],
+            scheduler_enabled: true,
+        })
+    }
+
+    async fn pause_automation(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        self.pause_automation_calls
+            .lock()
+            .expect("lock")
+            .push(automation_id);
+        Ok(RebornAutomationMutationResponse {
+            updated: true,
+            automation: Some(automation_info(
+                "automation-paused",
+                "Daily status",
+                "0 9 * * *",
+            )),
+        })
+    }
+
+    async fn resume_automation(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        self.resume_automation_calls
+            .lock()
+            .expect("lock")
+            .push(automation_id);
+        Ok(RebornAutomationMutationResponse {
+            updated: true,
+            automation: Some(automation_info(
+                "automation-resumed",
+                "Daily status",
+                "0 9 * * *",
+            )),
+        })
+    }
+
+    async fn rename_automation(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+        request: WebUiRenameAutomationRequest,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        self.rename_automation_calls
+            .lock()
+            .expect("lock")
+            .push((automation_id, request));
+        if let Some(error) = self
+            .next_rename_automation_error
+            .lock()
+            .expect("lock")
+            .take()
+        {
+            return Err(error);
+        }
+        Ok(RebornAutomationMutationResponse {
+            updated: true,
+            automation: Some(automation_info(
+                "automation-renamed",
+                "Renamed status",
+                "0 9 * * *",
+            )),
+        })
+    }
+
+    async fn delete_automation(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        self.delete_automation_calls
+            .lock()
+            .expect("lock")
+            .push(automation_id);
+        if let Some(error) = self
+            .next_delete_automation_error
+            .lock()
+            .expect("lock")
+            .take()
+        {
+            return Err(error);
+        }
+        Ok(RebornAutomationMutationResponse {
+            updated: true,
+            automation: None,
         })
     }
 
@@ -580,6 +1004,24 @@ impl RebornServicesApi for StubServices {
         Err(rejecting_reborn_services_error())
     }
 
+    async fn set_auto_activate_learned(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.set_auto_activate_learned_calls
+            .lock()
+            .expect("lock")
+            .push(enabled);
+        Ok(RebornSkillActionResponse {
+            success: true,
+            message: format!(
+                "Default skill auto-activation {}",
+                if enabled { "enabled" } else { "disabled" }
+            ),
+        })
+    }
+
     async fn list_connectable_channels(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -595,18 +1037,18 @@ impl RebornServicesApi for StubServices {
         }
         Ok(RebornConnectableChannelListResponse {
             channels: vec![RebornConnectableChannelInfo {
-                channel: "slack".to_string(),
-                display_name: "Slack".to_string(),
+                channel: "telegram".to_string(),
+                display_name: "Telegram".to_string(),
                 strategy: RebornChannelConnectStrategy::InboundProofCode,
                 action: RebornChannelConnectAction {
-                    title: "Slack account connection".to_string(),
-                    instructions: "Message the Slack app, then enter the code here.".to_string(),
-                    input_placeholder: "Enter Slack pairing code...".to_string(),
+                    title: "Telegram account connection".to_string(),
+                    instructions: "Message the Telegram bot to get a code, then paste it here. Codes expire in 10 minutes.".to_string(),
+                    input_placeholder: "Enter Telegram pairing code...".to_string(),
                     submit_label: "Connect".to_string(),
-                    success_message: "Slack account connected.".to_string(),
-                    error_message: "Invalid or expired Slack pairing code.".to_string(),
+                    success_message: "Telegram account connected.".to_string(),
+                    error_message: "Invalid or expired Telegram pairing code. Message the bot to get a new one.".to_string(),
                 },
-                command_aliases: vec!["slack".to_string()],
+                command_aliases: vec!["telegram".to_string()],
             }],
         })
     }
@@ -666,7 +1108,7 @@ impl RebornServicesApi for StubServices {
     ) -> Result<RebornOperatorConfigListResponse, RebornServicesError> {
         *self.list_operator_config_calls.lock().expect("lock") += 1;
         Ok(RebornOperatorConfigListResponse {
-            entries: Vec::new(),
+            entries: self.operator_config_entries.lock().expect("lock").clone(),
             precedence: Vec::new(),
             diagnostics: Vec::new(),
         })
@@ -681,6 +1123,16 @@ impl RebornServicesApi for StubServices {
             .lock()
             .expect("lock")
             .push(key.clone());
+        if let Some(entry) = self
+            .operator_config_entries
+            .lock()
+            .expect("lock")
+            .iter()
+            .find(|entry| entry.key == key)
+            .cloned()
+        {
+            return Ok(RebornOperatorConfigGetResponse { entry });
+        }
         Ok(RebornOperatorConfigGetResponse {
             entry: operator_config_entry(key, serde_json::json!("configured")),
         })
@@ -743,6 +1195,32 @@ impl RebornServicesApi for StubServices {
         Ok(operator_config_diagnostic_command_plane_response(
             RebornOperatorArea::Status,
         ))
+    }
+
+    async fn query_logs(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornLogQueryRequest,
+    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
+        if request.tail && request.follow {
+            return Err(RebornServicesError {
+                code: RebornServicesErrorCode::InvalidRequest,
+                kind: RebornServicesErrorKind::Validation,
+                status_code: 400,
+                retryable: false,
+                field: Some("follow".to_string()),
+                validation_code: Some(WebUiInboundValidationCode::InvalidValue),
+            });
+        }
+
+        self.query_logs_calls.lock().expect("lock").push(request);
+        Ok(RebornLogQueryResponse {
+            source: "test".to_string(),
+            entries: Vec::new(),
+            next_cursor: None,
+            tail_supported: true,
+            follow_supported: true,
+        })
     }
 
     async fn query_operator_logs(
@@ -869,6 +1347,18 @@ impl RebornServicesApi for StubServices {
         Ok(extension_action_response("installed"))
     }
 
+    async fn import_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        bundle: Vec<u8>,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        self.import_extension_calls
+            .lock()
+            .expect("lock")
+            .push(bundle);
+        Ok(extension_action_response("discovered"))
+    }
+
     async fn activate_extension(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -984,6 +1474,48 @@ impl RebornServicesApi for StubServices {
             message: String::new(),
         })
     }
+
+    async fn trace_account_traces(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornAccountTracesResponse, RebornServicesError> {
+        // Capture the forwarded caller so the contract test can verify the
+        // caller-scoped route actually threads the authenticated identity.
+        self.trace_account_traces_callers
+            .lock()
+            .expect("lock")
+            .push(caller.actor().user_id.as_str().to_string());
+        // Hermetic zero-state stub — no filesystem or network access.
+        // Mirrors the unenrolled branch of the real `account_traces_for_user`
+        // so the contract test for `GET /traces/account` is fully self-contained.
+        Ok(RebornAccountTracesResponse {
+            enrolled: false,
+            traces: vec![],
+        })
+    }
+
+    async fn trace_account_login_link(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornAccountLoginLinkResponse, RebornServicesError> {
+        // Capture the forwarded caller (tenant AND user — this is the trusted
+        // identity boundary) so the contract test can verify the caller-scoped
+        // route threads the authenticated identity, then return a hermetic
+        // canned mint (no network / filesystem).
+        self.trace_account_login_link_callers
+            .lock()
+            .expect("lock")
+            .push(format!(
+                "{}/{}",
+                caller.tenant_id.as_str(),
+                caller.actor().user_id.as_str()
+            ));
+        Ok(RebornAccountLoginLinkResponse {
+            minted: true,
+            enrolled: true,
+            url: Some("https://commons.example/account/login?code=stub".to_string()),
+        })
+    }
 }
 
 fn operator_command_response(area: RebornOperatorArea) -> RebornOperatorCommandPlaneResponse {
@@ -1067,6 +1599,7 @@ fn automation_info(automation_id: &str, name: &str, cron: &str) -> RebornAutomat
         }],
         is_active: true,
         created_at: None,
+        active_hold: None,
     }
 }
 
@@ -1182,6 +1715,154 @@ async fn send_message_path_overrides_body_thread_id() {
     );
 }
 
+// Regression: RejectedBusy must round-trip as {"outcome":"rejected_busy","notice":"..."} on the
+// POST /messages wire. Per `.claude/rules/testing.md` "Test Through the Caller", the serde tag
+// sits between the axum handler and the browser — only a caller-level test catches a missing
+// variant or a broken tag.
+//
+// Fresh-path variant: run metadata is Some — wire must include active_run_id, status,
+// event_cursor fields so the client can poll the blocking run.
+#[tokio::test]
+async fn send_message_rejected_busy_wire_shape() {
+    let services = Arc::new(StubServices::default());
+    services.set_next_submit_response(RebornSubmitTurnResponse::RejectedBusy {
+        thread_id: ThreadId::new("thread-alpha").expect("thread id"),
+        accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("msg:fake").expect("ref"),
+        active_run_id: Some(TurnRunId::new()),
+        status: Some(TurnStatus::BlockedApproval),
+        event_cursor: Some(EventCursor(1)),
+        notice: "An approval gate is open on this thread — resolve it (approve or deny) before continuing, then resend your message.".to_string(),
+    });
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/threads/thread-alpha/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"content":"hello"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(
+        body["outcome"], "rejected_busy",
+        "RejectedBusy must serialize with outcome tag 'rejected_busy'"
+    );
+    assert!(
+        body["notice"]
+            .as_str()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
+        "RejectedBusy must include a non-empty 'notice' field"
+    );
+    assert!(
+        !body["active_run_id"].is_null(),
+        "fresh RejectedBusy wire must include active_run_id when Some"
+    );
+    assert!(
+        !body["status"].is_null(),
+        "fresh RejectedBusy wire must include status when Some"
+    );
+    assert!(
+        !body["event_cursor"].is_null(),
+        "fresh RejectedBusy wire must include event_cursor when Some"
+    );
+}
+
+// Test-through-the-caller: the handler must forward the request body's
+// `enabled` flag to `RebornServicesApi::set_auto_activate_learned`, not a
+// hardcoded value. Posting `false` and asserting the facade recorded `false`
+// catches the arg-loss class (e.g. a handler that always passes `true`).
+#[tokio::test]
+async fn set_auto_activate_learned_forwards_enabled_flag_to_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/skills/auto-activate-learned")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"enabled":false}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["success"], true);
+    assert_eq!(
+        *services
+            .set_auto_activate_learned_calls
+            .lock()
+            .expect("lock"),
+        vec![false],
+        "handler must forward body.enabled=false to the facade verbatim"
+    );
+}
+
+// Replay-path variant: run metadata is None — wire must omit active_run_id, status,
+// event_cursor so the client receives no fabricated run reference it cannot query.
+#[tokio::test]
+async fn send_message_rejected_busy_replay_wire_shape_omits_run_fields() {
+    let services = Arc::new(StubServices::default());
+    services.set_next_submit_response(RebornSubmitTurnResponse::RejectedBusy {
+        thread_id: ThreadId::new("thread-alpha").expect("thread id"),
+        accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("msg:fake").expect("ref"),
+        active_run_id: None,
+        status: None,
+        event_cursor: None,
+        notice: "Ironclaw is still working on a previous message — resend yours once the current task finishes.".to_string(),
+    });
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/threads/thread-alpha/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"content":"hello"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(
+        body["outcome"], "rejected_busy",
+        "replay RejectedBusy must still serialize with outcome tag 'rejected_busy'"
+    );
+    assert!(
+        body["notice"]
+            .as_str()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
+        "replay RejectedBusy must include a non-empty 'notice' field"
+    );
+    assert!(
+        body.get("active_run_id").is_none() || body["active_run_id"].is_null(),
+        "replay RejectedBusy wire must omit active_run_id when None, got {:?}",
+        body.get("active_run_id")
+    );
+    assert!(
+        body.get("status").is_none() || body["status"].is_null(),
+        "replay RejectedBusy wire must omit status when None"
+    );
+    assert!(
+        body.get("event_cursor").is_none() || body["event_cursor"].is_null(),
+        "replay RejectedBusy wire must omit event_cursor when None"
+    );
+}
+
 #[tokio::test]
 async fn get_timeline_threads_path_into_request() {
     let services = Arc::new(StubServices::default());
@@ -1202,6 +1883,81 @@ async fn get_timeline_threads_path_into_request() {
     let calls = services.get_timeline_calls.lock().expect("lock").clone();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].thread_id, "thread-x");
+}
+
+// The attachment-bytes route carries three path segments and returns raw
+// bytes rather than JSON. Per "Test Through the Caller", drive the real router
+// so the Path<(_, _, _)> extractor, the byte response, and the headers are all
+// exercised — a facade-only test would miss the path plumbing and Content-Type.
+#[tokio::test]
+async fn get_attachment_serves_bytes_with_authoritative_content_type() {
+    let services = Arc::new(StubServices::default());
+    services.set_attachment(RebornAttachmentBytes {
+        mime_type: "image/png".to_string(),
+        filename: Some("diagram.png".to_string()),
+        bytes: vec![1, 2, 3, 4],
+    });
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/messages/msg-1/attachments/att-0")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("image/png")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-content-type-options")
+            .and_then(|v| v.to_str().ok()),
+        Some("nosniff")
+    );
+    let body = to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("body bytes");
+    assert_eq!(body.as_ref(), &[1, 2, 3, 4]);
+
+    // The whole (thread, message, attachment) triple reaches the facade — the
+    // attachment id alone is not unique across a thread.
+    let calls = services.read_attachment_calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].thread_id, "thread-x");
+    assert_eq!(calls[0].message_id, "msg-1");
+    assert_eq!(calls[0].attachment_id, "att-0");
+}
+
+#[tokio::test]
+async fn get_attachment_missing_bytes_returns_404() {
+    // The default stub leaves the attachment unset, mirroring an unwired
+    // reader or an unknown attachment.
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/messages/msg-1/attachments/missing")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 // Regression for the timeline pagination wire plumbing. Per
@@ -1292,6 +2048,107 @@ async fn resolve_gate_path_overrides_body_gate_ref() {
     assert_eq!(calls[0].thread_id.as_deref(), Some("thread-x"));
     assert_eq!(calls[0].run_id.as_deref(), Some("run-y"));
     assert_eq!(calls[0].gate_ref.as_deref(), Some("gate-from-path"));
+}
+
+#[tokio::test]
+async fn retry_run_path_overrides_body_run_id() {
+    let services = Arc::new(StubServices::default());
+    services.enqueue_retry_run(Ok(RebornRetryRunResponse {
+        run_id: TurnRunId::new(),
+        status: TurnStatus::Queued,
+        event_cursor: EventCursor(5),
+    }));
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/threads/thread-x/runs/run-from-path/retry")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"client_action_id":"retry-1","thread_id":"other","run_id":"run-from-body"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services.retry_run_calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].thread_id.as_deref(), Some("thread-x"));
+    assert_eq!(calls[0].run_id.as_deref(), Some("run-from-path"));
+}
+
+#[tokio::test]
+async fn retry_run_non_retryable_error_maps_to_conflict_body() {
+    let services = Arc::new(StubServices::default());
+    services.enqueue_retry_run(Err(RebornServicesError {
+        code: RebornServicesErrorCode::Conflict,
+        kind: RebornServicesErrorKind::Conflict,
+        status_code: 409,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    }));
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/threads/thread-x/runs/run-y/retry")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"client_action_id":"retry-not-retryable"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "conflict");
+    assert_eq!(body["kind"], "conflict");
+    assert_eq!(body["retryable"], false);
+}
+
+#[tokio::test]
+async fn retry_run_idempotent_replay_returns_same_response_shape() {
+    let services = Arc::new(StubServices::default());
+    let run_id = TurnRunId::new();
+    let replay = RebornRetryRunResponse {
+        run_id,
+        status: TurnStatus::Queued,
+        event_cursor: EventCursor(42),
+    };
+    services.enqueue_retry_run(Ok(replay.clone()));
+    services.enqueue_retry_run(Ok(replay));
+    let router = router_with(services.clone());
+
+    async fn post_retry(router: Router) -> axum::response::Response {
+        router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/threads/thread-x/runs/run-y/retry")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"client_action_id":"retry-replay"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot")
+    }
+
+    let first = post_retry(router.clone()).await;
+    let second = post_retry(router).await;
+
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(read_json(first).await, read_json(second).await);
+    let calls = services.retry_run_calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].client_action_id, calls[1].client_action_id);
 }
 
 #[tokio::test]
@@ -1450,6 +2307,9 @@ async fn list_automations_forwards_query_limits_to_facade() {
         body["automations"][0]["recent_runs"][0]["status"],
         "running"
     );
+    // The scheduler status must survive handler serialization onto the wire so
+    // the browser can warn when scheduling is off.
+    assert_eq!(body["scheduler_enabled"], true);
 
     let calls = services
         .list_automations_calls
@@ -1459,6 +2319,33 @@ async fn list_automations_forwards_query_limits_to_facade() {
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].limit, Some(5));
     assert_eq!(calls[0].run_limit, Some(7));
+}
+
+#[tokio::test]
+async fn list_threads_forwards_needs_approval_filter() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads?limit=12&needs_approval=true&candidate_thread_id=thread-active")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services.list_threads_calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].limit, Some(12));
+    assert_eq!(
+        calls[0].candidate_thread_id.as_deref(),
+        Some("thread-active")
+    );
+    assert!(calls[0].needs_approval);
 }
 
 #[tokio::test]
@@ -1489,6 +2376,411 @@ async fn list_automations_omits_limits_and_forwards_none() {
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].limit, None);
     assert_eq!(calls[0].run_limit, None);
+}
+
+#[tokio::test]
+async fn pause_and_resume_automation_dispatch_path_id_to_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let pause_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/automations/automation-alpha/pause")
+                .body(Body::empty())
+                .expect("pause request"),
+        )
+        .await
+        .expect("pause oneshot");
+    assert_eq!(pause_response.status(), StatusCode::OK);
+    let pause_body = read_json(pause_response).await;
+    assert_eq!(pause_body["updated"], true);
+    assert_eq!(
+        pause_body["automation"]["automation_id"],
+        "automation-paused"
+    );
+
+    let resume_response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/automations/automation-alpha/resume")
+                .body(Body::empty())
+                .expect("resume request"),
+        )
+        .await
+        .expect("resume oneshot");
+    assert_eq!(resume_response.status(), StatusCode::OK);
+    let resume_body = read_json(resume_response).await;
+    assert_eq!(resume_body["updated"], true);
+    assert_eq!(
+        resume_body["automation"]["automation_id"],
+        "automation-resumed"
+    );
+
+    assert_eq!(
+        services
+            .pause_automation_calls
+            .lock()
+            .expect("lock")
+            .clone(),
+        vec!["automation-alpha".to_string()]
+    );
+    assert_eq!(
+        services
+            .resume_automation_calls
+            .lock()
+            .expect("lock")
+            .clone(),
+        vec!["automation-alpha".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn rename_automation_dispatches_path_id_and_body_to_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/automations/automation-alpha")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"Renamed status"}"#))
+                .expect("rename request"),
+        )
+        .await
+        .expect("rename oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["updated"], true);
+    assert_eq!(body["automation"]["automation_id"], "automation-renamed");
+    assert_eq!(body["automation"]["name"], "Renamed status");
+
+    let calls = services
+        .rename_automation_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, "automation-alpha");
+    assert_eq!(calls[0].1.name.as_deref(), Some("Renamed status"));
+}
+
+#[tokio::test]
+async fn rename_automation_error_maps_to_http_status() {
+    for (error, expected_status, expected_code, expected_kind, expected_retryable) in [
+        (
+            RebornServicesError {
+                code: RebornServicesErrorCode::InvalidRequest,
+                kind: RebornServicesErrorKind::Validation,
+                status_code: 400,
+                retryable: false,
+                field: Some("name".to_string()),
+                validation_code: Some(WebUiInboundValidationCode::Blank),
+            },
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "validation",
+            false,
+        ),
+        (
+            RebornServicesError {
+                code: RebornServicesErrorCode::Forbidden,
+                kind: RebornServicesErrorKind::ParticipantDenied,
+                status_code: 403,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            },
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "participant_denied",
+            false,
+        ),
+    ] {
+        let services = Arc::new(StubServices::default());
+        services.fail_rename_automation(error);
+        let router = router_with(services.clone());
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/automations/automation-alpha")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"Renamed status"}"#))
+                    .expect("rename request"),
+            )
+            .await
+            .expect("rename oneshot");
+
+        assert_eq!(response.status(), expected_status);
+        let body = read_json(response).await;
+        assert_eq!(body["error"], expected_code);
+        assert_eq!(body["kind"], expected_kind);
+        assert_eq!(body["retryable"], expected_retryable);
+        assert_eq!(
+            services
+                .rename_automation_calls
+                .lock()
+                .expect("lock")
+                .iter()
+                .map(|(automation_id, request)| { (automation_id.clone(), request.name.clone()) })
+                .collect::<Vec<_>>(),
+            vec![(
+                "automation-alpha".to_string(),
+                Some("Renamed status".to_string())
+            )]
+        );
+    }
+}
+
+#[tokio::test]
+async fn trace_credits_returns_caller_scoped_unenrolled_zero_state() {
+    // The facade's default `trace_credits` body reads contributor-local
+    // Trace Commons state scoped by the authenticated caller's user id.
+    // A unique per-test user id guarantees a fresh scope so the
+    // unenrolled zero-state is deterministic on any machine.
+    let user_id = format!(
+        "webui-v2-trace-credits-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    );
+    let unique_caller = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        UserId::new(user_id.as_str()).expect("user"),
+        None,
+        None,
+    );
+    let router = webui_v2_router(WebUiV2State::new(
+        Arc::new(StubServices::default()),
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+    ))
+    .layer(axum::Extension(unique_caller))
+    .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/traces/credit")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["enrolled"], false);
+    assert_eq!(body["submissions_total"], 0);
+    assert_eq!(body["submissions_submitted"], 0);
+    assert_eq!(body["pending_credit"], 0.0);
+    assert_eq!(body["final_credit"], 0.0);
+    assert!(
+        body["note"]
+            .as_str()
+            .expect("note")
+            .contains("authoritative ledger is server-side")
+    );
+}
+
+#[tokio::test]
+async fn trace_account_traces_returns_caller_scoped_unenrolled_zero_state() {
+    // The facade's default `trace_account_traces` body reads contributor-local
+    // Trace Commons state scoped by the authenticated caller's user id.
+    // A unique per-test user id guarantees a fresh scope so the
+    // unenrolled zero-state is deterministic on any machine.
+    let user_id = format!(
+        "webui-v2-account-traces-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    );
+    let unique_caller = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        UserId::new(user_id.as_str()).expect("user"),
+        None,
+        None,
+    );
+    let services = Arc::new(StubServices::default());
+    let router = webui_v2_router(WebUiV2State::new(
+        services.clone(),
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+    ))
+    .layer(axum::Extension(unique_caller))
+    .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/traces/account")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["enrolled"], false);
+    assert_eq!(body["traces"].as_array().expect("traces array").len(), 0);
+
+    // The route is caller-scoped: the handler must forward the authenticated
+    // caller's user id to the facade (fails if it stops threading the caller).
+    assert_eq!(
+        services
+            .trace_account_traces_callers
+            .lock()
+            .expect("lock")
+            .clone(),
+        vec![user_id],
+    );
+}
+
+#[tokio::test]
+async fn trace_account_login_link_returns_minted_url_to_caller_scope() {
+    // POST /traces/account-login-link is caller-scoped and returns the minted
+    // one-time URL in the authenticated response body — the only delivery
+    // channel hosted users have (no host-file access).
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/traces/account-login-link")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["minted"], true);
+    assert_eq!(body["enrolled"], true);
+    assert_eq!(
+        body["url"],
+        "https://commons.example/account/login?code=stub"
+    );
+
+    // The route must forward the authenticated caller's tenant AND user id to
+    // the facade — the scope is trusted-caller-derived, never request input
+    // (fails if the handler stops threading the caller).
+    assert_eq!(
+        services
+            .trace_account_login_link_callers
+            .lock()
+            .expect("lock")
+            .clone(),
+        vec!["tenant-alpha/user-alpha".to_string()],
+    );
+}
+
+#[tokio::test]
+async fn delete_automation_dispatches_path_id_to_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/webchat/v2/automations/automation-alpha")
+                .body(Body::empty())
+                .expect("delete request"),
+        )
+        .await
+        .expect("delete oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["updated"], true);
+    assert!(body.get("automation").is_none() || body["automation"].is_null());
+    assert_eq!(
+        services
+            .delete_automation_calls
+            .lock()
+            .expect("lock")
+            .clone(),
+        vec!["automation-alpha".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn delete_automation_error_maps_to_http_status() {
+    for (error, expected_status, expected_code, expected_kind, expected_retryable) in [
+        (
+            RebornServicesError {
+                code: RebornServicesErrorCode::Forbidden,
+                kind: RebornServicesErrorKind::ParticipantDenied,
+                status_code: 403,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            },
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "participant_denied",
+            false,
+        ),
+        (
+            RebornServicesError {
+                code: RebornServicesErrorCode::Unavailable,
+                kind: RebornServicesErrorKind::ServiceUnavailable,
+                status_code: 503,
+                retryable: true,
+                field: None,
+                validation_code: None,
+            },
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            "service_unavailable",
+            true,
+        ),
+    ] {
+        let services = Arc::new(StubServices::default());
+        services.fail_delete_automation(error);
+        let router = router_with(services.clone());
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/api/webchat/v2/automations/automation-alpha")
+                    .body(Body::empty())
+                    .expect("delete request"),
+            )
+            .await
+            .expect("delete oneshot");
+
+        assert_eq!(response.status(), expected_status);
+        let body = read_json(response).await;
+        assert_eq!(body["error"], expected_code);
+        assert_eq!(body["kind"], expected_kind);
+        assert_eq!(body["retryable"], expected_retryable);
+        assert_eq!(
+            services
+                .delete_automation_calls
+                .lock()
+                .expect("lock")
+                .clone(),
+            vec!["automation-alpha".to_string()]
+        );
+    }
 }
 
 #[tokio::test]
@@ -1574,6 +2866,105 @@ async fn list_automations_error_maps_to_http_status() {
     assert_eq!(body["error"], "forbidden");
     assert_eq!(body["kind"], "participant_denied");
     assert_eq!(body["retryable"], false);
+}
+
+#[tokio::test]
+async fn list_automations_include_completed_true_forwarded_to_facade() {
+    // ?include_completed=true must be parsed and forwarded as `true` in the
+    // WebUiListAutomationsRequest so the facade can widen its exclusion slice.
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/automations?include_completed=true")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services
+        .list_automations_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        calls[0].include_completed,
+        "include_completed=true must be forwarded to the facade"
+    );
+}
+
+#[tokio::test]
+async fn list_automations_include_completed_absent_defaults_to_false() {
+    // No ?include_completed query param → `include_completed` must default to
+    // false so existing callers that do not set the flag are unaffected.
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/automations")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services
+        .list_automations_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        !calls[0].include_completed,
+        "absent include_completed must default to false (active-only)"
+    );
+}
+
+// Regression: malformed `?include_completed=garbage` must be rejected at the
+// Query extractor level (400 Bad Request) before the handler or facade run.
+// The field is a plain `bool`; `serde_urlencoded` does not silently default
+// unparseable values — it returns a deserialization error, which axum maps to
+// 400. There is no silent fallback to `false`.
+#[tokio::test]
+async fn list_automations_malformed_include_completed_rejected_with_400() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/automations?include_completed=notabool")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "malformed include_completed must be rejected at query deserialization with 400, \
+         not silently defaulted to false"
+    );
+    assert!(
+        services
+            .list_automations_calls
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "malformed include_completed must be rejected before reaching the facade"
+    );
 }
 
 #[tokio::test]
@@ -1754,11 +3145,15 @@ async fn list_connectable_channels_dispatches_through_facade() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_json(response).await;
-    assert_eq!(body["channels"][0]["channel"], "slack");
+    assert_eq!(body["channels"][0]["channel"], "telegram");
     assert_eq!(body["channels"][0]["strategy"], "inbound_proof_code");
     assert_eq!(
         body["channels"][0]["action"]["instructions"],
-        "Message the Slack app, then enter the code here."
+        "Message the Telegram bot to get a code, then paste it here. Codes expire in 10 minutes."
+    );
+    assert_eq!(
+        body["channels"][0]["action"]["error_message"],
+        "Invalid or expired Telegram pairing code. Message the bot to get a new one."
     );
     assert_eq!(
         *services
@@ -1795,6 +3190,55 @@ async fn get_session_returns_caller_identity_and_capabilities() {
     assert_eq!(body["tenant_id"], "tenant-alpha");
     assert_eq!(body["user_id"], "user-alpha");
     assert_eq!(body["capabilities"]["operator_webui_config"], true);
+
+    // The session advertises the inline-attachment contract so the browser
+    // file picker derives its `accept` set and size budgets from the server
+    // rather than a static frontend list that can drift. The `accept` tokens
+    // must be exactly the shared format registry's output (drift kill), and
+    // the budgets must match what `decode_attachments` enforces.
+    let expected = ironclaw_product_workflow::webui_attachment_capabilities();
+    let accept: Vec<String> = body["attachments"]["accept"]
+        .as_array()
+        .expect("attachments.accept is an array")
+        .iter()
+        .map(|token| {
+            token
+                .as_str()
+                .expect("accept token is a string")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(accept, expected.accept);
+    // The registry emits exact MIME types *and* canonical extensions (only the
+    // supported formats), never broad `image/*` wildcards that would admit
+    // unsupported ones. The MIME types keep folder navigation working in the
+    // native macOS picker — an extension-only `accept` makes a folder
+    // double-click dismiss the dialog instead of opening it.
+    assert!(
+        accept.iter().any(|t| t == ".png"),
+        "registry-derived accept must include an image extension: {accept:?}"
+    );
+    assert!(
+        accept.iter().any(|t| t == "image/png"),
+        "registry-derived accept must include the exact image MIME: {accept:?}"
+    );
+    assert!(
+        accept.iter().any(|t| t == ".pdf"),
+        "registry-derived accept must include .pdf: {accept:?}"
+    );
+    assert!(
+        !accept.iter().any(|t| t.contains('*')),
+        "accept must not advertise wildcards: {accept:?}"
+    );
+    assert_eq!(body["attachments"]["max_count"], expected.max_count);
+    assert_eq!(
+        body["attachments"]["max_file_bytes"],
+        expected.max_file_bytes
+    );
+    assert_eq!(
+        body["attachments"]["max_total_bytes"],
+        expected.max_total_bytes
+    );
 }
 
 #[tokio::test]
@@ -1818,6 +3262,198 @@ async fn get_session_returns_false_operator_capability_when_capabilities_default
     assert_eq!(body["tenant_id"], "tenant-alpha");
     assert_eq!(body["user_id"], "user-alpha");
     assert_eq!(body["capabilities"]["operator_webui_config"], false);
+}
+
+// The browser hides the Projects surface (sidebar entry + `/projects` route)
+// unless the deployment opts in. The gate is delivered through the session
+// response's `features.reborn_projects` field, fed from
+// `WebUiV2State::with_reborn_projects_enabled` at composition. Drive the real
+// router (not just the state accessor) so a handler that forgot to surface the
+// flag is caught — see `.claude/rules/testing.md` "Test Through the Caller".
+#[tokio::test]
+async fn get_session_reports_reborn_projects_feature_from_state_flag() {
+    for enabled in [false, true] {
+        let services = Arc::new(StubServices::default());
+        let router = webui_v2_router(
+            WebUiV2State::new(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+                .with_reborn_projects_enabled(enabled),
+        )
+        .layer(axum::Extension(caller()))
+        .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/webchat/v2/session")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(
+            body["features"]["reborn_projects"], enabled,
+            "features.reborn_projects must mirror the state flag (enabled={enabled})"
+        );
+    }
+}
+
+// The approval card hint needs the effective global auto-approve setting. Keep
+// that as a narrow facade read surfaced through the session bootstrap feature,
+// not an operator config key lookup from the browser or route handler.
+#[tokio::test]
+async fn get_session_reports_global_auto_approve_feature_from_facade() {
+    for enabled in [false, true] {
+        let services = Arc::new(StubServices::default());
+        *services.global_auto_approve_enabled.lock().expect("lock") = enabled;
+        let router = webui_v2_router(WebUiV2State::new(
+            services.clone(),
+            DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+        ))
+        .layer(axum::Extension(caller()))
+        .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/webchat/v2/session")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(
+            body["features"]["global_auto_approve"], enabled,
+            "features.global_auto_approve must mirror the facade flag (enabled={enabled})"
+        );
+        assert_eq!(
+            *services.global_auto_approve_calls.lock().expect("lock"),
+            1,
+            "session handler should read the feature through the narrow facade"
+        );
+        assert!(
+            services
+                .get_operator_config_key_calls
+                .lock()
+                .expect("lock")
+                .is_empty(),
+            "session handler must not read arbitrary operator config keys"
+        );
+    }
+}
+
+#[tokio::test]
+async fn get_session_refreshes_global_auto_approve_feature_between_requests() {
+    let services = Arc::new(StubServices::default());
+    let state = WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER);
+    let router = webui_v2_router(state)
+        .layer(axum::Extension(caller_for_user("user-alpha")))
+        .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+    *services.global_auto_approve_enabled.lock().expect("lock") = false;
+    let initial = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        read_json(initial).await["features"]["global_auto_approve"],
+        false
+    );
+
+    *services.global_auto_approve_enabled.lock().expect("lock") = true;
+    let refreshed = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        read_json(refreshed).await["features"]["global_auto_approve"],
+        true,
+        "session bootstrap must reflect the mutable tenant/user settings flag"
+    );
+    assert_eq!(
+        *services.global_auto_approve_calls.lock().expect("lock"),
+        2,
+        "session handler should re-read the mutable flag on each bootstrap request"
+    );
+}
+
+#[tokio::test]
+async fn get_session_defaults_global_auto_approve_false_when_facade_read_fails() {
+    let services = Arc::new(StubServices::default());
+    *services
+        .next_global_auto_approve_error
+        .lock()
+        .expect("lock") = Some(service_unavailable_error(false));
+    let router = webui_v2_router(WebUiV2State::new(
+        services.clone(),
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+    ))
+    .layer(axum::Extension(caller()))
+    .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["features"]["global_auto_approve"], false);
+    assert_eq!(*services.global_auto_approve_calls.lock().expect("lock"), 1);
+}
+
+#[tokio::test]
+async fn get_session_defaults_global_auto_approve_false_when_facade_stalls() {
+    let services = Arc::new(StubServices::default());
+    *services.stall_global_auto_approve.lock().expect("lock") = true;
+    let router = webui_v2_router(WebUiV2State::new(
+        services.clone(),
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+    ))
+    .layer(axum::Extension(caller()))
+    .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["features"]["global_auto_approve"], false);
+    assert_eq!(*services.global_auto_approve_calls.lock().expect("lock"), 1);
 }
 
 #[tokio::test]
@@ -1919,7 +3555,7 @@ async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/api/webchat/v2/operator/logs?limit=25&cursor=after-1&thread_id=thread-a&run_id=run-a&turn_id=turn-a&tool_call_id=tool-a&tool_name=shell&source=slack")
+                .uri("/api/webchat/v2/operator/logs?limit=25&cursor=after-1&thread_id=thread-a&run_id=run-a&turn_id=turn-a&tool_call_id=tool-a&tool_name=shell&source=slack&follow=true")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -1989,6 +3625,8 @@ async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
     );
     assert_eq!(operator_log_calls[0].tool_name.as_deref(), Some("shell"));
     assert_eq!(operator_log_calls[0].source.as_deref(), Some("slack"));
+    assert!(operator_log_calls[0].follow);
+    assert!(!operator_log_calls[0].tail);
     drop(operator_log_calls);
     assert_eq!(
         services
@@ -2001,7 +3639,7 @@ async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
 }
 
 #[tokio::test]
-async fn operator_routes_require_operator_capability() {
+async fn operator_config_routes_require_operator_capability() {
     let services = Arc::new(StubServices::default());
     let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
 
@@ -2039,6 +3677,368 @@ async fn operator_routes_require_operator_capability() {
             .expect("lock")
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn settings_tool_routes_do_not_require_operator_capability() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/settings/tools")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/tools")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"enabled":true}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/tools/ext.search")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"state":"always_allow"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    assert_eq!(
+        *services.list_operator_config_calls.lock().expect("lock"),
+        1
+    );
+    assert_eq!(
+        services
+            .set_operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        [
+            (
+                "agent.auto_approve_tools".to_string(),
+                serde_json::json!(true)
+            ),
+            (
+                "tool.ext.search".to_string(),
+                serde_json::json!({ "state": "always_allow" })
+            )
+        ]
+    );
+}
+
+#[tokio::test]
+async fn settings_tool_routes_fail_closed_without_capabilities_extension() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_caller_only(services.clone());
+
+    for (method, uri, body) in [
+        (Method::GET, "/api/webchat/v2/settings/tools", ""),
+        (
+            Method::POST,
+            "/api/webchat/v2/settings/tools",
+            r#"{"enabled":true}"#,
+        ),
+        (
+            Method::POST,
+            "/api/webchat/v2/settings/tools/ext.search",
+            r#"{"state":"always_allow"}"#,
+        ),
+    ] {
+        let mut request = Request::builder().method(method).uri(uri);
+        if !body.is_empty() {
+            request = request.header("content-type", "application/json");
+        }
+        let response = router
+            .clone()
+            .oneshot(request.body(Body::from(body)).expect("request"))
+            .await
+            .expect("oneshot");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    assert_eq!(
+        *services.list_operator_config_calls.lock().expect("lock"),
+        0
+    );
+    assert!(
+        services
+            .set_operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn settings_tool_routes_expose_only_tool_approval_config() {
+    let services = Arc::new(StubServices::default());
+    services
+        .operator_config_entries
+        .lock()
+        .expect("lock")
+        .extend([
+            operator_config_entry(
+                "agent.auto_approve_tools".to_string(),
+                serde_json::json!(true),
+            ),
+            operator_config_entry(
+                "tool.ext.search".to_string(),
+                serde_json::json!({ "state": "always_allow" }),
+            ),
+            operator_config_entry("provider.default".to_string(), serde_json::json!("openai")),
+            operator_config_entry("secret.api_key".to_string(), serde_json::json!("redacted")),
+        ]);
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/settings/tools")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    let keys = body["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .map(|entry| entry["key"].as_str().expect("key"))
+        .collect::<Vec<_>>();
+    assert_eq!(keys, ["agent.auto_approve_tools", "tool.ext.search"]);
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/tools")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"enabled":false}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/tools/ext.search")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"state":"disabled"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    assert_eq!(
+        services
+            .set_operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        [
+            (
+                "agent.auto_approve_tools".to_string(),
+                serde_json::json!(false)
+            ),
+            (
+                "tool.ext.search".to_string(),
+                serde_json::json!({ "state": "disabled" })
+            )
+        ],
+    );
+}
+
+#[tokio::test]
+async fn settings_tool_writes_fail_closed_when_config_service_unwired() {
+    let services = Arc::new(StubServices::default());
+    services.fail_set_operator_config_key(service_unavailable_error(false));
+    let router = router_with_capabilities(services, WebUiV2Capabilities::default());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/tools/ext.search")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"state":"always_allow"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = read_json(response).await;
+    assert_eq!(body["kind"], "service_unavailable");
+    assert_eq!(body["retryable"], false);
+}
+
+#[tokio::test]
+async fn settings_tool_permission_rejects_invalid_state_before_dispatch() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/tools/ext.search")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"state":"sometimes"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        services
+            .set_operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn settings_tool_permission_rejects_overlong_capability_id_before_dispatch() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+    let capability_id = "x".repeat(125);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/api/webchat/v2/settings/tools/{capability_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"state":"always_allow"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "invalid_request");
+    assert_eq!(body["field"], "capability_id");
+    assert_eq!(body["validation_code"], "too_long");
+    assert!(
+        services
+            .set_operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn operator_logs_require_operator_capability() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/operator/logs?limit=25&cursor=after-1&thread_id=thread-a&run_id=run-a&turn_id=turn-a&tool_call_id=tool-a&tool_name=shell&source=slack&follow=true")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(
+        services
+            .query_operator_logs_calls
+            .lock()
+            .expect("lock")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn logs_are_available_without_operator_capability() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/logs?limit=25&cursor=after-1&thread_id=thread-a&run_id=run-a&turn_id=turn-a&tool_call_id=tool-a&tool_name=shell&source=slack&follow=true")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let log_calls = services.query_logs_calls.lock().expect("lock");
+    assert_eq!(log_calls.len(), 1);
+    assert_eq!(log_calls[0].limit, Some(25));
+    assert_eq!(log_calls[0].cursor.as_deref(), Some("after-1"));
+    assert_eq!(log_calls[0].thread_id.as_deref(), Some("thread-a"));
+    assert_eq!(log_calls[0].run_id.as_deref(), Some("run-a"));
+    assert_eq!(log_calls[0].turn_id.as_deref(), Some("turn-a"));
+    assert_eq!(log_calls[0].tool_call_id.as_deref(), Some("tool-a"));
+    assert_eq!(log_calls[0].tool_name.as_deref(), Some("shell"));
+    assert_eq!(log_calls[0].source.as_deref(), Some("slack"));
+    assert!(log_calls[0].follow);
+    assert!(!log_calls[0].tail);
+}
+
+#[tokio::test]
+async fn logs_reject_ambiguous_tail_follow_modes() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/logs?tail=true&follow=true")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "invalid_request");
+    assert_eq!(body["field"], "follow");
+    assert_eq!(body["validation_code"], "invalid_value");
+    assert!(services.query_logs_calls.lock().expect("lock").is_empty());
 }
 
 #[tokio::test]
@@ -2364,6 +4364,130 @@ async fn install_extension_rejects_non_extension_package_kind_with_400() {
             .expect("lock")
             .is_empty(),
         "invalid package kind must not reach the facade"
+    );
+}
+
+/// #5499 review finding #4: the admin-only import route must reject a caller
+/// whose bearer token lacks `operator_webui_config` BEFORE the facade is
+/// reached. Lower-level lifecycle tests cannot catch this route dropping its
+/// `require_operator_webui_config` gate.
+#[tokio::test]
+async fn import_extension_requires_operator_webui_config() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/import")
+                .header("content-type", "application/zip")
+                .body(Body::from(b"PK\x03\x04not-really-a-zip".to_vec()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "forbidden");
+    assert!(
+        services
+            .import_extension_calls
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "a non-operator caller must never reach the import facade"
+    );
+}
+
+/// #5499 review finding #4: an operator upload must forward the raw zip bytes
+/// to the facade unmodified — a route regression that drops or re-encodes the
+/// body would pass every lifecycle-tier test.
+#[tokio::test]
+async fn import_extension_forwards_zip_bytes_to_facade_call() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(
+        services.clone(),
+        WebUiV2Capabilities {
+            operator_webui_config: true,
+        },
+    );
+    // Deliberately non-UTF-8 so byte fidelity (not just string round-trip) is
+    // what the assertion proves.
+    let bundle: Vec<u8> = b"PK\x03\x04\x00\xff\xfe binary zip bytes".to_vec();
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/import")
+                .header("content-type", "application/zip")
+                .body(Body::from(bundle.clone()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        services
+            .import_extension_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        [bundle]
+    );
+}
+
+/// #5499 review finding #1: the import route is operator-only, so a router
+/// built `without_operator_routes()` (the shape composition serves to
+/// deployments with no operator surface) must not mount it at all — exactly
+/// like its operator siblings. Before the fix the route was mounted
+/// unconditionally and answered 403 here instead of 404.
+#[tokio::test]
+async fn import_extension_is_stripped_alongside_operator_routes() {
+    let services = Arc::new(StubServices::default());
+    let router = webui_v2_router_with_options(
+        WebUiV2State::new(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER),
+        WebUiV2RouteOptions::without_operator_routes(),
+    )
+    .layer(axum::Extension(caller()))
+    .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+    let import_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/import")
+                .header("content-type", "application/zip")
+                .body(Body::from(b"PK\x03\x04".to_vec()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    // Parity check: an undisputed operator sibling on the same stripped router.
+    let operator_status_response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/operator/status")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(
+        operator_status_response.status(),
+        StatusCode::NOT_FOUND,
+        "operator sibling is stripped from a without_operator_routes router"
+    );
+    assert_eq!(
+        import_response.status(),
+        StatusCode::NOT_FOUND,
+        "the admin-only import route must be stripped exactly like its operator siblings"
     );
 }
 
@@ -3002,6 +5126,13 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
         ) -> Result<RebornResolveGateResponse, RebornServicesError> {
             unreachable!("not exercised by this test")
         }
+        async fn retry_run(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _request: WebUiRetryRunRequest,
+        ) -> Result<RebornRetryRunResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
         async fn get_run_state(
             &self,
             _caller: WebUiAuthenticatedCaller,
@@ -3222,6 +5353,7 @@ fn make_projection_update_envelope(cursor: &str) -> ProductOutboundEnvelope {
                 "thread-x",
                 vec![ProductProjectionItem::Text {
                     id: "message-1".to_string(),
+                    run_id: None,
                     body: "projection body".to_string(),
                 }],
             )
@@ -3244,7 +5376,11 @@ fn make_capability_activity_envelope(cursor: &str) -> ProductOutboundEnvelope {
             process_id: None,
             output_bytes: None,
             error_kind: None,
+            error_detail: None,
+            subtitle: None,
+            input_summary: None,
             updated_at: chrono::Utc::now(),
+            activity_order: None,
         }),
     )
 }
@@ -3336,6 +5472,154 @@ where
         }
     }
     buf
+}
+
+#[tokio::test]
+async fn stream_events_sets_unbuffered_sse_headers() {
+    let services = Arc::new(StubServices::default());
+    services.enable_stream_events_subscription(Vec::new());
+
+    let router = router_with(services);
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/events")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers();
+    assert_eq!(
+        headers
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-cache, no-transform"),
+        "SSE must opt out of intermediary transforms that can buffer chunks"
+    );
+    assert_eq!(
+        headers
+            .get(HeaderName::from_static("x-accel-buffering"))
+            .and_then(|value| value.to_str().ok()),
+        Some("no"),
+        "SSE must ask reverse proxies not to buffer stream chunks"
+    );
+    assert!(
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/event-stream")),
+        "SSE content type must remain event-stream"
+    );
+}
+
+#[tokio::test]
+async fn stream_events_continues_immediately_after_non_empty_batch() {
+    let services = Arc::new(StubServices::default());
+
+    let envelope_a = make_projection_update_envelope("cursor:live-a");
+    let envelope_b = make_projection_update_envelope("cursor:live-b");
+    services.enqueue_stream_events(Ok(RebornStreamEventsResponse {
+        events: vec![envelope_a],
+    }));
+    services.enqueue_stream_events(Ok(RebornStreamEventsResponse {
+        events: vec![envelope_b],
+    }));
+
+    let router = router_with(services.clone());
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/events")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut body = response.into_body();
+    let bytes = collect_sse_until(&mut body, Duration::from_millis(750), |buf| {
+        parse_sse_events(buf).len() >= 2
+    })
+    .await;
+    drop(body);
+
+    let events = parse_sse_events(&bytes);
+    assert!(
+        events.len() >= 2,
+        "second SSE event must not wait for the idle poll interval; got {events:?}; raw: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+
+    let calls = services.stream_events_calls.lock().expect("lock").clone();
+    assert!(
+        calls.len() >= 2,
+        "SSE handler must immediately re-enter stream_events after a non-empty batch"
+    );
+    let expected_cursor = ProjectionCursor::new("cursor:live-a").expect("cursor");
+    assert_eq!(
+        calls[1].after_cursor.as_ref(),
+        Some(&expected_cursor),
+        "follow-up call must still preserve cursor ordering"
+    );
+}
+
+#[tokio::test]
+async fn stream_events_uses_subscription_when_facade_supports_it() {
+    let services = Arc::new(StubServices::default());
+    let envelope_a = make_projection_update_envelope("cursor:sub-a");
+    let envelope_b = make_projection_update_envelope("cursor:sub-b");
+    services.enable_stream_events_subscription(vec![Ok(envelope_a.clone()), Ok(envelope_b)]);
+
+    let router = router_with(services.clone());
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/events")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut body = response.into_body();
+    let bytes = collect_sse_until(&mut body, Duration::from_millis(750), |buf| {
+        parse_sse_events(buf).len() >= 2
+    })
+    .await;
+    drop(body);
+
+    let events = parse_sse_events(&bytes);
+    assert!(
+        events.len() >= 2,
+        "subscription events must reach SSE without facade polling; got {events:?}; raw: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let cursor_a_json =
+        serde_json::to_string(envelope_a.projection_cursor()).expect("cursor-a json");
+    assert_eq!(events[0].event.as_deref(), Some("projection_update"));
+    assert_eq!(events[0].id.as_deref(), Some(cursor_a_json.as_str()));
+
+    assert_eq!(
+        services.stream_events_calls.lock().expect("lock").len(),
+        0,
+        "subscription-enabled SSE route must not call the polling drain facade"
+    );
+    let subscribe_calls = services
+        .subscribe_events_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(subscribe_calls.len(), 1);
+    assert_eq!(subscribe_calls[0].thread_id, "thread-x");
+    assert!(subscribe_calls[0].after_cursor.is_none());
 }
 
 // Pins the *wire* contract the browser sees, not just the handler being
@@ -3742,6 +6026,87 @@ async fn stream_events_ws_emits_projection_frames_and_redacted_error() {
 }
 
 #[tokio::test]
+async fn stream_events_ws_uses_subscription_when_facade_supports_it() {
+    use futures::StreamExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let services = Arc::new(StubServices::default());
+    let envelope_a = make_projection_update_envelope("cursor:ws-sub-a");
+    let envelope_b = make_projection_update_envelope("cursor:ws-sub-b");
+    services
+        .enable_stream_events_subscription(vec![Ok(envelope_a.clone()), Ok(envelope_b.clone())]);
+
+    let router = router_with(services.clone());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let serve_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    let url = format!("ws://{addr}/api/webchat/v2/threads/thread-x/ws");
+    let (mut ws, response) = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio_tungstenite::connect_async(url),
+    )
+    .await
+    .expect("ws connect within 5s")
+    .expect("ws upgrade");
+    assert_eq!(response.status().as_u16(), 101);
+
+    let mut text_frames: Vec<String> = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline && text_frames.len() < 2 {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match tokio::time::timeout(remaining, ws.next()).await {
+            Ok(Some(Ok(WsMessage::Text(text)))) => text_frames.push(text.to_string()),
+            Ok(Some(Ok(WsMessage::Close(_)))) | Ok(None) => break,
+            Ok(Some(Ok(_))) => continue,
+            Ok(Some(Err(_))) => break,
+            Err(_) => break,
+        }
+    }
+    let _ = ws.close(None).await;
+    serve_handle.abort();
+
+    assert!(
+        text_frames.len() >= 2,
+        "expected subscription projection frames; got {} text frame(s): {:?}",
+        text_frames.len(),
+        text_frames,
+    );
+
+    let envelope_a_json: Value = serde_json::from_str(&text_frames[0]).expect("envelope a parses");
+    let expected_a: Value = serde_json::to_value(&envelope_a).expect("envelope a value");
+    assert_eq!(
+        envelope_a_json, expected_a,
+        "first WS frame must carry the first subscription envelope",
+    );
+    let envelope_b_json: Value = serde_json::from_str(&text_frames[1]).expect("envelope b parses");
+    let expected_b: Value = serde_json::to_value(&envelope_b).expect("envelope b value");
+    assert_eq!(
+        envelope_b_json, expected_b,
+        "second WS frame must carry the second subscription envelope",
+    );
+
+    assert_eq!(
+        services.stream_events_calls.lock().expect("lock").len(),
+        0,
+        "subscription-enabled WS route must not call the polling drain facade",
+    );
+    let subscribe_calls = services
+        .subscribe_events_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(subscribe_calls.len(), 1);
+    assert_eq!(subscribe_calls[0].thread_id, "thread-x");
+    assert!(subscribe_calls[0].after_cursor.is_none());
+}
+
+#[tokio::test]
 async fn stream_events_ws_resumes_from_last_event_id_before_query_cursor() {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
@@ -3932,4 +6297,364 @@ async fn operator_setup_accepts_secret_request_without_echoing_values() {
             true,
         )]
     );
+}
+
+#[tokio::test]
+async fn list_fs_mounts_returns_browsable_mounts() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/mounts")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    // Assert set membership, not index order, so a semantically-equivalent
+    // ordering change does not fail spuriously.
+    let mounts: Vec<&str> = body["mounts"]
+        .as_array()
+        .expect("mounts array")
+        .iter()
+        .map(|m| m["mount"].as_str().expect("mount string"))
+        .collect();
+    assert!(
+        mounts.contains(&"memory"),
+        "memory mount present: {mounts:?}"
+    );
+    assert!(
+        mounts.contains(&"workspace"),
+        "workspace mount present: {mounts:?}"
+    );
+}
+
+#[tokio::test]
+async fn browse_fs_dir_lists_mount_relative_entries() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/list?mount=memory&path=daily")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["mount"], "memory");
+    assert_eq!(body["entries"][0]["name"], "today.md");
+    assert_eq!(body["entries"][0]["path"], "daily/today.md");
+}
+
+#[tokio::test]
+async fn browse_fs_dir_forwards_optional_project_selector() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/list?mount=memory&path=daily&project_id=project-beta")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services.browse_fs_calls.lock().expect("lock");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].project_id.as_ref().map(ProjectId::as_str),
+        Some("project-beta")
+    );
+}
+
+#[tokio::test]
+async fn read_fs_file_serves_attachment_with_nosniff() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/content?mount=memory&path=daily/today.md")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("x-content-type-options")
+            .and_then(|v| v.to_str().ok()),
+        Some("nosniff"),
+    );
+    assert!(
+        response
+            .headers()
+            .get("content-disposition")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|value| value.contains("attachment")),
+        "fs download must be served as an attachment",
+    );
+    let body = to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("body bytes");
+    assert_eq!(&body[..], b"# notes");
+}
+
+#[tokio::test]
+async fn read_fs_file_rejects_blank_path() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/content?mount=memory")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn stat_fs_path_returns_metadata() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/stat?mount=memory&path=daily/today.md")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["stat"]["path"], "daily/today.md");
+    assert_eq!(body["stat"]["kind"], "file");
+    assert_eq!(body["stat"]["mime_type"], "text/markdown");
+}
+
+#[tokio::test]
+async fn stat_fs_path_rejects_blank_path() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/stat?mount=memory")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+// --- Project route handler tests (path-param override + status codes) --------
+
+fn sample_project_info(project_id: &str) -> RebornProjectInfo {
+    RebornProjectInfo {
+        project_id: project_id.to_string(),
+        name: "Sample".to_string(),
+        description: String::new(),
+        icon: None,
+        color: None,
+        metadata: serde_json::json!({}),
+        state: RebornProjectState::Active,
+        role: RebornProjectRole::Owner,
+        created_at: "2026-06-17T00:00:00Z".parse().expect("created at"),
+        updated_at: "2026-06-17T00:00:00Z".parse().expect("updated at"),
+    }
+}
+
+fn sample_member_info(user_id: &str) -> RebornProjectMemberInfo {
+    RebornProjectMemberInfo {
+        user_id: user_id.to_string(),
+        role: RebornProjectRole::Editor,
+        status: RebornProjectMemberStatus::Active,
+        granted_by: "user-alpha".to_string(),
+        created_at: "2026-06-17T00:00:00Z".parse().expect("created at"),
+        updated_at: "2026-06-17T00:00:00Z".parse().expect("updated at"),
+    }
+}
+
+/// The path `project_id` must override any value carried in the body, so a
+/// caller cannot target a different project than the URL names.
+#[tokio::test]
+async fn update_project_path_id_overrides_body() {
+    let services = Arc::new(StubServices::default());
+    let app = router_with(services.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/webchat/v2/projects/path-project")
+                .header("content-type", "application/json")
+                // A hostile body names a different project; the path must win.
+                .body(Body::from(
+                    serde_json::json!({ "project_id": "body-project", "name": "x" }).to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services.update_project_calls.lock().expect("lock");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].project_id, "path-project",
+        "path project_id must override the body value"
+    );
+}
+
+/// Both path ids (project + user) must override the body on member role update.
+#[tokio::test]
+async fn update_member_path_ids_override_body() {
+    let services = Arc::new(StubServices::default());
+    let app = router_with(services.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/webchat/v2/projects/path-project/members/path-user")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "project_id": "body-project",
+                        "user_id": "body-user",
+                        "role": "editor"
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services.update_project_member_calls.lock().expect("lock");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].project_id, "path-project");
+    assert_eq!(calls[0].user_id, "path-user");
+}
+
+/// `add_project_member` takes user_id from the BODY (the path has no user
+/// segment) but the project_id from the path.
+#[tokio::test]
+async fn add_member_takes_user_from_body_project_from_path() {
+    let services = Arc::new(StubServices::default());
+    let app = router_with(services.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/webchat/v2/projects/path-project/members")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "project_id": "body-project",
+                        "user_id": "body-user",
+                        "role": "viewer"
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services.add_project_member_calls.lock().expect("lock");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].project_id, "path-project", "project from path");
+    assert_eq!(calls[0].user_id, "body-user", "user from body");
+}
+
+#[tokio::test]
+async fn delete_project_returns_204() {
+    let services = Arc::new(StubServices::default());
+    let app = router_with(services.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/webchat/v2/projects/p1")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        services.delete_project_calls.lock().expect("lock")[0].project_id,
+        "p1"
+    );
+}
+
+#[tokio::test]
+async fn remove_member_returns_204() {
+    let services = Arc::new(StubServices::default());
+    let app = router_with(services.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/webchat/v2/projects/p1/members/u1")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let calls = services.remove_project_member_calls.lock().expect("lock");
+    assert_eq!(calls[0].project_id, "p1");
+    assert_eq!(calls[0].user_id, "u1");
+}
+
+/// An unwired project service (the default trait body) surfaces 503, not 500.
+#[tokio::test]
+async fn list_projects_unwired_returns_503() {
+    let services = Arc::new(StubServices::default());
+    let app = router_with(services);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/webchat/v2/projects")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }

@@ -84,10 +84,44 @@ It is the source of truth for fire eligibility.
 
 - `Scheduled` means the trigger may be polled and fired.
 - `Paused` means the trigger is retained but must not fire.
-- `Completed` is reserved for future finite schedules and must not be treated as a V1 cron-state requirement.
+- `Completed` is the terminal state reached when a `complete_after_first_fire`
+  trigger fires successfully. `clear_active_fire` transitions the trigger to
+  `Completed` (soft-complete) after the run reaches a terminal outcome; the
+  same path also soft-completes successful `Once` fires after their terminal
+  run outcome. `Once` triggers also complete on a terminal pre-submit failure
+  so the same one-shot slot does not refire forever. Completed triggers are
+  retained and remain queryable — the model-visible `trigger_list` capability
+  surfaces all states, and
+  `GET /api/webchat/v2/automations?include_completed=true` returns them — but
+  the default WebUI automations panel excludes `Completed` entries to avoid
+  cluttering the active list with triggers that will never fire again.
 - V1 does not expose a separate `enabled` field. Durable backends may add
   denormalized indexes derived from `state == Scheduled`, but those indexes must
   never become independent fire gates.
+
+### 3.4 Completion policy
+
+`TriggerRecord.completion_policy` controls what happens after a successful fire:
+
+- `Recurring` — the trigger keeps firing on its cron schedule. (For
+  `trigger_create`, callers must provide `completion_policy` explicitly; this
+  describes behavioral semantics, not input defaulting.) After
+  `clear_active_fire` observes a terminal turn outcome, the trigger stays in
+  `Scheduled` and the poller resumes normal cadence.
+- `CompleteAfterFirstFire` — fire-once semantics. After `clear_active_fire`
+  observes a terminal turn outcome, the trigger transitions to `Completed`.
+  The year-pinned cron pattern (scheduling the trigger for a single past-future
+  slot) combined with `complete_after_first_fire` is the V1 one-shot
+  implementation. Subsequent poll ticks skip the trigger because its state is
+  `Completed`.
+
+Pre-submit permanent failures are handled separately by the worker: `Once`
+triggers complete on failure so the one-shot slot is retired, while exhausted
+Cron triggers stay `Scheduled`/retryable for manual investigation or removal.
+
+Run threads for completed triggers remain accessible by design; their history is
+retained user data and must not become unreachable when the trigger transitions
+to `Completed`.
 
 ---
 
@@ -228,19 +262,23 @@ A trigger fire is synthetic inbound, not a parallel agent loop.
   is backed by the real agent/project access source of truth, a normal
   runtime must fail closed instead of enabling the trigger poller with the
   tenant-scope placeholder.
-- Local-dev `run` and `serve` may satisfy that contract by seeding active
-  access rows from trusted operator configuration at boot. `run` reconciles the
-  configured CLI owner for its tenant/agent/no-project scope because the generic
-  `run` path does not yet wire `[identity].default_project` into trigger create
-  scope. `serve` reconciles the env-bearer WebUI user and, when local-dev SSO is
-  enabled, existing admitted SSO users at boot plus each admitted SSO identity
-  at login. Both paths wire the same store as the fire-time access checker.
-  This local-dev access table is bootstrap authorization state only; it is not
-  the production agent/project membership source of truth and must not be used
-  to justify enabling trigger polling in a production or multi-tenant runtime.
-  Bootstrap-owned active rows no longer present in the trusted local admission
-  set are marked inactive, while manually inactive rows are not silently
-  reactivated. The seeded row is exact
+- Local-dev and hosted-single-tenant `run`/`serve` may satisfy that contract by
+  seeding active access rows from trusted operator configuration. Local-dev
+  stores those rows in the local `reborn-local-dev.db` sidecar. Hosted
+  single-tenant stores the same bootstrap records through the host filesystem
+  abstraction backed by its resolved PostgreSQL runtime storage, so access
+  survives process restarts and ephemeral local files without adding a
+  trigger-access-specific SQL table. `run` reconciles the configured CLI owner
+  for its tenant/agent/no-project scope because the generic `run` path does
+  not yet wire `[identity].default_project` into trigger create scope. `serve`
+  reconciles the env-bearer WebUI user at boot when trigger polling is enabled,
+  and SSO seeds each admitted identity at login when SSO is enabled. Both paths
+  wire the same store as the fire-time access checker. This bootstrap access
+  record set is authorization state only; it is not the general agent/project
+  membership source of truth and must not be used to justify enabling trigger
+  polling in a multi-tenant runtime. Bootstrap-owned active rows no longer
+  present in the trusted local admission set are marked inactive, while manually
+  inactive rows are not silently reactivated. The seeded row is exact
   `tenant_id`/`creator_user_id`/`agent_id`/`project_id` access; a missing
   project is not a wildcard.
 - The trusted inbound request is a host-owned synthetic inbound shape around the ordinary inbound fields. It carries only ingress identity and turn scope data needed to create the canonical turn, and it has no adapter-supplied requested-scope hints before binding resolution.
@@ -331,24 +369,35 @@ Slot bookkeeping is tied to acceptance, not merely polling:
   in that order; `active_fire_slot` is written before turn submission and
   `active_run_ref` is populated only after the accepted/replayed submit result
   returns a `TurnRunId`;
+- stale claim-only rows with `active_fire_slot` but no `active_run_ref` are
+  recovered by re-entering the same trusted submit path after a grace period.
+  The deterministic fire identity and trusted conversation binding must replay
+  any already accepted turn and backfill `active_run_ref` plus run-history
+  `thread_id`, instead of clearing the claim or minting a separate recovery
+  ledger;
 - retryable submit failures write `last_status = Error`, clear
   `active_fire_slot` and `active_run_ref`, leave `last_fired_slot` and
   `last_run_at` unchanged, and keep `next_run_at` at or before the failed
   fire_slot so the poller can retry it on the next tick;
-- permanent validation or authorization failures write `last_status = Error`,
-  clear `active_fire_slot` and `active_run_ref`, leave `last_fired_slot` and
-  `last_run_at` unchanged, and advance `next_run_at` beyond the failed
-  fire_slot;
-- permanent failures on a schedule with no future fire slot mark the trigger
+- permanent validation or authorization failures on Cron write `last_status =
+  Error`, clear `active_fire_slot` and `active_run_ref`, leave
+  `last_fired_slot` and `last_run_at` unchanged, and advance `next_run_at`
+  beyond the failed fire_slot;
+- permanent validation or authorization failures on `Once` mark the trigger
   `Completed`, write `last_status = Error`, clear active-fire fields, and leave
-  `next_run_at` at the failed fire slot. The `Completed` state, not a sentinel
-  timestamp, removes the trigger from future due queries.
+  `next_run_at` at the failed fire slot so the one-shot slot is retired. The
+  `Completed` state, not a sentinel timestamp, removes the trigger from future
+  due queries;
+- exhausted Cron permanent pre-submit failures stay `Scheduled`/retryable so
+  they remain visible for manual review and removal.
 
 Turn terminal lookup and clearing are a narrow seam layered above fire-claim
 and submit-result bookkeeping:
 
 - `ironclaw_turns::active_run_ref_state` classifies
   `active_run_ref` through `get_run_state` and `TurnStatus::is_terminal`;
+  non-terminal states, including `BlockedApproval` and `BlockedAuth`, keep the
+  active fire locked as back-pressure until the turn reaches a terminal state;
 - `ironclaw_triggers::ClearActiveFireRequest` plus
   `TriggerRepository::clear_active_fire` clears only the exact matching
   `(tenant_id, trigger_id, active_fire_slot, active_run_ref)` after the caller
@@ -359,18 +408,19 @@ errors as structured tick report outcomes so one bad record does not block other
 eligible triggers in the same tick. Batch-level repository list failures remain
 fail-fast because the worker cannot know which records were safely observed.
 
-Approval waits are owned by the normal turn pipeline. While a submitted trigger
-turn is waiting for approval, the trigger remains active through
+Approval and auth waits are owned by the normal turn pipeline. While a submitted
+trigger turn is waiting for human interaction, the trigger remains active through
 `active_run_ref` back-pressure. Later lifecycle/notification work must define
-durable approval expiry, stale approval rejection, reminder throttling, and
-user/admin notification paths without making the trigger poller deliver outbound
-messages directly.
+durable gate expiry, stale gate rejection, reminder throttling, and user/admin
+notification paths without making the trigger poller deliver outbound messages
+directly.
 
 ---
 
 ## 8. Capability surface
 
-The trigger system must expose `trigger_create`, `trigger_list`, and `trigger_remove` as first-party Reborn capabilities.
+The trigger system must expose `trigger_create`, `trigger_list`, `trigger_remove`,
+`trigger_pause`, and `trigger_resume` as first-party Reborn capabilities.
 
 - `trigger_create` validates the schedule and timezone, captures caller scope,
   pairs the caller as the host-trusted synthetic trigger actor used by the
@@ -393,10 +443,22 @@ The trigger system must expose `trigger_create`, `trigger_list`, and `trigger_re
   defaults to 25 recent runs per trigger; callers that do not need embedded run
   history pass `run_limit = 0`.
 - `trigger_remove` is caller-scoped delete.
+- `trigger_pause` and `trigger_resume` are caller-scoped state transitions
+  (`Scheduled` <-> `Paused`); the poller does not fire a paused trigger.
 - Local-dev builds compiled with `libsql` store trigger records in the
   local-dev libSQL database (`reborn-local-dev.db`) through the same
   `TriggerRepository` contract used by production libSQL. Local-dev builds
   without `libsql` keep the existing in-memory repository behavior.
+- A scheduled-trigger fire resolves a dedicated `scheduled_trigger` run
+  profile, not the interactive default. That profile's capability surface
+  denies `trigger_create`, `trigger_remove`, `trigger_pause`, and
+  `trigger_resume` via a host-level per-surface-profile deny decorator
+  (`PerSurfaceCapabilityDenyDecorator` in `ironclaw_loop_host`, composed in
+  `ironclaw_runner::runtime`). Read-only `trigger_list` remains visible and
+  callable during a fire, so a routine can still inspect triggers. This
+  prevents a fired trigger's own run from creating or mutating the trigger
+  fleet — a malformed or self-referential routine prompt could otherwise
+  cause a fire to re-invoke `trigger_create` and spawn more triggers.
 
 Exact wiring of the capability registry and handler dependencies may land in later implementation PRs, but the capability names and semantics are frozen here.
 
@@ -417,7 +479,16 @@ Capability follow-ups before launch:
 
 ## 9. Delivery
 
-Trigger delivery is fast-follow.
+Trigger delivery target selection is outside trigger identity and goes through
+the outbound delivery track. Product-facing outbound preference APIs and
+explicit provider-backed target tooling own discovery and approval-gated
+selection. Local-dev Reborn exposes model-visible outbound target
+discovery/selection capabilities that write the caller's final-reply
+preference. When a user asks to send routine or trigger results through a
+delivery product/channel, model-visible trigger surfaces must steer the model to
+discover and select an outbound delivery target before calling
+`trigger_create`; durable selection remains product-owned and trigger records
+still do not embed delivery targets.
 
 - Trigger ingress identity must not include delivery targets.
 - Trigger record identity must not include delivery targets.
@@ -447,3 +518,55 @@ V1 acceptance does not require external delivery. A valid V1 trigger fire is one
   trigger and slot.
 - Unit tests must prove trigger fire identity derivation is collision-safe for
   delimiter-like or prefix-overlapping component values.
+- Caller-level tests must prove `active_hold` (§11) is present on both
+  `list_automations` and `trigger_list` while a fire is gate-parked, and absent
+  once the fire reaches a terminal outcome — already covered by
+  `tests/integration/group_triggers/scenario_triggered_gate_hold_visible.rs`.
+
+---
+
+## 11. Active-hold read-time projection (#5886)
+
+`active_hold` is a **derived, non-persisted, read-time-only** projection
+surfaced by product read paths. It adds nothing to `TriggerRunHistoryStatus`,
+`TriggerRunStatus`, or any other persisted status enum, and it does not change
+poller behavior: the poller still skips a due fire while a previous fire is
+active (§5) and never delivers outbound messages itself. This is a
+read-surface addition only — it does not relax the §7 constraint that
+`ApprovalBlocked`/`TimedOut` must not enter the V1 persisted status model, and
+it does not relax the §7/§9 constraint that later lifecycle/notification work
+must define notification paths without making the trigger poller deliver
+outbound messages directly.
+
+- `active_hold` appears on both `RebornAutomationProductFacade::list_automations`
+  (WebUI automations panel) and the model-visible `trigger_list` capability
+  (§8). Both surfaces use the same reason vocabulary because both compute it
+  through the same shared `ironclaw_triggers::worker::ports` derivation
+  (`active_hold_projection` / `active_holds_for_records`); the two read paths
+  cannot drift from each other.
+- Reason vocabulary (`RebornAutomationHoldReason` / `ActiveHoldReason`):
+  - `approval` — the held run is parked on an approval gate.
+  - `auth` — the held run is parked on an auth gate.
+  - `in_progress` — the previous run is still executing and is not gate-parked.
+  - `other` — any other blocked/held state, including the window between
+    `claim_due_fire` and `mark_fire_accepted` where `active_fire_slot` is set
+    but `active_run_ref` is not yet populated.
+- `since` is the held fire's claimed slot timestamp (`TriggerRecord.active_fire_slot`);
+  may be absent.
+- `elapsed_occurrences` is the count of scheduled occurrences that have
+  elapsed since `since`, computed from the schedule between `since` and now,
+  capped at `ACTIVE_HOLD_ELAPSED_OCCURRENCES_CAP` (99). At the cap,
+  `elapsed_occurrences_capped = true` signals truncation — the value must
+  never be presented as an exact count above the cap. This is **not** a count
+  of runs the poller attempted or skipped: it is derived purely from
+  wall-clock cron slots, so it keeps accruing while the trigger is paused or
+  whenever the poller isn't running at all.
+- Omission rule: `active_hold` is absent entirely when the active run resolves
+  to `Terminal` or `Missing` (nothing to report), or when the active-run
+  lookup itself fails or times out. A schedule-slot derivation failure
+  (malformed persisted schedule) does **not** omit the hold — it degrades
+  only `elapsed_occurrences` to absent (with `elapsed_occurrences_capped =
+  false`) while the hold itself, including `reason` and `since`, is still
+  returned. This is a display-only projection and must never fail the read;
+  any lookup or derivation problem degrades gracefully rather than
+  surfacing an error.

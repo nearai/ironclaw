@@ -459,8 +459,9 @@ fn redact_exchange_response(resp: &mut HttpExchangeResponse) {
 
 /// Replays recorded HTTP exchanges during test runs.
 ///
-/// Returns responses in order. If more requests arrive than recorded
-/// exchanges, returns a 599 error response.
+/// Matches by method + redacted URL + redacted body, using fixture order as a
+/// tiebreaker when multiple exchanges have the same request key. If no
+/// matching exchange remains, returns a 599 error response.
 #[derive(Debug)]
 pub struct ReplayingHttpInterceptor {
     exchanges: Mutex<VecDeque<HttpExchange>>,
@@ -474,37 +475,44 @@ impl ReplayingHttpInterceptor {
     }
 }
 
+fn http_replay_request_matches(
+    recorded: &HttpExchangeRequest,
+    incoming: &HttpExchangeRequest,
+) -> bool {
+    let incoming_body = incoming.body.as_deref().map(redact_body);
+    recorded.method == incoming.method
+        && recorded.url == redact_url(&incoming.url)
+        && recorded.body == incoming_body
+}
+
 #[async_trait]
 impl HttpInterceptor for ReplayingHttpInterceptor {
     async fn before_request(&self, request: &HttpExchangeRequest) -> Option<HttpExchangeResponse> {
         let mut queue = self.exchanges.lock().await;
-        if let Some(exchange) = queue.pop_front() {
-            // Soft-check: warn if the request doesn't match. Redact the
-            // incoming URL the same way stored URLs are redacted so
-            // sensitive query params don't cause false mismatches.
-            let redacted_incoming_url = redact_url(&request.url);
-            if exchange.request.url != redacted_incoming_url
-                || exchange.request.method != request.method
-            {
-                tracing::warn!(
-                    expected_url = %exchange.request.url,
-                    actual_url = %redacted_incoming_url,
-                    expected_method = %exchange.request.method,
-                    actual_method = %request.method,
-                    "HTTP replay: request mismatch (returning recorded response anyway)"
-                );
+        if let Some(position) = queue
+            .iter()
+            .position(|exchange| http_replay_request_matches(&exchange.request, request))
+        {
+            match queue.remove(position) {
+                Some(exchange) => Some(exchange.response),
+                None => Some(HttpExchangeResponse {
+                    status: 599,
+                    headers: Vec::new(),
+                    body: "trace replay: matched HTTP exchange disappeared".to_string(),
+                }),
             }
-            Some(exchange.response)
         } else {
+            let redacted_incoming_url = redact_url(&request.url);
             tracing::error!(
-                url = %request.url,
+                url = %redacted_incoming_url,
                 method = %request.method,
-                "HTTP replay: no more recorded exchanges, returning error"
+                remaining = queue.len(),
+                "HTTP replay: no matching recorded exchange, returning error"
             );
             Some(HttpExchangeResponse {
                 status: 599,
                 headers: Vec::new(),
-                body: "trace replay: no more recorded HTTP exchanges".to_string(),
+                body: "trace replay: no matching recorded HTTP exchange".to_string(),
             })
         }
     }
@@ -1518,6 +1526,99 @@ mod tests {
         // Second request: no more exchanges → 599
         let resp = interceptor.before_request(&req).await.unwrap();
         assert_eq!(resp.status, 599);
+    }
+
+    #[tokio::test]
+    async fn replaying_http_interceptor_matches_requests_by_key_not_order() {
+        let exchanges = vec![
+            HttpExchange {
+                request: HttpExchangeRequest {
+                    method: "GET".to_string(),
+                    url: "https://api.example.com/first".to_string(),
+                    headers: Vec::new(),
+                    body: None,
+                },
+                response: HttpExchangeResponse {
+                    status: 201,
+                    headers: Vec::new(),
+                    body: "first".to_string(),
+                },
+            },
+            HttpExchange {
+                request: HttpExchangeRequest {
+                    method: "POST".to_string(),
+                    url: "https://api.example.com/second".to_string(),
+                    headers: Vec::new(),
+                    body: Some(r#"{"query":"near"}"#.to_string()),
+                },
+                response: HttpExchangeResponse {
+                    status: 202,
+                    headers: Vec::new(),
+                    body: "second".to_string(),
+                },
+            },
+        ];
+        let interceptor = ReplayingHttpInterceptor::new(exchanges);
+
+        let second_req = HttpExchangeRequest {
+            method: "POST".to_string(),
+            url: "https://api.example.com/second".to_string(),
+            headers: Vec::new(),
+            body: Some(r#"{"query":"near"}"#.to_string()),
+        };
+        let second = interceptor.before_request(&second_req).await.unwrap();
+        assert_eq!(second.status, 202);
+        assert_eq!(second.body, "second");
+
+        let first_req = HttpExchangeRequest {
+            method: "GET".to_string(),
+            url: "https://api.example.com/first".to_string(),
+            headers: Vec::new(),
+            body: None,
+        };
+        let first = interceptor.before_request(&first_req).await.unwrap();
+        assert_eq!(first.status, 201);
+        assert_eq!(first.body, "first");
+    }
+
+    #[tokio::test]
+    async fn replaying_http_interceptor_rejects_unmatched_request() {
+        let exchanges = vec![HttpExchange {
+            request: HttpExchangeRequest {
+                method: "GET".to_string(),
+                url: "https://api.example.com/recorded".to_string(),
+                headers: Vec::new(),
+                body: None,
+            },
+            response: HttpExchangeResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: "recorded".to_string(),
+            },
+        }];
+        let interceptor = ReplayingHttpInterceptor::new(exchanges);
+
+        let wrong_req = HttpExchangeRequest {
+            method: "GET".to_string(),
+            url: "https://api.example.com/other".to_string(),
+            headers: Vec::new(),
+            body: None,
+        };
+        let wrong = interceptor.before_request(&wrong_req).await.unwrap();
+        assert_eq!(wrong.status, 599);
+        assert!(wrong.body.contains("no matching recorded HTTP exchange"));
+
+        let recorded_req = HttpExchangeRequest {
+            method: "GET".to_string(),
+            url: "https://api.example.com/recorded".to_string(),
+            headers: Vec::new(),
+            body: None,
+        };
+        let recorded = interceptor.before_request(&recorded_req).await.unwrap();
+        assert_eq!(
+            recorded.status, 200,
+            "an unmatched request must not consume the recorded exchange"
+        );
     }
 
     #[test]

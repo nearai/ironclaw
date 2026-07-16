@@ -1,11 +1,11 @@
 use super::{
     AgentLoopExecutor, AgentLoopExecutorError, AgentLoopHostError, AgentLoopHostErrorKind,
     CanonicalAgentLoopExecutor, CapabilityFailureKind, CapabilityOutcome, CapabilityResultMessage,
-    CheckpointKind, LoopCancelReasonKind, LoopCancelledReasonKind, LoopCheckpointKind,
+    CheckpointKind, HostStage, LoopCancelReasonKind, LoopCancelledReasonKind, LoopCheckpointKind,
     LoopExecutionState, LoopExit, LoopGateRef, LoopInput, LoopInputAckToken, LoopInputBatch,
-    LoopInputCursor, LoopInterruptKind, LoopResultRef, LoopRunInfoPort, MockHost, calls_response,
-    family_with_drain, final_staged_state, input_ack, input_cursor, message_ref, reply_response,
-    surface_version,
+    LoopInputCursor, LoopInterruptKind, LoopResultRef, LoopRunInfoPort, LoopSafeSummary, MockHost,
+    calls_response, family_with_drain, final_staged_state, input_ack, input_cursor, message_ref,
+    reply_response, surface_version,
 };
 
 #[tokio::test]
@@ -375,6 +375,51 @@ async fn cancellation_after_pending_input_ack_strict_profile_propagates_checkpoi
 }
 
 #[tokio::test]
+async fn cancellation_after_pending_input_ack_permissive_profile_propagates_checkpoint_unavailable()
+{
+    let host = MockHost::new(vec![reply_response()]);
+    let run_context = host.run_context().clone();
+    let next_cursor = input_cursor(&run_context, "input-cursor:after-user-before-cancel");
+    let host = host
+        .with_input_batches(vec![LoopInputBatch {
+            inputs: vec![LoopInput::UserMessage {
+                message_ref: message_ref("msg:user-drained-before-cancel"),
+            }],
+            input_acks: vec![input_ack(
+                &run_context,
+                "input-cursor:after-user-before-cancel",
+                "input-ack:after-user-before-cancel",
+            )],
+            next_cursor,
+        }])
+        .cancel_after_poll_inputs()
+        .with_require_final_checkpoint(false)
+        .fail_checkpoint_payload(
+            LoopCheckpointKind::Final,
+            AgentLoopHostErrorKind::Unavailable,
+        );
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let err = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect_err("expected checkpoint staging unavailability to propagate");
+
+    assert_eq!(
+        err,
+        AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Checkpoint,
+            kind: AgentLoopHostErrorKind::Unavailable,
+            safe_summary: LoopSafeSummary::new("scripted checkpoint payload failure").unwrap(),
+            reason_kind: None,
+            diagnostic_ref: None,
+            detail: None,
+        }
+    );
+}
+
+#[tokio::test]
 async fn cancellation_after_followup_drain_flushes_pending_input_ack() {
     let host = MockHost::new(vec![reply_response()]);
     let run_context = host.run_context().clone();
@@ -431,6 +476,43 @@ async fn model_cancelled_returns_cancelled_without_retry() {
 
     assert!(matches!(result, Err(AgentLoopExecutorError::Cancelled)));
     assert_eq!(host.model_requests().len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancellation_during_availability_backoff_wakes_the_sleep() {
+    // Availability backoffs run up to 60s per attempt; a cancel request must
+    // wake the executor out of the backoff sleep instead of waiting it out.
+    // Under paused time a non-cancellation-aware sleep would auto-advance the
+    // clock by the full first backoff (1s), so the elapsed-time assertion
+    // pins the select-over-cancellation behavior.
+    let host = MockHost::new(Vec::new()).with_model_errors(vec![AgentLoopHostError::new(
+        AgentLoopHostErrorKind::Unavailable,
+        "model unavailable",
+    )]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+    let started = tokio::time::Instant::now();
+
+    let family = crate::families::default();
+    let run = executor.execute_family(&family, &host, state);
+    let cancel = async {
+        // Fires while the executor is inside the 1s availability backoff.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        host.request_cancellation(LoopCancelReasonKind::UserRequested);
+    };
+    let (exit, ()) = tokio::join!(run, cancel);
+
+    assert!(matches!(exit.expect("execute"), LoopExit::Cancelled(_)));
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(1_000),
+        "cancellation must interrupt the backoff sleep, waited {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "no further model call after cancellation during backoff"
+    );
 }
 
 #[tokio::test]
@@ -595,6 +677,8 @@ async fn cancellation_after_capability_batch_preserves_completed_result() {
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: true,
                 byte_len: 0,
+                output_digest: None,
+                model_observation: None,
             })],
             stopped_on_suspension: false,
         }])
@@ -629,6 +713,37 @@ async fn cancellation_checkpoint_failure_still_cancels_for_permissive_profile() 
         other => panic!("expected cancelled, got {other:?}"),
     }
     assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
+}
+
+#[tokio::test]
+async fn cancellation_checkpoint_payload_unavailable_propagates_for_permissive_profile() {
+    let host = MockHost::new(vec![reply_response()])
+        .with_require_final_checkpoint(false)
+        .fail_checkpoint_payload(
+            LoopCheckpointKind::Final,
+            AgentLoopHostErrorKind::Unavailable,
+        );
+    host.request_cancellation(LoopCancelReasonKind::UserRequested);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let err = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect_err("expected checkpoint staging unavailability to propagate");
+
+    assert_eq!(
+        err,
+        AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Checkpoint,
+            kind: AgentLoopHostErrorKind::Unavailable,
+            safe_summary: LoopSafeSummary::new("scripted checkpoint payload failure").unwrap(),
+            reason_kind: None,
+            diagnostic_ref: None,
+            detail: None,
+        }
+    );
+    assert!(host.checkpoint_kinds().is_empty());
 }
 
 #[tokio::test]

@@ -9,8 +9,10 @@ mod capabilities;
 mod capability_helpers;
 mod checkpoint;
 mod exit_helpers;
+mod failure_explanation;
 mod gates;
 mod input;
+mod latency;
 mod loop_exit;
 mod mapping;
 mod model;
@@ -26,28 +28,34 @@ use capabilities::{CapabilityInput, CapabilityStage};
 use capability_helpers::{
     CapabilitySurfaceIndex, append_capability_error_ref, append_capability_result_ref,
     append_capability_safe_summary_ref, apply_capability_filter, capability_call_signature,
-    capability_invocation_from_candidate, capability_is_visible, capability_summary,
-    clear_matching_pending_auth_resume, gate_tool_result_summary,
+    capability_invocation_from_auth_resume_candidate, capability_invocation_from_candidate,
+    capability_is_visible, capability_summary, clear_matching_pending_auth_resume,
+    clear_matching_pending_external_tool_resume, gate_tool_result_summary,
     model_visible_capability_failure_observation, pending_approval_resume_candidate,
-    pending_auth_resume_candidate, push_call_signature_once, push_completed_result,
+    pending_auth_resume_candidate, pending_external_tool_resume_candidate,
+    push_call_signature_once, push_completed_result,
 };
 #[cfg(test)]
 use capability_helpers::{sanitize_result_ref_suffix, synthetic_provider_error_result_ref};
 use checkpoint::{CheckpointInput, CheckpointStage};
 use exit_helpers::{
-    cancelled_exit, cancelled_exit_with_reason, cancelled_reason_from_signal, completed_exit,
-    exit_id, failed_exit,
+    FailedExitDetails, cancelled_exit, cancelled_exit_with_reason, cancelled_reason_from_signal,
+    completed_exit, exit_id, failed_exit,
 };
+use failure_explanation::attach_failure_explanation;
 use gates::{AwaitDependentRunGateInput, AwaitDependentRunGateStage, GateInput, GateStage};
 #[cfg(test)]
 use input::consume_drainable_inputs;
 use input::{DrainInput, InputStage, InputStep, UserFacingInputDrainMode};
-use loop_exit::{ExitInput, ExitStage};
+use loop_exit::{
+    COMPLETION_NUDGE_LIMIT, ExitInput, ExitStage, completion_nudge_control_message,
+    reply_trailed_off,
+};
 use mapping::{
     batch_policy_kind, blocked_kind, capability_batch_counts, capability_error_class,
-    capability_failure_kind, capability_host_error, checkpoint_kind_to_host,
-    honor_retry_alteration, loop_gate_kind, model_error_class, model_preference_to_host,
-    sanitized_strategy_summary,
+    capability_error_failure_category, capability_failure_kind, capability_host_error,
+    checkpoint_kind_to_host, honor_retry_alteration, loop_gate_kind, model_error_class,
+    model_error_failure_summary, model_preference_to_host, sanitized_strategy_summary,
 };
 use model::{ModelInput, ModelStage, ModelStep};
 use pipeline::{DefaultExecutorPipeline, ExecutorStage, StageContext};
@@ -68,11 +76,10 @@ use ironclaw_turns::{
 use crate::{
     family::LoopFamily,
     state::{CheckpointKind, LoopExecutionState},
-    strategies::TurnSummary,
+    strategies::{StopKind, TurnSummary},
 };
 
 const MAX_CAPABILITY_RETRIES: usize = 8;
-const MAX_MODEL_RETRIES: usize = 8;
 const MAX_INPUT_DRAIN: usize = 32;
 
 /// Drives the canonical loop tick by consulting a resolved [`LoopFamily`].
@@ -104,6 +111,10 @@ pub enum AgentLoopExecutorError {
         safe_summary: LoopSafeSummary,
         reason_kind: Option<AgentLoopHostErrorReasonKind>,
         diagnostic_ref: Option<LoopDiagnosticRef>,
+        /// Secret-scrubbed model-visible raw cause carried from the host error
+        /// so the runner/explainer can surface the real fault instead of a
+        /// generic category. See [`AgentLoopHostError::detail`].
+        detail: Option<String>,
     },
     #[error("planner returned a contract violation: {detail}")]
     PlannerContract { detail: &'static str },
@@ -186,6 +197,15 @@ enum TurnCompletedStep {
         summary: TurnSummary,
     },
     Exit(LoopExit),
+}
+
+impl TurnCompletedStep {
+    fn iteration_or(&self, fallback: u32) -> u32 {
+        match self {
+            Self::Continue { state, .. } => state.iteration,
+            Self::Exit(_) => fallback,
+        }
+    }
 }
 
 #[derive(Debug, Default)]

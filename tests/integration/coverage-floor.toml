@@ -1,0 +1,72 @@
+# Reborn integration-tier coverage ratchet floor. Read by
+# scripts/ci/reborn-coverage-ratchet.sh inside coverage-report
+# (.github/workflows/reborn-tests.yml). Pure post-processing over the merged,
+# exemption-filtered lcov + this file — never re-runs tests, never triggers a
+# second CI pass.
+#
+# Schema:
+#
+#   [global]
+#   enforce = true|false      # false = dry-run: script always exits 0 for ratchet/threshold
+#                              # violations, but still prints every violation, prefixed
+#                              # "[dry-run, would FAIL]". Structural schema errors (missing
+#                              # required fields, a crate double-listed as both floored and
+#                              # whole-crate-exempted, duplicate [[crate]] names, a missing
+#                              # floor-toml file) always exit 1 regardless of this flag — those
+#                              # are manifest bugs, not coverage regressions. Flip to true only
+#                              # once the current baseline below is trusted (see captured_from).
+#   floor_percent = 41.9       # aggregate line-% floor, post-exemption — same number as the
+#                              # "Line coverage (Reborn crates): NN%" summary line.
+#   tolerance_percent = 0.5    # observed must be >= floor_percent - tolerance_percent.
+#                              # PROVISIONAL: a qualitative estimate (a handful of DA: hit
+#                              # counts flipping 0/1 across the lane+bucket split under timing),
+#                              # not a measured wobble histogram. Revisit against the dry-run
+#                              # soak period's actual runs when flipping enforce = true.
+#   captured_total_lines = 812345   # informational: flags "denominator changed materially"
+#                                    # in gate output, never itself gates.
+#   captured_date = "2026-07-06"
+#   captured_from = "<main commit sha this baseline was captured from>"
+#
+#   # Per-crate opt-in floors — a crate absent from this file is NEVER gated.
+#   # Add an entry only when you deliberately want to protect/ratchet a crate.
+#   # At least one of floor_percent / floor_covered_lines is required.
+#   # A crate may not appear here AND as a whole-crate `coverage-exemptions.toml`
+#   # entry (conflict — the script rejects this at parse time).
+#   [[crate]]
+#   name = "ironclaw_reborn_composition"
+#   floor_percent = 38.0             # optional
+#   floor_covered_lines = 4200       # optional — immune to denominator growth
+#   tolerance_percent = 0.5          # optional, overrides [global].tolerance_percent
+#   tolerance_lines = 20             # optional, default 20 if floor_covered_lines set
+#   captured_total_lines = 11234
+#   captured_date = "2026-07-06"
+#   rationale = "one-line why this crate is ratcheted and what it protects"
+#   issue = "https://github.com/nearai/ironclaw/issues/NNNN"
+#
+# Same-PR floor-raise workflow (both directions): a PR that materially
+# changes a gated crate's (or the global) denominator — growth (a
+# new/renamed module entering instrumentation, e.g. #5656's ~42k-line
+# slack-v2-host-beta addition) OR shrinkage (a legitimate code+test
+# deletion lowering covered lines, even when the denominator barely moves)
+# — updates captured_total_lines and floor_percent/floor_covered_lines for
+# the affected entry in the SAME PR, with captured_date bumped and a
+# one-line rationale (+ issue link for [[crate]] entries). This is the
+# deny.toml exception-add pattern, applied to coverage floors.
+
+[global]
+enforce = true
+# Recaptured from the first green main coverage-report run AFTER #5656 merged
+# (slack-v2-host-beta onto the int-tier lane): run 28817755166 at 28da8bd13,
+# aggregate 273132 / 320188 = 85.30%. Denominator moved only +246 lines vs the
+# prior 073cc3d6b capture — the slack-v2-host-beta sources already lived in
+# ironclaw_reborn_composition's counted set; #5656 mostly added numerator via
+# the new pairing suites. See nearai/ironclaw#5638 / #5718.
+floor_percent = 85.3
+tolerance_percent = 0.5
+captured_total_lines = 320188
+captured_date = "2026-07-06"
+captured_from = "28da8bd13"
+
+# No [[crate]] entries at initial landing — opt-in, added as owners choose to
+# ratchet a crate they care about (e.g. ironclaw_reborn_composition,
+# ironclaw_product_workflow) as a fast-follow, not blocking this landing.

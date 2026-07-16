@@ -84,7 +84,17 @@ def install_playwright(python: Path, mode: str) -> None:
     if resolved == "with-deps":
         cmd.append("--with-deps")
     cmd.append("chromium")
-    run(cmd, cwd=E2E_DIR)
+    try:
+        run(cmd, cwd=E2E_DIR)
+    except subprocess.CalledProcessError:
+        if resolved != "with-deps":
+            raise
+        print(
+            "[live-canary] playwright install --with-deps failed; "
+            "retrying browser-only install",
+            flush=True,
+        )
+        run([str(python), "-m", "playwright", "install", "chromium"], cwd=E2E_DIR)
 
 
 def cargo_build() -> None:
@@ -329,7 +339,18 @@ def build_gateway_env(
     # probe to notice was tool_install_chat in PR #3682 — chat-driven
     # tool dispatches parked on an approval gate instead of
     # auto-approving and never reached `installed=true`.
-    for var in ("ALLOW_LOCAL_TOOLS", "AGENT_AUTO_APPROVE_TOOLS"):
+    #
+    # REBORN_TOOL_DISCLOSURE / REBORN_COLLAPSE_REPEATED_FAILURES are the two
+    # default-off reborn context-management flags. They are forwarded only so a
+    # canary lane can exercise the flag-ON path by setting them at the job level;
+    # unset (the default) they never reach the gateway, so the canary's default
+    # run stays byte-identical to production.
+    for var in (
+        "ALLOW_LOCAL_TOOLS",
+        "AGENT_AUTO_APPROVE_TOOLS",
+        "REBORN_TOOL_DISCLOSURE",
+        "REBORN_COLLAPSE_REPEATED_FAILURES",
+    ):
         value = os.environ.get(var)
         if value:
             env[var] = value

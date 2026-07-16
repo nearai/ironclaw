@@ -1,5 +1,299 @@
 use crate::common::*;
 
+async fn completed_oauth_flow_with_continuation(
+    services: &InMemoryAuthProductServices,
+    owner: &AuthProductScope,
+    continuation: AuthContinuationRef,
+) -> ironclaw_auth::AuthFlowRecord {
+    let flow = services
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: owner.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: provider(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: authorization_url("https://provider.example/oauth"),
+                expires_at: Utc::now() + Duration::minutes(5),
+            },
+            continuation,
+            update_binding: None,
+            opaque_state_hash: Some(state_hash("state-hash")),
+            pkce_verifier_hash: Some(pkce_hash("pkce-hash")),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .expect("OAuth flow");
+
+    services
+        .complete_oauth_callback(
+            owner,
+            OAuthCallbackInput {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash("state-hash"),
+                outcome: ProviderCallbackOutcome::Authorized {
+                    exchange: Box::new(OAuthProviderExchange {
+                        provider: provider(),
+                        account_label: label("work github"),
+                        authorization_code_hash: code_hash("code-hash"),
+                        pkce_verifier_hash: pkce_hash("pkce-hash"),
+                        access_secret: SecretHandle::new(format!("github-access-{}", flow.id))
+                            .expect("access handle"),
+                        refresh_secret: None,
+                        scopes: Vec::new(),
+                        account_id: None,
+                        provider_identity: None,
+                    }),
+                },
+            },
+        )
+        .await
+        .expect("OAuth completion")
+}
+
+#[tokio::test]
+async fn continuation_side_effect_failure_terminalizes_only_the_expected_completion() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let flow = oauth_flow(&services, owner.clone()).await;
+    let completed = services
+        .complete_oauth_callback(
+            &owner,
+            OAuthCallbackInput {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash("state-hash"),
+                outcome: ProviderCallbackOutcome::Authorized {
+                    exchange: Box::new(OAuthProviderExchange {
+                        provider: provider(),
+                        account_label: label("work github"),
+                        authorization_code_hash: code_hash("code-hash"),
+                        pkce_verifier_hash: pkce_hash("pkce-hash"),
+                        access_secret: SecretHandle::new("github-access").unwrap(),
+                        refresh_secret: None,
+                        scopes: Vec::new(),
+                        account_id: None,
+                        provider_identity: None,
+                    }),
+                },
+            },
+        )
+        .await
+        .expect("OAuth completion");
+
+    let claimed = services
+        .claim_continuation_dispatch(
+            &owner,
+            ironclaw_auth::AuthContinuationDispatchClaimInput {
+                flow_id: completed.id,
+                claimed_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("continuation claim");
+    let failed = services
+        .settle_continuation_dispatch(
+            &owner,
+            ironclaw_auth::AuthContinuationDispatchSettlementInput {
+                flow_id: completed.id,
+                expected_claimed_at: claimed.updated_at,
+                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
+                    error: AuthErrorCode::BackendUnavailable,
+                },
+            },
+        )
+        .await
+        .expect("terminal continuation failure");
+    assert_eq!(failed.status, AuthFlowStatus::Failed);
+    assert_eq!(failed.error, Some(AuthErrorCode::BackendUnavailable));
+    assert!(failed.continuation_emitted_at.is_none());
+
+    let stale = services
+        .settle_continuation_dispatch(
+            &owner,
+            ironclaw_auth::AuthContinuationDispatchSettlementInput {
+                flow_id: completed.id,
+                expected_claimed_at: claimed.updated_at,
+                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
+                    error: AuthErrorCode::BackendUnavailable,
+                },
+            },
+        )
+        .await
+        .expect_err("stale failure cannot overwrite terminal state");
+    assert_eq!(stale, AuthProductError::FlowAlreadyTerminal);
+}
+
+#[tokio::test]
+async fn concurrent_continuation_dispatch_claims_have_exactly_one_active_owner() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let completed = completed_oauth_flow_with_continuation(
+        &services,
+        &owner,
+        AuthContinuationRef::LifecycleActivation {
+            package_ref: LifecyclePackageRef::new("github-extension").expect("valid package"),
+        },
+    )
+    .await;
+    let first_claimed_at = Utc::now();
+    let second_claimed_at = first_claimed_at + Duration::milliseconds(1);
+
+    let (first, second) = tokio::join!(
+        services.claim_continuation_dispatch(
+            &owner,
+            ironclaw_auth::AuthContinuationDispatchClaimInput {
+                flow_id: completed.id,
+                claimed_at: first_claimed_at,
+            },
+        ),
+        services.claim_continuation_dispatch(
+            &owner,
+            ironclaw_auth::AuthContinuationDispatchClaimInput {
+                flow_id: completed.id,
+                claimed_at: second_claimed_at,
+            },
+        )
+    );
+
+    let (winner, loser_claimed_at, loser_error) = match (first, second) {
+        (Ok(winner), Err(error)) => (winner, second_claimed_at, error),
+        (Err(error), Ok(winner)) => (winner, first_claimed_at, error),
+        (first, second) => panic!(
+            "exactly one concurrent claim must own dispatch; first={first:?}, second={second:?}"
+        ),
+    };
+    assert_eq!(loser_error, AuthProductError::BackendUnavailable);
+    assert_eq!(winner.status, AuthFlowStatus::Completing);
+
+    let stale_loser = services
+        .settle_continuation_dispatch(
+            &owner,
+            ironclaw_auth::AuthContinuationDispatchSettlementInput {
+                flow_id: completed.id,
+                expected_claimed_at: loser_claimed_at,
+                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::Dispatched {
+                    emitted_at: winner.updated_at + Duration::milliseconds(1),
+                },
+            },
+        )
+        .await
+        .expect_err("a blocked claimant cannot settle another owner's claim");
+    assert_eq!(stale_loser, AuthProductError::FlowAlreadyTerminal);
+
+    let settled = services
+        .settle_continuation_dispatch(
+            &owner,
+            ironclaw_auth::AuthContinuationDispatchSettlementInput {
+                flow_id: completed.id,
+                expected_claimed_at: winner.updated_at,
+                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::Dispatched {
+                    emitted_at: winner.updated_at + Duration::milliseconds(1),
+                },
+            },
+        )
+        .await
+        .expect("the active claim owner settles dispatch");
+    assert_eq!(settled.status, AuthFlowStatus::Completed);
+    assert!(settled.continuation_emitted_at.is_some());
+}
+
+#[tokio::test]
+async fn stale_continuation_dispatch_claim_can_be_reclaimed_and_fences_old_owner() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let completed = completed_oauth_flow_with_continuation(
+        &services,
+        &owner,
+        AuthContinuationRef::LifecycleActivation {
+            package_ref: LifecyclePackageRef::new("github-extension").expect("valid package"),
+        },
+    )
+    .await;
+    let first = services
+        .claim_continuation_dispatch(
+            &owner,
+            ironclaw_auth::AuthContinuationDispatchClaimInput {
+                flow_id: completed.id,
+                claimed_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("first continuation claim");
+    let reclaimed_at = first.updated_at
+        + Duration::seconds(ironclaw_auth::AUTH_CONTINUATION_DISPATCH_LEASE_SECONDS);
+    let reclaimed = services
+        .claim_continuation_dispatch(
+            &owner,
+            ironclaw_auth::AuthContinuationDispatchClaimInput {
+                flow_id: completed.id,
+                claimed_at: reclaimed_at,
+            },
+        )
+        .await
+        .expect("stale continuation claim is reclaimable");
+    assert_eq!(reclaimed.status, AuthFlowStatus::Completing);
+    assert_eq!(reclaimed.updated_at, reclaimed_at);
+
+    let stale_settlement = services
+        .settle_continuation_dispatch(
+            &owner,
+            ironclaw_auth::AuthContinuationDispatchSettlementInput {
+                flow_id: completed.id,
+                expected_claimed_at: first.updated_at,
+                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::Dispatched {
+                    emitted_at: reclaimed_at + Duration::milliseconds(1),
+                },
+            },
+        )
+        .await
+        .expect_err("the reclaimed lease fences the old owner");
+    assert_eq!(stale_settlement, AuthProductError::FlowAlreadyTerminal);
+
+    let settled = services
+        .settle_continuation_dispatch(
+            &owner,
+            ironclaw_auth::AuthContinuationDispatchSettlementInput {
+                flow_id: completed.id,
+                expected_claimed_at: reclaimed.updated_at,
+                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::Dispatched {
+                    emitted_at: reclaimed_at + Duration::milliseconds(1),
+                },
+            },
+        )
+        .await
+        .expect("reclaiming owner settles dispatch");
+    assert_eq!(settled.status, AuthFlowStatus::Completed);
+}
+
+#[tokio::test]
+async fn non_lifecycle_continuation_dispatch_claim_is_rejected_without_mutation() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let completed =
+        completed_oauth_flow_with_continuation(&services, &owner, AuthContinuationRef::SetupOnly)
+            .await;
+
+    let error = services
+        .claim_continuation_dispatch(
+            &owner,
+            ironclaw_auth::AuthContinuationDispatchClaimInput {
+                flow_id: completed.id,
+                claimed_at: Utc::now(),
+            },
+        )
+        .await
+        .expect_err("only lifecycle activation may claim exclusive dispatch");
+    assert_eq!(error, AuthProductError::FlowAlreadyTerminal);
+
+    let persisted = services
+        .get_flow(&owner, completed.id)
+        .await
+        .expect("flow lookup")
+        .expect("completed flow remains");
+    assert_eq!(persisted.status, AuthFlowStatus::Completed);
+    assert_eq!(persisted.updated_at, completed.updated_at);
+    assert!(persisted.continuation_emitted_at.is_none());
+}
+
 #[tokio::test]
 async fn oauth_callback_exchanges_provider_code_then_completes_once() {
     let services = InMemoryAuthProductServices::new();
@@ -37,7 +331,9 @@ async fn oauth_callback_exchanges_provider_code_then_completes_once() {
             OAuthCallbackInput {
                 flow_id: flow.id,
                 opaque_state_hash: state_hash("state-hash"),
-                outcome: ProviderCallbackOutcome::Authorized { exchange },
+                outcome: ProviderCallbackOutcome::Authorized {
+                    exchange: Box::new(exchange),
+                },
             },
         )
         .await
@@ -243,7 +539,7 @@ async fn oauth_callback_updates_existing_account_from_provider_exchange() {
                 flow_id: flow.id,
                 opaque_state_hash: state_hash("state-hash"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: provider(),
                         account_label: label("renamed github"),
                         authorization_code_hash: code_hash("code-hash"),
@@ -252,7 +548,8 @@ async fn oauth_callback_updates_existing_account_from_provider_exchange() {
                         refresh_secret: Some(refresh_secret.clone()),
                         scopes: provider_scopes(&["repo", "workflow"]),
                         account_id: Some(existing.id),
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )
@@ -275,6 +572,71 @@ async fn oauth_callback_updates_existing_account_from_provider_exchange() {
     assert_eq!(updated.access_secret, Some(access_secret));
     assert_eq!(updated.refresh_secret, Some(refresh_secret));
     assert_eq!(updated.scopes, provider_scopes(&["repo", "workflow"]));
+}
+
+#[tokio::test]
+async fn oauth_callback_with_no_provider_account_id_updates_bound_account_across_thread() {
+    // Regression (#4935, fake fidelity): a provider exchange that returns NO
+    // account_id but whose flow carries an update_binding is a reconnect of the
+    // bound account, and must update it at owner granularity — exactly as the
+    // durable production callback (`update_bound_oauth_account`) does. The
+    // in-memory fake previously routed `account_id: None` straight to
+    // create-account (rejecting the binding), so tests could not exercise the
+    // production reconnect contract. This drives that path across a different
+    // thread than the account was created in.
+    let services = InMemoryAuthProductServices::new();
+    let create_scope = scope("alice");
+    let existing = services
+        .create_account(NewCredentialAccount {
+            scope: create_scope.clone(),
+            provider: provider(),
+            label: label("work github"),
+            status: CredentialAccountStatus::Expired,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("github-old-access").unwrap()),
+            refresh_secret: None,
+            scopes: provider_scopes(&["read:user"]),
+        })
+        .await
+        .expect("existing account");
+
+    let reauth_scope = reconnect_scope("alice", "thread-reauth");
+    let flow = oauth_update_flow(&services, reauth_scope.clone(), &existing).await;
+    let access_secret = SecretHandle::new("github-new-access").unwrap();
+
+    let completed = services
+        .complete_oauth_callback(
+            &reauth_scope,
+            OAuthCallbackInput {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash("state-hash"),
+                outcome: ProviderCallbackOutcome::Authorized {
+                    exchange: Box::new(OAuthProviderExchange {
+                        provider: provider(),
+                        account_label: label("renamed github"),
+                        authorization_code_hash: code_hash("code-hash"),
+                        pkce_verifier_hash: pkce_hash("pkce-hash"),
+                        access_secret: access_secret.clone(),
+                        refresh_secret: None,
+                        scopes: provider_scopes(&["repo"]),
+                        account_id: None,
+                        provider_identity: None,
+                    }),
+                },
+            },
+        )
+        .await
+        .expect("no-account-id reconnect must update the bound account, not fork");
+
+    assert_eq!(completed.credential_account_id, Some(existing.id));
+    let accounts = services
+        .list_accounts(CredentialAccountListRequest::new(create_scope, provider()).with_limit(10))
+        .await
+        .expect("list accounts");
+    assert_eq!(accounts.accounts.len(), 1);
+    assert_eq!(accounts.accounts[0].id, existing.id);
 }
 
 #[tokio::test]
@@ -318,7 +680,7 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                 flow_id: provider_mismatch_flow.id,
                 opaque_state_hash: state_hash("state-hash"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: gitlab.clone(),
                         account_label: label("gitlab"),
                         authorization_code_hash: code_hash("code-hash"),
@@ -327,7 +689,8 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                         refresh_secret: None,
                         scopes: provider_scopes(&["read_user"]),
                         account_id: None,
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )
@@ -343,7 +706,7 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                 flow_id: unbound_account_flow.id,
                 opaque_state_hash: state_hash("state-hash"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: provider(),
                         account_label: label("missing"),
                         authorization_code_hash: code_hash("code-hash"),
@@ -352,7 +715,8 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                         refresh_secret: None,
                         scopes: provider_scopes(&["repo"]),
                         account_id: Some(existing.id),
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )
@@ -368,7 +732,7 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                 flow_id: cross_scope_flow.id,
                 opaque_state_hash: state_hash("state-hash"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: provider(),
                         account_label: label("foreign"),
                         authorization_code_hash: code_hash("code-hash"),
@@ -377,7 +741,8 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                         refresh_secret: None,
                         scopes: provider_scopes(&["repo"]),
                         account_id: Some(foreign.id),
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )
@@ -393,7 +758,7 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                 flow_id: unbound_provider_mismatch_flow.id,
                 opaque_state_hash: state_hash("state-hash"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: provider(),
                         account_label: label("wrong provider account"),
                         authorization_code_hash: code_hash("code-hash"),
@@ -402,7 +767,8 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                         refresh_secret: None,
                         scopes: provider_scopes(&["repo"]),
                         account_id: Some(provider_mismatch.id),
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )
@@ -421,7 +787,7 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                 flow_id: valid_update_flow.id,
                 opaque_state_hash: state_hash("state-hash"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: provider(),
                         account_label: label("renamed github"),
                         authorization_code_hash: code_hash("code-hash"),
@@ -430,7 +796,8 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                         refresh_secret: None,
                         scopes: provider_scopes(&["repo"]),
                         account_id: Some(existing.id),
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )
@@ -572,7 +939,7 @@ async fn oauth_callback_rejects_cross_scope_stale_malformed_and_denied() {
                 flow_id: flow.id,
                 opaque_state_hash: state_hash("state-hash"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: provider(),
                         account_label: label("work github"),
                         authorization_code_hash: code_hash("code-hash"),
@@ -581,7 +948,8 @@ async fn oauth_callback_rejects_cross_scope_stale_malformed_and_denied() {
                         refresh_secret: None,
                         scopes: provider_scopes(&["repo"]),
                         account_id: None,
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )

@@ -92,17 +92,14 @@ struct SkillListConfig {
 fn build_skill_list_config(config: &RebornBootConfig) -> anyhow::Result<SkillListConfig> {
     let config_file = crate::runtime::read_config_file(config)?;
     let profile = crate::runtime::effective_profile(config, config_file.as_ref())?;
-    match profile {
-        RebornProfile::LocalDev | RebornProfile::LocalDevYolo => {}
-        RebornProfile::Production | RebornProfile::MigrationDryRun => {
-            anyhow::bail!(
-                "ironclaw-reborn skills currently supports profile=local-dev or profile=local-dev-yolo; got profile={profile}"
-            );
-        }
+    if !profile.supports_local_runtime_skill_management() {
+        anyhow::bail!(
+            "ironclaw-reborn skills currently supports profile=local-dev, profile=local-dev-yolo, profile=hosted-single-tenant, or profile=hosted-single-tenant-volume; got profile={profile}"
+        );
     }
     Ok(SkillListConfig {
         owner_id: crate::runtime::default_owner_id(config_file.as_ref()).to_string(),
-        local_dev_root: config.home().path().join("local-dev"),
+        local_dev_root: crate::runtime::local_runtime_storage_root(config, profile),
         profile,
     })
 }
@@ -110,15 +107,21 @@ fn build_skill_list_config(config: &RebornBootConfig) -> anyhow::Result<SkillLis
 fn print_skill(skill: &RebornSkillSummary, verbose: bool) {
     println!(
         "- {} ({})",
-        terminal_safe_text(&skill.name),
+        crate::render::terminal_safe_text(&skill.name),
         skill.source.as_str()
     );
     if !skill.description.is_empty() {
-        println!("  description: {}", terminal_safe_text(&skill.description));
+        println!(
+            "  description: {}",
+            crate::render::terminal_safe_text(&skill.description)
+        );
     }
     if verbose {
         if !skill.version.is_empty() {
-            println!("  version: {}", terminal_safe_text(&skill.version));
+            println!(
+                "  version: {}",
+                crate::render::terminal_safe_text(&skill.version)
+            );
         }
         print_list_field("keywords", &skill.keywords);
         print_list_field("tags", &skill.tags);
@@ -132,22 +135,12 @@ fn print_list_field(label: &str, values: &[String]) {
     }
     let safe_values = values
         .iter()
-        .map(|value| terminal_safe_text(value))
+        .map(|value| crate::render::terminal_safe_text(value))
         .filter(|value| !value.is_empty())
         .collect::<Vec<_>>();
     if !safe_values.is_empty() {
         println!("  {label}: {}", safe_values.join(", "));
     }
-}
-
-fn terminal_safe_text(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| if ch.is_control() { ' ' } else { ch })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 fn skills_json(skills: &[RebornSkillSummary]) -> serde_json::Value {
@@ -160,12 +153,10 @@ fn skills_json(skills: &[RebornSkillSummary]) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn terminal_safe_text_replaces_control_characters() {
         assert_eq!(
-            terminal_safe_text("safe\nforged: row\u{1b}[31m"),
+            crate::render::terminal_safe_text("safe\nforged: row\u{1b}[31m"),
             "safe forged: row [31m"
         );
     }

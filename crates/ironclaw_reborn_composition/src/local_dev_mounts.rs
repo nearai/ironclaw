@@ -3,8 +3,9 @@ use std::{collections::HashSet, path::Path};
 use ironclaw_host_api::{
     HostApiError, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, VirtualPath,
 };
+use ironclaw_memory::MemoryDocumentScope;
 
-const WORKSPACE_ALIAS: &str = "/workspace";
+pub(crate) const WORKSPACE_ALIAS: &str = "/workspace";
 const WORKSPACE_TARGET: &str = "/projects/workspace";
 const HOST_ALIAS: &str = "/host";
 const HOST_TARGET: &str = "/projects/host";
@@ -117,6 +118,51 @@ pub(crate) fn scoped_skill_management_mount_view(
 
 pub(crate) fn memory_mount_view(permissions: MountPermissions) -> Result<MountView, HostApiError> {
     MountView::new(vec![grant(MEMORY_ALIAS, MEMORY_TARGET, permissions)?])
+}
+
+pub(crate) fn system_extensions_lifecycle_mount_view() -> Result<MountView, HostApiError> {
+    MountView::new(vec![grant(
+        "/system/extensions",
+        "/system/extensions",
+        MountPermissions::read_write_list_delete(),
+    )?])
+}
+
+/// Read-only mount view backing the standalone WebUI filesystem viewer.
+///
+/// Spans every mount the read-only browser can navigate — the workspace
+/// (project working files + landed attachments) and the persistent memory store
+/// — over the same targets the agent's own tools resolve through, so the viewer
+/// shows exactly what the agent sees. Read-only by construction: the viewer is a
+/// navigation + preview/download surface, never a write path. The aliases here
+/// are the contract the browse reader confines against; keep them aligned with
+/// [`BROWSE_MEMORY_ALIAS`]/[`WORKSPACE_ALIAS`].
+pub(crate) const BROWSE_MEMORY_ALIAS: &str = MEMORY_ALIAS;
+
+pub(crate) fn scoped_browse_mount_view(scope: &ResourceScope) -> Result<MountView, HostApiError> {
+    let memory_target = scoped_memory_target(scope)?;
+    MountView::new(vec![
+        grant(
+            WORKSPACE_ALIAS,
+            WORKSPACE_TARGET,
+            MountPermissions::read_only(),
+        )?,
+        grant(
+            MEMORY_ALIAS,
+            memory_target.as_str(),
+            MountPermissions::read_only(),
+        )?,
+    ])
+}
+
+fn scoped_memory_target(scope: &ResourceScope) -> Result<VirtualPath, HostApiError> {
+    MemoryDocumentScope::new_with_agent(
+        scope.tenant_id.as_str(),
+        scope.user_id.as_str(),
+        scope.agent_id.as_ref().map(|id| id.as_str()),
+        scope.project_id.as_ref().map(|id| id.as_str()),
+    )?
+    .virtual_prefix()
 }
 
 fn grant(

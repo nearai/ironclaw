@@ -24,9 +24,32 @@ pub(crate) fn internal_refs_from_ack(
             }
             ProductInboundAck::Duplicate { prior } => ack = prior,
             ProductInboundAck::DeferredBusy { .. }
+            | ProductInboundAck::RejectedBusy { .. }
             | ProductInboundAck::Rejected(_)
             | ProductInboundAck::CommandResult { .. }
             | ProductInboundAck::NoOp => return Err(OpenAiCompatHttpError::internal()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_product_adapters::ProductInboundAck;
+    use ironclaw_turns::AcceptedMessageRef;
+
+    use super::internal_refs_from_ack;
+
+    #[test]
+    fn rejected_busy_yields_internal_error_no_refs() {
+        let ack = ProductInboundAck::RejectedBusy {
+            accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy").expect("ref"),
+            active_run_id: None,
+        };
+        let err = internal_refs_from_ack(&ack).unwrap_err();
+        assert_eq!(err.status_code(), 500);
+        assert!(
+            !err.retryable(),
+            "RejectedBusy is terminal — internal_refs_from_ack must not bind refs"
+        );
     }
 }

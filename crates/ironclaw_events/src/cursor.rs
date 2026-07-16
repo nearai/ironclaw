@@ -95,7 +95,7 @@ impl EventStreamKey {
 /// records whose corresponding scope field is `Some(want)`. A record with
 /// `None` in that field does **not** match a filter that asks for
 /// `Some(...)` — the filter is a tightening, never a permissive default.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ReadScope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<ProjectId>,
@@ -113,6 +113,26 @@ impl ReadScope {
     /// admin/aggregate paths).
     pub fn any() -> Self {
         Self::default()
+    }
+
+    pub fn set_project_id(mut self, project_id: impl Into<Option<ProjectId>>) -> Self {
+        self.project_id = project_id.into();
+        self
+    }
+
+    pub fn set_mission_id(mut self, mission_id: impl Into<Option<MissionId>>) -> Self {
+        self.mission_id = mission_id.into();
+        self
+    }
+
+    pub fn set_thread_id(mut self, thread_id: impl Into<Option<ThreadId>>) -> Self {
+        self.thread_id = thread_id.into();
+        self
+    }
+
+    pub fn set_process_id(mut self, process_id: impl Into<Option<ProcessId>>) -> Self {
+        self.process_id = process_id.into();
+        self
     }
 
     /// True iff every `Some` field in the filter has a matching value in the

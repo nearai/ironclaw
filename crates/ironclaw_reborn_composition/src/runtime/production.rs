@@ -1,21 +1,18 @@
 use std::sync::{Arc, OnceLock};
 
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
-    CapabilitySurfaceProfileResolver, HostIdentityContextBuildError, HostIdentityContextCandidate,
-    HostIdentityContextSource, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter,
+    CapabilitySurfaceProfileResolver, CapabilityWriteResult, HostIdentityContextBuildError,
+    HostIdentityContextCandidate, HostIdentityContextSource, LoopCapabilityInputResolver,
+    LoopCapabilityPortFactory, LoopCapabilityResultWriter,
 };
 use ironclaw_product_workflow::{
     ApprovalInteractionService, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
     ProductWorkflowError, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
 };
-use ironclaw_turns::{
-    LoopResultRef,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, LoopCapabilityPort,
-        LoopRunContext, PromptMode,
-    },
+use ironclaw_turns::run_profile::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, LoopCapabilityPort,
+    LoopRunContext, PromptMode,
 };
 
 #[derive(Default)]
@@ -54,7 +51,7 @@ impl LoopCapabilityResultWriter for UnavailableCapabilityIo {
     async fn write_capability_result(
         &self,
         _write: CapabilityResultWrite<'_>,
-    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+    ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
         Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::Unavailable,
             "capability result writer is unavailable for production runtime launch",

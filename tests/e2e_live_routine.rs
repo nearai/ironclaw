@@ -193,7 +193,6 @@ mod live_routine_tests {
         // observed, so a missing gate is a test failure rather than a
         // silently-skipped path.
         let harness = LiveTestHarnessBuilder::new("routine_btc_create_test_and_refire")
-            .with_engine_v2(true)
             .with_max_tool_iterations(40)
             .with_auto_approve_tools(false)
             .with_channel_name(CHANNEL)

@@ -1,16 +1,17 @@
 #[allow(dead_code)]
-#[path = "support/reborn/mod.rs"]
+#[path = "support/reborn_parity_qa/mod.rs"]
+mod parity_qa_support;
+#[allow(dead_code)]
+#[path = "integration/support/mod.rs"]
 mod reborn_support;
 mod support;
 
-use ironclaw_loop_support::HostManagedModelResponse;
+use ironclaw_loop_host::HostManagedModelResponse;
 use ironclaw_threads::{MessageKind, MessageStatus, ThreadMessageRecord};
 use ironclaw_turns::TurnStatus;
-use reborn_support::harness::{
-    RebornBinaryE2EHarness, RebornHarnessSharedStorage, RecordingTestCapabilityPort,
-    test_product_scope,
-};
-use reborn_support::model_replay::RebornTraceReplayModelGateway;
+use parity_qa_support::binary_e2e::{RebornBinaryE2EHarness, RebornHarnessSharedStorage};
+use parity_qa_support::model_replay::RebornTraceReplayModelGateway;
+use reborn_support::harness::{RecordingTestCapabilityPort, test_product_scope};
 
 #[tokio::test]
 async fn reborn_direct_chat_user_scope_isolation_parity() {
@@ -24,34 +25,36 @@ async fn reborn_direct_chat_user_scope_isolation_parity() {
         Some("project-e2e"),
     );
 
-    let mut alice_harness = RebornBinaryE2EHarness::with_model_gateway_scope_initial_actor_installation_shared_storage_unscoped_worker(
-        DIRECT_ROOM,
-        "alice",
-        RebornTraceReplayModelGateway::with_responses([HostManagedModelResponse::assistant_reply(
-            "alice direct isolated reply",
-        )]),
-        RecordingTestCapabilityPort::echo(),
-        scope.clone(),
-        "reborn-test",
-        "install-1",
-        shared_storage.clone(),
-    )
-    .await
-    .expect("alice harness");
-    let mut bob_harness = RebornBinaryE2EHarness::with_model_gateway_scope_initial_actor_installation_shared_storage_unscoped_worker(
-        DIRECT_ROOM,
-        "bob",
-        RebornTraceReplayModelGateway::with_responses([HostManagedModelResponse::assistant_reply(
-            "bob direct isolated reply",
-        )]),
-        RecordingTestCapabilityPort::echo(),
-        scope,
-        "reborn-test",
-        "install-1",
-        shared_storage,
-    )
-    .await
-    .expect("bob harness");
+    let mut alice_harness =
+        RebornBinaryE2EHarness::with_model_gateway_scope_initial_actor_installation_shared_storage(
+            DIRECT_ROOM,
+            "alice",
+            RebornTraceReplayModelGateway::with_responses([
+                HostManagedModelResponse::assistant_reply("alice direct isolated reply"),
+            ]),
+            RecordingTestCapabilityPort::echo(),
+            scope.clone(),
+            "reborn-test",
+            "install-1",
+            shared_storage.clone(),
+        )
+        .await
+        .expect("alice harness");
+    let mut bob_harness =
+        RebornBinaryE2EHarness::with_model_gateway_scope_initial_actor_installation_shared_storage(
+            DIRECT_ROOM,
+            "bob",
+            RebornTraceReplayModelGateway::with_responses([
+                HostManagedModelResponse::assistant_reply("bob direct isolated reply"),
+            ]),
+            RecordingTestCapabilityPort::echo(),
+            scope,
+            "reborn-test",
+            "install-1",
+            shared_storage,
+        )
+        .await
+        .expect("bob harness");
 
     alice_harness.start();
     bob_harness.start();

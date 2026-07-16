@@ -1,3 +1,4 @@
+// arch-exempt: large_file, canonical obligation orchestration remains co-located; resolved-source optimization only, plan #5499
 use std::{
     collections::{HashMap, HashSet},
     fmt,
@@ -22,7 +23,7 @@ use ironclaw_host_api::{
     ExtensionId, MountView, NetworkPolicy, Obligation, ProcessId, ResourceCeiling,
     ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage,
     RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
-    RuntimeCredentialAuthRequirement, RuntimeHttpEgress, SandboxQuota, SecretHandle,
+    RuntimeCredentialAuthRequirement, RuntimeHttpEgress, SandboxQuota, SecretHandle, Timestamp,
 };
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{ProcessError, ProcessRecord, ProcessStart, ProcessStore};
@@ -595,8 +596,9 @@ impl SecretStore for SharedSecretStore {
         scope: ResourceScope,
         handle: SecretHandle,
         material: SecretMaterial,
+        expires_at: Option<Timestamp>,
     ) -> Result<SecretMetadata, SecretStoreError> {
-        self.0.put(scope, handle, material).await
+        self.0.put(scope, handle, material, expires_at).await
     }
 
     async fn metadata(
@@ -605,6 +607,13 @@ impl SecretStore for SharedSecretStore {
         handle: &SecretHandle,
     ) -> Result<Option<SecretMetadata>, SecretStoreError> {
         self.0.metadata(scope, handle).await
+    }
+
+    async fn metadata_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
+        self.0.metadata_for_scope(scope).await
     }
 
     async fn delete(
@@ -726,8 +735,10 @@ impl ProcessObligationLifecycleStore {
                 None
             }
         };
-        if let Some(event_sink) = event_sink {
-            let _ = event_sink.emit(event).await;
+        if let Some(event_sink) = event_sink
+            && let Err(error) = event_sink.emit(event).await
+        {
+            tracing::debug!(?error, "best-effort process lifecycle event emit failed");
         }
     }
 
@@ -1087,6 +1098,11 @@ pub struct BuiltinObligationHandler {
     credential_account_resolver: Option<Arc<dyn RuntimeCredentialAccountResolver>>,
 }
 
+struct ResolvedSecretInjection {
+    handle: SecretHandle,
+    source_scope: ResourceScope,
+}
+
 impl BuiltinObligationHandler {
     pub fn new() -> Self {
         Self::default()
@@ -1200,9 +1216,9 @@ impl BuiltinObligationHandler {
         &self,
         request: &CapabilityObligationRequest<'_>,
         handles: &[SecretHandle],
-    ) -> Result<(), CapabilityObligationError> {
+    ) -> Result<Vec<ResolvedSecretInjection>, CapabilityObligationError> {
         if handles.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let Some(secret_store) = &self.secret_store else {
             return Err(secret_obligation_failed());
@@ -1210,27 +1226,49 @@ impl BuiltinObligationHandler {
         if self.secret_injections.is_none() {
             return Err(secret_obligation_failed());
         }
+        let mut resolved = Vec::with_capacity(handles.len());
         for handle in handles {
-            let exists = secret_store
-                .metadata(&request.context.resource_scope, handle)
-                .await
-                .map_err(|_| secret_obligation_failed())?
-                .is_some();
-            if !exists {
+            // Fail closed on a store error: the dispatch-time backstop must never
+            // let an uncredentialed call through on a transient failure. Preserve the
+            // cause as a server-side trail (`SecretStoreError` Display carries no raw
+            // secret material — handles/reasons only); the caller still receives the
+            // opaque, sanitized secret-obligation failure.
+            let owner = match secret_owner_scope(
+                secret_store.as_ref(),
+                &request.context.resource_scope,
+                handle,
+            )
+            .await
+            {
+                Ok(owner) => owner,
+                Err(error) => {
+                    tracing::debug!(
+                        secret_handle = handle.as_str(),
+                        error = %error,
+                        "dispatch-time secret presence probe failed; failing closed at the obligation backstop"
+                    );
+                    return Err(secret_obligation_failed());
+                }
+            };
+            let Some(source_scope) = owner else {
                 return Err(CapabilityObligationError::AuthRequired {
                     credential_requirements: Vec::new(),
                 });
-            }
+            };
+            resolved.push(ResolvedSecretInjection {
+                handle: handle.clone(),
+                source_scope,
+            });
         }
-        Ok(())
+        Ok(resolved)
     }
 
     async fn inject_secrets(
         &self,
         request: &CapabilityObligationRequest<'_>,
-        handles: &[SecretHandle],
+        resolved: &[ResolvedSecretInjection],
     ) -> Result<(), CapabilityObligationError> {
-        if handles.is_empty() {
+        if resolved.is_empty() {
             return Ok(());
         }
         let Some(secret_store) = &self.secret_store else {
@@ -1240,17 +1278,41 @@ impl BuiltinObligationHandler {
             return Err(secret_obligation_failed());
         };
 
-        let mut material = Vec::with_capacity(handles.len());
-        for handle in handles {
+        let mut material = Vec::with_capacity(resolved.len());
+        for resolved in resolved {
+            // Use the same source scope the presence probe accepted: the caller's
+            // own secret if present, else the tenant-shared admin-managed secret
+            // (#5459). The injection target below stays the caller's invocation
+            // slot regardless of where the source material came from. The
+            // lease/consume operations remain authoritative if the secret
+            // vanishes between preflight and here.
+            // Every arm below fails closed; the bound error is logged first so a
+            // shared-secret lease/consume fault (e.g. an AAD/scope regression on
+            // the cross-scope read) leaves a server-side trail. `SecretStoreError`
+            // Display carries no raw secret material — handles/reasons only.
             let lease = secret_store
-                .lease_once(&request.context.resource_scope, handle)
+                .lease_once(&resolved.source_scope, &resolved.handle)
                 .await
-                .map_err(|_| secret_obligation_failed())?;
+                .map_err(|error| {
+                    tracing::debug!(
+                        secret_handle = resolved.handle.as_str(),
+                        error = %error,
+                        "secret injection: lease failed; failing closed"
+                    );
+                    secret_obligation_failed()
+                })?;
             let secret = secret_store
-                .consume(&request.context.resource_scope, lease.id)
+                .consume(&resolved.source_scope, lease.id)
                 .await
-                .map_err(|_| secret_obligation_failed())?;
-            material.push((handle.clone(), secret));
+                .map_err(|error| {
+                    tracing::debug!(
+                        secret_handle = resolved.handle.as_str(),
+                        error = %error,
+                        "secret injection: lease consume failed; failing closed"
+                    );
+                    secret_obligation_failed()
+                })?;
+            material.push((resolved.handle.clone(), secret));
         }
 
         for (handle, secret) in material {
@@ -1261,7 +1323,14 @@ impl BuiltinObligationHandler {
                     &handle,
                     secret,
                 )
-                .map_err(|_| secret_obligation_failed())?;
+                .map_err(|error| {
+                    tracing::debug!(
+                        secret_handle = handle.as_str(),
+                        error = %error,
+                        "secret injection: injection-slot insert failed; failing closed"
+                    );
+                    secret_obligation_failed()
+                })?;
         }
         Ok(())
     }
@@ -1361,7 +1430,7 @@ impl BuiltinObligationHandler {
     async fn finish_prepare(
         &self,
         request: &CapabilityObligationRequest<'_>,
-        secret_handles: &[SecretHandle],
+        resolved_secret_injections: &[ResolvedSecretInjection],
         network_policy: Option<NetworkPolicy>,
     ) -> Result<(), CapabilityObligationError> {
         if request
@@ -1372,7 +1441,8 @@ impl BuiltinObligationHandler {
             self.emit_audit_before(request).await?;
         }
 
-        self.inject_secrets(request, secret_handles).await?;
+        self.inject_secrets(request, resolved_secret_injections)
+            .await?;
         self.inject_credential_accounts(request).await?;
 
         if let Some(policy) = network_policy {
@@ -1441,11 +1511,13 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
         if let Some(reservation) = &outcome.resource_reservation
             && let Err(error) = self.release_resource_reservation(reservation)
         {
-            let _ = self.discard_staged_handoffs(
+            if let Err(cleanup_error) = self.discard_staged_handoffs(
                 &request.context.resource_scope,
                 request.capability_id,
                 request.obligations,
-            );
+            ) {
+                tracing::debug!(error = ?cleanup_error, "best-effort discard of staged handoffs failed");
+            }
             return Err(error);
         }
         Ok(())
@@ -1468,7 +1540,8 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
         }
         let scoped_mounts = scoped_mount_obligation(request.context, request.obligations)?;
         let secret_handles = secret_injection_handles(request.obligations);
-        self.preflight_secret_injection(&request, &secret_handles)
+        let resolved_secret_injections = self
+            .preflight_secret_injection(&request, &secret_handles)
             .await?;
         self.preflight_resource_ceiling(&request)?;
         let resource_reservation = self.reserve_resource_obligation(&request)?;
@@ -1478,7 +1551,7 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
         };
 
         if let Err(error) = self
-            .finish_prepare(&request, &secret_handles, network_policy)
+            .finish_prepare(&request, &resolved_secret_injections, network_policy)
             .await
         {
             self.abort(CapabilityObligationAbortRequest {
@@ -1524,6 +1597,13 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
         }
 
         let mut dispatch = request.dispatch.clone();
+        // Turn any base64 document payload into extracted text before redaction
+        // and the output-size obligations run, so the model gets bounded text
+        // (leak-scanned, size-checked) and the large base64 never survives.
+        dispatch.output = crate::document_output::extract_documents_in_output(
+            dispatch.capability_id.as_str(),
+            dispatch.output,
+        );
         if request
             .obligations
             .iter()
@@ -2018,6 +2098,50 @@ fn secret_obligation_failed() -> CapabilityObligationError {
     }
 }
 
+/// Single source of truth for "is this required secret present in `scope`".
+///
+/// Both the credential pre-flight (ordering — `DefaultHostRuntime::
+/// credential_preflight_check`) and the dispatch-time obligation backstop
+/// (enforcement — [`BuiltinObligationHandler::preflight_secret_injection`])
+/// consult this one rule so "what counts as a present credential" cannot drift
+/// between the two call sites. Each caller decides how to treat a store `Err`
+/// (the pre-flight fails open and skips; the obligation backstop fails closed).
+pub(crate) async fn secret_present(
+    store: &dyn SecretStore,
+    scope: &ResourceScope,
+    handle: &SecretHandle,
+) -> Result<bool, SecretStoreError> {
+    Ok(store.metadata(scope, handle).await?.is_some())
+}
+
+/// Resolve which scope owns `handle` for this caller, honoring tenant-shared,
+/// admin-managed credentials (#5459). A caller's OWN secret wins; otherwise the
+/// tenant-shared admin-managed scope ([`ResourceScope::tenant_shared_managed_scope`]),
+/// so one admin-set key satisfies every user of the tenant. `Ok(None)` means the
+/// secret is absent in both scopes.
+///
+/// Single source of truth for BOTH "is this required secret present" (callers map
+/// to `.is_some()`) and "where does the lease read from" — the pre-flight ordering
+/// probe (`credential_preflight_check`) and the dispatch-time backstop
+/// (`preflight_secret_injection`) consult this rule, then the injection lease
+/// (`inject_secrets`) consumes the resolved source scope. Each caller decides how
+/// to treat a store `Err` (the pre-flight fails open and skips; the obligation
+/// backstop and lease fail closed).
+pub(crate) async fn secret_owner_scope(
+    store: &dyn SecretStore,
+    caller_scope: &ResourceScope,
+    handle: &SecretHandle,
+) -> Result<Option<ResourceScope>, SecretStoreError> {
+    if secret_present(store, caller_scope, handle).await? {
+        return Ok(Some(caller_scope.clone()));
+    }
+    let shared = caller_scope.tenant_shared_managed_scope();
+    if secret_present(store, &shared, handle).await? {
+        return Ok(Some(shared));
+    }
+    Ok(None)
+}
+
 fn resource_obligation_failed() -> CapabilityObligationError {
     CapabilityObligationError::Failed {
         kind: CapabilityObligationFailureKind::Resource,
@@ -2319,15 +2443,13 @@ mod tests {
         let account = ResourceAccount::tenant(context.resource_scope.tenant_id.clone());
         let capability_id = capability_id();
         let handle = SecretHandle::new("api_token").unwrap();
-        let estimate = ResourceEstimate {
-            concurrency_slots: Some(1),
-            ..ResourceEstimate::default()
-        };
+        let estimate = ResourceEstimate::default().set_concurrency_slots(1);
         secret_store
             .put(
                 context.resource_scope.clone(),
                 handle.clone(),
                 SecretMaterial::from("runtime-secret"),
+                None,
             )
             .await
             .unwrap();
@@ -2365,6 +2487,126 @@ mod tests {
                 .take(&context.resource_scope, &capability_id, &handle)
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    // #5459 tenant-shared credential resolution: a caller's own secret wins;
+    // otherwise the tenant-shared admin-managed scope; otherwise absent.
+    #[tokio::test]
+    async fn secret_owner_scope_prefers_caller_then_tenant_shared_then_none() {
+        let handle = SecretHandle::new("market_data_api_key").unwrap();
+        let caller = execution_context().resource_scope;
+        let shared = caller.tenant_shared_managed_scope();
+
+        // Absent in both scopes -> None (dispatch then gates with AuthRequired).
+        let store = InMemorySecretStore::new();
+        assert_eq!(
+            secret_owner_scope(&store, &caller, &handle).await.unwrap(),
+            None,
+        );
+
+        // Present ONLY at the tenant-shared admin-managed scope -> resolves there,
+        // so one admin-set key satisfies a caller who never provisioned it.
+        let store = InMemorySecretStore::new();
+        store
+            .put(
+                shared.clone(),
+                handle.clone(),
+                SecretMaterial::from("shared-admin-key"),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            secret_owner_scope(&store, &caller, &handle)
+                .await
+                .unwrap()
+                .as_ref(),
+            Some(&shared),
+        );
+
+        // Present at BOTH scopes -> the caller's OWN secret wins over the shared one.
+        let store = InMemorySecretStore::new();
+        store
+            .put(
+                caller.clone(),
+                handle.clone(),
+                SecretMaterial::from("caller-own-key"),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .put(
+                shared.clone(),
+                handle.clone(),
+                SecretMaterial::from("shared-admin-key"),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            secret_owner_scope(&store, &caller, &handle)
+                .await
+                .unwrap()
+                .as_ref(),
+            Some(&caller),
+        );
+    }
+
+    // Through the caller: InjectSecretOnce is satisfied by an admin-set
+    // tenant-shared key even when the caller has no personal secret, and the
+    // material is staged at the caller's own invocation slot (#5459).
+    #[tokio::test]
+    async fn inject_secret_once_falls_back_to_tenant_shared_admin_key() {
+        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_injections = Arc::new(RuntimeSecretInjectionStore::new());
+        let services = BuiltinObligationServices::with_handoff_stores(
+            Arc::new(InMemoryAuditSink::new()),
+            Arc::new(NetworkObligationPolicyStore::new()),
+            secret_store.clone(),
+            secret_injections.clone(),
+            Arc::new(InMemoryResourceGovernor::new()),
+        );
+        let handler = services.obligation_handler();
+        let context = execution_context();
+        let capability_id = capability_id();
+        let handle = SecretHandle::new("market_data_api_key").unwrap();
+        let estimate = ResourceEstimate::default();
+
+        // Admin set the key ONLY at the tenant-shared scope; the caller has none.
+        secret_store
+            .put(
+                context.resource_scope.tenant_shared_managed_scope(),
+                handle.clone(),
+                SecretMaterial::from("shared-admin-key"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let obligations = vec![Obligation::InjectSecretOnce {
+            handle: handle.clone(),
+        }];
+        handler
+            .satisfy(CapabilityObligationRequest {
+                phase: CapabilityObligationPhase::Invoke,
+                context: &context,
+                capability_id: &capability_id,
+                estimate: &estimate,
+                obligations: &obligations,
+            })
+            .await
+            .expect(
+                "tenant-shared key satisfies InjectSecretOnce for a caller with no personal secret",
+            );
+
+        assert!(
+            secret_injections
+                .take(&context.resource_scope, &capability_id, &handle)
+                .unwrap()
+                .is_some(),
+            "shared-sourced secret must be staged at the caller's own invocation slot",
         );
     }
 
@@ -2420,6 +2662,73 @@ mod tests {
 
         assert!(completed.display_preview.is_none());
         assert_eq!(completed.output["safe"], serde_json::json!("ok"));
+    }
+
+    #[tokio::test]
+    async fn complete_dispatch_extracts_base64_document_into_text() {
+        use base64::Engine as _;
+        use ironclaw_host_api::{ReservationStatus, ResourceReceipt, ResourceUsage, RuntimeKind};
+
+        // Drive the *caller* (`complete_dispatch`), not the helper: a dispatch
+        // result carrying `content_base64` + `mime_type` must come back with the
+        // extracted text in `content` and no base64 left for the model to see.
+        let services = BuiltinObligationServices::with_handoff_stores(
+            Arc::new(InMemoryAuditSink::new()),
+            Arc::new(NetworkObligationPolicyStore::new()),
+            Arc::new(InMemorySecretStore::new()),
+            Arc::new(RuntimeSecretInjectionStore::new()),
+            Arc::new(InMemoryResourceGovernor::new()),
+        );
+        let handler = services.obligation_handler();
+        let context = execution_context();
+        // The document-extraction transform is capability-gated, so this test
+        // must dispatch a capability that opts in (`google-drive.download_file`)
+        // — the shared `echo.say` helper id would pass through untouched.
+        let capability_id = CapabilityId::new("google-drive.download_file").unwrap();
+        let estimate = ResourceEstimate::default();
+        let obligations = vec![Obligation::RedactOutput];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"name,age\nAlice,30");
+        let dispatch = CapabilityDispatchResult {
+            capability_id: capability_id.clone(),
+            provider: context.extension_id.clone(),
+            runtime: RuntimeKind::Wasm,
+            output: serde_json::json!({
+                "file_id": "f1",
+                "name": "data.csv",
+                "mime_type": "text/csv",
+                "content_base64": encoded,
+            }),
+            display_preview: None,
+            usage: ResourceUsage::default(),
+            receipt: ResourceReceipt {
+                id: ResourceReservationId::new(),
+                scope: context.resource_scope.clone(),
+                status: ReservationStatus::Released,
+                estimate: ResourceEstimate::default(),
+                actual: None,
+            },
+        };
+
+        let completed = handler
+            .complete_dispatch(CapabilityObligationCompletionRequest {
+                phase: CapabilityObligationPhase::Invoke,
+                context: &context,
+                capability_id: &capability_id,
+                estimate: &estimate,
+                obligations: &obligations,
+                dispatch: &dispatch,
+            })
+            .await
+            .expect("base64 document dispatch completes");
+
+        assert_eq!(
+            completed.output["content"],
+            serde_json::json!("name,age\nAlice,30")
+        );
+        assert!(
+            completed.output.get("content_base64").is_none(),
+            "base64 must be stripped before the result reaches the model"
+        );
     }
 
     #[tokio::test]
@@ -2623,6 +2932,7 @@ mod tests {
             parent_process_id: None,
             tenant_id: resource_scope.tenant_id.clone(),
             user_id: resource_scope.user_id.clone(),
+            authenticated_actor_user_id: None,
             agent_id: resource_scope.agent_id.clone(),
             project_id: resource_scope.project_id.clone(),
             mission_id: resource_scope.mission_id.clone(),

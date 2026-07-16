@@ -17,7 +17,8 @@ use ironclaw_turns::{
     InMemoryRunProfileResolver, InMemoryTurnEventSink, InMemoryTurnStateStore,
     InMemoryTurnStateStoreLimits, LifecyclePublicationErrorPort, LifecyclePublishingTurnStateStore,
     LoopBlockedKind, LoopCheckpointStateRef, LoopExitMapping, LoopGateRef, LoopResultRef,
-    ReplyTargetBindingRef, ResolvedRunProfile, ResumeTurnRequest, RunProfileId, RunProfileRequest,
+    ProductTurnContext, ReplyTargetBindingRef, ResolvedRunProfile, ResumeTurnRequest,
+    RetryTurnRequest, RetryTurnResponse, RunOriginAdapter, RunProfileId, RunProfileRequest,
     RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
     SanitizedCancelReason, SanitizedFailure, SourceBindingRef, StaticTurnAdmissionLimitProvider,
     SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
@@ -28,11 +29,16 @@ use ironclaw_turns::{
     TurnEventProjectionService, TurnEventSink, TurnIdempotencyErrorReplay,
     TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyRecord,
     TurnIdempotencyReplay, TurnLeaseToken, TurnLifecycleEvent, TurnLifecycleEventBus,
-    TurnLockVersion, TurnRunId, TurnRunProfile, TurnRunState, TurnRunWake, TurnRunWakeNotifier,
-    TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnSpawnTreePort, TurnSpawnTreeStateStore,
-    TurnStateStore, TurnStatus,
+    TurnLockVersion, TurnOriginKind, TurnOwner, TurnRunId, TurnRunProfile, TurnRunState,
+    TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnRunnerId, TurnScope,
+    TurnSpawnTreePort, TurnSpawnTreeStateStore, TurnStateBlockPersistence, TurnStateStore,
+    TurnStatus, TurnSurfaceType,
     events::EventCursor,
-    run_profile::{CapabilityOutcome, LoopGateKind, LoopModelRouteSnapshot},
+    run_profile::{
+        CapabilityOutcome, LoopGateKind, LoopModelRouteSnapshot, LoopModelUsage,
+        ModelVisibleToolObservation, ObservationTrust, ToolObservationDetail,
+        ToolObservationStatus,
+    },
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
@@ -52,6 +58,7 @@ where
     P: TurnRunTransitionPort + ?Sized,
 {
     port.apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+        model_usage: None,
         run_id,
         runner_id,
         lease_token,
@@ -91,6 +98,7 @@ fn approval_blocked_mapping(
         reason: BlockedReason::Approval {
             gate_ref: GateRef::new(gate_ref.as_str()).unwrap(),
         },
+        blocked_activity_id: None,
     })
 }
 
@@ -105,6 +113,7 @@ fn dependent_blocked_mapping(
         reason: BlockedReason::AwaitDependentRun {
             gate_ref: GateRef::new(gate_ref.as_str()).unwrap(),
         },
+        blocked_activity_id: None,
     })
 }
 
@@ -150,6 +159,7 @@ fn subagent_capability_outcomes_round_trip_with_suspension_semantics() {
         result_ref: result_ref.clone(),
         safe_summary: "spawned in background".to_string(),
         byte_len: 0,
+        model_observation: None,
     };
     let spawned_json = serde_json::to_value(&spawned).unwrap();
     // #[serde(default)] ensures legacy wire payloads (without byte_len) decode
@@ -180,6 +190,7 @@ fn subagent_capability_outcomes_round_trip_with_suspension_semantics() {
         result_ref: result_ref.clone(),
         safe_summary: "waiting on child".to_string(),
         byte_len: 0,
+        model_observation: None,
     };
     let awaiting_json = serde_json::to_value(&awaiting).unwrap();
     assert_eq!(
@@ -213,6 +224,7 @@ fn subagent_capability_outcomes_round_trip_with_non_zero_byte_len() {
         result_ref,
         safe_summary: "await large".to_string(),
         byte_len: 48_500,
+        model_observation: None,
     };
     let json = serde_json::to_value(&await_dep).expect("serialize");
     let decoded: CapabilityOutcome = serde_json::from_value(json).expect("decode");
@@ -229,6 +241,7 @@ fn subagent_capability_outcomes_round_trip_with_non_zero_byte_len() {
         result_ref,
         safe_summary: "spawn large".to_string(),
         byte_len: 60_000,
+        model_observation: None,
     };
     let json = serde_json::to_value(&spawn).expect("serialize");
     let decoded: CapabilityOutcome = serde_json::from_value(json).expect("decode");
@@ -237,6 +250,121 @@ fn subagent_capability_outcomes_round_trip_with_non_zero_byte_len() {
     } else {
         panic!("expected SpawnedChildRun variant");
     }
+}
+
+#[test]
+fn subagent_capability_outcomes_round_trip_model_observation() {
+    let result_ref = LoopResultRef::new("result:child-observation").expect("valid");
+    let observation = ModelVisibleToolObservation {
+        schema_version: 1,
+        status: ToolObservationStatus::Success,
+        summary: "Use result_read to continue this child result.".to_string(),
+        detail: ToolObservationDetail::ResultReference {
+            result_ref: result_ref.as_str().to_string(),
+            byte_len: 2_048,
+            preview: Some("first bounded chunk".to_string()),
+            total_bytes: Some(4_096),
+            next_offset: Some(2_048),
+            item_count: None,
+        },
+        artifacts: Vec::new(),
+        recovery: None,
+        trust: ObservationTrust::UntrustedToolOutput,
+    };
+    let spawned = CapabilityOutcome::SpawnedChildRun {
+        child_run_id: TurnRunId::new(),
+        result_ref: result_ref.clone(),
+        safe_summary: "spawned child".to_string(),
+        byte_len: 2_048,
+        model_observation: Some(observation.clone()),
+    };
+    let awaiting = CapabilityOutcome::AwaitDependentRun {
+        gate_ref: LoopGateRef::new("gate:child-observation").expect("valid"),
+        result_ref,
+        safe_summary: "awaiting child".to_string(),
+        byte_len: 2_048,
+        model_observation: Some(observation),
+    };
+
+    for outcome in [spawned, awaiting] {
+        let serialized = serde_json::to_value(&outcome).expect("serialize");
+        assert!(serialized.to_string().contains("next_offset"));
+        assert_eq!(
+            serde_json::from_value::<CapabilityOutcome>(serialized).expect("deserialize"),
+            outcome
+        );
+    }
+}
+
+#[test]
+fn retry_turn_request_wire_shape_matches_resume_without_gate_resolution() {
+    let run_id = TurnRunId::new();
+    let request = RetryTurnRequest {
+        scope: scope("thread-retry-wire"),
+        actor: actor(),
+        run_id,
+        source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
+        idempotency_key: IdempotencyKey::new("idem-retry-wire").unwrap(),
+    };
+
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(value["run_id"], serde_json::to_value(run_id).unwrap());
+    assert!(value.get("gate_resolution_ref").is_none());
+    assert_eq!(
+        serde_json::from_value::<RetryTurnRequest>(value).unwrap(),
+        request
+    );
+}
+
+#[tokio::test]
+async fn retry_turn_delegates_to_store_and_wakes_requeued_run() {
+    let response = RetryTurnResponse {
+        run_id: TurnRunId::new(),
+        status: TurnStatus::Queued,
+        event_cursor: EventCursor(17),
+    };
+    let store = Arc::new(RetryOnlyStore::new(Ok(response.clone())));
+    let wake_notifier = Arc::new(RecordingWakeNotifier::default());
+    let coordinator =
+        DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(wake_notifier.clone());
+    let request = retry_request(
+        "thread-retry-delegate",
+        response.run_id,
+        "idem-retry-delegate",
+    );
+
+    let actual = coordinator.retry_turn(request.clone()).await.unwrap();
+
+    assert_eq!(actual, response);
+    assert_eq!(store.retry_requests(), vec![request.clone()]);
+    assert_eq!(
+        wake_notifier.wakes(),
+        vec![TurnRunWake {
+            scope: request.scope,
+            run_id: response.run_id,
+            status: TurnStatus::Queued,
+            event_cursor: EventCursor(17),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn retry_turn_surfaces_not_retryable_without_wake() {
+    let run_id = TurnRunId::new();
+    let store = Arc::new(RetryOnlyStore::new(Err(TurnError::RunNotRetryable {
+        run_id,
+    })));
+    let wake_notifier = Arc::new(RecordingWakeNotifier::default());
+    let coordinator =
+        DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(wake_notifier.clone());
+    let request = retry_request("thread-retry-not-retryable", run_id, "idem-retry-denied");
+
+    let err = coordinator.retry_turn(request.clone()).await.unwrap_err();
+
+    assert_eq!(err, TurnError::RunNotRetryable { run_id });
+    assert_eq!(store.retry_requests(), vec![request]);
+    assert!(wake_notifier.wakes().is_empty());
 }
 
 #[test]
@@ -344,6 +472,51 @@ async fn prepare_turn_mints_ids_without_side_effects_and_submit_binds_requested_
 }
 
 #[tokio::test]
+async fn submit_turn_records_advisory_model_route_from_requested_model() {
+    let (coordinator, _store) = coordinator();
+    let mut request = submit_request("thread-model-select", "idem-model-select");
+    request.requested_model = Some("gpt-4o".to_string());
+
+    let run_id = accepted_run_id(&coordinator.submit_turn(request).await.unwrap());
+
+    let state = coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: scope("thread-model-select"),
+            run_id,
+        })
+        .await
+        .unwrap();
+    let route = state
+        .resolved_model_route
+        .expect("advisory model route recorded from requested_model");
+    assert_eq!(route.model_id, "gpt-4o");
+    assert!(
+        route.is_advisory(),
+        "a caller-requested model is an advisory route, not an operator-resolved one"
+    );
+}
+
+#[tokio::test]
+async fn submit_turn_without_requested_model_records_no_route() {
+    let (coordinator, _store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-no-model", "idem-no-model"))
+            .await
+            .unwrap(),
+    );
+
+    let state = coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: scope("thread-no-model"),
+            run_id,
+        })
+        .await
+        .unwrap();
+    assert!(state.resolved_model_route.is_none());
+}
+
+#[tokio::test]
 async fn children_of_get_run_record_and_tree_reservation_are_scope_checked() {
     let (coordinator, store) = coordinator();
     let parent = accepted_run_id(
@@ -442,7 +615,7 @@ async fn children_of_get_run_record_and_tree_reservation_are_scope_checked() {
     ));
     assert!(matches!(
         store
-            .release_tree_descendants(&child_scope, child_a_id, 1)
+            .release_tree_descendants(&child_scope, child_a_id, 1, child_a_id)
             .await,
         Err(TurnError::InvalidRequest { .. })
     ));
@@ -463,7 +636,7 @@ async fn children_of_get_run_record_and_tree_reservation_are_scope_checked() {
         Err(TurnError::CapacityExceeded { .. })
     ));
     store
-        .release_tree_descendants(&scope("thread-parent"), parent, 1)
+        .release_tree_descendants(&scope("thread-parent"), parent, 1, parent)
         .await
         .unwrap();
     assert_eq!(
@@ -815,6 +988,7 @@ async fn blocked_dependent_run_can_resume_and_cancel_directly() {
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-dependent-resume").unwrap(),
             precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedDependentRunGate,
+            resume_disposition: None,
         })
         .await
         .unwrap();
@@ -861,6 +1035,650 @@ async fn blocked_dependent_run_can_resume_and_cancel_directly() {
         .unwrap();
     assert_eq!(cancelled.status, TurnStatus::Cancelled);
     assert!(!cancelled.already_terminal);
+}
+
+/// Captures every snapshot the in-memory store hands the durable block sink so
+/// a test can assert both *that* persistence fired and *what* it persisted.
+#[derive(Default)]
+struct RecordingBlockPersistence {
+    snapshots: Mutex<Vec<ironclaw_turns::TurnPersistenceSnapshot>>,
+}
+
+impl RecordingBlockPersistence {
+    fn snapshots(&self) -> Vec<ironclaw_turns::TurnPersistenceSnapshot> {
+        self.snapshots.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl TurnStateBlockPersistence for RecordingBlockPersistence {
+    async fn persist(&self, snapshot: &ironclaw_turns::TurnPersistenceSnapshot) {
+        self.snapshots.lock().unwrap().push(snapshot.clone());
+    }
+}
+
+/// The in-memory turn-state authority is volatile, but a turn parked on a human
+/// gate (approval/auth) must survive a process restart. This exercises the
+/// persist-on-block contract end to end: the durable sink fires only when the
+/// gate-blocked set changes (block, then resume) and never on the plain
+/// claim/complete hot path, and the last persisted snapshot rehydrates a fresh
+/// store with the blocked run intact.
+#[tokio::test]
+async fn blocked_run_persists_to_sink_and_rehydrates_across_restart() {
+    let sink = Arc::new(RecordingBlockPersistence::default());
+    let store = Arc::new(InMemoryTurnStateStore::default().with_block_persistence(sink.clone()));
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+
+    // Hot path: a turn that runs to completion without ever blocking must not
+    // touch the durable sink — that is the contention the sink must not
+    // reintroduce.
+    let hot_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-hot", "idem-hot"))
+            .await
+            .unwrap(),
+    );
+    complete_queued_run(store.as_ref(), hot_run_id, "thread-hot").await;
+    assert!(
+        sink.snapshots().is_empty(),
+        "claim/complete hot path must not persist to the block sink"
+    );
+
+    // Block a turn on an approval gate — the blocked set changes, so the sink
+    // fires with a snapshot that carries the blocked run.
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-gate", "idem-gate"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-gate")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let gate_ref = LoopGateRef::new("gate:approval").unwrap();
+    apply_test_loop_exit(
+        store.as_ref(),
+        run_id,
+        runner_id,
+        lease_token,
+        approval_blocked_mapping(TurnCheckpointId::new(), block_state_ref(), &gate_ref),
+    )
+    .await
+    .unwrap();
+
+    let after_block = sink.snapshots();
+    assert_eq!(
+        after_block.len(),
+        1,
+        "blocking a run must persist exactly once"
+    );
+    let persisted_run = after_block
+        .last()
+        .unwrap()
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .expect("blocked run present in persisted snapshot")
+        .clone();
+    assert_eq!(persisted_run.status, TurnStatus::BlockedApproval);
+
+    // Auth gates take the same durable path: block a second run on an auth gate
+    // (via `block_run`, the path a `BlockedReason::Auth` uses) and confirm the
+    // sink fires again with the run recorded as `BlockedAuth`. This is the case
+    // that most needs durability — a turn parked on auth must survive a deploy.
+    let auth_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-gate-auth", "idem-gate-auth"))
+            .await
+            .unwrap(),
+    );
+    let auth_runner_id = TurnRunnerId::new();
+    let auth_lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: auth_runner_id,
+            lease_token: auth_lease_token,
+            scope_filter: Some(scope("thread-gate-auth")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id: auth_run_id,
+            runner_id: auth_runner_id,
+            lease_token: auth_lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
+            reason: BlockedReason::Auth {
+                gate_ref: GateRef::new("auth-gate").unwrap(),
+                credential_requirements: Vec::new(),
+            },
+        })
+        .await
+        .unwrap();
+    let after_auth_block = sink.snapshots();
+    assert_eq!(
+        after_auth_block.len(),
+        2,
+        "blocking a run on an auth gate must persist"
+    );
+
+    // The latest snapshot now carries both parked runs. Rehydrate a fresh store
+    // from it — both the approval- and auth-blocked runs must come back blocked
+    // so a later "Approve"/token submission lands on a real run.
+    let blocked_snapshot = after_auth_block.last().unwrap().clone();
+    let restored = InMemoryTurnStateStore::from_persistence_snapshot(
+        blocked_snapshot,
+        InMemoryTurnStateStoreLimits::default(),
+    )
+    .unwrap();
+    let restored_runs = restored.persistence_snapshot().runs;
+    let restored_approval = restored_runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .expect("approval-blocked run survives rehydration");
+    assert_eq!(restored_approval.status, TurnStatus::BlockedApproval);
+    let restored_auth = restored_runs
+        .iter()
+        .find(|record| record.run_id == auth_run_id)
+        .expect("auth-blocked run survives rehydration");
+    assert_eq!(restored_auth.status, TurnStatus::BlockedAuth);
+
+    // Resuming the approval gate changes the blocked set, so the sink fires
+    // again with that run no longer blocked.
+    let resumed = coordinator
+        .resume_turn(ResumeTurnRequest {
+            scope: scope("thread-gate"),
+            actor: actor(),
+            run_id,
+            gate_resolution_ref: GateRef::new(gate_ref.as_str()).unwrap(),
+            source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-gate-resume").unwrap(),
+            precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedApprovalGate,
+            resume_disposition: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(resumed.status, TurnStatus::Queued);
+    assert_eq!(
+        sink.snapshots().len(),
+        3,
+        "resuming a blocked run must persist the blocked-set change"
+    );
+
+    // A resumed run completes from `Running`, not from a blocked state. The
+    // durable snapshot must still converge to the terminal state so a restart
+    // does not rehydrate an already-finished run as a live `Queued`/`Running`
+    // run — persist-on-block tracks the gate-touched run through its terminal
+    // transition to guarantee this.
+    let resumed_runner_id = TurnRunnerId::new();
+    let resumed_lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: resumed_runner_id,
+            lease_token: resumed_lease_token,
+            scope_filter: Some(scope("thread-gate")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .complete_run(CompleteRunRequest {
+            run_id,
+            runner_id: resumed_runner_id,
+            lease_token: resumed_lease_token,
+        })
+        .await
+        .unwrap();
+    let after_complete = sink.snapshots();
+    assert_eq!(
+        after_complete.len(),
+        4,
+        "completing a gate-resumed run must persist its terminal state"
+    );
+    let terminal_snapshot = after_complete.last().unwrap().clone();
+    let terminal_run = terminal_snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .expect("resumed run present in terminal snapshot");
+    assert_eq!(terminal_run.status, TurnStatus::Completed);
+
+    // Rehydrate from the terminal snapshot — the run must come back Completed,
+    // not Queued/Running, so recovery does not re-run a finished turn.
+    let restored_terminal = InMemoryTurnStateStore::from_persistence_snapshot(
+        terminal_snapshot,
+        InMemoryTurnStateStoreLimits::default(),
+    )
+    .unwrap();
+    let restored_terminal_run = restored_terminal
+        .persistence_snapshot()
+        .runs
+        .into_iter()
+        .find(|record| record.run_id == run_id)
+        .expect("completed run survives rehydration");
+    assert_eq!(restored_terminal_run.status, TurnStatus::Completed);
+}
+
+/// A block→resume→complete sequence must report the run's cumulative token
+/// usage once, not double-count the pre-block legs. The loop carries the running
+/// per-run total in its execution state across the resume, so it reports the
+/// whole run at every validated exit; the store must therefore *replace* the
+/// stored total on each exit rather than accumulate. Regression for the
+/// `2*leg1 + leg2` double-count.
+#[tokio::test]
+async fn block_resume_complete_reports_cumulative_usage_without_double_counting() {
+    let (coordinator, store) = coordinator();
+
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-usage", "idem-usage"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-usage")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Leg 1 accumulates 100 input / 50 output, then blocks on an approval gate.
+    // The loop reports its cumulative-so-far (leg 1).
+    let gate_ref = LoopGateRef::new("gate:usage").unwrap();
+    let leg1 = LoopModelUsage {
+        input_tokens: 100,
+        output_tokens: 50,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+    };
+    store
+        .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            model_usage: Some(leg1),
+            run_id,
+            runner_id,
+            lease_token,
+            mapping: approval_blocked_mapping(
+                TurnCheckpointId::new(),
+                block_state_ref(),
+                &gate_ref,
+            ),
+        })
+        .await
+        .unwrap();
+
+    // Resume the approval gate; the run re-queues for a fresh claim.
+    coordinator
+        .resume_turn(ResumeTurnRequest {
+            scope: scope("thread-usage"),
+            actor: actor(),
+            run_id,
+            gate_resolution_ref: GateRef::new(gate_ref.as_str()).unwrap(),
+            source_binding_ref: SourceBindingRef::new("source-usage-resumed").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-usage-resumed").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-usage-resume").unwrap(),
+            precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedApprovalGate,
+            resume_disposition: None,
+        })
+        .await
+        .unwrap();
+
+    let resumed_runner_id = TurnRunnerId::new();
+    let resumed_lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: resumed_runner_id,
+            lease_token: resumed_lease_token,
+            scope_filter: Some(scope("thread-usage")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Leg 2 adds 40 input / 20 output. Because the loop's execution state carried
+    // leg 1 forward across the resume, the completing exit reports the *run
+    // cumulative* (leg1 + leg2), not just the delta.
+    let cumulative = LoopModelUsage {
+        input_tokens: 140,
+        output_tokens: 70,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+    };
+    store
+        .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            model_usage: Some(cumulative),
+            run_id,
+            runner_id: resumed_runner_id,
+            lease_token: resumed_lease_token,
+            mapping: completed_mapping(),
+        })
+        .await
+        .unwrap();
+
+    let state = coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: scope("thread-usage"),
+            run_id,
+        })
+        .await
+        .unwrap();
+    // The terminal total is the run cumulative (leg1 + leg2), NOT
+    // leg1 + (leg1 + leg2) = 2*leg1 + leg2.
+    assert_eq!(state.model_usage, Some(cumulative));
+}
+
+/// A run recovered *from a restart snapshot* while blocked must still receive a
+/// durable terminal-convergence write when it later resumes and completes —
+/// otherwise the next restart would resurrect the finished run as live. This
+/// exercises the seeding of the gate-persisted set on rehydration
+/// (`with_block_persistence` after `from_persistence_snapshot`), the path a live
+/// block never covers.
+#[tokio::test]
+async fn rehydrated_blocked_run_persists_terminal_state_after_resume() {
+    // Build a durable snapshot that contains a gate-blocked run, as a restart
+    // would recover.
+    let origin = Arc::new(
+        InMemoryTurnStateStore::default()
+            .with_block_persistence(Arc::new(RecordingBlockPersistence::default())),
+    );
+    let coordinator = DefaultTurnCoordinator::new(origin.clone());
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-recover", "idem-recover"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    origin
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-recover")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let gate_ref = GateRef::new("recover-gate").unwrap();
+    origin
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
+            reason: BlockedReason::Approval {
+                gate_ref: gate_ref.clone(),
+            },
+        })
+        .await
+        .unwrap();
+    let recovery_snapshot = origin.persistence_snapshot();
+
+    // Restart: rehydrate a fresh store from that snapshot and attach a fresh
+    // sink. The recovered blocked run must be seeded into the gate-persisted set.
+    let restored_sink = Arc::new(RecordingBlockPersistence::default());
+    let restored = Arc::new(
+        InMemoryTurnStateStore::from_persistence_snapshot(
+            recovery_snapshot,
+            InMemoryTurnStateStoreLimits::default(),
+        )
+        .unwrap()
+        .with_block_persistence(restored_sink.clone()),
+    );
+
+    // Resume the recovered gate, then claim + complete it.
+    restored
+        .resume_turn(ResumeTurnRequest {
+            scope: scope("thread-recover"),
+            actor: actor(),
+            run_id,
+            gate_resolution_ref: gate_ref,
+            source_binding_ref: SourceBindingRef::new("src-recover").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-recover").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-recover-resume").unwrap(),
+            precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedApprovalGate,
+            resume_disposition: None,
+        })
+        .await
+        .unwrap();
+    let resume_runner = TurnRunnerId::new();
+    let resume_lease = TurnLeaseToken::new();
+    restored
+        .claim_next_run(ClaimRunRequest {
+            runner_id: resume_runner,
+            lease_token: resume_lease,
+            scope_filter: Some(scope("thread-recover")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    restored
+        .complete_run(CompleteRunRequest {
+            run_id,
+            runner_id: resume_runner,
+            lease_token: resume_lease,
+        })
+        .await
+        .unwrap();
+
+    // Completing the recovered run must have persisted its terminal state, so a
+    // subsequent restart rehydrates it as Completed, not live.
+    let terminal_snapshot = restored_sink
+        .snapshots()
+        .pop()
+        .expect("terminal persist after recovery resume/complete");
+    let terminal_run = terminal_snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .expect("recovered run present in terminal snapshot");
+    assert_eq!(
+        terminal_run.status,
+        TurnStatus::Completed,
+        "recovered gate-blocked run must persist its terminal state, not stay Queued/Running"
+    );
+}
+
+/// The narrow window: a gate-touched run that has already *resumed* (persisted as
+/// `Queued`, not `Blocked`) when a restart snapshots it. Status alone no longer
+/// says "gate-touched", so seeding must key off the retained `checkpoint_id`.
+/// Otherwise the recovered run completes untracked, its terminal state is never
+/// persisted, and every subsequent restart re-runs the finished turn.
+#[tokio::test]
+async fn rehydrated_resumed_run_persists_terminal_state() {
+    // Build a snapshot where a gate-touched run has already resumed (Queued).
+    let origin = Arc::new(
+        InMemoryTurnStateStore::default()
+            .with_block_persistence(Arc::new(RecordingBlockPersistence::default())),
+    );
+    let coordinator = DefaultTurnCoordinator::new(origin.clone());
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-resumed-recover",
+                "idem-resumed-recover",
+            ))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    origin
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-resumed-recover")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let gate_ref = GateRef::new("resumed-recover-gate").unwrap();
+    origin
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
+            reason: BlockedReason::Approval {
+                gate_ref: gate_ref.clone(),
+            },
+        })
+        .await
+        .unwrap();
+    origin
+        .resume_turn(ResumeTurnRequest {
+            scope: scope("thread-resumed-recover"),
+            actor: actor(),
+            run_id,
+            gate_resolution_ref: gate_ref,
+            source_binding_ref: SourceBindingRef::new("src-resumed-recover").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-resumed-recover").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-resumed-recover-resume").unwrap(),
+            precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedApprovalGate,
+            resume_disposition: None,
+        })
+        .await
+        .unwrap();
+    let recovery_snapshot = origin.persistence_snapshot();
+    // Precondition: the run is captured as Queued (resumed), not Blocked.
+    assert_eq!(
+        recovery_snapshot
+            .runs
+            .iter()
+            .find(|record| record.run_id == run_id)
+            .expect("resumed run present in snapshot")
+            .status,
+        TurnStatus::Queued,
+    );
+
+    // Restart: rehydrate + attach a fresh sink. The resumed gate-touched run must
+    // be re-tracked from its retained checkpoint marker.
+    let restored_sink = Arc::new(RecordingBlockPersistence::default());
+    let restored = Arc::new(
+        InMemoryTurnStateStore::from_persistence_snapshot(
+            recovery_snapshot,
+            InMemoryTurnStateStoreLimits::default(),
+        )
+        .unwrap()
+        .with_block_persistence(restored_sink.clone()),
+    );
+    let resume_runner = TurnRunnerId::new();
+    let resume_lease = TurnLeaseToken::new();
+    restored
+        .claim_next_run(ClaimRunRequest {
+            runner_id: resume_runner,
+            lease_token: resume_lease,
+            scope_filter: Some(scope("thread-resumed-recover")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    restored
+        .complete_run(CompleteRunRequest {
+            run_id,
+            runner_id: resume_runner,
+            lease_token: resume_lease,
+        })
+        .await
+        .unwrap();
+
+    let terminal_snapshot = restored_sink
+        .snapshots()
+        .pop()
+        .expect("terminal persist after recovered resumed run completes");
+    assert_eq!(
+        terminal_snapshot
+            .runs
+            .iter()
+            .find(|record| record.run_id == run_id)
+            .expect("recovered resumed run present in terminal snapshot")
+            .status,
+        TurnStatus::Completed,
+        "a resumed gate-touched run recovered from a restart must still persist its terminal state"
+    );
+}
+
+/// Graceful-shutdown flush must durably capture **in-flight, non-blocked** runs,
+/// not just gate-blocked ones — that is what makes a planned deploy (SIGTERM)
+/// recover in-progress turns instead of dropping them. Persist-on-block never
+/// fires for a plain running turn, so only `flush()` covers it.
+#[tokio::test]
+async fn flush_persists_in_flight_non_blocked_run() {
+    let sink = Arc::new(RecordingBlockPersistence::default());
+    let store = Arc::new(InMemoryTurnStateStore::default().with_block_persistence(sink.clone()));
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-flush", "idem-flush"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-flush")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    // The run is now Running (in-flight) and never blocked, so persist-on-block
+    // has not fired — the hot path stays off the sink.
+    assert!(
+        sink.snapshots().is_empty(),
+        "claim/run must not persist on the hot path"
+    );
+
+    // Graceful shutdown flush captures the in-flight run.
+    store.flush().await;
+    let flushed = sink
+        .snapshots()
+        .pop()
+        .expect("flush must persist a snapshot");
+    let record = flushed
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .expect("in-flight run present in flushed snapshot");
+    assert!(
+        matches!(record.status, TurnStatus::Running | TurnStatus::Queued),
+        "flush must capture the in-flight non-blocked run, got {:?}",
+        record.status
+    );
+
+    // And it rehydrates, so a restart recovers the in-flight run.
+    let restored = InMemoryTurnStateStore::from_persistence_snapshot(
+        flushed,
+        InMemoryTurnStateStoreLimits::default(),
+    )
+    .unwrap();
+    assert!(
+        restored
+            .persistence_snapshot()
+            .runs
+            .iter()
+            .any(|record| record.run_id == run_id),
+        "in-flight run survives flush + rehydration"
+    );
 }
 
 #[tokio::test]
@@ -939,6 +1757,7 @@ async fn default_turn_coordinator_dedupes_idempotency_replay_events_by_cursor() 
         reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
         idempotency_key: IdempotencyKey::new("idem-event-replay-resume").unwrap(),
         precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedDependentRunGate,
+        resume_disposition: None,
     };
     coordinator.resume_turn(resume.clone()).await.unwrap();
     coordinator.resume_turn(resume).await.unwrap();
@@ -1656,6 +2475,7 @@ async fn lifecycle_publishing_store_propagates_required_observer_error_on_resume
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-required-resume-error").unwrap(),
             precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedDependentRunGate,
+            resume_disposition: None,
         })
         .await
         .unwrap_err();
@@ -1861,6 +2681,7 @@ async fn turn_lifecycle_projection_replays_submit_block_resume_complete_without_
             )
             .unwrap(),
             idempotency_key: IdempotencyKey::new("idem-turn-events-resume").unwrap(),
+            resume_disposition: None,
         })
         .await
         .unwrap();
@@ -2169,10 +2990,7 @@ async fn turn_lifecycle_projection_replays_cancelled_terminal_without_raw_refs()
 #[tokio::test]
 async fn turn_lifecycle_projection_requires_rebase_for_pruned_or_fabricated_cursors() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
-            max_events: 2,
-            ..InMemoryTurnStateStoreLimits::default()
-        },
+        InMemoryTurnStateStoreLimits::default().set_max_events(2),
     ));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let mut request = submit_request("thread-turn-gap", "idem-turn-gap-submit");
@@ -2488,6 +3306,7 @@ async fn resume_turn_wakes_runner_for_same_run_after_requeue() {
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
+            resume_disposition: None,
         })
         .await
         .unwrap();
@@ -2614,6 +3433,7 @@ async fn resume_turn_ignores_wake_notification_panic_after_requeue() {
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
+            resume_disposition: None,
         })
         .await
         .unwrap();
@@ -3332,10 +4152,7 @@ async fn record_model_route_snapshot_is_idempotent_and_rejects_route_changes() {
 #[tokio::test]
 async fn terminal_record_pruning_bounds_released_admission_reservations() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
-            max_terminal_records: 1,
-            ..InMemoryTurnStateStoreLimits::default()
-        },
+        InMemoryTurnStateStoreLimits::default().set_max_terminal_records(1),
     ));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let first_run_id = accepted_run_id(
@@ -3404,10 +4221,7 @@ async fn terminal_record_pruning_bounds_released_admission_reservations() {
 #[tokio::test]
 async fn terminal_root_with_tree_reservation_survives_terminal_pruning() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
-            max_terminal_records: 1,
-            ..InMemoryTurnStateStoreLimits::default()
-        },
+        InMemoryTurnStateStoreLimits::default().set_max_terminal_records(1),
     ));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let parent_scope = scope("thread-tree-root-pruned");
@@ -3468,10 +4282,7 @@ async fn terminal_root_with_tree_reservation_survives_terminal_pruning() {
 #[tokio::test]
 async fn terminal_root_release_does_not_duplicate_pruning_queue() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
-            max_terminal_records: 1,
-            ..InMemoryTurnStateStoreLimits::default()
-        },
+        InMemoryTurnStateStoreLimits::default().set_max_terminal_records(1),
     ));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let parent_scope = scope("thread-tree-root-release");
@@ -3491,7 +4302,7 @@ async fn terminal_root_release_does_not_duplicate_pruning_queue() {
         .unwrap();
     complete_queued_run(&store, parent_run_id, "thread-tree-root-release").await;
     store
-        .release_tree_descendants(&parent_scope, parent_run_id, 1)
+        .release_tree_descendants(&parent_scope, parent_run_id, 1, parent_run_id)
         .await
         .unwrap();
 
@@ -3508,10 +4319,7 @@ async fn terminal_root_release_does_not_duplicate_pruning_queue() {
 #[tokio::test]
 async fn releasing_old_reserved_terminal_root_keeps_newer_terminal_record() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
-            max_terminal_records: 1,
-            ..InMemoryTurnStateStoreLimits::default()
-        },
+        InMemoryTurnStateStoreLimits::default().set_max_terminal_records(1),
     ));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let parent_scope = scope("thread-tree-root-release-after-churn");
@@ -3556,7 +4364,7 @@ async fn releasing_old_reserved_terminal_root_keeps_newer_terminal_record() {
     );
 
     store
-        .release_tree_descendants(&parent_scope, parent_run_id, 1)
+        .release_tree_descendants(&parent_scope, parent_run_id, 1, parent_run_id)
         .await
         .unwrap();
 
@@ -3817,6 +4625,7 @@ async fn blocked_resume_then_recovery_failure_releases_admission_reservation() {
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
+            resume_disposition: None,
         })
         .await
         .unwrap();
@@ -4117,6 +4926,7 @@ async fn resume_updates_persisted_run_binding_refs_and_replay_envelope() {
         source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
         reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
         idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
+        resume_disposition: None,
     };
 
     let resumed = coordinator
@@ -4417,10 +5227,7 @@ fn capacity_exceeded_idempotency_replay_preserves_resource_and_cap() {
 #[tokio::test]
 async fn idempotency_persistence_snapshot_retains_each_operation_kind_capacity() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
-            max_idempotency_records: 1,
-            ..InMemoryTurnStateStoreLimits::default()
-        },
+        InMemoryTurnStateStoreLimits::default().set_max_idempotency_records(1),
     ));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let run_id = accepted_run_id(
@@ -4464,6 +5271,7 @@ async fn idempotency_persistence_snapshot_retains_each_operation_kind_capacity()
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
+            resume_disposition: None,
         })
         .await
         .unwrap();
@@ -4491,10 +5299,7 @@ async fn idempotency_persistence_snapshot_retains_each_operation_kind_capacity()
 #[tokio::test]
 async fn idempotency_persistence_snapshot_drops_records_when_replay_cache_prunes_them() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
-            max_idempotency_records: 1,
-            ..InMemoryTurnStateStoreLimits::default()
-        },
+        InMemoryTurnStateStoreLimits::default().set_max_idempotency_records(1),
     ));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
 
@@ -4562,6 +5367,7 @@ async fn idempotency_replay_helpers_require_matching_operation_kind() {
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
+            resume_disposition: None,
         })
         .await
         .unwrap();
@@ -4605,10 +5411,7 @@ async fn idempotency_replay_helpers_require_matching_operation_kind() {
 #[tokio::test]
 async fn idempotency_retention_keeps_the_newest_result_when_pruned() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
-            max_idempotency_records: 2,
-            ..InMemoryTurnStateStoreLimits::default()
-        },
+        InMemoryTurnStateStoreLimits::default().set_max_idempotency_records(2),
     ));
     let coordinator = DefaultTurnCoordinator::new(store);
 
@@ -4843,10 +5646,8 @@ async fn runner_claims_queued_run_with_lease_and_heartbeat_requires_matching_lea
 
 #[tokio::test]
 async fn cancel_requested_runner_heartbeat_does_not_extend_lease() {
-    let limits = InMemoryTurnStateStoreLimits {
-        runner_lease_ttl: ChronoDuration::milliseconds(40),
-        ..InMemoryTurnStateStoreLimits::default()
-    };
+    let limits = InMemoryTurnStateStoreLimits::default()
+        .set_runner_lease_ttl(ChronoDuration::milliseconds(40));
     let store = Arc::new(InMemoryTurnStateStore::with_limits(limits));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let request = submit_request("thread-cancel-heartbeat", "idem-submit-cancel-heartbeat");
@@ -4904,10 +5705,8 @@ async fn cancel_requested_runner_heartbeat_does_not_extend_lease() {
 
 #[tokio::test]
 async fn expired_runner_lease_rejects_heartbeat_and_terminal_completion_before_recovery_sweep() {
-    let limits = InMemoryTurnStateStoreLimits {
-        runner_lease_ttl: ChronoDuration::milliseconds(-1),
-        ..InMemoryTurnStateStoreLimits::default()
-    };
+    let limits = InMemoryTurnStateStoreLimits::default()
+        .set_runner_lease_ttl(ChronoDuration::milliseconds(-1));
     let store = Arc::new(InMemoryTurnStateStore::with_limits(limits));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let run_id = accepted_run_id(
@@ -4970,10 +5769,8 @@ async fn expired_runner_lease_rejects_heartbeat_and_terminal_completion_before_r
 
 #[tokio::test]
 async fn expired_runner_lease_rejects_fail_and_runner_side_cancel_before_recovery_sweep() {
-    let limits = InMemoryTurnStateStoreLimits {
-        runner_lease_ttl: ChronoDuration::milliseconds(-1),
-        ..InMemoryTurnStateStoreLimits::default()
-    };
+    let limits = InMemoryTurnStateStoreLimits::default()
+        .set_runner_lease_ttl(ChronoDuration::milliseconds(-1));
     let store = Arc::new(InMemoryTurnStateStore::with_limits(limits));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
 
@@ -5363,6 +6160,7 @@ async fn blocked_run_persists_checkpoint_and_keeps_same_thread_lock_until_resume
         source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
         reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
         idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
+        resume_disposition: None,
     };
     let resumed = coordinator
         .resume_turn(resume_request.clone())
@@ -5420,6 +6218,7 @@ async fn resume_turn_rejects_unexpected_blocked_status_without_requeueing_run() 
             source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-wrong-status").unwrap(),
+            resume_disposition: None,
         })
         .await
         .unwrap_err();
@@ -5487,6 +6286,7 @@ async fn resume_turn_from_foreign_actor_is_denied_without_requeueing_run() {
             source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-foreign-actor").unwrap(),
+            resume_disposition: None,
         })
         .await
         .unwrap_err();
@@ -5629,6 +6429,7 @@ async fn resume_turn_with_wrong_gate_resolution_ref_is_invalid_request() {
             source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-wrong-gate").unwrap(),
+            resume_disposition: None,
         })
         .await
         .unwrap_err();
@@ -5886,6 +6687,8 @@ async fn in_memory_event_sink_retains_a_bounded_tail() {
             kind: TurnEventKind::Submitted,
             blocked_gate: None,
             sanitized_reason: None,
+            retryable: None,
+            detail: None,
         })
         .await
         .unwrap();
@@ -6057,6 +6860,7 @@ async fn any_blocked_gate_resume_does_not_resume_dependent_run_gate() {
             source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-dependent-resume-any").unwrap(),
+            resume_disposition: None,
         })
         .await
         .unwrap_err();
@@ -6097,7 +6901,7 @@ async fn release_tree_descendants_rejects_over_release() {
         .unwrap();
 
     let err = store
-        .release_tree_descendants(&owner_scope, root, 3)
+        .release_tree_descendants(&owner_scope, root, 3, root)
         .await
         .unwrap_err();
     match err {
@@ -6106,6 +6910,142 @@ async fn release_tree_descendants_rejects_over_release() {
         }
         other => panic!("expected InvalidRequest, got {other:?}"),
     }
+}
+
+/// §5.5 round-5/6: a retried `release_tree_descendants` call for the same
+/// child (`idempotency_key`) must be a no-op, not a second decrement — this
+/// is what makes recovery re-driving an edge stuck at
+/// `ReservationReleaseState::Claimed`, or a rollback retry, safe to repeat.
+/// Deleting the dedup check would silently over-release capacity: this test
+/// pins that a repeated call for the *same* child does not free capacity
+/// twice, while a *different* child's release still counts normally.
+#[tokio::test]
+async fn release_tree_descendants_dedups_repeated_call_for_same_child() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+
+    let root = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-tree-root-dedup",
+                "idem-tree-root-dedup",
+            ))
+            .await
+            .unwrap(),
+    );
+    let owner_scope = scope("thread-tree-root-dedup");
+    let child_a = TurnRunId::new();
+    let child_b = TurnRunId::new();
+
+    // Reserve 2 descendant slots against a cap with no spare headroom (cap
+    // == the reservation), so a double-release is the only way a later
+    // 2-slot reserve could succeed.
+    store
+        .reserve_tree_descendants(&owner_scope, root, 2, 2)
+        .await
+        .unwrap();
+
+    // Release child_a's slot, then retry the *exact same* release call
+    // (simulating recovery re-driving a `Claimed`-stuck edge). The retry
+    // must not free a second slot.
+    store
+        .release_tree_descendants(&owner_scope, root, 1, child_a)
+        .await
+        .unwrap();
+    store
+        .release_tree_descendants(&owner_scope, root, 1, child_a)
+        .await
+        .unwrap();
+
+    // Only 1 slot was actually freed (child_a's) — 1 remains occupied, so
+    // reserving 2 more against the same cap=2 must be rejected. If the
+    // retry had double-released instead, 0 would remain occupied and this
+    // would incorrectly succeed.
+    let over_cap = store
+        .reserve_tree_descendants(&owner_scope, root, 2, 2)
+        .await;
+    assert!(
+        matches!(over_cap, Err(TurnError::CapacityExceeded { .. })),
+        "expected the retried release to be a no-op leaving 1 slot still occupied, got {over_cap:?}"
+    );
+
+    // A *different* child's release still counts normally, confirming the
+    // dedup is keyed per-child, not a blanket no-op — freeing child_b's slot
+    // too now allows a fresh 2-slot reservation against the same cap.
+    store
+        .release_tree_descendants(&owner_scope, root, 1, child_b)
+        .await
+        .unwrap();
+    let after_second_child = store
+        .reserve_tree_descendants(&owner_scope, root, 2, 2)
+        .await
+        .unwrap();
+    assert_eq!(after_second_child.descendant_count, 2);
+}
+
+/// §5.5 round-7: `prune_released_child` must remove a child's dedup entry
+/// from `released_children` (called strictly before the edge's delete,
+/// §4.0(a)) -- otherwise the set grows for the tree's whole cumulative
+/// lifetime instead of staying bounded by the live descendant cap. There is
+/// no direct observable for the set's contents, so this pins the
+/// *behavioral* meaning of pruning instead: a repeated release call for the
+/// same idempotency_key is a no-op only while the entry is present
+/// (`release_tree_descendants_dedups_repeated_call_for_same_child` above),
+/// so after pruning, a repeated call for the *same* key must decrement
+/// again, not no-op.
+#[tokio::test]
+async fn prune_released_child_allows_idempotency_key_reuse_after_prune() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+
+    let root = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-tree-root-prune",
+                "idem-tree-root-prune",
+            ))
+            .await
+            .unwrap(),
+    );
+    let owner_scope = scope("thread-tree-root-prune");
+    let child_a = TurnRunId::new();
+
+    store
+        .reserve_tree_descendants(&owner_scope, root, 2, 2)
+        .await
+        .unwrap();
+
+    // Release child_a's slot (count 2 -> 1, released_children = {child_a}).
+    store
+        .release_tree_descendants(&owner_scope, root, 1, child_a)
+        .await
+        .unwrap();
+
+    // Prune the dedup entry for child_a -- the close-path cleanup that keeps
+    // `released_children` bounded to currently-open-or-in-flight edges.
+    store
+        .prune_released_child(&owner_scope, root, child_a)
+        .await
+        .unwrap();
+
+    // With the entry pruned, a release call reusing the *same*
+    // idempotency_key must decrement again rather than no-op -- if the
+    // prune were a no-op, this call would find child_a already recorded and
+    // silently skip the decrement instead.
+    store
+        .release_tree_descendants(&owner_scope, root, 1, child_a)
+        .await
+        .unwrap();
+
+    // Full capacity must be free again: 2 slots total freed (one per
+    // release call), against a reservation cap of 2. If the prune had been
+    // a no-op, only 1 slot would ever have been freed and this would fail
+    // with CapacityExceeded.
+    let after_prune_reserve = store
+        .reserve_tree_descendants(&owner_scope, root, 2, 2)
+        .await
+        .unwrap();
+    assert_eq!(after_prune_reserve.descendant_count, 2);
 }
 
 #[tokio::test]
@@ -6189,6 +7129,7 @@ async fn complete_queued_run(store: &InMemoryTurnStateStore, run_id: TurnRunId, 
 
 fn submit_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest {
     SubmitTurnRequest {
+        requested_model: None,
         scope: scope(thread),
         actor: actor(),
         accepted_message_ref: AcceptedMessageRef::new(format!("message-{thread}")).unwrap(),
@@ -6201,6 +7142,7 @@ fn submit_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest {
         parent_run_id: None,
         subagent_depth: 0,
         spawn_tree_root_run_id: None,
+        product_context: None,
     }
 }
 
@@ -6238,6 +7180,17 @@ fn cancel_request(thread: &str, run_id: TurnRunId, idempotency_key: &str) -> Can
         actor: actor(),
         run_id,
         reason: SanitizedCancelReason::UserRequested,
+        idempotency_key: IdempotencyKey::new(idempotency_key).unwrap(),
+    }
+}
+
+fn retry_request(thread: &str, run_id: TurnRunId, idempotency_key: &str) -> RetryTurnRequest {
+    RetryTurnRequest {
+        scope: scope(thread),
+        actor: actor(),
+        run_id,
+        source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
         idempotency_key: IdempotencyKey::new(idempotency_key).unwrap(),
     }
 }
@@ -6283,6 +7236,67 @@ impl TurnRunWakeNotifier for RecordingWakeNotifier {
     fn notify_queued_run(&self, wake: TurnRunWake) -> Result<(), TurnRunWakeNotifyError> {
         self.wakes.lock().unwrap().push(wake);
         Ok(())
+    }
+}
+
+struct RetryOnlyStore {
+    retry_response: Mutex<Result<RetryTurnResponse, TurnError>>,
+    retry_requests: Mutex<Vec<RetryTurnRequest>>,
+}
+
+impl RetryOnlyStore {
+    fn new(retry_response: Result<RetryTurnResponse, TurnError>) -> Self {
+        Self {
+            retry_response: Mutex::new(retry_response),
+            retry_requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn retry_requests(&self) -> Vec<RetryTurnRequest> {
+        self.retry_requests.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl TurnStateStore for RetryOnlyStore {
+    async fn submit_turn(
+        &self,
+        _request: SubmitTurnRequest,
+        _admission_policy: &dyn TurnAdmissionPolicy,
+        _run_profile_resolver: &dyn RunProfileResolver,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "test store only implements retry_turn".to_string(),
+        })
+    }
+
+    async fn resume_turn(
+        &self,
+        _request: ResumeTurnRequest,
+    ) -> Result<ironclaw_turns::ResumeTurnResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "test store only implements retry_turn".to_string(),
+        })
+    }
+
+    async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
+        self.retry_requests.lock().unwrap().push(request);
+        self.retry_response.lock().unwrap().clone()
+    }
+
+    async fn request_cancel(
+        &self,
+        _request: CancelRunRequest,
+    ) -> Result<CancelRunResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "test store only implements retry_turn".to_string(),
+        })
+    }
+
+    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "test store only implements retry_turn".to_string(),
+        })
     }
 }
 
@@ -6457,7 +7471,8 @@ fn event_from_state_for_recording(state: &TurnRunState) -> TurnLifecycleEvent {
         TurnStatus::BlockedApproval
         | TurnStatus::BlockedAuth
         | TurnStatus::BlockedResource
-        | TurnStatus::BlockedDependentRun => TurnEventKind::Blocked,
+        | TurnStatus::BlockedDependentRun
+        | TurnStatus::BlockedExternalTool => TurnEventKind::Blocked,
         TurnStatus::Completed => TurnEventKind::Completed,
         TurnStatus::Cancelled => TurnEventKind::Cancelled,
         TurnStatus::Failed => TurnEventKind::Failed,
@@ -6586,12 +7601,16 @@ impl TurnRunTransitionPort for AtomicLoopExitPort {
             resolved_run_profile_id: RunProfileId::new("default").unwrap(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             resolved_model_route: None,
+            model_usage: None,
             received_at: received_at(),
             checkpoint_id: None,
             gate_ref: None,
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
+            product_context: None,
+            resume_disposition: None,
         })
     }
 }
@@ -7146,6 +8165,7 @@ async fn cancel_on_legacy_recovery_required_run_reports_already_terminal() {
     // a RecoveryRequired mapping (the compat shim).
     let rr_state = store
         .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            model_usage: None,
             run_id,
             runner_id,
             lease_token,
@@ -7175,6 +8195,198 @@ async fn cancel_on_legacy_recovery_required_run_reports_already_terminal() {
     assert!(
         cancel_response.already_terminal,
         "cancel on a terminal RecoveryRequired-turned-Failed run should report already_terminal"
+    );
+}
+
+// Regression: child run must inherit parent's product_context verbatim.
+// submit_child_turn copies parent.product_context → child RunRecord at line 1044 of memory.rs;
+// if that assignment were dropped the child record would silently carry None and no existing
+// lineage/reservation assertion would catch it.
+#[tokio::test]
+async fn submit_child_run_inherits_parent_product_context() {
+    let (coordinator, store) = coordinator();
+
+    let product_context = ProductTurnContext::new(
+        TurnOriginKind::Inbound,
+        Some(TurnSurfaceType::Channel),
+        Some(RunOriginAdapter::new("telegram").unwrap()),
+        TurnOwner::Personal {
+            user: UserId::new("user-ctx-inherit").unwrap(),
+        },
+    );
+
+    let mut parent_request = submit_request("thread-ctx-parent", "idem-ctx-parent");
+    parent_request.product_context = Some(product_context.clone());
+    let parent = accepted_run_id(&coordinator.submit_turn(parent_request).await.unwrap());
+
+    let child_id = coordinator
+        .prepare_turn(scope("thread-ctx-child"))
+        .await
+        .unwrap();
+    coordinator
+        .submit_child_run(child_run_request(
+            scope("thread-ctx-parent"),
+            parent,
+            "thread-ctx-child",
+            child_id,
+            "idem-ctx-child",
+            2,
+        ))
+        .await
+        .unwrap();
+
+    let child_record = store
+        .get_run_record(&scope("thread-ctx-child"), child_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        child_record.product_context,
+        Some(product_context),
+        "child run record must carry the parent's product_context verbatim"
+    );
+}
+
+// Persistence path: resume_turn with resume_disposition writes the field onto the run
+// record, and claim_next_run returns a TurnRunState that carries the same value.
+#[tokio::test]
+async fn resume_turn_resume_disposition_is_persisted_and_visible_on_claim() {
+    let (coordinator, store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-auth-deny-persist",
+                "idem-auth-deny-persist-submit",
+            ))
+            .await
+            .unwrap(),
+    );
+
+    // Claim the run so we can block it on an auth gate.
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-auth-deny-persist")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Drive the run into BlockedAuth via block_run with BlockedReason::Auth.
+    let gate_ref = GateRef::new("auth-deny-gate").unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
+            reason: BlockedReason::Auth {
+                gate_ref: gate_ref.clone(),
+                credential_requirements: Vec::new(),
+            },
+        })
+        .await
+        .unwrap();
+
+    // Verify we are now in BlockedAuth.
+    let blocked_state = coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: scope("thread-auth-deny-persist"),
+            run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        blocked_state.status,
+        TurnStatus::BlockedAuth,
+        "run must be in BlockedAuth before resume"
+    );
+
+    // Resume with Denied disposition — this is the auth-deny path.
+    let denied_disposition = ironclaw_turns::GateResumeDisposition::Denied;
+    coordinator
+        .resume_turn(ResumeTurnRequest {
+            scope: scope("thread-auth-deny-persist"),
+            actor: actor(),
+            run_id,
+            gate_resolution_ref: gate_ref,
+            precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedAuthGate,
+            source_binding_ref: SourceBindingRef::new("source-auth-deny").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-auth-deny").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-auth-deny-persist-resume").unwrap(),
+            resume_disposition: Some(denied_disposition.clone()),
+        })
+        .await
+        .unwrap();
+
+    // Claim the re-queued run and assert resume_disposition is propagated.
+    let claimed = store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(scope("thread-auth-deny-persist")),
+        })
+        .await
+        .unwrap()
+        .expect("run must be claimable after auth-deny resume");
+
+    assert_eq!(
+        claimed.state.resume_disposition,
+        Some(denied_disposition),
+        "resume_disposition must be visible on the claimed TurnRunState"
+    );
+
+    // Self-clearing contract: a subsequent normal resume (disposition: None) clears the field.
+    // First drive back to BlockedAuth again via block_run.
+    let gate_ref2 = GateRef::new("auth-deny-gate-2").unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id: claimed.runner_id,
+            lease_token: claimed.lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
+            reason: BlockedReason::Auth {
+                gate_ref: gate_ref2.clone(),
+                credential_requirements: Vec::new(),
+            },
+        })
+        .await
+        .unwrap();
+
+    // Resume again, this time with no disposition.
+    coordinator
+        .resume_turn(ResumeTurnRequest {
+            scope: scope("thread-auth-deny-persist"),
+            actor: actor(),
+            run_id,
+            gate_resolution_ref: gate_ref2,
+            precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedAuthGate,
+            source_binding_ref: SourceBindingRef::new("source-auth-deny-2").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-auth-deny-2").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-auth-deny-persist-resume-2").unwrap(),
+            resume_disposition: None,
+        })
+        .await
+        .unwrap();
+
+    let claimed2 = store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(scope("thread-auth-deny-persist")),
+        })
+        .await
+        .unwrap()
+        .expect("run must be claimable after second resume");
+
+    assert_eq!(
+        claimed2.state.resume_disposition, None,
+        "resume_disposition must be None after a resume that supplies no disposition"
     );
 }
 

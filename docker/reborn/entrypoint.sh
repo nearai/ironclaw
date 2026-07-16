@@ -35,10 +35,21 @@ fi
 export IRONCLAW_REBORN_HOME
 if [ -n "${IRONCLAW_REBORN_DEFAULT_CONFIG:-}" ]; then
   default_config="$IRONCLAW_REBORN_DEFAULT_CONFIG"
-elif [ "${IRONCLAW_REBORN_PROFILE:-}" = "production" ] || [ "${IRONCLAW_REBORN_PROFILE:-}" = "migration-dry-run" ]; then
-  default_config="/opt/ironclaw/reborn/config.production.toml"
 else
-  default_config="/opt/ironclaw/reborn/config.toml"
+  case "${IRONCLAW_REBORN_PROFILE:-}" in
+    production|migration-dry-run)
+      default_config="/opt/ironclaw/reborn/config.production.toml"
+      ;;
+    hosted-single-tenant)
+      default_config="/opt/ironclaw/reborn/config.hosted-single-tenant.toml"
+      ;;
+    hosted-single-tenant-volume)
+      default_config="/opt/ironclaw/reborn/config.hosted-single-tenant-volume.toml"
+      ;;
+    *)
+      default_config="/opt/ironclaw/reborn/config.toml"
+      ;;
+  esac
 fi
 config_path="$IRONCLAW_REBORN_HOME/config.toml"
 
@@ -70,6 +81,36 @@ if [ ! -f "$config_path" ]; then
   trap - EXIT HUP INT TERM
 fi
 
+if ! is_truthy "${IRONCLAW_REBORN_SLACK_ENABLED:-}" \
+  && awk '
+    /^[[:space:]]*\[/ {
+      in_slack = ($0 ~ /^[[:space:]]*\[slack\][[:space:]]*$/)
+    }
+    in_slack && /^[[:space:]]*enabled[[:space:]]*=[[:space:]]*false[[:space:]]*$/ {
+      disabled = 1
+    }
+    in_slack && /^[[:space:]]*(signing_secret_env|bot_token_env)[[:space:]]*=/ {
+      legacy = 1
+    }
+    END { exit !(disabled && legacy) }
+  ' "$config_path"
+then
+  tmp_config="${config_path}.tmp.$$"
+  trap 'rm -f "$tmp_config"' EXIT HUP INT TERM
+  awk '
+    /^[[:space:]]*\[/ {
+      in_slack = ($0 ~ /^[[:space:]]*\[slack\][[:space:]]*$/)
+    }
+    in_slack && /^[[:space:]]*(signing_secret_env|bot_token_env)[[:space:]]*=/ {
+      next
+    }
+    { print }
+  ' "$config_path" > "$tmp_config"
+  mv "$tmp_config" "$config_path"
+  trap - EXIT HUP INT TERM
+  echo "Removed disabled legacy Slack setup fields from $config_path." >&2
+fi
+
 effective_profile="${IRONCLAW_REBORN_PROFILE:-}"
 if [ -z "$effective_profile" ]; then
   effective_profile="$(sed -n 's/^[[:space:]]*profile[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$config_path" | sed -n '1p')"
@@ -88,13 +129,21 @@ case "$effective_profile" in
       exit 1
     fi
     ;;
+  hosted-single-tenant)
+    if ! grep -q '^[[:space:]]*\[storage\][[:space:]]*$' "$config_path"
+    then
+      echo "IRONCLAW_REBORN_PROFILE=$effective_profile requires $config_path to contain [storage]." >&2
+      echo "The existing config looks like a stale local-dev seed; remove it to let the entrypoint install $default_config, or migrate it manually." >&2
+      exit 1
+    fi
+    ;;
 esac
 
 if railway_runtime_detected \
   && ! is_truthy "${IRONCLAW_REBORN_ALLOW_EPHEMERAL_RAILWAY:-}"
 then
   case "$effective_profile" in
-    local-dev|local-dev-yolo)
+    local-dev|local-dev-yolo|hosted-single-tenant|hosted-single-tenant-volume)
       if [ -z "$railway_volume_mount" ]; then
         echo "Railway deployment using profile=$effective_profile requires a persistent volume for IRONCLAW_REBORN_HOME=$IRONCLAW_REBORN_HOME." >&2
         echo "Attach a Railway volume mounted at /data (or set IRONCLAW_REBORN_HOME under RAILWAY_VOLUME_MOUNT_PATH)." >&2

@@ -214,15 +214,25 @@ impl CodexChatGptProvider {
         refresh_token: Option<SecretString>,
         auth_path: Option<PathBuf>,
         request_timeout_secs: u64,
-    ) -> Self {
+    ) -> Result<Self, crate::LlmError> {
         tracing::warn!(
             "Codex ChatGPT provider uses a private, undocumented API \
              (chatgpt.com/backend-api/codex). This may violate OpenAI's \
              Terms of Service and could break without notice."
         );
 
-        Self {
-            client: Client::new(),
+        // The total request timeout is applied per-request (see
+        // `send_http_request`); the shared builder adds the connect/keepalive/
+        // pool-idle hygiene at the client level.
+        let client = crate::config::hardened_client_builder(request_timeout_secs)
+            .build()
+            .map_err(|e| crate::LlmError::RequestFailed {
+                provider: "codex_chatgpt".to_string(),
+                reason: format!("Failed to build HTTP client: {e}"),
+            })?;
+
+        Ok(Self {
+            client,
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: RwLock::new(api_key),
             configured_model: configured_model.to_string(),
@@ -231,7 +241,7 @@ impl CodexChatGptProvider {
             auth_path,
             request_timeout: Duration::from_secs(request_timeout_secs),
             refresh_lock: Mutex::new(()),
-        }
+        })
     }
 
     /// Resolve the model to use, lazily on first call.
@@ -515,6 +525,11 @@ impl CodexChatGptProvider {
                                 .await
                                 .unwrap_or(Ok(String::new()))
                                 .unwrap_or_default();
+                        if let Some(error) =
+                            crate::error::context_length_error(retry_status.as_u16(), &body_text)
+                        {
+                            return Err(error);
+                        }
                         return Err(LlmError::RequestFailed {
                             provider: "codex_chatgpt".to_string(),
                             reason: format!(
@@ -551,6 +566,11 @@ impl CodexChatGptProvider {
                                 .await
                                 .unwrap_or(Ok(String::new()))
                                 .unwrap_or_default();
+                        if let Some(error) =
+                            crate::error::context_length_error(retry_status.as_u16(), &body_text)
+                        {
+                            return Err(error);
+                        }
                         return Err(LlmError::RequestFailed {
                             provider: "codex_chatgpt".to_string(),
                             reason: format!(
@@ -581,6 +601,12 @@ impl CodexChatGptProvider {
                 .await
                 .unwrap_or(Ok(String::new()))
                 .unwrap_or_default();
+            // Context-overflow (HTTP 413, or a 400 whose body names a
+            // context-length error) must surface as ContextLengthExceeded so
+            // the loop's context-shrink recovery fires.
+            if let Some(error) = crate::error::context_length_error(status.as_u16(), &body_text) {
+                return Err(error);
+            }
             return Err(LlmError::RequestFailed {
                 provider: "codex_chatgpt".to_string(),
                 reason: format!("HTTP {status} from {url}: {body_text}",),
@@ -641,7 +667,10 @@ impl CodexChatGptProvider {
                         continue;
                     }
                     if data == "[DONE]" {
-                        return Ok(result);
+                        // `[DONE]` is the SSE terminator, but the Responses API
+                        // always emits `response.completed` before it. A `[DONE]`
+                        // without a preceding completion is a truncated stream.
+                        return Self::finalize_stream_result(result);
                     }
 
                     let parsed: Value = match serde_json::from_str(data) {
@@ -650,7 +679,7 @@ impl CodexChatGptProvider {
                     };
 
                     let event_type = Self::resolve_sse_event_type(event.event.as_str(), &parsed);
-                    if Self::handle_sse_event(&mut result, event_type.as_ref(), &parsed) {
+                    if Self::handle_sse_event(&mut result, event_type.as_ref(), &parsed)? {
                         return Ok(result);
                     }
                 }
@@ -660,7 +689,9 @@ impl CodexChatGptProvider {
                         reason: format!("Failed to read SSE stream: {e}"),
                     });
                 }
-                Ok(None) => return Ok(result),
+                // Stream ended without a terminal `response.completed`
+                // (mid-stream disconnect). Treat as truncated, not success.
+                Ok(None) => return Self::finalize_stream_result(result),
                 Err(_) => {
                     return Err(LlmError::RequestFailed {
                         provider: "codex_chatgpt".to_string(),
@@ -672,6 +703,26 @@ impl CodexChatGptProvider {
                 }
             }
         }
+    }
+
+    /// Convert a stream that ended without a terminal `response.completed`
+    /// event into a RETRYABLE error. A dropped connection must not masquerade
+    /// as a successful completion: `EmptyResponse` when nothing was produced,
+    /// `InvalidResponse` when partial content/tool calls were captured.
+    ///
+    /// `response.completed` is the only path that returns `Ok(result)`
+    /// directly, so reaching this finalizer always means the terminal event
+    /// was missing.
+    fn finalize_stream_result(result: ResponsesResult) -> Result<ResponsesResult, LlmError> {
+        if result.text.is_empty() && result.pending_tool_calls.is_empty() {
+            return Err(LlmError::EmptyResponse {
+                provider: "codex_chatgpt".to_string(),
+            });
+        }
+        Err(LlmError::InvalidResponse {
+            provider: "codex_chatgpt".to_string(),
+            reason: "stream ended before response.completed".to_string(),
+        })
     }
 
     /// Parse SSE events from the response text.
@@ -692,7 +743,7 @@ impl CodexChatGptProvider {
                     continue;
                 }
                 if data == "[DONE]" {
-                    return Ok(result);
+                    return Self::finalize_stream_result(result);
                 }
 
                 let parsed: Value = match serde_json::from_str(data) {
@@ -701,13 +752,13 @@ impl CodexChatGptProvider {
                 };
 
                 let event_type = Self::resolve_sse_event_type(current_event_type.as_str(), &parsed);
-                if Self::handle_sse_event(&mut result, event_type.as_ref(), &parsed) {
+                if Self::handle_sse_event(&mut result, event_type.as_ref(), &parsed)? {
                     return Ok(result);
                 }
             }
         }
 
-        Ok(result)
+        Self::finalize_stream_result(result)
     }
 
     fn resolve_sse_event_type<'a>(event_type: &'a str, parsed: &'a Value) -> Cow<'a, str> {
@@ -721,7 +772,19 @@ impl CodexChatGptProvider {
             .unwrap_or_else(|| Cow::Borrowed(event_type))
     }
 
-    fn handle_sse_event(result: &mut ResponsesResult, event_type: &str, parsed: &Value) -> bool {
+    /// Handle a single SSE event.
+    ///
+    /// Returns `Ok(true)` when a terminal `response.completed` event was seen
+    /// (the caller stops reading), `Ok(false)` to continue, and `Err(_)` when
+    /// the event signals an upstream failure (`error` / `response.failed`).
+    /// Context-overflow failures map to [`LlmError::ContextLengthExceeded`] so
+    /// the loop's context-shrink recovery fires; everything else maps to a
+    /// retryable error.
+    fn handle_sse_event(
+        result: &mut ResponsesResult,
+        event_type: &str,
+        parsed: &Value,
+    ) -> Result<bool, LlmError> {
         match event_type {
             "response.output_text.delta" => {
                 if let Some(delta) = parsed.get("delta").and_then(|d| d.as_str()) {
@@ -817,12 +880,53 @@ impl CodexChatGptProvider {
                     output_tokens = result.output_tokens,
                     "Codex ChatGPT: parsed completed response"
                 );
-                return true;
+                return Ok(true);
+            }
+            // Upstream signalled the response failed. Mirror
+            // `openai_codex_provider.rs`: prefer ContextLengthExceeded when the
+            // message names a context/413 error, else a retryable error.
+            "response.failed" => {
+                let reason = parsed
+                    .get("response")
+                    .and_then(|r| r.get("status_details"))
+                    .and_then(|d| d.get("error"))
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("Unknown error");
+                if crate::error::is_context_length_error_message(&reason.to_ascii_lowercase()) {
+                    let (used, limit) =
+                        crate::error::parse_context_token_counts(&reason.to_ascii_lowercase());
+                    return Err(LlmError::ContextLengthExceeded { used, limit });
+                }
+                return Err(LlmError::RequestFailed {
+                    provider: "codex_chatgpt".to_string(),
+                    reason: format!("Response failed: {reason}"),
+                });
+            }
+            // Standalone SSE error event.
+            "error" => {
+                let code = parsed
+                    .get("code")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("unknown");
+                let message = parsed
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("Unknown error");
+                if crate::error::is_context_length_error_message(&message.to_ascii_lowercase()) {
+                    let (used, limit) =
+                        crate::error::parse_context_token_counts(&message.to_ascii_lowercase());
+                    return Err(LlmError::ContextLengthExceeded { used, limit });
+                }
+                return Err(LlmError::RequestFailed {
+                    provider: "codex_chatgpt".to_string(),
+                    reason: format!("Error {code}: {message}"),
+                });
             }
             _ => {}
         }
 
-        false
+        Ok(false)
     }
 
     fn merge_completed_response_output(result: &mut ResponsesResult, response: &Value) {
@@ -1003,9 +1107,12 @@ impl LlmProvider for CodexChatGptProvider {
         // Strict-mode tool schemas advertise every optional as required+nullable,
         // so the model fills unset optionals with `null` (or `""` for some codex
         // models). Strip those placeholders against each tool's original schema
-        // so only genuinely-provided values reach the tool. `true`: the codex
-        // family fills with `""` as well as `null`.
-        crate::tool_schema::strip_unset_optional_fields(&mut tool_calls, &request.tools, true);
+        // so only genuinely-provided values reach the tool.
+        crate::tool_schema::strip_unset_optional_fields(
+            &mut tool_calls,
+            &request.tools,
+            crate::tool_schema::PlaceholderStrippingMode::NullAndEmptyStrings,
+        );
 
         let finish_reason = if tool_calls.is_empty() {
             FinishReason::Stop
@@ -1026,6 +1133,7 @@ impl LlmProvider for CodexChatGptProvider {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             reasoning: crate::responses_reasoning::finish_summary(result.reasoning),
+            reasoning_details: None,
         })
     }
 }
@@ -1502,8 +1610,13 @@ data: {"response":{"usage":{"input_tokens":20,"output_tokens":15}}}
     }
 
     #[tokio::test]
-    async fn test_parse_sse_done_marker_stops_parsing() {
+    async fn test_parse_sse_done_marker_stops_parsing_after_completed() {
+        // `[DONE]` stops parsing and ignores later events, but only AFTER a
+        // terminal `response.completed`. With the completion present, the
+        // result is returned successfully and trailing events are dropped.
         let sse = r#"data: {"type":"response.output_text.delta","delta":"hello"}
+
+data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}
 
 data: [DONE]
 
@@ -1517,6 +1630,9 @@ data: {"type":"response.output_text.delta","delta":" ignored"}
             Ok(Bytes::from_static(
                 b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
             )),
+            Ok(Bytes::from_static(
+                b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+            )),
             Ok(Bytes::from_static(b"data: [DONE]\n\n")),
             Ok(Bytes::from_static(
                 b"data: {\"type\":\"response.output_text.delta\",\"delta\":\" ignored\"}\n\n",
@@ -1526,6 +1642,122 @@ data: {"type":"response.output_text.delta","delta":" ignored"}
             .await
             .unwrap();
         assert_eq!(result.text, "hello");
+    }
+
+    /// `[DONE]` (or stream end) without a preceding `response.completed` is a
+    /// truncated stream — a mid-stream disconnect must surface as a retryable
+    /// error, not a successful partial result.
+    #[tokio::test]
+    async fn test_parse_sse_done_without_completed_is_truncated() {
+        let sse = r#"data: {"type":"response.output_text.delta","delta":"hello"}
+
+data: [DONE]
+
+"#;
+        let result = CodexChatGptProvider::parse_sse_response(sse);
+        assert!(
+            matches!(result, Err(LlmError::InvalidResponse { .. })),
+            "[DONE] without response.completed must be InvalidResponse, got {result:?}"
+        );
+
+        let stream = stream::iter(vec![
+            Ok(Bytes::from_static(
+                b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
+            )),
+            Ok(Bytes::from_static(b"data: [DONE]\n\n")),
+        ]);
+        let result = CodexChatGptProvider::parse_sse_stream(stream, Duration::from_secs(1)).await;
+        assert!(matches!(result, Err(LlmError::InvalidResponse { .. })));
+    }
+
+    /// A stream that ends (EOF) without any terminal event and without content
+    /// must surface as `EmptyResponse`.
+    #[tokio::test]
+    async fn test_parse_sse_stream_eof_empty_is_error() {
+        let stream = stream::iter(Vec::<Result<Bytes, String>>::new());
+        let result = CodexChatGptProvider::parse_sse_stream(stream, Duration::from_secs(1)).await;
+        assert!(
+            matches!(result, Err(LlmError::EmptyResponse { .. })),
+            "empty stream must be EmptyResponse, got {result:?}"
+        );
+    }
+
+    /// A stream that produced partial text then hit EOF (no `response.completed`)
+    /// must surface as a retryable `InvalidResponse`.
+    #[tokio::test]
+    async fn test_parse_sse_stream_eof_with_partial_text_is_error() {
+        let stream = stream::iter(vec![Ok(Bytes::from_static(
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+        ))]);
+        let result = CodexChatGptProvider::parse_sse_stream(stream, Duration::from_secs(1)).await;
+        match result {
+            Err(LlmError::InvalidResponse { reason, .. }) => {
+                assert!(reason.contains("response.completed"), "reason: {reason}");
+            }
+            other => panic!("expected InvalidResponse, got {other:?}"),
+        }
+    }
+
+    /// An SSE `error` event whose message is a context-overflow error maps to
+    /// `ContextLengthExceeded` so the loop's context-shrink recovery fires.
+    #[test]
+    fn test_parse_sse_error_event_context_length() {
+        let sse = r#"data: {"type":"error","code":"context_length_exceeded","message":"This model's maximum context length is 128000 tokens. However, your messages resulted in 150000 tokens."}
+
+"#;
+        match CodexChatGptProvider::parse_sse_response(sse) {
+            Err(LlmError::ContextLengthExceeded { used, limit }) => {
+                assert_eq!(used, 150000);
+                assert_eq!(limit, 128000);
+            }
+            other => panic!("expected ContextLengthExceeded, got {other:?}"),
+        }
+    }
+
+    /// An SSE `error` event that is NOT context-related maps to a retryable
+    /// `RequestFailed` (previously these were silently ignored).
+    #[test]
+    fn test_parse_sse_error_event_generic_maps_to_request_failed() {
+        let sse = r#"data: {"type":"error","code":"rate_limit_exceeded","message":"Too many requests"}
+
+"#;
+        match CodexChatGptProvider::parse_sse_response(sse) {
+            Err(LlmError::RequestFailed { reason, .. }) => {
+                assert!(reason.contains("rate_limit_exceeded"), "reason: {reason}");
+            }
+            other => panic!("expected RequestFailed, got {other:?}"),
+        }
+    }
+
+    /// A `response.failed` event maps to a retryable `RequestFailed` (was
+    /// previously ignored, letting the stream look truncated/empty).
+    #[test]
+    fn test_parse_sse_response_failed_event() {
+        let sse = r#"data: {"type":"response.failed","response":{"status":"failed","status_details":{"error":{"message":"Model overloaded"}}}}
+
+"#;
+        match CodexChatGptProvider::parse_sse_response(sse) {
+            Err(LlmError::RequestFailed { reason, .. }) => {
+                assert!(reason.contains("Model overloaded"), "reason: {reason}");
+            }
+            other => panic!("expected RequestFailed, got {other:?}"),
+        }
+    }
+
+    /// A `response.failed` event whose message is a context-overflow error maps
+    /// to `ContextLengthExceeded`.
+    #[test]
+    fn test_parse_sse_response_failed_context_length() {
+        let sse = r#"data: {"type":"response.failed","response":{"status":"failed","status_details":{"error":{"message":"prompt is too long: 200000 tokens > 128000 maximum"}}}}
+
+"#;
+        match CodexChatGptProvider::parse_sse_response(sse) {
+            Err(LlmError::ContextLengthExceeded { used, limit }) => {
+                assert_eq!(used, 200000);
+                assert_eq!(limit, 128000);
+            }
+            other => panic!("expected ContextLengthExceeded, got {other:?}"),
+        }
     }
 
     #[tokio::test]

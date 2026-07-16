@@ -5,15 +5,14 @@ paths:
 ---
 # Architecture Discipline — Stop the Sprawl Before It Ships
 
-This rule exists because the engine refactor of 2026-05 found a class
+This rule exists because architecture reviews found a class
 of slow-burn architectural decay that no existing rule catches. The
 individual symptoms look reasonable in isolation (one extra Arc, one
 extra method arg, one `with_*` builder, one `#[allow(...)]`). The
 class is recognizable only when you grep for the smoke alarms across
-the crate: 11 `#[allow(clippy::too_many_arguments)]` annotations in
-`crates/ironclaw_engine/`, a 7,933-line `runtime/mission.rs`, two
-parallel action-dispatch pipelines, and the same six Arcs threaded
-through three layers without ever being given a name.
+the crate: repeated `#[allow(clippy::too_many_arguments)]` annotations,
+oversized runtime modules, parallel dispatch pipelines, and the same service
+handles threaded through several layers without being given a name.
 
 The rule is: **listen to the language. When the compiler or clippy
 complains, the answer is almost never `#[allow]`.**
@@ -146,19 +145,19 @@ because each layer catches a different failure mode.
 
 | Smell | Pre-commit script | CI / clippy | Code review | Agent-facing (this file) |
 |---|---|---|---|---|
-| 1. `too_many_arguments` allow | yes — count + annotation grep | clippy default already fires | required | yes |
-| 2. `Option<Arc<…>>` + `with_*` | yes — paired-pattern grep | — | required | yes |
+| 1. `too_many_arguments` allow | yes — `ARCH-SPRAWL` annotation grep | clippy default already fires | required | yes |
+| 2. `Option<Arc<…>>` + `with_*` | yes — `ARCH-SPRAWL` paired-pattern grep | — | required | yes |
 | 3. Re-derived identity | — (heuristic) | — | required | yes |
-| 4. Duplicate dispatch | partial — known-method grep | — | required | yes |
-| 5. File size | yes — `wc -l` on staged | — | informational | yes |
+| 4. Duplicate dispatch | partial — `ARCH-SPRAWL` repeated known-method grep | — | required | yes |
+| 5. File size | yes — `ARCH-SPRAWL` `wc -l` on changed files | — | informational | yes |
 
 ### Why this split
 
-- **Pre-commit catches the mechanical patterns.** A regex on staged
-  diffs is enough for #1 (annotation grep), #2 (paired patterns),
-  and #5 (line count). These are cheap, deterministic, and run on
-  every commit. Add to `scripts/pre-commit-safety.sh` as Check #10
-  (`ARCH-SPRAWL`) following the existing format.
+- **Pre-commit catches the mechanical patterns.** `scripts/pre-commit-safety.sh`
+  runs an `ARCH-SPRAWL` check for #1 (annotation grep), #2 (paired field/builder
+  patterns), #4 (repeated known downstream-call smoke alarms), and #5 (line
+  count). These are cheap, deterministic, and run on every commit. #3 stays
+  review-only because identity re-derivation requires semantic code reading.
 - **CI / clippy catches what compilers can express.** clippy already
   emits `too_many_arguments`. The rule is "don't silence it without
   a plan link." No new CI check needed; existing default works once
@@ -204,8 +203,6 @@ exempt without a plan link is a violation, not an exception.
 
 ## References
 
-- The diagnosis that motivated this rule:
-  `docs/plans/2026-05-02-engine-architecture-simplification.md`.
 - Adjacent rules with the same shape (extract a single gateway,
   route everything through it): `tools.md`, `safety-and-sandbox.md`,
   `gateway-events.md`.

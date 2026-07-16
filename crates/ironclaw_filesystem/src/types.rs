@@ -13,7 +13,8 @@ use crate::record::RecordVersion;
 /// *intent* of an operation against the underlying [`MountPermissions`]
 /// surface and are reused by the unified `put`/`get` ops as their permission
 /// witness — `put` is a write, `get` is a read. The newer variants
-/// (`Query`, `EnsureIndex`, `BeginTxn`, `Append`, `Tail`, `HeadSeq`) describe
+/// (`Query`, `EnsureIndex`, `BeginTxn`, `Append`, `Tail`, `HeadSeq`,
+/// `ReserveSeq`) describe
 /// operations that have no analogue in the legacy enum.
 ///
 /// `AppendFile` is the legacy byte-plane append onto a regular file; `Append`
@@ -22,6 +23,7 @@ use crate::record::RecordVersion;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilesystemOperation {
     MountLocal,
+    Connect,
     ReadFile,
     WriteFile,
     AppendFile,
@@ -38,12 +40,17 @@ pub enum FilesystemOperation {
     /// replay/live boundary. Distinct from `Tail` (which streams records) so a
     /// head_seq failure surfaces under its own operation in logs/errors.
     HeadSeq,
+    /// Path-local monotonic sequence reservation. Used by row-shaped stores
+    /// that need an atomic per-record-set counter without rewriting a shared
+    /// JSON snapshot just to assign the next sequence.
+    ReserveSeq,
 }
 
 impl std::fmt::Display for FilesystemOperation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::MountLocal => "mount_local",
+            Self::Connect => "connect",
             Self::ReadFile => "read_file",
             Self::WriteFile => "write_file",
             Self::AppendFile => "append_file",
@@ -57,6 +64,7 @@ impl std::fmt::Display for FilesystemOperation {
             Self::Append => "append",
             Self::Tail => "tail",
             Self::HeadSeq => "head_seq",
+            Self::ReserveSeq => "reserve_seq",
         })
     }
 }
@@ -94,6 +102,16 @@ pub enum FilesystemError {
         path: VirtualPath,
         operation: FilesystemOperation,
         reason: String,
+    },
+    /// The backend reported a retryable database contention outcome that did
+    /// not commit the attempted operation (for example SQLite BUSY/LOCKED or a
+    /// PostgreSQL transaction conflict). Unlike [`Self::Backend`], callers may
+    /// retry when the operation's interface also guarantees an error did not
+    /// commit a partial side effect (for example [`RootFilesystem::append_batch`](crate::RootFilesystem::append_batch)).
+    #[error("filesystem backend is busy during {operation} at {path}")]
+    BackendBusy {
+        path: VirtualPath,
+        operation: FilesystemOperation,
     },
     /// Compare-and-swap precondition failed: the existing record's version did
     /// not match the caller's expectation. Stores typically retry by reading

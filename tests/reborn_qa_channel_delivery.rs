@@ -12,11 +12,14 @@
 //! outbound delivery is asserted through the recording delivery sink.
 
 #[allow(dead_code)]
-#[path = "support/reborn/mod.rs"]
+#[path = "support/reborn_parity_qa/mod.rs"]
+mod parity_qa_support;
+#[allow(dead_code)]
+#[path = "integration/support/mod.rs"]
 mod reborn_support;
 mod support;
 
-use ironclaw_loop_support::HostManagedModelResponse;
+use ironclaw_loop_host::HostManagedModelResponse;
 use ironclaw_product_adapters::{
     DeliveryStatus, ExternalConversationRef, FakeProtocolHttpEgress, FinalReplyView,
     ProductAdapter, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
@@ -24,13 +27,13 @@ use ironclaw_product_adapters::{
 };
 use ironclaw_threads::{MessageKind, MessageStatus};
 use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId, TurnStatus};
+use parity_qa_support::binary_e2e::{
+    RebornBinaryE2EHarness, RebornHarnessSharedStorage, trace_tool_call_response,
+};
+use parity_qa_support::delivery::RecordingOutboundDeliverySink;
+use parity_qa_support::model_replay::RebornTraceReplayModelGateway;
 use reborn_support::{
-    delivery::RecordingOutboundDeliverySink,
-    harness::{
-        RebornBinaryE2EHarness, RebornHarnessSharedStorage, RecordingTestCapabilityPort,
-        test_product_scope, trace_tool_call_response,
-    },
-    model_replay::RebornTraceReplayModelGateway,
+    harness::{RecordingTestCapabilityPort, test_product_scope},
     test_adapter::RebornTestProductAdapter,
 };
 
@@ -41,7 +44,7 @@ async fn slack_shaped_harness(
     room: &str,
     model_gateway: RebornTraceReplayModelGateway,
 ) -> RebornBinaryE2EHarness {
-    RebornBinaryE2EHarness::with_model_gateway_scope_installation_shared_storage_unscoped_worker(
+    RebornBinaryE2EHarness::with_model_gateway_scope_installation_shared_storage(
         room,
         model_gateway,
         RecordingTestCapabilityPort::echo(),

@@ -18,7 +18,10 @@
 //! carrying the routine prompt.
 
 #[allow(dead_code)]
-#[path = "support/reborn/mod.rs"]
+#[path = "support/reborn_parity_qa/mod.rs"]
+mod parity_qa_support;
+#[allow(dead_code)]
+#[path = "integration/support/mod.rs"]
 mod reborn_support;
 mod support;
 
@@ -27,6 +30,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_approvals::AutoApproveSettingInput;
 use ironclaw_host_api::{
     AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
     ExecutionContext, ExtensionId, GrantConstraints, MountView, NetworkPolicy, Principal,
@@ -36,9 +40,9 @@ use ironclaw_host_runtime::{
     ECHO_CAPABILITY_ID, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
     TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelMessageRole,
-    HostManagedModelRequest, HostManagedModelResponse,
+    HostManagedModelRequest, HostManagedModelResponse, HostManagedToolResultContent,
 };
 use ironclaw_reborn_composition::{
     RebornCompositionProfile, RebornLocalRuntimeProfileOptions, RebornRuntime,
@@ -48,11 +52,9 @@ use ironclaw_reborn_composition::{
 use ironclaw_triggers::{TriggerId, TriggerPollerWorkerConfig, TriggerRunStatus, TriggerState};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::TurnStatus;
-use reborn_support::{
-    harness::RebornBinaryE2EHarness,
-    model_replay::{
-        RebornModelReplayStep, RebornScriptedProviderToolCall, RebornTraceReplayModelGateway,
-    },
+use parity_qa_support::binary_e2e::RebornBinaryE2EHarness;
+use parity_qa_support::model_replay::{
+    RebornModelReplayStep, RebornScriptedProviderToolCall, RebornTraceReplayModelGateway,
 };
 use serde_json::{Value, json};
 use tokio::sync::Mutex as TokioMutex;
@@ -79,8 +81,11 @@ async fn run_routine_creation(case: RoutineCreationCase) {
                 json!({
                     "name": case.trigger_name,
                     "prompt": case.prompt,
-                    "cron": case.cron,
-                    "timezone": "UTC",
+                    "schedule": {
+                        "kind": "cron",
+                        "expression": case.cron,
+                        "timezone": "UTC"
+                    },
                 }),
             )],
             expected_tool_results: Vec::new(),
@@ -289,7 +294,24 @@ async fn build_qa_fire_runtime(
                 }),
         )
         .with_model_gateway_override(gateway);
-    build_reborn_runtime(input).await.expect("runtime builds")
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    seed_qa_fire_auto_approve(&runtime).await;
+    runtime
+}
+
+async fn seed_qa_fire_auto_approve(runtime: &RebornRuntime) {
+    let auto_approve = runtime
+        .services()
+        .local_dev_auto_approve_settings_for_test()
+        .expect("QA fire runtime exposes local-dev auto-approve settings");
+    auto_approve
+        .set(AutoApproveSettingInput {
+            scope: trigger_management_execution_context().resource_scope,
+            enabled: true,
+            updated_by: Principal::User(UserId::new(QA_USER).expect("QA user id")),
+        })
+        .await
+        .expect("seed QA fire global auto-approve");
 }
 
 #[tokio::test]
@@ -307,8 +329,11 @@ async fn reborn_qa_routine_created_by_tool_fires_and_runs_routine_prompt() {
         json!({
             "name": "Deployment health watcher",
             "prompt": QA_ROUTINE_PROMPT,
-            "cron": "*/5 * * * *",
-            "timezone": "UTC",
+            "schedule": {
+                "kind": "cron",
+                "expression": "*/5 * * * *",
+                "timezone": "UTC"
+            },
         }),
     )
     .await;
@@ -462,8 +487,11 @@ async fn reborn_qa_fired_routine_executes_action_and_finalizes_reply() {
         json!({
             "name": "Deployment health watcher action",
             "prompt": QA_ROUTINE_PROMPT,
-            "cron": "*/5 * * * *",
-            "timezone": "UTC",
+            "schedule": {
+                "kind": "cron",
+                "expression": "*/5 * * * *",
+                "timezone": "UTC"
+            },
         }),
     )
     .await;
@@ -532,17 +560,42 @@ async fn reborn_qa_fired_routine_executes_action_and_finalizes_reply() {
             .any(|message| message.content.contains(QA_ROUTINE_PROMPT)),
         "first fired-turn request should carry the routine prompt"
     );
+    let tool_result = requests[1]
+        .messages
+        .iter()
+        .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
+        .expect("the fired routine's action must reach the model");
+    // Issue #5838: a result under the inline first-look preview cap
+    // (`LOCAL_DEV_RESULT_PREVIEW_MAX_BYTES`) legitimately appears inline in
+    // `detail.preview` so the model does not need a follow-up `result_read`
+    // call; the marker here is well under the cap. Mirrors
+    // `assert_local_dev_result_reference` in
+    // `crates/ironclaw_reborn_composition/src/runtime.rs`.
     assert!(
-        requests[1].messages.iter().any(|message| {
-            message.role == HostManagedModelMessageRole::ToolResult
-                && message.content.contains(QA_DM_ACTION_MARKER)
-        }),
-        "the fired routine's action must execute and its tool result must reach the model — messages: {:?}",
-        requests[1]
-            .messages
-            .iter()
-            .map(|message| (&message.role, &message.content))
-            .collect::<Vec<_>>()
+        tool_result.content.contains(QA_DM_ACTION_MARKER),
+        "a result under the first-look preview cap should appear inline in model replay: {}",
+        tool_result.content
+    );
+    let Some(HostManagedToolResultContent::Reference { envelope }) =
+        tool_result.tool_result_content.as_ref()
+    else {
+        panic!(
+            "fired routine replay should carry a result-reference envelope, got {:?}",
+            tool_result.tool_result_content
+        );
+    };
+    assert_eq!(envelope.version, 1);
+    assert!(envelope.result_ref.starts_with("result:"));
+    let observation = envelope
+        .model_observation
+        .as_ref()
+        .expect("fired routine replay should include a model observation");
+    assert_eq!(observation["schema_version"], json!(1));
+    assert_eq!(observation["status"], json!("success"));
+    assert_eq!(observation["detail"]["kind"], json!("result_reference"));
+    assert_eq!(
+        observation["detail"]["result_ref"],
+        json!(envelope.result_ref)
     );
     assert_eq!(
         settled.last_status,

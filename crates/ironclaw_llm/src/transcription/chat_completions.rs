@@ -28,9 +28,13 @@ impl ChatCompletionsTranscriptionProvider {
     /// Create a new provider with the given API key.
     pub fn new(api_key: SecretString) -> Self {
         Self {
-            client: match reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
-                .build()
+            // Transcription is not a turn-model call and is not gated by the
+            // runner lease, so its longer request budget is intentionally kept;
+            // it gains connect/keepalive/pool hygiene via the shared builder.
+            client: match crate::config::hardened_client_builder(
+                crate::config::TRANSCRIPTION_REQUEST_TIMEOUT_SECS,
+            )
+            .build()
             {
                 Ok(c) => c,
                 Err(e) => {

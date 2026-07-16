@@ -149,9 +149,9 @@ may name the PostgreSQL URL variable, but must not contain the raw URL:
 backend = "postgres"
 url_env = "IRONCLAW_REBORN_POSTGRES_URL"
 secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
-# Optional; defaults to 16. Keep below the PostgreSQL server's max_connections
-# after reserving capacity for migrations and operator sessions.
-pool_max_size = 16
+# Optional; defaults to 2. Keep below the PostgreSQL server or managed
+# session-pool cap after reserving capacity for restarts and operator sessions.
+pool_max_size = 2
 
 [policy]
 deployment_mode = "hosted_multi_tenant"
@@ -204,14 +204,23 @@ the current branch.
 | Variable | Purpose |
 | --- | --- |
 | `IRONCLAW_REBORN_HOME` | Absolute Reborn state root. Defaults to `$HOME/.ironclaw/reborn`. The resolver rejects unsafe paths and v1 state-root aliases such as `$HOME/.ironclaw`. |
-| `IRONCLAW_REBORN_PROFILE` | Boot profile selector. Supported values: `local-dev`, `local-dev-yolo`, `production`, `migration-dry-run`. |
+| `IRONCLAW_REBORN_PROFILE` | Boot profile selector. Supported values: `local-dev`, `local-dev-yolo`, `hosted-single-tenant`, `hosted-single-tenant-volume`, `production`, `migration-dry-run`. |
 | `IRONCLAW_REBORN_POSTGRES_URL` | Production PostgreSQL storage URL when `[storage].backend = "postgres"` and `[storage].url_env` names this variable. Keep it out of `config.toml`; remote providers must use TLS. |
+| `IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE` | Optional override for the Reborn PostgreSQL client pool size. Use this when a managed provider enforces a small session-pool cap. |
+| `IRONCLAW_FILESYSTEM_POSTGRES_MIGRATION_CONNECT_MAX_WAIT_SECS` | Optional startup wait window for Postgres filesystem migration connection retries. Defaults to 300 seconds. |
 | `IRONCLAW_REBORN_SECRET_MASTER_KEY` | Production Reborn secret master key when `[storage].secret_master_key_env` names this variable. Keep it independent from the database URL and out of `config.toml`. |
-| `IRONCLAW_REBORN_LOG` | Tracing filter for the Reborn binary, for example `debug,ironclaw_reborn=trace`. |
+| `IRONCLAW_REBORN_LOG` | Tracing filter for the Reborn binary, for example `debug,ironclaw_runner=trace`. |
 
-`run` and `repl` currently support `local-dev` and `local-dev-yolo` runtime
-composition. `local-dev-yolo` grants trusted-laptop host access and must be
-confirmed explicitly:
+`run` and `repl` currently support local-runtime composition through
+`local-dev`, `local-dev-yolo`, and `hosted-single-tenant-volume`.
+`hosted-single-tenant-volume` uses the local-runtime libSQL substrate under
+`$IRONCLAW_REBORN_HOME/hosted-single-tenant-volume`, resolves the hosted
+secure-default runtime policy, and disables process-backed tools such as shell.
+It is intended for single-tenant preview deployments on a persistent volume,
+not as the full PostgreSQL production composition.
+
+`local-dev-yolo` grants trusted-laptop host access and must be confirmed
+explicitly:
 
 ```bash
 export IRONCLAW_REBORN_PROFILE=local-dev-yolo
@@ -220,8 +229,10 @@ cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- repl --confirm-host
 
 ### WebUI service
 
-The Reborn WebUI is compiled behind the `webui-v2-beta` Cargo feature. Build or
-run the binary with that feature to enable the `serve` command:
+The Reborn WebUI is compiled behind the `webui-v2-beta` Cargo feature. Builds
+with this feature require Node.js 22 with Corepack/pnpm so Cargo can generate
+and embed the SPA bundle. Build or run the binary with that feature to enable the `serve`
+command:
 
 ```bash
 cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn -- serve --help
@@ -263,17 +274,17 @@ Required WebUI env vars:
 | `IRONCLAW_REBORN_WEBUI_TOKEN` | Bearer token for WebUI requests. If SSO is enabled, this also signs sessions and must be at least 32 bytes. |
 | `IRONCLAW_REBORN_WEBUI_USER_ID` | Reborn owner/user id for env-bearer requests. If `[identity].default_owner` is configured, it must match this value. |
 
-Optional WebUI SSO env vars:
+Optional WebUI OAuth env vars:
 
 | Variable | Purpose |
 | --- | --- |
+| `IRONCLAW_REBORN_WEBUI_BASE_URL` | Public base URL used for WebUI login and product-auth OAuth callbacks. Non-loopback deployments must use `https://`. |
 | `IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID` | Enables Google SSO when set. |
 | `IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET` | Required when Google SSO is enabled. |
 | `IRONCLAW_REBORN_WEBUI_GOOGLE_ALLOWED_HD` | Optional Google hosted-domain restriction. |
 | `IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_ID` | Enables GitHub SSO when set. |
 | `IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_SECRET` | Required when GitHub SSO is enabled. |
 | `IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS` | Required when any SSO provider is enabled. Comma-separated verified email domains. |
-| `IRONCLAW_REBORN_WEBUI_BASE_URL` | Public base URL used for OAuth callbacks. Non-loopback deployments must use `https://`. |
 | `IRONCLAW_REBORN_WEBUI_OAUTH_HTTP_TIMEOUT_SECS` | Optional OAuth HTTP timeout override. |
 
 For Google SSO, create a Google OAuth web client and register the Reborn WebUI
@@ -290,11 +301,13 @@ the authorized redirect URI in Google Cloud is:
 https://ironclaw.example.com/auth/callback/google
 ```
 
-Do not include a trailing slash in `IRONCLAW_REBORN_WEBUI_BASE_URL`; Reborn
-trims it before building callback URLs. If the base URL is omitted, Reborn uses
-the actual listener address, such as `http://127.0.0.1:3000`, which is suitable
-only for loopback/local OAuth testing. Public or non-loopback SSO deployments
-must set an `https://` base URL.
+Notion MCP and other product-auth OAuth setup flows use the same public WebUI
+base URL when registering provider callback URLs. Do not include a trailing
+slash in `IRONCLAW_REBORN_WEBUI_BASE_URL`; Reborn trims it before building
+callback URLs. If the base URL is omitted, Reborn uses the actual listener
+address, such as `http://127.0.0.1:3000`, which is suitable only for
+loopback/local OAuth testing. Public or non-loopback OAuth deployments must set
+an `https://` base URL.
 
 Complete Google SSO startup env:
 
@@ -333,39 +346,33 @@ export IRONCLAW_REBORN_HOME="$PWD/.reborn-home"
 export OPENAI_API_KEY="sk-..." # or the required env var for your configured provider
 export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"
 export IRONCLAW_REBORN_WEBUI_USER_ID="reborn-cli"
-export IRONCLAW_REBORN_SLACK_SIGNING_SECRET="..."
-export IRONCLAW_REBORN_SLACK_BOT_TOKEN="xoxb-..."
+export IRONCLAW_REBORN_SLACK_ENABLED="true"
 
 cargo run -q -p ironclaw_reborn_cli --features slack-v2-host-beta --bin ironclaw-reborn -- serve
 ```
 
-Slack env vars alone do not enable Slack. Add a `[slack]` section to
-`config.toml`:
+Enable Slack by setting `IRONCLAW_REBORN_SLACK_ENABLED=true`, or by adding a
+`[slack]` section to `config.toml`:
 
 ```toml
 [slack]
 enabled = true
-installation_id = "install-alpha"
-team_id = "T123"
-api_app_id = "A123"
-# slack_user_id = "U123" # optional legacy static user mapping
-# user_id = "reborn-cli" # defaults to the WebUI authenticated user
-signing_secret_env = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"
-bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"
 ```
 
-Required Slack settings and env vars:
+The env var overrides only the Slack route enablement gate: `true`/`1` mounts
+Slack, while `false`/`0` acts as a deployment kill switch. After the server
+starts, configure the Slack app ids, bot token, signing secret, and channel
+mappings from WebUI channel setup.
+
+Required Slack settings:
 
 | Name | Purpose |
 | --- | --- |
-| `[slack].enabled = true` | Mounts the Slack route during `serve`. |
-| `[slack].installation_id` | Stable local installation id. |
-| `[slack].team_id` | Slack workspace/team id. |
-| `[slack].api_app_id` | Slack app id. |
-| `IRONCLAW_REBORN_SLACK_SIGNING_SECRET` | Slack request signing secret, or the env var named by `[slack].signing_secret_env`. |
-| `IRONCLAW_REBORN_SLACK_BOT_TOKEN` | Slack bot token, or the env var named by `[slack].bot_token_env`. |
+| `[slack].enabled = true` or `IRONCLAW_REBORN_SLACK_ENABLED=true` | Mounts the Slack route during `serve`. |
+| WebUI Slack workspace setup | Stores Slack installation ids, channel mappings, and Slack bot/signing secrets. |
 
-More detailed command notes live in [`docs/reborn-binary.md`](docs/reborn-binary.md).
+More detailed Slack setup notes live in
+[`docs/reborn/setup-slack-for-reborn-binary.md`](docs/reborn/setup-slack-for-reborn-binary.md).
 
 ## Philosophy
 
@@ -415,8 +422,9 @@ IronClaw is the AI assistant you can actually trust with your personal and profe
 
 ### Prerequisites
 
-- Rust 1.92+
+- Rust 1.96+
 - PostgreSQL 15+ with [pgvector](https://github.com/pgvector/pgvector) extension
+- Node.js 22+ with Corepack/pnpm for source builds that enable the `webui-v2-beta` feature
 - NEAR AI account (authentication handled via setup wizard)
 - `libclang` and a working C toolchain if you build the WeChat voice/SILK path from source
 
@@ -624,9 +632,7 @@ External content passes through multiple security layers:
 | **Workspace** | Persistent memory with hybrid search |
 | **Safety Layer** | Prompt injection defense and content sanitization |
 
-## Legacy IronClaw Usage
-
-Engine v2 is opt-in right now. If you want to run the new engine instead of the legacy agent loop, start IronClaw with `ENGINE_V2=true`. See [Engine v2 architecture](docs/internal/engine-v2-architecture.md#enabling-engine-v2) for more details.
+## IronClaw Usage
 
 ```bash
 # First-time setup (configures database, auth, etc.)
@@ -635,11 +641,8 @@ ironclaw onboard
 # Start interactive REPL
 cargo run
 
-# Start interactive REPL with engine v2
-ENGINE_V2=true cargo run
-
-# Engine v2 with debug logging
-ENGINE_V2=true RUST_LOG=ironclaw=debug cargo run
+# REPL with debug logging
+RUST_LOG=ironclaw=debug cargo run
 ```
 
 ## Development

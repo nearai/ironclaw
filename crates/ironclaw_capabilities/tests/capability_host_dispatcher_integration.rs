@@ -33,10 +33,7 @@ async fn capability_host_invokes_through_runtime_dispatcher_and_completes_run() 
     });
     let scope = context.resource_scope.clone();
     let invocation_id = context.invocation_id;
-    let estimate = ResourceEstimate {
-        output_bytes: Some(4_096),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_output_bytes(4_096);
     let input = json!({"message":"authorized"});
 
     let result = host
@@ -100,10 +97,7 @@ async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_d
     let context = execution_context(CapabilitySet::default());
     let scope = context.resource_scope.clone();
     let invocation_id = context.invocation_id;
-    let estimate = ResourceEstimate {
-        output_bytes: Some(1_024),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_output_bytes(1_024);
     let input = json!({"message":"approved"});
 
     let err = block_host
@@ -179,10 +173,7 @@ async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_d
             context,
             approval_request_id: approval_id,
             capability_id: capability_id(),
-            estimate: ResourceEstimate {
-                output_bytes: Some(1_024),
-                ..ResourceEstimate::default()
-            },
+            estimate: ResourceEstimate::default().set_output_bytes(1_024),
             input: json!({"message":"approved"}),
             trust_decision: trust_decision(),
         })
@@ -401,10 +392,8 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingRunt
             input: request.input.clone(),
         });
         let output = self.output.clone();
-        let usage = ResourceUsage {
-            output_bytes: serde_json::to_vec(&output).unwrap().len() as u64,
-            ..ResourceUsage::default()
-        };
+        let usage = ResourceUsage::default()
+            .set_output_bytes(serde_json::to_vec(&output).unwrap().len() as u64);
         let reservation = match request.resource_reservation {
             Some(reservation) => reservation,
             None => request
@@ -412,6 +401,7 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingRunt
                 .reserve(request.scope, request.estimate)
                 .map_err(|_| DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::Resource,
+                    safe_summary: None,
                 })?,
         };
         let output_bytes = usage.output_bytes;
@@ -420,6 +410,7 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingRunt
             .reconcile(reservation.id, usage.clone())
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
+                safe_summary: None,
             })?;
         Ok(RuntimeAdapterResult {
             output,
@@ -463,13 +454,15 @@ async fn approve_dispatch(
             approval_id,
             LeaseApproval {
                 issued_by: Principal::HostRuntime,
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: MountView::default(),
-                network: NetworkPolicy::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await

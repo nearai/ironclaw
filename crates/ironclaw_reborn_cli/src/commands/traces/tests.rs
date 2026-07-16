@@ -90,11 +90,9 @@ fn redaction_summary_handles_empty_and_counts() {
 }
 
 fn trace_queue_policy_fixture() -> StandingTraceContributionPolicy {
-    StandingTraceContributionPolicy {
-        enabled: true,
-        ingestion_endpoint: Some("https://trace.example/internal/v1/traces".to_string()),
-        ..StandingTraceContributionPolicy::default()
-    }
+    StandingTraceContributionPolicy::default()
+        .set_enabled(true)
+        .set_ingestion_endpoint("https://trace.example/internal/v1/traces")
 }
 
 fn trace_queue_envelope_fixture(
@@ -151,6 +149,7 @@ fn trace_queue_envelope_fixture(
         hindsight: None,
         training_dynamics: None,
         process_evaluation: None,
+        manual_review_authorized: false,
     }
 }
 
@@ -424,6 +423,92 @@ fn opt_in_invite_code_defaults_to_none_when_absent() {
     };
 
     assert!(upload_token_invite_code.is_none());
+}
+
+#[test]
+fn profile_token_flags_parse_through_cli() {
+    let cli = parse_cli([
+        "ironclaw-reborn",
+        "traces",
+        "profile",
+        "token",
+        "--user-scope",
+        "tenant-a:user-alice",
+        "--json",
+    ]);
+
+    let TracesSubcommand::Profile {
+        command: TracesProfileSubcommand::Token { user_scope, json },
+    } = unwrap_traces_command(cli)
+    else {
+        panic!("expected traces profile token command");
+    };
+
+    assert_eq!(user_scope.as_deref(), Some("tenant-a:user-alice"));
+    assert!(json);
+}
+
+#[test]
+fn profile_set_flags_parse_through_cli() {
+    let cli = parse_cli([
+        "ironclaw-reborn",
+        "traces",
+        "profile",
+        "set",
+        "--handle",
+        "pilot_zaki",
+        "--bio",
+        "Pilot contributor",
+        "--user-scope",
+        "tenant-a:user-alice",
+    ]);
+
+    let TracesSubcommand::Profile {
+        command:
+            TracesProfileSubcommand::Set {
+                handle,
+                bio,
+                user_scope,
+            },
+    } = unwrap_traces_command(cli)
+    else {
+        panic!("expected traces profile set command");
+    };
+
+    assert_eq!(handle, "pilot_zaki");
+    assert_eq!(bio.as_deref(), Some("Pilot contributor"));
+    assert_eq!(user_scope.as_deref(), Some("tenant-a:user-alice"));
+}
+
+#[test]
+fn profile_set_requires_handle_flag() {
+    let error = parse_cli_result(["ironclaw-reborn", "traces", "profile", "set"])
+        .expect_err("profile set without --handle must fail to parse");
+    assert_eq!(
+        error.kind(),
+        clap::error::ErrorKind::MissingRequiredArgument
+    );
+}
+
+#[test]
+fn profile_withdraw_flags_parse_through_cli() {
+    let cli = parse_cli([
+        "ironclaw-reborn",
+        "traces",
+        "profile",
+        "withdraw",
+        "--user-scope",
+        "tenant-a:user-alice",
+    ]);
+
+    let TracesSubcommand::Profile {
+        command: TracesProfileSubcommand::Withdraw { user_scope },
+    } = unwrap_traces_command(cli)
+    else {
+        panic!("expected traces profile withdraw command");
+    };
+
+    assert_eq!(user_scope.as_deref(), Some("tenant-a:user-alice"));
 }
 
 #[test]
@@ -705,13 +790,11 @@ fn queue_status_diagnostics_reports_invite_code_configured() {
     );
 
     // Configured: non-empty invite code => true.
-    let configured_policy = StandingTraceContributionPolicy {
-        enabled: true,
-        ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-        bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
-        upload_token_invite_code: Some("INV-PILOT-001".to_string()),
-        ..Default::default()
-    };
+    let configured_policy = StandingTraceContributionPolicy::default()
+        .set_enabled(true)
+        .set_ingestion_endpoint("https://trace.example.com/v1/traces")
+        .set_bearer_token_env("TRACE_COMMONS_TEST_TOKEN")
+        .set_upload_token_invite_code("INV-PILOT-001");
     ironclaw_reborn_traces::contribution::write_trace_policy_for_scope(
         Some(&runtime_scope),
         &configured_policy,
@@ -727,13 +810,11 @@ fn queue_status_diagnostics_reports_invite_code_configured() {
 
     // Whitespace-only invite code => false (matches show_policy_status's
     // trimmed-emptiness contract).
-    let whitespace_policy = StandingTraceContributionPolicy {
-        enabled: true,
-        ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-        bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
-        upload_token_invite_code: Some("   ".to_string()),
-        ..Default::default()
-    };
+    let whitespace_policy = StandingTraceContributionPolicy::default()
+        .set_enabled(true)
+        .set_ingestion_endpoint("https://trace.example.com/v1/traces")
+        .set_bearer_token_env("TRACE_COMMONS_TEST_TOKEN")
+        .set_upload_token_invite_code("   ");
     ironclaw_reborn_traces::contribution::write_trace_policy_for_scope(
         Some(&runtime_scope),
         &whitespace_policy,
@@ -747,13 +828,10 @@ fn queue_status_diagnostics_reports_invite_code_configured() {
     );
 
     // None => false.
-    let none_policy = StandingTraceContributionPolicy {
-        enabled: true,
-        ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-        bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
-        upload_token_invite_code: None,
-        ..Default::default()
-    };
+    let none_policy = StandingTraceContributionPolicy::default()
+        .set_enabled(true)
+        .set_ingestion_endpoint("https://trace.example.com/v1/traces")
+        .set_bearer_token_env("TRACE_COMMONS_TEST_TOKEN");
     ironclaw_reborn_traces::contribution::write_trace_policy_for_scope(
         Some(&runtime_scope),
         &none_policy,
@@ -765,4 +843,41 @@ fn queue_status_diagnostics_reports_invite_code_configured() {
         !diagnostics.upload_token_invite_code_configured,
         "absent invite code must report configured=false"
     );
+}
+
+#[test]
+fn enroll_instance_parses_invite_and_consent_flags() {
+    let cli = parse_cli([
+        "ironclaw-reborn",
+        "traces",
+        "enroll-instance",
+        "--invite",
+        "https://commons.example#INVADMIN1",
+        "--include-message-text",
+        "--json",
+    ]);
+
+    let TracesSubcommand::EnrollInstance {
+        invite,
+        include_message_text,
+        include_tool_payloads,
+        json,
+    } = unwrap_traces_command(cli)
+    else {
+        panic!("expected traces enroll-instance command");
+    };
+
+    assert_eq!(invite, "https://commons.example#INVADMIN1");
+    assert!(include_message_text);
+    assert!(
+        !include_tool_payloads,
+        "tool payloads must default to excluded"
+    );
+    assert!(json);
+}
+
+#[test]
+fn enroll_instance_requires_invite() {
+    let result = parse_cli_result(["ironclaw-reborn", "traces", "enroll-instance"]);
+    assert!(result.is_err(), "--invite must be required");
 }

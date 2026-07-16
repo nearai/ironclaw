@@ -529,6 +529,30 @@ async fn chat_stream_idempotency_retries_pending_mapping_after_busy() {
     assert_eq!(workflow.seen_count(), 2);
 }
 
+#[tokio::test]
+async fn chat_stream_rejected_busy_ack_returns_429() {
+    let streamer = Arc::new(QueuedStreamer::new());
+    let workflow = Arc::new(FixedAckWorkflow::new(rejected_busy_ack()));
+    let router = router_with_workflow(streamer, workflow.clone());
+    let body = json!({
+        "model": "gpt-reborn",
+        "stream": true,
+        "messages": [{"role": "user", "content": "hello"}]
+    });
+
+    let response = router
+        .oneshot(post_json_with_key(
+            "/v1/chat/completions",
+            body,
+            "rejected-busy-key",
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(workflow.seen_count(), 1);
+}
+
 #[derive(Default)]
 struct QueuedStreamer {
     chat: Mutex<VecDeque<Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError>>>,
@@ -825,6 +849,7 @@ fn projection_text_envelope(cursor: &str, text: &str) -> ProductOutboundEnvelope
                 "thread-a",
                 vec![ProductProjectionItem::Text {
                     id: format!("text-{cursor}"),
+                    run_id: None,
                     body: text.to_string(),
                 }],
             )
@@ -855,6 +880,7 @@ fn run_status_envelope(cursor: &str, status: &str) -> ProductOutboundEnvelope {
                     status: status.to_string(),
                     failure_category: None,
                     failure_summary: None,
+                    retryable: None,
                 }],
             )
             .expect("projection state"),
@@ -888,6 +914,13 @@ fn deferred_busy_ack() -> ProductInboundAck {
     }
 }
 
+fn rejected_busy_ack() -> ProductInboundAck {
+    ProductInboundAck::RejectedBusy {
+        accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy").expect("accepted ref"),
+        active_run_id: None,
+    }
+}
+
 fn completed_response(public_id: OpenAiResponseId, text: &str) -> OpenAiResponseObject {
     OpenAiResponseObject {
         id: public_id,
@@ -902,6 +935,8 @@ fn completed_response(public_id: OpenAiResponseId, text: &str) -> OpenAiResponse
             input_tokens: 1,
             output_tokens: text.len() as u32,
             total_tokens: 1 + text.len() as u32,
+            input_tokens_details: None,
+            cost: None,
         }),
     }
 }

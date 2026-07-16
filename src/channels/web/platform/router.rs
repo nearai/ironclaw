@@ -35,13 +35,6 @@ use crate::channels::web::features::jobs::{
     jobs_events_handler, jobs_list_handler, jobs_prompt_handler, jobs_restart_handler,
     jobs_summary_handler,
 };
-use crate::channels::web::handlers::engine::{
-    engine_mission_detail_handler, engine_mission_fire_handler, engine_mission_pause_handler,
-    engine_mission_resume_handler, engine_missions_handler, engine_missions_summary_handler,
-    engine_project_detail_handler, engine_projects_handler, engine_projects_overview_handler,
-    engine_thread_detail_handler, engine_thread_events_handler, engine_thread_steps_handler,
-    engine_threads_handler,
-};
 use crate::channels::web::handlers::frontend::{
     frontend_layout_handler, frontend_layout_update_handler, frontend_widget_file_handler,
     frontend_widgets_handler,
@@ -80,8 +73,8 @@ use crate::channels::web::platform::static_files::{
 // backward-compat re-export shim waiting on stage 6 deletion.
 use crate::channels::web::features::chat::{
     chat_approval_handler, chat_auth_cancel_handler, chat_auth_token_handler, chat_events_handler,
-    chat_gate_resolve_handler, chat_history_handler, chat_new_thread_handler, chat_send_handler,
-    chat_threads_handler, chat_ws_handler,
+    chat_history_handler, chat_new_thread_handler, chat_send_handler, chat_threads_handler,
+    chat_ws_handler,
 };
 use crate::channels::web::features::extensions::{
     extensions_activate_handler, extensions_install_handler, extensions_list_handler,
@@ -181,7 +174,6 @@ pub async fn start_server(
     let protected = Router::new()
         // Chat
         .route("/api/chat/send", post(chat_send_handler))
-        .route("/api/chat/gate/resolve", post(chat_gate_resolve_handler))
         .route("/api/chat/auth-token", post(chat_auth_token_handler))
         .route("/api/chat/auth-cancel", post(chat_auth_cancel_handler))
         .route("/api/chat/approval", post(chat_approval_handler))
@@ -262,54 +254,6 @@ pub async fn start_server(
             axum::routing::delete(routines_delete_handler),
         )
         .route("/api/routines/{id}/runs", get(routines_runs_handler))
-        // Engine v2
-        .route("/api/engine/threads", get(engine_threads_handler))
-        .route(
-            "/api/engine/threads/{id}",
-            get(engine_thread_detail_handler),
-        )
-        .route(
-            "/api/engine/threads/{id}/steps",
-            get(engine_thread_steps_handler),
-        )
-        .route(
-            "/api/engine/threads/{id}/events",
-            get(engine_thread_events_handler),
-        )
-        .route("/api/engine/projects", get(engine_projects_handler))
-        .route(
-            "/api/engine/projects/overview",
-            get(engine_projects_overview_handler),
-        )
-        .route(
-            "/api/engine/projects/{id}",
-            get(engine_project_detail_handler),
-        )
-        .route(
-            "/api/engine/projects/{id}/widgets",
-            get(crate::channels::web::handlers::frontend::project_widgets_handler),
-        )
-        .route("/api/engine/missions", get(engine_missions_handler))
-        .route(
-            "/api/engine/missions/summary",
-            get(engine_missions_summary_handler),
-        )
-        .route(
-            "/api/engine/missions/{id}",
-            get(engine_mission_detail_handler),
-        )
-        .route(
-            "/api/engine/missions/{id}/fire",
-            post(engine_mission_fire_handler),
-        )
-        .route(
-            "/api/engine/missions/{id}/pause",
-            post(engine_mission_pause_handler),
-        )
-        .route(
-            "/api/engine/missions/{id}/resume",
-            post(engine_mission_resume_handler),
-        )
         // Skills
         .route("/api/skills", get(skills_list_handler))
         .route("/api/skills/search", post(skills_search_handler))
@@ -461,31 +405,6 @@ pub async fn start_server(
         .route(
             "/v1/models",
             get(crate::channels::web::openai_compat::models_handler),
-        )
-        // OpenAI Responses API (routes through the full agent loop).
-        //
-        // Canonical path is `/api/v1/responses` so the Responses API shares
-        // the `/api/...` prefix used by the rest of IronClaw's HTTP surface.
-        // The legacy `/v1/responses` path is kept as an alias for backward
-        // compatibility with OpenAI SDK clients that were configured against
-        // it directly (see ironclaw#2201). Both paths dispatch to the same
-        // handlers — remove the legacy routes only after a deprecation
-        // window.
-        .route(
-            "/api/v1/responses",
-            post(crate::channels::web::responses_api::create_response_handler),
-        )
-        .route(
-            "/api/v1/responses/{id}",
-            get(crate::channels::web::responses_api::get_response_handler),
-        )
-        .route(
-            "/v1/responses",
-            post(crate::channels::web::responses_api::create_response_handler),
-        )
-        .route(
-            "/v1/responses/{id}",
-            get(crate::channels::web::responses_api::get_response_handler),
         )
         .route_layer(middleware::from_fn_with_state(
             auth_state.clone(),

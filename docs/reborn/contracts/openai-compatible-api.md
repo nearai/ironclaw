@@ -4,8 +4,7 @@
 Responses create/retrieve/cancel, idempotency/opaque-ref, and projection-backed
 SSE streaming slices (#4442, #4443, #4444, #4445, #4446, #4447)
 **Parent:** #3283
-**Crates:** `crates/ironclaw_reborn_openai_compat`,
-`crates/ironclaw_reborn_openai_compat_storage`
+**Crates:** `crates/ironclaw_reborn_openai_compat`
 
 ## Purpose
 
@@ -54,7 +53,7 @@ bind sockets or call `axum::serve`.
 - External ids (`chatcmpl-*`, `resp_*`) are opaque product references. They must
   not encode tenant, user, thread, run, projection cursor, or host paths.
 - Durable ref mappings are persisted behind `OpenAiCompatRefStore`; the
-  contract crate defines the port and the storage crate provides
+  route crate defines the port and its `storage` feature provides
   filesystem-backed adapters under `/engine/openai_compat/refs/` with
   per-public-id mapping records plus per-scope idempotency index records.
   Reborn local-dev host composition places the production route's tenant-owned
@@ -206,6 +205,44 @@ Errors serialize as:
 Messages and codes come from a fixed sanitized vocabulary. Route code must not
 surface raw provider/runtime diagnostics, host paths, backend details, raw
 prompts, raw tool input/output, secrets, or user content in error payloads.
+
+## Busy-Thread / 429 Retry Semantics
+
+Both Chat Completions and Responses create routes return HTTP `429` with
+error type `rate_limit_error` when the underlying thread is busy at
+submission time. There are two distinct outcomes with different retry
+semantics:
+
+- **`DeferredBusy` — retryable.** The thread slot was temporarily
+  unavailable and the request was not admitted. The client may retry
+  the same request (including the same idempotency key) after a brief
+  back-off; the server has not settled a final decision for this
+  request.
+
+- **`RejectedBusy` — non-retryable (terminal).** The thread slot
+  evaluated the request and issued a settled rejection. Retrying the
+  same idempotency key replays the same rejection. The client must
+  start a **new request** (new idempotency key, or no key) to make
+  forward progress.
+
+Both outcomes use the standard error envelope:
+
+```json
+{
+  "error": {
+    "message": "...",
+    "type": "rate_limit_error",
+    "code": "rate_limited"
+  }
+}
+```
+
+No `Retry-After` header is emitted. The `retryable` distinction is
+internal to the route layer; the caller must infer non-retryability
+from the context (e.g., receiving the same 429 after an exponential
+back-off cycle with the same key). The recommended client strategy for
+a `RejectedBusy` 429 is to drop the current idempotency key and
+issue a fresh request.
 
 ## Current Fail-Closed Behavior
 

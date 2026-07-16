@@ -1,24 +1,224 @@
 use async_trait::async_trait;
 use ironclaw_turns::{
-    LoopExit, LoopMessageRef,
-    run_profile::{AssistantReply, FinalizeAssistantMessage},
+    LoopExit, LoopFailureKind, LoopMessageRef,
+    run_profile::{
+        AgentLoopHostError, AgentLoopHostErrorKind, FinalizeAssistantMessage, LoopInlineMessage,
+        LoopInlineMessageBody, LoopInlineMessageRole, LoopModelCapabilityView, LoopModelRequest,
+        ParentLoopOutput,
+    },
 };
 
 use crate::{
     state::{CheckpointKind, LoopExecutionState},
-    strategies::StopKind,
+    strategies::{ReplyAdmissionOutcome, StopKind},
 };
 
 use super::{
-    AgentLoopExecutorError, CheckpointStage, ExecutorStage, StageContext, completed_exit,
-    failed_exit,
+    AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, FailedExitDetails,
+    StageContext, attach_failure_explanation, completed_exit, failed_exit,
+    model_preference_to_host,
 };
 
-const NO_PROGRESS_FALLBACK_REPLY: &str = concat!(
-    "I stopped because I was repeating the same step without making progress. ",
-    "The recent tool activity shows the repeated calls, results, and any failure summaries. ",
-    "Try again with a narrower request, or fix the failed tool/resource and rerun it."
-);
+/// Instruction injected by the final-answer nudge — drive the model to produce a
+/// closing answer with no tools available. Template lives in a prompt file so it
+/// stays reviewable and versioned with the rest of the prompt surface.
+pub(super) const FINAL_ANSWER_NUDGE: &str = include_str!("../../prompts/final_answer_nudge.md");
+
+/// Instruction injected by the tools-capable completion nudge — drive the model
+/// to *finish* the task (writing any required output artifact with its tools)
+/// before answering, rather than merely synthesize prose from work already done.
+/// Unlike `FINAL_ANSWER_NUDGE`, this is delivered as an inline message on an
+/// ordinary loop iteration with the full tool surface still available.
+pub(super) const COMPLETION_NUDGE: &str = include_str!("../../prompts/completion_nudge.md");
+
+/// Hard cap on tools-capable completion nudges per run. Each nudge re-enters the
+/// loop for at least one more model call (plus any tool calls the model makes),
+/// so this bounds the extra work a stuck run can generate.
+pub(super) const COMPLETION_NUDGE_LIMIT: u32 = 2;
+
+/// Whether an admitted assistant reply "trailed off" without a real closing
+/// answer: empty after trimming, or ending in a colon (the model narrated a next
+/// step — "Let me write the file:" — but emitted no tool call, so the turn ended
+/// mid-intent). Mirrors nearai-bench's `trailed_off_without_answer` so the
+/// in-loop nudge fires on the same signal the out-of-loop bench nudge used.
+pub(super) fn reply_trailed_off(content: &str) -> bool {
+    let trimmed = content.trim();
+    trimmed.is_empty() || trimmed.ends_with(':')
+}
+
+/// Inline control message carrying the completion-nudge instruction. Delivered as
+/// a `User` turn (matching `FINAL_ANSWER_NUDGE`'s role and the bench nudge, which
+/// re-prompted the agent with a user message) so the model treats it as a fresh
+/// directive to act on with its tools. Fallible (never panics) like the
+/// `FINAL_ANSWER_NUDGE` construction: a malformed static body surfaces as a
+/// planner-contract error the caller propagates.
+pub(super) fn completion_nudge_control_message() -> Result<LoopInlineMessage, AgentLoopExecutorError>
+{
+    let safe_body =
+        LoopInlineMessageBody::new(COMPLETION_NUDGE.trim().to_string()).map_err(|_| {
+            AgentLoopExecutorError::PlannerContract {
+                detail: "completion-nudge control text was invalid",
+            }
+        })?;
+    Ok(LoopInlineMessage {
+        role: LoopInlineMessageRole::User,
+        safe_body,
+    })
+}
+
+/// Driver-specific "final-answer" nudge: when the loop would otherwise end a turn
+/// with no real assistant answer (empty/trailed-off reply, model-call budget
+/// exhausted, or no-progress detected), issue ONE extra **tool-free** model call
+/// asking the model to synthesize a closing answer from the work done, and return
+/// the finalized reply ref. This is the reborn equivalent of the legacy loop's
+/// `on_tool_intent_nudge` / force-text-recovery.
+///
+/// Gated by `SteeringPolicy.allow_driver_specific_nudges` (off in production) and
+/// capped at one nudge per run. Returns `Ok(None)` when disabled, capped, or the
+/// model still declines to answer — callers then keep their existing behavior.
+/// Does NOT push to `state.assistant_refs` (the caller owns that, to stay
+/// consistent with each exit path's checkpoint ordering).
+pub(super) async fn try_final_answer_nudge(
+    ctx: StageContext<'_>,
+    state: &mut LoopExecutionState,
+) -> Result<Option<LoopMessageRef>, AgentLoopExecutorError> {
+    if !ctx
+        .host
+        .run_context()
+        .resolved_run_profile
+        .steering_policy
+        .allow_driver_specific_nudges
+    {
+        return Ok(None);
+    }
+    if state.final_answer_nudges_used >= 1 {
+        return Ok(None);
+    }
+
+    // Build the prompt-context request, then suppress tools. Clearing
+    // `surface_version`/`capability_view` here only strips tools from the prompt
+    // *text*; the empty capability view set on the model request below (not these
+    // `None`s) is what actually forces a tool-free provider call. See the comment
+    // on `LoopModelRequest.capability_view` construction further down.
+    let context_plan = ctx.planner.context().plan_context_request(state).await;
+    let mut request = context_plan.request;
+    request.surface_version = None;
+    request.capability_view = None;
+    let safe_body =
+        LoopInlineMessageBody::new(FINAL_ANSWER_NUDGE.trim().to_string()).map_err(|_| {
+            AgentLoopExecutorError::PlannerContract {
+                detail: "final-answer nudge body was invalid",
+            }
+        })?;
+    request.inline_messages.push(LoopInlineMessage {
+        role: LoopInlineMessageRole::User,
+        safe_body,
+    });
+    // Count the attempt before any host call so a failure can't be retried into
+    // a loop, and so the best-effort nudge is bounded even when its own
+    // infrastructure is the thing failing.
+    state.final_answer_nudges_used += 1;
+    let bundle = match ctx.host.build_prompt_bundle(request).await {
+        Ok(bundle) => bundle,
+        Err(error) => return nudge_bail("prompt", error),
+    };
+
+    let model_preference = model_preference_to_host(ctx.planner.model().preference(state).await)?;
+    // An *empty* capability view (not `None`) is what actually forces a tool-free
+    // model call: the reborn gateway attaches tools whenever the loop port holds a
+    // capability port, filtered by this view — an empty visible set filters the
+    // surface to zero tools, so the provider gets a text-only request and must
+    // answer in prose. `surface_version: None` only strips tools from the prompt
+    // *text*, not from the provider tool array, so it is not sufficient on its own.
+    let model_request = LoopModelRequest {
+        inline_messages: Vec::new(),
+        messages: bundle.messages,
+        surface_version: None,
+        model_preference,
+        capability_view: Some(LoopModelCapabilityView {
+            visible_capability_ids: Vec::new(),
+        }),
+    };
+    let response = match ctx.host.stream_model(model_request).await {
+        Ok(response) => response,
+        Err(error) => return nudge_bail("model", error),
+    };
+
+    let usage = response.usage;
+    match response.output {
+        ParentLoopOutput::AssistantReply(reply) => {
+            // Route the nudged reply through the SAME admission policy as a
+            // normal assistant reply, rather than a bespoke `!is_empty()` check:
+            // this keeps `DefaultReplyAdmissionStrategy`'s protections (blank
+            // text, provider-transcript artifacts) as the single gate before
+            // anything is finalized into the transcript.
+            match ctx
+                .planner
+                .reply_admission()
+                .admit_reply(state, &reply)
+                .await
+            {
+                ReplyAdmissionOutcome::AcceptFinal => {
+                    // Preserve the canonical assistant-reply accounting so the
+                    // diminishing-returns window sees the nudge turn's output
+                    // tokens (matches `AssistantReplyStage`).
+                    let output_tokens = usage
+                        .map(|u| u.output_tokens)
+                        .unwrap_or_else(|| estimate_output_tokens(&reply.content));
+                    let reply_ref = match ctx
+                        .host
+                        .finalize_assistant_message(FinalizeAssistantMessage { reply })
+                        .await
+                    {
+                        Ok(reply_ref) => reply_ref,
+                        Err(error) => return nudge_bail("transcript", error),
+                    };
+                    state.recent_output_token_counts.push(output_tokens);
+                    state.accumulate_model_usage(usage);
+                    Ok(Some(reply_ref))
+                }
+                // Admission rejected it (empty / artifact) — give up; the caller
+                // falls back to its existing exit (typed no-progress failure, or
+                // the budget path's fail-closed terminal).
+                ReplyAdmissionOutcome::RejectFinal { .. } => Ok(None),
+            }
+        }
+        // Model emitted capability calls despite the tool-free surface — give up.
+        _ => Ok(None),
+    }
+}
+
+/// Best-effort nudge host-call failures must NOT bork the run: the nudge exists
+/// to rescue an otherwise-empty turn ending, so when its own prompt/model/
+/// transcript host call fails we fall back (`Ok(None)`) and let the caller keep
+/// its normal exit. Only explicit cancellation is propagated. The underlying
+/// cause is logged (never erased) — this is the fail-open counterpart to the
+/// `map_err(|_| ...)?` pattern the executor otherwise forbids.
+fn nudge_bail(
+    stage: &'static str,
+    error: AgentLoopHostError,
+) -> Result<Option<LoopMessageRef>, AgentLoopExecutorError> {
+    if error.kind == AgentLoopHostErrorKind::Cancelled {
+        return Err(AgentLoopExecutorError::Cancelled);
+    }
+    tracing::debug!(
+        nudge_stage = stage,
+        error_kind = ?error.kind,
+        detail = %error.safe_summary,
+        "final-answer nudge host call failed; falling back to normal exit"
+    );
+    Ok(None)
+}
+
+/// Fallback output-token estimate when the provider reports no usage, mirroring
+/// `AssistantReplyStage`'s estimate so accounting stays consistent.
+fn estimate_output_tokens(content: &str) -> u32 {
+    if content.is_empty() {
+        return 0;
+    }
+    let estimated = content.len().div_ceil(4).max(1);
+    estimated.min(u32::MAX as usize) as u32
+}
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct ExitStage;
@@ -57,14 +257,46 @@ impl ExitStage {
             }
             StopKind::NoProgressDetected => {
                 let mut state = state;
-                let reply_ref = finalize_no_progress_fallback(ctx).await?;
-                state.assistant_refs.push(reply_ref);
+                // A no-progress stop is a runtime *failure*, not a conversational
+                // completion. Where the driver-specific nudge is enabled and the
+                // model synthesizes a real closing answer, complete with that
+                // answer (preserves the #4837 final-answer-nudge benchmark path,
+                // bit-for-bit). Otherwise finalize a typed no-progress failure that
+                // the product layer renders deterministically — never a canned
+                // "I stopped" reply finalized as a successful turn.
+                // The nudge owns its own output-token accounting (it pushes to
+                // `recent_output_token_counts` on AcceptFinal); the caller only
+                // owns `assistant_refs`. Keep the checkpoint write single and
+                // shared across both outcomes.
+                let completed = match try_final_answer_nudge(ctx, &mut state).await? {
+                    Some(reply_ref) => {
+                        state.assistant_refs.push(reply_ref);
+                        true
+                    }
+                    None => false,
+                };
                 let checked = CheckpointStage
                     .write(ctx, state, CheckpointKind::Final)
                     .await?;
-                completed_exit(ctx.host, checked.state, Some(checked.checkpoint_id))
+                if completed {
+                    completed_exit(ctx.host, checked.state, Some(checked.checkpoint_id))
+                } else {
+                    failed_exit(
+                        ctx.host,
+                        checked.state,
+                        LoopFailureKind::NoProgressDetected,
+                        Some(checked.checkpoint_id),
+                        FailedExitDetails::default(),
+                    )
+                }
             }
             StopKind::Aborted(failure_kind) => {
+                let mut state = match CheckpointStage.cancel_if_requested(ctx, state).await? {
+                    CancelCheck::Continue(state) => *state,
+                    CancelCheck::Exit(exit) => return Ok(exit),
+                };
+                let explanation_message_ref =
+                    attach_failure_explanation(ctx, &mut state, failure_kind).await?;
                 let checked = CheckpointStage
                     .write(ctx, state, CheckpointKind::Final)
                     .await?;
@@ -73,25 +305,13 @@ impl ExitStage {
                     checked.state,
                     failure_kind,
                     Some(checked.checkpoint_id),
+                    FailedExitDetails {
+                        diagnostic_ref: None,
+                        safe_summary: None,
+                        explanation_message_ref,
+                    },
                 )
             }
         }
     }
-}
-
-async fn finalize_no_progress_fallback(
-    ctx: StageContext<'_>,
-) -> Result<LoopMessageRef, AgentLoopExecutorError> {
-    let reply_ref = ctx
-        .host
-        .finalize_assistant_message(FinalizeAssistantMessage {
-            reply: AssistantReply {
-                content: NO_PROGRESS_FALLBACK_REPLY.to_string(),
-            },
-        })
-        .await
-        .map_err(|_| AgentLoopExecutorError::HostUnavailable {
-            stage: super::HostStage::Transcript,
-        })?;
-    Ok(reply_ref)
 }

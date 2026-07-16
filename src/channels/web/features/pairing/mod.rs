@@ -1,7 +1,7 @@
 //! Channel pairing approval.
 //!
-//! Owns the pairing-code approval flow for WASM channels (Telegram, Slack
-//! relay, etc.). The admin dashboard lists pending requests via
+//! Owns the pairing-code approval flow for WASM channels such as Telegram
+//! and custom relays. The admin dashboard lists pending requests via
 //! `GET /api/pairing/{channel}`, and any authenticated user can self-claim
 //! a request by submitting the code from their DM via
 //! `POST /api/pairing/{channel}/approve` — that's the "self-service" wire
@@ -17,9 +17,8 @@
 //! pre-fold lowercased `String` through the handler. The validator's
 //! canonical form folds `-` into `_`, but the pairing store keys off the
 //! *un-folded* lowercased name (see `crate::pairing::normalize_channel_name`
-//! in `src/pairing/mod.rs`). WASM channels like `slack-relay` (see
-//! `src/channels/wasm/setup.rs` and `crate::channels::relay::DEFAULT_RELAY_NAME`)
-//! store hyphenated rows, and querying `slack_relay` would miss them —
+//! in `src/pairing/mod.rs`). Some WASM channels store hyphenated rows, and
+//! querying their underscore-folded names would miss them —
 //! returning empty lists / failing approvals silently. When the wider
 //! codebase harmonizes `ExtensionName` with WASM-channel naming, this
 //! discard-and-keep-the-raw-string dance can go away.
@@ -268,7 +267,7 @@ mod tests {
     // 2. Lowercase mixed-case URL paths.
     // 3. **Preserve hyphens** — `ExtensionName::new` canonicalizes `-`
     //    to `_`, but the pairing store keys off the un-folded name, so
-    //    `slack-relay` (a real live WASM channel) must stay addressable.
+    //    hyphenated channel names must stay addressable.
     // 4. Reject shapes that can't correspond to a real channel (path
     //    traversal, invalid charset, edge/consecutive underscores,
     //    oversize) with `StatusCode::BAD_REQUEST`.
@@ -283,8 +282,8 @@ mod tests {
         assert_eq!(parsed, "telegram");
 
         let parsed =
-            parse_channel("slack_relay".to_string()).expect("snake_case name must validate");
-        assert_eq!(parsed, "slack_relay");
+            parse_channel("custom_relay".to_string()).expect("snake_case name must validate");
+        assert_eq!(parsed, "custom_relay");
     }
 
     #[test]
@@ -303,12 +302,13 @@ mod tests {
     fn parse_channel_preserves_hyphens_for_slack_relay() {
         // Regression for the PR #2665 Copilot review: a previous revision of
         // `parse_channel` returned `ExtensionName::new(...)` directly, which
-        // canonicalizes `-` into `_`. But the live WASM channel name (see
-        // `crate::channels::relay::DEFAULT_RELAY_NAME` and
-        // `src/channels/wasm/setup.rs`) is `slack-relay` — stored and keyed
-        // hyphenated in the pairing store. Folding to `slack_relay` would
-        // silently miss every real pairing row. This test pins the un-folded
-        // form so the regression can't reoccur without a visible signal.
+        // canonicalizes `-` into `_`. Pairing rows are keyed by the raw
+        // channel segment, so folding `slack-relay` to `slack_relay` would
+        // silently miss every matching row. `slack-relay` is a live channel
+        // name — `DEFAULT_RELAY_NAME` in `src/channels/relay/channel.rs`,
+        // wired through `features/oauth/mod.rs` — so this test pins the
+        // un-folded form of a *real* channel and the regression can't reoccur
+        // without a visible signal.
         let parsed = parse_channel("slack-relay".to_string())
             .expect("slack-relay must validate and retain hyphens");
         assert_eq!(parsed, "slack-relay");
