@@ -1902,17 +1902,29 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("extension lifecycle state could not be restored: {error}"),
     })?;
+    #[cfg_attr(
+        not(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")),
+        allow(unused_mut)
+    )]
+    let mut removal_cleanup_adapters: Vec<Arc<dyn ExtensionRemovalCleanupAdapter>> = Vec::new();
     #[cfg(feature = "slack-v2-host-beta")]
-    let removal_cleanup_adapters: Vec<Arc<dyn ExtensionRemovalCleanupAdapter>> = vec![Arc::new(
+    removal_cleanup_adapters.push(Arc::new(
         SlackPersonalConnectionCleanupAdapter::new(Arc::clone(
             &store_graph.local_runtime.channel_connection_facade_slot,
         ))
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("Slack extension removal cleanup could not be built: {error}"),
         })?,
-    )];
-    #[cfg(not(feature = "slack-v2-host-beta"))]
-    let removal_cleanup_adapters: Vec<Arc<dyn ExtensionRemovalCleanupAdapter>> = Vec::new();
+    ));
+    #[cfg(feature = "telegram-v2-host-beta")]
+    removal_cleanup_adapters.push(Arc::new(
+        crate::extension_host::extension_removal_cleanup::TelegramPairingConnectionCleanupAdapter::new(
+            Arc::clone(&store_graph.local_runtime.channel_connection_facade_slot),
+        )
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("Telegram extension removal cleanup could not be built: {error}"),
+        })?,
+    ));
     let removal_cleanup = Arc::new(
         ExtensionRemovalCleanupRegistry::try_from_adapters(removal_cleanup_adapters).map_err(
             |error| RebornBuildError::InvalidConfig {

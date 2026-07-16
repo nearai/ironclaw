@@ -27,10 +27,17 @@ use crate::extension_host::extension_credential_requirements::{
     product_auth_credential_source,
 };
 use crate::extension_host::extension_removal_cleanup::ExtensionRemovalCleanupRequirement;
-#[cfg(feature = "slack-v2-host-beta")]
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 use crate::extension_host::extension_removal_cleanup::{
     ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapterId,
+};
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::extension_host::extension_removal_cleanup::{
     SLACK_EXTENSION_REMOVAL_CHANNEL_ID, SLACK_PERSONAL_CONNECTION_CLEANUP_ADAPTER_ID,
+};
+#[cfg(feature = "telegram-v2-host-beta")]
+use crate::extension_host::extension_removal_cleanup::{
+    TELEGRAM_EXTENSION_REMOVAL_CHANNEL_ID, TELEGRAM_PAIRING_CONNECTION_CLEANUP_ADAPTER_ID,
 };
 use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 use crate::llm_admin::nearai_mcp::{
@@ -654,12 +661,30 @@ fn slack_bot_package() -> Result<AvailableExtensionPackage, ProductWorkflowError
 /// this single `telegram` id.
 #[cfg(feature = "telegram-v2-host-beta")]
 pub(crate) fn telegram_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package(
+    let mut package = bundled_extension_package(
         TELEGRAM_EXTENSION_ID,
         "Telegram",
         TELEGRAM_MANIFEST,
         Vec::new(),
-    )
+    )?;
+    // Removal must unpair the removing user (identity binding, DM delivery
+    // target, pending pairing code) — declared here, executed by
+    // TelegramPairingConnectionCleanupAdapter through the shared
+    // channel-connection facade slot.
+    package
+        .cleanup_requirements
+        .push(ExtensionRemovalCleanupRequirement::channel_connection(
+            ExtensionRemovalCleanupAdapterId::new(TELEGRAM_PAIRING_CONNECTION_CLEANUP_ADAPTER_ID)
+                .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+                reason: error.to_string(),
+            })?,
+            ExtensionRemovalChannelId::new(TELEGRAM_EXTENSION_REMOVAL_CHANNEL_ID).map_err(
+                |error| ProductWorkflowError::InvalidBindingRequest {
+                    reason: error.to_string(),
+                },
+            )?,
+        ));
+    Ok(package)
 }
 
 pub(crate) fn google_calendar_manifest_digest() -> String {
@@ -3256,5 +3281,23 @@ mod telegram_catalog_tests {
             .search("telegram")
             .any(|package| package.package_ref.id.as_str() == TELEGRAM_EXTENSION_ID);
         assert!(found, "telegram must appear in the user-visible catalog");
+    }
+}
+
+#[cfg(all(test, feature = "telegram-v2-host-beta"))]
+mod telegram_cleanup_requirement_tests {
+    use super::*;
+
+    #[test]
+    fn telegram_package_declares_the_pairing_removal_cleanup() {
+        let package = telegram_package().expect("telegram package builds");
+        assert_eq!(package.cleanup_requirements.len(), 1);
+        let requirement = &package.cleanup_requirements[0];
+        assert_eq!(
+            requirement.adapter_id.as_str(),
+            TELEGRAM_PAIRING_CONNECTION_CLEANUP_ADAPTER_ID
+        );
+        let crate::extension_host::extension_removal_cleanup::ExtensionRemovalCleanupBinding::ChannelConnection { channel } = &requirement.binding;
+        assert_eq!(channel.as_str(), TELEGRAM_EXTENSION_REMOVAL_CHANNEL_ID);
     }
 }
