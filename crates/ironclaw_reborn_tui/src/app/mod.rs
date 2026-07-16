@@ -231,6 +231,16 @@ pub struct AppState {
     pub quitting: bool,
     pub running: bool,
     pub last_local_error: Option<String>,
+    /// Index (into `transcript`) of the first item the transcript pane
+    /// should render. `None` is the default "follow" mode: the pane always
+    /// shows the tail (`ui/transcript.rs` computes the window from the
+    /// current length), so newly appended items stay visible. `Some(idx)`
+    /// pins the view to an absolute, content-stable index set by
+    /// `PageUp`/`PageDown`/`Home` (see `scroll_*` below) — because it's
+    /// absolute rather than relative-to-the-tail, appending new transcript
+    /// items never shifts what's on screen while scrolled. `End` (or
+    /// `PageDown` walking off the tail) resets to `None` to resume follow.
+    pub transcript_scroll: Option<usize>,
 }
 
 impl AppState {
@@ -266,6 +276,11 @@ impl AppState {
 
     pub fn set_last_local_error(mut self, last_local_error: Option<impl Into<String>>) -> Self {
         self.last_local_error = last_local_error.map(Into::into);
+        self
+    }
+
+    pub fn set_transcript_scroll(mut self, transcript_scroll: usize) -> Self {
+        self.transcript_scroll = Some(transcript_scroll);
         self
     }
 
@@ -359,6 +374,37 @@ fn dispatch_modal_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
     }
 }
 
+/// Fixed logical page size for `PageUp`/`PageDown` transcript scrolling.
+/// The reducer has no access to the actual render area (it stays pure, no
+/// terminal I/O — see the module doc), so paging moves a constant number of
+/// transcript items rather than a viewport-derived count; `ui/transcript.rs`
+/// separately clamps whatever window this produces to what actually fits.
+const TRANSCRIPT_PAGE_SIZE: usize = 10;
+
+/// `PageUp`: enters (or advances) scrolled mode, moving the pinned top index
+/// back by one page. Starting from follow (`None`), the first page anchors
+/// one page above the current tail.
+fn scroll_transcript_page_up(state: &mut AppState) {
+    // While following, the implicit bottom-anchor is the length itself (one
+    // past the last item) — subtracting a page from that lands one page
+    // above the tail, matching what the follow window was just showing.
+    let current = state.transcript_scroll.unwrap_or(state.transcript.len());
+    state.transcript_scroll = Some(current.saturating_sub(TRANSCRIPT_PAGE_SIZE));
+}
+
+/// `PageDown`: while scrolled, advances the pinned top index down by one
+/// page; once that would reach (or pass) the tail, resumes follow (`None`)
+/// instead of pinning at an index that's already the tail. A no-op while
+/// already following (there's nothing further down than the tail).
+fn scroll_transcript_page_down(state: &mut AppState) {
+    let Some(current) = state.transcript_scroll else {
+        return;
+    };
+    let len = state.transcript.len();
+    let next = current.saturating_add(TRANSCRIPT_PAGE_SIZE);
+    state.transcript_scroll = if next >= len { None } else { Some(next) };
+}
+
 /// Global open-a-modal shortcuts plus composer text editing. Only reachable
 /// when no modal is open and no gate is pending (see `dispatch_key_inner`).
 fn dispatch_composer_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
@@ -386,6 +432,22 @@ fn dispatch_composer_key(state: &mut AppState, key: KeyEvent) -> Vec<Effect> {
         }
         KeyCode::Char(c) => {
             state.composer_text.push(c);
+            Vec::new()
+        }
+        KeyCode::PageUp => {
+            scroll_transcript_page_up(state);
+            Vec::new()
+        }
+        KeyCode::PageDown => {
+            scroll_transcript_page_down(state);
+            Vec::new()
+        }
+        KeyCode::Home => {
+            state.transcript_scroll = Some(0);
+            Vec::new()
+        }
+        KeyCode::End => {
+            state.transcript_scroll = None;
             Vec::new()
         }
         _ => Vec::new(),
@@ -487,5 +549,107 @@ mod dispatch_key_tests {
         let mut state = AppState::default();
         let effects = reduce(&mut state, AppEvent::Key(ctrl('c')));
         assert_eq!(effects, vec![Effect::Quit]);
+    }
+}
+
+#[cfg(test)]
+mod transcript_scroll_tests {
+    use crossterm::event::KeyCode;
+
+    use super::test_support::key;
+    use super::*;
+
+    fn state_with_items(count: usize) -> AppState {
+        let mut state = AppState::default();
+        for i in 0..count {
+            state.transcript.push(TranscriptItem::System {
+                text: format!("item {i}"),
+            });
+        }
+        state
+    }
+
+    #[test]
+    fn default_state_follows_with_no_scroll_pin() {
+        let state = state_with_items(3);
+        assert_eq!(
+            state.transcript_scroll, None,
+            "fresh state must default to follow mode"
+        );
+    }
+
+    #[test]
+    fn page_up_from_follow_pins_one_page_above_the_tail() {
+        let mut state = state_with_items(25);
+        reduce(&mut state, AppEvent::Key(key(KeyCode::PageUp)));
+        assert_eq!(
+            state.transcript_scroll,
+            Some(15),
+            "25 items - one page (10) = pinned top index 15"
+        );
+    }
+
+    #[test]
+    fn page_up_clamps_at_the_top_instead_of_going_negative() {
+        let mut state = state_with_items(5);
+        reduce(&mut state, AppEvent::Key(key(KeyCode::PageUp)));
+        reduce(&mut state, AppEvent::Key(key(KeyCode::PageUp)));
+        assert_eq!(
+            state.transcript_scroll,
+            Some(0),
+            "saturating_sub must clamp at 0, never wrap"
+        );
+    }
+
+    #[test]
+    fn new_content_does_not_move_a_pinned_scroll_position() {
+        let mut state = state_with_items(25);
+        reduce(&mut state, AppEvent::Key(key(KeyCode::PageUp)));
+        assert_eq!(state.transcript_scroll, Some(15));
+
+        // Appending items past PageUp must not force the view back to the
+        // tail — the pin is an absolute index, unaffected by pushes.
+        state.transcript.push(TranscriptItem::System {
+            text: "new item".to_string(),
+        });
+        assert_eq!(
+            state.transcript_scroll,
+            Some(15),
+            "a pinned scroll position must survive new transcript content"
+        );
+    }
+
+    #[test]
+    fn end_resumes_follow() {
+        let mut state = state_with_items(25).set_transcript_scroll(15);
+        reduce(&mut state, AppEvent::Key(key(KeyCode::End)));
+        assert_eq!(state.transcript_scroll, None, "End must resume follow");
+    }
+
+    #[test]
+    fn home_pins_to_the_very_top() {
+        let mut state = state_with_items(25);
+        reduce(&mut state, AppEvent::Key(key(KeyCode::Home)));
+        assert_eq!(state.transcript_scroll, Some(0));
+    }
+
+    #[test]
+    fn page_down_walking_off_the_tail_resumes_follow() {
+        let mut state = state_with_items(15).set_transcript_scroll(5);
+        reduce(&mut state, AppEvent::Key(key(KeyCode::PageDown)));
+        assert_eq!(
+            state.transcript_scroll, None,
+            "5 + page(10) = 15 >= len(15) must resume follow, not overshoot"
+        );
+    }
+
+    #[test]
+    fn page_down_while_following_is_a_no_op() {
+        let mut state = state_with_items(25);
+        reduce(&mut state, AppEvent::Key(key(KeyCode::PageDown)));
+        assert_eq!(
+            state.transcript_scroll, None,
+            "nothing to page down to past the tail"
+        );
     }
 }
