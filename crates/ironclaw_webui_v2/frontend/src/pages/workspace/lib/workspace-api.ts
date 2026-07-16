@@ -10,7 +10,6 @@
 // no write/save path here.
 
 import { apiFetch, fetchAttachmentBlob, fetchAttachmentDataUrl } from "../../../lib/api";
-import { areaDisplayName } from "./workspace-presenters";
 
 const FS_BASE = "/api/webchat/v2/fs";
 
@@ -101,14 +100,13 @@ export async function listFsMounts() {
 // returned entry's `path` is qualified so the tree can recurse with it directly.
 export async function listWorkspace(qualifiedPath = "") {
   if (!qualifiedPath) {
-    // The root lists the storage areas as plain top-level folders (memory,
-    // home) — the "mount" concept is never surfaced in the UI. `path` is the
-    // backend area id (used to route reads); `name` is the friendly display
-    // name, so navigation stays unambiguous without exposing area ids.
+    // Keep the backend area id in the query cache. Presentation components
+    // translate known areas at render time so changing languages updates the
+    // tree immediately without refetching mount data.
     const mounts = await listFsMounts();
     return {
       entries: mounts.map((mount) => ({
-        name: areaDisplayName(mount.mount),
+        name: mount.mount,
         path: mount.mount,
         is_dir: true,
       })),
