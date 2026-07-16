@@ -46,6 +46,8 @@ function channelsTabForTest(props) {
     RegistryCard() {},
     SlackChannelPicker() {},
     SlackAdminManagedSection() {},
+    TelegramAdminManagedSection() {},
+    TelegramPairingPanel() {},
     StatusPill() {},
     globalThis: {},
     html(strings, ...values) {
@@ -61,6 +63,8 @@ function channelsTabForTest(props) {
     PairingSection: context.PairingSection,
     RegistryCard: context.RegistryCard,
     SlackChannelPicker: context.SlackChannelPicker,
+    TelegramAdminManagedSection: context.TelegramAdminManagedSection,
+    TelegramPairingPanel: context.TelegramPairingPanel,
   };
 }
 
@@ -365,6 +369,132 @@ test("ChannelsTab renders generic connect controls under installed non-Slack cha
   assert.equal(
     renderedContainsChannelAction(installedCard, "telegram", "inbound_proof_code"),
     true,
+  );
+});
+
+test("telegram connect action predicates route admin setup and web-generated pairing", () => {
+  const context = { globalThis: {} };
+  vm.runInNewContext(channelsTabSourceForTest(), context);
+  const {
+    isWebGeneratedCodeAction,
+    isTelegramAdminManagedAction,
+    isTelegramWebGeneratedCodeAction,
+    isGenericInboundProofCodeAction,
+  } = context.globalThis.__testExports;
+
+  assert.equal(
+    isWebGeneratedCodeAction({ channel: "telegram", strategy: "web_generated_code" }),
+    true,
+  );
+  assert.equal(
+    isTelegramAdminManagedAction({ channel: "telegram", strategy: "admin_managed_channels" }),
+    true,
+  );
+  assert.equal(
+    isTelegramAdminManagedAction({ channel: "slack", strategy: "admin_managed_channels" }),
+    false,
+  );
+  assert.equal(
+    isTelegramWebGeneratedCodeAction({ channel: "telegram", strategy: "web_generated_code" }),
+    true,
+  );
+  assert.equal(
+    isTelegramWebGeneratedCodeAction({ channel: "telegram", strategy: "inbound_proof_code" }),
+    false,
+  );
+  assert.equal(
+    isGenericInboundProofCodeAction({ channel: "telegram", strategy: "web_generated_code" }),
+    false,
+    "web-generated pairing must not fall into the paste-code section",
+  );
+});
+
+test("connectActionsForChannel returns telegram admin and web-generated-code actions together", () => {
+  const context = { globalThis: {} };
+  vm.runInNewContext(channelsTabSourceForTest(), context);
+  const { connectActionsForChannel } = context.globalThis.__testExports;
+  const slackAdmin = { channel: "slack", strategy: "admin_managed_channels" };
+  const telegramAdmin = { channel: "telegram", strategy: "admin_managed_channels" };
+  const telegramPairing = { channel: "telegram", strategy: "web_generated_code" };
+
+  const actions = connectActionsForChannel(
+    [slackAdmin, telegramPairing, telegramAdmin],
+    "telegram",
+  );
+  assert.equal(actions.length, 2);
+  assert.equal(actions[0].strategy, "admin_managed_channels");
+  assert.equal(actions[1].strategy, "web_generated_code");
+  assert.ok(actions.every((action) => action.channel === "telegram"));
+});
+
+test("ChannelConnectActionSections renders telegram admin setup and the web-generated pairing panel", () => {
+  const admin = {
+    channel: "telegram",
+    strategy: "admin_managed_channels",
+    action: { title: "Telegram bot" },
+  };
+  const pairing = { channel: "telegram", strategy: "web_generated_code", action: {} };
+
+  const view = connectActionSectionsForTest(null, [admin, pairing]);
+  assert.equal(
+    renderedComponentCount(view.rendered, view.TelegramAdminManagedSection),
+    1,
+  );
+  assert.deepEqual(
+    componentProps(view.rendered, view.TelegramAdminManagedSection).action,
+    admin.action,
+  );
+  assert.equal(renderedComponentCount(view.rendered, view.TelegramPairingPanel), 1);
+  // Neither telegram surface leaks into the Slack or paste-code sections.
+  assert.equal(renderedComponentCount(view.rendered, view.SlackAdminManagedSection), 0);
+  assert.equal(renderedComponentCount(view.rendered, view.PairingSection), 0);
+});
+
+test("ChannelsTab renders no fallback paste pairing when telegram web-generated pairing owns onboarding", () => {
+  const view = channelsTabForTest({
+    status: { enabled_channels: [], sse_connections: 0, ws_connections: 0 },
+    channels: [
+      {
+        package_ref: { id: "telegram" },
+        kind: "channel",
+        activation_status: "installed",
+        onboarding_state: "pairing_required",
+      },
+    ],
+    connectableChannels: [
+      { channel: "telegram", strategy: "admin_managed_channels", action: {} },
+      { channel: "telegram", strategy: "web_generated_code", action: {} },
+    ],
+    channelRegistry: [],
+    isBusy: false,
+    onActivate() {},
+    onConfigure() {},
+    onInstall() {},
+    onRemove() {},
+  });
+
+  const installedCard = renderedNodeContainingComponent(
+    view.rendered,
+    view.ChannelConnectActionSections,
+  );
+  assert.notEqual(installedCard, undefined, "expected installed telegram card wrapper");
+  assert.equal(
+    renderedContainsChannelAction(installedCard, "telegram", "admin_managed_channels"),
+    true,
+  );
+  assert.equal(
+    renderedContainsChannelAction(installedCard, "telegram", "web_generated_code"),
+    true,
+  );
+  assert.equal(
+    renderedComponentCount(view.rendered, view.ChannelConnectActionSections),
+    1,
+    "the connect actions own both telegram surfaces",
+  );
+  assert.equal(
+    renderedComponentCount(view.rendered, view.PairingSection),
+    0,
+    "the web-generated pairing panel owns onboarding; no paste-code fallback",
   );
 });
 

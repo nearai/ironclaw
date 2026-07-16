@@ -361,7 +361,7 @@ test("TelegramPairingPanel poll flip to connected broadcasts the connection and 
   const body = JSON.stringify(connectedView);
   assert.ok(body.includes("telegramPairing.paired"));
   assert.ok(body.includes("✅"));
-  assert.deepEqual(harness.notifyCalls, [
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.notifyCalls)), [
     { channel: "telegram", source: "telegram-pairing-panel" },
   ]);
   assert.deepEqual(JSON.parse(JSON.stringify(harness.invalidations)), [
