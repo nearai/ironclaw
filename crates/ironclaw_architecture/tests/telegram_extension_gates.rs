@@ -46,6 +46,80 @@ fn rust_and_frontend_files(root: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// Retired identifiers with the legitimate longer-identifier continuations
+/// that may embed them: `telegram_bot_token` (the credential handle) and the
+/// `telegram_bot_api` module are not the retired `telegram_bot` extension
+/// identity; `telegram_channel_routes`/`telegram_channel_connection` are host
+/// module names, not a `telegram_channel` companion extension.
+const RETIRED_TELEGRAM_IDENTIFIERS: &[(&str, &[&str])] = &[
+    ("telegram_personal", &[]),
+    // `_after` covers `activate_telegram_channel_after_setup_save`, the
+    // mirror of slack's setup-activation trait method name.
+    (
+        "telegram_channel",
+        &["_route", "_connection", "_setup", "_after"],
+    ),
+    ("telegram_bot", &["_token", "_api"]),
+];
+
+/// Whether `line` uses `needle` as a retired identifier: any occurrence that
+/// stands alone as an identifier token (bare, quoted, dotted, …) or that
+/// continues into a longer identifier NOT on the allowlist. Catches both
+/// `"telegram_bot"` string literals and bare `telegram_bot` identifiers while
+/// letting `telegram_bot_token` through — a plain substring needle can do
+/// only one of those.
+fn uses_retired_identifier(line: &str, needle: &str, allowed_continuations: &[&str]) -> bool {
+    let mut search_from = 0;
+    while let Some(offset) = line[search_from..].find(needle) {
+        let start = search_from + offset;
+        let end = start + needle.len();
+        search_from = start + 1;
+        let right_continues_identifier = line[end..]
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+        if !right_continues_identifier {
+            return true;
+        }
+        if !allowed_continuations
+            .iter()
+            .any(|allowed| line[end..].starts_with(allowed))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+#[test]
+fn retired_identifier_matcher_catches_bare_and_quoted_forms() {
+    for offending in [
+        r#"let id = "telegram_bot";"#,
+        "mod telegram_bot;",
+        "telegram_bot.activate()",
+        "let telegram_channel = 1;",
+        "telegram_bot_service()",
+        "telegram_personal_token",
+    ] {
+        let flagged = RETIRED_TELEGRAM_IDENTIFIERS
+            .iter()
+            .any(|(needle, allowed)| uses_retired_identifier(offending, needle, allowed));
+        assert!(flagged, "must flag: {offending}");
+    }
+    for legitimate in [
+        r#"let handle = "telegram_bot_token";"#,
+        "use crate::telegram::telegram_bot_api::TelegramBotApi;",
+        "mod telegram_channel_routes;",
+        "use crate::telegram::telegram_channel_connection::TelegramPairedStatusSlot;",
+        "TELEGRAM_BOT_TOKEN_HANDLE_PREFIX",
+    ] {
+        let flagged = RETIRED_TELEGRAM_IDENTIFIERS
+            .iter()
+            .any(|(needle, allowed)| uses_retired_identifier(legitimate, needle, allowed));
+        assert!(!flagged, "must allow: {legitimate}");
+    }
+}
+
 #[test]
 fn no_retired_taxonomy_telegram_identifiers() {
     let root = workspace_root();
@@ -68,12 +142,8 @@ fn no_retired_taxonomy_telegram_identifiers() {
             if trimmed.starts_with("//") || trimmed.starts_with("*") {
                 continue;
             }
-            for needle in [
-                "telegram_personal",
-                "telegram_channel\"",
-                "\"telegram_bot\"",
-            ] {
-                if line.contains(needle) {
+            for (needle, allowed_continuations) in RETIRED_TELEGRAM_IDENTIFIERS {
+                if uses_retired_identifier(line, needle, allowed_continuations) {
                     offenders.push(format!("{display}:{}: {needle}", line_number + 1));
                 }
             }

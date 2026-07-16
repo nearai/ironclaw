@@ -206,5 +206,14 @@ mod credential_setup_wire_tests {
                 scopes: vec!["users:read".to_string()]
             }
         );
+
+        let parsed: RuntimeCredentialAccountSetup =
+            serde_json::from_str(r#"{"kind":"pairing"}"#).expect("pairing");
+        assert_eq!(parsed, RuntimeCredentialAccountSetup::Pairing);
+        assert_eq!(
+            serde_json::to_value(RuntimeCredentialAccountSetup::Pairing).expect("serializes"),
+            serde_json::json!({"kind": "pairing"}),
+            "the pairing gate's persisted wire shape is locked"
+        );
     }
 }
