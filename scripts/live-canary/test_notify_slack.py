@@ -649,10 +649,83 @@ class RebornQaSlackReportTests(unittest.TestCase):
         self.assertEqual(report.failed, 0)
         self.assertEqual(report.skipped, 2)
         self.assertEqual((report.contract_passed, report.contract_total), (0, 0))
+        self.assertTrue(report.junit_status_authoritative)
+        self.assertEqual(report.status, "skip")
+        haiku_response = {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps({"status": "pass"}),
+                }
+            ]
+        }
+        with mock.patch.object(notify, "post_json", return_value=haiku_response):
+            notify.run_haiku("anthropic-test-key", report)
         self.assertEqual(report.status, "skip")
         body = notify.github_comment_body([report], None, None)
         self.assertIn(":heavy_minus_sign: skip | — | — | 0 | 0s |", body)
         self.assertNotIn("0/2 passed", body)
+
+    def test_all_skipped_junit_lane_honors_nonzero_summary_status(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lane_dir = Path(tmpdir) / "auth-smoke" / "mock" / "run"
+            lane_dir.mkdir(parents=True)
+            (lane_dir / "auth-canary-junit.xml").write_text(
+                """\
+<testsuites>
+  <testsuite tests="2" failures="0" errors="0" skipped="2" time="0.1">
+    <testcase name="skip-a"><skipped /></testcase>
+    <testcase name="skip-b"><skipped /></testcase>
+  </testsuite>
+</testsuites>
+""",
+                encoding="utf-8",
+            )
+            (lane_dir / "summary.md").write_text(
+                _SUMMARY_TEMPLATE.format(status="1"),
+                encoding="utf-8",
+            )
+            report = notify.collect_lane(lane_dir)
+
+        self.assertEqual(report.tests, 2)
+        self.assertEqual(report.skipped, 2)
+        self.assertEqual((report.contract_passed, report.contract_total), (0, 0))
+        self.assertTrue(report.junit_status_authoritative)
+        self.assertEqual(report.status, "fail")
+        self.assertEqual(report.reason, "lane exited with status 1")
+        haiku_response = {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps({"status": "pass"}),
+                }
+            ]
+        }
+        with mock.patch.object(notify, "post_json", return_value=haiku_response):
+            notify.run_haiku("anthropic-test-key", report)
+        self.assertEqual(report.status, "fail")
+
+    def test_haiku_can_classify_genuinely_unstructured_lane(self):
+        report = notify.LaneReport(
+            lane="unstructured",
+            provider="mock",
+            status="unknown",
+        )
+        haiku_response = {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps({"status": "pass"}),
+                }
+            ]
+        }
+
+        with mock.patch.object(notify, "post_json", return_value=haiku_response):
+            notify.run_haiku("anthropic-test-key", report)
+
+        self.assertFalse(report.structured_results)
+        self.assertFalse(report.junit_status_authoritative)
+        self.assertEqual(report.status, "pass")
 
     def test_empty_structured_results_do_not_mask_summary_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -111,6 +111,7 @@ class LaneReport:
     junit_failures: list[tuple[str, str]] = field(default_factory=list)
     warning_failures: list[tuple[str, str]] = field(default_factory=list)
     structured_results: bool = False
+    junit_status_authoritative: bool = False
     status: str = "unknown"
     reason: str = ""
     tool_calls_total: int = 0
@@ -208,6 +209,8 @@ def parse_junit(path: Path, report: LaneReport) -> None:
         tests = int(ts.get("tests", 0) or 0)
         failed = int(ts.get("failures", 0) or 0) + int(ts.get("errors", 0) or 0)
         skipped = int(ts.get("skipped", 0) or 0)
+        if tests > 0:
+            report.junit_status_authoritative = True
         report.tests += tests
         report.failed += failed
         report.skipped += skipped
@@ -552,6 +555,7 @@ def collect_lane(lane_dir: Path) -> LaneReport | None:
     parse_reborn_qa_case_reports(lane_dir, r)
     r.summary_md = read_tail(lane_dir / "summary.md", 4_000)
     r.log_tail = read_tail(lane_dir / "test-output.log", MAX_LOG_BYTES)
+    summary_status = parse_summary_status(r.summary_md)
 
     if r.failed > 0:
         r.status = "fail"
@@ -562,13 +566,17 @@ def collect_lane(lane_dir: Path) -> LaneReport | None:
     elif r.tests > r.skipped:
         r.status = "pass"
     elif r.tests > 0:
-        r.status = "skip"
+        if summary_status is not None and summary_status != 0:
+            r.status = "fail"
+            if not r.reason:
+                r.reason = f"lane exited with status {summary_status}"
+        else:
+            r.status = "skip"
     else:
         # No structured counts. Fall back to the lane's exit code from
         # summary.md so summary-only lanes (private-oauth) and any lane
         # whose results.json got stripped by strict scrub still show
         # up as pass/fail instead of misleading "skip".
-        summary_status = parse_summary_status(r.summary_md)
         if summary_status is not None:
             r.status = "pass" if summary_status == 0 else "fail"
             if summary_status != 0 and not r.reason:
@@ -675,7 +683,11 @@ def run_haiku(api_key: str, report: LaneReport) -> None:
     except json.JSONDecodeError:
         report.notable = f"haiku JSON parse failed: {match.group(0)[:160]}"
         return
-    if isinstance(data.get("status"), str) and not report.structured_results:
+    if (
+        isinstance(data.get("status"), str)
+        and not report.structured_results
+        and not report.junit_status_authoritative
+    ):
         report.status = data["status"]
     report.reason = str(data.get("reason", ""))[:200]
     try:
