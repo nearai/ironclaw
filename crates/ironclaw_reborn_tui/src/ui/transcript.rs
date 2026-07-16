@@ -1,13 +1,14 @@
 //! Transcript widget: renders a window of `state.transcript` inside a
 //! bordered, wrapping paragraph. Pure function of `&AppState` — windowing is
-//! item-count based (one `TranscriptItem` maps to one pre-wrap `Line`), not
-//! a precise post-wrap row count, matching `app/mod.rs`'s `PageUp`/
-//! `PageDown` paging (which is likewise item-count based, since the reducer
-//! has no access to the render width). `state.transcript_scroll` drives
-//! which window is shown: `None` (follow) always shows the tail, so newly
-//! appended items stay visible; `Some(start)` pins the window to an
-//! absolute start index, so it holds position across new content — see
-//! `app/mod.rs`'s field doc.
+//! item-count based (one `TranscriptItem` maps to one *pre-wrap item slot*,
+//! itself expanded into one or more `Line`s when the item's body has
+//! embedded `\n`s), not a precise post-wrap row count, matching
+//! `app/mod.rs`'s `PageUp`/`PageDown` paging (which is likewise item-count
+//! based, since the reducer has no access to the render width).
+//! `state.transcript_scroll` drives which window of *items* is shown:
+//! `None` (follow) always shows the tail, so newly appended items stay
+//! visible; `Some(start)` pins the window to an absolute start item index,
+//! so it holds position across new content — see `app/mod.rs`'s field doc.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -18,72 +19,102 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use crate::app::{AppState, TranscriptItem, wire_label};
 
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
-    let all_lines: Vec<Line> = state.transcript.iter().map(render_item).collect();
-    let window = visible_window(&all_lines, area, state.transcript_scroll);
+    let item_lines: Vec<Vec<Line<'static>>> = state.transcript.iter().map(render_item).collect();
+    let window = visible_window(&item_lines, area, state.transcript_scroll);
     let block = Block::default().borders(Borders::ALL).title("transcript");
-    let paragraph = Paragraph::new(window.to_vec())
+    let paragraph = Paragraph::new(window)
         .block(block)
         .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
 }
 
-/// Slices `lines` down to what the pane can show, per `state.transcript_scroll`.
-/// `area`'s border consumes the top/bottom row, so the usable height is
-/// `area.height - 2` (floored at 1 so a degenerate/tiny area still shows
-/// something rather than panicking on the slice).
-fn visible_window<'a>(
-    lines: &'a [Line<'static>],
+/// Slices `items` (one entry per `TranscriptItem`, each already expanded
+/// into its own `Line`s) down to what the pane can show, per
+/// `state.transcript_scroll`, then flattens the selected items' lines into
+/// the single `Vec<Line>` the `Paragraph` renders. `area`'s border consumes
+/// the top/bottom row, so the usable height is `area.height - 2` (floored
+/// at 1 so a degenerate/tiny area still shows something rather than
+/// panicking on the slice). The item-count-based window size is an
+/// approximation of the visible row budget — a multi-line item can still
+/// push later items off-screen — matching this module's existing
+/// item-count paging contract with `app/mod.rs`.
+fn visible_window(
+    items: &[Vec<Line<'static>>],
     area: Rect,
     scroll: Option<usize>,
-) -> &'a [Line<'static>] {
-    let len = lines.len();
+) -> Vec<Line<'static>> {
+    let len = items.len();
     let visible = (area.height.saturating_sub(2)).max(1) as usize;
     let start = match scroll {
         Some(idx) => idx.min(len),
         None => len.saturating_sub(visible),
     };
     let end = (start + visible).min(len);
-    &lines[start..end]
+    items[start..end].iter().flatten().cloned().collect()
 }
 
-fn render_item(item: &TranscriptItem) -> Line<'static> {
+/// Splits `text` on embedded `\n` into one `Line` per physical line, all
+/// sharing `style`, so multi-line item bodies (e.g. a numbered list in an
+/// LLM reply) render as separate visible rows instead of being squished
+/// onto one line. Any individual line still soft-wraps via the
+/// `Paragraph`'s `Wrap` setting when it's wider than the pane.
+fn split_lines(text: &str, style: Style) -> Vec<Line<'static>> {
+    text.split('\n')
+        .map(|segment| Line::styled(segment.to_string(), style))
+        .collect()
+}
+
+/// Same as `split_lines`, but the first physical line is prefixed with a
+/// distinctly styled label span (e.g. `"you: "`); the label is not repeated
+/// on subsequent physical lines of a multi-line body.
+fn split_lines_with_prefix(prefix: &str, prefix_style: Style, text: &str) -> Vec<Line<'static>> {
+    let mut segments = text.split('\n');
+    let mut lines = Vec::new();
+    if let Some(first) = segments.next() {
+        lines.push(Line::from(vec![
+            Span::styled(prefix.to_string(), prefix_style),
+            Span::raw(first.to_string()),
+        ]));
+    }
+    for segment in segments {
+        lines.push(Line::from(Span::raw(segment.to_string())));
+    }
+    lines
+}
+
+fn render_item(item: &TranscriptItem) -> Vec<Line<'static>> {
     match item {
-        TranscriptItem::User { text } => Line::from(vec![
-            Span::styled("you: ", Style::default().fg(Color::White)),
-            Span::raw(text.clone()),
-        ]),
-        TranscriptItem::Assistant { text } => Line::from(vec![
-            Span::styled("assistant: ", Style::default().fg(Color::Cyan)),
-            Span::raw(text.clone()),
-        ]),
-        TranscriptItem::LiveText { body, .. } => Line::from(vec![
-            Span::styled("assistant: ", Style::default().fg(Color::Cyan)),
-            Span::raw(body.clone()),
-        ]),
-        TranscriptItem::Thinking { body, .. } => Line::styled(
-            format!("thinking: {body}"),
+        TranscriptItem::User { text } => {
+            split_lines_with_prefix("you: ", Style::default().fg(Color::White), text)
+        }
+        TranscriptItem::Assistant { text } => {
+            split_lines_with_prefix("assistant: ", Style::default().fg(Color::Cyan), text)
+        }
+        TranscriptItem::LiveText { body, .. } => {
+            split_lines_with_prefix("assistant: ", Style::default().fg(Color::Cyan), body)
+        }
+        TranscriptItem::Thinking { body, .. } => split_lines(
+            &format!("thinking: {body}"),
             Style::default().fg(Color::DarkGray),
         ),
         TranscriptItem::Activity(activity) => {
             let status = wire_label(&activity.status);
             let detail = activity.subtitle.clone().unwrap_or_default();
-            Line::styled(
-                format!("[{status}] {} {detail}", activity.capability_id),
+            split_lines(
+                &format!("[{status}] {} {detail}", activity.capability_id),
                 Style::default().fg(Color::DarkGray),
             )
         }
         TranscriptItem::Preview(preview) => {
             let summary = preview.output_summary.clone().unwrap_or_default();
-            Line::styled(
-                format!("{}: {summary}", preview.title),
+            split_lines(
+                &format!("{}: {summary}", preview.title),
                 Style::default().fg(Color::Magenta),
             )
         }
-        TranscriptItem::System { text } => {
-            Line::styled(text.clone(), Style::default().fg(Color::DarkGray))
-        }
+        TranscriptItem::System { text } => split_lines(text, Style::default().fg(Color::DarkGray)),
         TranscriptItem::Error { text } => {
-            Line::styled(format!("error: {text}"), Style::default().fg(Color::Red))
+            split_lines(&format!("error: {text}"), Style::default().fg(Color::Red))
         }
     }
 }
@@ -126,6 +157,35 @@ mod tests {
         assert!(content.contains("hello back"));
         assert!(content.contains("run completed"));
         assert!(content.contains("provider_unavailable"));
+    }
+
+    #[test]
+    fn multiline_item_body_splits_on_embedded_newlines_into_separate_rows() {
+        // Live repro: "list the integers 1..60, one per line" rendered as
+        // one squished row ("123456789101112…5960") because embedded `\n`s
+        // in the item body were never turned into separate `Line`s.
+        let mut state = AppState::default();
+        state.transcript.push(TranscriptItem::final_text("a\nb\nc"));
+
+        let content = draw(&state, 40, 10);
+
+        assert!(
+            !content.contains("abc"),
+            "embedded newlines must not collapse onto one squished line: {content:?}"
+        );
+        let rows: Vec<&str> = content.lines().collect();
+        let row_of = |needle: &str| rows.iter().position(|r| r.contains(needle));
+        let row_a = row_of("assistant: a").expect("first segment renders");
+        let row_b = row_of("│b").expect("second segment renders on its own row");
+        let row_c = row_of("│c").expect("third segment renders on its own row");
+        assert_ne!(
+            row_a, row_b,
+            "each newline-separated segment must be its own visible line: {content:?}"
+        );
+        assert_ne!(
+            row_b, row_c,
+            "each newline-separated segment must be its own visible line: {content:?}"
+        );
     }
 
     fn state_with_items(count: usize) -> AppState {
