@@ -2623,7 +2623,7 @@ def _normalize_slack_search_index_metadata(metadata: object) -> dict[str, object
         not isinstance(indexed, bool)
         or isinstance(attempts, bool)
         or not isinstance(attempts, int)
-        or attempts < 0
+        or attempts < 1
         or isinstance(latency_ms, bool)
         or not isinstance(latency_ms, int)
         or latency_ms < 0
@@ -2697,15 +2697,19 @@ async def _wait_for_slack_search_index(
         checked = observation.get("checked")
         hits = observation.get("hits")
         if (
-            checked is True
-            and (
-                not isinstance(hits, list)
-                or any(not isinstance(hit, dict) for hit in hits)
+            not isinstance(checked, bool)
+            or (
+                checked is True
+                and (
+                    not isinstance(hits, list)
+                    or any(not isinstance(hit, dict) for hit in hits)
+                )
             )
-        ) or (
-            checked is False
-            and not isinstance(observation.get("error"), str)
-        ) or checked not in (True, False):
+            or (
+                checked is False
+                and not isinstance(observation.get("error"), str)
+            )
+        ):
             return _slack_search_index_failure_metadata(
                 started=started,
                 attempts=attempts,

@@ -6799,6 +6799,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         malformed_observations = (
             None,
             {"checked": True, "hits": "not-a-list"},
+            {"checked": 1, "hits": "not-a-list"},
+            {"checked": 0, "hits": "not-a-list"},
             {"hits": []},
         )
         for observation in malformed_observations:
@@ -6907,6 +6909,55 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "D0123456789",
         ):
             self.assertNotIn(secret, persisted)
+        chat.assert_not_awaited()
+
+    def test_global_last_sent_rejects_indexed_preflight_without_search_attempt(self):
+        with (
+            patch.object(
+                run_live_qa,
+                "_require_slack_personal_token",
+                return_value="xoxp-unit-test",
+            ),
+            patch.object(
+                run_live_qa,
+                "_require_slack_personal_bot_dm_channel",
+                return_value="D0FIXTURE1",
+            ),
+            patch.object(
+                run_live_qa,
+                "_seed_slack_fixture_message",
+                new=AsyncMock(return_value={"ok": True}),
+            ),
+            patch.object(
+                run_live_qa,
+                "_wait_for_slack_search_index",
+                new=AsyncMock(
+                    return_value={
+                        "indexed": True,
+                        "attempts": 0,
+                        "latency_ms": 0,
+                    }
+                ),
+            ),
+            patch.object(
+                run_live_qa,
+                "_slack_correctness_chat_reply",
+                new=AsyncMock(),
+            ) as chat,
+        ):
+            result = asyncio.run(
+                run_live_qa.case_qa_10g_slack_last_message_sent_global(
+                    self._dummy_ctx()
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.details["failure_class"], "infrastructure")
+        self.assertEqual(
+            result.details["failure_category"], "slack_search_index_stale"
+        )
+        self.assertTrue(result.details["inconclusive"])
+        self.assertEqual(result.details["slack_search_index"]["attempts"], 0)
         chat.assert_not_awaited()
 
     def test_global_last_sent_search_cancellation_propagates(self):
