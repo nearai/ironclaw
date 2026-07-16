@@ -306,14 +306,13 @@ impl AuthInteractionService for DefaultAuthInteractionService {
         request: ListPendingAuthInteractionsRequest,
     ) -> Result<ListPendingAuthInteractionsResponse, ProductWorkflowError> {
         let scope = AuthInteractionScope::from_turn(&request.scope, &request.actor);
-        let now = chrono::Utc::now();
         let mut auth = self
             .read_model
             .auth_gates(&scope)
             .await?
             .into_iter()
             .filter(|gate| gate.scope() == &scope && is_pending_auth_status(gate.status()))
-            .filter_map(|gate| gate.to_view(now))
+            .filter_map(|gate| gate.to_view())
             .collect::<Vec<_>>();
         auth.sort_by(|left, right| {
             left.run_id

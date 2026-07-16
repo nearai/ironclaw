@@ -1065,7 +1065,6 @@ async fn cleanup_for_lifecycle_cancels_pending_flows_for_the_disconnected_provid
             scope: scope.clone(),
             extension_id: ExtensionId::new("example_ext").unwrap(),
             provider: Some(disconnected.clone()),
-            lifecycle_package: None,
             action: ironclaw_auth::SecretCleanupAction::Uninstall,
         },
     )
@@ -1100,7 +1099,6 @@ async fn cleanup_for_lifecycle_cancels_pending_flows_for_the_disconnected_provid
             scope: scope.clone(),
             extension_id: ExtensionId::new("example_ext").unwrap(),
             provider: Some(disconnected.clone()),
-            lifecycle_package: None,
             action: ironclaw_auth::SecretCleanupAction::Uninstall,
         },
     )
@@ -1133,99 +1131,6 @@ async fn cleanup_for_lifecycle_cancels_pending_flows_for_the_disconnected_provid
         Some(AuthFlowStatus::AwaitingUser),
         "cleanup must not touch other providers' flows"
     );
-}
-
-/// Removal skips the provider selector when the provider is still used by
-/// another installed extension — but the removed extension's OWN connect
-/// flows must not survive to complete a late callback and then compensate
-/// away the shared credential. The `lifecycle_package` selector cancels them
-/// regardless of provider sharing.
-#[tokio::test]
-async fn cleanup_for_lifecycle_cancels_the_removed_packages_flows_despite_shared_provider() {
-    let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
-    let scope = test_scope();
-    let service = test_service(filesystem, secret_store);
-
-    let shared_provider = AuthProviderId::new("google").unwrap();
-    let removed_package = ironclaw_auth::LifecyclePackageRef::new("gmail").unwrap();
-    let surviving_package = ironclaw_auth::LifecyclePackageRef::new("gdrive").unwrap();
-    let lifecycle_flow = |package: &ironclaw_auth::LifecyclePackageRef, state: &str| NewAuthFlow {
-        id: None,
-        scope: scope.clone(),
-        kind: AuthFlowKind::IntegrationCredential,
-        provider: shared_provider.clone(),
-        challenge: AuthChallenge::OAuthUrl {
-            authorization_url: OAuthAuthorizationUrl::new(
-                "https://example.com/oauth/authorize?state=pkg",
-            )
-            .unwrap(),
-            expires_at: Utc::now() + Duration::minutes(10),
-        },
-        continuation: AuthContinuationRef::LifecycleActivation {
-            package_ref: package.clone(),
-        },
-        update_binding: None,
-        opaque_state_hash: Some(state_hash(state)),
-        pkce_verifier_hash: Some(pkce_hash(state)),
-        expires_at: Utc::now() + Duration::minutes(10),
-    };
-    let removed_flow = service
-        .create_flow(lifecycle_flow(&removed_package, "removed-package"))
-        .await
-        .unwrap();
-    let surviving_flow = service
-        .create_flow(lifecycle_flow(&surviving_package, "surviving-package"))
-        .await
-        .unwrap();
-
-    let request = ironclaw_auth::SecretCleanupRequest {
-        scope: scope.clone(),
-        extension_id: ExtensionId::new("gmail").unwrap(),
-        provider: None,
-        lifecycle_package: Some(removed_package.clone()),
-        action: ironclaw_auth::SecretCleanupAction::Uninstall,
-    };
-    let report =
-        ironclaw_auth::SecretCleanupService::cleanup_for_lifecycle(&service, request.clone())
-            .await
-            .unwrap();
-
-    assert_eq!(
-        service
-            .get_flow(&scope, removed_flow.id)
-            .await
-            .unwrap()
-            .expect("removed package flow is retained")
-            .status,
-        AuthFlowStatus::Canceled,
-        "the removed package's connect flow must die with the extension"
-    );
-    assert_eq!(
-        service
-            .get_flow(&scope, surviving_flow.id)
-            .await
-            .unwrap()
-            .expect("surviving package flow is retained")
-            .status,
-        AuthFlowStatus::AwaitingUser,
-        "another extension's flow on the shared provider must survive"
-    );
-    // The report names the canceled flow so the composition wrapper can drop
-    // its durable setup PKCE verifier eagerly instead of waiting out the TTL.
-    assert_eq!(
-        report
-            .canceled_flows
-            .iter()
-            .map(|flow| flow.flow_id)
-            .collect::<Vec<_>>(),
-        vec![removed_flow.id]
-    );
-
-    let retry = ironclaw_auth::SecretCleanupService::cleanup_for_lifecycle(&service, request)
-        .await
-        .expect("package-keyed cleanup retry");
-    assert!(retry.canceled_flows.is_empty(), "cleanup is idempotent");
 }
 
 /// #4a lifecycle lock — the removal entrypoints cancel a pending flow through
@@ -1320,7 +1225,6 @@ async fn removal_doors_cancel_pending_flow_through_the_shared_cleanup() {
         scope: scope.clone(),
         extension_id: ExtensionId::new("example_ext").unwrap(),
         provider: Some(provider.clone()),
-        lifecycle_package: None,
         action: ironclaw_auth::SecretCleanupAction::Uninstall,
     };
 
@@ -1851,7 +1755,6 @@ async fn filesystem_oauth_callback_canceled_after_flow_read_cannot_leave_configu
         scope: scope.clone(),
         extension_id: ExtensionId::new("slack").unwrap(),
         provider: Some(google_provider()),
-        lifecycle_package: None,
         action: SecretCleanupAction::Uninstall,
     };
     cleanup_service
@@ -1982,7 +1885,6 @@ async fn filesystem_disconnect_cleans_account_when_callback_completes_before_flo
                 scope: cleanup_scope,
                 extension_id: ExtensionId::new("slack").unwrap(),
                 provider: Some(google_provider()),
-                lifecycle_package: None,
                 action: SecretCleanupAction::Uninstall,
             })
             .await
@@ -2355,7 +2257,6 @@ async fn assert_stale_bound_callback_restores_newer_reconnect(failure: StaleBoun
                     scope: scope.clone(),
                     extension_id: ExtensionId::new("slack").unwrap(),
                     provider: Some(google_provider()),
-                    lifecycle_package: None,
                     action: SecretCleanupAction::Uninstall,
                 })
                 .await
@@ -2842,7 +2743,6 @@ async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_unins
             scope: scope.clone(),
             extension_id: ext_id.clone(),
             provider: None,
-            lifecycle_package: None,
             action: SecretCleanupAction::Deactivate,
         })
         .await
@@ -2863,7 +2763,6 @@ async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_unins
             scope: scope.clone(),
             extension_id: ext_id.clone(),
             provider: None,
-            lifecycle_package: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await
@@ -2937,7 +2836,6 @@ async fn filesystem_cleanup_retries_failed_secret_deletion_without_losing_handle
         scope: scope.clone(),
         extension_id: extension_id.clone(),
         provider: None,
-        lifecycle_package: None,
         action: SecretCleanupAction::Uninstall,
     };
 
@@ -3049,7 +2947,6 @@ async fn filesystem_cleanup_matches_owner_granularity_and_provider_selector() {
             scope: cleanup_scope.clone(),
             extension_id: ExtensionId::new("slack").unwrap(),
             provider: None,
-            lifecycle_package: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await
@@ -3062,7 +2959,6 @@ async fn filesystem_cleanup_matches_owner_granularity_and_provider_selector() {
             scope: cleanup_scope,
             extension_id: ExtensionId::new("slack").unwrap(),
             provider: Some(google_provider()),
-            lifecycle_package: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await
@@ -3520,7 +3416,6 @@ async fn filesystem_oauth_reauth_retains_failed_old_secret_deletion_for_lifecycl
             scope: scope.clone(),
             extension_id: ExtensionId::new("slack").unwrap(),
             provider: Some(google_provider()),
-            lifecycle_package: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await
@@ -3681,7 +3576,6 @@ async fn filesystem_oauth_reauth_cleanup_journal_failure_preserves_both_generati
             scope: scope.clone(),
             extension_id: ExtensionId::new("slack").unwrap(),
             provider: Some(google_provider()),
-            lifecycle_package: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await
@@ -4746,7 +4640,6 @@ async fn filesystem_cleanup_removes_grant_from_non_owner_account() {
             scope: scope.clone(),
             extension_id: ext_id.clone(),
             provider: None,
-            lifecycle_package: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await

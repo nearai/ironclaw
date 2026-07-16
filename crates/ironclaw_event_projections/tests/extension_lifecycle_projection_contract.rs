@@ -14,7 +14,7 @@ use ironclaw_extensions::{
 use ironclaw_host_api::{
     ActionSummary, AgentId, AuditEnvelope, AuditEventId, AuditStage, CorrelationId,
     DecisionSummary, EffectKind, ExtensionId, ExtensionLifecycleOperation, HostPortCatalog,
-    InvocationId, ProjectId, ResourceScope, RuntimeKind, TenantId, UserId, VirtualPath,
+    InvocationId, ProjectId, ResourceScope, TenantId, UserId, VirtualPath,
 };
 use ironclaw_reborn_event_store::{
     RebornEventStoreConfig, RebornProfile, build_reborn_event_stores,
@@ -47,26 +47,24 @@ async fn extension_lifecycle_projects_metadata_only_from_durable_audit_log() {
         VirtualPath::new("/system/extensions/echo").unwrap(),
     )
     .unwrap();
-    let mut service = ExtensionLifecycleService::new(ExtensionRegistry::new())
-        .with_event_sink(Arc::clone(&lifecycle_sink));
+    let updated_package = ExtensionPackage::from_manifest(
+        ExtensionManifest::parse(
+            &EXTENSION_MANIFEST_WITH_RAW_SENTINELS
+                .replace("version = \"0.1.0\"", "version = \"0.2.0\"")
+                .replace("echo.say", "echo.reply"),
+            ManifestSource::InstalledLocal,
+            &HostPortCatalog::empty(),
+        )
+        .unwrap(),
+        VirtualPath::new("/system/extensions/echo").unwrap(),
+    )
+    .unwrap();
+    let mut service =
+        ExtensionLifecycleService::new(ExtensionRegistry::new()).with_event_sink(lifecycle_sink);
 
     let extension_id = ExtensionId::new("echo").unwrap();
     service.install(package).await.unwrap();
-    // The interactive `update` lifecycle verb was removed (no production
-    // caller), but historical durable audit logs still contain
-    // `extension_updated` decisions — emit the event directly through the
-    // same sink so replay projection of that operation stays covered.
-    lifecycle_sink
-        .record_extension_lifecycle_event(ExtensionLifecycleEvent {
-            operation: ExtensionLifecycleOperation::Update,
-            extension_id: extension_id.clone(),
-            version: "0.2.0".to_string(),
-            runtime: RuntimeKind::Wasm,
-            capability_count: 1,
-            capability_surface_changed: true,
-        })
-        .await
-        .unwrap();
+    service.update(updated_package).await.unwrap();
     service.disable(&extension_id).await.unwrap();
     service.enable(&extension_id).await.unwrap();
     service.remove(&extension_id).await.unwrap();

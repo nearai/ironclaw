@@ -835,14 +835,16 @@ fn registry_rejects_duplicate_extension_ids() {
 }
 
 #[tokio::test]
-async fn lifecycle_service_records_disable_enable_and_remove_events() {
+async fn lifecycle_service_records_update_disable_enable_and_remove_events() {
     let events = std::sync::Arc::new(RecordingExtensionLifecycleEventSink::default());
     let installed = lifecycle_package("echo", "echo.say", "0.1.0");
+    let updated = lifecycle_package("echo", "echo.reply", "0.2.0");
     let extension_id = ExtensionId::new("echo").unwrap();
     let mut service = ExtensionLifecycleService::new(ExtensionRegistry::new())
         .with_event_sink(std::sync::Arc::clone(&events));
 
     service.install(installed).await.unwrap();
+    service.update(updated).await.unwrap();
     service.disable(&extension_id).await.unwrap();
     assert!(!service.is_enabled(&extension_id));
     service.enable(&extension_id).await.unwrap();
@@ -851,11 +853,14 @@ async fn lifecycle_service_records_disable_enable_and_remove_events() {
 
     assert!(service.registry().get_extension(&extension_id).is_none());
     let recorded = events.events();
-    assert_eq!(recorded.len(), 4);
+    assert_eq!(recorded.len(), 5);
     assert_eq!(recorded[0].operation, ExtensionLifecycleOperation::Install);
-    assert_eq!(recorded[1].operation, ExtensionLifecycleOperation::Disable);
-    assert_eq!(recorded[2].operation, ExtensionLifecycleOperation::Enable);
-    assert_eq!(recorded[3].operation, ExtensionLifecycleOperation::Remove);
+    assert_eq!(recorded[1].operation, ExtensionLifecycleOperation::Update);
+    assert_eq!(recorded[1].version, "0.2.0");
+    assert!(recorded[1].capability_surface_changed);
+    assert_eq!(recorded[2].operation, ExtensionLifecycleOperation::Disable);
+    assert_eq!(recorded[3].operation, ExtensionLifecycleOperation::Enable);
+    assert_eq!(recorded[4].operation, ExtensionLifecycleOperation::Remove);
 }
 
 #[tokio::test]

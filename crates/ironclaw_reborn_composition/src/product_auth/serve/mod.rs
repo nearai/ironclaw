@@ -21,8 +21,9 @@ pub(crate) use oauth::{
 };
 
 use std::{
-    num::{NonZeroU32, NonZeroU64},
-    sync::Arc,
+    hash::Hash,
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -61,6 +62,7 @@ use ironclaw_host_api::{
 use ironclaw_product_workflow::{
     LifecyclePackageKind, RebornServicesApi, RebornServicesError, WebUiAuthenticatedCaller,
 };
+use lru::LruCache;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::json;
@@ -124,6 +126,11 @@ const ACCOUNTS_SELECT_ROUTE_ID: &str = "product_auth.accounts.select";
 const ACCOUNTS_RECOVERY_ROUTE_ID: &str = "product_auth.accounts.recovery";
 const ACCOUNTS_REFRESH_ROUTE_ID: &str = "product_auth.accounts.refresh";
 const LIFECYCLE_CLEANUP_ROUTE_ID: &str = "product_auth.lifecycle.cleanup";
+const OAUTH_PKCE_VERIFIER_CACHE_CAPACITY: NonZeroUsize = match NonZeroUsize::new(1024) {
+    Some(value) => value,
+    // SAFETY: 1024 is a non-zero literal cache cap.
+    None => unreachable!(),
+};
 const PRODUCT_AUTH_MUTATION_BODY_LIMIT_BYTES: NonZeroU64 = match NonZeroU64::new(16 * 1024) {
     Some(value) => value,
     // SAFETY: 16 KiB is a non-zero literal body cap.
@@ -179,6 +186,11 @@ pub(crate) struct ProductAuthRouteState {
     slack_personal_oauth: Option<crate::slack::slack_setup::SlackPersonalSetupServiceSlot>,
     #[cfg(feature = "slack-v2-host-beta")]
     slack_personal_oauth_binding: Option<SlackPersonalOAuthBindingConfig>,
+    // First-slice WebUI OAuth stores the raw PKCE verifier process-locally
+    // because `AuthFlowRecord` deliberately serializes hashes only. Production
+    // HA must replace this with a host-owned encrypted verifier store before
+    // routing callbacks across replicas or restarts.
+    pkce_verifiers: ExpiringLruCache<AuthFlowId, StoredPkceVerifier>,
 }
 
 #[async_trait::async_trait]
@@ -242,6 +254,10 @@ impl ProductAuthRouteState {
             slack_personal_oauth: None,
             #[cfg(feature = "slack-v2-host-beta")]
             slack_personal_oauth_binding: None,
+            pkce_verifiers: ExpiringLruCache::new(
+                OAUTH_PKCE_VERIFIER_CACHE_CAPACITY,
+                StoredPkceVerifier::expires_at,
+            ),
         }
     }
 
@@ -354,6 +370,35 @@ impl ProductAuthRouteState {
     ) -> Option<&SlackPersonalOAuthBindingConfig> {
         self.slack_personal_oauth_binding.as_ref()
     }
+
+    pub(crate) fn store_pkce_verifier(
+        &self,
+        flow_id: AuthFlowId,
+        verifier: SecretString,
+        expires_at: Timestamp,
+    ) -> Result<(), ProductAuthRouteFailure> {
+        self.pkce_verifiers.store(
+            flow_id,
+            StoredPkceVerifier {
+                verifier,
+                expires_at,
+            },
+        )
+    }
+
+    fn pkce_verifier_for_callback(
+        &self,
+        flow_id: AuthFlowId,
+    ) -> Result<SecretString, ProductAuthRouteFailure> {
+        self.pkce_verifiers
+            .get(&flow_id)
+            .map(|stored| stored.verifier.clone())
+            .ok_or_else(ProductAuthRouteFailure::unknown_or_expired_flow)
+    }
+
+    pub(crate) fn remove_pkce_verifier(&self, flow_id: AuthFlowId) {
+        self.pkce_verifiers.remove(&flow_id);
+    }
 }
 
 impl std::fmt::Debug for ProductAuthRouteState {
@@ -376,7 +421,9 @@ impl std::fmt::Debug for ProductAuthRouteState {
             "slack_personal_oauth_binding",
             &self.slack_personal_oauth_binding.is_some(),
         );
-        builder.finish()
+        builder
+            .field("pkce_verifiers", &"ExpiringLruCache<...>")
+            .finish()
     }
 }
 
@@ -429,6 +476,76 @@ impl std::fmt::Debug for SlackPersonalOAuthBindingConfig {
                 &"Arc<dyn SlackUserBindingLifecycleStore>",
             )
             .finish()
+    }
+}
+
+#[derive(Clone)]
+struct ExpiringLruCache<K, V> {
+    entries: Arc<Mutex<LruCache<K, V>>>,
+    expires_at: fn(&V) -> Timestamp,
+}
+
+impl<K, V> ExpiringLruCache<K, V>
+where
+    K: Clone + Eq + Hash,
+{
+    fn new(capacity: NonZeroUsize, expires_at: fn(&V) -> Timestamp) -> Self {
+        Self {
+            entries: Arc::new(Mutex::new(LruCache::new(capacity))),
+            expires_at,
+        }
+    }
+
+    fn store(&self, key: K, value: V) -> Result<(), ProductAuthRouteFailure> {
+        let mut entries = self.lock();
+        self.remove_expired(&mut entries);
+        if entries.len() >= entries.cap().get() && !entries.contains(&key) {
+            return Err(ProductAuthRouteFailure::backend_unavailable());
+        }
+        entries.put(key, value);
+        Ok(())
+    }
+
+    fn get(&self, key: &K) -> Option<V>
+    where
+        V: Clone,
+    {
+        let mut entries = self.lock();
+        self.remove_expired(&mut entries);
+        entries.get(key).cloned()
+    }
+
+    fn remove(&self, key: &K) {
+        self.lock().pop(key);
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, LruCache<K, V>> {
+        self.entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn remove_expired(&self, entries: &mut LruCache<K, V>) {
+        let now = Utc::now();
+        let expired = entries
+            .iter()
+            .filter_map(|(key, value)| ((self.expires_at)(value) <= now).then_some(key.clone()))
+            .collect::<Vec<_>>();
+        for key in expired {
+            entries.pop(&key);
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct StoredPkceVerifier {
+    verifier: SecretString,
+    expires_at: Timestamp,
+}
+
+impl StoredPkceVerifier {
+    fn expires_at(&self) -> Timestamp {
+        self.expires_at
     }
 }
 
@@ -1632,7 +1749,6 @@ mod tests {
     };
     use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
     use ironclaw_turns::{TurnRunId, TurnScope};
-    use std::sync::Mutex;
     use tower::ServiceExt;
 
     // Contract: the origin-independent reconnect flow-status route is a
@@ -1738,6 +1854,17 @@ mod tests {
         }
     }
 
+    fn test_state() -> ProductAuthRouteState {
+        ProductAuthRouteState::new(
+            Arc::new(RebornProductAuthServices::local_dev_in_memory(Arc::new(
+                NoopDispatcher,
+            ))),
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        )
+    }
+
     fn test_resource_scope() -> ResourceScope {
         ResourceScope {
             tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
@@ -1770,6 +1897,32 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         assert!(!hashed.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn pkce_cache_rejects_new_entries_when_full() {
+        let state = test_state();
+        let expires_at = Utc::now() + ChronoDuration::minutes(5);
+        for index in 0..OAUTH_PKCE_VERIFIER_CACHE_CAPACITY.get() {
+            state
+                .store_pkce_verifier(
+                    AuthFlowId::new(),
+                    SecretString::from(format!("pkce-{index}")),
+                    expires_at,
+                )
+                .expect("cache entry");
+        }
+
+        let error = state
+            .store_pkce_verifier(
+                AuthFlowId::new(),
+                SecretString::from("pkce-overflow".to_string()),
+                expires_at,
+            )
+            .expect_err("full cache must reject without LRU eviction");
+
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.body.code, AuthErrorCode::BackendUnavailable);
     }
 
     #[tokio::test]

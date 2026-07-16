@@ -362,7 +362,6 @@ fn personal_credential_cleanup_request(
             AuthProviderId::new(SLACK_PERSONAL_PROVIDER_ID)
                 .map_err(|error| RebornServicesError::internal_from(error.to_string()))?,
         ),
-        lifecycle_package: None,
         action: SecretCleanupAction::Uninstall,
     })
 }

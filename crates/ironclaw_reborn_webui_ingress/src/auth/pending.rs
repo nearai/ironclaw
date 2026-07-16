@@ -17,19 +17,12 @@
 //! consumes the entry, so a replayed callback cannot re-use a state
 //! token.
 //!
-//! Both stores are process-local by design TODAY: bounded, single-use, and
-//! covered by this crate's documented single-replica deployment assumption.
-//! A restart (or a 1024-entry flood evicting a live entry) strands an
-//! in-flight login, which then fails closed as `invalid_state` / a dead
-//! ticket — never an auth bypass. Note the composition product-auth setup
-//! path has since solved this same shape by moving its raw PKCE verifiers
-//! into the injected durable `SecretStore` (`product-auth-setup-pkce-…`,
-//! TTL-bounded, one-shot `lease_once`/`consume`) — and its CLAUDE.md now
-//! forbids reintroducing a process-local verifier cache there. Porting that
-//! pattern here additionally needs a decision about the storage scope for
-//! PRE-authentication material (there is no authenticated user to scope a
-//! secret to before the callback), so restart/multi-replica safety for the
-//! login surface is a deliberate follow-up, not an accident of this module.
+//! The cache is intentionally process-local. A future multi-replica
+//! deployment must replace this module with a shared store (matches
+//! the `ironclaw_reborn_composition` CLAUDE.md note that the first
+//! WebUI-mounted OAuth route keeps raw PKCE verifiers in a bounded,
+//! expiring process-local cache because `ironclaw_auth` durable
+//! records may store hashes only).
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};

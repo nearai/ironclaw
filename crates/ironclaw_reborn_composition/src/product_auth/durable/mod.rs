@@ -1,9 +1,6 @@
-#![cfg_attr(
-    not(any(feature = "libsql", feature = "postgres")),
-    allow(
-        dead_code,
-        reason = "the durable product-auth service is constructed only by the libsql/postgres composition paths (see factory.rs); default-feature builds compile it for type checking only"
-    )
+#![allow(
+    dead_code,
+    reason = "durable product-auth is staged for production/webui composition; clippy can check this crate before those callers are enabled"
 )]
 
 use std::{
@@ -378,37 +375,6 @@ where
         };
         self.flow_records_for_resource_filtered(&resource, |flow| {
             &flow.provider == provider && flow_requires_lifecycle_cleanup(flow)
-        })
-        .await
-    }
-
-    /// The removed package's own auth flows, walked across surfaces/sessions
-    /// like [`Self::lifecycle_flows_for_owner_provider`] but keyed by the
-    /// `LifecycleActivation` continuation instead of the provider. Uninstall
-    /// deliberately skips the provider selector when the provider is still
-    /// used by another installed extension; this selector cancels the removed
-    /// extension's own connect flows anyway, so a late callback cannot mint
-    /// against — and its failure compensation cannot revoke — the shared
-    /// credential.
-    async fn lifecycle_flows_for_owner_package(
-        &self,
-        resource: &ResourceScope,
-        package: &ironclaw_auth::LifecyclePackageRef,
-    ) -> Result<Vec<AuthFlowRecord>, AuthProductError> {
-        let resource = ResourceScope {
-            tenant_id: resource.tenant_id.clone(),
-            user_id: resource.user_id.clone(),
-            agent_id: resource.agent_id.clone(),
-            project_id: resource.project_id.clone(),
-            mission_id: None,
-            thread_id: None,
-            invocation_id: ironclaw_host_api::InvocationId::new(),
-        };
-        self.flow_records_for_resource_filtered(&resource, |flow| {
-            matches!(
-                &flow.continuation,
-                AuthContinuationRef::LifecycleActivation { package_ref } if package_ref == package
-            ) && flow_requires_lifecycle_cleanup(flow)
         })
         .await
     }

@@ -563,59 +563,6 @@ async fn list_pending_auth_projects_challenges_to_minimal_safe_views() {
     assert!(!serialized.contains("secret_handle_count"));
 }
 
-/// The pending-auth projection must honor `expires_at` (RFC 6819 §5.1.5.3). A
-/// non-terminal flow whose TTL has already passed — but which no background
-/// sweep has transitioned to `Expired` yet — must not read as a live
-/// authenticating interaction. Only the still-live flow is listed.
-#[tokio::test]
-async fn list_pending_auth_omits_flow_past_its_expiry() {
-    let actor = TurnActor::new(UserId::new("alice").unwrap());
-    let scope = turn_scope("alice", "thread-a");
-    let live_gate = make_gate_ref("gate:auth-live");
-    let expired_gate = make_gate_ref("gate:auth-expired");
-    let now = Utc::now();
-
-    let live = auth_flow(
-        AuthFlowStatus::AwaitingUser,
-        &scope,
-        &actor,
-        TurnRunId::new(),
-        &live_gate,
-        None,
-        setup_challenge(),
-    );
-    // Abandoned popup: still `AwaitingUser` in storage, but past its deadline
-    // and never swept. The projection must treat it as not-live.
-    let mut expired = auth_flow(
-        AuthFlowStatus::AwaitingUser,
-        &scope,
-        &actor,
-        TurnRunId::new(),
-        &expired_gate,
-        None,
-        setup_challenge(),
-    );
-    expired.expires_at = now - Duration::minutes(1);
-
-    let service = service(
-        live.clone(),
-        vec![live, expired],
-        actor.clone(),
-        live_gate.clone(),
-    );
-
-    let response = service
-        .list_pending(ListPendingAuthInteractionsRequest { scope, actor })
-        .await
-        .expect("list pending auth");
-
-    assert_eq!(response.auth_interactions.len(), 1);
-    assert_eq!(
-        response.auth_interactions[0].auth_request_ref.as_str(),
-        live_gate.as_str()
-    );
-}
-
 #[tokio::test]
 async fn credential_provided_resumes_completed_auth_gate() {
     let actor = TurnActor::new(UserId::new("alice").unwrap());

@@ -22,19 +22,11 @@
   handler must claim the scoped flow/state/provider through `AuthFlowManager`
   before exchanging provider material through `AuthProviderClient`, then
   complete the flow and emit typed continuations.
-- Raw PKCE verifiers for setup-path OAuth flows live in the injected
-  `SecretStore` under a per-flow handle (`product-auth-setup-pkce-{flow_id}`),
-  written by `RebornProductAuthServices::start_setup_oauth_flow` with
-  TTL = the flow's `expires_at`, and read back once via `lease_once`/`consume`.
-  `ironclaw_auth` durable records still store hashes only. This mirrors the
-  blocked-turn gate driver (`oauth_gate.rs`), so setup callbacks are
-  restart- and replica-safe: the verifier survives anywhere the secret store
-  does. Do not reintroduce a process-local verifier cache — a bounded
-  route-local cache strands a LIVE flow's verifier on eviction or restart, and
-  the callback then fails `unknown_or_expired_flow` on a good flow.
-  The verifier write belongs at the shared start seam, before `create_flow`,
-  so a failed secret write fails the start (fail-closed) rather than minting a
-  flow whose callback can never complete.
+- The first WebUI-mounted OAuth route keeps raw PKCE verifiers in a bounded,
+  expiring process-local cache because `ironclaw_auth` durable records may
+  store hashes only. Do not treat that route as multi-replica/restart-safe
+  until a host-owned encrypted verifier store or equivalent sticky callback
+  mechanism is wired.
 - Manual-token setup routes should call
   `RebornProductAuthServices::request_manual_token_setup` for the typed
   challenge and `RebornProductAuthServices::submit_manual_token` with a

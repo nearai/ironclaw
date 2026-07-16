@@ -360,66 +360,6 @@ pub trait AuthFlowManager: Send + Sync {
         scope: &AuthProductScope,
         flow_id: AuthFlowId,
     ) -> Result<AuthFlowRecord, AuthProductError>;
-
-    /// Supersede-on-start (RFC 9700 §4.7.1). Cancel any prior non-terminal
-    /// setup-class flow for the same owner+provider before a fresh setup flow
-    /// is minted, so a re-opened "Connect" popup cannot leave two live
-    /// authorization requests racing to write the same credential.
-    ///
-    /// Setup-class means [`is_setup_class_continuation`]: the web connect
-    /// button's `SetupOnly` and the extension card's `LifecycleActivation`.
-    /// A `TurnGateResume` or `ProductActionResume` flow belongs to a parked
-    /// turn/action, not to the setup surface, and is never superseded here.
-    ///
-    /// Owner granularity is tenant/user/agent/project + surface + session
-    /// (setup flows are thread-less), matching the durable flow-root layout.
-    /// Idempotent and race-tolerant: an already-terminal or concurrently
-    /// canceled prior flow is skipped, never an error. Returns the ids that
-    /// were superseded.
-    ///
-    /// The default is a no-op for narrow flow stores and test doubles that
-    /// never hold more than one concurrent setup flow; the durable store and
-    /// the in-memory fake override it.
-    async fn cancel_superseded_setup_flows(
-        &self,
-        _scope: &AuthProductScope,
-        _provider: &AuthProviderId,
-    ) -> Result<Vec<AuthFlowId>, AuthProductError> {
-        Ok(Vec::new())
-    }
-}
-
-/// Whether a continuation belongs to the setup surface — the class a new setup
-/// start supersedes. `SetupOnly` is the plain web connect button;
-/// `LifecycleActivation` is the extension card's connect button, which
-/// `start_setup_oauth_flow` receives verbatim. Both mean "the user is
-/// (re-)connecting this provider from a settings surface", so a fresh start
-/// replaces them. `TurnGateResume` and `ProductActionResume` have a parked
-/// turn/action waiting on them and must outlive an unrelated setup start.
-pub fn is_setup_class_continuation(continuation: &AuthContinuationRef) -> bool {
-    matches!(
-        continuation,
-        AuthContinuationRef::SetupOnly | AuthContinuationRef::LifecycleActivation { .. }
-    )
-}
-
-/// Owner-root match for supersede-on-start: two auth scopes share a setup-flow
-/// root iff they carry the same owner (tenant/user/agent/project), surface, and
-/// session — the exact granularity of the durable flow-root path, which omits
-/// the transient thread/mission/invocation axes. Full scope equality would miss
-/// a prior setup flow started under a different per-request invocation.
-pub fn flow_shares_setup_owner_root(
-    flow_scope: &AuthProductScope,
-    scope: &AuthProductScope,
-) -> bool {
-    let flow_resource = &flow_scope.resource;
-    let resource = &scope.resource;
-    flow_resource.tenant_id == resource.tenant_id
-        && flow_resource.user_id == resource.user_id
-        && flow_resource.agent_id == resource.agent_id
-        && flow_resource.project_id == resource.project_id
-        && flow_scope.surface == scope.surface
-        && flow_scope.session_id == scope.session_id
 }
 
 /// Read-only auth-flow projection source for product interaction views.

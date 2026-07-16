@@ -102,6 +102,20 @@ impl ExtensionLifecycleService {
         Ok(())
     }
 
+    pub async fn update(&mut self, package: ExtensionPackage) -> Result<(), ExtensionError> {
+        let current = self.registry.existing_package(&package.id)?.clone();
+        self.registry.validate_replacement(&package)?;
+        let capability_surface_changed = current.capabilities != package.capabilities;
+        self.emit_lifecycle_event(ExtensionLifecycleEvent::from_package(
+            ExtensionLifecycleOperation::Update,
+            &package,
+            capability_surface_changed,
+        ))
+        .await?;
+        self.registry.replace_validated(package);
+        Ok(())
+    }
+
     pub async fn remove(&mut self, id: &ExtensionId) -> Result<(), ExtensionError> {
         let package = self.registry.existing_package(id)?.clone();
         self.emit_lifecycle_event(ExtensionLifecycleEvent::from_package(

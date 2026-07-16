@@ -208,30 +208,6 @@ pub(crate) async fn start_extension_oauth_flow(
     );
     let connection_epoch = SlackConnectionEpoch::new(flow_id);
 
-    // Supersede-on-start cancels the prior setup FLOW, but this provider's
-    // connection epoch is separate lifecycle state keyed by that flow's id, and
-    // `begin_connection` rejects a second live epoch with `ConnectionInProgress`
-    // until the first one's TTL lapses. Without this, closing the connect popup
-    // and re-opening it is a 409 for the rest of the flow TTL. Drive the same
-    // generic supersede seam `start_setup_oauth_flow` uses (idempotent — its own
-    // call below then finds nothing left) so the abandoned attempts' epochs are
-    // released before this one begins.
-    let superseded = run_with_backend_timeout(
-        state
-            .product_auth_services()
-            .flow_manager()
-            .cancel_superseded_setup_flows(&scope, &provider),
-    )
-    .await?;
-    for superseded_flow_id in superseded {
-        abandon_slack_connection_epoch(
-            binding_config.lifecycle_store.as_ref(),
-            &scope,
-            superseded_flow_id,
-        )
-        .await?;
-    }
-
     let flow = match run_with_backend_timeout(
         state
             .product_auth_services()
@@ -242,7 +218,6 @@ pub(crate) async fn start_extension_oauth_flow(
                 authorization_url: authorization_url.clone(),
                 opaque_state_hash: opaque_state_hash.clone(),
                 pkce_verifier_hash,
-                pkce_verifier: pkce_verifier_secret,
                 continuation: AuthContinuationRef::LifecycleActivation {
                     package_ref: ironclaw_auth::LifecyclePackageRef::new(
                         requester_extension.as_str(),
@@ -258,20 +233,20 @@ pub(crate) async fn start_extension_oauth_flow(
         Ok(flow) => flow,
         Err(error) => return Err(error),
     };
-    if let Err(error) = begin_connection_reconciling_stranded_epoch(
-        &state,
-        binding_config.lifecycle_store.as_ref(),
-        &scope,
-        &connection_owner,
-        connection_epoch,
-        request.expires_at,
-    )
-    .await
-    {
-        state
+    if let Err(error) = state.store_pkce_verifier(flow.id, pkce_verifier_secret, flow.expires_at) {
+        let _ = state
             .product_auth_services()
-            .delete_setup_pkce_verifier(&scope, flow.id)
+            .flow_manager()
+            .cancel_flow(&scope, flow.id)
             .await;
+        return Err(error);
+    }
+    if let Err(error) = binding_config
+        .lifecycle_store
+        .begin_connection(&connection_owner, connection_epoch, request.expires_at)
+        .await
+    {
+        state.remove_pkce_verifier(flow.id);
         let _ = state
             .product_auth_services()
             .flow_manager()
@@ -444,75 +419,6 @@ fn slack_personal_oauth_abandon_hook(
         abandon_slack_connection_epoch(config.lifecycle_store.as_ref(), &callback_scope, flow_id)
             .await
     })
-}
-
-/// Begin the new connection epoch, reconciling a stranded predecessor first.
-///
-/// Attempt-liveness truth is the auth-flow record; the epoch row is derived
-/// state. A crash or failed abandon between "supersede the prior flow" and
-/// "abandon its epoch" (the loop in the start handler) leaves a live epoch
-/// whose flow is already terminal — and the supersede walk only returns
-/// non-terminal flows, so nothing would ever release it: every re-open would
-/// 409 `connection_conflict` until the epoch TTL lapses. On conflict, look up
-/// the blocking epoch's flow at owner granularity; if it is terminal — or
-/// unknown to the read model, in which case nothing can ever complete it and
-/// a late write is still fenced by `bind_user_identity_for_epoch` — abandon
-/// the stale epoch and retry once. A genuinely live concurrent attempt still
-/// conflicts, and an unverifiable one fails closed to the conflict.
-async fn begin_connection_reconciling_stranded_epoch(
-    state: &ProductAuthRouteState,
-    lifecycle_store: &dyn crate::slack::slack_personal_binding::SlackUserBindingLifecycleStore,
-    scope: &AuthProductScope,
-    connection_owner: &crate::slack::slack_personal_binding::SlackConnectionOwner,
-    connection_epoch: SlackConnectionEpoch,
-    expires_at: ironclaw_auth::Timestamp,
-) -> Result<(), SlackUserBindingLifecycleError> {
-    let first_attempt = lifecycle_store
-        .begin_connection(connection_owner, connection_epoch, expires_at)
-        .await;
-    if !matches!(
-        first_attempt,
-        Err(SlackUserBindingLifecycleError::ConnectionInProgress)
-    ) {
-        return first_attempt;
-    }
-    let Some(flow_source) = state.product_auth_services().flow_record_source() else {
-        return first_attempt;
-    };
-    // `connection_state` projects an Active row's live pending attempt as
-    // `(pending_epoch, Connecting)`, so this one arm covers both conflict
-    // shapes `begin_connection` can report.
-    let Ok(Some((
-        blocking_epoch,
-        crate::slack::slack_personal_binding::SlackConnectionState::Connecting,
-    ))) = lifecycle_store.connection_state(connection_owner).await
-    else {
-        return first_attempt;
-    };
-    if blocking_epoch == connection_epoch {
-        return first_attempt;
-    }
-    let blocking_flow_is_dead = match flow_source
-        .flow_for_owner_by_id(scope, blocking_epoch.flow_id())
-        .await
-    {
-        Ok(Some(flow)) => ironclaw_auth::is_terminal_status(flow.status),
-        Ok(None) => true,
-        Err(_) => false,
-    };
-    if !blocking_flow_is_dead {
-        return first_attempt;
-    }
-    tracing::debug!(
-        stranded_epoch_flow_id = %blocking_epoch.flow_id(),
-        "releasing a stranded Slack connection epoch whose flow is already terminal"
-    );
-    lifecycle_store
-        .abandon_connection(connection_owner, blocking_epoch)
-        .await?;
-    lifecycle_store
-        .begin_connection(connection_owner, connection_epoch, expires_at)
-        .await
 }
 
 async fn abandon_slack_connection_epoch(

@@ -1313,11 +1313,6 @@ pub enum ExtensionInstallationError {
     ManifestNotFound { extension_id: ExtensionId },
     #[error("invalid installation: {reason}")]
     InvalidInstallation { reason: String },
-    /// The backing installation store could not serve the operation
-    /// (IO/backend failure). Retryable, unlike the malformed-request
-    /// variants: callers map this to their transient error class (#4091).
-    #[error("extension installation store unavailable: {reason}")]
-    StoreUnavailable { reason: String },
     #[error("duplicate credential binding {handle}")]
     DuplicateCredentialBinding { handle: ExtensionCredentialHandle },
     #[error("conflicting manifest references for extension {extension_id}")]

@@ -48,13 +48,13 @@ pub(super) async fn oauth_start_handler(
                     .map_err(ProductAuthRouteFailure::from)?,
                 opaque_state_hash,
                 pkce_verifier_hash,
-                pkce_verifier,
                 continuation: AuthContinuationRef::SetupOnly,
                 update_binding: None,
                 expires_at: request.expires_at,
             }),
     )
     .await?;
+    state.store_pkce_verifier(flow.id, pkce_verifier, flow.expires_at)?;
     let authorization_url = compose_authorization_url(authorization_endpoint, flow.id, &scope)?;
 
     Ok(Json(OAuthStartResponse {
@@ -227,10 +227,7 @@ pub(super) async fn abort_started_extension_oauth_flow(
             .cancel_flow(&scope, response.flow_id),
     )
     .await?;
-    state
-        .product_auth
-        .delete_setup_pkce_verifier(&scope, response.flow_id)
-        .await;
+    state.remove_pkce_verifier(response.flow_id);
     Ok(())
 }
 
@@ -421,7 +418,6 @@ async fn start_google_oauth_flow(
                 authorization_url: authorization_url.clone(),
                 opaque_state_hash: opaque_state_hash.clone(),
                 pkce_verifier_hash,
-                pkce_verifier: pkce_verifier_secret,
                 continuation: requester_extension
                     .as_ref()
                     .map(extension_lifecycle_continuation)
@@ -432,6 +428,7 @@ async fn start_google_oauth_flow(
             }),
     )
     .await?;
+    state.store_pkce_verifier(flow.id, pkce_verifier_secret, flow.expires_at)?;
 
     Ok(Json(ProductOAuthStartResponse {
         flow_id: flow.id,
@@ -499,7 +496,6 @@ pub(super) async fn oauth_callback_handler(
     )
     .await?;
 
-    let cleanup_scope = scope.clone();
     let response = match run_with_backend_timeout(state.product_auth.handle_oauth_callback(
         RebornOAuthCallbackRequest {
             scope,
@@ -511,18 +507,12 @@ pub(super) async fn oauth_callback_handler(
     .await
     {
         Ok(response) => {
-            state
-                .product_auth
-                .delete_setup_pkce_verifier(&cleanup_scope, flow_id)
-                .await;
+            state.remove_pkce_verifier(flow_id);
             response
         }
         Err(error) => {
             if should_forget_pkce_verifier(error.body.code) {
-                state
-                    .product_auth
-                    .delete_setup_pkce_verifier(&cleanup_scope, flow_id)
-                    .await;
+                state.remove_pkce_verifier(flow_id);
             }
             return Err(error);
         }
@@ -663,9 +653,8 @@ pub(super) async fn google_oauth_callback_handler(
 ///
 /// Safety-preserving invariants (identical for both providers): the raw `state`
 /// is hashed once and claimed through `AuthFlowManager` (CSRF/state-hash +
-/// single-use/replay), the PKCE verifier is resolved from the durable
-/// setup/gate/DCR secret stores (never a process-local cache — see the
-/// composition CLAUDE.md guardrail), provider tokens are exchanged only after
+/// single-use/replay), the PKCE verifier is resolved from the process-local
+/// cache then the durable gate store, provider tokens are exchanged only after
 /// the flow is claimed, and the callback tenant must match the route tenant
 /// before any exchange.
 pub(crate) async fn oauth_provider_callback_handler(
@@ -755,10 +744,7 @@ async fn oauth_provider_callback_attempt(
             RebornOAuthCallbackFailureStage::Terminal,
         )
         .await;
-        state
-            .product_auth
-            .delete_setup_pkce_verifier(callback_scope, flow_id)
-            .await;
+        state.remove_pkce_verifier(flow_id);
         return oauth_callback_route_result_response(headers, response);
     }
 
@@ -771,10 +757,7 @@ async fn oauth_provider_callback_attempt(
     {
         Ok(provider) => provider,
         Err(error) => {
-            state
-                .product_auth
-                .delete_setup_pkce_verifier(callback_scope, flow_id)
-                .await;
+            state.remove_pkce_verifier(flow_id);
             return Err(error);
         }
     };
@@ -800,10 +783,7 @@ async fn oauth_provider_callback_attempt(
         )? {
             CallbackScopeOutcome::Scopes(scopes) => scopes,
             CallbackScopeOutcome::ProviderDenied => {
-                state
-                    .product_auth
-                    .delete_setup_pkce_verifier(callback_scope, flow_id)
-                    .await;
+                state.remove_pkce_verifier(flow_id);
                 callback_owned_by_service = true;
                 let response = run_with_backend_timeout(state.product_auth.handle_oauth_callback(
                     RebornOAuthCallbackRequest {
@@ -859,10 +839,7 @@ async fn oauth_provider_callback_attempt(
                 ),
         )
         .await?;
-        state
-            .product_auth
-            .delete_setup_pkce_verifier(callback_scope, flow_id)
-            .await;
+        state.remove_pkce_verifier(flow_id);
         Ok(oauth_callback_response(headers, response))
     }
     .await;
@@ -878,10 +855,7 @@ async fn oauth_provider_callback_attempt(
                 | RebornOAuthCallbackFailureStage::ContinuationRetryable
                 | RebornOAuthCallbackFailureStage::ContinuationCompensation
         ) {
-            state
-                .product_auth
-                .delete_setup_pkce_verifier(callback_scope, flow_id)
-                .await;
+            state.remove_pkce_verifier(flow_id);
         }
         if !terminal_failure_hook_attempted
             && !matches!(
@@ -1220,13 +1194,17 @@ async fn pkce_verifier_for_known_callback_flow(
     provider: &AuthProviderId,
     flow_id: AuthFlowId,
 ) -> Result<SecretString, ProductAuthRouteFailure> {
+    let cache_error = match state.pkce_verifier_for_callback(flow_id) {
+        Ok(verifier) => return Ok(verifier),
+        Err(error) => error,
+    };
     run_with_backend_timeout(
         state
             .product_auth
             .oauth_pkce_verifier_for_flow(scope, provider, flow_id),
     )
     .await?
-    .ok_or_else(ProductAuthRouteFailure::unknown_or_expired_flow)
+    .ok_or(cache_error)
 }
 
 fn validate_google_callback_query_fields(
@@ -1506,94 +1484,6 @@ mod tests {
                 turn_run_ref: TurnRunRef::new(run_id.to_string()).expect("run ref"),
                 gate_ref: AuthGateRef::new(gate_ref).expect("gate ref"),
             }
-        );
-    }
-
-    /// The flow-status poll must be expiry-honest. A non-terminal flow whose
-    /// `expires_at` has passed is dead — the user's popup can never complete it
-    /// — but nothing sweeps it to `Expired` in storage, so the read projection
-    /// must report `Expired` itself. Reporting `awaiting_user` forever leaves
-    /// the browser's popup watcher to its own timeout with no signal.
-    ///
-    /// Projection only: the durable record is NOT mutated by a GET.
-    #[tokio::test]
-    async fn oauth_flow_status_reports_expired_for_non_terminal_flow_past_its_expiry() {
-        use ironclaw_auth::{AuthFlowKind, AuthFlowManager, NewAuthFlow};
-
-        let shared = Arc::new(InMemoryAuthProductServices::new());
-        let product_auth = Arc::new(
-            RebornProductAuthServices::from_shared(
-                shared.clone(),
-                Arc::new(RecordingDispatcher::default()),
-            )
-            .with_flow_record_source(shared.clone()),
-        );
-        let tenant = TenantId::new("tenant-alpha").expect("tenant");
-        let state = ProductAuthRouteState::new(product_auth, tenant.clone(), None, None);
-        let caller = WebUiAuthenticatedCaller::new(
-            tenant,
-            UserId::new("user-alpha").expect("user"),
-            None,
-            None,
-        );
-        let invocation_id = ironclaw_host_api::InvocationId::new().to_string();
-        let fields = ScopeFields {
-            session_id: None,
-            thread_id: None,
-            invocation_id: Some(invocation_id.clone()),
-        };
-        let scope = scope_from_authenticated_caller_parts_requiring_invocation(&caller, &fields)
-            .expect("caller scope");
-
-        // An abandoned "Connect" popup: `create_flow` mints it `AwaitingUser`,
-        // and its deadline has already passed with no callback and no sweep.
-        let expired_at = Utc::now() - ChronoDuration::minutes(1);
-        let flow = shared
-            .create_flow(NewAuthFlow {
-                id: None,
-                scope: scope.clone(),
-                kind: AuthFlowKind::IntegrationCredential,
-                provider: AuthProviderId::new("google").expect("provider"),
-                challenge: AuthChallenge::OAuthUrl {
-                    authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
-                        .expect("authorization url"),
-                    expires_at: expired_at,
-                },
-                continuation: AuthContinuationRef::SetupOnly,
-                update_binding: None,
-                opaque_state_hash: None,
-                pkce_verifier_hash: None,
-                expires_at: expired_at,
-            })
-            .await
-            .expect("expired setup flow");
-        assert_eq!(flow.status, AuthFlowStatus::AwaitingUser);
-
-        let Json(observed) = oauth_flow_status_handler(
-            State(state),
-            Extension(caller),
-            Path(flow.id.to_string()),
-            axum::extract::Query(OAuthFlowStatusQuery {
-                invocation_id: Some(invocation_id),
-            }),
-        )
-        .await
-        .expect("status read");
-
-        assert_eq!(
-            observed.status,
-            AuthFlowStatus::Expired,
-            "a non-terminal flow past its deadline must poll as expired, not awaiting_user"
-        );
-        assert_eq!(
-            shared
-                .get_flow(&scope, flow.id)
-                .await
-                .expect("lookup")
-                .expect("record")
-                .status,
-            AuthFlowStatus::AwaitingUser,
-            "GET status is projection-only and must not mutate the durable record"
         );
     }
 
@@ -2837,202 +2727,6 @@ mod tests {
         assert_eq!(stored_identity.app_id.as_deref(), Some("A123"));
     }
 
-    /// The user's real scenario: click Connect on the Slack card, close the
-    /// popup without authorizing, click Connect again. Supersede-on-start
-    /// cancels the prior auth FLOW, but the Slack connection EPOCH lives in the
-    /// lifecycle store, and `begin_connection` rejects a second live epoch with
-    /// `ConnectionInProgress` (409) until the first one's TTL lapses.
-    #[cfg(feature = "slack-v2-host-beta")]
-    #[tokio::test]
-    async fn slack_personal_reopen_after_closing_popup_is_not_blocked_by_prior_epoch() {
-        let shared = Arc::new(InMemoryAuthProductServices::new());
-        let provider_identity = OAuthProviderIdentity::new(
-            "U123",
-            Some("T123".to_string()),
-            None,
-            Some("A123".to_string()),
-        )
-        .expect("provider identity");
-        let provider_client = Arc::new(SlackIdentityProviderClient::new(provider_identity));
-        let product_auth = Arc::new(
-            RebornProductAuthServices::from_shared(
-                shared.clone(),
-                Arc::new(RecordingDispatcher::default()),
-            )
-            .with_flow_record_source(shared)
-            .with_provider_client(provider_client),
-        );
-        let tenant_id = TenantId::new("tenant-alpha").expect("tenant");
-        let user_id = UserId::new("user-alpha").expect("user");
-        let installation_id = AdapterInstallationId::new("install-alpha").expect("installation");
-        let binding_store = Arc::new(RecordingBindingStore::default());
-        let binding_service = Arc::new(SlackPersonalUserBindingService::new(
-            [SlackPersonalBindingInstallation {
-                tenant_id: tenant_id.clone(),
-                installation_id: installation_id.clone(),
-                selector: SlackInstallationSelector::app_team("A123", "T123"),
-            }],
-            binding_store.clone(),
-        ));
-        let lifecycle_store = Arc::new(TestSlackLifecycleStore::default());
-        let state = ProductAuthRouteState::new(product_auth.clone(), tenant_id.clone(), None, None)
-            .with_test_installed_extension_lookup()
-            .with_slack_personal_oauth(slack_personal_oauth_test_slot().await)
-            .with_slack_personal_oauth_binding(SlackPersonalOAuthBindingConfig::new(
-                binding_service,
-                Arc::new(StaticSlackPersonalConnectionScopeResolver::new(Some(
-                    SlackPersonalConnectionScope { installation_id },
-                ))),
-                binding_store,
-                lifecycle_store.clone(),
-            ));
-        let caller = WebUiAuthenticatedCaller::new(tenant_id.clone(), user_id.clone(), None, None);
-
-        let start_request = || ExtensionOAuthStartRequest {
-            provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
-            account_label: "personal slack".to_string(),
-            scopes: vec![],
-            expires_at: Utc::now() + ChronoDuration::minutes(5),
-            invocation_id: Some(InvocationId::new().to_string()),
-        };
-
-        // Click Connect. Popup opens.
-        let Json(first_start) = extension_oauth_start_handler(
-            State(state.clone()),
-            Extension(caller.clone()),
-            Path("slack".to_string()),
-            Json(start_request()),
-        )
-        .await
-        .expect("first Slack connect starts");
-
-        // User closes the popup without authorizing. Nothing calls back.
-        // Click Connect again.
-        let Json(second_start) = extension_oauth_start_handler(
-            State(state.clone()),
-            Extension(caller.clone()),
-            Path("slack".to_string()),
-            Json(start_request()),
-        )
-        .await
-        .expect("re-opening the Slack connect popup must not be blocked by the abandoned attempt");
-
-        assert_ne!(second_start.flow_id, first_start.flow_id);
-        let first_state_value = Url::parse(first_start.authorization_url.as_str())
-            .expect("authorization url")
-            .query_pairs()
-            .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
-            .expect("oauth state");
-        let first_callback_state =
-            OAuthCallbackState::decode(OAuthCallbackStateKind::SLACK_PERSONAL, &first_state_value)
-                .expect("decode first callback state");
-        assert_eq!(
-            product_auth
-                .flow_record_for_status(first_callback_state.scope(), first_start.flow_id)
-                .await
-                .expect("load superseded flow")
-                .status,
-            AuthFlowStatus::Canceled,
-            "the abandoned first attempt must be superseded, not left live"
-        );
-    }
-
-    /// A crash or failed abandon between "supersede the prior flow" and
-    /// "abandon its epoch" leaves a live epoch whose flow is already terminal
-    /// — and the supersede walk only returns non-terminal flows, so nothing
-    /// would ever release it. The start path must reconcile the stranded
-    /// epoch from the flow record instead of 409ing until its TTL lapses.
-    #[cfg(feature = "slack-v2-host-beta")]
-    #[tokio::test]
-    async fn slack_personal_reopen_recovers_when_a_stranded_epoch_outlives_its_flow() {
-        let shared = Arc::new(InMemoryAuthProductServices::new());
-        let provider_identity = OAuthProviderIdentity::new(
-            "U123",
-            Some("T123".to_string()),
-            None,
-            Some("A123".to_string()),
-        )
-        .expect("provider identity");
-        let provider_client = Arc::new(SlackIdentityProviderClient::new(provider_identity));
-        let product_auth = Arc::new(
-            RebornProductAuthServices::from_shared(
-                shared.clone(),
-                Arc::new(RecordingDispatcher::default()),
-            )
-            .with_flow_record_source(shared)
-            .with_provider_client(provider_client),
-        );
-        let tenant_id = TenantId::new("tenant-alpha").expect("tenant");
-        let user_id = UserId::new("user-alpha").expect("user");
-        let installation_id = AdapterInstallationId::new("install-alpha").expect("installation");
-        let binding_store = Arc::new(RecordingBindingStore::default());
-        let binding_service = Arc::new(SlackPersonalUserBindingService::new(
-            [SlackPersonalBindingInstallation {
-                tenant_id: tenant_id.clone(),
-                installation_id: installation_id.clone(),
-                selector: SlackInstallationSelector::app_team("A123", "T123"),
-            }],
-            binding_store.clone(),
-        ));
-        let lifecycle_store = Arc::new(TestSlackLifecycleStore::default());
-        let state = ProductAuthRouteState::new(product_auth.clone(), tenant_id.clone(), None, None)
-            .with_test_installed_extension_lookup()
-            .with_slack_personal_oauth(slack_personal_oauth_test_slot().await)
-            .with_slack_personal_oauth_binding(SlackPersonalOAuthBindingConfig::new(
-                binding_service,
-                Arc::new(StaticSlackPersonalConnectionScopeResolver::new(Some(
-                    SlackPersonalConnectionScope { installation_id },
-                ))),
-                binding_store,
-                lifecycle_store.clone(),
-            ));
-        let caller = WebUiAuthenticatedCaller::new(tenant_id.clone(), user_id.clone(), None, None);
-        let start_request = || ExtensionOAuthStartRequest {
-            provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
-            account_label: "personal slack".to_string(),
-            scopes: vec![],
-            expires_at: Utc::now() + ChronoDuration::minutes(5),
-            invocation_id: Some(InvocationId::new().to_string()),
-        };
-
-        // Click Connect: flow F1 and epoch E1 are live.
-        let Json(first_start) = extension_oauth_start_handler(
-            State(state.clone()),
-            Extension(caller.clone()),
-            Path("slack".to_string()),
-            Json(start_request()),
-        )
-        .await
-        .expect("first Slack connect starts");
-
-        // Re-open while the epoch-abandon write fails: supersede cancels F1,
-        // then the abandon errors out — the exact partial failure that
-        // strands E1 with no non-terminal flow left pointing at it.
-        lifecycle_store
-            .fail_next_abandon
-            .store(true, Ordering::SeqCst);
-        extension_oauth_start_handler(
-            State(state.clone()),
-            Extension(caller.clone()),
-            Path("slack".to_string()),
-            Json(start_request()),
-        )
-        .await
-        .expect_err("a failed epoch abandon fails the re-open");
-
-        // Third click with a healthy backend. Only flow-record reconciliation
-        // can release E1 now; without it this 409s until the epoch TTL.
-        let Json(third_start) = extension_oauth_start_handler(
-            State(state.clone()),
-            Extension(caller.clone()),
-            Path("slack".to_string()),
-            Json(start_request()),
-        )
-        .await
-        .expect("re-opening after a stranded abandon reconciles the dead epoch instead of 409ing");
-        assert_ne!(third_start.flow_id, first_start.flow_id);
-    }
-
     #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_personal_terminal_callback_failures_allow_immediate_retry() {
@@ -3195,20 +2889,12 @@ mod tests {
         )
         .await
         .expect("terminal provider failure must not block immediate reconnect");
+        state.remove_pkce_verifier(third_start.flow_id);
         let state_value = Url::parse(third_start.authorization_url.as_str())
             .expect("authorization url")
             .query_pairs()
             .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
             .expect("oauth state");
-        let third_callback_state =
-            OAuthCallbackState::decode(OAuthCallbackStateKind::SLACK_PERSONAL, &state_value)
-                .expect("decode third callback state");
-        // Simulate the verifier being gone at callback time (consumed by an
-        // earlier redelivery, or expired) by deleting it from the durable
-        // store the setup path now uses.
-        product_auth
-            .delete_setup_pkce_verifier(third_callback_state.scope(), third_start.flow_id)
-            .await;
         let encoded_state =
             url::form_urlencoded::byte_serialize(state_value.as_bytes()).collect::<String>();
         let uri = format!(
@@ -3226,6 +2912,9 @@ mod tests {
         .await
         .expect_err("known callback without PKCE must fail");
         assert_eq!(error.body.code, AuthErrorCode::UnknownOrExpiredFlow);
+        let third_callback_state =
+            OAuthCallbackState::decode(OAuthCallbackStateKind::SLACK_PERSONAL, &state_value)
+                .expect("decode third callback state");
         assert_eq!(
             product_auth
                 .flow_record_for_status(third_callback_state.scope(), third_start.flow_id)
@@ -3516,7 +3205,6 @@ mod tests {
                 provider: Some(
                     AuthProviderId::new(SLACK_PERSONAL_PROVIDER_ID).expect("Slack provider"),
                 ),
-                lifecycle_package: None,
                 action: ironclaw_auth::SecretCleanupAction::Uninstall,
             })
             .await
@@ -4463,19 +4151,6 @@ mod tests {
             self.inner.create_flow(request).await
         }
 
-        // Forward instead of inheriting the trait's no-op default: a
-        // decorator that silently skips supersede-on-start would diverge
-        // from the store it wraps.
-        async fn cancel_superseded_setup_flows(
-            &self,
-            scope: &AuthProductScope,
-            provider: &ironclaw_auth::AuthProviderId,
-        ) -> Result<Vec<ironclaw_auth::AuthFlowId>, AuthProductError> {
-            self.inner
-                .cancel_superseded_setup_flows(scope, provider)
-                .await
-        }
-
         async fn get_flow(
             &self,
             scope: &AuthProductScope,
@@ -4576,19 +4251,6 @@ mod tests {
             request: ironclaw_auth::NewAuthFlow,
         ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
             self.inner.create_flow(request).await
-        }
-
-        // Forward instead of inheriting the trait's no-op default: a
-        // decorator that silently skips supersede-on-start would diverge
-        // from the store it wraps.
-        async fn cancel_superseded_setup_flows(
-            &self,
-            scope: &AuthProductScope,
-            provider: &ironclaw_auth::AuthProviderId,
-        ) -> Result<Vec<ironclaw_auth::AuthFlowId>, AuthProductError> {
-            self.inner
-                .cancel_superseded_setup_flows(scope, provider)
-                .await
         }
 
         async fn get_flow(

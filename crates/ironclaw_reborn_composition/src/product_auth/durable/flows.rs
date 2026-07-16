@@ -21,7 +21,7 @@ use ironclaw_auth::{
     ManualTokenCompletionInput, NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest,
     OAuthCallbackFailureInput, OAuthCallbackInput, OAuthProviderExchange, ProviderCallbackOutcome,
     TurnGateAuthFlowQuery, binding_scope_owns_account, flow_matches_durable_owner,
-    flow_matches_turn_gate_query, is_setup_class_continuation,
+    flow_matches_turn_gate_query,
 };
 
 struct CallbackAccountWrite {
@@ -419,44 +419,6 @@ where
         self.write_flow(scope, &record, CasExpectation::Version(version))
             .await?;
         Ok(record)
-    }
-
-    async fn cancel_superseded_setup_flows(
-        &self,
-        scope: &ironclaw_auth::AuthProductScope,
-        provider: &ironclaw_auth::AuthProviderId,
-    ) -> Result<Vec<AuthFlowId>, AuthProductError> {
-        // Setup flows live under the owner+surface+session flow root, keyed by
-        // flow id only — thread/mission/invocation are not part of the durable
-        // path (see `product_auth::durable::paths`). Listing that root therefore
-        // yields every prior setup flow for this owner+provider regardless of
-        // the per-request invocation that started it. Filter to non-terminal
-        // setup-class flows so a parked turn-gate flow is never disturbed.
-        // Records arrive sorted by flow id from the listing.
-        let mut superseded = Vec::new();
-        for (flow, _version) in self.flow_records_under_scope_root(scope).await? {
-            if is_terminal_status(flow.status)
-                || flow.provider != *provider
-                || !is_setup_class_continuation(&flow.continuation)
-            {
-                continue;
-            }
-            // Cancel through the flow's OWN scope: `cancel_flow` re-reads under
-            // full-scope equality, which the superseding start's scope (fresh
-            // invocation) would not satisfy.
-            match self.cancel_flow(&flow.scope, flow.id).await {
-                Ok(_) => superseded.push(flow.id),
-                // A concurrent claim/cancel/expiry that already moved the flow
-                // terminal is the desired end state, not a fault.
-                Err(
-                    AuthProductError::Canceled
-                    | AuthProductError::FlowAlreadyTerminal
-                    | AuthProductError::UnknownOrExpiredFlow,
-                ) => {}
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(superseded)
     }
 
     async fn mark_continuation_dispatched(

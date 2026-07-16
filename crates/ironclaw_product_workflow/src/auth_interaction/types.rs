@@ -297,18 +297,7 @@ impl AuthGateRecord {
         self.flow.status
     }
 
-    pub(super) fn to_view(&self, now: Timestamp) -> Option<PendingAuthInteractionView> {
-        // Honor `expires_at` in the projection (RFC 6819 §5.1.5.3). A
-        // non-terminal flow whose TTL has passed is not a live interaction, even
-        // when a background sweep has not yet transitioned it to `Expired`.
-        // Without this, an abandoned "Connect" flow keeps reading as
-        // authenticating past its deadline. The durable write paths expire flows
-        // lazily; read projections must guard the clock themselves. The
-        // boundary is inclusive (`>=`) to match `project_flow_status`'s
-        // `expires_at <= now`, so both projections flip at the same instant.
-        if now >= self.flow.expires_at {
-            return None;
-        }
+    pub(super) fn to_view(&self) -> Option<PendingAuthInteractionView> {
         let status = AuthInteractionStatus::from_flow_status(self.flow.status)?;
         Some(PendingAuthInteractionView {
             scope: self.scope.clone(),
