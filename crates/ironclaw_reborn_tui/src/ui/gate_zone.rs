@@ -38,9 +38,9 @@ fn describe(gate: &PendingGate) -> (String, String, String) {
             ..
         } => {
             let options = if *allow_always {
-                "[a] allow  [A] allow always  [d] deny  [esc] dismiss".to_string()
+                "[a] allow  [A] allow always  [d] deny  [esc] cancel".to_string()
             } else {
-                "[a] allow  [d] deny  [esc] dismiss".to_string()
+                "[a] allow  [d] deny  [esc] cancel".to_string()
             };
             (headline.clone(), body.clone(), options)
         }
@@ -66,7 +66,7 @@ fn describe(gate: &PendingGate) -> (String, String, String) {
                 body_text.push_str("kind: ");
                 body_text.push_str(kind);
             }
-            (headline.clone(), body_text, "[esc] dismiss".to_string())
+            (headline.clone(), body_text, "[esc] cancel".to_string())
         }
     }
 }
@@ -98,10 +98,14 @@ mod tests {
         let content = draw(&state);
         assert!(content.contains("Allow write_file?"));
         assert!(content.contains("allow") && content.contains("deny"));
+        assert!(
+            content.contains("[esc] cancel"),
+            "Esc now resolves the gate server-side, not just a local dismiss"
+        );
     }
 
     #[test]
-    fn auth_gate_renders_authorization_url_and_dismiss_only() {
+    fn auth_gate_renders_authorization_url_and_cancel_hint() {
         let state = AppState::default().set_pending_gate(Some(PendingGate::Auth {
             turn_run_id: "run-stub".to_string(),
             gate_ref: "gate-stub".to_string(),
@@ -113,7 +117,7 @@ mod tests {
         let content = draw(&state);
         assert!(content.contains("Connect Gmail"));
         assert!(content.contains("https://example.com/oauth"));
-        assert!(content.contains("esc"));
+        assert!(content.contains("[esc] cancel"));
         assert!(!content.contains("[a] allow"));
     }
 

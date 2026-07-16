@@ -209,11 +209,16 @@ pub(crate) fn dispatch_gate_key(state: &mut AppState, key: KeyEvent) -> Vec<Effe
         ),
         KeyCode::Char('d') => resolve(state, &pending, WebUiGateResolution::Declined),
         KeyCode::Esc => {
-            // Esc is local-only: it dismisses the local gate-zone view but
-            // does not resolve the gate server-side, so the run stays
-            // blocked until a resolution actually arrives.
-            state.pending_gate = None;
-            Vec::new()
+            // Esc is a real server-side cancel, mirroring webui's Cancel
+            // button — it must not merely clear the local view, or the run
+            // stays blocked server-side forever. `WebUiGateResolution` has
+            // no distinct `Cancelled` variant (only `Approved`/`Declined`/
+            // `CredentialProvided`), and the server's `parse_gate_resolution`
+            // (`webui_inbound.rs`) already treats the wire strings
+            // `"denied"` and `"cancelled"` as synonyms for `Declined`, so
+            // `Declined` is the correct resolution to send here — same as
+            // the `d` key, just triggered by a different key.
+            resolve(state, &pending, WebUiGateResolution::Declined)
         }
         _ => Vec::new(),
     }
@@ -308,7 +313,7 @@ mod tests {
     }
 
     #[test]
-    fn esc_on_auth_gate_emits_no_api_call_and_just_dismisses_local_view() {
+    fn esc_on_auth_gate_emits_declined_resolution_not_just_a_local_dismiss() {
         let mut state = AppState::default();
         reduce(
             &mut state,
@@ -317,11 +322,38 @@ mod tests {
             })),
         );
         let effects = reduce(&mut state, AppEvent::Key(key(KeyCode::Esc)));
-        assert!(effects.is_empty());
+        assert!(matches!(
+            &effects[0],
+            Effect::Api(ApiCall::ResolveGate {
+                gate_ref,
+                resolution: WebUiGateResolution::Declined,
+                ..
+            }) if gate_ref == "ar-1"
+        ));
         assert!(
-            state.pending_gate.is_none(),
-            "Esc dismisses the local gate-zone view only"
+            state.pending_gate.is_some(),
+            "gate stays pending until the server confirms the cancel via a new event"
         );
+    }
+
+    #[test]
+    fn esc_on_approval_gate_emits_declined_resolution() {
+        let mut state = AppState::default();
+        reduce(
+            &mut state,
+            AppEvent::Server(boxed_frame(WebChatV2Event::Gate {
+                prompt: gate_prompt("gr-1", false),
+            })),
+        );
+        let effects = reduce(&mut state, AppEvent::Key(key(KeyCode::Esc)));
+        assert!(matches!(
+            &effects[0],
+            Effect::Api(ApiCall::ResolveGate {
+                gate_ref,
+                resolution: WebUiGateResolution::Declined,
+                ..
+            }) if gate_ref == "gr-1"
+        ));
     }
 
     #[test]
