@@ -303,6 +303,45 @@ async def test_reborn_v2_light_theme_semantic_colors_have_readable_contrast(
             ).to_be_visible(timeout=15000)
 
 
+async def test_reborn_v2_appearance_theme_selection_persists(reborn_v2_page):
+    """Appearance controls update the live theme and preserve it across reloads."""
+    origin = await reborn_v2_page.evaluate("location.origin")
+    await reborn_v2_page.goto(
+        f"{origin}/v2/settings/appearance?token={REBORN_V2_AUTH_TOKEN}"
+    )
+
+    light_option = reborn_v2_page.get_by_role("radio", name="Light theme")
+    dark_option = reborn_v2_page.get_by_role("radio", name="Dark theme")
+    await expect(light_option).to_be_visible(timeout=15000)
+    await expect(dark_option).to_be_visible(timeout=15000)
+
+    await dark_option.click()
+    await expect(dark_option).to_have_attribute("aria-checked", "true")
+    await expect(reborn_v2_page.locator("html")).to_have_attribute(
+        "data-theme", "dark"
+    )
+    await reborn_v2_page.wait_for_function(
+        'localStorage.getItem("ironclaw:v2-theme") === "dark"'
+    )
+
+    await reborn_v2_page.reload()
+    dark_option = reborn_v2_page.get_by_role("radio", name="Dark theme")
+    await expect(dark_option).to_have_attribute("aria-checked", "true", timeout=15000)
+    await expect(reborn_v2_page.locator("html")).to_have_attribute(
+        "data-theme", "dark"
+    )
+
+    light_option = reborn_v2_page.get_by_role("radio", name="Light theme")
+    await light_option.click()
+    await expect(light_option).to_have_attribute("aria-checked", "true")
+    await expect(reborn_v2_page.locator("html")).to_have_attribute(
+        "data-theme", "light"
+    )
+    await reborn_v2_page.wait_for_function(
+        'localStorage.getItem("ironclaw:v2-theme") === "light"'
+    )
+
+
 async def test_reborn_v2_text_turn_persists(reborn_v2_server):
     """A text turn over /api/webchat/v2/* completes and persists one assistant reply."""
     headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
