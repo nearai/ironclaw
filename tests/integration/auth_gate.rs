@@ -155,6 +155,27 @@ async fn runtime_401_after_injection_populates_provider_credential_requirement()
          wrong setup kind would route the WebUI to the wrong re-auth UI"
     );
 
+    // T2 of the #6105 lifecycle transitions — the #5878 negative
+    // discriminator: a revoked/rejected token (provider 401) must surface
+    // EXCLUSIVELY as the re-auth gate asserted above, never as a generic
+    // model-visible failure ("the tool input could not be encoded" / "AI
+    // model provider was temporarily unavailable"). An empty reason matches
+    // any summary of the class, so this pins that NO Failed-classed tool
+    // error of any reason was persisted for the 401.
+    harness
+        .assert_no_tool_error(ToolErrorClass::Failed, "")
+        .await
+        .expect(
+            "a provider 401 must park at the auth gate, not persist a generic \
+             Failed tool error (#5878 misleading-error regression)",
+        );
+    // ...and it must not hot-retry the rejected credential: exactly the one
+    // 401 probe crossed the wire (#5878's "multiple retry attempts" shape).
+    harness
+        .assert_network_egress_count(1)
+        .await
+        .expect("a 401 must not be hot-retried against the provider");
+
     // Drain the run cleanly (deny) so the test doesn't leak a blocked run.
     harness
         .deny_auth_gate(run_id, &gate_ref)

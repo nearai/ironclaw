@@ -866,6 +866,12 @@ registerPack("fr", {
   "ext.registry.importing": "Importation…",
   "ext.registry.importSuccess": "Outil importé — installez-le depuis le registre.",
   "ext.registry.importFailed": "Échec de l’importation",
+  "ext.catalog.loadErrorTitle": "Catalogue d’extensions indisponible",
+  "ext.catalog.loadErrorDesc": "Impossible de charger le catalogue d’extensions. Vérifiez votre connexion et réessayez.",
+  "ext.catalog.partialErrorTitle": "Certaines données d’extension sont indisponibles",
+  "ext.catalog.partialErrorDesc": "Les données d’extension disponibles sont affichées, mais certains détails n’ont pas pu être chargés. Vérifiez votre connexion et réessayez.",
+  "ext.catalog.retry": "Réessayer",
+  "ext.catalog.retrying": "Nouvelle tentative…",
 
   // Chat — history
   "chat.history.loading": "Chargement...",

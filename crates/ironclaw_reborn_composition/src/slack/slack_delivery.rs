@@ -3684,8 +3684,15 @@ mod tests {
 
     // --- Tests ----------------------------------------------------------------
 
-    #[tokio::test]
-    async fn driver_happy_path_completed_run_with_preference_delivers_and_records_delivered() {
+    /// Shared arrangement for the T1 delivery-honesty pair (#6105): a
+    /// `Completed` run with a finalized reply and a saved personal DM
+    /// preference, driven through the real `TriggeredRunDeliveryDriver`
+    /// against a programmed `chat.postMessage` response body. The two tests
+    /// differ ONLY in that body and in what they assert — one arrangement
+    /// keeps the Delivered and Failed arms from drifting apart.
+    async fn deliver_completed_run_with_programmed_post_response(
+        post_response_body: Vec<u8>,
+    ) -> (TriggeredRunDeliveryRecord, Arc<FakeProtocolHttpEgress>) {
         let install = "test-install";
         let scope = personal_turn_scope();
         let run_id = TurnRunId::new();
@@ -3706,10 +3713,7 @@ mod tests {
         egress.allow_credential_handle("slack_bot_token");
         egress.program_response(
             "slack.com",
-            Ok(EgressResponse::new(
-                200,
-                slack_post_ok_json("D456", "1234.5678"),
-            )),
+            Ok(EgressResponse::new(200, post_response_body)),
         );
 
         let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
@@ -3740,18 +3744,69 @@ mod tests {
 
         // Poll until the spawned delivery task writes its outcome record.
         let record = wait_for_delivery_record(&delivery_store, run_id).await;
+        (record, egress)
+    }
+
+    #[tokio::test]
+    async fn driver_happy_path_completed_run_with_preference_delivers_and_records_delivered() {
+        let (record, egress) = deliver_completed_run_with_programmed_post_response(
+            slack_post_ok_json("D456", "1234.5678"),
+        )
+        .await;
 
         // Egress should have been called for chat.postMessage.
+        let post = egress
+            .calls()
+            .into_iter()
+            .find(|c| c.path == "/api/chat.postMessage")
+            .expect("expected chat.postMessage egress call");
+
+        // Right-target pin (#5943/#5877 shape, T1 of #6105): the posted body
+        // must carry the DM conversation id decoded from the saved
+        // preference's binding ref — not the run's current channel or another
+        // user's target.
+        let body: serde_json::Value =
+            serde_json::from_slice(&post.body).expect("postMessage body is valid JSON");
+        assert_eq!(
+            body.get("channel").and_then(|channel| channel.as_str()),
+            Some("D456"),
+            "chat.postMessage must target the preference binding's DM conversation; body: {body}"
+        );
+
+        // Outcome should be Delivered.
+        assert_eq!(record.outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+    }
+
+    /// Delivery-honesty pin (#5944 shape, T1 of #6105): the RUN completed, but
+    /// Slack rejected the post (`200 {"ok":false,...}`). The delivery record
+    /// must say `Failed` — a `Delivered` here is exactly the "delivery
+    /// silently fails but run reports success" bug: run status alone cannot
+    /// distinguish the two, only this record can.
+    #[tokio::test]
+    async fn driver_slack_api_rejection_records_failed_not_delivered() {
+        // Slack accepts the HTTP call but rejects the post — the classic
+        // silent-failure shape (revoked channel, kicked bot, archived DM).
+        let (record, egress) = deliver_completed_run_with_programmed_post_response(
+            serde_json::json!({"ok": false, "error": "channel_not_found"})
+                .to_string()
+                .into_bytes(),
+        )
+        .await;
+
+        // The post WAS attempted (this is not a skip/no-target case)…
         assert!(
             egress
                 .calls()
                 .iter()
                 .any(|c| c.path == "/api/chat.postMessage"),
-            "expected chat.postMessage egress call"
+            "expected the rejected chat.postMessage egress call"
         );
-
-        // Outcome should be Delivered.
-        assert_eq!(record.outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+        // …and the rejection must be recorded as Failed, never Delivered.
+        assert_eq!(
+            record.outcome,
+            TriggeredRunDeliveryOutcomeKind::Failed,
+            "a Slack-rejected post on a Completed run must record Failed (#5944 honesty pair)"
+        );
     }
 
     #[tokio::test]

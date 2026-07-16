@@ -3119,6 +3119,41 @@ fn local_dev_project_filesystem(
     Ok(filesystem)
 }
 
+/// Test-only (C-SLACK-LIFECYCLE restart seam, issue #6105 T5): reopen the
+/// composed Slack host-state filesystem at an existing local-dev
+/// `storage_root` — a FRESH root filesystem (fresh durable-backend handles,
+/// independent of the live runtime's `Arc`s) wrapped with the SAME
+/// `slack_host_state_mount_view` production wraps it with. Mirrors the
+/// production construction in [`build_reborn_services`]
+/// (`local_dev_slack_host_state_filesystem` over the local-dev root), so a
+/// restart-survival test proves durable Slack host state (identity bindings,
+/// DM targets) is reconstructible the way a real process restart
+/// reconstructs it. Tests only; zero bytes in production builds.
+///
+/// `libsql`-only (not `any(libsql, postgres)`): the body reopens via
+/// `LocalDevStorageBackendInput::LocalDefault`, whose non-libsql arm mounts a
+/// fresh `InMemoryBackend` — under a postgres-composed runtime that would be
+/// a brand-new empty store, not the live Postgres-backed host state, so a
+/// postgres gate here would compile a probe that can only report absence.
+#[cfg(all(
+    feature = "test-support",
+    feature = "slack-v2-host-beta",
+    feature = "libsql"
+))]
+pub(crate) async fn open_local_dev_slack_host_state_filesystem_for_test(
+    storage_root: &Path,
+) -> Result<Arc<ScopedFilesystem<LocalDevRootFilesystem>>, RebornBuildError> {
+    let workspace_root = storage_root.join("workspace");
+    let bundle = build_local_dev_root_filesystem(
+        storage_root,
+        &workspace_root,
+        None,
+        LocalDevStorageBackendInput::LocalDefault,
+    )
+    .await?;
+    Ok(local_dev_slack_host_state_filesystem(bundle.filesystem))
+}
+
 /// Test-only (E-DURABLE seam): open a FRESH, independent
 /// [`ExtensionInstallationStore`] at an existing local-dev `storage_root`,
 /// paralleling how `assert_reply_persists_after_reopen` opens a fresh libsql
