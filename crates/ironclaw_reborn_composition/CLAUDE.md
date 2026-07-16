@@ -247,7 +247,7 @@ Reborn-native auth router. v1 gateway code remains untouched —
 ### Session transport decision (#4116)
 
 The OAuth callback returns a short-lived, one-time login ticket to
-the SPA via the URL query (`/v2?login_ticket=<ticket>`), not the
+the SPA via the URL query (`/?login_ticket=<ticket>`), not the
 session bearer itself and not an `HttpOnly` cookie. The SPA
 immediately POSTs that ticket to `/auth/session/exchange` and stores
 the returned bearer in `sessionStorage`.

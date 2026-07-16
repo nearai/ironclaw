@@ -12,8 +12,8 @@
 use axum::Router;
 use axum::body::Body;
 use axum::extract::Path as AxumPath;
-use axum::http::{HeaderValue, StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use axum::http::{HeaderValue, StatusCode, Uri, header};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 use rand::RngExt as _;
 
@@ -27,70 +27,63 @@ const NONCE_PLACEHOLDER: &str = "__IRONCLAW_CSP_NONCE__";
 /// characters, well above the CSP-3 recommendation of 128 bits.
 const NONCE_BYTES: usize = 16;
 
-/// Build the SPA static-asset router with no path prefix.
+/// Build the SPA static-asset router at the gateway root.
 ///
-/// Standalone consumers (the crate's own tests) mount this at `/`.
-/// Host composition should call [`mount_at_prefix`] instead so the
-/// SPA lives under a stable URL prefix without dragging the SPA
-/// shell handler onto the gateway root.
+/// The canonical browser routes live at `/chat`, `/settings`, and the other
+/// root-level SPA paths. The legacy `/v2` surface redirects to the matching
+/// root path while preserving its query string so bookmarked URLs and OAuth
+/// login tickets keep working during the migration. Host-owned namespaces
+/// such as `/api`, `/auth`, `/v1`, and `/webhooks` remain fail-closed.
 ///
 /// The router owns no per-instance state; each request generates a
 /// fresh nonce.
 pub fn static_router() -> Router {
-    // Three explicit routes keep `axum::Router::nest` out of the
-    // picture — nest in 0.8 has quirky dispatch for the exact prefix
-    // with/without trailing slash. The wildcard handler reads the
-    // matched suffix via `Path` so the path passed downstream is
-    // already prefix-stripped, no matter what mount the caller used.
+    // Explicit routes keep `axum::Router::nest` out of the picture — nest in
+    // 0.8 has quirky dispatch for exact prefixes with/without trailing slash.
+    // The wildcard handler receives the root-relative path via `Path`.
     Router::new()
         .route("/", get(serve_root))
-        .route("/{*path}", get(serve_wildcard))
+        // Keep the isolated wallet page ahead of the SPA wildcard. It carries
+        // a deliberately different CSP and must never render the app shell.
+        .route("/wallet/connect", get(serve_wallet_connect))
+        .route("/v2", get(redirect_legacy_v2))
+        .route("/v2/", get(redirect_legacy_v2))
+        .route("/v2/{*path}", get(redirect_legacy_v2))
+        // A custom method fallback keeps unmounted POST/PUT API paths at 404.
+        // Without it, this root wildcard would turn them into 405 responses
+        // merely because the SPA owns GET for the same catch-all path.
+        .route(
+            "/{*path}",
+            get(serve_wildcard).fallback(|| async { StatusCode::NOT_FOUND }),
+        )
 }
 
-/// Build the SPA static-asset router wired under `prefix`.
+/// Redirect a legacy `/v2` URL to its root-mounted equivalent.
 ///
-/// This is the factory host composition should use — owning the
-/// prefixed route shape inside the static crate means a future
-/// fourth route is picked up automatically by every mount site.
-/// Composition merges the returned `Router` into the gateway's main
-/// router; it must not also enumerate individual handlers from this
-/// crate.
-///
-/// `prefix` must begin with `/` and must not end with `/`. Passing
-/// `"/v2"` mounts the SPA at `/v2`, `/v2/`, and `/v2/<anything>`.
-///
-/// # Panics
-///
-/// Panics if `prefix` is empty, doesn't start with `/`, or ends with
-/// `/`. The factory is called at composition-startup, so failing loud
-/// there is preferable to silently building broken routes that only
-/// surface as request-time 404s in production.
-pub fn mount_at_prefix(prefix: &str) -> Router {
-    let valid = !prefix.is_empty() && prefix.starts_with('/') && !prefix.ends_with('/');
-    if !valid {
-        panic!("mount_at_prefix expects a path like \"/v2\" — got {prefix:?}"); // safety: composition-startup factory — failing loud on bad prefix is preferable to silently building broken routes
+/// A temporary redirect is intentional: it keeps compatibility links working
+/// without leaving a browser-cached permanent redirect behind if the root mount
+/// ever needs to be rolled back. Leading slashes in the suffix are collapsed
+/// so an input such as `/v2//example.com` cannot become a protocol-relative
+/// redirect target. Backslashes are normalized as path separators as well:
+/// WHATWG URL parsing treats them like slashes for HTTP(S), so forwarding a
+/// raw backslash could otherwise turn a same-origin `Location` into an
+/// external navigation.
+async fn redirect_legacy_v2(uri: Uri) -> Redirect {
+    Redirect::temporary(&legacy_v2_target(&uri))
+}
+
+fn legacy_v2_target(uri: &Uri) -> String {
+    let suffix = match uri.path().strip_prefix("/v2") {
+        Some(suffix) => suffix.trim_start_matches(['/', '\\']),
+        None => "",
+    };
+    let mut target = String::from("/");
+    target.push_str(&suffix.replace('\\', "/"));
+    if let Some(query) = uri.query() {
+        target.push('?');
+        target.push_str(query);
     }
-    // Three explicit routes (no `nest`) for the same reason
-    // `static_router` keeps `nest` out of the picture: axum 0.8's
-    // nest dispatch for the exact prefix with/without trailing
-    // slash is quirky and was the source of regressions in the
-    // earlier inline wiring this factory replaces.
-    Router::new()
-        .route(prefix, get(serve_root))
-        .route(&format!("{prefix}/"), get(serve_root))
-        // Isolated NEAR-wallet connect popup. It needs a far looser CSP than the
-        // hardened SPA shell (the wallet connector loads remote executor code in
-        // sandboxed iframes and talks to wallet relays / NEAR RPC), so it gets a
-        // dedicated route and a scoped policy instead of widening the app CSP.
-        // The page takes only a random BroadcastChannel name and posts the
-        // resulting signature back on that same-origin channel, so the blast
-        // radius of the looser policy is this one popup page. Registered before
-        // the wildcard so it wins.
-        .route(
-            &format!("{prefix}/wallet/connect"),
-            get(serve_wallet_connect),
-        )
-        .route(&format!("{prefix}/{{*path}}"), get(serve_wildcard))
+    target
 }
 
 /// Serve the isolated NEAR-wallet connect popup with its own relaxed CSP.
@@ -155,6 +148,16 @@ fn serve_for_path(path: &str) -> Response {
         return StatusCode::NOT_FOUND.into_response();
     }
 
+    // Root-mounting the SPA must not turn unknown host/API requests into a
+    // successful HTML response. Exact registered routes still win in axum;
+    // unmatched requests in these server-owned namespaces fail closed here.
+    if matches!(
+        path.split('/').next(),
+        Some("api" | "auth" | "v1" | "webhooks")
+    ) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
     // Empty path (only reachable through unusual routings) → SPA shell.
     if path.is_empty() {
         return render_index_with_nonce();
@@ -201,13 +204,13 @@ fn render_index_with_nonce() -> Response {
     // header we set here instead of overwriting it.
     //
     // Every sub-resource the shell loads is same-origin: Vite emits the app
-    // bundle and CSS under `/v2/assets/`, and the web fonts are vendored under
-    // `/v2/vendor/` (see `frontend/public`). So `script-src` / `style-src` /
+    // bundle and CSS under `/assets/`, and the web fonts are vendored under
+    // `/vendor/` (see `frontend/public`). So `script-src` / `style-src` /
     // `font-src` collapse to `'self'` — no CDN origins, no third-party fetches.
     // `'unsafe-inline'` stays on `style-src` only: the Tailwind browser
     // runtime injects a generated `<style>` and the shell carries an
-    // inline `text/tailwindcss` theme block; scripts still rely on the
-    // per-request nonce, never `'unsafe-inline'`.
+    // inline theme styles; inline scripts rely on the per-request nonce,
+    // never `'unsafe-inline'` (same-origin external bundles use `'self'`).
     let csp = format!(
         "default-src 'self'; \
          script-src 'self' 'nonce-{nonce}'; \
@@ -304,6 +307,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_v2_routes_redirect_to_root_and_preserve_query() {
+        let app = static_router();
+        for (source, target) in [
+            ("/v2", "/"),
+            ("/v2/", "/"),
+            ("/v2?login_ticket=ticket%2B1", "/?login_ticket=ticket%2B1"),
+            (
+                "/v2/settings/skills?token=old%2Btoken&tab=installed",
+                "/settings/skills?token=old%2Btoken&tab=installed",
+            ),
+            // Repeated leading slashes must not produce a protocol-relative
+            // Location header (an open redirect to `evil.example`).
+            ("/v2//evil.example?keep=1", "/evil.example?keep=1"),
+            // Browsers normalize backslashes as URL path separators. Keep a
+            // raw backslash from becoming a network-path redirect target.
+            (r"/v2/\evil.example", "/evil.example"),
+            (r"/v2/path\segment", "/path/segment"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(source)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("oneshot");
+            assert_eq!(
+                response.status(),
+                StatusCode::TEMPORARY_REDIRECT,
+                "GET {source}",
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::LOCATION)
+                    .and_then(|value| value.to_str().ok()),
+                Some(target),
+                "GET {source}",
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn standalone_known_asset_returns_bytes() {
         let app = static_router();
         let css_path = asset_path_with("assets/app-", ".css");
@@ -369,8 +418,8 @@ mod tests {
     #[tokio::test]
     async fn spa_document_csp_allowlist_is_locked() {
         // Every sub-resource the SPA loads is now same-origin (the Vite
-        // bundle under `/v2/assets/` plus self-hosted fonts under
-        // `/v2/vendor/`). Lock that in:
+        // bundle under `/assets/` plus self-hosted fonts under `/vendor/`).
+        // Lock that in:
         // a regression that re-introduced a third-party CDN origin, added
         // `unsafe-eval`, or allowed `'unsafe-inline'` scripts must fail
         // here, not ship silently. (security-parity 03 row 3b.)
@@ -486,7 +535,7 @@ mod tests {
 
     #[tokio::test]
     async fn wallet_connect_popup_gets_relaxed_csp_and_spa_shell_stays_strict() {
-        let app = mount_at_prefix("/v2");
+        let app = static_router();
 
         // The isolated wallet popup carries a deliberately relaxed CSP so the
         // wallet connector can load remote executors and reach wallet relays.
@@ -495,7 +544,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri("/v2/wallet/connect")
+                    .uri("/wallet/connect")
                     .body(Body::empty())
                     .expect("request"),
             )
@@ -521,7 +570,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri("/v2")
+                    .uri("/")
                     .body(Body::empty())
                     .expect("request"),
             )
@@ -572,6 +621,38 @@ mod tests {
                 response.status(),
                 StatusCode::NOT_FOUND,
                 "path `{path}` must be rejected with 404",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn standalone_reserved_host_namespaces_do_not_fall_back_to_spa() {
+        let app = static_router();
+        for (method, path) in [
+            (Method::GET, "/api/not-a-route"),
+            (Method::POST, "/api/not-a-route"),
+            (Method::GET, "/auth/not-a-route"),
+            (Method::POST, "/auth/not-a-route"),
+            (Method::GET, "/v1/not-a-route"),
+            (Method::POST, "/v1/not-a-route"),
+            (Method::GET, "/webhooks/not-a-route"),
+            (Method::POST, "/webhooks/not-a-route"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method.clone())
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("oneshot");
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{method} reserved host path `{path}` must not render the SPA shell",
             );
         }
     }
@@ -657,24 +738,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "mount_at_prefix expects a path like")]
-    fn mount_at_prefix_panics_on_empty_prefix() {
-        let _ = mount_at_prefix("");
-    }
-
-    #[test]
-    #[should_panic(expected = "mount_at_prefix expects a path like")]
-    fn mount_at_prefix_panics_on_trailing_slash() {
-        let _ = mount_at_prefix("/v2/");
-    }
-
-    #[test]
-    #[should_panic(expected = "mount_at_prefix expects a path like")]
-    fn mount_at_prefix_panics_without_leading_slash() {
-        let _ = mount_at_prefix("v2");
-    }
-
-    #[test]
     fn nonce_is_unique_per_call() {
         let a = generate_nonce();
         let b = generate_nonce();
@@ -689,6 +752,10 @@ mod tests {
             INDEX_HTML_TEMPLATE.contains(NONCE_PLACEHOLDER),
             "index.html must include `{}` so CSP nonce substitution has a target",
             NONCE_PLACEHOLDER,
+        );
+        assert!(
+            !INDEX_HTML_TEMPLATE.contains("/v2/"),
+            "root-mounted SPA shell must not reference legacy /v2 assets",
         );
     }
 
@@ -727,6 +794,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn pwa_manifest_uses_root_scope_and_assets() {
+        let manifest = assets::lookup("assets/site.webmanifest")
+            .expect("PWA manifest is embedded in the asset table");
+        let value: serde_json::Value =
+            serde_json::from_slice(manifest.bytes).expect("PWA manifest is valid JSON");
+        // Preserve the identity of installations created while the app lived
+        // at `/v2/`, even though launches and navigation now use root paths.
+        assert_eq!(value["id"], "/v2/");
+        assert_eq!(value["start_url"], "/");
+        assert_eq!(value["scope"], "/");
+        let icons = value["icons"].as_array().expect("manifest icons array");
+        assert!(!icons.is_empty(), "manifest must keep install icons");
+        assert!(icons.iter().all(|icon| {
+            icon["src"]
+                .as_str()
+                .is_some_and(|source| source.starts_with("/assets/"))
+        }));
+    }
+
     fn source_text(path: &str) -> String {
         let full = format!("{}/frontend/src/{path}", env!("CARGO_MANIFEST_DIR"));
         std::fs::read_to_string(&full).unwrap_or_else(|e| panic!("read {full}: {e}"))
@@ -735,7 +822,7 @@ mod tests {
     // Locks the WebChat v2 SSO login-ticket contract documented
     // in `frontend/src/app/auth.ts` (issue #4116 review finding #11). The
     // user-visible OAuth login path is "callback redirects to
-    // `/v2?login_ticket=<ticket>` → SPA strips the ticket from the
+    // `/?login_ticket=<ticket>` → SPA strips the ticket from the
     // URL → exchanges it via `/auth/session/exchange` → stores the
     // returned bearer in sessionStorage".
     //
@@ -786,7 +873,7 @@ mod tests {
         // 3. Refuses to overwrite an existing stored token for raw
         //    bearer URLs — `consumeTokenFromUrl` must early-return when
         //    `readStoredToken()` is truthy. This guards against the
-        //    `/v2#token=BAD` lock-out scenario the doc-comment
+        //    `/#token=BAD` lock-out scenario the doc-comment
         //    calls out.
         let guard_index = consume_token
             .find("if (readStoredToken())")

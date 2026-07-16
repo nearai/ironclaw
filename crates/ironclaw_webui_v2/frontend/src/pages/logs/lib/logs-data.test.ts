@@ -97,8 +97,5 @@ test("buildScopedLogsPath encodes structured log filters", () => {
     }),
     "/logs?thread_id=thread+a&run_id=run-a&tool_call_id=tool%2Fa&source=slack",
   );
-  assert.equal(
-    buildScopedLogsPath({ threadId: "thread-a" }, { absolute: true }),
-    "/v2/logs?thread_id=thread-a",
-  );
+  assert.equal(buildScopedLogsPath({ threadId: "thread-a" }), "/logs?thread_id=thread-a");
 });

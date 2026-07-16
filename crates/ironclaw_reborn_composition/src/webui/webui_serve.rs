@@ -767,14 +767,11 @@ pub fn webui_v2_app_with_lifecycle(
         // CORS, panic boundary, and the global body-limit
         // (`.layer(...)` calls below) still apply, defense in depth.
         //
-        // The static crate's `mount_at_prefix` factory owns the
-        // routing surface (root, trailing-slash, wildcard, and any
-        // future routes it adds) so the composition layer never
-        // enumerates individual handlers. `merge` (not `nest`) is
-        // used because the factory already returns fully prefixed
-        // routes — `nest` in axum 0.8 has quirky dispatch for the
-        // exact prefix with/without trailing slash.
-        .merge(ironclaw_webui_v2::mount_at_prefix("/v2"))
+        // The static crate owns the complete browser surface: root SPA
+        // routes, assets, the isolated wallet popup, and compatibility
+        // redirects from the former `/v2` mount. Composition merges that
+        // surface as a unit so it never re-implements route policy.
+        .merge(ironclaw_webui_v2::static_router())
         // Outer global cap: applies to unmatched paths (e.g. 404 fallback)
         // as defense in depth. v2 routes are tighter via the per-route
         // body-limit middleware above.

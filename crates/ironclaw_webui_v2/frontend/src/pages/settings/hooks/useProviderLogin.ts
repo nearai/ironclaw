@@ -220,7 +220,7 @@ export function useProviderLogin({ onSuccess } = {}) {
       // user closing the popup instead of waiting out the full timeout. The
       // popup is a same-origin route we control, so the handle is safe.
       const popup = window.open(
-        `/v2/wallet/connect?channel=${encodeURIComponent(channelName)}`,
+        `/wallet/connect?channel=${encodeURIComponent(channelName)}`,
         "_blank",
         "width=460,height=640"
       );

@@ -43,7 +43,7 @@ use crate::session::SessionStore;
 
 /// Default landing page after a successful OAuth callback. The SPA
 /// reads `?login_ticket=` and exchanges it for a bearer.
-const DEFAULT_REDIRECT_AFTER: &str = "/v2";
+const DEFAULT_REDIRECT_AFTER: &str = "/";
 
 /// Default session lifetime (30 days). Matches the v1 gateway's
 /// `SESSION_LIFETIME_SECS`; production deployments can override via
@@ -645,7 +645,7 @@ fn build_success_redirect(redirect_after: &str, ticket: &str) -> String {
 /// code in the query string. The SPA maps the code to a localized
 /// error banner.
 fn spa_error_redirect(code: &str) -> Redirect {
-    let target = format!("/v2?login_error={}", urlencoding::encode(code));
+    let target = format!("/?login_error={}", urlencoding::encode(code));
     Redirect::to(&target)
 }
 

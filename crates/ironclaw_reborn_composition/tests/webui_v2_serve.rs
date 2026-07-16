@@ -14,6 +14,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+// arch-exempt: large_file, root WebUI caller regressions stay with the shared composed-router fixture, plan #5905
 use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
@@ -1064,7 +1065,7 @@ async fn served_app_stylesheet() -> String {
 }
 
 async fn served_app_vite_asset(suffix: &str) -> String {
-    let shell = served_static_text("/v2/").await;
+    let shell = served_static_text("/").await;
     let asset_path = shell_vite_asset_path(&shell, suffix);
     served_static_text(&asset_path).await
 }
@@ -1072,7 +1073,7 @@ async fn served_app_vite_asset(suffix: &str) -> String {
 fn shell_vite_asset_path(shell: &str, suffix: &str) -> String {
     shell
         .split(['"', '\''])
-        .find(|part| part.starts_with("/v2/assets/app-") && part.ends_with(suffix))
+        .find(|part| part.starts_with("/assets/app-") && part.ends_with(suffix))
         .expect("shell should reference requested Vite asset")
         .to_string()
 }
@@ -2168,11 +2169,11 @@ fn expand_route_pattern(pattern: &str) -> String {
 
 // ─── static SPA mount (`ironclaw_webui_v2`) ────────────────────
 //
-// The composition mounts the embedded SPA bundle under `/v2`. These
-// tests drive that mount through the same composed router production
-// uses, so a regression that drops the `.nest("/v2", ...)` call (or
-// that accidentally routes the SPA through the bearer-auth middleware)
-// fails here. Per `.claude/rules/testing.md` ("Test Through the
+// The composition mounts the embedded SPA bundle at the gateway root. These
+// tests drive that mount through the same composed router production uses, so
+// a regression that drops the static router (or accidentally routes the SPA
+// through the bearer-auth middleware) fails here. Per
+// `.claude/rules/testing.md` ("Test Through the
 // Caller") — the standalone router test in `ironclaw_webui_v2`
 // does not exercise the composition seam, so this layer needs its
 // own coverage.
@@ -2184,7 +2185,7 @@ async fn static_root_serves_index_with_substituted_csp_nonce() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/v2/")
+                .uri("/")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -2214,19 +2215,138 @@ async fn static_root_does_not_require_bearer_auth() {
     let (app, _) = build_app();
     // No Authorization header at all — anonymous fetch of the SPA shell
     // must succeed. The bearer-auth middleware is only attached to the
-    // v2 JSON routes via `route_layer`, so the static `.nest("/v2", …)`
-    // mount escapes it by design.
+    // v2 JSON routes via `route_layer`, so the root static router escapes it
+    // by design.
     let response = app
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/v2/")
+                .uri("/")
                 .body(Body::empty())
                 .expect("request"),
         )
         .await
         .expect("oneshot");
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn legacy_v2_urls_redirect_to_root_without_losing_query_data() {
+    let (app, _) = build_app();
+    for (source, target) in [
+        ("/v2", "/"),
+        ("/v2/", "/"),
+        (
+            "/v2/settings/skills?token=old%2Btoken&tab=installed",
+            "/settings/skills?token=old%2Btoken&tab=installed",
+        ),
+        ("/v2?login_ticket=ticket%2B1", "/?login_ticket=ticket%2B1"),
+        ("/v2//evil.example?keep=1", "/evil.example?keep=1"),
+        (r"/v2/\evil.example", "/evil.example"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(source)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(
+            response.status(),
+            StatusCode::TEMPORARY_REDIRECT,
+            "GET {source}",
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some(target),
+            "GET {source}",
+        );
+    }
+}
+
+#[tokio::test]
+async fn root_static_mount_keeps_server_namespaces_fail_closed() {
+    let (app, _) = build_app();
+    for (method, path) in [
+        (Method::GET, "/api/not-a-route"),
+        (Method::POST, "/api/not-a-route"),
+        (Method::GET, "/auth/not-a-route"),
+        (Method::POST, "/auth/not-a-route"),
+        (Method::GET, "/v1/not-a-route"),
+        (Method::POST, "/v1/not-a-route"),
+        (Method::GET, "/webhooks/not-a-route"),
+        (Method::POST, "/webhooks/not-a-route"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method.clone())
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
+    }
+}
+
+#[tokio::test]
+async fn root_manifest_and_wallet_popup_are_served_with_owned_contracts() {
+    let (app, _) = build_app();
+    let manifest_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/assets/site.webmanifest")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(manifest_response.status(), StatusCode::OK);
+    assert_eq!(
+        manifest_response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/manifest+json"),
+    );
+    let manifest = read_body_string(manifest_response).await;
+    let manifest: serde_json::Value =
+        serde_json::from_str(&manifest).expect("embedded manifest must be valid JSON");
+    assert_eq!(manifest["id"], "/v2/");
+    assert_eq!(manifest["start_url"], "/");
+    assert_eq!(manifest["scope"], "/");
+
+    let wallet_response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/wallet/connect")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(wallet_response.status(), StatusCode::OK);
+    let wallet_csp = wallet_response
+        .headers()
+        .get(header::CONTENT_SECURITY_POLICY)
+        .and_then(|value| value.to_str().ok())
+        .expect("wallet popup CSP");
+    assert!(wallet_csp.contains("script-src 'self' 'unsafe-inline' https:"));
+    let wallet_body = read_body_string(wallet_response).await;
+    assert!(wallet_body.contains("src=\"/wallet-connect.js\""));
 }
 
 #[tokio::test]
@@ -2237,7 +2357,7 @@ async fn static_js_asset_returns_javascript_content_type() {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri("/v2/")
+                    .uri("/")
                     .body(Body::empty())
                     .expect("request"),
             )
@@ -2362,7 +2482,7 @@ async fn static_css_asset_returns_text_css_content_type() {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri("/v2/")
+                    .uri("/")
                     .body(Body::empty())
                     .expect("request"),
             )
@@ -2469,7 +2589,7 @@ async fn static_unknown_extension_path_returns_404() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/v2/missing-asset.bin")
+                .uri("/missing-asset.bin")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -2480,16 +2600,16 @@ async fn static_unknown_extension_path_returns_404() {
 
 #[tokio::test]
 async fn static_client_side_route_falls_back_to_spa_shell() {
-    // Any `/v2/<no-dot-segment>` path that does not match an asset
+    // Any root-level no-dot path that does not match an asset
     // returns the SPA shell so react-router can render the right
-    // view. Without this, a hard refresh on `/v2/chat/<id>` would
+    // view. Without this, a hard refresh on `/chat/<id>` would
     // 404 instead of resuming the chat view.
     let (app, _) = build_app();
     let response = app
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/v2/chat/some-thread-id")
+                .uri("/chat/some-thread-id")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -2516,7 +2636,7 @@ async fn static_root_emits_a_fresh_nonce_per_request() {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri("/v2/")
+                    .uri("/")
                     .body(Body::empty())
                     .expect("request"),
             )
@@ -2528,7 +2648,7 @@ async fn static_root_emits_a_fresh_nonce_per_request() {
         app.oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/v2/")
+                .uri("/")
                 .body(Body::empty())
                 .expect("request"),
         )
