@@ -99,6 +99,10 @@ class LaneReport:
     provider: str
     passed: int = 0
     failed: int = 0
+    contract_passed: int = 0
+    contract_total: int = 0
+    behavioral_passed: int = 0
+    behavioral_total: int = 0
     warnings: int = 0
     inconclusive: int = 0
     skipped: int = 0
@@ -192,9 +196,14 @@ def parse_junit(path: Path, report: LaneReport) -> None:
     except ET.ParseError:
         return
     for ts in root.iter("testsuite"):
-        report.tests += int(ts.get("tests", 0) or 0)
-        report.failed += int(ts.get("failures", 0) or 0) + int(ts.get("errors", 0) or 0)
-        report.skipped += int(ts.get("skipped", 0) or 0)
+        tests = int(ts.get("tests", 0) or 0)
+        failed = int(ts.get("failures", 0) or 0) + int(ts.get("errors", 0) or 0)
+        skipped = int(ts.get("skipped", 0) or 0)
+        report.tests += tests
+        report.failed += failed
+        report.skipped += skipped
+        report.contract_total += tests
+        report.contract_passed += max(tests - failed - skipped, 0)
         report.duration_s += float(ts.get("time", 0.0) or 0.0)
     report.passed = max(report.tests - report.failed - report.skipped, 0)
     for tc in root.iter("testcase"):
@@ -237,10 +246,19 @@ def parse_results_json(path: Path, report: LaneReport) -> None:
             continue
         report.structured_results = True
         report.tests += 1
+        classification = _normalize_result_classification(entry)
+        if not classification.inconclusive:
+            if classification.tier == "behavioral":
+                report.behavioral_total += 1
+                if entry.get("success"):
+                    report.behavioral_passed += 1
+            else:
+                report.contract_total += 1
+                if entry.get("success"):
+                    report.contract_passed += 1
         if entry.get("success"):
             report.passed += 1
         else:
-            classification = _normalize_result_classification(entry)
             name = (
                 f"{entry.get('provider', '?')}/{entry.get('mode', '?')}"
             )
@@ -862,6 +880,30 @@ def _has_blocking_failure(report: LaneReport) -> bool:
     return not report.structured_results and report.status == "fail"
 
 
+def _tier_health_lines(report: LaneReport) -> list[str]:
+    lines: list[str] = []
+    if report.contract_total:
+        lines.append(
+            f"Contracts: {report.contract_passed}/{report.contract_total} passed"
+        )
+    if report.behavioral_total:
+        warnings = report.behavioral_total - report.behavioral_passed
+        suffix = (
+            f", {warnings} warning{'s' if warnings != 1 else ''}"
+            if warnings
+            else ""
+        )
+        lines.append(
+            "Behavioral quality: "
+            f"{report.behavioral_passed}/{report.behavioral_total} passed{suffix}"
+        )
+    if report.inconclusive:
+        lines.append(
+            f"Infrastructure/preconditions: {report.inconclusive} inconclusive"
+        )
+    return lines
+
+
 def slack_payload(
     reports: list[LaneReport],
     run_url: str | None,
@@ -896,15 +938,36 @@ def slack_payload(
         )
     for r in reports:
         renders_reborn_qa_groups = bool(r.reborn_qa_cases)
-        header_line = (
-            f"{emoji.get(r.status, ':grey_question:')} *{r.lane}* ({r.provider}) — "
-            f"{r.passed}/{r.tests} passed, {r.failed} failed in {r.duration_s:.0f}s"
+        tier_health_lines = (
+            _tier_health_lines(r) if renders_reborn_qa_groups else []
         )
-        if r.warnings:
-            header_line += f", {r.warnings} warning{'s' if r.warnings != 1 else ''}"
-        if r.inconclusive:
-            header_line += f", {r.inconclusive} inconclusive"
-        lines = [header_line]
+        if tier_health_lines:
+            header_line = (
+                f"{emoji.get(r.status, ':grey_question:')} *{r.lane}* "
+                f"({r.provider}) — {r.status} in {r.duration_s:.0f}s"
+            )
+            execution_detail = (
+                f"Execution detail: {r.passed} succeeded of {r.tests}, "
+                f"{r.failed} failed"
+            )
+            if r.warnings:
+                execution_detail += (
+                    f", {r.warnings} warning{'s' if r.warnings != 1 else ''}"
+                )
+            lines = [header_line, *tier_health_lines, execution_detail]
+        else:
+            header_line = (
+                f"{emoji.get(r.status, ':grey_question:')} *{r.lane}* "
+                f"({r.provider}) — {r.passed}/{r.tests} passed, "
+                f"{r.failed} failed in {r.duration_s:.0f}s"
+            )
+            if r.warnings:
+                header_line += (
+                    f", {r.warnings} warning{'s' if r.warnings != 1 else ''}"
+                )
+            if r.inconclusive:
+                header_line += f", {r.inconclusive} inconclusive"
+            lines = [header_line]
         # Rich failure block: shown when Haiku populated the diagnostic
         # fields. The shape mirrors the issue-friendly format reviewers
         # asked for so a Slack reader can paste it straight into a
@@ -1121,6 +1184,10 @@ def github_comment_body(
                     "",
                 ]
             )
+            detail_lines.extend(
+                f"- {line}" for line in _tier_health_lines(r)
+            )
+            detail_lines.append("")
             detail_lines.extend(_markdown_reborn_case_lines(r.reborn_qa_cases, run_url))
         elif r.status == "fail":
             detail_lines.extend(

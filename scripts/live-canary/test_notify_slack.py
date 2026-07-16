@@ -104,6 +104,41 @@ def _trace_json(tool_calls: list[dict]) -> str:
     )
 
 
+def result_entry(
+    case: str,
+    success: bool,
+    case_tier: str | None,
+    blocking: bool | None,
+    *,
+    failure_class: str = "product",
+    failure_status: str = "failed",
+) -> dict:
+    details = {
+        "case": case,
+        "qa_rows": [case],
+        "feature": case.replace("_", " "),
+    }
+    if case_tier is not None:
+        details["case_tier"] = case_tier
+    if blocking is not None:
+        details["blocking"] = blocking
+    if not success:
+        details.update(
+            {
+                "failure_class": failure_class,
+                "failure_status": failure_status,
+                "error": f"{case} did not pass",
+            }
+        )
+    return {
+        "provider": "reborn-webui-v2",
+        "mode": f"live:{case}",
+        "success": success,
+        "latency_ms": 1,
+        "details": details,
+    }
+
+
 class ParseSummaryStatusTests(unittest.TestCase):
     def test_zero_status_means_pass(self):
         self.assertEqual(
@@ -277,6 +312,118 @@ class RebornQaSlackReportTests(unittest.TestCase):
         for case, expected in cases:
             with self.subTest(case=case.case):
                 self.assertEqual(notify._case_outcome(case), expected)
+
+    def test_report_separates_contract_health_from_behavioral_warnings(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lane_dir = (
+                Path(tmpdir)
+                / "reborn-webui-v2-live-qa"
+                / "reborn-webui-v2"
+                / "run"
+            )
+            lane_dir.mkdir(parents=True)
+            entries = [
+                result_entry("contract_a", True, "contract", True),
+                result_entry("contract_b", True, "contract", True),
+                result_entry("behavior_a", True, "behavioral", False),
+                result_entry("behavior_b", False, "behavioral", False),
+                result_entry("behavior_c", False, "behavioral", False),
+            ]
+            (lane_dir / "results.json").write_text(
+                json.dumps({"results": entries}),
+                encoding="utf-8",
+            )
+            report = notify.collect_lane(lane_dir)
+
+        self.assertEqual((report.contract_passed, report.contract_total), (2, 2))
+        self.assertEqual((report.behavioral_passed, report.behavioral_total), (1, 3))
+        self.assertEqual(report.status, "warn")
+        slack = json.dumps(notify.slack_payload([report], None, None))
+        github = notify.github_comment_body([report], None, None)
+        for rendered in (slack, github):
+            self.assertIn("Contracts: 2/2 passed", rendered)
+            self.assertIn(
+                "Behavioral quality: 1/3 passed, 2 warnings",
+                rendered,
+            )
+            self.assertNotIn("3/5 passed", rendered)
+
+    def test_infrastructure_results_do_not_increment_tier_totals(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lane_dir = (
+                Path(tmpdir)
+                / "reborn-webui-v2-live-qa"
+                / "reborn-webui-v2"
+                / "run"
+            )
+            lane_dir.mkdir(parents=True)
+            infrastructure = result_entry(
+                "missing_precondition",
+                False,
+                "contract",
+                True,
+                failure_class="infrastructure",
+                failure_status="inconclusive",
+            )
+            (lane_dir / "results.json").write_text(
+                json.dumps({"results": [infrastructure]}),
+                encoding="utf-8",
+            )
+            report = notify.collect_lane(lane_dir)
+
+        self.assertEqual((report.contract_passed, report.contract_total), (0, 0))
+        self.assertEqual((report.behavioral_passed, report.behavioral_total), (0, 0))
+        self.assertEqual(report.failed, 0)
+        self.assertEqual(report.warnings, 0)
+        self.assertEqual(report.inconclusive, 1)
+        self.assertEqual(report.status, "inconclusive")
+        self.assertEqual(
+            notify._tier_health_lines(report),
+            ["Infrastructure/preconditions: 1 inconclusive"],
+        )
+
+    def test_untyped_failures_fail_closed_into_contract_tier_totals(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lane_dir = (
+                Path(tmpdir)
+                / "reborn-webui-v2-live-qa"
+                / "reborn-webui-v2"
+                / "run"
+            )
+            lane_dir.mkdir(parents=True)
+            untyped = result_entry("legacy_failure", False, None, None)
+            for key in ("failure_class", "failure_status"):
+                untyped["details"].pop(key)
+            (lane_dir / "results.json").write_text(
+                json.dumps({"results": [untyped]}),
+                encoding="utf-8",
+            )
+            report = notify.collect_lane(lane_dir)
+
+        self.assertEqual((report.contract_passed, report.contract_total), (0, 1))
+        self.assertEqual((report.behavioral_passed, report.behavioral_total), (0, 0))
+        self.assertEqual(report.failed, 1)
+        self.assertEqual(report.status, "fail")
+
+    def test_junit_results_populate_contract_tier_totals(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lane_dir = Path(tmpdir) / "auth-smoke" / "mock" / "run"
+            lane_dir.mkdir(parents=True)
+            (lane_dir / "auth-canary-junit.xml").write_text(
+                """\
+<testsuites>
+  <testsuite tests="2" failures="1" errors="0" skipped="0" time="0.2">
+    <testcase name="passes" />
+    <testcase name="fails"><failure message="nope" /></testcase>
+  </testsuite>
+</testsuites>
+""",
+                encoding="utf-8",
+            )
+            report = notify.collect_lane(lane_dir)
+
+        self.assertEqual((report.contract_passed, report.contract_total), (1, 2))
+        self.assertEqual((report.behavioral_passed, report.behavioral_total), (0, 0))
 
     def test_empty_structured_results_do_not_mask_summary_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:
