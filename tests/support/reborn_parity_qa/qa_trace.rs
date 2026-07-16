@@ -455,7 +455,9 @@ pub async fn send_qa_phrase(runtime: &RebornRuntime, phrase: &str) -> AssistantR
 fn live_credentials_for_fixture(fixture_name: &str) -> &'static [&'static LiveCredentialSeed] {
     match fixture_name {
         "routine_meeting_prep" | "routine_crm_inbox" => &[&GOOGLE_LIVE_CREDENTIAL],
-        "triage_ci_holonear" => &[&GITHUB_LIVE_CREDENTIAL],
+        "investigate_ci_job" => &[&GITHUB_LIVE_CREDENTIAL],
+        // `github_notifications` deliberately seeds no credential: the scenario
+        // exercises the unauthenticated onboarding / auth-gate path.
         _ => &[],
     }
 }
@@ -1556,7 +1558,10 @@ fn assert_recorded_fixture_matches_expected_result(
     outcome: &RebornTurnDriveOutcome,
 ) {
     let trace = load_recorded_trace_from_path(fixture_path);
-    let requires_terminal_reply = !matches!(fixture_name, "connect_gmail");
+    // `github_notifications` (like `connect_gmail`) exercises an unauthenticated
+    // onboarding path that legitimately ends at an auth gate rather than a
+    // completed action, so it is not required to finalize a terminal reply.
+    let requires_terminal_reply = !matches!(fixture_name, "connect_gmail" | "github_notifications");
     if requires_terminal_reply {
         match outcome {
             RebornTurnDriveOutcome::Terminal(reply) if reply.is_successful_final_reply() => {}
@@ -1587,13 +1592,13 @@ fn assert_recorded_fixture_matches_expected_result(
     }
 
     match fixture_name {
-        "triage_ci_holonear" => {
-            // The scenario's contract: the agent *triaged* the failing CI by
-            // reading a failing GitHub Actions job's logs via the first-party
-            // `github.get_job_logs` capability (the token is injected as a Bearer
-            // header at the api.github.com egress boundary, then stripped on the
-            // cross-host redirect to blob storage), and proposed a fix in its
-            // final reply — without pushing any change to the pull request.
+        "investigate_ci_job" => {
+            // The scenario's contract: the agent investigated one specific,
+            // already-completed GitHub Actions job by reading its logs via the
+            // first-party `github.get_job_logs` capability (the token is injected
+            // as a Bearer header at the api.github.com egress boundary, then
+            // stripped on the cross-host redirect to blob storage), and explained
+            // the root cause in its final reply — without pushing any change.
             assert_recorded_tool_call(
                 fixture_name,
                 fixture_path,
@@ -1603,10 +1608,31 @@ fn assert_recorded_fixture_matches_expected_result(
             );
             assert!(
                 !recorded_trace_has_tool_call(&trace, "github.create_or_update_file", &[]),
-                "triage fixture {fixture_name:?} must not commit a fix (github.create_or_update_file); \
-                 the contract is triage + proposed fix only. Recorded calls: {:#?}; trace flushed to {}",
+                "investigation fixture {fixture_name:?} must not commit a fix \
+                 (github.create_or_update_file); the contract is investigate + proposed fix only. \
+                 Recorded calls: {:#?}; trace flushed to {}",
                 recorded_tool_calls(&trace),
                 fixture_path.display()
+            );
+        }
+        "github_notifications" => {
+            // No credential is seeded, so the agent should onboard the github
+            // extension (install + activate) and reach the auth gate rather than
+            // silently give up. The onboarding tool choices are the guardrail;
+            // the outcome may be an auth gate or an onboarding reply.
+            assert_recorded_tool_call(
+                fixture_name,
+                fixture_path,
+                &trace,
+                "builtin.extension_install",
+                &["github"],
+            );
+            assert_recorded_tool_call(
+                fixture_name,
+                fixture_path,
+                &trace,
+                "builtin.extension_activate",
+                &["github"],
             );
         }
         "connect_gmail" => {
