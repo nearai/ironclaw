@@ -353,6 +353,12 @@ ironclaw_wasm = { path = "crates/ironclaw_wasm", version = "0.1.0" }
 ironclaw_embeddings = { path = "crates/ironclaw_embeddings", version = "0.1.0", features = ["testing"] }
 # Named `#[case]` parametrization for the storage-backend matrix tests (slice 3).
 rstest = "0.23"
+# B2.13 gate-seam int test: the Reborn TUI's `ApiClient` (real reqwest HTTP +
+# SSE) drives a real bound `webui_v2_app` listener end-to-end.
+ironclaw_reborn_tui = { path = "crates/ironclaw_reborn_tui", version = "0.1.0" }
+# `EnvBearerAuthenticator` for the same test — the real bearer-auth impl
+# `webui_v2_app` composes against, matching what `ironclaw-reborn serve` uses.
+ironclaw_reborn_webui_ingress = { path = "crates/ironclaw_reborn_webui_ingress", version = "0.1.0" }
 
 [features]
 default = ["postgres", "libsql", "html-to-markdown", "tui"]
@@ -584,6 +590,10 @@ path = "tests/integration/tracecap.rs"
 [[test]]
 name = "reborn_integration_triggered_submit"
 path = "tests/integration/triggered_submit.rs"
+
+[[test]]
+name = "reborn_integration_tui_gate_seam"
+path = "tests/integration/tui_gate_seam.rs"
 
 [[test]]
 name = "reborn_integration_web_access"
