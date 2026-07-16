@@ -1,7 +1,7 @@
 //! One-row status bar: priority-ordered segments folded to fit the
 //! available width. Priority (highest to lowest, per the design): a
-//! working spinner+elapsed indicator, connection state, thread name,
-//! provider/model, global keybinding hints.
+//! last-local-error banner, a working spinner+elapsed indicator,
+//! connection state, thread name, provider/model, global keybinding hints.
 //!
 //! `AppState` (as landed in `app/mod.rs`) does not carry an elapsed-time
 //! field or an active-provider/model field — those only exist transiently
@@ -32,12 +32,21 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
 fn build_segments(state: &AppState) -> Vec<(String, Style)> {
     let mut segments = Vec::new();
 
-    // Priority 1: working spinner (elapsed omitted — see module doc).
+    // Priority 1 (highest): the last local error, so a failed API call
+    // (`list_threads`/`send_message`/`resolve_gate`/etc., set via
+    // `lib.rs`'s `state.last_local_error = Some(...)`) is never silently
+    // invisible. The `⚠` marker keeps it visually distinct from the plain
+    // status segments even in a color-stripped terminal/test buffer.
+    if let Some(err) = &state.last_local_error {
+        segments.push((format!("⚠ error: {err}"), Style::default().fg(Color::Red)));
+    }
+
+    // Priority 2: working spinner (elapsed omitted — see module doc).
     if state.is_running() {
         segments.push(("working…".to_string(), Style::default().fg(Color::Yellow)));
     }
 
-    // Priority 2: connection state (only shown when not the default
+    // Priority 3: connection state (only shown when not the default
     // Connected — a healthy connection has nothing to say here).
     match state.conn {
         ConnState::Connected => {}
@@ -50,7 +59,7 @@ fn build_segments(state: &AppState) -> Vec<(String, Style)> {
         }
     }
 
-    // Priority 3: thread name.
+    // Priority 4: thread name.
     if let Some(thread_id) = &state.thread_id {
         segments.push((
             format!("thread: {thread_id}"),
@@ -58,10 +67,10 @@ fn build_segments(state: &AppState) -> Vec<(String, Style)> {
         ));
     }
 
-    // Priority 4 (provider/model) intentionally omitted: no AppState field
+    // Priority 5 (provider/model) intentionally omitted: no AppState field
     // carries the active provider/model today (see module doc).
 
-    // Priority 5 (lowest): global keybinding hints, so it's the first thing
+    // Priority 6 (lowest): global keybinding hints, so it's the first thing
     // dropped on a narrow terminal. Context-aware: while a run is active,
     // `Esc stop` (this crate's cancel binding — `app/mod.rs`'s
     // `dispatch_composer_key`) leads the hint, since it's the one action a
@@ -166,6 +175,31 @@ mod tests {
         assert!(content.contains("automations"));
         assert!(content.contains("providers"));
         assert!(content.contains("quit"));
+    }
+
+    #[test]
+    fn last_local_error_renders_as_a_visually_distinct_segment() {
+        let state = AppState::default().set_last_local_error(Some("boom"));
+        let content = draw(&state, 80, 1);
+        assert!(
+            content.contains("boom"),
+            "error text must be visible: {content}"
+        );
+        assert!(
+            content.contains('⚠'),
+            "error segment must carry a distinct marker: {content}"
+        );
+    }
+
+    #[test]
+    fn no_local_error_renders_no_error_segment() {
+        let state = AppState::default();
+        let content = draw(&state, 80, 1);
+        assert!(!content.contains("boom"));
+        assert!(
+            !content.contains('⚠'),
+            "no error present, so no error marker should render: {content}"
+        );
     }
 
     #[test]
