@@ -20,13 +20,14 @@ The implementation clones the proven `crates/ironclaw_reborn_composition/src/sla
 2. **Transport:** webhook only. IronClaw calls `setWebhook` itself on admin save; verifies `X-Telegram-Bot-Api-Secret-Token` on every inbound. No long-polling in v1.
 3. **Scope:** DMs only. Group messages, `channel_post`, edited messages, inline queries are ignored/fail closed. Unpaired DM fails closed with a static pairing hint.
 4. **Approach:** Slack-shaped composition module, **single `telegram` extension** (no hidden `telegram_bot` companion), target-shaped naming, #6116 webhook path, pairing resumed via the existing `BlockedAuth` fanout.
+5. **Legacy scope:** Reborn-scoped purge. Every legacy-shaped Telegram artifact in the Reborn context is rewritten or removed as part of this feature (see §8); the v1 monolith implementation keeps working until the monolith itself retires (tracked follow-up under the roadmap's "Clean up old architecture"), and the v1/v2 exclusivity guard survives as the collision arbiter while both exist.
 
 ## Non-goals (v1)
 
 - No `telegram.*` tools, no acting on the user's behalf (no MTProto/link-device). A negative test pins the empty tool surface.
 - No group-chat routing/admission, no admin subject-routes for Telegram.
 - No long-poll transport, no QR pairing, no bot-issues-code direction.
-- No changes to the v1 monolith Telegram WASM channel (`channels-src/telegram/`); the existing v1↔v2 exclusivity guard (`REBORN_TELEGRAM_V2_ENABLED`) stays as-is for v1-monolith installs. The reborn binary never runs v1 channels.
+- No behavioral changes to the v1 monolith Telegram (`channels-src/telegram/`, `tools-src/telegram/`, v1 pairing machinery) — it keeps working until the monolith retires; deleting it rides that retirement, not this feature. The v1↔v2 exclusivity guard (`REBORN_TELEGRAM_V2_ENABLED`) is retained and re-pointed at the new implementation (§8). The reborn binary never runs v1 channels. Legacy-shaped Telegram code *inside the Reborn context* is NOT exempt — §8 removes it.
 - No multi-bot / multi-workspace support (one bot per deployment; Slack has the same single-installation shape).
 
 ## 1. Identity & naming (the porting contract's foundation)
@@ -131,13 +132,35 @@ All pairing state in telegram host state (`/tenant-shared/telegram-pairing/`). T
 
 **Gates to respect now** (so the fold is mechanical): no retired-taxonomy names in anything new; no `telegram` strings outside the telegram module/crates/inventory (mirror the specificity-gate exemption boundaries even though the gate itself isn't on main).
 
-## 8. Feature flag & config
+## 8. Legacy retirement (Reborn scope)
+
+After this feature, the Reborn context — `crates/**`, the webui_v2 frontend, `docs/reborn/**`, `tests/integration/` + reborn-tier root tests, and the reborn live-QA/canary scripts — contains exactly **one** Telegram model: this one. Disposition of the existing Telegram-touching artifacts:
+
+**Rewritten as part of this feature:**
+
+| Artifact | Disposition |
+|---|---|
+| webui_v2 v1-pairing UI (`pages/extensions/lib/pairing-api.ts`, `pairing-section.tsx` + test, `chat/components/onboarding-pairing-card.tsx` + test, `useExtensions-pairing.test.ts`, telegram paths in `useChannelOnboarding.ts`) | Replaced by the WebGeneratedCode pairing panel + its tests. **Caveat (verify at planning):** these components may also serve v1-mounted webui_v2 flows (`test_reborn_webui_v2_legacy_extensions.py` suggests dual hosting). If a v1 consumer exists, the legacy components stay only for that consumer, clearly quarantined, and no reborn path routes to them; if reborn-only, they are deleted. |
+| `docs/reborn/contracts/telegram-v2.md` | Rewritten to the shipped contract (single extension, admin setup, WebGeneratedCode pairing, DM-only). Per house pattern it names its test file + run command and is wired into `scripts/reborn-e2e-rust.sh`. |
+| `tests/telegram_v2_default_off_integration.rs` | Replaced by a new-model gating test: the `telegram-v2-host-beta` feature/default posture, and the exclusivity guard still blocking v1 telegram activation when the reborn channel owns the bot. |
+| Telegram legs in `tests/reborn_qa_connect_flows.rs`, `tests/staging_regression_fixes.rs`, `crates/ironclaw_reborn_composition/tests/webui_v2_serve.rs`, `crates/ironclaw_webui_v2/tests/webui_v2_handlers_contract.rs` | Rewritten to the new model (pairing connect action, `WebGeneratedCode` strategy payloads). |
+| Stale `telegram` references in composition (`extension_host/extension_removal_cleanup.rs`, `extension_host/extension_lifecycle.rs`, `outbound/outbound_preferences.rs`, `root/communication_context.rs`, mention in `slack/slack_actor_identity.rs`) | Reconciled into the new `telegram/**` module — no orphaned pre-feature hooks left behind. |
+| `scripts/reborn_webui_v2_live_qa/` telegram cases; `scripts/live-canary` / `scripts/live_canary` telegram registry entries | Updated to drive the new model (admin setup + pairing), becoming its live proof. |
+| Telegram-flavored logic in shared reborn crates (`ironclaw_common/src/{platform,event,attachment,identity}.rs`, `ironclaw_product_adapter_registry` fixtures, `ironclaw_wasm_product_adapters` examples) | Inventoried at planning: doc-comments/examples stay; any v1-behavior-bearing logic is aligned to the new model. |
+
+**Kept (v1 monolith, out of scope, removed with monolith retirement):** `channels-src/telegram/`, `tools-src/telegram/` (MTProto), `registry/{channels,tools}/telegram*`, `src/channels/wasm/telegram_host_config.rs` + v1 WASM host paths, v1 pairing machinery (`src/pairing/`, `/api/pairing/{channel}`, `ironclaw pairing` CLI), v1 telegram tests (Rust + Python e2e + `fake_telegram_api.py`), `scripts/telegram_smoke/`, `workflow_canary` v1 telegram scenarios, user-facing v1 docs (`docs/channels/telegram.mdx`, translations).
+
+**Exclusivity guard:** `REBORN_TELEGRAM_V2_ENABLED` + `validate_telegram_v1_v2_exclusivity()` are retained with the env name unchanged (config compat); their documented meaning becomes "the reborn Telegram channel owns the bot — v1 telegram must not activate." Comments/docs updated; a new-model test pins the arbitration.
+
+**No-legacy gate:** planning adds a mechanical check (arch-tier test or CI grep) asserting reborn-context files reference no v1 pairing routes (`/api/pairing/`), no v1 telegram config keys (`wasm_channel_owner_ids`-era), and no bot-issues-code pairing flow — so legacy can't creep back in ahead of the #6116 fold.
+
+## 9. Feature flag & config
 
 - New cargo feature `telegram-v2-host-beta` on `ironclaw_reborn_composition` (module gate + `lib.rs` re-exports) and `ironclaw_reborn_cli` (serve wiring), **declared in every workspace manifest that references it** and threaded through CI aggregate jobs, reborn-e2e, live-canary, and the QA runner flag sets — the S1 merge-hygiene lesson: no undeclared features.
 - Serve wiring mirrors `serve.rs` lines ~497–619 + `serve_slack.rs`: build telegram mounts, install facades (connectable channels, channel connection), `with_public_route_mount(telegram_mounts.events)`, `with_telegram_channel_routes(...)`, register the outbound delivery target provider.
 - Public base URL: required for `setWebhook`; sourced from the existing deployment public-origin config (same as OAuth callbacks), overridable per §2. Absent ⇒ admin save fails closed with a precise message.
 
-## 9. Testing & QA deliverable
+## 10. Testing & QA deliverable
 
 **First artifact: manual QA journey** — new journey **"Use IronClaw in Telegram"** in `~/ironclaw-manual-qa` (manifest.json + validator totals bumped + re-rendered), mirroring the Slack journey's pack structure (~10 packs, ~55–65 tests):
 
@@ -156,7 +179,7 @@ Plus rewrite the 3 stale Telegram tests in `connect-and-use-other-integrations/t
 
 **Repo-side (implementation phase, test-first per `.claude/rules/testing.md`):** red-first `tests/integration/` coverage driven through the harness at real seams — webhook → verified ingress → turn; pairing consume → binding → `BlockedAuth` resume; unpaired fail-closed; honest delivery statuses; restart survival through reopened stores; admin save rollback on activation failure. Consolidate into the channel-lifecycle test shapes from #6105/#6113 rather than proliferating new files. Crate-tier only where the integration tier can't reach (justify in the PR).
 
-## 10. Implementation map
+## 11. Implementation map
 
 **New (all additive, feature-gated):**
 
@@ -180,7 +203,7 @@ Plus rewrite the 3 stale Telegram tests in `connect-and-use-other-integrations/t
 
 **Reference files** (read before implementing): `slack_serve.rs`, `slack_host_beta/runtime_setup.rs`, `slack_setup.rs`, `slack_channel_routes/setup.rs`, `slack_actor_identity.rs`, `slack_personal_binding.rs`, `slack_connectable_channel.rs`, `slack_channel_connection.rs`, `slack_host_state.rs`, `conversation_binding.rs`, `blocked_auth_resume.rs`, `extension_lifecycle_capabilities.rs`, `ironclaw_wasm_product_adapters/src/{runner_immediate_ack,auth_verifier}.rs`, `serve.rs`/`serve_slack.rs`, `channels-tab.tsx`, `docs/reborn/contracts/telegram-v2.md`, and `f8e7c72c3:crates/ironclaw_first_party_extensions/assets/telegram/manifest.toml`.
 
-## 11. Planning-time verifications (pin before building)
+## 12. Planning-time verifications (pin before building)
 
 1. **Gate seam for channel connection**: confirm how in-chat `extension_activate` should park the run for an unpaired channel caller — extend `activation_credential_requirements` to include the channel-connection requirement (provider `telegram`) vs a parallel connection gate. Must end as `TurnStatus::BlockedAuth` + fanout-resumable. (Today Slack surfaces `connection_required` on activate results; the credential gate is a separate error path.)
 2. **Continuation event for pairing**: confirm `AuthContinuationEvent` (or the dispatcher entry point) can be emitted by a non-OAuth completion with provider `telegram` and `AuthContinuationRef::SetupOnly`/`LifecycleActivation` — the fanout itself is provider-keyed and agnostic.
@@ -189,6 +212,8 @@ Plus rewrite the 3 stale Telegram tests in `connect-and-use-other-integrations/t
 5. **Idempotency seam** for duplicate `update_id` (what exactly dedups Slack retries today — workflow-level accepted-message idempotency vs runner-level).
 6. **Existing `telegram` references** in composition (`extension_removal_cleanup.rs`, `slack_actor_identity.rs`, `outbound_preferences.rs`, `communication_context.rs`) — reconcile rather than duplicate.
 7. **Where `RebornChannelConnectAction` needs extension** — current shape is input-oriented (`input_placeholder`/`submit_label`); the WebGeneratedCode panel needs code + link + expiry + status fields (additive DTO change in `reborn_services/types.rs` + webui contract test).
+8. **webui_v2 v1-pairing component consumers** — determine whether `pairing-section`/`onboarding-pairing-card`/`pairing-api` serve v1-mounted webui_v2 (the `test_reborn_webui_v2_legacy_*` suites suggest dual hosting) before choosing delete vs quarantine (§8).
+9. **Shared-crate telegram references** — classify every `telegram` hit in `ironclaw_common`, `ironclaw_product_adapter_registry`, `ironclaw_wasm_product_adapters` as doc-example (keep) vs behavior (align), per §8's inventory rule.
 
 ## Appendix: exploration provenance
 
