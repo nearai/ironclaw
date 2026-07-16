@@ -9,6 +9,7 @@ use std::fmt;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
+pub mod gates;
 pub mod threads;
 
 pub use threads::{ThreadMessageSummary, ThreadSummary, TimelinePage};
