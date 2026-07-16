@@ -6,6 +6,7 @@ import { Button } from "../../../design-system/button";
 import { SelectMenu } from "../../../design-system/select-menu";
 import { useAdminUserDetail, useAdminUsers } from "../hooks/useAdminUsers";
 import { useUsage } from "../hooks/useAdminUsage";
+import { UserSecretsPanel } from "./user-secrets-panel";
 import {
   formatRelativeTime,
   formatCost,
@@ -154,6 +155,8 @@ export function UserDetail({ userId, onBack }) {
           </Button>
         </div>
       </Panel>
+
+      <UserSecretsPanel key={user.id} userId={user.id} />
 
       <Panel className="p-5 sm:p-6">
         <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("admin.user.usage30Days")}</h3>

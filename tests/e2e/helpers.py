@@ -241,6 +241,22 @@ SEL_V2 = {
     "admin_token_value": "code",
     "admin_token_description_text": "Copy this now — it will not be shown again.",
     "admin_create_token_button_name": "Create token",
+    "admin_user_secrets_panel": "[data-testid='admin-user-secrets-panel']",
+    "admin_secret_handle_input": "[data-testid='admin-secret-handle']",
+    "admin_secret_value_input": "[data-testid='admin-secret-value']",
+    "admin_secret_save": "[data-testid='admin-secret-save']",
+    "admin_secret_status": "[data-testid='admin-secret-status']",
+    "admin_secret_row_for": (
+        "[data-testid='admin-secret-row'][data-secret-handle='{handle}']"
+    ),
+    "admin_secret_replace_for": (
+        "[data-testid='admin-secret-replace'][data-secret-handle='{handle}']"
+    ),
+    "admin_secret_delete_for": (
+        "[data-testid='admin-secret-delete'][data-secret-handle='{handle}']"
+    ),
+    "admin_secret_delete_dialog": "[data-testid='admin-secret-delete-dialog']",
+    "admin_secret_delete_confirm": "[data-testid='admin-secret-delete-confirm']",
     "sidebar":        "#gateway-sidebar",  # app navigation sidebar
     "sidebar_button": "#gateway-sidebar button",
     "thread_delete_for": (
