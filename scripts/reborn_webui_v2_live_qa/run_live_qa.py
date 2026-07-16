@@ -3030,6 +3030,10 @@ class SlackDeliveryReadbackInconclusive(RuntimeError):
         self.evidence = evidence
 
 
+class SlackDeliveryProbePrecondition(AssertionError):
+    """A fixture cannot exercise a Slack delivery assertion reliably."""
+
+
 def _trigger_run_slack_send_evidence(
     reborn_home: Path,
     *,
@@ -4911,13 +4915,13 @@ async def _slack_delivery_routine_case(
                 )
             record_count = int(record_snapshot.get("record_count") or 0)
             if record_count != 1:
-                raise AssertionError(
+                raise SlackDeliveryProbePrecondition(
                     "probe precondition failed: expected exactly one trigger "
                     f"record named {routine_name!r}, found {record_count}"
                 )
             schedule_kind = record_snapshot.get("schedule_kind")
             if schedule_kind != "once":
-                raise AssertionError(
+                raise SlackDeliveryProbePrecondition(
                     "probe precondition failed: routine is not one-shot "
                     f"(schedule_kind={schedule_kind!r})"
                 )
@@ -4927,7 +4931,7 @@ async def _slack_delivery_routine_case(
             if fire_epoch is None or not (
                 wall_started - 5.0 <= fire_epoch <= window_end
             ):
-                raise AssertionError(
+                raise SlackDeliveryProbePrecondition(
                     "probe precondition failed: one-shot fire time "
                     f"{record_snapshot.get('next_run_at')!r} is outside the "
                     f"delivery wait window (case start {wall_started:.0f}, "
@@ -4941,14 +4945,14 @@ async def _slack_delivery_routine_case(
             slack_tools_surface = await _installed_active_extension_ids(ctx)
             base_details["slack_tools_surface"] = slack_tools_surface
             if not slack_tools_surface.get("checked"):
-                raise AssertionError(
+                raise SlackDeliveryProbePrecondition(
                     "probe precondition failed: could not verify the Slack "
                     "tools surface via the extensions API: "
                     f"{slack_tools_surface.get('error')!r}"
                 )
             active_ids = slack_tools_surface.get("active_extension_ids") or []
             if "slack" not in active_ids:
-                raise AssertionError(
+                raise SlackDeliveryProbePrecondition(
                     "probe precondition failed: Slack tools extension is not "
                     "installed/active after the creation turn, so the "
                     "duplicate-delivery arm would be vacuous"
@@ -5047,7 +5051,7 @@ async def _slack_delivery_routine_case(
                         f"({channel_id}): {stray_hits!r}"
                     )
             elif sweep.get("permanent"):
-                raise AssertionError(
+                raise SlackDeliveryProbePrecondition(
                     "probe precondition failed: workspace sweep is permanently "
                     f"unavailable ({sweep.get('error')!r}); repair the personal "
                     "token (search:read scope) — without the sweep the "
@@ -5083,6 +5087,16 @@ async def _slack_delivery_routine_case(
                 "delivery_outcome": delivery.get("delivery_outcome"),
                 "slack_history": history,
                 "exactly_once": exactly_once,
+            },
+        )
+    except SlackDeliveryProbePrecondition as exc:
+        return _precondition_result(
+            case_name,
+            started,
+            {
+                **base_details,
+                "error": _exc_text(exc),
+                "failure_category": "invalid_probe_fixture",
             },
         )
     except SlackDeliveryReadbackInconclusive as exc:
@@ -8296,7 +8310,26 @@ async def run_cases(args: argparse.Namespace) -> int:
     first_base_url = ""
     for case_index, name in enumerate(selected_cases):
         case_spec = CASES[name]
-        prepared_home = prepare_reborn_home(args, [name], case_name=name)
+        prepare_started = time.monotonic()
+        try:
+            prepared_home = prepare_reborn_home(args, [name], case_name=name)
+        except LiveQaError as exc:
+            result = _precondition_result(
+                name,
+                prepare_started,
+                {
+                    "blocked": True,
+                    "error": _exc_text(exc),
+                    "preflight_stage": "prepare_reborn_home",
+                },
+            )
+            results.append(result)
+            print(
+                f"[reborn-webui-v2-live-qa] case={name} success={result.success} "
+                "blocked=prepare_reborn_home",
+                flush=True,
+            )
+            continue
         preflight_path = write_preflight(args.output_dir, prepared_home)
         case_preflight_path = args.output_dir / f"preflight.{name}.json"
         shutil.copyfile(preflight_path, case_preflight_path)
@@ -8568,10 +8601,36 @@ async def run_cases(args: argparse.Namespace) -> int:
                 )
                 if case_spec.requires_slack and isinstance(slack_preflight, dict):
                     setup_started = time.monotonic()
-                    setup_api = await _apply_slack_setup_api_after_start(
-                        base_url=base_url,
-                        prepared_home=prepared_home,
-                    )
+                    try:
+                        setup_api = await _apply_slack_setup_api_after_start(
+                            base_url=base_url,
+                            prepared_home=prepared_home,
+                        )
+                    except LiveQaError as exc:
+                        setup_error = _exc_text(exc)
+                        result = _precondition_result(
+                            name,
+                            setup_started,
+                            {
+                                "blocked": True,
+                                "error": setup_error,
+                                "preflight": {
+                                    **slack_preflight,
+                                    "setup_api": {
+                                        "applied": False,
+                                        "reason": setup_error,
+                                    },
+                                },
+                            },
+                        )
+                        results.append(result)
+                        print(
+                            f"[reborn-webui-v2-live-qa] case={name} "
+                            f"success={result.success} "
+                            "blocked=slack_setup_exception",
+                            flush=True,
+                        )
+                        continue
                     if not setup_api.get("applied"):
                         blocked_preflight = {**slack_preflight, "setup_api": setup_api}
                         result = _precondition_result(

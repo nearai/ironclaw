@@ -167,10 +167,14 @@ def _normalize_result_classification(entry: dict) -> _ResultClassification:
     failure_class = typed_string("failure_class")
     failure_category = typed_string("failure_category")
     failure_status = typed_string("failure_status")
-    inconclusive = (
-        details.get("inconclusive") is True
-        or failure_class in ("infrastructure", "precondition")
-        or failure_status == "inconclusive"
+    inconclusive = bool(
+        tier_is_valid
+        and not entry.get("success")
+        and (
+            details.get("inconclusive") is True
+            or failure_class in ("infrastructure", "precondition")
+            or failure_status == "inconclusive"
+        )
     )
     return _ResultClassification(
         tier=tier,
@@ -207,7 +211,7 @@ def parse_junit(path: Path, report: LaneReport) -> None:
         report.tests += tests
         report.failed += failed
         report.skipped += skipped
-        report.contract_total += tests
+        report.contract_total += max(tests - skipped, 0)
         report.contract_passed += max(tests - failed - skipped, 0)
         report.duration_s += float(ts.get("time", 0.0) or 0.0)
     report.passed = max(report.tests - report.failed - report.skipped, 0)
@@ -555,8 +559,10 @@ def collect_lane(lane_dir: Path) -> LaneReport | None:
         r.status = "inconclusive"
     elif r.warnings > 0:
         r.status = "warn"
-    elif r.tests > 0:
+    elif r.tests > r.skipped:
         r.status = "pass"
+    elif r.tests > 0:
+        r.status = "skip"
     else:
         # No structured counts. Fall back to the lane's exit code from
         # summary.md so summary-only lanes (private-oauth) and any lane
@@ -1190,7 +1196,7 @@ def github_comment_body(
             behavioral_health = "—"
         lines.append(
             f"| `{_github_md_code(r.lane)}` | `{_github_md_code(r.provider)}` | "
-            f"{status} {r.status} | "
+            f"{status} {_github_md_text(r.status, 80)} | "
             f"{contract_health} | {behavioral_health} | {r.inconclusive} | "
             f"{r.duration_s:.0f}s |"
         )

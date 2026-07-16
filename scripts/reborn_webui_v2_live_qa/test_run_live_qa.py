@@ -8956,6 +8956,109 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertFalse(result.details["blocking"])
         self.assertEqual(result.details["delivery_readback_evidence"], evidence)
 
+    def test_slack_delivery_routine_fixture_precondition_is_inconclusive(self):
+        async def fake_creation(_ctx, **kwargs):
+            return run_live_qa._result(
+                kwargs["case_name"],
+                True,
+                run_live_qa.time.monotonic(),
+                {"creation": "ok"},
+            )
+
+        async def fail_wait(*_args, **_kwargs):
+            raise AssertionError("delivery wait must not run after invalid fixture")
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_routine_creation_case",
+                side_effect=fake_creation,
+            ),
+            patch.object(
+                run_live_qa,
+                "_trigger_record_snapshot",
+                return_value={
+                    "checked": True,
+                    "record_count": 0,
+                    "schedule_kind": None,
+                    "next_run_at": None,
+                },
+            ),
+            patch.object(
+                run_live_qa,
+                "_wait_for_slack_delivery_marker",
+                side_effect=fail_wait,
+            ),
+        ):
+            result = asyncio.run(
+                run_live_qa._slack_delivery_routine_case(
+                    self._dummy_ctx(),
+                    case_name="qa_9b_routine_dm_delivery_exactly_once",
+                    routine_prefix="qa-9b",
+                    marker_prefix="QA_9B",
+                    routine_instruction="send the marker to Slack",
+                    required_delivery_text=["status"],
+                    expect_one_shot_schedule=True,
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertIn("probe precondition failed:", result.details["error"])
+        self.assertEqual(result.details["failure_class"], "precondition")
+        self.assertEqual(result.details["failure_status"], "inconclusive")
+        self.assertTrue(result.details["inconclusive"])
+        self.assertFalse(result.details["blocking"])
+
+    def test_slack_delivery_runtime_assertions_remain_blocking(self):
+        async def fake_creation(_ctx, **kwargs):
+            return run_live_qa._result(
+                kwargs["case_name"],
+                True,
+                run_live_qa.time.monotonic(),
+                {"creation": "ok"},
+            )
+
+        runtime_errors = (
+            "delivery marker found outside the expected DM (D_EXPECTED)",
+            "expected the delivery marker exactly once after the grace window, found 2",
+        )
+        for runtime_error in runtime_errors:
+            async def fail_wait(*_args, **_kwargs):
+                raise AssertionError(runtime_error)
+
+            with (
+                self.subTest(error=runtime_error),
+                patch.object(
+                    run_live_qa,
+                    "_routine_creation_case",
+                    side_effect=fake_creation,
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_wait_for_slack_delivery_marker",
+                    side_effect=fail_wait,
+                ),
+            ):
+                result = asyncio.run(
+                    run_live_qa._slack_delivery_routine_case(
+                        self._dummy_ctx(),
+                        case_name="qa_9b_routine_dm_delivery_exactly_once",
+                        routine_prefix="qa-9b",
+                        marker_prefix="QA_9B",
+                        routine_instruction="send the marker to Slack",
+                        required_delivery_text=["status"],
+                    )
+                )
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.details["error"], runtime_error)
+            self.assertTrue(result.details["blocking"])
+            self.assertNotEqual(
+                result.details.get("failure_class"),
+                "precondition",
+            )
+            self.assertIsNot(result.details.get("inconclusive"), True)
+
     def test_export_case_trace_writes_runtime_entries_without_secret_store(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -9627,6 +9730,124 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     ],
                 )
 
+    def test_run_cases_marks_prepare_exception_as_precondition_and_continues(self):
+        prepared_cases: list[str] = []
+        started_servers: list[str] = []
+
+        async def first_case(_ctx: run_live_qa.LiveQaContext):
+            raise AssertionError("first case must not run after preparation fails")
+
+        async def second_case(_ctx: run_live_qa.LiveQaContext):
+            return run_live_qa._result(
+                "second_case",
+                True,
+                run_live_qa.time.monotonic(),
+                {"case_completed": True},
+            )
+
+        async def fake_start_reborn_server(
+            _binary,
+            reborn_home,
+            _output_dir,
+            _workspace_dir,
+            _env,
+        ):
+            started_servers.append(reborn_home.name)
+            return object(), "http://127.0.0.1:38555"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_dir = root / "out"
+            binary = root / "ironclaw-reborn"
+            binary.touch()
+            args = argparse.Namespace(
+                all_cases=False,
+                non_telegram_qa_cases=False,
+                case=["first_case", "second_case"],
+                output_dir=output_dir,
+                reborn_home=root / "source-home",
+                skip_build=True,
+                require_slack_live=False,
+            )
+
+            def fake_prepare_reborn_home(_args, _selected, *, case_name):
+                prepared_cases.append(case_name)
+                if case_name == "first_case":
+                    raise run_live_qa.LiveQaError(
+                        "failed to decrypt credential fixture"
+                    )
+                home = output_dir / "reborn-home" / case_name
+                home.mkdir(parents=True)
+                return run_live_qa.PreparedRebornHome(
+                    path=home,
+                    env={},
+                    preflight={
+                        "slack": {},
+                        "slack_personal_auth": {},
+                        "google_product_auth": {},
+                        "telegram": {},
+                        "github_auth": {},
+                    },
+                )
+
+            with (
+                patch.object(
+                    run_live_qa,
+                    "CASES",
+                    {
+                        "first_case": run_live_qa.CaseSpec(first_case),
+                        "second_case": run_live_qa.CaseSpec(second_case),
+                    },
+                ),
+                patch.object(run_live_qa, "QA_SHEET_CASES", {}),
+                patch.object(run_live_qa, "_reborn_binary", return_value=binary),
+                patch.object(
+                    run_live_qa,
+                    "prepare_reborn_home",
+                    side_effect=fake_prepare_reborn_home,
+                ),
+                patch.object(
+                    run_live_qa,
+                    "start_reborn_server",
+                    side_effect=fake_start_reborn_server,
+                ),
+                patch.object(run_live_qa, "stop_process"),
+            ):
+                status = asyncio.run(run_live_qa.run_cases(args))
+
+            payload = json.loads(
+                (output_dir / "results.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(prepared_cases, ["first_case", "second_case"])
+        self.assertEqual(started_servers, ["second_case"])
+        self.assertEqual(len(payload["results"]), 2)
+        failed_prepare, completed = payload["results"]
+        self.assertFalse(failed_prepare["success"])
+        self.assertEqual(failed_prepare["details"]["case"], "first_case")
+        self.assertTrue(failed_prepare["details"]["blocked"])
+        self.assertEqual(
+            failed_prepare["details"]["error"],
+            "failed to decrypt credential fixture",
+        )
+        self.assertEqual(
+            failed_prepare["details"]["preflight_stage"],
+            "prepare_reborn_home",
+        )
+        self.assertEqual(
+            failed_prepare["details"]["failure_class"],
+            "precondition",
+        )
+        self.assertEqual(
+            failed_prepare["details"]["failure_status"],
+            "inconclusive",
+        )
+        self.assertTrue(failed_prepare["details"]["inconclusive"])
+        self.assertFalse(failed_prepare["details"]["blocking"])
+        self.assertTrue(completed["success"])
+        self.assertEqual(completed["details"]["case"], "second_case")
+
     def test_run_cases_marks_missing_slack_credential_as_precondition(self):
         async def fake_case(_ctx: run_live_qa.LiveQaContext) -> run_live_qa.ProbeResult:
             raise AssertionError("case should not run without Slack personal auth")
@@ -9937,6 +10158,126 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 result["details"]["preflight"]["setup_api"]["missing"],
                 ["bot_token"],
             )
+
+    def test_run_cases_marks_slack_setup_api_exceptions_as_precondition(self):
+        setup_errors = (
+            "Slack setup API returned HTTP 503",
+            "Slack setup API call failed: ConnectError",
+            "Slack setup API returned non-object JSON",
+            "Slack setup API returned incomplete setup status",
+        )
+        for setup_error in setup_errors:
+            with (
+                self.subTest(setup_error=setup_error),
+                tempfile.TemporaryDirectory() as tmpdir,
+            ):
+                root = Path(tmpdir)
+                output_dir = root / "out"
+                binary = root / "ironclaw-reborn"
+                binary.touch()
+                prepared_home = root / "prepared-home"
+                prepared_home.mkdir()
+                process = object()
+                case_called = False
+
+                async def fake_case(_ctx: run_live_qa.LiveQaContext):
+                    nonlocal case_called
+                    case_called = True
+                    raise AssertionError(
+                        "case must not run when Slack setup inspection fails"
+                    )
+
+                async def fake_start_reborn_server(*_args, **_kwargs):
+                    return process, "http://127.0.0.1:38555"
+
+                async def fake_apply_slack_setup_api_after_start(
+                    *_args,
+                    **_kwargs,
+                ):
+                    raise run_live_qa.LiveQaError(setup_error)
+
+                args = argparse.Namespace(
+                    all_cases=False,
+                    non_telegram_qa_cases=False,
+                    case=["case_slack"],
+                    output_dir=output_dir,
+                    reborn_home=root / "source-home",
+                    skip_build=True,
+                    require_slack_live=False,
+                )
+                prepared = run_live_qa.PreparedRebornHome(
+                    path=prepared_home,
+                    env={},
+                    preflight={
+                        "slack": {
+                            "enabled_in_config": True,
+                            "env_present": True,
+                            "delivery_target_present": True,
+                            "auth_test": {"ok": True, "team_id": "T123"},
+                        },
+                        "slack_personal_auth": {},
+                        "google_product_auth": {},
+                        "telegram": {},
+                        "github_auth": {},
+                    },
+                )
+
+                with (
+                    patch.object(
+                        run_live_qa,
+                        "CASES",
+                        {
+                            "case_slack": run_live_qa.CaseSpec(
+                                fake_case,
+                                requires_slack=True,
+                            )
+                        },
+                    ),
+                    patch.object(run_live_qa, "QA_SHEET_CASES", {}),
+                    patch.object(run_live_qa, "_reborn_binary", return_value=binary),
+                    patch.object(
+                        run_live_qa,
+                        "prepare_reborn_home",
+                        return_value=prepared,
+                    ),
+                    patch.object(
+                        run_live_qa,
+                        "start_reborn_server",
+                        side_effect=fake_start_reborn_server,
+                    ),
+                    patch.object(
+                        run_live_qa,
+                        "_apply_slack_setup_api_after_start",
+                        side_effect=fake_apply_slack_setup_api_after_start,
+                    ),
+                    patch.object(run_live_qa, "stop_process") as stop_process,
+                ):
+                    status = asyncio.run(run_live_qa.run_cases(args))
+
+                payload = json.loads(
+                    (output_dir / "results.json").read_text(encoding="utf-8")
+                )
+                result = payload["results"][0]
+                self.assertEqual(status, 0)
+                self.assertFalse(case_called)
+                stop_process.assert_called_once_with(process)
+                self.assertFalse(result["success"])
+                self.assertTrue(result["details"]["blocked"])
+                self.assertEqual(result["details"]["error"], setup_error)
+                self.assertEqual(
+                    result["details"]["failure_class"],
+                    "precondition",
+                )
+                self.assertEqual(
+                    result["details"]["failure_status"],
+                    "inconclusive",
+                )
+                self.assertTrue(result["details"]["inconclusive"])
+                self.assertFalse(result["details"]["blocking"])
+                self.assertEqual(
+                    result["details"]["preflight"]["setup_api"]["reason"],
+                    setup_error,
+                )
 
 
 if __name__ == "__main__":

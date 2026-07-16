@@ -456,6 +456,103 @@ class RebornQaSlackReportTests(unittest.TestCase):
             self.assertEqual(case.case_tier, "contract")
             self.assertTrue(case.blocking)
 
+    def test_missing_or_invalid_tier_overrides_inconclusive_metadata(self):
+        inconclusive_metadata = (
+            ("precondition", {"failure_class": "precondition"}),
+            ("infrastructure", {"failure_class": "infrastructure"}),
+            ("status", {"failure_status": "inconclusive"}),
+            ("flag", {"inconclusive": True}),
+        )
+        for tier_label, case_tier in (("missing", None), ("invalid", "preview")):
+            for metadata_label, metadata in inconclusive_metadata:
+                with (
+                    self.subTest(tier=tier_label, metadata=metadata_label),
+                    tempfile.TemporaryDirectory() as tmpdir,
+                ):
+                    lane_dir = (
+                        Path(tmpdir)
+                        / "reborn-webui-v2-live-qa"
+                        / "reborn-webui-v2"
+                        / f"{tier_label}-{metadata_label}"
+                    )
+                    lane_dir.mkdir(parents=True)
+                    entry = result_entry(
+                        f"{tier_label}_{metadata_label}",
+                        False,
+                        case_tier,
+                        False,
+                    )
+                    entry["details"].update(metadata)
+                    (lane_dir / "results.json").write_text(
+                        json.dumps({"results": [entry]}),
+                        encoding="utf-8",
+                    )
+                    report = notify.collect_lane(lane_dir)
+
+                self.assertEqual(
+                    (report.contract_passed, report.contract_total),
+                    (0, 1),
+                )
+                self.assertEqual(report.failed, 1)
+                self.assertEqual(report.warnings, 0)
+                self.assertEqual(report.inconclusive, 0)
+                self.assertEqual(report.status, "fail")
+                case = report.reborn_qa_cases[0]
+                self.assertEqual(case.case_tier, "contract")
+                self.assertTrue(case.blocking)
+                self.assertFalse(case.inconclusive)
+
+    def test_success_ignores_stale_failure_metadata(self):
+        cases = (
+            ("contract", "contract", True, (1, 1), (0, 0), True),
+            ("behavioral", "behavioral", False, (0, 0), (1, 1), False),
+            ("invalid", "preview", False, (1, 1), (0, 0), True),
+        )
+        for (
+            label,
+            case_tier,
+            blocking,
+            contracts,
+            behavioral,
+            expected_blocking,
+        ) in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as tmpdir:
+                lane_dir = (
+                    Path(tmpdir)
+                    / "reborn-webui-v2-live-qa"
+                    / "reborn-webui-v2"
+                    / label
+                )
+                lane_dir.mkdir(parents=True)
+                entry = result_entry(label, True, case_tier, blocking)
+                entry["details"].update(
+                    {
+                        "failure_class": "precondition",
+                        "failure_status": "inconclusive",
+                        "inconclusive": True,
+                    }
+                )
+                (lane_dir / "results.json").write_text(
+                    json.dumps({"results": [entry]}),
+                    encoding="utf-8",
+                )
+                report = notify.collect_lane(lane_dir)
+
+            self.assertEqual(
+                (report.contract_passed, report.contract_total),
+                contracts,
+            )
+            self.assertEqual(
+                (report.behavioral_passed, report.behavioral_total),
+                behavioral,
+            )
+            self.assertEqual(report.passed, 1)
+            self.assertEqual(report.inconclusive, 0)
+            self.assertEqual(report.status, "pass")
+            case = report.reborn_qa_cases[0]
+            self.assertFalse(case.inconclusive)
+            self.assertEqual(case.blocking, expected_blocking)
+
     def test_untyped_failures_fail_closed_into_contract_tier_totals(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             lane_dir = (
@@ -498,6 +595,64 @@ class RebornQaSlackReportTests(unittest.TestCase):
 
         self.assertEqual((report.contract_passed, report.contract_total), (1, 2))
         self.assertEqual((report.behavioral_passed, report.behavioral_total), (0, 0))
+
+    def test_junit_skips_are_excluded_from_contract_execution_totals(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lane_dir = Path(tmpdir) / "auth-smoke" / "mock" / "run"
+            lane_dir.mkdir(parents=True)
+            (lane_dir / "auth-canary-junit.xml").write_text(
+                """\
+<testsuites>
+  <testsuite tests="3" failures="1" errors="0" skipped="1" time="0.2">
+    <testcase name="passes" />
+    <testcase name="fails"><failure message="nope" /></testcase>
+    <testcase name="skips"><skipped /></testcase>
+  </testsuite>
+</testsuites>
+""",
+                encoding="utf-8",
+            )
+            report = notify.collect_lane(lane_dir)
+
+        self.assertEqual(report.tests, 3)
+        self.assertEqual(report.passed, 1)
+        self.assertEqual(report.failed, 1)
+        self.assertEqual(report.skipped, 1)
+        self.assertEqual((report.contract_passed, report.contract_total), (1, 2))
+        self.assertEqual(report.status, "fail")
+        body = notify.github_comment_body([report], None, None)
+        self.assertIn(":x: fail | 1/2 passed | — | 0 | 0s |", body)
+
+    def test_all_skipped_junit_lane_is_non_executed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lane_dir = Path(tmpdir) / "auth-smoke" / "mock" / "run"
+            lane_dir.mkdir(parents=True)
+            (lane_dir / "auth-canary-junit.xml").write_text(
+                """\
+<testsuites>
+  <testsuite tests="2" failures="0" errors="0" skipped="2" time="0.1">
+    <testcase name="skip-a"><skipped /></testcase>
+    <testcase name="skip-b"><skipped /></testcase>
+  </testsuite>
+</testsuites>
+""",
+                encoding="utf-8",
+            )
+            (lane_dir / "summary.md").write_text(
+                _SUMMARY_TEMPLATE.format(status="0"),
+                encoding="utf-8",
+            )
+            report = notify.collect_lane(lane_dir)
+
+        self.assertEqual(report.tests, 2)
+        self.assertEqual(report.passed, 0)
+        self.assertEqual(report.failed, 0)
+        self.assertEqual(report.skipped, 2)
+        self.assertEqual((report.contract_passed, report.contract_total), (0, 0))
+        self.assertEqual(report.status, "skip")
+        body = notify.github_comment_body([report], None, None)
+        self.assertIn(":heavy_minus_sign: skip | — | — | 0 | 0s |", body)
+        self.assertNotIn("0/2 passed", body)
 
     def test_empty_structured_results_do_not_mask_summary_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1138,6 +1293,26 @@ class RebornQaSlackReportTests(unittest.TestCase):
             "  - `test\\|name`: bad \\| value from @\u200bteam \\[link\\](http://evil)",
             body,
         )
+
+    def test_github_primary_table_escapes_untrusted_status(self):
+        report = notify.LaneReport(
+            lane="adversarial",
+            provider="mock",
+            contract_passed=1,
+            contract_total=1,
+            passed=1,
+            tests=1,
+            status="warn | @team\n[status]",
+        )
+
+        body = notify.github_comment_body([report], None, None)
+        row = next(line for line in body.splitlines() if line.startswith("| `adversarial`"))
+
+        self.assertIn(
+            ":grey_question: warn \\| @\u200bteam \\[status\\]",
+            row,
+        )
+        self.assertNotIn("@team", row)
 
     def test_post_pr_comment_validates_target_is_decimal_pull_request(self):
         for target_pr in ("42abc", "\u0664\u0662"):
