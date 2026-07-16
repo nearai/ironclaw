@@ -66,10 +66,11 @@ Live Canary GitHub dispatch options:
 - Replay Gate owns deterministic replay of the committed `e2e_recorded_trace`
   and `e2e_live` snapshots with the `libsql,replay` feature set.
 - Upgrade Compatibility owns `upgrade-canary`. It is manual-only and requires
-  dedicated `previous_ref` and `current_ref` inputs. It checks out the selected
-  current ref with tags/history, routes through `run.sh` to
-  `upgrade-canary.sh`, scrubs the output, and uploads the dedicated
-  `upgrade-compatibility` artifact for 30 days.
+  dedicated `previous_ref` and `current_ref` inputs; `current_ref` defaults to
+  `main`. It checks out the resolved current ref with tags/history and passes
+  that exact checkout to `upgrade-canary.sh` as `CURRENT_REF=HEAD`. The workflow
+  scrubs the output and uploads the dedicated `upgrade-compatibility` artifact
+  for 30 days.
 
 This ownership keeps hermetic failures in required deterministic CI, live
 provider drift in Live Canary, and the slower previous/current database check
@@ -90,23 +91,29 @@ The renderer omits the infrastructure/preconditions line when its count is
 zero; the example includes it to state the three-signal interpretation
 explicitly.
 
-- **Contracts** are blocking. Explicit contract failures fail the lane, and
-  missing or malformed tier/blocking metadata fails closed as a blocking
-  contract failure.
-- **Behavioral quality** is nonblocking. A failed behavioral probe is a warning
-  that records model-quality variance without turning it into a contract
-  regression.
-- **Infrastructure/preconditions** are inconclusive. Provider outages, stale
-  external indexes, unavailable durable evidence, and missing preconditions do
-  not increment either tier's totals.
+- **Runner-emitted case policy:** current contract cases are blocking; current
+  behavioral cases explicitly carry `blocking=false`, so a failure is a warning
+  rather than a contract regression.
+- **Notifier normalization:** `case_tier` and `blocking` are normalized
+  independently. A missing or invalid `case_tier` becomes `contract`; a missing
+  or nonboolean `blocking` becomes `true`. A valid value for one field survives
+  an invalid value for the other.
+- **Infrastructure/preconditions:** a result is inconclusive only when it
+  explicitly carries `failure_class=infrastructure`,
+  `failure_status=inconclusive`, or `inconclusive=true`. Examples are a stale
+  Slack search index, a terminal model-provider incident, and a durable-evidence
+  read error. These results do not increment contract or behavioral totals.
+- Missing credentials, setup, or fixtures—including Slack fixture
+  preconditions—remain blocking contract failures unless the emitted result is
+  explicitly typed with one of the infrastructure/inconclusive markers above.
 
 Slack and GitHub summaries may also show an aggregate execution count such as
 `succeeded of total`. That combined number is secondary execution detail; it
 must not be used in place of the three tier-specific health lines.
 
-Older JUnit-only lanes are treated as contract results. Structured results
-must carry their tier metadata; the notifier deliberately defaults unsafe or
-untyped failures to the contract tier.
+Older JUnit-only lanes are treated as contract results. For structured results,
+the notifier applies the tier, blocking, and inconclusive rules independently
+rather than treating them as one all-or-nothing metadata pair.
 
 ## Reborn WebUI v2 operating guarantees
 
@@ -130,12 +137,18 @@ redact query secrets plus Slack user/conversation identifiers.
 
 ### Agent workspace isolation
 
-Every selected Reborn QA case launches `ironclaw-reborn` with a newly created
-ephemeral working directory. The harness rejects a working directory inside
-either the repository checkout or the artifact output tree, passes the isolated
-path as the server process `cwd`, stops the server before leaving the context,
-and then removes the directory. The working directory therefore cannot consume
-the repository's files as ambient agent state or contaminate uploaded
+Only a selected Reborn QA case that passes credential/setup/fixture preflight
+and reaches server execution gets a newly created ephemeral working directory.
+Preflight failures return their blocking result before allocation; after a
+terminal provider incident, the remaining selected cases are recorded as
+inconclusive without being run or allocated workspaces.
+
+For a case that starts, the harness rejects a working directory inside either
+the repository checkout or the artifact output tree and passes the isolated
+path as the server process `cwd`. Its `finally` path stops the server, exports
+the case trace while the temporary context still exists, and then leaves the
+context so the workspace is removed. The working directory therefore cannot
+consume the repository's files as ambient agent state or contaminate uploaded
 artifacts.
 
 ### Durable routine and capability evidence
@@ -211,6 +224,12 @@ Required secrets are:
 - `IRONCLAW_REBORN_SLACK_BOT_TOKEN`
 - `AUTH_LIVE_SLACK_ACCESS_TOKEN`
 
+`AUTH_LIVE_SLACK_ACCESS_TOKEN` must be a real Slack user token for the live QA
+identity. Before writing any account state, the harness calls Slack
+`auth.test`; only a successful response with the user/team identity proceeds to
+encrypt the token and seed a configured `slack_personal` product-auth account.
+A failed validation leaves the account unseeded and blocks dependent cases.
+
 The personal OAuth connect probes additionally require variable
 `REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_ID` and secret
 `REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_SECRET`. An optional
@@ -240,6 +259,33 @@ LANE=deterministic-replay scripts/live-canary/run.sh
 
 These commands are local reproduction support; they do not make the lanes Live
 Canary GitHub dispatch options.
+
+The local `deterministic-replay` convenience is narrower than Replay Gate: it
+runs only ignored `e2e_live` tests through `cargo test --features libsql`. For
+an exact Replay Gate reproduction, install `cargo-insta` and `cargo-nextest`,
+then run:
+
+```bash
+NEXTEST_PROFILE=ci cargo insta test \
+  --check \
+  --test-runner nextest \
+  --no-default-features \
+  --features "libsql,replay" \
+  --test e2e_recorded_trace \
+  --test e2e_live
+
+if git ls-files 'tests/snapshots/*.snap.new' | grep .; then
+  echo "Committed .snap.new files found — run 'cargo insta review' and commit the accepted .snap."
+  exit 1
+fi
+```
+
+Run private OAuth refresh on the dedicated `ironclaw-live` runner or an
+equivalently configured host:
+
+```bash
+LANE=private-oauth scripts/live-canary/run.sh
+```
 
 Run the two live auth lanes:
 
