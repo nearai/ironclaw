@@ -36,15 +36,6 @@ function initApp() {
   if (authScreen) authScreen.style.opacity = '0';
   // Show app container (invisible — opacity:0 in CSS) so layout computes
   app.style.display = 'flex';
-  // Position tab indicator instantly (no transition) before fade-in
-  var indicator = document.getElementById('tab-indicator');
-  if (indicator) indicator.style.transition = 'none';
-  updateTabIndicator();
-  // Force layout so the instant position is applied, then restore transition
-  if (indicator) {
-    void indicator.offsetLeft;
-    indicator.style.transition = '';
-  }
   // Now fade in
   app.classList.add('visible');
   // Hide auth screen after fade-out transition completes
@@ -181,6 +172,23 @@ function showTokenForm() {
   }
 }
 
+// Mock OAuth sign-in for the self-contained demo: no provider redirect
+// exists, so "Sign in with X" resolves locally after a short beat and
+// drops into the workspace (auth token supplied behind the scenes — the
+// gateway's real token mechanics stay intact, the user just never sees
+// them).
+function demoOAuthSignIn(provider, btn) {
+  var errEl = document.getElementById('auth-error');
+  if (errEl) errEl.textContent = '';
+  var label = btn.querySelector('[data-i18n]');
+  btn.disabled = true;
+  if (label) label.textContent = I18n.t('auth.connecting');
+  setTimeout(function() {
+    document.getElementById('token-input').value = 'demo-oauth-' + provider;
+    authenticate();
+  }, 450);
+}
+
 // Discover enabled providers and show corresponding buttons.
 fetch('/auth/providers', { credentials: 'include' })
   .then(function(r) { return r.ok ? r.json() : { providers: [] }; })
@@ -194,8 +202,12 @@ fetch('/auth/providers', { credentials: 'include' })
     providers.forEach(function(p) {
       var btn = document.getElementById('auth-' + p + '-btn');
       if (!btn) return;
-      btn.style.display = '';
-      if (p === 'near') {
+      // Buttons ship with the `hidden` attribute so visibility checks
+      // (e.g. landing.js's :not([hidden]) selector) stay reliable.
+      btn.hidden = false;
+      if (window.__IRONCLAW_DEMO__) {
+        btn.addEventListener('click', function() { demoOAuthSignIn(p, btn); });
+      } else if (p === 'near') {
         btn.addEventListener('click', authenticateWithNear);
       } else {
         btn.addEventListener('click', function() { window.location = '/auth/login/' + p; });
@@ -299,6 +311,13 @@ async function authenticateWithNear() {
 // screen entirely.
 (function autoAuth() {
   const params = new URLSearchParams(window.location.search);
+  // PROTOTYPE-ONLY convenience: `?token=<gateway token>` auto-authenticates,
+  // skipping the auth screen entirely. The mocked marketing-site onboarding
+  // flow hands off to the gateway with this param (alongside ?usecase=,
+  // ?prompt=, ?integrations= — see landing.js). The token is stored exactly
+  // like the manual auth form (sessionStorage via authenticate()) and is
+  // stripped from the URL in initApp() via history.replaceState. Do not ship
+  // token-in-URL auth beyond local prototyping.
   const urlToken = params.get('token');
   if (urlToken) {
     document.getElementById('token-input').value = urlToken;

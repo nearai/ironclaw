@@ -112,6 +112,9 @@ async def reborn_gateway_server(ironclaw_binary, mock_llm_server, tmp_path_facto
             "EMBEDDING_ENABLED": "false",
             "WASM_ENABLED": "false",
             "ONBOARD_COMPLETED": "true",
+            # Never touch the real OS keychain (macOS Keychain auth dialog /
+            # Linux Secret Service); matches the base env in helpers.py.
+            "IRONCLAW_DISABLE_OS_KEYCHAIN": "1",
         }
         _forward_coverage_env(env)
 
@@ -217,16 +220,17 @@ async def test_reborn_gateway_loads_shell(reborn_gateway_page):
     """The isolated Reborn smoke gateway boots the browser shell.
 
     With engine v2 removed the gateway always reports ``engine_v2_enabled:
-    false``, so the shell renders the legacy tab layout: chat, missions, and
-    routines stay visible while the v2-only projects tab is hidden.
+    false``, so the shell renders the legacy tab layout: chat, tasks (the
+    surface that folded in the old missions tab), and routines stay visible
+    while the v2-only projects tab is hidden.
     """
     chat_tab = reborn_gateway_page.locator(SEL["tab_button"].format(tab="chat"))
-    missions_tab = reborn_gateway_page.locator(SEL["tab_button"].format(tab="missions"))
+    tasks_tab = reborn_gateway_page.locator(SEL["tab_button"].format(tab="tasks"))
     routines_tab = reborn_gateway_page.locator(SEL["tab_button"].format(tab="routines"))
     projects_tab = reborn_gateway_page.locator(SEL["tab_button"].format(tab="projects"))
 
     await expect(chat_tab).to_be_visible()
-    await expect(missions_tab).to_be_visible()
+    await expect(tasks_tab).to_be_visible()
     await expect(routines_tab).to_be_visible()
     await expect(projects_tab).to_be_hidden()
 

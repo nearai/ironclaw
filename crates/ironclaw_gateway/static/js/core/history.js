@@ -255,10 +255,24 @@ function loadHistory(before) {
 }
 
 // Create a message DOM element without appending it (for prepend operations)
+// Claw mark for the agent avatar chip (matches WELCOME_CLAW_SVG).
+const AGENT_AVATAR_SVG =
+  '<svg viewBox="45.2 34.11 54.25 54.25" fill="currentColor" aria-hidden="true">'
+  + '<path d="M93.67,34.12c-2.01,0-3.87,1.04-4.93,2.75l-11.34,16.83c-.37.55-.22,1.3.34,1.67.45.3,1.04.26,1.45-.09l11.16-9.68c.19-.17.47-.15.64.04.08.08.12.19.12.31v30.31c0,.25-.2.45-.45.45-.13,0-.26-.06-.35-.16l-33.74-40.39c-1.1-1.3-2.71-2.04-4.41-2.05h-1.18c-3.19,0-5.78,2.59-5.78,5.78v42.69c0,3.19,2.59,5.78,5.78,5.78,2.01,0,3.87-1.04,4.93-2.75l11.34-16.83c.37-.55.22-1.3-.34-1.67-.45-.3-1.04-.26-1.45.09l-11.16,9.68c-.19.17-.47.15-.64-.04-.08-.08-.12-.19-.11-.31v-30.32c0-.25.2-.45.45-.45.13,0,.26.06.35.16l33.73,40.39c1.1,1.3,2.71,2.04,4.41,2.05h1.18c3.19,0,5.78-2.58,5.78-5.78v-42.69c0-3.19-2.59-5.78-5.78-5.78h0Z"/></svg>';
+
 function createMessageElement(role, content, options) {
   const opts = options || {};
   const div = document.createElement('div');
   div.className = 'message ' + role;
+
+  // Agent replies carry an avatar chip beside the bubble (prototype style).
+  if (role === 'assistant') {
+    const avatar = document.createElement('span');
+    avatar.className = 'message-avatar';
+    avatar.setAttribute('aria-hidden', 'true');
+    avatar.innerHTML = AGENT_AVATAR_SVG;
+    div.appendChild(avatar);
+  }
 
   const ts = document.createElement('span');
   ts.className = 'message-timestamp';
@@ -361,8 +375,8 @@ function threadTitle(thread) {
   if (thread.thread_type === 'heartbeat') return I18n.t('thread.heartbeatAlerts');
   if (thread.thread_type === 'routine') return I18n.t('thread.routine');
   if (ch !== 'gateway') return ch.charAt(0).toUpperCase() + ch.slice(1);
-  if (thread.turn_count === 0) return 'New chat';
-  return thread.id.substring(0, 8);
+  // Untitled threads read as "New chat" — never a raw thread id.
+  return I18n.t('thread.untitled');
 }
 
 function relativeTime(isoStr) {
@@ -406,6 +420,9 @@ function loadThreads() {
 
     const list = document.getElementById('thread-list');
     list.innerHTML = '';
+    _threadTitles.clear();
+    threads.forEach((t) => { if (t.title) _threadTitles.set(t.id, t.title); });
+    if (currentTab === 'chat') updateTopbarTitle();
     for (const thread of threads) {
       rememberedThreads.push({
         threadId: thread.id,
@@ -484,8 +501,10 @@ function loadThreads() {
 
     // Reopen the server's active thread on first load. This keeps the visible
     // chat attached to an in-flight agent turn after a browser refresh, even
-    // when the URL does not carry an explicit thread hash.
-    if (!currentThreadId) {
+    // when the URL does not carry an explicit thread hash. Skipped when the
+    // user deep-linked to another surface (switchThread forces the chat tab,
+    // which would stomp e.g. #/tasks/missions/<id> on reload).
+    if (!currentThreadId && currentTab === 'chat') {
       const activeThreadId = data.active_thread || null;
       if (activeThreadId && threads.some(t => t.id === activeThreadId)) {
         const activeThread = threads.find(t => t.id === activeThreadId);
@@ -558,13 +577,12 @@ function switchThread(threadId) {
   processingThreads.delete(threadId);
   hasMore = false;
   oldestTimestamp = null;
+  if (currentTab !== 'chat') switchTab('chat');
   loadHistory();
   loadThreads();
   updateHash();
   if (window.innerWidth <= 768) {
-    const sidebar = document.getElementById('thread-sidebar');
-    sidebar.classList.remove('expanded-mobile');
-    document.getElementById('thread-toggle-btn').innerHTML = '&raquo;';
+    closeMobileSidebar();
   }
 }
 
@@ -582,20 +600,59 @@ function createNewThread() {
   });
 }
 
-function toggleThreadSidebar() {
-  const sidebar = document.getElementById('thread-sidebar');
-  const isMobile = window.innerWidth <= 768;
-  if (isMobile) {
-    sidebar.classList.toggle('expanded-mobile');
-  } else {
-    sidebar.classList.toggle('collapsed');
-  }
-  const btn = document.getElementById('thread-toggle-btn');
-  const isOpen = isMobile
-    ? sidebar.classList.contains('expanded-mobile')
-    : !sidebar.classList.contains('collapsed');
-  btn.innerHTML = isOpen ? '&laquo;' : '&raquo;';
+// --- App sidebar (collapse rail on desktop, overlay drawer on mobile) ---
+
+const SIDEBAR_COLLAPSED_KEY = 'ironclaw-sidebar-collapsed';
+
+function toggleSidebarCollapsed() {
+  const sidebar = document.getElementById('app-sidebar');
+  if (!sidebar) return;
+  const collapsed = sidebar.classList.toggle('collapsed');
+  try { localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? '1' : '0'); } catch (e) {}
 }
+
+// Element that had focus before the drawer opened, restored on close so
+// keyboard/screen-reader users don't lose their place.
+let _sidebarReturnFocus = null;
+
+function openMobileSidebar() {
+  const sidebar = document.getElementById('app-sidebar');
+  const scrim = document.getElementById('sidebar-scrim');
+  if (sidebar) {
+    sidebar.classList.add('mobile-open');
+    sidebar.setAttribute('role', 'dialog');
+    sidebar.setAttribute('aria-modal', 'true');
+    _sidebarReturnFocus = document.activeElement;
+    const firstControl = sidebar.querySelector('button, a, input, [tabindex]');
+    if (firstControl) firstControl.focus();
+  }
+  if (scrim) scrim.classList.add('visible');
+}
+
+function closeMobileSidebar() {
+  const sidebar = document.getElementById('app-sidebar');
+  const scrim = document.getElementById('sidebar-scrim');
+  if (sidebar) {
+    sidebar.classList.remove('mobile-open');
+    sidebar.removeAttribute('role');
+    sidebar.removeAttribute('aria-modal');
+  }
+  if (scrim) scrim.classList.remove('visible');
+  if (_sidebarReturnFocus && typeof _sidebarReturnFocus.focus === 'function') {
+    _sidebarReturnFocus.focus();
+  }
+  _sidebarReturnFocus = null;
+}
+
+// Restore persisted collapse state on load (desktop only).
+(function restoreSidebarCollapsed() {
+  try {
+    if (localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1') {
+      const sidebar = document.getElementById('app-sidebar');
+      if (sidebar) sidebar.classList.add('collapsed');
+    }
+  } catch (e) {}
+})();
 
 // Chat input auto-resize and keyboard handling
 const chatInput = document.getElementById('chat-input');
@@ -722,7 +779,9 @@ document.getElementById('scroll-to-bottom-btn').addEventListener('click', () => 
 function autoResizeTextarea(el) {
   const prev = el.offsetHeight;
   el.style.height = 'auto';
-  const target = Math.min(el.scrollHeight, 120);
+  // Grow with content up to ~8 lines (matches the textarea's CSS
+  // max-height), after which the textarea scrolls internally.
+  const target = Math.min(el.scrollHeight, 200);
   el.style.height = prev + 'px';
   requestAnimationFrame(() => {
     el.style.height = target + 'px';
@@ -738,8 +797,155 @@ document.querySelectorAll('.tab-bar button[data-tab]').forEach((btn) => {
   });
 });
 
+// Missions and Jobs share the first-class "Tasks" surface as segments.
+// Legacy callers (hash routes, active-work chips, widget layouts) still pass
+// 'jobs' / 'missions'; switchTab folds them into 'tasks' below.
+let currentTasksSegment = 'missions';
+
+// True when the Tasks surface is open on the given segment ('jobs'/'missions').
+// Used by SSE refresh paths that used to check `currentTab === 'jobs'` etc.
+function isTasksSurfaceActive(segment) {
+  return currentTab === 'tasks' && currentTasksSegment === segment;
+}
+
+function switchTasksSegment(segment, options) {
+  if (segment !== 'jobs' && segment !== 'missions') return;
+  currentTasksSegment = segment;
+  document.querySelectorAll('.tasks-segment').forEach((b) => {
+    b.classList.toggle('active', b.getAttribute('data-tasks-segment') === segment);
+  });
+  document.querySelectorAll('.tasks-pane').forEach((p) => {
+    p.classList.toggle('active', p.id === 'tasks-pane-' + segment);
+  });
+  if (!options || options.load !== false) {
+    if (segment === 'jobs') loadJobs();
+    else loadMissions();
+  }
+}
+
+document.querySelectorAll('.tasks-segment').forEach((btn) => {
+  btn.addEventListener('click', () => switchTasksSegment(btn.getAttribute('data-tasks-segment')));
+});
+
+// Thread titles by id, kept fresh by loadThreads for the topbar header.
+const _threadTitles = new Map();
+
+function updateTopbarTitle(tab) {
+  const el = document.getElementById('main-topbar-title');
+  if (!el) return;
+  // On the chat surface the header is the THREAD title (editable);
+  // everywhere else it's the page name.
+  if (currentTab === 'chat' && currentThreadId) {
+    el.textContent = _threadTitles.get(currentThreadId) || I18n.t('thread.untitled');
+    // Rename is demo-only for now: the gateway router has no
+    // PATCH /api/chat/threads/{id} handler yet, so outside the demo the
+    // affordance would always 404 on save.
+    if (window.__IRONCLAW_DEMO__ === true) {
+      el.classList.add('editable');
+      el.title = I18n.t('thread.renameHint');
+    }
+    return;
+  }
+  el.classList.remove('editable');
+  el.removeAttribute('title');
+  const activeBtn = document.querySelector('.tab-bar button[data-tab].active');
+  const label = activeBtn ? activeBtn.textContent.trim() : '';
+  const fallback = typeof getInstanceName === 'function' ? getInstanceName() : 'IronClaw';
+  el.textContent = label || fallback;
+}
+
+// --- Inline thread rename (topbar) ---
+//
+// Click the title → input with the current value + two round icon buttons
+// (cancel ×, save ✓). Enter saves, Escape cancels.
+function startThreadTitleEdit() {
+  const el = document.getElementById('main-topbar-title');
+  if (!el || !el.classList.contains('editable') || !currentThreadId) return;
+  if (document.getElementById('thread-title-editor')) return;
+
+  const current = _threadTitles.get(currentThreadId) || '';
+  const wrap = document.createElement('div');
+  wrap.className = 'thread-title-editor';
+  wrap.id = 'thread-title-editor';
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'thread-title-input';
+  input.maxLength = 80;
+  input.value = current;
+  input.placeholder = I18n.t('thread.untitled');
+  wrap.appendChild(input);
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.className = 'thread-title-btn tertiary';
+  cancelBtn.setAttribute('aria-label', I18n.t('btn.cancel'));
+  cancelBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'button';
+  saveBtn.className = 'thread-title-btn primary';
+  saveBtn.setAttribute('aria-label', I18n.t('memory.save'));
+  saveBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+
+  wrap.appendChild(cancelBtn);
+  wrap.appendChild(saveBtn);
+
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    wrap.remove();
+    el.style.display = '';
+  };
+  const save = () => {
+    const value = input.value.trim().slice(0, 80);
+    const threadId = currentThreadId;
+    const previous = _threadTitles.get(threadId);
+    close();
+    if (!value || !threadId) return;
+    _threadTitles.set(threadId, value);
+    updateTopbarTitle();
+    apiFetch('/api/chat/threads/' + encodeURIComponent(threadId), {
+      method: 'PATCH',
+      body: { title: value },
+    }).then(() => {
+      loadThreads();
+    }).catch((err) => {
+      // Roll back the optimistic rename so the UI matches server state.
+      if (previous !== undefined) _threadTitles.set(threadId, previous);
+      else _threadTitles.delete(threadId);
+      updateTopbarTitle();
+      showToast(I18n.t('thread.renameFailed', { message: err.message }), 'error');
+    });
+  };
+
+  cancelBtn.addEventListener('click', close);
+  saveBtn.addEventListener('click', save);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); save(); }
+    if (e.key === 'Escape') { e.preventDefault(); close(); }
+  });
+  input.addEventListener('blur', (e) => {
+    // Let clicks on the save/cancel buttons land before closing.
+    setTimeout(() => { if (!closed && !wrap.contains(document.activeElement)) close(); }, 150);
+  });
+
+  el.style.display = 'none';
+  el.parentNode.insertBefore(wrap, el);
+  input.focus();
+  input.select();
+}
+
+document.getElementById('main-topbar-title')?.addEventListener('click', () => startThreadTitleEdit());
+
 function switchTab(tab) {
   tab = normalizeTabForEngineMode(tab);
+  // Jobs/missions fold into the Tasks surface (segment per legacy tab).
+  if (tab === 'jobs' || tab === 'missions') {
+    switchTasksSegment(tab, { load: false });
+    tab = 'tasks';
+  }
   currentTab = tab;
   // NOTE: this function takes a `tab` argument that may originate from
   // workspace-supplied `layout.tabs.default_tab`, so it must NOT be
@@ -757,13 +963,29 @@ function switchTab(tab) {
     p.classList.toggle('active', p.id === 'tab-' + tab);
   });
   applyAriaAttributes();
+  updateTopbarTitle(tab);
+  // List/detail surfaces own their headers (view title + description +
+  // sticky toolbar), so the global topbar is suppressed there — no
+  // duplicated title chrome. Mobile keeps the topbar (sidebar toggle).
+  const TOPBARLESS_TABS = ['memory', 'skills', 'integrations', 'discover', 'tasks', 'projects', 'logs', 'settings'];
+  document.querySelector('.app-main')?.classList.toggle('no-topbar', TOPBARLESS_TABS.indexOf(tab) !== -1);
+  // Settings is a full takeover: the app sidebar hides too (Linear).
+  document.getElementById('app')?.classList.toggle('settings-takeover', tab === 'settings');
+  if (window.innerWidth <= 768) closeMobileSidebar();
 
   if (tab === 'memory') {
     loadMemoryTree();
     // Auto-open README.md on first visit (no file selected yet)
     if (!currentMemoryPath) readMemoryFile('README.md');
   }
-  if (tab === 'jobs') loadJobs();
+  if (tab === 'discover') loadDiscover();
+  if (tab === 'integrations') loadIntegrations();
+  if (tab === 'skills') loadSkills();
+  if (tab === 'billing') renderBillingSurface();
+  if (tab === 'tasks') {
+    if (currentTasksSegment === 'jobs') loadJobs();
+    else loadMissions();
+  }
   if (tab === 'projects') {
     loadProjectsOverview();
   } else if (crCurrentProjectId) {
@@ -771,7 +993,6 @@ function switchTab(tab) {
     // the Projects tab so widgets don't keep running in the background.
     crBackToOverview();
   }
-  if (tab === 'missions') loadMissions();
   if (tab === 'routines') loadRoutines();
   if (tab === 'logs') { connectLogSSE(); applyLogFilters(); }
   else if (logEventSource) { logEventSource.close(); logEventSource = null; }
@@ -780,25 +1001,7 @@ function switchTab(tab) {
   } else {
     stopPairingPoll();
   }
-  updateTabIndicator();
   updateHash();
 }
-
-function updateTabIndicator() {
-  const indicator = document.getElementById('tab-indicator');
-  if (!indicator) return;
-  const activeBtn = document.querySelector('.tab-bar button[data-tab].active');
-  if (!activeBtn) {
-    indicator.style.width = '0';
-    return;
-  }
-  const bar = activeBtn.closest('.tab-bar');
-  const barRect = bar.getBoundingClientRect();
-  const btnRect = activeBtn.getBoundingClientRect();
-  indicator.style.left = (btnRect.left - barRect.left) + 'px';
-  indicator.style.width = btnRect.width + 'px';
-}
-
-window.addEventListener('resize', updateTabIndicator);
 
 // --- Memory (filesystem tree) ---

@@ -1,7 +1,8 @@
-/* Main App */
+/* Main App — ChatGPT-style shell: sidebar + main pane (see
+   components/sidebar.css for the rail itself). */
 #app {
   display: none;
-  flex-direction: column;
+  flex-direction: row;
   height: 100vh;
   height: 100dvh;
   opacity: 0;
@@ -12,106 +13,24 @@
   opacity: 1;
 }
 
-/* Tab Bar */
-.tab-bar {
-  display: flex;
-  background: var(--tab-bg);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  will-change: backdrop-filter;
-  border-bottom: 1px solid var(--border);
-  padding: 0 16px;
-  gap: 0;
-  flex-shrink: 0;
-  position: relative;
-  z-index: 200;
-  box-shadow: var(--surface-highlight);
-}
-
-.tab-bar button:not(.status-logs-btn):not(.restart-btn) {
-  padding: 10px 20px;
-  background: none;
-  border: none;
-  border-bottom: 2px solid transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: var(--text-base);
-  font-weight: 500;
-  position: relative;
-  transition: color 0.2s, border-color 0.2s;
-}
-
-.tab-bar button[data-active-count]:not([data-active-count="0"])::after {
-  content: attr(data-active-count);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 18px;
-  height: 18px;
-  margin-left: 8px;
-  padding: 0 5px;
-  border-radius: 999px;
-  background: var(--accent);
-  color: var(--bg);
-  font-size: 11px;
-  font-weight: 700;
-  line-height: 1;
-  vertical-align: middle;
-}
-
-.tab-bar button:not(.status-logs-btn):not(.restart-btn):hover {
-  color: var(--text);
-}
-
-.tab-bar button:not(.status-logs-btn):not(.restart-btn).active {
-  color: var(--accent);
-  border-bottom-color: transparent;
-  background: var(--accent-subtle);
-  border-radius: var(--radius) var(--radius) 0 0;
-}
-
-.tab-bar .spacer {
-  flex: 1;
-}
-
-.tab-bar .docs-link-btn {
-  text-decoration: none;
-}
-
-.tab-bar .status-logs-btn {
-  padding: 4px 10px;
-  background: none;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: var(--text-xs);
-  align-self: center;
-  margin-right: 8px;
-  transition: color 0.2s, border-color 0.2s, background 0.2s;
-}
-
-.tab-bar .status-logs-btn:hover {
-  color: var(--text);
-  border-color: var(--text-secondary);
-}
-
-.tab-bar .status-logs-btn.active {
-  color: var(--accent);
-  border-color: var(--accent);
-  background: var(--accent-tee-bg);
-}
-
 .active-work-strip {
   display: flex;
   align-items: center;
   gap: 6px;
   padding: 5px 12px;
   border-bottom: 1px solid var(--border);
-  background: color-mix(in srgb, var(--surface) 90%, var(--accent-subtle) 10%);
+  /* --surface was never defined; color-mix() with an invalid var computed
+     to transparent. Use real tokens so the strip is opaque in both themes. */
+  background: color-mix(in srgb, var(--bg) 92%, var(--accent) 8%);
   overflow-x: auto;
   flex-shrink: 0;
   min-height: 34px;
+}
+
+/* display:flex above beats the [hidden] UA rule — restate it so the strip
+   actually disappears when there is no running work. */
+.active-work-strip[hidden] {
+  display: none;
 }
 
 .active-work-item {
@@ -119,8 +38,8 @@
   max-width: 320px;
   padding: 4px 9px;
   border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--panel);
+  border-radius: var(--v2-radius-full);
+  background: var(--bg-secondary);
   color: var(--text);
   display: inline-flex;
   align-items: center;
@@ -137,7 +56,7 @@
 
 .active-work-item[data-state="running"] {
   border-color: color-mix(in srgb, var(--accent) 35%, var(--border) 65%);
-  background: color-mix(in srgb, var(--panel) 82%, var(--accent-subtle) 18%);
+  background: color-mix(in srgb, var(--bg-secondary) 82%, var(--accent-subtle) 18%);
 }
 
 .active-work-item[data-state="done"] {
@@ -145,8 +64,8 @@
 }
 
 .active-work-item[data-state="failed"] {
-  border-color: color-mix(in srgb, var(--error) 32%, var(--border) 68%);
-  background: color-mix(in srgb, var(--panel) 88%, var(--error) 12%);
+  border-color: color-mix(in srgb, var(--danger) 32%, var(--border) 68%);
+  background: color-mix(in srgb, var(--bg-secondary) 88%, var(--danger) 12%);
 }
 
 .active-work-kind {
@@ -176,16 +95,36 @@
   color: var(--text-muted);
 }
 
-/* Tab sliding indicator */
-.tab-indicator {
-  position: absolute;
-  bottom: 0;
-  height: 2px;
-  background: var(--accent);
-  border-radius: 1px;
-  transition: left 300ms var(--ease-spring), width 300ms var(--ease-spring);
-  z-index: 1;
-  pointer-events: none;
+/* "Just ask the agent" affordance — appears on config/discovery surfaces */
+.ask-agent-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  align-self: flex-start;
+  padding: 6px 14px;
+  background: var(--accent-subtle);
+  border: 1px solid var(--accent-border-subtle);
+  border-radius: var(--v2-radius-full);
+  color: var(--accent);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.ask-agent-hint:hover {
+  background: var(--accent-tee-hover);
+  box-shadow: var(--glow-accent);
+}
+
+.ask-agent-hint-glyph {
+  font-size: var(--text-xs);
+  line-height: 1;
+}
+
+#tab-settings .ask-agent-hint {
+  margin: var(--space-3) var(--space-4) 0;
 }
 
 /* Tab Panels */
@@ -246,57 +185,37 @@
   to { width: 0%; }
 }
 
-/* Mobile bottom tab bar */
-@media (max-width: 768px) {
-  .tab-bar {
-    position: fixed;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    top: auto;
-    z-index: 100;
-    border-bottom: none;
-    border-top: 1px solid var(--border);
-    padding-bottom: env(safe-area-inset-bottom);
-    overflow-x: visible;
-    background: var(--glass-bg);
-    backdrop-filter: var(--glass-blur);
-    -webkit-backdrop-filter: var(--glass-blur);
-    box-shadow: 0 -2px 12px rgba(0,0,0,0.15);
-  }
 
-  .tab-bar button:not(.status-logs-btn):not(.restart-btn):not(.language-btn) {
-    flex: 1;
-    text-align: center;
-    padding: 10px 4px;
-  }
 
-  .tab-bar .spacer,
-  .tab-bar .language-switcher,
-  .tab-bar .tee-shield,
-  .tab-bar .restart-btn {
-    display: none;
-  }
+/* ── View header (list surfaces own their titles; topbar suppressed) ── */
 
-  .tab-bar .status {
-    display: none;
-  }
-
-  .tab-bar .status-logs-btn {
-    display: none;
-  }
-
-  .tab-bar .theme-toggle-btn {
-    display: none;
-  }
-
-  .tab-indicator {
-    top: 0;
-    bottom: auto;
-  }
-
-  #app {
-    padding-bottom: 52px;
-  }
+.view-header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--v2-space-5) 0 var(--v2-space-3);
 }
 
+.view-header-title {
+  font-size: var(--text-xl);
+  font-weight: 600;
+  letter-spacing: var(--heading-tracking);
+  color: var(--text);
+}
+
+.view-header-desc {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+/* Sticky toolbar shared by the list views: stays reachable on scroll. */
+.view-toolbar-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--bg);
+  padding-top: var(--v2-space-2);
+  padding-bottom: var(--v2-space-2);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--v2-space-4);
+}

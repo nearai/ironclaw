@@ -17,9 +17,19 @@ function updateHash() {
         parts.push(currentMemoryPath);
       }
       break;
-    case 'jobs':
-      if (typeof currentJobId !== 'undefined' && currentJobId) {
-        parts.push(currentJobId);
+    case 'tasks':
+      if (typeof currentTasksSegment !== 'undefined' && currentTasksSegment) {
+        parts.push(currentTasksSegment);
+        if (currentTasksSegment === 'jobs'
+            && typeof currentJobId !== 'undefined' && currentJobId) {
+          parts.push(currentJobId);
+        }
+        // Dedicated task page: #/tasks/missions/<id> (the "Open full page"
+        // action on the task detail sheet routes here).
+        if (currentTasksSegment === 'missions'
+            && typeof currentMissionId !== 'undefined' && currentMissionId) {
+          parts.push(currentMissionId);
+        }
       }
       break;
     case 'routines':
@@ -110,8 +120,18 @@ function restoreFromHash() {
         readMemoryFile(state.detail);
         break;
       case 'jobs':
+        // Legacy '#/jobs/<id>' links: switchTab already folded into Tasks.
         openJobDetail(state.detail);
         break;
+      case 'tasks': {
+        var taskParts = state.detail ? state.detail.split('/') : [];
+        // Skip the list load when deep-linking straight to a detail view —
+        // the async list render would race the detail render otherwise.
+        switchTasksSegment(taskParts[0], taskParts[1] ? { load: false } : undefined);
+        if (taskParts[0] === 'jobs' && taskParts[1]) openJobDetail(taskParts[1]);
+        if (taskParts[0] === 'missions' && taskParts[1]) openMissionDetail(taskParts[1]);
+        break;
+      }
       case 'routines':
         if (shouldHideRoutinesTab()) {
           switchTab('missions');
@@ -120,7 +140,12 @@ function restoreFromHash() {
         }
         break;
       case 'settings':
-        switchSettingsSubtab(state.detail);
+        // Skills was promoted out of Settings to a first-class surface.
+        if (state.detail === 'skills') {
+          switchTab('skills');
+        } else {
+          switchSettingsSubtab(state.detail);
+        }
         break;
     }
   }

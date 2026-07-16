@@ -1,4 +1,6 @@
 function switchSettingsSubtab(subtab) {
+  // Skills is a first-class surface now; old deep links land there.
+  if (subtab === 'skills') { switchTab('skills'); return; }
   currentSettingsSubtab = subtab;
   document.querySelectorAll('.settings-subtab').forEach(function(b) {
     b.classList.toggle('active', b.getAttribute('data-settings-subtab') === subtab);
@@ -6,6 +8,10 @@ function switchSettingsSubtab(subtab) {
   document.querySelectorAll('.settings-subpanel').forEach(function(p) {
     p.classList.toggle('active', p.id === 'settings-' + subtab);
   });
+  // The content pane's big title mirrors the active nav item (Linear).
+  var activeBtn = document.querySelector('.settings-subtab[data-settings-subtab="' + CSS.escape(subtab) + '"]');
+  var viewTitle = document.getElementById('settings-view-title');
+  if (activeBtn && viewTitle) viewTitle.textContent = activeBtn.textContent.trim();
   // Clear search when switching subtabs so stale filters don't apply
   var searchInput = document.getElementById('settings-search-input');
   if (searchInput && searchInput.value) {
@@ -31,7 +37,6 @@ function loadSettingsSubtab(subtab) {
   else if (subtab === 'networking') loadNetworkingSettings();
   else if (subtab === 'extensions') { loadExtensions(); startPairingPoll(); }
   else if (subtab === 'mcp') loadMcpServers();
-  else if (subtab === 'skills') loadSkills();
   else if (subtab === 'users') loadUsers();
   else if (subtab === 'tools') loadToolsPermissions();
   else if (subtab === 'trace-commons') loadTraceCommonsCredits();

@@ -121,7 +121,6 @@ if (window.__IRONCLAW_LAYOUT__) {
           return ai - bi;
         });
         buttons.forEach(function(btn) { tabBar.appendChild(btn); });
-        updateTabIndicator();
       }
     }
 

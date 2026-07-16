@@ -58,111 +58,129 @@ function addMcpServer() {
 
 // --- Skills ---
 
+// Trust is optional on the wire (older gateways / registry entries may omit
+// it) — normalize instead of crashing on `undefined.toLowerCase()`.
+function skillTrustLabel(skill) {
+  return String((skill && skill.trust) || 'Installed');
+}
+
+// Each skill carries a purposeful lucide mark (`icon` on the wire) —
+// distinct per skill, sparkle only as the fallback.
+function skillGlyphSvg(skill) {
+  return lucideGlyphSvg((skill && skill.icon) || 'sparkles', 15);
+}
+
 function loadSkills() {
   var skillsList = document.getElementById('skills-list');
   skillsList.innerHTML = renderCardsSkeleton(3);
   apiFetch('/api/skills').then(function(data) {
-    setSlashSkillEntries((data && data.skills) || []);
-    if (!data.skills || data.skills.length === 0) {
-      skillsList.innerHTML = '<div class="empty-state">' + I18n.t('skills.noInstalled') + '</div>';
+    var skills = (data && data.skills) || [];
+    setSlashSkillEntries(skills);
+    var count = document.getElementById('skills-installed-count');
+    if (count) count.textContent = skills.length > 0 ? String(skills.length) : '';
+    if (skills.length === 0) {
+      skillsList.innerHTML = '<div class="skills-empty">'
+        + '<div class="skills-empty-title">' + escapeHtml(I18n.t('skills.noInstalled')) + '</div>'
+        + '<div class="skills-empty-hint">' + escapeHtml(I18n.t('skills.noInstalledHint')) + '</div>'
+        + '</div>';
       return;
     }
     skillsList.innerHTML = '';
-    for (var i = 0; i < data.skills.length; i++) {
-      skillsList.appendChild(renderSkillCard(data.skills[i]));
+    for (var i = 0; i < skills.length; i++) {
+      skillsList.appendChild(renderSkillRow(skills[i]));
     }
   }).catch(function(err) {
     skillsList.innerHTML = '<div class="empty-state">' + I18n.t('skills.loadFailed', {message: escapeHtml(err.message)}) + '</div>';
   });
+  // Populate discovery with the featured shelf (empty query).
+  runClawHubSearch('');
 }
 
-function renderSkillCard(skill) {
-  var card = document.createElement('div');
-  card.className = 'ext-card state-active';
+// One row per skill: glyph, name + badges, description, hover actions.
+function renderSkillRow(skill) {
+  var trustLabel = skillTrustLabel(skill);
+  var trusted = trustLabel.toLowerCase() === 'trusted';
 
-  var header = document.createElement('div');
-  header.className = 'ext-header';
+  var row = document.createElement('div');
+  row.className = 'skill-row';
 
+  var glyph = document.createElement('span');
+  glyph.className = 'skill-row-glyph';
+  glyph.innerHTML = skillGlyphSvg(skill);
+  row.appendChild(glyph);
+
+  var main = document.createElement('div');
+  main.className = 'skill-row-main';
+
+  var head = document.createElement('div');
+  head.className = 'skill-row-head';
   var name = document.createElement('span');
-  name.className = 'ext-name';
+  name.className = 'skill-row-name';
   name.textContent = skill.name;
-  header.appendChild(name);
-
+  head.appendChild(name);
+  if (skill.version) {
+    var version = document.createElement('span');
+    version.className = 'skill-version';
+    version.textContent = 'v' + skill.version;
+    head.appendChild(version);
+  }
   var trust = document.createElement('span');
-  var trustClass = skill.trust.toLowerCase() === 'trusted' ? 'trust-trusted' : 'trust-installed';
-  trust.className = 'skill-trust ' + trustClass;
-  trust.textContent = skill.trust;
-  header.appendChild(trust);
+  trust.className = 'skill-trust ' + (trusted ? 'trust-trusted' : 'trust-installed');
+  trust.textContent = trustLabel;
+  head.appendChild(trust);
+  main.appendChild(head);
 
-  var version = document.createElement('span');
-  version.className = 'skill-version';
-  version.textContent = 'v' + skill.version;
-  header.appendChild(version);
+  if (skill.description) {
+    var desc = document.createElement('div');
+    desc.className = 'skill-row-desc';
+    desc.textContent = skill.description;
+    main.appendChild(desc);
+  }
 
-  card.appendChild(header);
-
-  var desc = document.createElement('div');
-  desc.className = 'ext-desc';
-  desc.textContent = skill.description;
-  card.appendChild(desc);
-
+  var metaParts = [];
   if (skill.keywords && skill.keywords.length > 0) {
-    var kw = document.createElement('div');
-    kw.className = 'ext-keywords';
-    kw.textContent = I18n.t('skills.activatesOn') + ': ' + skill.keywords.join(', ');
-    card.appendChild(kw);
+    metaParts.push(I18n.t('skills.activatesOn') + ': ' + skill.keywords.join(', '));
+  }
+  if (skill.usage_hint) metaParts.push(skill.usage_hint);
+  if (skill.install_source_url) metaParts.push(I18n.t('skills.installedFrom', { url: skill.install_source_url }));
+  if (metaParts.length > 0) {
+    var meta = document.createElement('div');
+    meta.className = 'skill-row-meta';
+    meta.textContent = metaParts.join('  \u00b7  ');
+    main.appendChild(meta);
   }
 
-  if (skill.usage_hint) {
-    var hint = document.createElement('div');
-    hint.className = 'ext-usage-hint';
-    hint.textContent = skill.usage_hint;
-    card.appendChild(hint);
-  }
-
-  if (skill.has_requirements) {
-    var reqs = document.createElement('div');
-    reqs.className = 'ext-bundle-detail';
-    reqs.textContent = 'Bundle includes requirements.txt';
-    card.appendChild(reqs);
-  }
-
-  if (skill.has_scripts) {
-    var scripts = document.createElement('div');
-    scripts.className = 'ext-bundle-detail';
-    scripts.textContent = 'Bundle includes scripts/';
-    card.appendChild(scripts);
-  }
-
-  if (skill.install_source_url) {
-    var source = document.createElement('div');
-    source.className = 'ext-install-source';
-    source.textContent = 'Installed from: ' + skill.install_source_url;
-    card.appendChild(source);
-  }
+  row.appendChild(main);
 
   var actions = document.createElement('div');
-  actions.className = 'ext-actions';
-
-  // Only show Remove for registry-installed skills, not user-placed trusted skills
-  if (skill.trust.toLowerCase() !== 'trusted') {
+  actions.className = 'skill-row-actions';
+  // User-placed trusted skills are managed on disk, not removable here.
+  if (!trusted) {
     var removeBtn = document.createElement('button');
-    removeBtn.className = 'btn-ext remove';
+    removeBtn.className = 'skill-row-remove';
     removeBtn.textContent = I18n.t('skills.remove');
     removeBtn.addEventListener('click', function() { removeSkill(skill.name); });
     actions.appendChild(removeBtn);
   }
-
-  card.appendChild(actions);
-  return card;
+  row.appendChild(actions);
+  return row;
 }
 
 function searchClawHub() {
   var input = document.getElementById('skill-search-input');
-  var query = input.value.trim();
-  if (!query) return;
+  runClawHubSearch(input ? input.value.trim() : '');
+}
 
+// Shared by the toolbar search and the default featured shelf (query '').
+function runClawHubSearch(query) {
   var resultsDiv = document.getElementById('skill-search-results');
+  var title = document.getElementById('skills-results-title');
+  if (!resultsDiv) return;
+  if (title) {
+    title.textContent = query
+      ? I18n.t('skills.resultsFor', { query: query })
+      : I18n.t('skills.featured');
+  }
   resultsDiv.innerHTML = '<div class="empty-state">' + I18n.t('skills.searching') + '</div>';
 
   apiFetch('/api/skills/search', {
@@ -174,133 +192,97 @@ function searchClawHub() {
     // Show registry error as a warning banner if present
     if (data.catalog_error) {
       var warning = document.createElement('div');
-      warning.className = 'empty-state';
-      warning.style.color = '#f0ad4e';
-      warning.style.borderLeft = '3px solid #f0ad4e';
-      warning.style.paddingLeft = '12px';
-      warning.style.marginBottom = '16px';
+      warning.className = 'skills-registry-warning';
       warning.textContent = I18n.t('skills.registryError', {message: data.catalog_error});
       resultsDiv.appendChild(warning);
     }
 
-    // Show catalog results
     if (data.catalog && data.catalog.length > 0) {
-      // Build a set of installed skill names for quick lookup
       var installedNames = {};
       if (data.installed) {
         for (var j = 0; j < data.installed.length; j++) {
           installedNames[data.installed[j].name] = true;
         }
       }
-
       for (var i = 0; i < data.catalog.length; i++) {
-        var card = renderCatalogSkillCard(data.catalog[i], installedNames);
-        card.style.animationDelay = (i * 0.06) + 's';
-        resultsDiv.appendChild(card);
+        resultsDiv.appendChild(renderCatalogSkillRow(data.catalog[i], installedNames));
       }
     }
 
-    // Show matching installed skills too
-    if (data.installed && data.installed.length > 0) {
+    // Matching installed skills surface inline for search queries.
+    if (query && data.installed && data.installed.length > 0) {
       for (var k = 0; k < data.installed.length; k++) {
-        var installedCard = renderSkillCard(data.installed[k]);
-        installedCard.style.animationDelay = ((data.catalog ? data.catalog.length : 0) + k) * 0.06 + 's';
-        installedCard.classList.add('skill-search-result');
-        resultsDiv.appendChild(installedCard);
+        resultsDiv.appendChild(renderSkillRow(data.installed[k]));
       }
     }
 
     if (resultsDiv.children.length === 0) {
-      resultsDiv.innerHTML = '<div class="empty-state">' + I18n.t('skills.noResults', {query: escapeHtml(query)}) + '</div>';
+      resultsDiv.innerHTML = '<div class="skills-empty">'
+        + '<div class="skills-empty-title">' + escapeHtml(I18n.t('skills.noResults', {query: query})) + '</div>'
+        + '<div class="skills-empty-hint">' + escapeHtml(I18n.t('skills.noResultsHint')) + '</div>'
+        + '</div>';
     }
   }).catch(function(err) {
     resultsDiv.innerHTML = '<div class="empty-state">' + I18n.t('skills.searchFailed', {message: escapeHtml(err.message)}) + '</div>';
   });
 }
 
-function renderCatalogSkillCard(entry, installedNames) {
-  var card = document.createElement('div');
-  card.className = 'ext-card ext-available skill-search-result';
+function renderCatalogSkillRow(entry, installedNames) {
+  var row = document.createElement('div');
+  row.className = 'skill-row skill-row-catalog';
 
-  var header = document.createElement('div');
-  header.className = 'ext-header';
+  var glyph = document.createElement('span');
+  glyph.className = 'skill-row-glyph';
+  glyph.innerHTML = skillGlyphSvg(entry);
+  row.appendChild(glyph);
 
+  var main = document.createElement('div');
+  main.className = 'skill-row-main';
+
+  var head = document.createElement('div');
+  head.className = 'skill-row-head';
   var name = document.createElement('a');
-  name.className = 'ext-name';
+  name.className = 'skill-row-name skill-row-link';
   name.textContent = entry.name || entry.slug;
   name.href = 'https://clawhub.ai/skills/' + encodeURIComponent(entry.slug);
   name.target = '_blank';
   name.rel = 'noopener noreferrer';
-  name.style.textDecoration = 'none';
-  name.style.color = 'inherit';
   name.title = I18n.t('skills.viewOnClawHub');
-  header.appendChild(name);
-
+  head.appendChild(name);
   if (entry.version) {
     var version = document.createElement('span');
     version.className = 'skill-version';
     version.textContent = 'v' + entry.version;
-    header.appendChild(version);
+    head.appendChild(version);
   }
-
-  card.appendChild(header);
+  main.appendChild(head);
 
   if (entry.description) {
     var desc = document.createElement('div');
-    desc.className = 'ext-desc';
+    desc.className = 'skill-row-desc';
     desc.textContent = entry.description;
-    card.appendChild(desc);
+    main.appendChild(desc);
   }
 
-  // Metadata row: owner, stars, downloads, recency
-  var meta = document.createElement('div');
-  meta.className = 'ext-meta';
-  meta.style.fontSize = '11px';
-  meta.style.color = '#888';
-  meta.style.marginTop = '6px';
-
-  function addMetaSep() {
-    if (meta.children.length > 0) {
-      meta.appendChild(document.createTextNode(' \u00b7 '));
-    }
-  }
-
-  if (entry.owner) {
-    var ownerSpan = document.createElement('span');
-    ownerSpan.textContent = 'by ' + entry.owner;
-    meta.appendChild(ownerSpan);
-  }
-
-  if (entry.stars != null) {
-    addMetaSep();
-    var starsSpan = document.createElement('span');
-    starsSpan.textContent = entry.stars + ' stars';
-    meta.appendChild(starsSpan);
-  }
-
-  if (entry.downloads != null) {
-    addMetaSep();
-    var dlSpan = document.createElement('span');
-    dlSpan.textContent = formatCompactNumber(entry.downloads) + ' downloads';
-    meta.appendChild(dlSpan);
-  }
-
+  var metaParts = [];
+  if (entry.owner) metaParts.push('by ' + entry.owner);
+  if (entry.stars != null) metaParts.push('\u2605 ' + formatCompactNumber(entry.stars));
+  if (entry.downloads != null) metaParts.push(formatCompactNumber(entry.downloads) + ' installs');
   if (entry.updatedAt) {
     var ago = formatTimeAgo(entry.updatedAt);
-    if (ago) {
-      addMetaSep();
-      var updatedSpan = document.createElement('span');
-      updatedSpan.textContent = 'updated ' + ago;
-      meta.appendChild(updatedSpan);
-    }
+    if (ago) metaParts.push('updated ' + ago);
+  }
+  if (metaParts.length > 0) {
+    var meta = document.createElement('div');
+    meta.className = 'skill-row-meta';
+    meta.textContent = metaParts.join('  \u00b7  ');
+    main.appendChild(meta);
   }
 
-  if (meta.children.length > 0) {
-    card.appendChild(meta);
-  }
+  row.appendChild(main);
 
   var actions = document.createElement('div');
-  actions.className = 'ext-actions';
+  actions.className = 'skill-row-actions skill-row-actions-static';
 
   var slug = entry.slug || entry.name;
   var slugSuffix = slug.indexOf('/') >= 0 ? slug.split('/').pop() : slug;
@@ -308,16 +290,16 @@ function renderCatalogSkillCard(entry, installedNames) {
 
   if (isInstalled) {
     var label = document.createElement('span');
-    label.className = 'ext-active-label';
-    label.textContent = I18n.t('status.installed');
+    label.className = 'skill-row-installed';
+    label.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>'
+      + escapeHtml(I18n.t('status.installed'));
     actions.appendChild(label);
   } else {
     var installBtn = document.createElement('button');
-    installBtn.className = 'btn-ext install';
+    installBtn.className = 'btn-primary skill-row-install';
     installBtn.textContent = I18n.t('extensions.install');
     installBtn.addEventListener('click', (function(displayName, slugValue, btn) {
       return function() {
-        if (!confirm(I18n.t('skills.confirmInstallHub', { name: displayName }))) return;
         btn.disabled = true;
         btn.textContent = I18n.t('extensions.installing');
         installSkill(displayName, null, btn, slugValue);
@@ -326,8 +308,8 @@ function renderCatalogSkillCard(entry, installedNames) {
     actions.appendChild(installBtn);
   }
 
-  card.appendChild(actions);
-  return card;
+  row.appendChild(actions);
+  return row;
 }
 
 function formatCompactNumber(n) {
@@ -351,12 +333,14 @@ function formatTimeAgo(epochMs) {
   return Math.floor(months / 12) + 'y ago';
 }
 
+// Returns the install promise (settles after the toast/refresh handling)
+// so callers can chain their own refresh instead of guessing with timers.
 function installSkill(name, url, btn, slug) {
   var body = { name: name };
   if (slug) body.slug = slug;
   if (url) body.url = url;
 
-  apiFetch('/api/skills/install', {
+  return apiFetch('/api/skills/install', {
     method: 'POST',
     headers: { 'X-Confirm-Action': 'true' },
     body: body,
@@ -365,7 +349,7 @@ function installSkill(name, url, btn, slug) {
       showToast(I18n.t('skills.installedSuccess', {name: name}), 'success');
       if (btn && btn.parentNode) {
         var label = document.createElement('span');
-        label.className = 'ext-active-label';
+        label.className = 'skill-row-installed';
         label.textContent = I18n.t('status.installed');
         btn.parentNode.innerHTML = '';
         btn.parentNode.appendChild(label);
@@ -407,11 +391,36 @@ function installSkillFromForm() {
     showToast(I18n.t('skills.httpsRequired'), 'error');
     return;
   }
-  if (!confirm(I18n.t('skills.confirmInstall', { name: name }))) return;
   installSkill(name, url, null);
   document.getElementById('skill-install-name').value = '';
   document.getElementById('skill-install-url').value = '';
+  closeSkillUrlModal();
 }
+
+// --- Install-from-URL modal ---
+
+function openSkillUrlModal() {
+  var overlay = document.getElementById('skills-url-overlay');
+  if (!overlay) return;
+  overlay.style.display = 'flex';
+  var name = document.getElementById('skill-install-name');
+  if (name) name.focus();
+}
+
+function closeSkillUrlModal() {
+  var overlay = document.getElementById('skills-url-overlay');
+  if (overlay) overlay.style.display = 'none';
+}
+
+document.getElementById('skill-install-url-open')?.addEventListener('click', openSkillUrlModal);
+document.getElementById('skills-url-close')?.addEventListener('click', closeSkillUrlModal);
+document.getElementById('skills-url-cancel')?.addEventListener('click', closeSkillUrlModal);
+document.getElementById('skills-url-overlay')?.addEventListener('click', function(e) {
+  if (e.target === this) closeSkillUrlModal();
+});
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') closeSkillUrlModal();
+});
 
 // Wire up Enter key on search input
 document.getElementById('skill-search-input').addEventListener('keydown', function(e) {

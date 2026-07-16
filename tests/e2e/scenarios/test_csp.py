@@ -80,7 +80,9 @@ async def test_buttons_still_functional_after_csp_migration(page):
     button_ids = [
         'send-btn',
         'thread-new-btn',
-        'thread-toggle-btn',
+        # The NUX sidebar replaced the thread drawer toggle with a
+        # persistent collapsible sidebar.
+        'sidebar-collapse-btn',
         'restart-btn',
         'memory-edit-btn',
         'logs-pause-btn',

@@ -18,7 +18,6 @@ function applyEngineModeToTabs() {
   });
   var activeBtn = document.querySelector('.tab-bar button[data-tab].active');
   if (activeBtn && activeBtn.style.display === 'none') switchTab('chat');
-  updateTabIndicator();
 }
 
 function loadProjectsOverview() {
@@ -72,10 +71,6 @@ function renderCrCards(projects) {
       + '</button></div>';
   }
 
-  // User-created project cards.
-  if (!userProjects.length && !defaultProj) {
-    html += '<div class="cr-empty">No projects yet. Ask the assistant to create one, or use the button below.</div>';
-  }
   html += userProjects.map(function(p) {
     var dot = p.health === 'green' ? 'cr-dot-green'
       : p.health === 'yellow' ? 'cr-dot-yellow' : 'cr-dot-red';
@@ -92,11 +87,40 @@ function renderCrCards(projects) {
 
   // "New Project" card.
   html += '<button class="cr-card cr-card-new" data-action="cr-new-project">'
-    + '<div class="cr-card-head"><span class="cr-card-name">+ New Project</span></div>'
-    + '<div class="cr-card-stats">Create an autonomous workspace</div>'
+    + '<div class="cr-card-head"><span class="cr-card-name">+ New project</span></div>'
+    + '<div class="cr-card-stats">' + escapeHtml(I18n.t('projects.newBlurb')) + '</div>'
     + '</button>';
 
+  // Null state (no user projects yet): explain what a project is and offer
+  // curated starter templates that kick off through chat.
+  if (userProjects.length === 0) {
+    var starters = (typeof NUX_DATA !== 'undefined' && NUX_DATA.projectStarters) || [];
+    if (starters.length > 0) {
+      html += '<div class="cr-starters">'
+        + '<div class="cr-starters-head">'
+        + '<span class="cr-starters-label">' + escapeHtml(I18n.t('projects.startersLabel')) + '</span>'
+        + '<span class="cr-starters-hint">' + escapeHtml(I18n.t('projects.startersHint')) + '</span>'
+        + '</div>'
+        + '<div class="cr-starters-grid">'
+        + starters.map(function(s) {
+          return '<button type="button" class="cr-starter" data-starter-prompt="' + escapeHtml(s.prompt) + '">'
+            + '<span class="cr-starter-name">' + escapeHtml(s.name) + '</span>'
+            + '<span class="cr-starter-blurb">' + escapeHtml(s.blurb) + '</span>'
+            + '<span class="cr-starter-cta">' + escapeHtml(I18n.t('projects.starterCta'))
+            + ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></span>'
+            + '</button>';
+        }).join('')
+        + '</div></div>';
+    }
+  }
+
   el.innerHTML = html;
+  el.querySelectorAll('[data-starter-prompt]').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      switchTab('chat');
+      prefillChatPrompt(btn.getAttribute('data-starter-prompt'));
+    });
+  });
 }
 
 function drillIntoProject(projectId) {
@@ -568,7 +592,7 @@ function applyMissionDetailUpdate(mission) {
   if (currentMissionData && currentMissionData.id === mission.id) {
     const shouldRerenderDetail = haveMissionThreadsChanged(currentMissionData, mission);
     currentMissionData = mission;
-    if (currentTab === 'missions' && !currentEngineThreadDetail && shouldRerenderDetail) {
+    if (isTasksSurfaceActive('missions') && !currentEngineThreadDetail && shouldRerenderDetail) {
       renderMissionDetail(currentMissionData);
       return;
     }
@@ -597,7 +621,7 @@ function applyMissionDetailUpdate(mission) {
     });
   }
 
-  if (currentTab === 'missions' && !currentMissionData && !currentEngineThreadDetail && missionListChanged) {
+  if (isTasksSurfaceActive('missions') && !currentMissionData && !currentEngineThreadDetail && missionListChanged) {
     renderMissionsList(currentMissionList);
     return;
   }
@@ -715,7 +739,6 @@ function loadMissions() {
     var threadData = results[2];
     currentMissionList = listData.missions || [];
     activeWorkStore.rememberMissions(currentMissionList);
-    renderMissionsSummary(summary);
     renderMissionsList(currentMissionList);
     renderMissionsActivity(threadData.threads || []);
     enrichMissionProgress(currentMissionList);
@@ -730,24 +753,75 @@ function loadMissions() {
   });
 }
 
-function renderMissionsSummary(s) {
-  document.getElementById('missions-summary').innerHTML =
-    '<div class="ms-summary-card"><span class="ms-summary-label">' + escapeHtml(I18n.t('missions.summary.total')) + '</span><span class="ms-summary-value">' + s.total + '</span></div>'
-    + '<div class="ms-summary-card"><span class="ms-summary-label">' + escapeHtml(I18n.t('missions.summary.active')) + '</span><span class="ms-summary-value green">' + s.active + '</span></div>'
-    + '<div class="ms-summary-card"><span class="ms-summary-label">' + escapeHtml(I18n.t('missions.summary.paused')) + '</span><span class="ms-summary-value amber">' + s.paused + '</span></div>'
-    + '<div class="ms-summary-card"><span class="ms-summary-label">' + escapeHtml(I18n.t('missions.summary.completed')) + '</span><span class="ms-summary-value blue">' + s.completed + '</span></div>'
-    + '<div class="ms-summary-card"><span class="ms-summary-label">' + escapeHtml(I18n.t('missions.summary.failed')) + '</span><span class="ms-summary-value red">' + s.failed + '</span></div>';
+// Kanban board: one column per status with the count in the column header
+// (replaces the old count tiles + flat list). Cards open the task detail
+// sheet; statuses change through the sheet's pause/resume actions.
+// Null state for Tasks: explains what tasks ARE and offers three one-click
+// starters (curated use cases) that drop the prompt into chat. Rendered
+// lazily so the starter list always reflects NUX_DATA.
+function renderTasksEmptyState(container) {
+  var useCases = (typeof NUX_DATA !== 'undefined' && NUX_DATA.useCases) || [];
+  var starterIds = ['daily-briefing', 'keyword-monitor', 'deploy-watcher'];
+  var starters = starterIds
+    .map(function(id) {
+      return useCases.find(function(u) { return u.id === id; });
+    })
+    .filter(Boolean);
+
+  var html =
+    '<div class="tasks-empty-hero" aria-hidden="true">'
+    + '<div class="tasks-empty-ghost">'
+    + ['todo', 'doing', 'done'].map(function(col, i) {
+      return '<div class="tasks-empty-ghost-col">'
+        + '<span class="tasks-empty-ghost-dot c' + i + '"></span>'
+        + '<span class="tasks-empty-ghost-bar w1"></span>'
+        + (i !== 2 ? '<span class="tasks-empty-ghost-bar w2"></span>' : '')
+        + '</div>';
+    }).join('')
+    + '</div>'
+    + '</div>'
+    + '<div class="tasks-empty-title">' + escapeHtml(I18n.t('tasks.emptyTitle')) + '</div>'
+    + '<div class="tasks-empty-desc">' + escapeHtml(I18n.t('tasks.emptyDesc')) + '</div>'
+    + '<div class="tasks-empty-label">' + escapeHtml(I18n.t('tasks.emptyStartersLabel')) + '</div>'
+    + '<div class="tasks-empty-starters">';
+
+  starters.forEach(function(u) {
+    html += '<button type="button" class="tasks-empty-starter" data-starter-prompt="'
+      + escapeHtml(u.prompt) + '">'
+      + '<span class="tasks-empty-starter-icon">' + taskIconSvg(u.title + ' ' + u.description, 16) + '</span>'
+      + '<span class="tasks-empty-starter-body">'
+      + '<span class="tasks-empty-starter-title">' + escapeHtml(u.title) + '</span>'
+      + '<span class="tasks-empty-starter-desc">' + escapeHtml(u.description) + '</span>'
+      + '</span>'
+      + '<span class="tasks-empty-starter-arrow" aria-hidden="true">'
+      + '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>'
+      + '</span>'
+      + '</button>';
+  });
+
+  html += '</div>'
+    + '<div class="tasks-empty-footnote">' + escapeHtml(I18n.t('tasks.emptyFootnote')) + '</div>';
+
+  container.innerHTML = html;
+  container.querySelectorAll('[data-starter-prompt]').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      switchTab('chat');
+      prefillChatPrompt(btn.getAttribute('data-starter-prompt'));
+    });
+  });
 }
 
 function renderMissionsList(missions) {
-  var col = document.getElementById('missions-list-col');
+  var board = document.getElementById('tasks-kanban');
   var empty = document.getElementById('missions-empty');
   var body = document.getElementById('missions-body');
+  if (!board) return;
 
   if (!missions || missions.length === 0) {
-    if (col) col.innerHTML = '';
+    board.innerHTML = '';
     if (body) body.style.display = 'none';
-    empty.style.display = 'block';
+    renderTasksEmptyState(empty);
+    empty.style.display = 'flex';
     return;
   }
 
@@ -760,7 +834,6 @@ function renderMissionsList(missions) {
     else groups.Active.push(m);
   });
 
-  var html = '';
   var order = ['Active', 'Paused', 'Completed', 'Failed'];
   var labels = {
     Active: I18n.t('missions.summary.active'),
@@ -769,42 +842,42 @@ function renderMissionsList(missions) {
     Failed: I18n.t('missions.summary.failed')
   };
 
+  var html = '';
   order.forEach(function(status) {
     var list = groups[status];
-    if (!list.length) return;
+    html += '<div class="kanban-col" data-status="' + escapeHtml(status.toLowerCase()) + '">'
+      + '<div class="kanban-col-header">'
+      + '<span class="kanban-col-title">' + escapeHtml(labels[status]) + '</span>'
+      + '<span class="kanban-col-count">' + list.length + '</span>'
+      + '</div>'
+      + '<div class="kanban-col-cards">';
 
-    html += '<div class="ms-section-title">' + escapeHtml(labels[status]) + '</div>';
     list.forEach(function(m) {
-      var badgeClass = m.status === 'Active' ? 'in_progress'
-        : m.status === 'Completed' ? 'completed'
-        : m.status === 'Paused' ? 'pending' : 'failed';
       var progress = activeWorkStore.getMissionProgress(m.id);
       var liveHtml = progress
         ? '<span class="ms-live-tag"><span class="ms-live-dot"></span> Running</span>'
         : '';
-
-      html += '<div class="ms-card" data-action="open-mission" data-id="' + escapeHtml(m.id) + '">'
-        + '<div class="ms-card-body">'
-        + '<div class="ms-card-head">'
-        + '<span class="ms-card-name">' + escapeHtml(m.name) + '</span>'
-        + '<span class="badge ' + badgeClass + '">' + escapeHtml(m.status) + '</span>'
-        + '</div>'
-        + '<div class="ms-card-goal">' + escapeHtml(m.goal) + '</div>'
-        + '<div class="ms-card-meta">'
-        + '<span>' + escapeHtml(m.cadence_description || m.cadence_type || 'manual') + '</span>'
-        + '<span>' + m.thread_count + ' threads</span>'
-        + '</div>'
-        + '</div>'
-        + '<div class="ms-card-right">'
+      html += '<div class="kanban-card" data-action="open-task-sheet" data-id="' + escapeHtml(m.id) + '" tabindex="0" role="button">'
+        + '<div class="kanban-card-head">'
+        + '<span class="kanban-card-icon" aria-hidden="true">' + taskIconSvg(m.name + ' ' + (m.goal || '')) + '</span>'
+        + '<span class="kanban-card-name">' + escapeHtml(m.name) + '</span>'
         + liveHtml
-        + '<div><div class="ms-card-threads-num">' + m.thread_count + '</div>'
-        + '<div class="ms-card-threads-label">threads</div></div>'
+        + '</div>'
+        + '<div class="kanban-card-goal">' + escapeHtml(m.goal || '') + '</div>'
+        + '<div class="kanban-card-meta">'
+        + '<span>' + escapeHtml(m.cadence_description || m.cadence_type || 'manual') + '</span>'
+        + '<span>' + m.thread_count + ' ' + escapeHtml(I18n.t('tasks.threads')) + '</span>'
         + '</div>'
         + '</div>';
     });
+
+    if (!list.length) {
+      html += '<div class="kanban-col-empty">' + escapeHtml(I18n.t('tasks.columnEmpty')) + '</div>';
+    }
+    html += '</div></div>';
   });
 
-  col.innerHTML = html;
+  board.innerHTML = html;
 }
 
 function renderMissionsActivity(threads) {
@@ -879,6 +952,7 @@ function openMissionDetail(id) {
       renderMissionDetailInCr(data.mission);
     } else {
       renderMissionDetail(currentMissionData);
+      if (typeof updateHash === 'function') updateHash();
     }
   }).catch((err) => {
     showToast(I18n.t('missions.loadFailed', { message: err.message }), 'error');
@@ -890,6 +964,7 @@ function closeMissionDetail() {
   currentMissionData = null;
   currentEngineThreadDetail = null;
   loadMissions();
+  if (typeof updateHash === 'function') updateHash();
 }
 
 function renderMissionRichBlock(text, extraClass) {
@@ -1361,7 +1436,7 @@ function refreshMissionView(missionId) {
     openMissionDetail(missionId);
   } else if (crCurrentProjectId) {
     drillIntoProject(crCurrentProjectId);
-  } else if (currentTab === 'missions') {
+  } else if (isTasksSurfaceActive('missions')) {
     loadMissions();
   }
 }

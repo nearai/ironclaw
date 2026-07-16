@@ -196,6 +196,10 @@ async function sendMessage() {
     }
   }
 
+  // MOCK billing: each agent message burns a little of the credit balance
+  // so the sidebar ring visibly moves (see js/core/billing.js).
+  if (typeof billingRecordUsage === 'function') billingRecordUsage();
+
   apiFetch('/api/chat/send', {
     method: 'POST',
     body: body,

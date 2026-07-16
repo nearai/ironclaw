@@ -25,6 +25,10 @@ async def test_tab_navigation(page):
         await btn.click()
         panel = page.locator(SEL["tab_panel"].format(tab=tab))
         await panel.wait_for(state="visible", timeout=5000)
+        if tab == "settings":
+            # Settings is a full takeover (Linear pattern) that hides the
+            # app sidebar, so leave it via its own "back to app" control.
+            await page.locator("#settings-back-app").click()
 
     # Return to Chat tab
     await page.locator(SEL["tab_button"].format(tab="chat")).click()

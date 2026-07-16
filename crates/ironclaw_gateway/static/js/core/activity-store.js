@@ -337,16 +337,17 @@ class ActiveWorkStore {
     if (chatButton) {
       chatButton.removeAttribute('data-active-count');
     }
-    ['jobs', 'missions'].forEach((tabName) => {
-      const button = document.querySelector('.tab-bar button[data-tab="' + tabName + '"]');
-      if (!button) return;
-      const count = counts[tabName] || 0;
-      if (count > 0) {
-        button.setAttribute('data-active-count', String(count));
+    // Jobs and missions live behind the unified Tasks nav item; the badge
+    // shows the aggregate of active work across both.
+    const tasksButton = document.querySelector('.tab-bar button[data-tab="tasks"]');
+    if (tasksButton) {
+      const total = (counts.jobs || 0) + (counts.missions || 0);
+      if (total > 0) {
+        tasksButton.setAttribute('data-active-count', String(total));
       } else {
-        button.removeAttribute('data-active-count');
+        tasksButton.removeAttribute('data-active-count');
       }
-    });
+    }
   }
 
   getMissionLiveSnapshot(missionId) {
@@ -374,10 +375,10 @@ class ActiveWorkStore {
 
   getActivityBarItems() {
     const items = [];
-    for (const [missionId, entry] of this.missions.entries()) {
-      if (!entry || !entry.isVisibleInBar()) continue;
-      items.push(entry.toBarItem(this.getMissionLiveSnapshot(missionId)));
-    }
+    // Missions are deliberately excluded: the engine's internal missions
+    // (skill-repair, self-improvement, ...) are always "Active" and turned
+    // the strip into a permanent banner. The strip is reserved for genuinely
+    // user-facing running work (one-off jobs).
     for (const [jobId, entry] of this.jobs.entries()) {
       if (!entry) continue;
       items.push(entry.toBarItem());
@@ -397,9 +398,11 @@ class ActiveWorkStore {
       return;
     }
     const items = this.getActivityBarItems();
-    strip.hidden = false;
+    // No persistent empty banner: the strip only appears while there is
+    // actual running work to show.
+    strip.hidden = items.length === 0;
     strip.innerHTML = items.length === 0
-      ? '<div class="active-work-empty">' + escapeHtml(ActivityEntry.t('activity.empty', 'No recent jobs or missions')) + '</div>'
+      ? ''
       : items.map((item) => {
         const kindLabel = item.kind === 'job'
           ? ActivityEntry.t('activity.kind.job', 'Job')

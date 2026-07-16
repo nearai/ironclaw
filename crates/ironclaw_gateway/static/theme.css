@@ -1,34 +1,200 @@
 /* Shared IronClaw theme tokens */
 
+/* Brand type system — Geist (shared with ironclaw.com), served from
+   /fonts/*. Variable woff2 from the official `geist` npm package; Geist
+   Pixel Square is the stylistic face for uppercase tags/labels. */
+@font-face {
+  font-family: 'Geist';
+  src: url('/fonts/Geist-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Geist Mono';
+  src: url('/fonts/GeistMono-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Geist Pixel Square';
+  src: url('/fonts/GeistPixel-Square.woff2') format('woff2');
+  font-weight: 500;
+  font-display: swap;
+}
+
+/* ==========================================================================
+   IronClaw design-system tokens (--v2-*)
+   ==========================================================================
+   Canonical token set shared with the WebUI v2 design system
+   (crates/ironclaw_webui_v2: DESIGN_SYSTEM.md + styles/app.css +
+   js/design-system/tokens.js, branch achal/design-system). The values were
+   backfilled INTO the design system FROM this gateway restyle, so the two
+   must stay in lockstep: change a value there, mirror it here.
+
+   The gateway's legacy tokens (--bg, --accent, --radius, …) are aliased
+   onto the v2 set below so every surface resolves through the system.
+   New CSS should reference --v2-* roles directly. */
+
 :root {
-  --bg: #09090b;
-  --bg-secondary: #0f0f11;
-  --bg-tertiary: #1a1a1e;
-  --border: rgba(255, 255, 255, 0.08);
-  --text: #fafafa;
-  --text-secondary: #a1a1aa;
-  --accent: #34d399;
-  --accent-hover: #2fc48d;
-  --accent-soft: rgba(52, 211, 153, 0.15);
-  --success: #34d399;
-  --info: #60a5fa;
-  --warning: #F5A623;
-  --danger: #E64C4C;
-  --code-bg: #111113;
-  --radius: 8px;
-  --radius-lg: 12px;
+  /* Canvas & surfaces */
+  --v2-canvas: #09090b;
+  --v2-canvas-strong: #060608;
+  --v2-surface: #0f0f11;
+  --v2-surface-soft: rgba(255, 255, 255, 0.04);
+  --v2-surface-muted: rgba(255, 255, 255, 0.07);
+  --v2-rail: #0f0f11;
+  --v2-input-bg: #111113;
+
+  /* Cards & borders */
+  --v2-card-bg: #1a1a1e;
+  --v2-card-border: rgba(255, 255, 255, 0);
+  --v2-card-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+  --v2-panel-border: rgba(255, 255, 255, 0.08);
+
+  /* Text */
+  --v2-text: #e0e0e0;
+  --v2-text-strong: #fafafa;
+  --v2-text-muted: #a1a1aa;
+  --v2-text-faint: #888888;
+  --v2-inverse: #111111;
+  --v2-ink: #4ca7e6;
+
+  /* Accent */
+  --v2-accent: #4ca7e6;
+  --v2-accent-strong: #2882c8;
+  --v2-accent-soft: rgba(76, 167, 230, 0.15);
+  --v2-accent-text: #6bb8ec;
+
+  /* Semantic status */
+  --v2-positive-soft: rgba(52, 211, 153, 0.15);
+  --v2-positive-text: #34d399;
+  --v2-warning-soft: rgba(245, 166, 35, 0.15);
+  --v2-warning-text: #f5a623;
+  --v2-danger-soft: rgba(230, 76, 76, 0.15);
+  --v2-danger-text: #e64c4c;
+  --v2-info-soft: rgba(96, 165, 250, 0.15);
+  --v2-info-text: #60a5fa;
+
+  /* Glass */
+  --v2-glass-bg: rgba(9, 9, 11, 0.72);
+  --v2-glass-blur: blur(16px) saturate(180%);
+
+  /* Radius scale */
+  --v2-radius-xs: 6px;
+  --v2-radius-sm: 8px;
+  --v2-radius-md: 10px;
+  --v2-radius-lg: 16px;
+  --v2-radius-xl: 20px;
+  --v2-radius-2xl: 24px;
+  --v2-radius-full: 9999px;
+
+  /* Spacing scale — 4px base grid */
+  --v2-space-1: 4px;
+  --v2-space-2: 8px;
+  --v2-space-3: 12px;
+  --v2-space-4: 16px;
+  --v2-space-5: 20px;
+  --v2-space-6: 24px;
+  --v2-space-7: 28px;
+  --v2-space-8: 32px;
+  --v2-space-10: 40px;
+
+  /* Type scale */
+  --v2-font-size-label: 11px;
+  --v2-font-size-caption: 12px;
+  --v2-font-size-body-sm: 13px;
+  --v2-font-size-body: 14px;
+  --v2-font-size-body-lg: 16px;
+  --v2-font-size-title: 20px;
+  --v2-font-size-heading: 24px;
+  --v2-font-size-display-sm: 28px;
+  --v2-font-size-display: 36px;
+  --v2-font-pixel: 'Geist Pixel Square', 'Geist Mono', ui-monospace, monospace;
+  --v2-tracking-tag: 0.08em;
+  --v2-tracking-caps: 0.14em;
+  --v2-tracking-wide: 0.22em;
+  --v2-tracking-tight: -0.02em;
+  --v2-tracking-display: -0.04em;
+
+  /* Code surfaces (themed — reconciled with the design system) */
+  --v2-code-bg: #111113;
+
+  /* Scrims (design-system reconciliation: scrim for full overlays,
+     scrim-soft for side sheets where the page should stay visible) */
+  --v2-scrim: rgba(0, 0, 0, 0.55);
+  --v2-scrim-soft: rgba(0, 0, 0, 0.3);
+
+  /* Shadows — THEMED per the design-system reconciliation */
+  --v2-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3), 0 1px 3px rgba(0, 0, 0, 0.15);
+  --v2-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4), 0 2px 4px rgba(0, 0, 0, 0.2);
+  --v2-shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.5), 0 4px 12px rgba(0, 0, 0, 0.3);
+  --v2-shadow-modal: 0 24px 60px rgba(0, 0, 0, 0.35);
+  --v2-shadow-accent-hover: 0 24px 24px -20px rgba(76, 167, 230, 0.55);
+
+  /* Compact control scale (design-system reconciliation) */
+  --v2-control-h-sm: 28px;  /* toolbars, table rows, chips */
+  --v2-control-h-md: 32px;  /* default controls */
+  --v2-control-h-lg: 36px;  /* prominent CTAs, hero forms */
+  --v2-control-px-sm: 10px;
+  --v2-control-px-md: 12px;
+  --v2-control-px-lg: 16px;
+  --v2-on-accent: #ffffff;
+
+  /* Motion */
+  --v2-duration-instant: 100ms;
+  --v2-duration-fast: 150ms;
+  --v2-duration-base: 250ms;
+  --v2-duration-slow: 400ms;
+  --v2-ease-standard: ease;
+  --v2-ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --v2-ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --v2-ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --v2-ease-spring-gentle: cubic-bezier(0.22, 1.2, 0.36, 1);
+
+  /* Action-button language (ironclaw.com / nux parity) */
+  --v2-btn-primary-bg: radial-gradient(ellipse 100% 100% at 50% 130%, #4ca7e6 0%, #2882c8 65%);
+  --v2-btn-primary-bg-hover: radial-gradient(ellipse 200% 220% at 50% 110%, #5bbaf5 0%, #2882c8 60%);
+  --v2-btn-primary-border: rgba(76, 167, 230, 0.72);
+  --v2-btn-secondary-border: rgba(76, 167, 230, 0.6);
+  --v2-btn-secondary-bg: rgba(76, 167, 230, 0.05);
+
+  /* ------------------------------------------------------------------
+     Legacy gateway tokens, aliased onto the design system. Values are
+     unchanged — only the source of truth moved. Tokens with no v2 role
+     yet keep their raw values (candidates for future system tokens).
+     ------------------------------------------------------------------ */
+  --bg: var(--v2-canvas);
+  --bg-secondary: var(--v2-surface);
+  --bg-tertiary: var(--v2-card-bg);
+  --border: var(--v2-panel-border);
+  --text: var(--v2-text-strong);
+  --text-secondary: var(--v2-text-muted);
+  --accent: var(--v2-accent);
+  --accent-hover: var(--v2-accent-text);
+  --accent-soft: var(--v2-accent-soft);
+  --success: var(--v2-positive-text);
+  --info: var(--v2-info-text);
+  --warning: var(--v2-warning-text);
+  --danger: var(--v2-danger-text);
+  --code-bg: var(--v2-code-bg);
+  --radius: var(--v2-radius-sm);
+  --radius-lg: var(--v2-radius-lg);
   --shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
-  --font-mono: 'IBM Plex Mono', 'SF Mono', 'Fira Code', Consolas, monospace;
-  --bg-overlay: rgba(0, 0, 0, 0.5);
+  --font-sans: 'Geist', -apple-system, 'BlinkMacSystemFont', 'Segoe UI', sans-serif;
+  --font-mono: 'Geist Mono', 'SF Mono', 'Consolas', monospace;
+  --font-pixel: var(--v2-font-pixel);
+  --bg-overlay: var(--v2-scrim);
   --bg-modal: #1a1a1a;
   --border-modal: #333;
   --border-soft: #2a2a2a;
-  --text-tertiary: #e0e0e0;
-  --text-muted: #888;
+  --text-tertiary: var(--v2-text);
+  --text-muted: var(--v2-text-faint);
   --text-dimmed: #666;
-  --text-on-accent: #09090b;
-  --accent-brand: #00D894;
-  --accent-brand-hover: #00be82;
+  --text-on-accent: var(--v2-on-accent);
+  --accent-brand: var(--v2-accent);
+  --accent-brand-hover: var(--v2-accent-strong);
   --warning-bg: #1e1400;
   --warning-border: #3a2a00;
   --warning-text: #facc15;
@@ -37,90 +203,149 @@
   --badge-sandbox-bg: rgba(136, 132, 216, 0.15);
   --badge-sandbox-text: #b4b0e8;
   --hover-surface: rgba(255, 255, 255, 0.03);
-  --focus-ring: rgba(52, 211, 153, 0.1);
-  --accent-subtle: rgba(52, 211, 153, 0.15);
-  --accent-border-subtle: rgba(52, 211, 153, 0.3);
-  --danger-subtle: rgba(230, 76, 76, 0.15);
+  --focus-ring: rgba(76, 167, 230, 0.1);
+  --accent-subtle: var(--v2-accent-soft);
+  --accent-border-subtle: rgba(76, 167, 230, 0.3);
+  --danger-subtle: var(--v2-danger-soft);
   --danger-border-subtle: rgba(230, 76, 76, 0.3);
-  --warning-subtle: rgba(245, 166, 35, 0.15);
+  --warning-subtle: var(--v2-warning-soft);
   --border-hover: rgba(255, 255, 255, 0.15);
-  --user-msg-bg: rgba(52, 211, 153, 0.08);
-  --user-msg-border: rgba(52, 211, 153, 0.2);
+  --user-msg-bg: rgba(76, 167, 230, 0.08);
+  --user-msg-border: rgba(76, 167, 230, 0.2);
   --danger-error-bg: rgba(230, 76, 76, 0.1);
-  --accent-tee-bg: rgba(52, 211, 153, 0.1);
-  --accent-tee-border: rgba(52, 211, 153, 0.25);
-  --accent-tee-hover: rgba(52, 211, 153, 0.18);
+  --accent-tee-bg: rgba(76, 167, 230, 0.1);
+  --accent-tee-border: rgba(76, 167, 230, 0.25);
+  --accent-tee-hover: rgba(76, 167, 230, 0.18);
   --text-on-danger: #fff;
-  --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.4);
+  --shadow-card: var(--v2-card-shadow);
   --shadow-toast: 0 4px 12px rgba(0, 0, 0, 0.4);
   --danger-error-border: rgba(230, 76, 76, 0.2);
-  --note-bg: rgba(255, 255, 255, 0.04);
-  --overlay-heavy: rgba(0, 0, 0, 0.6);
-  --highlight-bg: rgba(52, 211, 153, 0.3);
+  --note-bg: var(--v2-surface-soft);
+  --overlay-heavy: var(--v2-scrim);
+  --highlight-bg: rgba(76, 167, 230, 0.3);
   --hover-subtle: rgba(255, 255, 255, 0.06);
-  --transition-fast: 150ms ease;
-  --transition-base: 0.2s ease;
-  --shadow-sm: 0 1px 2px rgba(0,0,0,0.3), 0 1px 3px rgba(0,0,0,0.15);
-  --shadow-md: 0 4px 12px rgba(0,0,0,0.4), 0 2px 4px rgba(0,0,0,0.2);
-  --shadow-lg: 0 12px 40px rgba(0,0,0,0.5), 0 4px 12px rgba(0,0,0,0.3);
-  --glow-accent: 0 0 20px rgba(52,211,153,0.1);
-  --glass-bg: rgba(9,9,11,0.72);
-  --glass-blur: blur(16px) saturate(180%);
-  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-  --ease-spring-gentle: cubic-bezier(0.22, 1.2, 0.36, 1);
-  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
-  --surface-highlight: inset 0 1px 0 rgba(255,255,255,0.05);
-  --space-1: 4px;
-  --space-2: 8px;
-  --space-3: 12px;
-  --space-4: 16px;
-  --space-6: 24px;
-  --space-8: 32px;
-  --text-xs: 11px;
-  --text-sm: 13px;
-  --text-base: 14px;
-  --text-lg: 16px;
-  --text-xl: 20px;
-  --text-2xl: 24px;
-  --text-3xl: 36px;
-  --transition-slow: 300ms ease;
-  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
-  --duration-instant: 100ms;
-  --duration-fast: 150ms;
-  --duration-base: 250ms;
-  --duration-slow: 400ms;
-  --accent-soft: var(--accent-subtle);
-  --accent-dim: var(--accent-subtle);
+  --transition-fast: var(--v2-duration-fast) var(--v2-ease-standard);
+  --transition-base: var(--v2-duration-base) var(--v2-ease-standard);
+  --shadow-sm: var(--v2-shadow-sm);
+  --shadow-md: var(--v2-shadow-md);
+  --shadow-lg: var(--v2-shadow-lg);
+  --glow-accent: 0 0 20px rgba(76, 167, 230, 0.1);
+  --glass-bg: var(--v2-glass-bg);
+  --glass-blur: var(--v2-glass-blur);
+  --ease-spring: var(--v2-ease-spring);
+  --ease-spring-gentle: var(--v2-ease-spring-gentle);
+  --ease-out-expo: var(--v2-ease-out-expo);
+  --surface-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  --space-1: var(--v2-space-1);
+  --space-2: var(--v2-space-2);
+  --space-3: var(--v2-space-3);
+  --space-4: var(--v2-space-4);
+  --space-5: var(--v2-space-5);
+  --space-6: var(--v2-space-6);
+  --space-8: var(--v2-space-8);
+  --text-xs: var(--v2-font-size-label);
+  --text-sm: var(--v2-font-size-body-sm);
+  --text-base: var(--v2-font-size-body);
+  --text-lg: var(--v2-font-size-body-lg);
+  --text-xl: var(--v2-font-size-title);
+  --text-2xl: var(--v2-font-size-heading);
+  --text-3xl: var(--v2-font-size-display);
+  --transition-slow: var(--v2-duration-slow) var(--v2-ease-standard);
+  --ease-in-out: var(--v2-ease-in-out);
+  --duration-instant: var(--v2-duration-instant);
+  --duration-fast: var(--v2-duration-fast);
+  --duration-base: var(--v2-duration-base);
+  --duration-slow: var(--v2-duration-slow);
+  --accent-dim: var(--v2-accent-soft);
   --bg-hover: var(--hover-surface);
-  --danger-soft: var(--danger-subtle);
-  --warning-soft: var(--warning-subtle);
+  --danger-soft: var(--v2-danger-soft);
+  --warning-soft: var(--v2-warning-soft);
+  --btn-primary-bg: var(--v2-btn-primary-bg);
+  --btn-primary-bg-hover: var(--v2-btn-primary-bg-hover);
+  --btn-primary-shadow-hover: var(--v2-shadow-accent-hover);
+  --btn-radius: var(--v2-radius-lg);
+  --btn-secondary-border: var(--v2-btn-secondary-border);
+  --btn-secondary-bg: var(--v2-btn-secondary-bg);
+  --heading-tracking: var(--v2-tracking-tight);
+  --radius-xl: var(--v2-radius-2xl);
+  /* Aliases for tokens referenced across surface CSS but never defined —
+     without these, color-mix()/var() fall back to transparent/invalid. */
+  --bg-primary: var(--bg);
+  --text-primary: var(--text);
+  --surface-muted: var(--bg-tertiary);
+  --error: var(--danger);
+  --radius-sm: var(--v2-radius-xs);
+  --radius-md: var(--v2-radius-md);
 }
 
 [data-theme="light"] {
-  --bg: #ffffff;
-  --bg-secondary: #f5f5f7;
-  --bg-tertiary: #ebebed;
-  --border: rgba(0, 0, 0, 0.1);
-  --text: #1a1a2e;
-  --text-secondary: #555555;
-  --accent: #059669;
-  --accent-hover: #047857;
-  --success: #059669;
-  --info: #2563eb;
-  --warning: #d97706;
-  --danger: #dc2626;
-  --code-bg: #f0f0f2;
+  /* Canvas & surfaces */
+  --v2-canvas: #f5f5f7;
+  --v2-canvas-strong: #ffffff;
+  --v2-surface: #ffffff;
+  --v2-surface-soft: #f5f5f7;
+  --v2-surface-muted: #ebebed;
+  --v2-rail: #f5f5f7;
+  --v2-input-bg: #ffffff;
+
+  /* Cards & borders */
+  --v2-card-bg: #ffffff;
+  --v2-card-border: rgba(0, 0, 0, 0.08);
+  --v2-card-shadow: 0 4px 24px rgba(0, 0, 0, 0.08);
+  --v2-panel-border: rgba(0, 0, 0, 0.08);
+
+  /* Text */
+  --v2-text: #1a1a2e;
+  --v2-text-strong: #090909;
+  --v2-text-muted: #555555;
+  --v2-text-faint: #999999;
+  --v2-inverse: #ffffff;
+  --v2-ink: #090909;
+
+  /* Accent */
+  --v2-accent: #2882c8;
+  --v2-accent-strong: #1f6ca8;
+  --v2-accent-soft: rgba(40, 130, 200, 0.1);
+  --v2-accent-text: #2882c8;
+
+  /* Semantic status */
+  --v2-positive-soft: rgba(5, 150, 105, 0.1);
+  --v2-positive-text: #059669;
+  --v2-warning-soft: rgba(217, 119, 6, 0.1);
+  --v2-warning-text: #d97706;
+  --v2-danger-soft: rgba(220, 38, 38, 0.1);
+  --v2-danger-text: #dc2626;
+  --v2-info-soft: rgba(37, 99, 235, 0.1);
+  --v2-info-text: #2563eb;
+
+  /* Glass */
+  --v2-glass-bg: rgba(255, 255, 255, 0.85);
+
+  /* Code surfaces (themed) */
+  --v2-code-bg: #f0f0f2;
+
+  /* Shadows — themed light scale (now canonical in the design system). */
+  --v2-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04);
+  --v2-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08), 0 2px 4px rgba(0, 0, 0, 0.04);
+  --v2-shadow-lg: 0 25px 50px -12px rgba(0, 0, 0, 0.1);
+
+  /* Legacy aliases whose *mapping* differs by theme: in light, the page
+     canvas is white and the secondary surface is the grey wash. */
+  --bg: var(--v2-canvas-strong);
+  --bg-secondary: var(--v2-surface-soft);
+  --bg-tertiary: var(--v2-surface-muted);
+  --text: var(--v2-text);
+  --accent-hover: var(--v2-accent-strong);
+  --text-tertiary: #333333;
+  --text-muted: #777777;
+  --text-dimmed: var(--v2-text-faint);
+
+  /* Legacy tokens with no v2 role yet (light values). */
   --shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
-  --bg-overlay: rgba(0, 0, 0, 0.3);
   --bg-modal: #ffffff;
   --border-modal: #e0e0e0;
   --border-soft: #e5e5e5;
-  --text-tertiary: #333333;
-  --text-muted: #777777;
-  --text-dimmed: #999999;
   --text-on-accent: #ffffff;
-  --accent-brand: #059669;
-  --accent-brand-hover: #047857;
   --warning-bg: #fffbeb;
   --warning-border: #fde68a;
   --warning-text: #92400e;
@@ -129,59 +354,23 @@
   --badge-sandbox-bg: rgba(136, 132, 216, 0.1);
   --badge-sandbox-text: #6b67b0;
   --hover-surface: rgba(0, 0, 0, 0.03);
-  --focus-ring: rgba(5, 150, 105, 0.15);
-  --accent-subtle: rgba(5, 150, 105, 0.1);
-  --accent-border-subtle: rgba(5, 150, 105, 0.3);
-  --danger-subtle: rgba(220, 38, 38, 0.1);
+  --focus-ring: rgba(40, 130, 200, 0.15);
+  --accent-border-subtle: rgba(40, 130, 200, 0.3);
   --danger-border-subtle: rgba(220, 38, 38, 0.2);
-  --warning-subtle: rgba(217, 119, 6, 0.1);
   --border-hover: rgba(0, 0, 0, 0.15);
-  --user-msg-bg: rgba(5, 150, 105, 0.08);
-  --user-msg-border: rgba(5, 150, 105, 0.2);
+  --user-msg-bg: rgba(40, 130, 200, 0.08);
+  --user-msg-border: rgba(40, 130, 200, 0.2);
   --danger-error-bg: rgba(220, 38, 38, 0.06);
-  --accent-tee-bg: rgba(5, 150, 105, 0.08);
-  --accent-tee-border: rgba(5, 150, 105, 0.2);
-  --accent-tee-hover: rgba(5, 150, 105, 0.15);
-  --text-on-danger: #fff;
-  --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.08);
+  --accent-tee-bg: rgba(40, 130, 200, 0.08);
+  --accent-tee-border: rgba(40, 130, 200, 0.2);
+  --accent-tee-hover: rgba(40, 130, 200, 0.15);
   --shadow-toast: 0 4px 12px rgba(0, 0, 0, 0.08);
-  --shadow-lg: 0 25px 50px -12px rgba(0, 0, 0, 0.1);
   --danger-error-border: rgba(220, 38, 38, 0.15);
   --note-bg: rgba(0, 0, 0, 0.02);
-  --overlay-heavy: rgba(0, 0, 0, 0.4);
-  --highlight-bg: rgba(5, 150, 105, 0.2);
+  --highlight-bg: rgba(40, 130, 200, 0.2);
   --hover-subtle: rgba(0, 0, 0, 0.04);
-  --shadow-sm: 0 1px 2px rgba(0,0,0,0.06), 0 1px 3px rgba(0,0,0,0.04);
-  --shadow-md: 0 4px 12px rgba(0,0,0,0.08), 0 2px 4px rgba(0,0,0,0.04);
-  --glow-accent: 0 0 20px rgba(5,150,105,0.08);
-  --glass-bg: rgba(255,255,255,0.85);
-  --glass-blur: blur(16px) saturate(180%);
-  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-  --ease-spring-gentle: cubic-bezier(0.22, 1.2, 0.36, 1);
-  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
-  --surface-highlight: inset 0 1px 0 rgba(255,255,255,0.8);
-  --space-1: 4px;
-  --space-2: 8px;
-  --space-3: 12px;
-  --space-4: 16px;
-  --space-6: 24px;
-  --space-8: 32px;
-  --text-xs: 11px;
-  --text-sm: 13px;
-  --text-base: 14px;
-  --text-lg: 16px;
-  --text-xl: 20px;
-  --text-2xl: 24px;
-  --text-3xl: 36px;
-  --transition-slow: 300ms ease;
-  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
-  --duration-instant: 100ms;
-  --duration-fast: 150ms;
-  --duration-base: 250ms;
-  --duration-slow: 400ms;
-  --accent-soft: var(--accent-subtle);
-  --accent-dim: var(--accent-subtle);
-  --bg-hover: var(--hover-surface);
-  --danger-soft: var(--danger-subtle);
-  --warning-soft: var(--warning-subtle);
+  --glow-accent: 0 0 20px rgba(40, 130, 200, 0.08);
+  --surface-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+  /* Secondary buttons read as frosted white on light surfaces. */
+  --btn-secondary-bg: rgba(255, 255, 255, 0.5);
 }

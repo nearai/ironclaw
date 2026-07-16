@@ -99,7 +99,7 @@
 .ext-kind {
   font-size: 10px;
   padding: 2px 6px;
-  border-radius: 8px;
+  border-radius: var(--v2-radius-sm);
   font-weight: 500;
   text-transform: uppercase;
   letter-spacing: 0.3px;
@@ -135,7 +135,7 @@
 .ext-auth-dot {
   width: 8px;
   height: 8px;
-  border-radius: 50%;
+  border-radius: var(--v2-radius-full);
   flex-shrink: 0;
 }
 
@@ -154,7 +154,7 @@
 }
 
 .ext-url {
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   color: var(--text-secondary);
   font-family: var(--font-mono);
   overflow: hidden;
@@ -163,7 +163,7 @@
 }
 
 .ext-tools {
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   color: var(--text-secondary);
 }
 
@@ -177,7 +177,7 @@
 }
 
 .ext-active-label {
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   color: var(--success);
   font-weight: 500;
 }
@@ -208,7 +208,7 @@
 .stepper-circle {
   width: 20px;
   height: 20px;
-  border-radius: 50%;
+  border-radius: var(--v2-radius-full);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -269,7 +269,7 @@
 }
 
 .ext-pairing-label {
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   color: var(--warning);
   font-weight: 500;
 }
@@ -314,7 +314,7 @@
   padding: 4px 10px;
   border-radius: var(--radius);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   font-weight: 500;
   border: 1px solid var(--border);
   background: var(--bg-tertiary);
@@ -456,7 +456,7 @@
   padding: 8px 12px;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--v2-radius-xs);
   color: var(--text-primary);
   font-size: var(--text-sm);
   font-family: inherit;
@@ -473,7 +473,7 @@
   padding: 8px 12px;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--v2-radius-xs);
   color: var(--text-primary);
   font-size: var(--text-sm);
   font-family: inherit;
@@ -492,12 +492,12 @@
   color: var(--accent);
   background: var(--bg-tertiary);
   padding: 2px 6px;
-  border-radius: 3px;
+  border-radius: var(--v2-radius-xs);
   flex-shrink: 0;
 }
 
 .pairing-sender {
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   color: var(--text-secondary);
   flex: 1 1 14rem;
   min-width: 0;
@@ -527,7 +527,7 @@
 .configure-modal {
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: calc(var(--v2-radius-md) + 2px);
   padding: 24px;
   width: 460px;
   max-width: 90vw;
@@ -544,7 +544,7 @@
 .configure-hint {
   margin: 0 0 16px 0;
   padding: 10px 12px;
-  border-radius: 8px;
+  border-radius: var(--v2-radius-sm);
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   color: var(--text-secondary);
@@ -558,7 +558,7 @@
   gap: 10px;
   margin: 16px 0 0 0;
   padding: 12px;
-  border-radius: 8px;
+  border-radius: var(--v2-radius-sm);
   background: var(--bg-secondary);
   border: 1px solid var(--border);
 }
@@ -569,7 +569,7 @@
   gap: 12px;
   margin: 16px 0 0 0;
   padding: 12px;
-  border-radius: 8px;
+  border-radius: var(--v2-radius-sm);
   background: var(--bg-secondary);
   border: 1px solid var(--border);
 }
@@ -590,7 +590,7 @@
   display: inline-block;
   width: fit-content;
   padding: 6px 10px;
-  border-radius: 6px;
+  border-radius: var(--v2-radius-xs);
   background: rgba(255, 255, 255, 0.06);
   border: 1px solid var(--border);
   color: var(--text-primary);
@@ -603,7 +603,7 @@
   justify-content: center;
   width: fit-content;
   padding: 10px 14px;
-  border-radius: 10px;
+  border-radius: var(--v2-radius-md);
   border: 1px solid var(--accent);
   background: var(--accent-subtle);
   color: var(--accent, var(--text-link, #4ea3ff));
@@ -626,7 +626,7 @@
 .configure-inline-error {
   margin: 16px 0 0 0;
   padding: 10px 12px;
-  border-radius: 8px;
+  border-radius: var(--v2-radius-sm);
   background: rgba(220, 38, 38, 0.12);
   border: 1px solid rgba(220, 38, 38, 0.35);
   color: #fca5a5;
@@ -681,7 +681,7 @@
   padding: 8px 12px;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--v2-radius-xs);
   color: var(--text-primary);
   font-size: var(--text-sm);
   font-family: inherit;
@@ -707,7 +707,7 @@
   padding: 2px 8px;
   background: rgba(63, 185, 80, 0.15);
   color: var(--success);
-  border-radius: 4px;
+  border-radius: var(--v2-radius-xs);
   white-space: nowrap;
 }
 

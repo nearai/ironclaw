@@ -16,7 +16,7 @@
 .ms-summary-card {
   background: var(--bg-secondary);
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: calc(var(--v2-radius-lg) - 2px);
   padding: 18px 20px;
   display: flex;
   flex-direction: column;
@@ -75,7 +75,7 @@
   grid-template-columns: 1fr auto;
   gap: var(--space-4);
   padding: 18px 22px;
-  border-radius: 14px;
+  border-radius: calc(var(--v2-radius-lg) - 2px);
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   box-shadow: var(--shadow-sm);
@@ -155,7 +155,7 @@
 .ms-live-dot {
   width: 5px;
   height: 5px;
-  border-radius: 50%;
+  border-radius: var(--v2-radius-full);
   background: var(--accent);
   animation: ms-livePulse 2s ease-in-out infinite;
 }
@@ -179,7 +179,7 @@
 .ms-act-dot {
   width: 8px;
   height: 8px;
-  border-radius: 50%;
+  border-radius: var(--v2-radius-full);
   flex: 0 0 auto;
   margin-top: 5px;
 }
@@ -208,7 +208,7 @@
   color: var(--accent);
   background: var(--accent-subtle);
   padding: 2px 7px;
-  border-radius: 4px;
+  border-radius: var(--v2-radius-xs);
   margin-top: 6px;
 }
 .ms-act-tag.danger {
@@ -403,17 +403,17 @@
 }
 .ms-rich code {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--v2-radius-xs);
   padding: 1px 6px;
   color: var(--text);
 }
 .ms-rich pre {
   margin: 0 0 14px;
   padding: 14px 16px;
-  border-radius: 14px;
+  border-radius: calc(var(--v2-radius-lg) - 2px);
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
   overflow-x: auto;
@@ -476,7 +476,7 @@
 .ms-brief-note {
   margin-bottom: 12px;
   padding: 12px 14px;
-  border-radius: 14px;
+  border-radius: calc(var(--v2-radius-lg) - 2px);
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
 }
@@ -495,7 +495,7 @@
   align-items: start;
   gap: 12px;
   padding: 12px 14px;
-  border-radius: 14px;
+  border-radius: calc(var(--v2-radius-lg) - 2px);
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
 }
@@ -510,7 +510,7 @@
 .ms-schema-key,
 .ms-category-key {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   color: var(--text);
 }
 .ms-schema-key { color: var(--accent); }
@@ -531,12 +531,12 @@
 .ms-step-index {
   width: 24px;
   height: 24px;
-  border-radius: 999px;
+  border-radius: var(--v2-radius-full);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--v2-font-size-label);
   color: var(--text-on-accent);
   background: var(--accent);
   font-weight: 700;
@@ -548,14 +548,14 @@
 .ms-callout-icon {
   width: 24px;
   height: 24px;
-  border-radius: 999px;
+  border-radius: var(--v2-radius-full);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   background: rgba(245, 158, 11, 0.16);
   color: var(--warning);
   font-weight: 700;
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
 }
 
 /* ── Approach history ── */
@@ -600,7 +600,7 @@
   display: inline-flex;
   align-items: center;
   padding: 4px 9px;
-  border-radius: 999px;
+  border-radius: var(--v2-radius-full);
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.06em;
@@ -630,7 +630,7 @@
 .ms-approach-summary {
   margin-bottom: 14px;
   padding: 12px 14px;
-  border-radius: 14px;
+  border-radius: calc(var(--v2-radius-lg) - 2px);
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
 }
@@ -646,7 +646,7 @@
 .ms-approach-field {
   min-width: 0;
   padding: 14px 16px;
-  border-radius: 14px;
+  border-radius: calc(var(--v2-radius-lg) - 2px);
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
 }
@@ -686,7 +686,7 @@
   letter-spacing: 0.04em;
   text-transform: uppercase;
   padding: 3px 8px;
-  border-radius: 4px;
+  border-radius: var(--v2-radius-xs);
   min-width: 64px;
   text-align: center;
 }

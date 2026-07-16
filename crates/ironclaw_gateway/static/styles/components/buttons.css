@@ -1,0 +1,231 @@
+/* ── Design-system button roles (ironclaw_webui_v2 button spec) ───────────
+   Loaded LAST in the style bundle so it overrides the per-surface button
+   styling without rewriting seventeen files. Ported from the v2 design
+   system's button.tsx: control heights/paddings come from the
+   --v2-control-* scale (sm 28 / md 32 / lg 36), radius from
+   --v2-radius-md, text sizes from the --v2-font-size-* scale, and text on
+   accent fills is always white (--v2-on-accent). Two roles:
+
+   PRIMARY — brand-blue radial gradient, 1px accent border, white text;
+   hover brightens the gradient and lifts with the signature glow.
+
+   SECONDARY (v2 "outline") — 2px accent outline, translucent fill; fills
+   solid blue with white text on hover, deepens on press.
+
+   Danger/destructive buttons keep their per-surface styling on purpose. */
+
+#send-btn,
+.discover-btn.primary,
+.btn-ext.install,
+.btn-save,
+.ms-btn.primary,
+.btn-add-provider,
+.provider-dialog-footer button:first-child,
+.config-form-actions button:first-child,
+.nux-wizard-footer .btn-primary,
+.nux-channel-btn.btn-primary,
+.auth-card-login .auth-form button,
+.auth-card .auth-actions button.auth-submit,
+.approval-card .approval-actions button.approve,
+.ext-install-form button,
+.skill-search-box button,
+.api-tokens-create,
+.restart-modal-btn.confirm,
+.empty-state-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--v2-space-2);
+  height: var(--v2-control-h-md);
+  padding: 0 var(--v2-control-px-md);
+  background: var(--btn-primary-bg);
+  color: var(--v2-on-accent);
+  border: 1px solid var(--v2-btn-primary-border);
+  border-radius: var(--v2-radius-md);
+  font-family: inherit;
+  font-size: var(--v2-font-size-body-sm);
+  font-weight: 500;
+  letter-spacing: 0;
+  cursor: pointer;
+  transition: background 0.35s ease, box-shadow 0.3s ease, transform 0.2s ease;
+}
+
+#send-btn:hover:not(:disabled),
+.discover-btn.primary:hover:not(:disabled),
+.btn-ext.install:hover:not(:disabled),
+.btn-save:hover:not(:disabled),
+.ms-btn.primary:hover:not(:disabled),
+.btn-add-provider:hover:not(:disabled),
+.provider-dialog-footer button:first-child:hover:not(:disabled),
+.config-form-actions button:first-child:hover:not(:disabled),
+.nux-wizard-footer .btn-primary:hover:not(:disabled),
+.nux-channel-btn.btn-primary:hover:not(:disabled),
+.auth-card-login .auth-form button:hover:not(:disabled),
+.auth-card .auth-actions button.auth-submit:hover:not(:disabled),
+.approval-card .approval-actions button.approve:hover:not(:disabled),
+.ext-install-form button:hover:not(:disabled),
+.skill-search-box button:hover:not(:disabled),
+.api-tokens-create:hover:not(:disabled),
+.restart-modal-btn.confirm:hover:not(:disabled),
+.empty-state-action:hover:not(:disabled) {
+  background: var(--btn-primary-bg-hover);
+  box-shadow: var(--btn-primary-shadow-hover);
+  transform: none;
+}
+
+/* Press: settle back down (drop the hover glow). */
+#send-btn:active:not(:disabled),
+.discover-btn.primary:active:not(:disabled),
+.btn-ext.install:active:not(:disabled),
+.btn-save:active:not(:disabled),
+.ms-btn.primary:active:not(:disabled),
+.btn-add-provider:active:not(:disabled),
+.provider-dialog-footer button:first-child:active:not(:disabled),
+.config-form-actions button:first-child:active:not(:disabled),
+.nux-wizard-footer .btn-primary:active:not(:disabled),
+.nux-channel-btn.btn-primary:active:not(:disabled),
+.auth-card-login .auth-form button:active:not(:disabled),
+.auth-card .auth-actions button.auth-submit:active:not(:disabled),
+.approval-card .approval-actions button.approve:active:not(:disabled),
+.ext-install-form button:active:not(:disabled),
+.skill-search-box button:active:not(:disabled),
+.api-tokens-create:active:not(:disabled),
+.restart-modal-btn.confirm:active:not(:disabled),
+.empty-state-action:active:not(:disabled) {
+  background: var(--btn-primary-bg);
+  box-shadow: none;
+}
+
+#send-btn:disabled,
+.discover-btn.primary:disabled,
+.btn-ext.install:disabled,
+.btn-save:disabled,
+.ms-btn.primary:disabled,
+.btn-add-provider:disabled,
+.provider-dialog-footer button:first-child:disabled,
+.config-form-actions button:first-child:disabled,
+.nux-wizard-footer .btn-primary:disabled,
+.nux-channel-btn.btn-primary:disabled,
+.auth-card-login .auth-form button:disabled,
+.auth-card .auth-actions button.auth-submit:disabled,
+.approval-card .approval-actions button.approve:disabled,
+.ext-install-form button:disabled,
+.skill-search-box button:disabled,
+.api-tokens-create:disabled,
+.restart-modal-btn.confirm:disabled,
+.empty-state-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Prominent CTAs (hero forms, wizard footers, empty states) sit on the
+   lg step of the control scale. */
+.nux-wizard-footer .btn-primary,
+.nux-channel-btn.btn-primary,
+.auth-card-login .auth-form button,
+.auth-card .auth-actions button.auth-submit,
+.empty-state-action {
+  height: var(--v2-control-h-lg);
+  padding: 0 var(--v2-control-px-lg);
+  font-size: var(--v2-font-size-body);
+}
+
+/* Composer send: icon button on the md step (h == w, radius-md square). */
+#send-btn {
+  width: var(--v2-control-h-md);
+  height: var(--v2-control-h-md);
+  padding: 0;
+  border-radius: var(--v2-radius-md);
+}
+
+/* Secondary role — accent outline, frosted fill, solid blue on hover */
+.discover-btn.secondary,
+.btn-secondary,
+.btn-cancel-edit,
+.nux-wizard-footer .btn-secondary,
+.nux-channel-btn.btn-secondary,
+.provider-dialog-footer .btn-secondary,
+.restart-modal-btn.cancel,
+.config-form-actions .btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--v2-space-2);
+  height: var(--v2-control-h-md);
+  padding: 0 var(--v2-control-px-md);
+  background: var(--btn-secondary-bg);
+  border: 2px solid var(--btn-secondary-border);
+  border-radius: var(--v2-radius-md);
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--v2-font-size-body-sm);
+  font-weight: 500;
+  cursor: pointer;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  transition: background 0.25s ease, border-color 0.25s ease, color 0.25s ease;
+}
+
+.discover-btn.secondary:hover:not(:disabled),
+.btn-secondary:hover:not(:disabled),
+.btn-cancel-edit:hover:not(:disabled),
+.nux-wizard-footer .btn-secondary:hover:not(:disabled),
+.nux-channel-btn.btn-secondary:hover:not(:disabled),
+.provider-dialog-footer .btn-secondary:hover:not(:disabled),
+.restart-modal-btn.cancel:hover:not(:disabled),
+.config-form-actions .btn-secondary:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--v2-on-accent);
+}
+
+.discover-btn.secondary:active:not(:disabled),
+.btn-secondary:active:not(:disabled),
+.btn-cancel-edit:active:not(:disabled),
+.nux-wizard-footer .btn-secondary:active:not(:disabled),
+.nux-channel-btn.btn-secondary:active:not(:disabled),
+.provider-dialog-footer .btn-secondary:active:not(:disabled),
+.restart-modal-btn.cancel:active:not(:disabled),
+.config-form-actions .btn-secondary:active:not(:disabled) {
+  background: var(--v2-accent-strong);
+  border-color: var(--v2-accent-strong);
+  color: var(--v2-on-accent);
+}
+
+.nux-wizard-footer .btn-secondary,
+.nux-channel-btn.btn-secondary {
+  height: var(--v2-control-h-lg);
+  padding: 0 var(--v2-control-px-lg);
+  font-size: var(--v2-font-size-body);
+}
+
+/* The danger flavour of .btn-secondary contexts stays red */
+.btn-danger:hover:not(:disabled) {
+  box-shadow: none;
+}
+
+/* ── Pixel-face tags/badges (landing kicker language) ─────────────────────
+   Small uppercase stylistic labels use Geist Pixel Square with wide
+   tracking — applied as one consistent rule set rather than ad hoc. */
+.integration-kind,
+.integration-badge,
+.skill-trust,
+.skill-version,
+.badge,
+.integrations-connected-section h3,
+.integrations-available-section h3 {
+  font-family: var(--font-pixel);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 500;
+}
+
+/* Headings: Geist medium with the landing's tight tracking */
+.surface-title,
+.discover-title,
+.welcome-heading,
+.auth-brand h1,
+.nux-wizard-title {
+  font-weight: 500;
+  letter-spacing: var(--heading-tracking);
+}

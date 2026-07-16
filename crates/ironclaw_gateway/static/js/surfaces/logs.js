@@ -72,6 +72,7 @@ function prependLogEntry(entry) {
   div.className = 'log-entry level-' + entry.level;
   div.setAttribute('data-level', entry.level);
   div.setAttribute('data-target', entry.target);
+  div.setAttribute('data-msg', entry.message);
 
   const ts = document.createElement('span');
   ts.className = 'log-ts';
@@ -79,8 +80,8 @@ function prependLogEntry(entry) {
   div.appendChild(ts);
 
   const lvl = document.createElement('span');
-  lvl.className = 'log-level';
-  lvl.textContent = entry.level.padEnd(5);
+  lvl.className = 'log-level log-level-' + entry.level.toLowerCase();
+  lvl.textContent = entry.level;
   div.appendChild(lvl);
 
   const tgt = document.createElement('span');
@@ -95,10 +96,12 @@ function prependLogEntry(entry) {
 
   div.addEventListener('click', () => div.classList.toggle('expanded'));
 
-  // Apply current filters as visibility
+  // Apply current filters as visibility (search spans target + message).
   const matchesLevel = levelFilter === 'all' || entry.level === levelFilter;
-  const matchesTarget = !targetFilter || entry.target.toLowerCase().includes(targetFilter);
-  if (!matchesLevel || !matchesTarget) {
+  const matchesQuery = !targetFilter
+    || entry.target.toLowerCase().includes(targetFilter)
+    || entry.message.toLowerCase().includes(targetFilter);
+  if (!matchesLevel || !matchesQuery) {
     div.style.display = 'none';
   }
 
@@ -109,10 +112,25 @@ function prependLogEntry(entry) {
     output.removeChild(output.lastChild);
   }
 
+  syncLogsEmptyState();
+
   // Auto-scroll to top (newest entries are at the top)
   if (document.getElementById('logs-autoscroll').checked) {
     output.scrollTop = 0;
   }
+}
+
+// Toggle the null state depending on whether any row is visible.
+function syncLogsEmptyState() {
+  const output = document.getElementById('logs-output');
+  const empty = document.getElementById('logs-empty');
+  if (!output || !empty) return;
+  let anyVisible = false;
+  for (const el of output.children) {
+    if (el.style.display !== 'none') { anyVisible = true; break; }
+  }
+  empty.style.display = anyVisible ? 'none' : '';
+  output.style.display = anyVisible ? '' : 'none';
 }
 
 function toggleLogsPause() {
@@ -146,9 +164,12 @@ function applyLogFilters() {
   const entries = document.querySelectorAll('#logs-output .log-entry');
   for (const el of entries) {
     const matchesLevel = levelFilter === 'all' || el.getAttribute('data-level') === levelFilter;
-    const matchesTarget = !targetFilter || el.getAttribute('data-target').toLowerCase().includes(targetFilter);
-    el.style.display = (matchesLevel && matchesTarget) ? '' : 'none';
+    const matchesQuery = !targetFilter
+      || el.getAttribute('data-target').toLowerCase().includes(targetFilter)
+      || (el.getAttribute('data-msg') || '').toLowerCase().includes(targetFilter);
+    el.style.display = (matchesLevel && matchesQuery) ? '' : 'none';
   }
+  syncLogsEmptyState();
 }
 
 // --- Server-side log level control ---

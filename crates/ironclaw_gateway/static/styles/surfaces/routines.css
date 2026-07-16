@@ -57,7 +57,7 @@
   border-radius: var(--radius);
   color: var(--accent);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
 }
 
 .btn-trigger:hover {
@@ -71,7 +71,7 @@
   border-radius: var(--radius);
   color: var(--warning);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
 }
 
 .btn-toggle:hover {

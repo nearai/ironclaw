@@ -14,11 +14,11 @@
 .btn-add-provider {
   padding: 5px 14px;
   background: var(--accent);
-  color: #09090b;
+  color: var(--v2-inverse);
   border: none;
   border-radius: var(--radius);
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--v2-font-size-body-sm);
   font-weight: 600;
   transition: background 0.2s, transform 0.2s;
 }
@@ -64,12 +64,12 @@
 
 .provider-name {
   font-weight: 600;
-  font-size: 14px;
+  font-size: var(--v2-font-size-body);
   color: var(--text);
 }
 
 .provider-id-label {
-  font-size: 11px;
+  font-size: var(--v2-font-size-label);
   color: var(--text-secondary);
   font-family: var(--font-mono);
 }
@@ -105,19 +105,19 @@
 }
 
 .provider-adapter {
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   color: var(--text-secondary);
 }
 
 .provider-url {
-  font-size: 11px;
+  font-size: var(--v2-font-size-label);
   color: var(--text-secondary);
   font-family: var(--font-mono);
   opacity: 0.7;
 }
 
 .provider-current-model {
-  font-size: 11px;
+  font-size: var(--v2-font-size-label);
   color: var(--accent);
   font-family: var(--font-mono);
   font-weight: 500;
@@ -136,7 +136,7 @@
   border-radius: var(--radius);
   color: var(--text-secondary);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   transition: color 0.2s, border-color 0.2s, background 0.2s;
 }
 
@@ -200,7 +200,7 @@
 }
 
 .provider-dialog-header h2 {
-  font-size: 14px;
+  font-size: var(--v2-font-size-body);
   font-weight: 600;
   color: var(--text);
   margin: 0;
@@ -240,7 +240,7 @@
 .provider-dialog-footer button {
   padding: 6px 18px;
   border-radius: var(--radius);
-  font-size: 13px;
+  font-size: var(--v2-font-size-body-sm);
   font-weight: 600;
   cursor: pointer;
   transition: background 0.2s, transform 0.2s;
@@ -248,7 +248,7 @@
 
 .provider-dialog-footer button:first-child {
   background: var(--accent);
-  color: #09090b;
+  color: var(--v2-inverse);
   border: none;
 }
 
@@ -281,7 +281,7 @@
 }
 
 .config-form-row label {
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   font-weight: 500;
   color: var(--text-secondary);
 }
@@ -293,7 +293,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius);
   color: var(--text);
-  font-size: 13px;
+  font-size: var(--v2-font-size-body-sm);
 }
 
 .config-form-row input:focus,
@@ -304,7 +304,7 @@
 }
 
 .config-form-hint {
-  font-size: 11px;
+  font-size: var(--v2-font-size-label);
   color: var(--text-secondary);
   opacity: 0.7;
 }
@@ -318,7 +318,7 @@
 .config-form-actions button {
   padding: 6px 18px;
   border-radius: var(--radius);
-  font-size: 13px;
+  font-size: var(--v2-font-size-body-sm);
   font-weight: 600;
   cursor: pointer;
   transition: background 0.2s, transform 0.2s;
@@ -326,7 +326,7 @@
 
 .config-form-actions button:first-child {
   background: var(--accent);
-  color: #09090b;
+  color: var(--v2-inverse);
   border: none;
 }
 
@@ -357,7 +357,7 @@
   border-radius: var(--radius);
   color: var(--text-secondary);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--v2-font-size-caption);
   transition: color 0.15s, border-color 0.15s, background 0.15s;
 }
 
@@ -376,7 +376,7 @@
   margin-top: 8px;
   padding: 6px 12px;
   border-radius: var(--radius);
-  font-size: 13px;
+  font-size: var(--v2-font-size-body-sm);
 }
 
 .test-connection-result.test-ok {

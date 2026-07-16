@@ -1,0 +1,271 @@
+/* Discover (unified marketplace) */
+
+.discover-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-6);
+  max-width: 1040px;
+  margin: 0 auto;
+  width: 100%;
+  overflow-y: auto;
+}
+
+.discover-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.discover-title {
+  font-size: var(--text-2xl);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.discover-subtitle {
+  font-size: var(--text-base);
+  color: var(--text-secondary);
+}
+
+.discover-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.discover-search {
+  flex: 1;
+  min-width: 220px;
+}
+
+.discover-search input {
+  width: 100%;
+  padding: 10px 14px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: var(--text-base);
+  font-family: inherit;
+}
+
+.discover-search input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+.discover-categories {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.discover-category {
+  padding: 6px 14px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--v2-radius-full);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast),
+    border-color var(--transition-fast);
+}
+
+.discover-category:hover {
+  background: var(--hover-surface);
+  color: var(--text);
+}
+
+.discover-category.active {
+  background: var(--accent-subtle);
+  border-color: var(--accent-border-subtle);
+  color: var(--accent);
+}
+
+.discover-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--space-4);
+  padding-bottom: var(--space-8);
+}
+
+.discover-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.discover-card:hover {
+  border-color: var(--border-hover);
+  box-shadow: var(--shadow-md);
+}
+
+.discover-card-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.discover-card-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.discover-card-action {
+  margin-left: auto;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+}
+
+.discover-card-name {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.discover-kind {
+  font-family: var(--font-pixel);
+  text-transform: uppercase;
+  font-size: 10px;
+  font-weight: 500;
+  padding: 1px 8px;
+  border-radius: var(--v2-radius-full);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+
+.discover-kind.kind-wasm_channel,
+.discover-kind.kind-channel,
+.discover-kind.kind-channel_relay {
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.discover-kind.kind-mcp_server {
+  background: var(--badge-sandbox-bg);
+  color: var(--badge-sandbox-text);
+}
+
+.discover-kind.kind-skill {
+  background: var(--warning-subtle);
+  color: var(--warning);
+}
+
+.discover-source {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.discover-card-desc {
+  flex: 1;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.discover-card-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.discover-status {
+  font-family: var(--font-pixel);
+  text-transform: uppercase;
+  font-size: 10px;
+  font-weight: 500;
+  padding: 2px 10px;
+  border-radius: var(--v2-radius-full);
+}
+
+.discover-status.active {
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.discover-status.pending {
+  background: var(--warning-subtle);
+  color: var(--warning);
+}
+
+.discover-btn {
+  padding: 6px 14px;
+  border-radius: var(--radius);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.discover-btn.primary {
+  background: var(--accent);
+  border: none;
+  color: var(--text-on-accent);
+}
+
+.discover-btn.primary:hover {
+  background: var(--accent-hover);
+}
+
+.discover-btn.primary:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.discover-btn.secondary {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+.discover-btn.secondary:hover {
+  background: var(--hover-surface);
+}
+
+/* "Ask the agent to build it" card */
+.discover-build-card {
+  text-align: left;
+  font-family: inherit;
+  color: var(--text);
+  cursor: pointer;
+  border-style: dashed;
+  background: var(--note-bg);
+}
+
+.discover-build-card:hover {
+  border-color: var(--accent-border-subtle);
+  background: var(--accent-subtle);
+}
+
+.discover-build-card .discover-card-name {
+  color: var(--accent);
+}
+
+.discover-empty {
+  grid-column: 1 / -1;
+  text-align: center;
+  padding: var(--space-8);
+  color: var(--text-secondary);
+}
+
+@media (max-width: 640px) {
+  .discover-container {
+    padding: var(--space-4);
+  }
+}

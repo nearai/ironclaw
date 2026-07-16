@@ -311,6 +311,11 @@ def _build_gateway_env(
         "ONBOARD_COMPLETED": "true",
         "IRONCLAW_OAUTH_CALLBACK_URL": "https://oauth.test.example/oauth/callback",
         "IRONCLAW_OAUTH_EXCHANGE_URL": mock_llm_server,
+        # Never touch the real OS keychain (macOS Keychain auth dialog /
+        # Linux Secret Service). CI sets this at the workflow level but the
+        # fixture env replaces the environment wholesale, so restate it here
+        # or macOS dev machines hang on a Keychain prompt during boot.
+        "IRONCLAW_DISABLE_OS_KEYCHAIN": "1",
     }
     if extra_env:
         env.update(extra_env)
@@ -792,6 +797,8 @@ async def ironclaw_server(
         # token exchange at mock_llm.py so OAuth tests work without Google.
         "IRONCLAW_OAUTH_CALLBACK_URL": "https://oauth.test.example/oauth/callback",
         "IRONCLAW_OAUTH_EXCHANGE_URL": mock_llm_server,
+        # Never touch the real OS keychain; see _build_gateway_env.
+        "IRONCLAW_DISABLE_OS_KEYCHAIN": "1",
     }
     _forward_coverage_env(env)
     env["SECRETS_MASTER_KEY"] = (

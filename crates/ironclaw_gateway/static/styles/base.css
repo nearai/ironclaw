@@ -20,7 +20,7 @@
 }
 
 body {
-  font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-family: var(--font-sans, 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
   background: var(--bg);
   color: var(--text);
   height: 100vh;
@@ -42,89 +42,9 @@ body {
 /* --- Mobile responsive --- */
 
 @media (max-width: 768px) {
-  /* Tab bar: horizontal scroll */
-  .tab-bar {
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    padding: 0 8px;
-  }
-
-  .tab-bar button:not(.status-logs-btn) {
-    padding: 8px 12px;
-    font-size: var(--text-sm);
-    white-space: nowrap;
-  }
-
-  .tab-bar button[data-active-count]:not([data-active-count="0"])::after {
-    min-width: 16px;
-    height: 16px;
-    margin-left: 6px;
-    padding: 0 4px;
-    font-size: 10px;
-  }
-
   /* Chat messages: wider */
   .message {
     max-width: 95%;
-  }
-
-  /* Thread sidebar: hidden behind toggle */
-  .thread-sidebar {
-    width: 36px;
-  }
-
-  .thread-sidebar .thread-new-btn,
-  .thread-sidebar .thread-list,
-  .thread-sidebar .assistant-item {
-    display: none;
-  }
-
-  .thread-sidebar .threads-section-header > span,
-  .thread-sidebar .threads-section-header > .spacer,
-  .thread-sidebar .threads-section-header > .thread-new-btn {
-    display: none;
-  }
-
-  .thread-sidebar .threads-section-header {
-    padding: 0;
-    justify-content: center;
-  }
-
-  .thread-sidebar .thread-toggle-btn {
-    min-width: 36px;
-    min-height: 44px;
-  }
-
-  .thread-sidebar.expanded-mobile {
-    position: absolute;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    width: 240px;
-    z-index: 50;
-  }
-
-  .thread-sidebar.expanded-mobile .thread-new-btn,
-  .thread-sidebar.expanded-mobile .assistant-item {
-    display: flex;
-  }
-
-  .thread-sidebar.expanded-mobile .thread-list {
-    display: block;
-  }
-
-  .thread-sidebar.expanded-mobile .threads-section-header > span,
-  .thread-sidebar.expanded-mobile .threads-section-header > .spacer,
-  .thread-sidebar.expanded-mobile .threads-section-header > .thread-new-btn {
-    display: initial;
-  }
-
-  .thread-sidebar.expanded-mobile::before {
-    content: '';
-    position: fixed;
-    inset: 0;
-    background: rgba(0,0,0,0.4);
-    z-index: -1;
   }
 
   /* Memory: vertical stack */
@@ -259,8 +179,8 @@ body {
 
 .skeleton-bar {
   height: 12px;
-  border-radius: 6px;
-  background: linear-gradient(90deg, var(--bg-tertiary) 25%, rgba(255,255,255,0.06) 50%, var(--bg-tertiary) 75%);
+  border-radius: var(--v2-radius-xs);
+  background: linear-gradient(90deg, var(--bg-tertiary) 25%, var(--hover-subtle) 50%, var(--bg-tertiary) 75%);
   background-size: 200% 100%;
   animation: shimmer 1.5s ease-in-out infinite;
 }
@@ -334,7 +254,7 @@ body.theme-transition *:not(svg):not(path):not(line):not(circle):not(rect) {
   .modal {
     width: 100%;
     max-width: 100%;
-    border-radius: 12px 12px 0 0;
+    border-radius: calc(var(--v2-radius-md) + 2px) 12px 0 0;
     animation: bottomSheetSlideIn 300ms var(--ease-out-expo);
     max-height: 85vh;
     overflow-y: auto;
@@ -346,3 +266,98 @@ body.theme-transition *:not(svg):not(path):not(line):not(circle):not(rect) {
   to { transform: translateY(0); }
 }
 
+
+/* ── Styled select primitive (design-system control) ──
+   Wrap a native <select class="ui-select"> in .ui-select-wrap; the wrapper
+   paints the chevron so the control matches inputs/buttons across themes. */
+
+.ui-select-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.ui-select {
+  appearance: none;
+  -webkit-appearance: none;
+  height: var(--v2-control-h-sm);
+  padding: 0 26px 0 var(--v2-control-px-sm);
+  background: var(--v2-input-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--v2-radius-sm);
+  color: var(--text);
+  font-size: var(--v2-font-size-caption);
+  font-weight: 500;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.ui-select:hover { border-color: var(--border-hover); }
+
+.ui-select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+.ui-select-wrap::after {
+  content: '';
+  position: absolute;
+  right: 9px;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  margin-top: -5px;
+  border-right: 1.5px solid var(--text-dimmed);
+  border-bottom: 1.5px solid var(--text-dimmed);
+  transform: rotate(45deg);
+  pointer-events: none;
+}
+
+/* ── Shared card anatomy (Discover / Integrations / Skills) ──
+   icon · title(+version) · action top-right · description · tag list. */
+
+.card-app-icon {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: var(--v2-radius-sm);
+  object-fit: cover;
+  box-shadow: 0 0 0 1px var(--border);
+}
+
+.card-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: var(--v2-radius-sm);
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.card-version {
+  font-family: var(--font-mono);
+  font-size: var(--v2-font-size-label);
+  color: var(--text-dimmed);
+}
+
+.card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: var(--v2-space-2);
+}
+
+.card-tag {
+  font-family: var(--font-pixel);
+  font-size: 10px;
+  letter-spacing: var(--v2-tracking-tag);
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: var(--v2-radius-full);
+  background: var(--v2-surface-muted);
+  color: var(--text-secondary);
+}

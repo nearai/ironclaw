@@ -21,6 +21,8 @@ pub const INDEX_HTML: &str = include_str!("../static/index.html");
 /// prevents the last token of one file running into the first token of
 /// the next when a file ends without a trailing newline.
 pub const APP_JS: &str = concat!(
+    include_str!("../static/js/core/mock-backend.js"),
+    "\n",
     include_str!("../static/js/core/bootstrap.js"),
     "\n",
     include_str!("../static/js/core/activity-store.js"),
@@ -28,6 +30,10 @@ pub const APP_JS: &str = concat!(
     include_str!("../static/js/core/routing.js"),
     "\n",
     include_str!("../static/js/core/init-auth.js"),
+    "\n",
+    include_str!("../static/js/core/landing.js"),
+    "\n",
+    include_str!("../static/js/core/api-tokens.js"),
     "\n",
     include_str!("../static/js/core/sse.js"),
     "\n",
@@ -53,17 +59,25 @@ pub const APP_JS: &str = concat!(
     "\n",
     include_str!("../static/js/surfaces/projects.js"),
     "\n",
+    include_str!("../static/js/surfaces/tasks.js"),
+    "\n",
     include_str!("../static/js/surfaces/users.js"),
     "\n",
     include_str!("../static/js/core/gateway-tee.js"),
     "\n",
     include_str!("../static/js/surfaces/skills.js"),
     "\n",
+    include_str!("../static/js/surfaces/integrations.js"),
+    "\n",
+    include_str!("../static/js/surfaces/discover.js"),
+    "\n",
     include_str!("../static/js/surfaces/tool-permissions.js"),
     "\n",
     include_str!("../static/js/surfaces/settings.js"),
     "\n",
     include_str!("../static/js/core/ui-helpers.js"),
+    "\n",
+    include_str!("../static/js/core/billing.js"),
     "\n",
     include_str!("../static/js/surfaces/config.js"),
     "\n",
@@ -84,6 +98,8 @@ pub const STYLE_CSS: &str = concat!(
     "\n",
     include_str!("../static/styles/layout.css"),
     "\n",
+    include_str!("../static/styles/components/sidebar.css"),
+    "\n",
     include_str!("../static/styles/components/topbar.css"),
     "\n",
     include_str!("../static/styles/components/markdown.css"),
@@ -102,6 +118,10 @@ pub const STYLE_CSS: &str = concat!(
     "\n",
     include_str!("../static/styles/surfaces/missions.css"),
     "\n",
+    include_str!("../static/styles/surfaces/tasks.css"),
+    "\n",
+    include_str!("../static/styles/surfaces/billing.css"),
+    "\n",
     include_str!("../static/styles/surfaces/routines.css"),
     "\n",
     include_str!("../static/styles/surfaces/logs.css"),
@@ -112,6 +132,10 @@ pub const STYLE_CSS: &str = concat!(
     "\n",
     include_str!("../static/styles/surfaces/skills.css"),
     "\n",
+    include_str!("../static/styles/surfaces/integrations.css"),
+    "\n",
+    include_str!("../static/styles/surfaces/discover.css"),
+    "\n",
     include_str!("../static/styles/surfaces/settings.css"),
     "\n",
     include_str!("../static/styles/surfaces/config.css"),
@@ -121,6 +145,10 @@ pub const STYLE_CSS: &str = concat!(
     include_str!("../static/styles/surfaces/tool-permissions.css"),
     "\n",
     include_str!("../static/styles/surfaces/projects.css"),
+    "\n",
+    // Loaded last on purpose: landing-page button/typography parity layer
+    // that overrides per-surface button styling (see file header).
+    include_str!("../static/styles/components/buttons.css"),
 );
 
 /// Theme initialization script (runs synchronously in `<head>` to prevent FOUC).
@@ -128,6 +156,47 @@ pub const THEME_INIT_JS: &str = include_str!("../static/theme-init.js");
 
 /// Favicon.
 pub const FAVICON_ICO: &[u8] = include_bytes!("../static/favicon.ico");
+
+// ==================== Brand Fonts ====================
+// Geist — the brand type system shared with ironclaw.com (variable woff2
+// from the official `geist` npm package, SIL OFL licensed). Served under
+// `/fonts/*` and declared via @font-face in theme.css. Geist Pixel Square
+// is the stylistic face for uppercase tags/labels.
+
+/// Geist variable (weights 100-900).
+pub const FONT_GEIST_VARIABLE: &[u8] = include_bytes!("../static/fonts/Geist-Variable.woff2");
+
+/// Geist Mono variable (weights 100-900).
+pub const FONT_GEIST_MONO_VARIABLE: &[u8] =
+    include_bytes!("../static/fonts/GeistMono-Variable.woff2");
+
+/// Geist Pixel Square (500) — stylistic uppercase tags/labels.
+pub const FONT_GEIST_PIXEL_SQUARE: &[u8] =
+    include_bytes!("../static/fonts/GeistPixel-Square.woff2");
+
+// ==================== Integration Icons ====================
+// Real provider app marks (App Store artwork, resized to 128px) for the
+// Integrations surface and setup wizard. Served under
+// `/icons/integrations/{name}.png`; the frontend applies the border-radius.
+
+/// Look up an embedded integration icon by provider id.
+pub fn integration_icon(name: &str) -> Option<&'static [u8]> {
+    Some(match name {
+        "gmail" => include_bytes!("../static/icons/integrations/gmail.png"),
+        "google_calendar" => include_bytes!("../static/icons/integrations/google_calendar.png"),
+        "google_sheets" => include_bytes!("../static/icons/integrations/google_sheets.png"),
+        "telegram" => include_bytes!("../static/icons/integrations/telegram.png"),
+        "slack" => include_bytes!("../static/icons/integrations/slack.png"),
+        "discord" => include_bytes!("../static/icons/integrations/discord.png"),
+        "whatsapp" => include_bytes!("../static/icons/integrations/whatsapp.png"),
+        "github" => include_bytes!("../static/icons/integrations/github.png"),
+        "linear" => include_bytes!("../static/icons/integrations/linear.png"),
+        "google_drive" => include_bytes!("../static/icons/integrations/google_drive.png"),
+        "google_docs" => include_bytes!("../static/icons/integrations/google_docs.png"),
+        "notion" => include_bytes!("../static/icons/integrations/notion.png"),
+        _ => return None,
+    })
+}
 
 // ==================== Internationalization ====================
 

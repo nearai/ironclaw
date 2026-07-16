@@ -32,13 +32,214 @@ function showToast(message, type) {
   }, 4000);
 }
 
-// --- Welcome Card (Phase 4.2) ---
+// --- Instance name (sidebar brand row) ---
+//
+// MOCK: the workspace instance name is client-side only for now — persisted
+// in localStorage, no backend field. Click the name in the sidebar header to
+// rename inline.
+
+const INSTANCE_NAME_KEY = 'ironclaw-instance-name';
+
+function getInstanceName() {
+  try {
+    const stored = (localStorage.getItem(INSTANCE_NAME_KEY) || '').trim();
+    if (stored) return stored.slice(0, 40);
+  } catch (e) {}
+  return 'IronClaw';
+}
+
+function applyInstanceName() {
+  const text = document.getElementById('instance-name-text');
+  if (text) text.textContent = getInstanceName();
+  if (typeof updateTopbarTitle === 'function') updateTopbarTitle();
+}
+
+function startInstanceRename() {
+  const btn = document.getElementById('instance-name-btn');
+  if (!btn || btn.querySelector('.instance-name-input')) return;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'instance-name-input';
+  input.maxLength = 40;
+  input.value = getInstanceName();
+  btn.style.display = 'none';
+  btn.parentNode.insertBefore(input, btn);
+  input.focus();
+  input.select();
+
+  let finished = false;
+  const finish = (save) => {
+    if (finished) return;
+    finished = true;
+    if (save) {
+      const value = input.value.trim().slice(0, 40);
+      try {
+        if (value) localStorage.setItem(INSTANCE_NAME_KEY, value);
+        else localStorage.removeItem(INSTANCE_NAME_KEY);
+      } catch (e) {}
+    }
+    input.remove();
+    btn.style.display = '';
+    applyInstanceName();
+  };
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+  });
+  input.addEventListener('blur', () => finish(true));
+}
+
+// The brand name in the sidebar header is intentionally not editable
+// (startInstanceRename stays for the Settings surface to reuse).
+applyInstanceName();
+
+// Keyboard shortcut: `n` starts a new chat (ignored while typing).
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'n' || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+  const target = e.target;
+  if (target && (
+    target.tagName === 'INPUT'
+    || target.tagName === 'TEXTAREA'
+    || target.tagName === 'SELECT'
+    || target.isContentEditable
+  )) return;
+  e.preventDefault();
+  if (currentTab !== 'chat') switchTab('chat');
+  createNewThread();
+});
+
+// --- Shared lucide glyphs ---
+//
+// Small inline icon set (lucide path data) shared by Skills, Integrations,
+// and Discover so every entry can carry a distinct, purposeful mark.
+const LUCIDE_PATHS = {
+  'sparkles': '<path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/>',
+  'globe': '<circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/>',
+  'app-window': '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="M10 4v4"/><path d="M2 8h20"/><path d="M6 4v4"/>',
+  'search': '<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
+  'list': '<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>',
+  'sunrise': '<path d="M12 2v8"/><path d="m4.93 10.93 1.41 1.41"/><path d="M2 18h2"/><path d="M20 18h2"/><path d="m19.07 10.93-1.41 1.41"/><path d="M22 22H2"/><path d="m8 6 4-4 4 4"/><path d="M16 18a4 4 0 0 0-8 0"/>',
+  'inbox': '<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
+  'calendar-clock': '<path d="M21 7.5V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h3.5"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h5"/><circle cx="16" cy="16" r="6"/><path d="M16 14v2l1 1"/>',
+  'file-diff': '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M9 10h6"/><path d="M12 13V7"/><path d="M9 17h6"/>',
+  'bar-chart': '<line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/>',
+  'git-pull-request': '<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" x2="6" y1="9" y2="21"/>',
+  'radar': '<path d="M19.07 4.93A10 10 0 0 0 6.99 3.34"/><path d="M4 6h.01"/><path d="M2.29 9.62a10 10 0 1 0 19.02-1.27"/><path d="M16.24 7.76a6 6 0 1 0-8.01 8.91"/><path d="M12 18h.01"/><path d="M17.99 11.66a6 6 0 0 1-2.22 4.75"/><circle cx="12" cy="12" r="2"/><path d="m13.41 10.59 5.66-5.66"/>',
+};
+
+function lucideGlyphSvg(name, size) {
+  const path = LUCIDE_PATHS[name] || LUCIDE_PATHS['sparkles'];
+  return '<svg width="' + (size || 15) + '" height="' + (size || 15) + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + path + '</svg>';
+}
+
+// --- Agent home / welcome card ---
+//
+// The empty chat state is the agent's home: it leads with what the agent can
+// do (use-case quick-starts, capability-demonstrating prompts) and the state
+// of its connections, instead of generic feature chips. Everything routes
+// through chat — config surfaces stay out of the way.
+
+function prefillChatPrompt(text) {
+  const input = document.getElementById('chat-input');
+  if (!input || input.disabled || !text) return;
+  input.value = text;
+  // Reuse the input pipeline so autosize + send-button state stay in sync.
+  input.dispatchEvent(new Event('input'));
+  input.focus();
+}
+
+// Derive 3-5 immediately actionable suggestions from the onboarding handoff
+// (?usecase= + ?integrations= → sessionStorage, see landing.js). Each entry is
+// { label, prompt }: the label renders on the chip, clicking fills the
+// composer with the prompt (never auto-sends).
+function getHandoffSuggestions() {
+  const useCases = (typeof NUX_DATA !== 'undefined' && NUX_DATA.useCases) || [];
+  const useCaseId = typeof getHandoffUseCaseId === 'function' ? getHandoffUseCaseId() : null;
+  const connected = typeof getHandoffConnectedIntegrations === 'function'
+    ? getHandoffConnectedIntegrations()
+    : [];
+  if (!useCaseId && connected.length === 0) return [];
+
+  const suggestions = [];
+  const seen = new Set();
+  const push = (useCase) => {
+    if (!useCase || seen.has(useCase.id) || suggestions.length >= 5) return;
+    seen.add(useCase.id);
+    suggestions.push({ label: useCase.title, prompt: useCase.prompt });
+  };
+
+  // 1. The use case picked during onboarding leads.
+  const picked = useCases.find((u) => u.id === useCaseId) || null;
+  push(picked);
+
+  // 2. Use cases powered by the integrations the user connected.
+  connected.forEach((id) => {
+    useCases
+      .filter((u) => (u.integrations || []).indexOf(id) !== -1)
+      .forEach(push);
+  });
+
+  // 3. Pad with same-category neighbours so there are at least 3 chips.
+  if (picked && suggestions.length < 3) {
+    useCases.filter((u) => u.category === picked.category).forEach(push);
+  }
+  if (suggestions.length < 3) {
+    useCases.forEach(push);
+  }
+  return suggestions.slice(0, 5);
+}
+
+// One coherent suggestion set for the empty state: use-case-aware handoff
+// suggestions lead when onboarding params exist, padded from the curated
+// use-case gallery. Always 4-5 chips, each pre-fills the composer.
+function getWelcomeSuggestions() {
+  const out = [];
+  const seen = new Set();
+  const add = (label, prompt) => {
+    if (!label || !prompt || seen.has(label) || out.length >= 5) return;
+    seen.add(label);
+    out.push({ label: label, prompt: prompt });
+  };
+  getHandoffSuggestions().forEach((s) => add(s.label, s.prompt));
+  ((typeof NUX_DATA !== 'undefined' && NUX_DATA.useCases) || [])
+    .forEach((u) => add(u.title, u.prompt));
+  return out;
+}
+
+// First-run setup checklist progress (MOCK: session-scoped, purely visual).
+const NUX_CHECKLIST_DONE_KEY = 'ironclaw_nux_checklist_done';
+
+function getChecklistDone() {
+  try {
+    const raw = sessionStorage.getItem(NUX_CHECKLIST_DONE_KEY);
+    return new Set(raw ? JSON.parse(raw) : []);
+  } catch (e) {
+    return new Set();
+  }
+}
+
+function markChecklistDone(id) {
+  const done = getChecklistDone();
+  done.add(id);
+  try { sessionStorage.setItem(NUX_CHECKLIST_DONE_KEY, JSON.stringify([...done])); } catch (e) {}
+}
+
+const WELCOME_CLAW_SVG =
+  '<svg viewBox="45.2 34.11 54.25 54.25" fill="currentColor" aria-hidden="true">'
+  + '<path d="M93.67,34.12c-2.01,0-3.87,1.04-4.93,2.75l-11.34,16.83c-.37.55-.22,1.3.34,1.67.45.3,1.04.26,1.45-.09l11.16-9.68c.19-.17.47-.15.64.04.08.08.12.19.12.31v30.31c0,.25-.2.45-.45.45-.13,0-.26-.06-.35-.16l-33.74-40.39c-1.1-1.3-2.71-2.04-4.41-2.05h-1.18c-3.19,0-5.78,2.59-5.78,5.78v42.69c0,3.19,2.59,5.78,5.78,5.78,2.01,0,3.87-1.04,4.93-2.75l11.34-16.83c.37-.55.22-1.3-.34-1.67-.45-.3-1.04-.26-1.45.09l-11.16,9.68c-.19.17-.47.15-.64-.04-.08-.08-.12-.19-.11-.31v-30.32c0-.25.2-.45.45-.45.13,0,.26.06.35.16l33.73,40.39c1.1,1.3,2.71,2.04,4.41,2.05h1.18c3.19,0,5.78-2.58,5.78-5.78v-42.69c0-3.19-2.59-5.78-5.78-5.78h0Z"/></svg>';
 
 function showWelcomeCard() {
   const container = document.getElementById('chat-messages');
   if (!container || container.querySelector('.welcome-card')) return;
   const card = document.createElement('div');
   card.className = 'welcome-card';
+
+  // Hero: the claw glyph on a soft blue radial disc, above the headline.
+  const hero = document.createElement('div');
+  hero.className = 'welcome-hero';
+  hero.setAttribute('aria-hidden', 'true');
+  hero.innerHTML = WELCOME_CLAW_SVG;
+  card.appendChild(hero);
 
   const heading = document.createElement('h2');
   heading.className = 'welcome-heading';
@@ -50,27 +251,97 @@ function showWelcomeCard() {
   desc.textContent = I18n.t('welcome.description');
   card.appendChild(desc);
 
-  const chips = document.createElement('div');
-  chips.className = 'welcome-chips';
+  // ONE coherent suggestion group (4-5 chips, use-case-aware when the
+  // onboarding handoff provided params). Pre-fills the composer, never
+  // auto-sends.
+  const suggestions = getWelcomeSuggestions();
+  if (suggestions.length > 0) {
+    const chips = document.createElement('div');
+    chips.className = 'welcome-chips';
+    suggestions.forEach((s) => {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'welcome-chip';
+      chip.textContent = s.label;
+      chip.title = s.prompt;
+      chip.addEventListener('click', () => prefillChatPrompt(s.prompt));
+      chips.appendChild(chip);
+    });
+    card.appendChild(chips);
+  }
 
-  const suggestions = [
-    { key: 'welcome.runTool', fallback: 'Run a tool' },
-    { key: 'welcome.checkJobs', fallback: 'Check job status' },
-    { key: 'welcome.searchMemory', fallback: 'Search memory' },
-    { key: 'welcome.manageRoutines', fallback: 'Manage routines' },
-    { key: 'welcome.systemStatus', fallback: 'System status' },
-    { key: 'welcome.writeCode', fallback: 'Write code' },
-  ];
-  suggestions.forEach(({ key, fallback }) => {
-    const chip = document.createElement('button');
-    chip.className = 'welcome-chip';
-    chip.textContent = I18n.t(key) || fallback;
-    chip.addEventListener('click', () => sendSuggestion(chip));
-    chips.appendChild(chip);
-  });
+  // Setup is an inline task from the agent (MOCK: client-authored message,
+  // not a real engine turn) — replaces the old "Set up your agent" button.
+  card.appendChild(buildWelcomeAgentSetup(suggestions));
 
-  card.appendChild(chips);
   container.appendChild(card);
+}
+
+// Agent-authored first-run message with a small actionable checklist.
+// MOCK: rendered client-side; completion state is session-scoped and purely
+// cosmetic (see NUX_CHECKLIST_DONE_KEY).
+function buildWelcomeAgentSetup(suggestions) {
+  const wrap = document.createElement('div');
+  wrap.className = 'welcome-agent-msg';
+
+  const avatar = document.createElement('span');
+  avatar.className = 'welcome-agent-avatar';
+  avatar.setAttribute('aria-hidden', 'true');
+  avatar.innerHTML = WELCOME_CLAW_SVG;
+  wrap.appendChild(avatar);
+
+  const bubble = document.createElement('div');
+  bubble.className = 'welcome-agent-bubble';
+
+  const intro = document.createElement('p');
+  intro.className = 'welcome-agent-text';
+  intro.textContent = I18n.t('welcome.agentSetupIntro');
+  bubble.appendChild(intro);
+
+  const items = [
+    {
+      id: 'channel',
+      label: I18n.t('welcome.checkChannel'),
+      run: () => switchTab('integrations'),
+    },
+    {
+      id: 'task',
+      label: I18n.t('welcome.checkFirstTask'),
+      run: () => {
+        const first = suggestions && suggestions[0];
+        if (first) prefillChatPrompt(first.prompt);
+      },
+    },
+    {
+      id: 'integrations',
+      label: I18n.t('welcome.checkIntegrations'),
+      run: () => switchTab('integrations'),
+    },
+  ];
+
+  const list = document.createElement('div');
+  list.className = 'welcome-checklist';
+  const done = getChecklistDone();
+  items.forEach((item) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'welcome-check-item' + (done.has(item.id) ? ' done' : '');
+    btn.innerHTML =
+      '<span class="welcome-check-circle" aria-hidden="true">'
+      + '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>'
+      + '</span>'
+      + '<span class="welcome-check-label">' + escapeHtml(item.label) + '</span>';
+    btn.addEventListener('click', () => {
+      markChecklistDone(item.id);
+      btn.classList.add('done');
+      item.run();
+    });
+    list.appendChild(btn);
+  });
+  bubble.appendChild(list);
+
+  wrap.appendChild(bubble);
+  return wrap;
 }
 
 function renderEmptyState({ icon, title, hint, action }) {
@@ -181,6 +452,9 @@ function closeModals() {
   // Close restart confirmation modal
   const restartModal = document.getElementById('restart-confirm-modal');
   if (restartModal) restartModal.style.display = 'none';
+
+  // Close the mobile sidebar drawer
+  closeMobileSidebar();
 }
 
 // --- ARIA Accessibility (Phase 5.2) ---
@@ -252,8 +526,13 @@ document.getElementById('restart-btn').addEventListener('click', () => triggerRe
 // Bug #3082 recovery affordances on the progress modal.
 document.getElementById('restart-refresh-btn').addEventListener('click', () => window.location.reload());
 document.getElementById('restart-dismiss-btn').addEventListener('click', () => dismissRestartLoader());
-document.getElementById('thread-new-btn').addEventListener('click', () => createNewThread());
-document.getElementById('thread-toggle-btn').addEventListener('click', () => toggleThreadSidebar());
+document.getElementById('thread-new-btn').addEventListener('click', () => {
+  if (currentTab !== 'chat') switchTab('chat');
+  createNewThread();
+});
+document.getElementById('sidebar-collapse-btn')?.addEventListener('click', () => toggleSidebarCollapsed());
+document.getElementById('mobile-sidebar-btn')?.addEventListener('click', () => openMobileSidebar());
+document.getElementById('sidebar-scrim')?.addEventListener('click', () => closeMobileSidebar());
 document.getElementById('send-btn').addEventListener('click', () => sendMessage());
 document.getElementById('memory-edit-btn').addEventListener('click', () => startMemoryEdit());
 document.getElementById('memory-save-btn').addEventListener('click', () => saveMemoryEdit());
@@ -269,16 +548,51 @@ document.getElementById('skill-install-btn').addEventListener('click', () => ins
 document.getElementById('settings-export-btn').addEventListener('click', () => exportSettings());
 document.getElementById('settings-import-btn').addEventListener('click', () => importSettings());
 document.getElementById('settings-back-btn')?.addEventListener('click', () => settingsBack());
+// "Back to app" exits the settings takeover to the chat surface.
+document.getElementById('settings-back-app')?.addEventListener('click', () => switchTab('chat'));
 
-// --- Mobile: close thread sidebar on outside click ---
-document.addEventListener('click', function(e) {
-  const sidebar = document.getElementById('thread-sidebar');
-  if (sidebar && sidebar.classList.contains('expanded-mobile') &&
-      !sidebar.contains(e.target)) {
-    sidebar.classList.remove('expanded-mobile');
-    document.getElementById('thread-toggle-btn').innerHTML = '&raquo;';
+// --- "Just ask the agent" affordance ---
+// Config surfaces exist 'just in case'; the canonical way to do anything is
+// to ask the agent in chat. This hint teaches that behavior exactly where
+// users would otherwise start clicking through menus.
+
+function createAskAgentHint(labelKey, prompt) {
+  const hint = document.createElement('button');
+  hint.type = 'button';
+  hint.className = 'ask-agent-hint';
+
+  const glyph = document.createElement('span');
+  glyph.className = 'ask-agent-hint-glyph';
+  glyph.setAttribute('aria-hidden', 'true');
+  glyph.textContent = '\u25C6';
+  hint.appendChild(glyph);
+
+  const text = document.createElement('span');
+  text.textContent = I18n.t(labelKey);
+  hint.appendChild(text);
+
+  hint.addEventListener('click', () => {
+    switchTab('chat');
+    prefillChatPrompt(prompt);
+  });
+  return hint;
+}
+
+(function injectAskAgentHints() {
+  const discoverHeader = document.querySelector('#tab-discover .discover-header');
+  if (discoverHeader) {
+    discoverHeader.appendChild(
+      createAskAgentHint('askAgent.discover', I18n.t('askAgent.discoverPrompt'))
+    );
   }
-});
+  const settingsToolbar = document.querySelector('#tab-settings .settings-toolbar');
+  if (settingsToolbar) {
+    settingsToolbar.parentNode.insertBefore(
+      createAskAgentHint('askAgent.settings', I18n.t('askAgent.settingsPrompt')),
+      settingsToolbar
+    );
+  }
+})();
 
 // --- Delegated Event Handlers (for dynamically generated HTML) ---
 
