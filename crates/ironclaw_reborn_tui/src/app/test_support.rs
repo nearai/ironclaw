@@ -140,6 +140,8 @@ pub(crate) fn run_state_with_failure(
         checkpoint_id: None,
         gate_ref: None,
         failure: Some(failure),
+        usage: None,
+        cost: None,
     }
 }
 
