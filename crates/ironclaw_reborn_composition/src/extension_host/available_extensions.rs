@@ -86,11 +86,16 @@ const NEARAI_MCP_MANIFEST: &str =
 #[cfg(feature = "slack-v2-host-beta")]
 const SLACK_BOT_MANIFEST: &str =
     include_str!("../../../ironclaw_first_party_extensions/assets/slack_bot/manifest.toml");
+#[cfg(feature = "telegram-v2-host-beta")]
+const TELEGRAM_MANIFEST: &str =
+    include_str!("../../../ironclaw_first_party_extensions/assets/telegram/manifest.toml");
 const NEARAI_EXTENSION_ID: &str = HostManagedCredentialExtension::NearAi.id();
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) const SLACK_BOT_EXTENSION_ID: &str = "slack_bot";
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) const SLACK_EXTENSION_ID: &str = "slack";
+#[cfg(feature = "telegram-v2-host-beta")]
+pub(crate) const TELEGRAM_EXTENSION_ID: &str = "telegram";
 #[cfg(feature = "slack-v2-host-beta")]
 const SLACK_PERSONAL_OAUTH_REQUIREMENT_NAME: &str = "slack_personal_oauth";
 // The slack_personal OAuth setup scopes are the union of the Slack tools'
@@ -414,7 +419,10 @@ impl AvailableExtensionCatalog {
     pub(crate) fn from_first_party_assets_with_nearai_mcp_config(
         nearai_mcp_config: Option<&NearAiMcpBootstrapConfig>,
     ) -> Result<Self, ProductWorkflowError> {
-        #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(unused_mut))]
+        #[cfg_attr(
+            not(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")),
+            allow(unused_mut)
+        )]
         let mut packages = vec![
             github_package()?,
             notion_mcp_package()?,
@@ -431,6 +439,8 @@ impl AvailableExtensionCatalog {
         packages.push(slack_bot_package()?);
         #[cfg(feature = "slack-v2-host-beta")]
         packages.push(slack_package()?);
+        #[cfg(feature = "telegram-v2-host-beta")]
+        packages.push(telegram_package()?);
         Ok(Self::from_packages(packages))
     }
 
@@ -638,6 +648,15 @@ fn slack_bot_package() -> Result<AvailableExtensionPackage, ProductWorkflowError
     bundled_extension_package("slack_bot", "Slack", SLACK_BOT_MANIFEST, slack_bot_assets())
 }
 
+/// The Telegram channel package: one user-visible extension owning the
+/// webhook ingress. Unlike the Slack model-B split there is no hidden
+/// operator companion — admin bot setup and per-user pairing both hang off
+/// this single `telegram` id.
+#[cfg(feature = "telegram-v2-host-beta")]
+pub(crate) fn telegram_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    bundled_extension_package(TELEGRAM_EXTENSION_ID, "Telegram", TELEGRAM_MANIFEST, Vec::new())
+}
+
 pub(crate) fn google_calendar_manifest_digest() -> String {
     sha256_digest_token(GOOGLE_CALENDAR_MANIFEST.as_bytes())
 }
@@ -701,6 +720,18 @@ pub(crate) fn slack_bot_manifest_digest() -> String {
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) fn slack_bot_manifest_toml() -> &'static str {
     SLACK_BOT_MANIFEST
+}
+
+/// The Telegram channel manifest — `telegram_serve` projects the
+/// `telegram.updates` host-ingress route descriptor from here.
+#[cfg(feature = "telegram-v2-host-beta")]
+pub(crate) fn telegram_manifest_toml() -> &'static str {
+    TELEGRAM_MANIFEST
+}
+
+#[cfg(feature = "telegram-v2-host-beta")]
+pub(crate) fn telegram_manifest_digest() -> String {
+    sha256_digest_token(TELEGRAM_MANIFEST.as_bytes())
 }
 
 pub(crate) fn nearai_mcp_manifest_toml_for_config(
@@ -3185,5 +3216,40 @@ output_schema_ref = "schemas/write.output.json"
                 },
             ],
         }
+    }
+}
+
+#[cfg(all(test, feature = "telegram-v2-host-beta"))]
+mod telegram_catalog_tests {
+    use super::*;
+
+    #[test]
+    fn telegram_package_is_visible_channel_with_zero_tools() {
+        let package = telegram_package().expect("telegram manifest parses");
+        assert_eq!(package.package_ref.id.as_str(), TELEGRAM_EXTENSION_ID);
+        assert!(
+            !is_internal_extension_package_ref(&package.package_ref),
+            "telegram must stay user-visible (no hidden companion pattern)"
+        );
+        assert!(
+            package
+                .surface_kinds
+                .contains(&LifecycleExtensionSurfaceKind::ExternalChannel),
+            "telegram must project the external-channel surface"
+        );
+        assert!(
+            package.package.manifest.capabilities.is_empty(),
+            "telegram must expose zero tools in v1"
+        );
+    }
+
+    #[test]
+    fn telegram_package_is_listed_in_first_party_catalog_search() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets()
+            .expect("first-party catalog builds");
+        let found = catalog
+            .search("telegram")
+            .any(|package| package.package_ref.id.as_str() == TELEGRAM_EXTENSION_ID);
+        assert!(found, "telegram must appear in the user-visible catalog");
     }
 }
