@@ -59,14 +59,11 @@ use crate::channel_identity::RebornUserIdentityLookup;
 use crate::extension_host::extension_lifecycle::{
     ExtensionActivationMode, RebornLocalExtensionManagementPort,
 };
-use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
-// The Slack-named delivery observer and triggered-run driver are
-// adapter-generic machinery (adapter, egress, and sink are injected); the
-// Telegram host reuses them pending a vendor-neutral rename in the #6116 fold.
-use crate::slack::slack_delivery::{
-    PostSubmitDeliveryHook, SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
-    SlackFinalReplyDeliverySettings, TriggeredRunDeliveryDriver,
+use crate::outbound::channel_delivery::{
+    FinalReplyDeliveryObserver, FinalReplyDeliveryServices, FinalReplyDeliverySettings,
+    PostSubmitDeliveryHook, TriggeredRunDeliveryDriver,
 };
+use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
 use crate::telegram::telegram_actor_identity::{
     TELEGRAM_V2_ADAPTER_ID, TelegramUserIdentityActorResolver,
 };
@@ -645,8 +642,11 @@ impl TelegramRevisionWorkflowBuilder for TelegramRevisionWorkflowParts {
         let adapter = self
             .adapter_for_setup(setup, installation_id)
             .map_err(revision_workflow_build_error)?;
-        let observer = Arc::new(SlackFinalReplyDeliveryObserver::with_settings(
-            SlackFinalReplyDeliveryServices {
+        let observer = Arc::new(FinalReplyDeliveryObserver::with_settings(
+            FinalReplyDeliveryServices {
+                channel_protocol: Arc::new(
+                    crate::telegram::telegram_outbound_targets::TelegramDeliveryProtocol,
+                ),
                 binding_service: Arc::new(binding),
                 thread_service: Arc::clone(&self.parts.thread_service),
                 turn_coordinator: Arc::clone(&self.parts.turn_coordinator),
@@ -663,7 +663,7 @@ impl TelegramRevisionWorkflowBuilder for TelegramRevisionWorkflowParts {
                 approval_requests: Some(Arc::clone(&self.parts.local_runtime.approval_requests)
                     as Arc<dyn ironclaw_run_state::ApprovalRequestStore>),
             },
-            SlackFinalReplyDeliverySettings::default(),
+            FinalReplyDeliverySettings::default(),
         ));
 
         Ok(TelegramRevisionWorkflow {
@@ -793,7 +793,10 @@ impl DynamicTelegramTriggeredRunDeliveryHook {
         let parts = &self.revision_parts.parts;
         let route_store: Arc<dyn DeliveredGateRouteStore> =
             Arc::clone(&parts.local_runtime.delivered_gate_routes);
-        let services = SlackFinalReplyDeliveryServices {
+        let services = FinalReplyDeliveryServices {
+            channel_protocol: Arc::new(
+                crate::telegram::telegram_outbound_targets::TelegramDeliveryProtocol,
+            ),
             binding_service: Arc::new(NoopTelegramConversationBindingService),
             thread_service: Arc::clone(&parts.thread_service),
             turn_coordinator: Arc::clone(&parts.turn_coordinator),

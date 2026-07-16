@@ -1,3 +1,4 @@
+pub(crate) mod channel_delivery;
 pub(crate) mod outbound_delivery_capability_surface;
 pub(crate) mod outbound_preferences;
 

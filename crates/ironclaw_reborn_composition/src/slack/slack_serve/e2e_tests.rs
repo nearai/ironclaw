@@ -68,9 +68,9 @@ use ironclaw_wasm_product_adapters::{
 use tower::ServiceExt;
 
 use super::*;
-use crate::slack::slack_delivery::{
-    PostSubmitDeliveryHook, SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
-    SlackFinalReplyDeliverySettings, TriggeredRunDeliveryDriver,
+use crate::outbound::channel_delivery::{
+    FinalReplyDeliveryObserver, FinalReplyDeliveryServices, FinalReplyDeliverySettings,
+    PostSubmitDeliveryHook, TriggeredRunDeliveryDriver,
 };
 use crate::{
     AuthChallengeProvider, RebornUserIdentityLookup, RebornUserIdentityLookupError,
@@ -328,8 +328,9 @@ async fn build_harness_with_full_settings(
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
     let egress = RecordingEgress::default();
     let sink = RecordingDeliverySink::default();
-    let observer = Arc::new(SlackFinalReplyDeliveryObserver::with_settings(
-        SlackFinalReplyDeliveryServices {
+    let observer = Arc::new(FinalReplyDeliveryObserver::with_settings(
+        FinalReplyDeliveryServices {
+            channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
             binding_service: Arc::new(binding),
             thread_service: Arc::new(threads),
             turn_coordinator: Arc::new(coordinator.clone()),
@@ -343,7 +344,7 @@ async fn build_harness_with_full_settings(
             auth_flow_canceller: None,
             approval_requests: None,
         },
-        SlackFinalReplyDeliverySettings {
+        FinalReplyDeliverySettings {
             poll_interval: Duration::from_millis(1),
             max_wait,
             max_concurrent_deliveries: std::num::NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
@@ -544,8 +545,9 @@ async fn build_harness_for_delivered_route_tests_with_store_mode(
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
     let egress = RecordingEgress::default();
     let sink = RecordingDeliverySink::default();
-    let observer = Arc::new(SlackFinalReplyDeliveryObserver::with_settings(
-        SlackFinalReplyDeliveryServices {
+    let observer = Arc::new(FinalReplyDeliveryObserver::with_settings(
+        FinalReplyDeliveryServices {
+            channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
             binding_service: Arc::new(binding),
             thread_service: Arc::new(threads),
             turn_coordinator: Arc::new(coordinator.clone()),
@@ -559,7 +561,7 @@ async fn build_harness_for_delivered_route_tests_with_store_mode(
             auth_flow_canceller: None,
             approval_requests: None,
         },
-        SlackFinalReplyDeliverySettings {
+        FinalReplyDeliverySettings {
             poll_interval: Duration::from_millis(1),
             max_wait: Duration::from_secs(2),
             max_concurrent_deliveries: std::num::NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
@@ -1058,7 +1060,8 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
     let driver_egress = RecordingEgress::default();
     let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
-    let services = SlackFinalReplyDeliveryServices {
+    let services = FinalReplyDeliveryServices {
+        channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
         turn_coordinator: coordinator,
@@ -1076,7 +1079,7 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
     };
     let driver = TriggeredRunDeliveryDriver::with_settings(
         services,
-        SlackFinalReplyDeliverySettings {
+        FinalReplyDeliverySettings {
             poll_interval: Duration::from_millis(1),
             max_wait: Duration::from_secs(2),
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
@@ -1318,7 +1321,8 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
     let route_store: Arc<dyn DeliveredGateRouteStore> =
         Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
-    let services = SlackFinalReplyDeliveryServices {
+    let services = FinalReplyDeliveryServices {
+        channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
         turn_coordinator: coordinator,
@@ -1334,7 +1338,7 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
     };
     let driver = TriggeredRunDeliveryDriver::with_settings(
         services,
-        SlackFinalReplyDeliverySettings {
+        FinalReplyDeliverySettings {
             poll_interval: Duration::from_millis(1),
             max_wait: Duration::from_secs(2),
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
@@ -1454,7 +1458,8 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
     let route_store: Arc<dyn DeliveredGateRouteStore> =
         Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
-    let services = SlackFinalReplyDeliveryServices {
+    let services = FinalReplyDeliveryServices {
+        channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
         turn_coordinator: Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
@@ -1470,7 +1475,7 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
     };
     let driver = TriggeredRunDeliveryDriver::with_settings(
         services,
-        SlackFinalReplyDeliverySettings {
+        FinalReplyDeliverySettings {
             poll_interval: Duration::from_millis(1),
             max_wait: Duration::from_secs(2),
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
@@ -3261,7 +3266,7 @@ fn auth_resolution_allowed_envelope(callback_ref: &str) -> ProductInboundEnvelop
 /// the resolution ack without going through the Slack route.
 async fn build_harness_for_auth_fanout_test(
     max_wait: Duration,
-) -> (Harness, Arc<SlackFinalReplyDeliveryObserver>) {
+) -> (Harness, Arc<FinalReplyDeliveryObserver>) {
     let auth_provider = Arc::new(FakeAuthChallengeProvider::default());
     let auth_challenges: Arc<dyn AuthChallengeProvider> = auth_provider;
 
@@ -3339,8 +3344,9 @@ async fn build_harness_for_auth_fanout_test(
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
     let egress = RecordingEgress::default();
     let sink = RecordingDeliverySink::default();
-    let observer = Arc::new(SlackFinalReplyDeliveryObserver::with_settings(
-        SlackFinalReplyDeliveryServices {
+    let observer = Arc::new(FinalReplyDeliveryObserver::with_settings(
+        FinalReplyDeliveryServices {
+            channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
             binding_service: Arc::new(binding),
             thread_service: Arc::new(threads),
             turn_coordinator: Arc::new(coordinator.clone()),
@@ -3354,7 +3360,7 @@ async fn build_harness_for_auth_fanout_test(
             auth_flow_canceller: None,
             approval_requests: None,
         },
-        SlackFinalReplyDeliverySettings {
+        FinalReplyDeliverySettings {
             poll_interval: Duration::from_millis(1),
             max_wait,
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: 4 is non-zero.

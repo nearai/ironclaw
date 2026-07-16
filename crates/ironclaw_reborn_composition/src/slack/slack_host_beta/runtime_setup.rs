@@ -18,6 +18,7 @@ use crate::RebornRuntime;
 use crate::extension_host::extension_lifecycle::{
     ExtensionActivationMode, RebornLocalExtensionManagementPort,
 };
+use crate::outbound::channel_delivery::{PostSubmitDeliveryHook, TriggeredRunDeliveryDriver};
 use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
 use crate::slack::slack_actor_identity::{
@@ -28,7 +29,6 @@ use crate::slack::slack_channel_routes::{
     SlackChannelRouteStore, SlackChannelRouteSubjectResolver, SlackChannelSetupActivation,
     SlackChannelSetupActivationError,
 };
-use crate::slack::slack_delivery::{PostSubmitDeliveryHook, TriggeredRunDeliveryDriver};
 use crate::slack::slack_host_state::FilesystemSlackHostState;
 use crate::slack::slack_outbound_targets::{
     SlackHostBetaOutboundTargetProvider, SlackOutboundTargetProviderConfig, SlackPersonalDmTarget,

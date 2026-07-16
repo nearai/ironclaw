@@ -678,14 +678,14 @@ pub struct RebornRuntime {
     /// `None` when the trigger poller is not enabled.
     #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     post_submit_hook_slot:
-        Option<Arc<std::sync::OnceLock<Arc<dyn crate::slack::slack_delivery::PostSubmitDeliveryHook>>>>,
+        Option<Arc<std::sync::OnceLock<Arc<dyn crate::outbound::channel_delivery::PostSubmitDeliveryHook>>>>,
     /// Composite installed into `post_submit_hook_slot` on the first
     /// `add_trigger_post_submit_hook` call so multiple channel hosts (Slack +
     /// Telegram) can each register a triggered-run delivery hook while the
     /// poller keeps its single-`OnceLock` consumer. `None` iff the slot is.
     #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     post_submit_hook_composite:
-        Option<Arc<crate::slack::slack_delivery::CompositePostSubmitDeliveryHook>>,
+        Option<Arc<crate::outbound::channel_delivery::CompositePostSubmitDeliveryHook>>,
     #[cfg(any(test, feature = "test-support"))]
     trigger_conversation_pairing:
         Option<Arc<dyn ironclaw_conversations::ConversationActorPairingService>>,
@@ -855,8 +855,9 @@ struct TriggerPollerServices {
     /// called after runtime build) can wire their hooks without restarting the
     /// poller.
     #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
-    post_submit_hook_slot:
-        Arc<std::sync::OnceLock<Arc<dyn crate::slack::slack_delivery::PostSubmitDeliveryHook>>>,
+    post_submit_hook_slot: Arc<
+        std::sync::OnceLock<Arc<dyn crate::outbound::channel_delivery::PostSubmitDeliveryHook>>,
+    >,
     /// Test-support handle on the SAME conversation services instance the
     /// poller-side materializer/submitter use, so integration tests can call
     /// the production `pair_external_actor` API to seed the trigger
@@ -1800,7 +1801,7 @@ impl RebornRuntime {
     #[cfg(feature = "slack-v2-host-beta")]
     pub fn set_trigger_post_submit_hook(
         &self,
-        hook: Arc<dyn crate::slack::slack_delivery::PostSubmitDeliveryHook>,
+        hook: Arc<dyn crate::outbound::channel_delivery::PostSubmitDeliveryHook>,
     ) -> bool {
         self.add_trigger_post_submit_hook(SLACK_TRIGGER_POST_SUBMIT_HOOK_KEY, hook)
     }
@@ -1808,7 +1809,7 @@ impl RebornRuntime {
     /// Append a channel host's triggered-run delivery hook to the trigger
     /// poller's post-submit fan-out. The poller consumes one `OnceLock` slot;
     /// the first add installs a
-    /// [`crate::slack::slack_delivery::CompositePostSubmitDeliveryHook`] into
+    /// [`crate::outbound::channel_delivery::CompositePostSubmitDeliveryHook`] into
     /// it (append-then-install, so the poller's buffered-settlement drain never
     /// observes an empty composite) and later adds append to that composite.
     ///
@@ -1821,7 +1822,7 @@ impl RebornRuntime {
     pub(crate) fn add_trigger_post_submit_hook(
         &self,
         hook_key: &str,
-        hook: Arc<dyn crate::slack::slack_delivery::PostSubmitDeliveryHook>,
+        hook: Arc<dyn crate::outbound::channel_delivery::PostSubmitDeliveryHook>,
     ) -> bool {
         let (Some(slot), Some(composite)) = (
             self.post_submit_hook_slot.as_ref(),
@@ -1842,9 +1843,8 @@ impl RebornRuntime {
         }
         // First add installs the composite; later installs are the idempotent
         // Err arm of OnceLock::set (the composite already carries every hook).
-        let _ =
-            slot.set(Arc::clone(composite)
-                as Arc<dyn crate::slack::slack_delivery::PostSubmitDeliveryHook>);
+        let _ = slot.set(Arc::clone(composite)
+            as Arc<dyn crate::outbound::channel_delivery::PostSubmitDeliveryHook>);
         true
     }
 
@@ -3956,11 +3956,13 @@ pub async fn build_reborn_runtime(
     let trigger_poller_handle: Option<TriggerPollerRuntimeHandle>;
     #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     let runtime_post_submit_hook_slot: Option<
-        Arc<std::sync::OnceLock<Arc<dyn crate::slack::slack_delivery::PostSubmitDeliveryHook>>>,
+        Arc<
+            std::sync::OnceLock<Arc<dyn crate::outbound::channel_delivery::PostSubmitDeliveryHook>>,
+        >,
     >;
     #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     let runtime_post_submit_hook_composite: Option<
-        Arc<crate::slack::slack_delivery::CompositePostSubmitDeliveryHook>,
+        Arc<crate::outbound::channel_delivery::CompositePostSubmitDeliveryHook>,
     >;
     #[cfg(any(test, feature = "test-support"))]
     let trigger_conversation_pairing_value: Option<
@@ -3997,7 +3999,7 @@ pub async fn build_reborn_runtime(
         {
             runtime_post_submit_hook_slot = Some(Arc::clone(&hook_slot));
             runtime_post_submit_hook_composite = Some(Arc::new(
-                crate::slack::slack_delivery::CompositePostSubmitDeliveryHook::default(),
+                crate::outbound::channel_delivery::CompositePostSubmitDeliveryHook::default(),
             ));
         }
         trigger_poller_handle = spawn_trigger_poller(

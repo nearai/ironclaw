@@ -356,3 +356,144 @@ mod tests {
         );
     }
 }
+
+/// Telegram's [`crate::outbound::channel_delivery::ChannelDeliveryProtocol`]:
+/// `tg:` binding-ref decoding and positive-chat-id DM classification. Status
+/// messages are deliberately unwired in v1 — the pre-router owns Telegram's
+/// static replies, and the delivery machinery's working/notification posts
+/// were never delivered on this channel (they previously failed closed at the
+/// telegram egress policy); the error here preserves that behavior without a
+/// network round-trip.
+#[derive(Debug, Default)]
+pub(crate) struct TelegramDeliveryProtocol;
+
+#[async_trait::async_trait]
+impl crate::outbound::channel_delivery::ChannelDeliveryProtocol for TelegramDeliveryProtocol {
+    fn conversation_id_from_reply_target_binding_ref(
+        &self,
+        target: &ironclaw_turns::ReplyTargetBindingRef,
+    ) -> Option<(String, Option<String>)> {
+        // The Telegram adapter renders straight from the
+        // `tg:<chat_id>:<topic|_>:<reply|_>` binding ref; Telegram has no
+        // space/team dimension.
+        let parsed = ironclaw_telegram_v2_adapter::parse_reply_target(target).ok()?;
+        Some((parsed.chat_id.to_string(), None))
+    }
+
+    fn reply_target_is_personal_dm(&self, target: &ironclaw_turns::ReplyTargetBindingRef) -> bool {
+        // Telegram private chats have positive chat ids (groups/supergroups/
+        // channels are negative), and the host only stores DM targets from
+        // private-chat pairing.
+        ironclaw_telegram_v2_adapter::parse_reply_target(target)
+            .map(|parsed| parsed.chat_id > 0)
+            .unwrap_or(false)
+    }
+
+    fn posted_message_from_render_response(
+        &self,
+        _path: &str,
+        _body: &[u8],
+    ) -> Option<crate::outbound::channel_delivery::PostedChannelMessage> {
+        None
+    }
+
+    fn connect_nudge_message(&self) -> &'static str {
+        // Unreachable in practice (the pairing-aware pre-router intercepts
+        // unpaired senders before the workflow), kept consistent with the
+        // pre-router's static hint.
+        "This bot is IronClaw. Pair your account from IronClaw → Extensions → Telegram, then message me here."
+    }
+
+    fn is_direct_message_conversation(&self, conversation_id: &str) -> bool {
+        conversation_id
+            .parse::<i64>()
+            .is_ok_and(|chat_id| chat_id > 0)
+    }
+
+    async fn post_status_message(
+        &self,
+        _egress: &dyn ironclaw_product_adapters::ProtocolHttpEgress,
+        _conversation: &ironclaw_product_adapters::ExternalConversationRef,
+        _text: &str,
+    ) -> Result<
+        crate::outbound::channel_delivery::PostedChannelMessage,
+        crate::outbound::channel_delivery::FinalReplyDeliveryError,
+    > {
+        Err(
+            crate::outbound::channel_delivery::FinalReplyDeliveryError::StatusMessage {
+                reason: "telegram status messages are not wired".to_string(),
+            },
+        )
+    }
+
+    async fn delete_status_message(
+        &self,
+        _egress: &dyn ironclaw_product_adapters::ProtocolHttpEgress,
+        _message: &crate::outbound::channel_delivery::PostedChannelMessage,
+    ) -> Result<(), crate::outbound::channel_delivery::FinalReplyDeliveryError> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod telegram_delivery_protocol_tests {
+    use ironclaw_product_adapters::{
+        EgressRequest, EgressResponse, ExternalConversationRef, ProtocolHttpEgress,
+        ProtocolHttpEgressError,
+    };
+
+    use super::TelegramDeliveryProtocol;
+    use crate::outbound::channel_delivery::{ChannelDeliveryProtocol, FinalReplyDeliveryError};
+
+    /// Egress that panics if the protocol touches the network.
+    #[derive(Debug)]
+    struct PanicEgress;
+
+    #[async_trait::async_trait]
+    impl ProtocolHttpEgress for PanicEgress {
+        async fn send(
+            &self,
+            _request: EgressRequest,
+        ) -> Result<EgressResponse, ProtocolHttpEgressError> {
+            panic!("telegram status messages must not reach egress");
+        }
+    }
+
+    /// Behavior-preserving contract for the unwired v1 status messages: the
+    /// old shared machinery built Slack-shaped posts that failed closed at
+    /// telegram's egress policy; the protocol seam now fails without ANY
+    /// network round-trip.
+    #[tokio::test]
+    async fn post_status_message_fails_without_touching_egress() {
+        let protocol = TelegramDeliveryProtocol;
+        let conversation =
+            ExternalConversationRef::new(None, "555", None, None).expect("conversation");
+
+        let error = protocol
+            .post_status_message(&PanicEgress, &conversation, "working…")
+            .await
+            .expect_err("status messages are unwired in v1");
+        assert!(matches!(
+            error,
+            FinalReplyDeliveryError::StatusMessage { .. }
+        ));
+        protocol
+            .delete_status_message(
+                &PanicEgress,
+                &crate::outbound::channel_delivery::PostedChannelMessage {
+                    conversation_id: "555".to_string(),
+                    message_ref: "1".to_string(),
+                },
+            )
+            .await
+            .expect("delete is a no-op");
+    }
+
+    #[test]
+    fn telegram_refs_classify_dm_and_conversation() {
+        let protocol = TelegramDeliveryProtocol;
+        assert!(protocol.is_direct_message_conversation("555"));
+        assert!(!protocol.is_direct_message_conversation("-100123"));
+        assert!(!protocol.is_direct_message_conversation("not-a-chat-id"));
+    }
+}

@@ -212,23 +212,23 @@ pub use slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH,
     WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH, WEBUI_V2_CHANNELS_SLACK_SUBJECTS_PATH,
 };
-#[cfg(all(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
-pub use slack::slack_connectable_channel::build_webui_services_with_slack_and_telegram_host_mounts;
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_connectable_channel::{
     SlackOperatorRouteVisibility, build_webui_services_with_slack_host_beta_mounts,
 };
+#[cfg(all(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+pub use webui::facade::build_webui_services_with_slack_and_telegram_host_mounts;
 // Exported under either channel-host feature: the delivery observer and the
-// triggered-run driver are adapter-generic machinery the Telegram host reuses
-// (pending the vendor-neutral rename in the #6116 fold).
+// triggered-run driver are adapter-generic machinery in
+// `outbound::channel_delivery`; each channel host injects its own
+// adapter/egress/sink plus a `ChannelDeliveryProtocol`.
 #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
-pub use slack::slack_delivery::{
-    NoopPostSubmitDeliveryHook, PostSubmitDeliveryHook, TriggeredRunDeliveryDriver,
+pub use outbound::channel_delivery::{
+    FinalReplyDeliveryObserver, FinalReplyDeliveryServices, FinalReplyDeliverySettings,
 };
 #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
-pub use slack::slack_delivery::{
-    SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
-    SlackFinalReplyDeliverySettings,
+pub use outbound::channel_delivery::{
+    NoopPostSubmitDeliveryHook, PostSubmitDeliveryHook, TriggeredRunDeliveryDriver,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_egress::{
