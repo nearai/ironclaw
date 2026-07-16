@@ -17,7 +17,7 @@ use std::sync::Arc;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_product_workflow::RebornServicesApi;
 use ironclaw_reborn_composition::{
-    RebornReadiness, RebornWebuiBundle, WebuiServeConfig, webui_v2_app,
+    RebornProductAuthServices, RebornReadiness, RebornWebuiBundle, WebuiServeConfig, webui_v2_app,
 };
 use ironclaw_reborn_webui_ingress::EnvBearerAuthenticator;
 use secrecy::SecretString;
@@ -49,13 +49,57 @@ pub async fn spawn_webui_v2(
     project_id: Option<ProjectId>,
     token: &str,
 ) -> (SocketAddr, AbortOnDrop) {
+    spawn_webui_v2_inner(api, tenant_id, user_id, agent_id, project_id, token, None).await
+}
+
+/// Like [`spawn_webui_v2`], but additionally mounts the real product-auth
+/// route set (`/api/reborn/product-auth/manual-token/submit` and friends) by
+/// passing a real `Arc<RebornProductAuthServices>` into the bundle —
+/// `spawn_webui_v2` always mounts `product_auth: None`, so those routes
+/// 404 there. Callers proving the manual-token credential-2-step flow
+/// (submit -> resolve `CredentialProvided`) need this variant with the SAME
+/// `RebornProductAuthServices` instance the capability harness's credential
+/// resolver reads from (`HostRuntimeCapabilityHarness::reborn_services_for_test()
+/// .product_auth`, a public field on `ironclaw_reborn_composition::RebornServices`)
+/// — otherwise the HTTP-submitted token lands in a disconnected store the
+/// gated capability's re-dispatch can never see.
+pub async fn spawn_webui_v2_with_product_auth(
+    api: Arc<dyn RebornServicesApi>,
+    tenant_id: TenantId,
+    user_id: UserId,
+    agent_id: AgentId,
+    project_id: Option<ProjectId>,
+    token: &str,
+    product_auth: Arc<RebornProductAuthServices>,
+) -> (SocketAddr, AbortOnDrop) {
+    spawn_webui_v2_inner(
+        api,
+        tenant_id,
+        user_id,
+        agent_id,
+        project_id,
+        token,
+        Some(product_auth),
+    )
+    .await
+}
+
+async fn spawn_webui_v2_inner(
+    api: Arc<dyn RebornServicesApi>,
+    tenant_id: TenantId,
+    user_id: UserId,
+    agent_id: AgentId,
+    project_id: Option<ProjectId>,
+    token: &str,
+    product_auth: Option<Arc<RebornProductAuthServices>>,
+) -> (SocketAddr, AbortOnDrop) {
     let authenticator = Arc::new(
         EnvBearerAuthenticator::new(SecretString::from(token.to_string()), user_id)
             .expect("non-empty test token"),
     );
     let bundle = RebornWebuiBundle {
         api,
-        product_auth: None,
+        product_auth,
         readiness: RebornReadiness::default(),
     };
     let mut config =
