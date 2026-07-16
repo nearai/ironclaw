@@ -133,15 +133,17 @@ pub use slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH,
     WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH, WEBUI_V2_CHANNELS_SLACK_SUBJECTS_PATH,
 };
+#[cfg(all(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+pub use slack::slack_connectable_channel::build_webui_services_with_slack_and_telegram_host_mounts;
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_connectable_channel::{
     SlackOperatorRouteVisibility, build_webui_services_with_slack_host_beta_mounts,
 };
-#[cfg(feature = "slack-v2-host-beta")]
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 pub use slack::slack_delivery::{
     NoopPostSubmitDeliveryHook, PostSubmitDeliveryHook, TriggeredRunDeliveryDriver,
 };
-#[cfg(feature = "slack-v2-host-beta")]
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 pub use slack::slack_delivery::{
     SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
     SlackFinalReplyDeliverySettings,
@@ -169,6 +171,17 @@ pub use slack::slack_serve::{
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_setup::SlackPersonalSetupServiceSlot;
+#[cfg(feature = "telegram-v2-host-beta")]
+pub use telegram::telegram_channel_routes::{
+    WEBUI_V2_CHANNELS_TELEGRAM_PAIRING_PATH, WEBUI_V2_CHANNELS_TELEGRAM_SETUP_PATH,
+};
+#[cfg(feature = "telegram-v2-host-beta")]
+pub use telegram::telegram_connectable_channel::build_webui_services_with_telegram_host_mounts;
+#[cfg(feature = "telegram-v2-host-beta")]
+pub use telegram::telegram_host_beta::{
+    TelegramHostBuildError, TelegramHostMounts, TelegramHostRuntimeConfig,
+    build_telegram_host_runtime_mounts,
+};
 pub use web_access::register_bundled_web_access_first_party_handlers;
 pub use webui::facade::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
