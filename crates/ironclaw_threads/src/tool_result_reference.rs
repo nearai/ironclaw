@@ -1184,6 +1184,57 @@ mod tests {
         );
     }
 
+    /// Airtight guard for the paged-`result_read` retention path (the "issues
+    /// #1/#2" a caller might frame separately): a `result_read` CHUNK
+    /// observation — same shape `result_read_observation` emits, a
+    /// ResultReference whose `preview` is a paged content chunk plus a
+    /// `next_offset` — must ALSO survive replay when it contains marker-like
+    /// document words ("Secretary of the Treasury"). Before the word-boundary
+    /// fix this chunk was scrubbed to a stub exactly like the first-look
+    /// preview, so paged content "vanished" and the model re-paged/re-fetched
+    /// in a loop. Chunk observations flow through the same
+    /// `normalized_model_observation` scrub as first-look previews, so fixing
+    /// the matcher fixes both — this pins that they stay coupled.
+    #[test]
+    fn result_read_chunk_observation_with_document_content_is_retained() {
+        let chunk = "Ownership of Federal Securities. Secretary of the Treasury. ".repeat(60);
+        let observation = serde_json::json!({
+            "schema_version": 1,
+            "status": "success",
+            "summary": "Requested tool-result chunk returned.",
+            "detail": {
+                "kind": "result_reference",
+                "result_ref": "result:paged-chunk",
+                "byte_len": chunk.len(),
+                "preview": chunk,
+                "total_bytes": chunk.len() * 3,
+                "next_offset": chunk.len() * 2,
+            },
+            "artifacts": [{
+                "artifact_ref": "result:paged-chunk",
+                "summary": "Stored result-read response"
+            }],
+            "trust": "untrusted_tool_output"
+        });
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            "result:paged-chunk",
+            ToolResultSafeSummary::new("Requested tool-result chunk returned.").expect("summary"),
+            Some(observation),
+        )
+        .expect("envelope construction is fail-open");
+
+        assert!(
+            envelope.model_observation.is_some(),
+            "a result_read chunk of document content must be retained, not evicted to a stub"
+        );
+        assert!(
+            envelope
+                .model_visible_content_or_safe_summary()
+                .contains("Secretary of the Treasury"),
+            "the paged chunk's content must survive replay so the model does not re-fetch it"
+        );
+    }
+
     #[test]
     fn collapse_to_repeated_error_marker_produces_valid_observation() {
         let error_obs = serde_json::json!({

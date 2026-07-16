@@ -472,7 +472,7 @@ pub struct PutToolResultRecordRequest {
 /// tool outputs recoverable in 1-2 calls instead of ~49.
 /// `tool_result_reference.rs`'s `MAX_MODEL_OBSERVATION_BYTES` is derived from
 /// this value; raising it here raises that ceiling too.
-pub const TOOL_RESULT_RECORD_READ_MAX_BYTES: usize = 16 * 1024;
+pub const TOOL_RESULT_RECORD_READ_MAX_BYTES: usize = 24 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadToolResultRecordRequest {
