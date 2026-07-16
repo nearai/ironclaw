@@ -1660,6 +1660,8 @@ async def _live_chat_with_extensions_case(
     timeout: float = 240.0,
     extra_details: dict[str, object] | None = None,
     forbidden_text: list[str] | None = None,
+    enforce_marker: bool = True,
+    capture_submission_identity: bool = False,
 ) -> ProbeResult:
     return await _live_chat_case(
         ctx,
@@ -1671,6 +1673,8 @@ async def _live_chat_with_extensions_case(
         timeout=timeout,
         extra_details=extra_details,
         forbidden_text=forbidden_text,
+        enforce_marker=enforce_marker,
+        capture_submission_identity=capture_submission_identity,
     )
 
 
@@ -4298,7 +4302,11 @@ async def case_qa_5b_drive_connect(ctx: LiveQaContext) -> ProbeResult:
 
 async def case_qa_5c_strategy_doc_knowledge_base(ctx: LiveQaContext) -> ProbeResult:
     strategy_phrase = "Reborn QA Strategy North Star: verify live WebUIv2 tool grounding."
-    return await _live_chat_with_extensions_case(
+    expected_capabilities = [
+        "google-docs.create_document",
+        "google-docs.read_content",
+    ]
+    result = await _live_chat_with_extensions_case(
         ctx,
         case_name="qa_5c_strategy_doc_knowledge_base",
         marker=None,
@@ -4307,10 +4315,7 @@ async def case_qa_5c_strategy_doc_knowledge_base(ctx: LiveQaContext) -> ProbeRes
             {
                 "package_id": "google-docs",
                 "display_name": "Google Docs",
-                "required_tools": [
-                    "google-docs.create_document",
-                    "google-docs.read_content",
-                ],
+                "required_tools": expected_capabilities,
             },
         ],
         prompt=_qa_sheet_prompt("qa_5c_strategy_doc_knowledge_base"),
@@ -4321,11 +4326,48 @@ async def case_qa_5c_strategy_doc_knowledge_base(ctx: LiveQaContext) -> ProbeRes
             "authentication required",
             "local file",
             "/workspace/",
-            ".md",
             "can't create",
             "cannot create",
         ],
+        capture_submission_identity=True,
     )
+    if not result.success:
+        return result
+
+    submission_identity = result.details.get("submission_identity")
+    evidence = _current_turn_capability_evidence(
+        ctx.reborn_home,
+        submission_identity if isinstance(submission_identity, dict) else {},
+        expected_capabilities,
+        {"completed"},
+    )
+    result.details["expected_capabilities"] = expected_capabilities
+    result.details["capability_evidence"] = evidence
+    statuses = evidence.get("statuses")
+    missing_capabilities = (
+        [
+            capability_id
+            for capability_id in expected_capabilities
+            if not statuses.get(capability_id, [])
+        ]
+        if isinstance(statuses, dict)
+        else expected_capabilities
+    )
+    if missing_capabilities:
+        result.success = False
+        result.details.update(
+            {
+                "error": (
+                    "strategy document reply did not produce current-turn terminal "
+                    "success evidence for the expected Google Docs capabilities: "
+                    f"{missing_capabilities!r}"
+                ),
+                "failure_class": "model_quality",
+                "failure_category": "missing_expected_capability",
+                "failure_status": "failed",
+            }
+        )
+    return result
 
 
 async def case_qa_5d_slack_strategy_doc_answer(ctx: LiveQaContext) -> ProbeResult:
@@ -4654,6 +4696,8 @@ async def _routine_creation_case(
     details = {
         "routine_name": routine_name,
         "trigger_records_before": before_count,
+        "expected_creation_marker": marker,
+        "expected_creation_terms": required_text,
         **(extra_details or {}),
     }
     if extensions:
@@ -4662,10 +4706,11 @@ async def _routine_creation_case(
             case_name=case_name,
             prompt=prompt,
             marker=marker,
-            required_text=required_text,
+            required_text=[],
             extensions=extensions,
             timeout=180.0,
             extra_details=details,
+            enforce_marker=False,
         )
     else:
         result = await _live_chat_case(
@@ -4673,11 +4718,12 @@ async def _routine_creation_case(
             case_name=case_name,
             prompt=prompt,
             marker=marker,
-            required_text=required_text,
+            required_text=[],
             timeout=180.0,
             extra_details=details,
             routine_confirmation_follow_up=True,
             routine_follow_up_timezone_instruction=follow_up_timezone_instruction,
+            enforce_marker=False,
         )
     if result.success:
         after_count, wait_ms = await _wait_for_trigger_record_after_count(

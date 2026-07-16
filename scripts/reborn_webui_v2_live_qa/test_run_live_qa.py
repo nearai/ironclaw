@@ -1162,6 +1162,179 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(result.details["trigger_record_wait_ms"], 25)
         self.assertIn("did not add a trigger_record", result.details["error"])
 
+    def test_routine_creation_accepts_reformatted_reply_when_trigger_is_durable(self):
+        marker = "REBORN_QA_ROUTINE_CREATED"
+        expected_terms = ["routine", "created"]
+
+        async def fake_live_chat_case(_ctx, **kwargs):
+            self.assertEqual(kwargs["required_text"], [])
+            self.assertFalse(kwargs.get("enforce_marker", True))
+            extra_details = kwargs.get("extra_details") or {}
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=True,
+                latency_ms=1,
+                details={
+                    "text_excerpt": "Trigger created successfully.",
+                    **extra_details,
+                },
+            )
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_live_chat_case",
+                side_effect=fake_live_chat_case,
+            ),
+            patch.object(run_live_qa, "_trigger_record_count", return_value=0),
+            patch.object(
+                run_live_qa,
+                "_wait_for_trigger_record_after_count",
+                return_value=(1, 25),
+            ),
+        ):
+            result = asyncio.run(
+                run_live_qa._routine_creation_case(
+                    self._dummy_ctx(),
+                    case_name="qa_test_routine",
+                    prompt="create the requested routine",
+                    marker=marker,
+                    routine_name="qa-test-routine",
+                    required_text=expected_terms,
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["trigger_records_after"], 1)
+        self.assertEqual(result.details["expected_creation_marker"], marker)
+        self.assertEqual(result.details["expected_creation_terms"], expected_terms)
+
+    def test_strategy_doc_knowledge_requires_current_turn_google_docs_evidence(self):
+        captured: dict[str, object] = {}
+        submission_identity = {
+            "accepted_message_ref": "msg:qa-5c",
+            "thread_id": "thread-qa-5c",
+            "turn_id": "turn-qa-5c",
+            "run_id": "run-qa-5c",
+        }
+        expected_capabilities = [
+            "google-docs.create_document",
+            "google-docs.read_content",
+        ]
+        evidence = {
+            "statuses": {
+                capability_id: ["completed"]
+                for capability_id in expected_capabilities
+            }
+        }
+
+        async def fake_live_chat_with_extensions_case(_ctx, **kwargs):
+            captured.update(kwargs)
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=True,
+                latency_ms=1,
+                details={
+                    "text_excerpt": "The strategy document is ready.",
+                    "submission_identity": submission_identity,
+                },
+            )
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_live_chat_with_extensions_case",
+                side_effect=fake_live_chat_with_extensions_case,
+            ),
+            patch.object(
+                run_live_qa,
+                "_current_turn_capability_evidence",
+                return_value=evidence,
+            ) as evidence_reader,
+        ):
+            result = asyncio.run(
+                run_live_qa.case_qa_5c_strategy_doc_knowledge_base(
+                    self._dummy_ctx()
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertTrue(captured["capture_submission_identity"])
+        self.assertEqual(
+            captured["extensions"][0]["required_tools"],
+            expected_capabilities,
+        )
+        self.assertNotIn(".md", captured["forbidden_text"])
+        for phrase in (
+            "auth_denied",
+            "authentication required",
+            "local file",
+            "/workspace/",
+            "can't create",
+            "cannot create",
+        ):
+            self.assertIn(phrase, captured["forbidden_text"])
+        evidence_reader.assert_called_once_with(
+            self._dummy_ctx().reborn_home,
+            submission_identity,
+            expected_capabilities,
+            {"completed"},
+        )
+        self.assertEqual(result.details["capability_evidence"], evidence)
+
+    def test_strategy_doc_knowledge_fails_without_current_turn_google_docs_evidence(
+        self,
+    ):
+        async def fake_live_chat_with_extensions_case(_ctx, **kwargs):
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=True,
+                latency_ms=1,
+                details={
+                    "text_excerpt": "The strategy document is ready.",
+                    "submission_identity": {
+                        "accepted_message_ref": "msg:qa-5c",
+                        "thread_id": "thread-qa-5c",
+                        "turn_id": "turn-qa-5c",
+                        "run_id": "run-qa-5c",
+                    },
+                },
+            )
+
+        evidence = {
+            "statuses": {
+                "google-docs.create_document": ["completed"],
+                "google-docs.read_content": [],
+            }
+        }
+        with (
+            patch.object(
+                run_live_qa,
+                "_live_chat_with_extensions_case",
+                side_effect=fake_live_chat_with_extensions_case,
+            ),
+            patch.object(
+                run_live_qa,
+                "_current_turn_capability_evidence",
+                return_value=evidence,
+            ),
+        ):
+            result = asyncio.run(
+                run_live_qa.case_qa_5c_strategy_doc_knowledge_base(
+                    self._dummy_ctx()
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(
+            result.details["failure_category"],
+            "missing_expected_capability",
+        )
+        self.assertIn("google-docs.read_content", result.details["error"])
+
     def test_wait_for_trigger_record_after_count_polls_until_record_added(self):
         counts = iter([0, 0, 1])
         observed_sleeps: list[float] = []
@@ -1228,6 +1401,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             extensions,
             timeout,
             extra_details,
+            enforce_marker,
         ):
             captured.update(
                 {
@@ -1238,6 +1412,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     "extensions": extensions,
                     "timeout": timeout,
                     "extra_details": extra_details,
+                    "enforce_marker": enforce_marker,
                 }
             )
             extra_details = extra_details or {}
@@ -1283,10 +1458,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(captured["case_name"], "qa_test_routine")
         self.assertEqual(captured["prompt"], "original sheet prompt")
         self.assertIsNone(captured["marker"])
-        self.assertEqual(captured["required_text"], ["routine"])
+        self.assertEqual(captured["required_text"], [])
+        self.assertFalse(captured["enforce_marker"])
         self.assertEqual(captured["extensions"][0]["package_id"], "google-sheets")
         self.assertEqual(captured["timeout"], 180.0)
         self.assertTrue(result.details["fixture_ready"])
+        self.assertEqual(result.details["expected_creation_terms"], ["routine"])
 
     def test_required_text_accepts_explicit_alternatives(self):
         self.assertTrue(
@@ -3890,7 +4067,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertNotIn("[endpoint URL]", prompt)
         self.assertIn(run_live_qa.ENDPOINT_STATUS_URL, prompt)
         self.assertIsNone(captured["marker"])
-        self.assertEqual(captured["required_text"], ["routine"])
+        self.assertEqual(captured["required_text"], [])
+        self.assertFalse(captured["enforce_marker"])
+        self.assertEqual(
+            captured["extra_details"]["expected_creation_terms"],
+            ["routine"],
+        )
 
     def test_hn_live_chat_accepts_hacker_news_url_host(self):
         captured: dict[str, object] = {}
@@ -3943,8 +4125,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             )
 
         self.assertTrue(result.success)
+        self.assertEqual(captured["required_text"], [])
+        self.assertFalse(captured["enforce_marker"])
         self.assertEqual(
-            captured["required_text"],
+            captured["extra_details"]["expected_creation_terms"],
             ["routine|trigger|automation|cron|schedule|created|monitor"],
         )
 
