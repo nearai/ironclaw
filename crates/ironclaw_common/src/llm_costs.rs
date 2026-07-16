@@ -116,9 +116,16 @@ pub struct UsageCost {
 /// OpenAI 2× i.e. 50% off, others no discount).
 pub fn cache_read_discount(model_id: &str) -> Decimal {
     let lower = model_id.to_ascii_lowercase();
-    if lower.contains("claude") {
+    // Strip provider prefixes (e.g. "openai/o1-mini" -> "o1-mini") so the
+    // reasoning-tier `starts_with` checks match, mirroring `model_cost`.
+    let name = lower.rsplit_once('/').map(|(_, n)| n).unwrap_or(&lower);
+    if name.contains("claude") {
         Decimal::from(10)
-    } else if lower.contains("gpt") || lower.starts_with("o1") || lower.starts_with("o3") {
+    } else if name.contains("gpt")
+        || name.starts_with("o1")
+        || name.starts_with("o3")
+        || name.starts_with("o4")
+    {
         Decimal::from(2)
     } else {
         Decimal::ONE
@@ -277,6 +284,30 @@ mod tests {
     fn test_provider_prefix_stripped() {
         // "openai/gpt-4o" should resolve to same as "gpt-4o"
         assert_eq!(model_cost("openai/gpt-4o"), model_cost("gpt-4o"));
+    }
+
+    #[test]
+    fn test_cache_read_discount_by_family() {
+        // Anthropic: 10× (90% off).
+        assert_eq!(cache_read_discount("claude-opus-4-6"), Decimal::from(10));
+        // OpenAI GPT + reasoning tiers (o1/o3/o4): 2× (50% off).
+        assert_eq!(cache_read_discount("gpt-4o"), Decimal::from(2));
+        assert_eq!(cache_read_discount("o1-mini"), Decimal::from(2));
+        assert_eq!(cache_read_discount("o3-mini"), Decimal::from(2));
+        // o4-mini is priced as an OpenAI reasoning model by `model_cost`, so it
+        // must receive the same 2× cache discount (regression: previously fell
+        // through to no discount).
+        assert_eq!(cache_read_discount("o4-mini"), Decimal::from(2));
+        // Provider-prefixed IDs must strip the prefix before matching, matching
+        // `model_cost` (regression: "openai/o1-mini" previously got no discount).
+        assert_eq!(cache_read_discount("openai/o1-mini"), Decimal::from(2));
+        assert_eq!(cache_read_discount("azure/o4-mini"), Decimal::from(2));
+        assert_eq!(
+            cache_read_discount("anthropic/claude-opus-4-6"),
+            Decimal::from(10)
+        );
+        // Unknown / local models: no discount.
+        assert_eq!(cache_read_discount("llama-3.1-70b"), Decimal::ONE);
     }
 
     #[test]
