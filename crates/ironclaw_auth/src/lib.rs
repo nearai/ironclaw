@@ -23,7 +23,7 @@ mod provider;
 mod scope;
 
 pub use cleanup::{
-    OAuthCompletionCompensationOutcome, OAuthCompletionCompensationRequest,
+    CanceledCleanupFlow, OAuthCompletionCompensationOutcome, OAuthCompletionCompensationRequest,
     OAuthExchangeCleanupRequest, SecretCleanupAction, SecretCleanupQuarantine,
     SecretCleanupQuarantineReason, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
 };

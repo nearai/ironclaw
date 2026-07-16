@@ -153,6 +153,108 @@ prompt_doc_ref = "prompts/gmail/echo.md"
     );
 }
 
+fn gmail_manifest() -> ExtensionManifestRecord {
+    ExtensionManifestRecord::from_toml(
+        format!(
+            r#"
+schema_version = "{schema}"
+id = "gmail"
+name = "Gmail"
+version = "0.1.0"
+description = "test"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/gmail.wasm"
+
+[[capabilities]]
+id = "gmail.echo"
+description = "Echoes input"
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/gmail/echo.input.v1.json"
+output_schema_ref = "schemas/gmail/echo.output.v1.json"
+prompt_doc_ref = "prompts/gmail/echo.md"
+"#,
+            schema = MANIFEST_SCHEMA_VERSION,
+        ),
+        ManifestSource::HostBundled,
+        &HostPortCatalog::empty(),
+        None,
+    )
+    .expect("valid manifest")
+}
+
+fn gmail_installation(installation_id: &ExtensionInstallationId) -> ExtensionInstallation {
+    let extension_id = ExtensionId::new("gmail").expect("valid extension id");
+    ExtensionInstallation::new(
+        installation_id.clone(),
+        extension_id.clone(),
+        ExtensionActivationState::Installed,
+        ExtensionManifestRef::new(extension_id, None),
+        Vec::new(),
+        Utc::now(),
+        InstallationOwner::Tenant,
+    )
+    .expect("valid installation")
+}
+
+#[tokio::test]
+async fn stale_store_write_fails_instead_of_clobbering_concurrent_snapshot() {
+    let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+    let state_path = VirtualPath::new("/tenants/acme/system/extensions/.installations/state.json")
+        .expect("valid state path");
+    let installation_id =
+        ExtensionInstallationId::new("gmail".to_string()).expect("valid installation id");
+
+    // "Process" one persists an installation; "process" two loads the same
+    // snapshot afterwards, so both hold the same on-disk baseline.
+    let first =
+        FilesystemExtensionInstallationStore::load_at(Arc::clone(&filesystem), state_path.clone())
+            .await
+            .expect("first store loads");
+    first
+        .upsert_manifest_and_installation(gmail_manifest(), gmail_installation(&installation_id))
+        .await
+        .expect("first process persists installation");
+    let second =
+        FilesystemExtensionInstallationStore::load_at(Arc::clone(&filesystem), state_path.clone())
+            .await
+            .expect("second store loads");
+
+    // The first process advances the snapshot again...
+    first
+        .set_activation_state(&installation_id, ExtensionActivationState::Enabled)
+        .await
+        .expect("first process enables installation");
+
+    // ...so the second process's next full-snapshot rewrite is stale and must
+    // fail loudly instead of silently reverting the first process's write.
+    let error = second
+        .set_activation_state(&installation_id, ExtensionActivationState::Disabled)
+        .await
+        .expect_err("stale snapshot write must not clobber a concurrent writer");
+    assert!(
+        matches!(error, ExtensionInstallationError::StoreUnavailable { .. }),
+        "expected the retryable store-unavailable class, got {error:?}"
+    );
+
+    let reloaded = FilesystemExtensionInstallationStore::load_at(filesystem, state_path)
+        .await
+        .expect("store reloads");
+    assert_eq!(
+        reloaded
+            .get_installation(&installation_id)
+            .await
+            .expect("installation read")
+            .expect("installation present")
+            .activation_state(),
+        ExtensionActivationState::Enabled,
+        "the concurrent writer's snapshot survives the stale write attempt"
+    );
+}
+
 #[tokio::test]
 async fn load_at_canonicalizes_duplicate_rows_and_preserves_complete_snapshot() {
     let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
@@ -377,9 +479,11 @@ async fn load_at_returns_rewrite_failure_without_exposing_normalized_store() {
             Ok(_) => panic!("canonical rewrite failure must fail closed"),
             Err(error) => error,
         };
+    // #4091: an IO failure during the canonical rewrite is retryable backend
+    // trouble, not a malformed snapshot.
     assert_eq!(
         error,
-        ExtensionInstallationError::InvalidInstallation {
+        ExtensionInstallationError::StoreUnavailable {
             reason: "failed to load extension installation state".to_string(),
         }
     );

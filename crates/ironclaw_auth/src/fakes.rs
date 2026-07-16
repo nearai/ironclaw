@@ -1341,16 +1341,33 @@ impl SecretCleanupService for InMemoryAuthProductServices {
             }
         }
         if matches!(request.action, SecretCleanupAction::Uninstall)
-            && let Some(provider) = request.provider.as_ref()
+            && (request.provider.is_some() || request.lifecycle_package.is_some())
         {
             let owner = &request.scope.resource;
             for flow in state.flows.values_mut().filter(|flow| {
                 let resource = &flow.scope.resource;
-                &flow.provider == provider
-                    && resource.tenant_id == owner.tenant_id
+                let owner_matches = resource.tenant_id == owner.tenant_id
                     && resource.user_id == owner.user_id
                     && resource.agent_id == owner.agent_id
-                    && resource.project_id == owner.project_id
+                    && resource.project_id == owner.project_id;
+                let provider_selected = request.provider.as_ref() == Some(&flow.provider);
+                // Package-keyed selection mirrors the durable store: the
+                // removed extension's own LifecycleActivation flows die with
+                // it even when the provider is shared with another extension.
+                let package_selected = matches!(
+                    (&flow.continuation, request.lifecycle_package.as_ref()),
+                    (
+                        AuthContinuationRef::LifecycleActivation { package_ref },
+                        Some(package),
+                    ) if package_ref == package
+                );
+                let requires_cleanup = !crate::is_terminal_status(flow.status)
+                    || (flow.continuation_emitted_at.is_none()
+                        && matches!(
+                            flow.continuation,
+                            AuthContinuationRef::TurnGateResume { .. }
+                        ));
+                owner_matches && (provider_selected || package_selected) && requires_cleanup
             }) {
                 if !crate::is_terminal_status(flow.status) {
                     flow.status = AuthFlowStatus::Canceled;
@@ -1374,6 +1391,10 @@ impl SecretCleanupService for InMemoryAuthProductServices {
                             emitted_at: Utc::now(),
                         });
                 }
+                report.canceled_flows.push(crate::CanceledCleanupFlow {
+                    scope: flow.scope.clone(),
+                    flow_id: flow.id,
+                });
             }
         }
         Ok(report)

@@ -20,7 +20,10 @@ pub(crate) struct FilesystemExtensionInstallationStore {
     filesystem: std::sync::Arc<dyn RootFilesystem>,
     state_path: VirtualPath,
     inner: InMemoryExtensionInstallationStore,
-    save_lock: Mutex<()>,
+    /// The exact snapshot bytes this store last observed on disk (`None`
+    /// before the first write). Serializes writers in-process and backs the
+    /// stale-writer guard in [`Self::ensure_snapshot_current`].
+    persisted_snapshot: Mutex<Option<Vec<u8>>>,
 }
 
 impl FilesystemExtensionInstallationStore {
@@ -29,7 +32,7 @@ impl FilesystemExtensionInstallationStore {
         state_path: VirtualPath,
     ) -> Result<Self, ExtensionInstallationError> {
         let inner = InMemoryExtensionInstallationStore::default();
-        match filesystem.read_file(&state_path).await {
+        let persisted = match filesystem.read_file(&state_path).await {
             Ok(bytes) => {
                 let state: WireState =
                     serde_json::from_slice(&bytes).map_err(invalid_installation_error)?;
@@ -48,24 +51,26 @@ impl FilesystemExtensionInstallationStore {
                 // store.
                 normalized_state.load_into(&inner).await?;
                 if needs_rewrite {
-                    write_snapshot(&filesystem, &state_path, &normalized_state).await?;
+                    Some(write_snapshot(&filesystem, &state_path, &normalized_state).await?)
+                } else {
+                    Some(bytes)
                 }
             }
-            Err(FilesystemError::NotFound { .. }) => {}
+            Err(FilesystemError::NotFound { .. }) => None,
             Err(error) => {
                 tracing::debug!(
                     ?error,
                     state_path = %state_path.as_str(),
                     "extension installation state load failed"
                 );
-                return Err(invalid_installation_error(INSTALLATION_STATE_IO_ERROR));
+                return Err(store_unavailable_error(INSTALLATION_STATE_IO_ERROR));
             }
-        }
+        };
         Ok(Self {
             filesystem,
             state_path,
             inner,
-            save_lock: Mutex::new(()),
+            persisted_snapshot: Mutex::new(persisted),
         })
     }
 
@@ -73,9 +78,53 @@ impl FilesystemExtensionInstallationStore {
         default_installation_state_path()
     }
 
-    async fn save_snapshot(&self) -> Result<(), ExtensionInstallationError> {
+    /// Stale-writer guard: the on-disk snapshot must still be exactly the
+    /// bytes this store last observed, or the pending full-snapshot rewrite
+    /// would silently revert a concurrent writer's state.
+    ///
+    /// The extension mount is served by the byte-oriented backend family
+    /// (`LocalFilesystem` for materialized bundles), which cannot honor
+    /// `CasExpectation::Version` — a true CAS fence is not expressible here
+    /// until this store migrates onto the versioned record plane (see
+    /// docs/plans/2026-06-25-cas-migration.md). Until then this read-back
+    /// compare converts the split-brain failure mode (two processes over one
+    /// state file, last-writer-wins) into a loud retryable error. The
+    /// read-compare-write sequence is not atomic across processes; the
+    /// deployment assumption stays a single serving process, and this guard
+    /// makes a violation of that assumption detectable instead of silent.
+    async fn ensure_snapshot_current(
+        &self,
+        persisted: &Option<Vec<u8>>,
+    ) -> Result<(), ExtensionInstallationError> {
+        let on_disk = match self.filesystem.read_file(&self.state_path).await {
+            Ok(bytes) => Some(bytes),
+            Err(FilesystemError::NotFound { .. }) => None,
+            Err(error) => {
+                tracing::debug!(
+                    ?error,
+                    state_path = %self.state_path.as_str(),
+                    "extension installation state pre-write read failed"
+                );
+                return Err(store_unavailable_error(INSTALLATION_STATE_IO_ERROR));
+            }
+        };
+        if &on_disk != persisted {
+            return Err(store_unavailable_error(
+                "extension installation state changed on disk under this process; \
+                 another writer owns the snapshot — restart to reload it",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn save_snapshot(
+        &self,
+        persisted: &mut Option<Vec<u8>>,
+    ) -> Result<(), ExtensionInstallationError> {
         let state = WireState::from_store(&self.inner).await?;
-        write_snapshot(&self.filesystem, &self.state_path, &state).await
+        let bytes = write_snapshot(&self.filesystem, &self.state_path, &state).await?;
+        *persisted = Some(bytes);
+        Ok(())
     }
 }
 
@@ -83,7 +132,7 @@ async fn write_snapshot(
     filesystem: &std::sync::Arc<dyn RootFilesystem>,
     state_path: &VirtualPath,
     state: &WireState,
-) -> Result<(), ExtensionInstallationError> {
+) -> Result<Vec<u8>, ExtensionInstallationError> {
     let bytes = serde_json::to_vec_pretty(state).map_err(invalid_installation_error)?;
     filesystem
         .write_file(state_path, &bytes)
@@ -94,8 +143,9 @@ async fn write_snapshot(
                 state_path = %state_path.as_str(),
                 "extension installation state write failed"
             );
-            invalid_installation_error(INSTALLATION_STATE_IO_ERROR)
-        })
+            store_unavailable_error(INSTALLATION_STATE_IO_ERROR)
+        })?;
+    Ok(bytes)
 }
 
 fn default_installation_state_path() -> Result<VirtualPath, ExtensionInstallationError> {
@@ -125,9 +175,10 @@ impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
         &self,
         manifest: ExtensionManifestRecord,
     ) -> Result<(), ExtensionInstallationError> {
-        let _guard = self.save_lock.lock().await;
+        let mut persisted = self.persisted_snapshot.lock().await;
+        self.ensure_snapshot_current(&persisted).await?;
         self.inner.upsert_manifest(manifest).await?;
-        self.save_snapshot().await
+        self.save_snapshot(&mut persisted).await
     }
 
     async fn upsert_manifest_and_installation(
@@ -135,11 +186,12 @@ impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
         manifest: ExtensionManifestRecord,
         installation: ExtensionInstallation,
     ) -> Result<(), ExtensionInstallationError> {
-        let _guard = self.save_lock.lock().await;
+        let mut persisted = self.persisted_snapshot.lock().await;
+        self.ensure_snapshot_current(&persisted).await?;
         self.inner
             .upsert_manifest_and_installation(manifest, installation)
             .await?;
-        self.save_snapshot().await
+        self.save_snapshot(&mut persisted).await
     }
 
     async fn list_installations(
@@ -165,9 +217,10 @@ impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
         &self,
         installation: ExtensionInstallation,
     ) -> Result<(), ExtensionInstallationError> {
-        let _guard = self.save_lock.lock().await;
+        let mut persisted = self.persisted_snapshot.lock().await;
+        self.ensure_snapshot_current(&persisted).await?;
         self.inner.upsert_installation(installation).await?;
-        self.save_snapshot().await
+        self.save_snapshot(&mut persisted).await
     }
 
     async fn set_activation_state(
@@ -175,29 +228,32 @@ impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
         installation_id: &ExtensionInstallationId,
         state: ExtensionActivationState,
     ) -> Result<(), ExtensionInstallationError> {
-        let _guard = self.save_lock.lock().await;
+        let mut persisted = self.persisted_snapshot.lock().await;
+        self.ensure_snapshot_current(&persisted).await?;
         self.inner
             .set_activation_state(installation_id, state)
             .await?;
-        self.save_snapshot().await
+        self.save_snapshot(&mut persisted).await
     }
 
     async fn delete_installation(
         &self,
         installation_id: &ExtensionInstallationId,
     ) -> Result<(), ExtensionInstallationError> {
-        let _guard = self.save_lock.lock().await;
+        let mut persisted = self.persisted_snapshot.lock().await;
+        self.ensure_snapshot_current(&persisted).await?;
         self.inner.delete_installation(installation_id).await?;
-        self.save_snapshot().await
+        self.save_snapshot(&mut persisted).await
     }
 
     async fn delete_manifest(
         &self,
         extension_id: &ExtensionId,
     ) -> Result<(), ExtensionInstallationError> {
-        let _guard = self.save_lock.lock().await;
+        let mut persisted = self.persisted_snapshot.lock().await;
+        self.ensure_snapshot_current(&persisted).await?;
         self.inner.delete_manifest(extension_id).await?;
-        self.save_snapshot().await
+        self.save_snapshot(&mut persisted).await
     }
 
     async fn update_health(
@@ -205,9 +261,10 @@ impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
         installation_id: &ExtensionInstallationId,
         health: ExtensionHealthSnapshot,
     ) -> Result<(), ExtensionInstallationError> {
-        let _guard = self.save_lock.lock().await;
+        let mut persisted = self.persisted_snapshot.lock().await;
+        self.ensure_snapshot_current(&persisted).await?;
         self.inner.update_health(installation_id, health).await?;
-        self.save_snapshot().await
+        self.save_snapshot(&mut persisted).await
     }
 }
 
@@ -316,6 +373,12 @@ impl WireManifestSource {
 
 fn invalid_installation_error(error: impl std::fmt::Display) -> ExtensionInstallationError {
     ExtensionInstallationError::InvalidInstallation {
+        reason: error.to_string(),
+    }
+}
+
+fn store_unavailable_error(error: impl std::fmt::Display) -> ExtensionInstallationError {
+    ExtensionInstallationError::StoreUnavailable {
         reason: error.to_string(),
     }
 }

@@ -663,8 +663,9 @@ pub(super) async fn google_oauth_callback_handler(
 ///
 /// Safety-preserving invariants (identical for both providers): the raw `state`
 /// is hashed once and claimed through `AuthFlowManager` (CSRF/state-hash +
-/// single-use/replay), the PKCE verifier is resolved from the process-local
-/// cache then the durable gate store, provider tokens are exchanged only after
+/// single-use/replay), the PKCE verifier is resolved from the durable
+/// setup/gate/DCR secret stores (never a process-local cache — see the
+/// composition CLAUDE.md guardrail), provider tokens are exchanged only after
 /// the flow is claimed, and the callback tenant must match the route tenant
 /// before any exchange.
 pub(crate) async fn oauth_provider_callback_handler(
@@ -3419,6 +3420,7 @@ mod tests {
                 provider: Some(
                     AuthProviderId::new(SLACK_PERSONAL_PROVIDER_ID).expect("Slack provider"),
                 ),
+                lifecycle_package: None,
                 action: ironclaw_auth::SecretCleanupAction::Uninstall,
             })
             .await

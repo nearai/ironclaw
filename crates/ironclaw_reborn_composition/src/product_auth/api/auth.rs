@@ -1133,6 +1133,13 @@ impl RebornProductAuthServices {
                 .await
                 .map_err(RebornCredentialLifecycleError::from)?;
         }
+        for canceled in &report.canceled_flows {
+            // A terminal flow's callback can never claim, so its stored setup
+            // verifier is dead material — drop it eagerly (idempotent,
+            // best-effort) instead of leaving it to TTL expiry.
+            self.delete_setup_pkce_verifier(&canceled.scope, canceled.flow_id)
+                .await;
+        }
         Ok(report)
     }
 
@@ -1475,7 +1482,10 @@ impl RebornProductAuthServices {
         Ok(outcome)
     }
 
-    #[allow(dead_code, reason = "used by upcoming Reborn OAuth setup route wiring")]
+    #[allow(
+        dead_code,
+        reason = "used by the feature-scoped webui-v2-beta OAuth setup routes"
+    )]
     pub(crate) async fn ensure_oauth_callback_flow_known(
         &self,
         scope: &AuthProductScope,
@@ -1627,7 +1637,10 @@ impl RebornProductAuthServices {
             .map_err(RebornOAuthCallbackError::from)
     }
 
-    #[allow(dead_code, reason = "used by upcoming Reborn OAuth setup route wiring")]
+    #[allow(
+        dead_code,
+        reason = "used by the feature-scoped webui-v2-beta OAuth setup routes"
+    )]
     pub(crate) async fn start_setup_oauth_flow(
         &self,
         request: RebornOAuthStartFlowRequest,
@@ -2435,6 +2448,77 @@ mod tests {
             .expect("flow exists");
         assert_eq!(persisted.status, AuthFlowStatus::Failed);
         assert_eq!(persisted.error, Some(AuthErrorCode::MalformedCallback));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_cleanup_drops_setup_pkce_verifiers_for_canceled_flows() {
+        let services = Arc::new(InMemoryAuthProductServices::new());
+        let secret_store = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
+        let product_auth = RebornProductAuthServicePorts::from_shared(services.clone())
+            .into_services(
+                Arc::new(NoopAuthContinuationDispatcher),
+                secret_store.clone(),
+            );
+        let scope = AuthProductScope::new(
+            ironclaw_host_api::ResourceScope::local_default(
+                ironclaw_host_api::UserId::new("verifier-owner").expect("user id"),
+                ironclaw_host_api::InvocationId::new(),
+            )
+            .expect("resource scope"),
+            ironclaw_auth::AuthSurface::Web,
+        );
+        let package = ironclaw_auth::LifecyclePackageRef::new("gmail").expect("package ref");
+        let flow = product_auth
+            .start_setup_oauth_flow(RebornOAuthStartFlowRequest {
+                flow_id: None,
+                scope: scope.clone(),
+                provider: AuthProviderId::new("google").expect("provider"),
+                authorization_url: OAuthAuthorizationUrl::new("https://example.com/authorize")
+                    .expect("authorization url"),
+                opaque_state_hash: OpaqueStateHash::new("a".repeat(64)).expect("state hash"),
+                pkce_verifier_hash: PkceVerifierHash::new("b".repeat(64)).expect("PKCE hash"),
+                pkce_verifier: SecretString::from("raw-verifier".to_string()),
+                continuation: AuthContinuationRef::LifecycleActivation {
+                    package_ref: package.clone(),
+                },
+                update_binding: None,
+                expires_at: Utc::now() + chrono::Duration::minutes(10),
+            })
+            .await
+            .expect("setup flow starts");
+
+        product_auth
+            .cleanup_credentials_for_lifecycle(SecretCleanupRequest {
+                scope: scope.clone(),
+                extension_id: ironclaw_host_api::ExtensionId::new("gmail").expect("extension id"),
+                provider: None,
+                lifecycle_package: Some(package),
+                action: ironclaw_auth::SecretCleanupAction::Uninstall,
+            })
+            .await
+            .expect("lifecycle cleanup");
+
+        assert_eq!(
+            product_auth
+                .flow_manager()
+                .get_flow(&scope, flow.id)
+                .await
+                .expect("flow lookup")
+                .expect("flow retained")
+                .status,
+            AuthFlowStatus::Canceled,
+            "package-keyed cleanup cancels the setup flow"
+        );
+        // The canceled flow's callback can never claim, so its one-shot
+        // verifier must be gone immediately — not merely after TTL expiry.
+        assert!(
+            product_auth
+                .setup_pkce_verifier_for_flow(&scope, flow.id)
+                .await
+                .expect("verifier lookup")
+                .is_none(),
+            "canceled flow's setup PKCE verifier must be deleted eagerly"
+        );
     }
 
     #[tokio::test]
