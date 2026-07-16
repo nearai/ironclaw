@@ -57,9 +57,9 @@ pub struct ThreadMessageSummary {
     /// `ThreadMessageRecord::turn_run_id` at `ironclaw_threads::contract`);
     /// this crate previously dropped it as an unused subtraction (serde
     /// silently ignores unknown fields), but it is the stable id `lib.rs`'s
-    /// `apply_timeline_page` and `app/transcript.rs`'s `FinalReply` handling
-    /// now share to dedupe an SSE replay against an already-loaded timeline
-    /// snapshot — see `app/mod.rs`'s `AppState::known_reply_ids` doc.
+    /// `apply_timeline_page` and `app/transcript.rs`'s replay filtering now
+    /// share to dedupe an SSE replay against an already-loaded timeline
+    /// snapshot — see `app/mod.rs`'s `AppState::settled_run_ids` doc.
     #[serde(default)]
     pub turn_run_id: Option<String>,
 }

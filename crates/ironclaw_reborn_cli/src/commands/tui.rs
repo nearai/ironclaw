@@ -40,7 +40,11 @@ impl TuiCommand {
                     .map(IpAddr::from_str)
                     .transpose()
                     .map_err(|err| anyhow!("[webui].listen_host invalid: {err}"))?
-                    .unwrap_or_else(|| IpAddr::from_str(DEFAULT_SERVE_HOST).expect("literal"));
+                    .unwrap_or_else(|| {
+                        IpAddr::from_str(DEFAULT_SERVE_HOST).expect(
+                            "DEFAULT_SERVE_HOST is a crate-local literal that parses as IpAddr",
+                        )
+                    });
                 let port = webui_section
                     .and_then(|s| s.listen_port)
                     .unwrap_or(DEFAULT_SERVE_PORT);

@@ -269,18 +269,40 @@ pub struct AppState {
     /// without this crate storing a typed `TurnRunId` (see the module
     /// doc's boundary note).
     pub active_run_id: Option<String>,
-    /// `turn_run_id`s of every assistant reply currently represented in
-    /// `transcript` — either from the last `LoadTimeline` snapshot
-    /// (`lib.rs`'s `apply_timeline_page` rebuilds this set alongside
-    /// `transcript` on every load) or from a live `FinalReply` this session
-    /// already appended. `app/transcript.rs`'s `FinalReply` handling checks
-    /// this before pushing: a cursor-less SSE resubscribe (fired on every
-    /// thread switch, see `lib.rs`'s `run_event_loop`) replays the whole
-    /// thread's event history, which would otherwise re-append every
-    /// already-loaded reply on top of the timeline snapshot. `HashSet` (not
-    /// a `Vec`) because membership, not order, is all a dedup check needs —
-    /// display order is exactly `transcript`'s own order.
-    pub known_reply_ids: HashSet<String>,
+    /// `turn_run_id`s of every run whose outcome the currently-loaded
+    /// timeline snapshot already represents — either from the last
+    /// `LoadTimeline` page (`lib.rs`'s `apply_timeline_page` rebuilds this
+    /// set alongside `transcript` on every load, from that page's messages'
+    /// `turn_run_id`s) or from a live `FinalReply` this session already
+    /// appended (`app/transcript.rs`'s `FinalReply` handling inserts as it
+    /// goes). `app/transcript.rs`'s `apply_server_event`/`apply_projection_item`
+    /// check membership here before applying ANY run-scoped item (not just
+    /// `FinalReply`): a cursor-less SSE resubscribe (fired on every thread
+    /// switch and on startup, see `lib.rs`'s `run_event_loop` — the wire's
+    /// `after_cursor`/`Last-Event-ID` param exists but the timeline read
+    /// exposes no resumable `ProjectionCursor` to derive it from, only a
+    /// message-`sequence`-keyed backward-pagination cursor in a different,
+    /// incompatible opaque-token space — see `client/threads.rs`'s module
+    /// doc) replays the whole thread's event history from origin, which
+    /// would otherwise re-append/resurrect every already-settled run's
+    /// `Text`/`Thinking`/`WorkSummary`/`SkillActivation`/`Gate`/`AuthRequired`
+    /// on top of the timeline snapshot, not just duplicate `FinalReply`.
+    ///
+    /// Coverage boundary: this only protects runs the loaded PAGE actually
+    /// captured (`LoadTimeline`'s default page is the thread's newest N
+    /// messages — see `reborn_services.rs::paginate_timeline_messages`).
+    /// A run older than the loaded page's oldest message is not in this set
+    /// and its replayed items are NOT filtered — the wire carries no
+    /// per-item ordering key (sequence/timestamp) on `ProductProjectionItem`
+    /// that would let the reducer tell "replay of out-of-page history" apart
+    /// from "genuinely live" without one, so this is a real, documented
+    /// residual gap (shared by the browser frontend's equivalent first-visit
+    /// full redrain, `useChatEvents.ts`), not something this fix can close
+    /// without a server-side resumable-cursor change.
+    ///
+    /// `HashSet` (not a `Vec`) because membership, not order, is all a dedup
+    /// check needs — display order is exactly `transcript`'s own order.
+    pub settled_run_ids: HashSet<String>,
 }
 
 impl AppState {

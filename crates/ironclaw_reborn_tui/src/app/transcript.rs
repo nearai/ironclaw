@@ -42,7 +42,52 @@ const PROMPT_RUN_STATUSES: [&str; 4] = [
     "blocked_dependent_run",
 ];
 
+/// BLOCKER fix (SSE full-history replay on thread switch): drops any
+/// run-scoped event whose `turn_run_id` is already in
+/// `state.settled_run_ids` — i.e. a run the currently-loaded timeline
+/// snapshot already fully represents — before it ever reaches the match
+/// below. A cursor-less SSE resubscribe (see `lib.rs`'s `run_event_loop`)
+/// replays the thread's ENTIRE event history from origin on every connect
+/// and thread switch; without this guard, `Running`/`CapabilityProgress`
+/// would toggle `state.running` back on for a long-settled run,
+/// `Gate`/`AuthRequired` would resurrect (and briefly flash) an
+/// already-resolved gate, and `Cancelled`/`Failed` would re-append a stale
+/// status line. `FinalReply` is deliberately excluded here — its own arm
+/// below already performs the equivalent check-and-insert (and must still
+/// run so a genuinely new run's first arrival gets recorded); dropping it
+/// here too would just be redundant. `ProjectionSnapshot`/`ProjectionUpdate`
+/// are also excluded: one frame can carry items from several runs at once,
+/// so they're filtered per-item by `projection_item_run_id` inside
+/// `apply_projection_item` instead. See `AppState::settled_run_ids`'s doc
+/// for this filter's coverage boundary (it only protects runs the loaded
+/// timeline PAGE captured, not history older than that page).
+fn event_run_id(event: &WebChatV2Event) -> Option<String> {
+    match event {
+        WebChatV2Event::Running { progress } | WebChatV2Event::CapabilityProgress { progress } => {
+            Some(progress.turn_run_id.to_string())
+        }
+        WebChatV2Event::CapabilityActivity { activity } => {
+            activity.turn_run_id.map(|id| id.to_string())
+        }
+        WebChatV2Event::CapabilityDisplayPreview { preview } => {
+            preview.turn_run_id.map(|id| id.to_string())
+        }
+        WebChatV2Event::Gate { prompt } => Some(prompt.turn_run_id.to_string()),
+        WebChatV2Event::AuthRequired { prompt } => Some(prompt.turn_run_id.to_string()),
+        WebChatV2Event::Cancelled { response } => Some(response.run_id.to_string()),
+        WebChatV2Event::Failed { run_state } => Some(run_state.run_id.to_string()),
+        WebChatV2Event::Accepted { .. }
+        | WebChatV2Event::FinalReply { .. }
+        | WebChatV2Event::ProjectionSnapshot { .. }
+        | WebChatV2Event::ProjectionUpdate { .. }
+        | WebChatV2Event::KeepAlive => None,
+    }
+}
+
 pub(crate) fn apply_server_event(state: &mut AppState, frame: WebChatV2EventFrame) -> Vec<Effect> {
+    if event_run_id(&frame.event).is_some_and(|run_id| state.settled_run_ids.contains(&run_id)) {
+        return Vec::new();
+    }
     match frame.event {
         // The ack for a submitted message arrives on this event; nothing
         // durable to show yet (the assistant's reply is what actually lands
@@ -69,9 +114,11 @@ pub(crate) fn apply_server_event(state: &mut AppState, frame: WebChatV2EventFram
         // including this one, on top of the timeline snapshot `lib.rs`'s
         // `apply_timeline_page` already loaded it from — is a no-op here.
         // `state.running` still clears either way: a stale replay finding
-        // the run no longer active is the correct outcome, not a bug.
+        // the run no longer active is the correct outcome, not a bug. Not
+        // gated by `apply_server_event`'s `event_run_id` filter above (see
+        // that fn's doc) — this IS the check for `FinalReply` specifically.
         WebChatV2Event::FinalReply { reply } => {
-            if state.known_reply_ids.insert(reply.turn_run_id.to_string()) {
+            if state.settled_run_ids.insert(reply.turn_run_id.to_string()) {
                 state
                     .transcript
                     .push(TranscriptItem::final_text(reply.text));
@@ -133,7 +180,37 @@ fn apply_projection(state: &mut AppState, projection: ProductProjectionState) ->
     effects
 }
 
+/// Per-item counterpart of `event_run_id`, for items inside a
+/// `ProjectionSnapshot`/`ProjectionUpdate` frame — one frame's `items` list
+/// can span several runs at once, so filtering has to happen per item
+/// rather than for the whole frame. `Text`/`Thinking`'s `run_id` is
+/// `Option` (not every projection item is definitively attributed); `None`
+/// is passed through unfiltered by the caller, same as an activity/preview
+/// with no `turn_run_id` today.
+fn projection_item_run_id(item: &ProductProjectionItem) -> Option<String> {
+    match item {
+        ProductProjectionItem::RunStatus { run_id, .. } => Some(run_id.to_string()),
+        ProductProjectionItem::Text { run_id, .. }
+        | ProductProjectionItem::Thinking { run_id, .. } => run_id.map(|id| id.to_string()),
+        ProductProjectionItem::CapabilityActivity(activity) => {
+            activity.turn_run_id.map(|id| id.to_string())
+        }
+        ProductProjectionItem::WorkSummary { run_id, .. } => Some(run_id.to_string()),
+        ProductProjectionItem::Gate { run_id, .. } => Some(run_id.to_string()),
+        ProductProjectionItem::SkillActivation { run_id, .. } => Some(run_id.to_string()),
+    }
+}
+
 fn apply_projection_item(state: &mut AppState, item: ProductProjectionItem) -> Vec<Effect> {
+    if projection_item_run_id(&item).is_some_and(|run_id| state.settled_run_ids.contains(&run_id)) {
+        // Same BLOCKER fix as `apply_server_event`'s `event_run_id` guard,
+        // for items carried inside a projection frame: a replayed `Text`/
+        // `Thinking`/`WorkSummary`/`SkillActivation`/`Gate`/`RunStatus` for
+        // an already-settled run must not upsert/append/resurrect, and a
+        // replayed terminal `RunStatus` for it must not re-fire another
+        // `ApiCall::LoadTimeline`.
+        return Vec::new();
+    }
     match item {
         ProductProjectionItem::RunStatus { run_id, status, .. } => {
             apply_run_status(state, run_id.to_string(), status)
@@ -288,8 +365,10 @@ fn upsert_preview(state: &mut AppState, preview: CapabilityDisplayPreviewView) {
 #[cfg(test)]
 mod tests {
     use ironclaw_host_api::InvocationId;
-    use ironclaw_product_workflow::CapabilityActivityStatusView;
     use ironclaw_product_workflow::webchat_schema::WebChatV2Event;
+    use ironclaw_product_workflow::{
+        CapabilityActivityStatusView, ProductProjectionItem, ProductWorkSummaryPhase,
+    };
     use ironclaw_turns::{EventCursor, TurnRunId, TurnStatus};
 
     use super::super::test_support::{
@@ -299,7 +378,7 @@ mod tests {
     use super::*;
 
     /// Pins Defect E's fix at the reducer level: a `FinalReply` carrying a
-    /// `turn_run_id` already in `state.known_reply_ids` (as it would be
+    /// `turn_run_id` already in `state.settled_run_ids` (as it would be
     /// after a cursor-less SSE resubscribe replays a reply the timeline
     /// snapshot already loaded — see `lib.rs`'s `apply_timeline_page`) must
     /// upsert-skip rather than append a second transcript row, while a
@@ -648,5 +727,137 @@ mod tests {
             "a stale/unrelated run must not clear this state"
         );
         assert_eq!(state.active_run_id, Some(active_run_id.to_string()));
+    }
+
+    /// BLOCKER fix, generalized beyond `FinalReply`: seeds `settled_run_ids`
+    /// with a run (as `lib.rs`'s `apply_timeline_page` would after loading a
+    /// timeline page that already captured this run), then replays a FULL
+    /// mix of run-scoped projection item types for that SAME run — exactly
+    /// what a cursor-less SSE resubscribe would redeliver. None of them may
+    /// upsert/append/resurrect: `Text` must not push a stale `LiveText` row,
+    /// `WorkSummary`/`SkillActivation` must not push a `System` line, the
+    /// projection `Gate` item must not resurrect `pending_gate`, and the
+    /// terminal `RunStatus` must not re-fire an `ApiCall::LoadTimeline`
+    /// (previously it always would, at extra cost, on every switch replay).
+    /// A second, genuinely new run's own item still applies normally,
+    /// proving the filter is scoped to the settled run, not projection
+    /// items in general.
+    #[test]
+    fn replayed_projection_items_for_an_already_settled_run_are_dropped_but_a_new_run_still_applies()
+     {
+        let mut state = AppState::default().set_thread_id("t-1");
+        let settled_run = TurnRunId::new();
+        state.settled_run_ids.insert(settled_run.to_string());
+
+        let effects = apply_server_event(
+            &mut state,
+            frame(WebChatV2Event::ProjectionUpdate {
+                state: projection_state(
+                    "t-1",
+                    vec![
+                        projection_text("old-text-1", settled_run, "stale streamed text"),
+                        ProductProjectionItem::WorkSummary {
+                            id: "old-work-1".to_string(),
+                            run_id: settled_run,
+                            phase: ProductWorkSummaryPhase::Planning,
+                            body: "stale work summary".to_string(),
+                        },
+                        ProductProjectionItem::SkillActivation {
+                            id: "old-skill-1".to_string(),
+                            run_id: settled_run,
+                            skill_names: vec!["some-skill".to_string()],
+                            feedback: Vec::new(),
+                        },
+                        projection_gate(settled_run, "stale-gate"),
+                        projection_run_status(settled_run, "completed"),
+                    ],
+                ),
+            }),
+        );
+
+        assert!(
+            state.transcript.is_empty(),
+            "no item for an already-settled run may enter the transcript, got {:?}",
+            state.transcript
+        );
+        assert!(
+            state.pending_gate.is_none(),
+            "a replayed Gate item for an already-settled run must not resurrect pending_gate"
+        );
+        assert!(!state.is_running());
+        assert!(
+            effects.is_empty(),
+            "a replayed terminal RunStatus for an already-settled run must not re-fire LoadTimeline"
+        );
+
+        // A genuinely new (not-yet-settled) run's own item still applies.
+        let new_run = TurnRunId::new();
+        apply_server_event(
+            &mut state,
+            frame(WebChatV2Event::ProjectionUpdate {
+                state: projection_state(
+                    "t-1",
+                    vec![projection_text("new-text-1", new_run, "live text")],
+                ),
+            }),
+        );
+        assert_eq!(
+            state
+                .transcript
+                .iter()
+                .filter_map(|i| i.as_live_text())
+                .collect::<Vec<_>>(),
+            vec!["live text"],
+            "a run not yet in settled_run_ids must still render live"
+        );
+    }
+
+    /// Same fix, at the top-level frame filter (`event_run_id`, guarding
+    /// `apply_server_event` before the match): a replayed raw `Gate` frame
+    /// and a replayed `Running` frame for an already-settled run must both
+    /// be dropped — the raw-frame counterpart of the projection-item test
+    /// above. `Running` matters because, unlike the projection `RunStatus`
+    /// item, nothing else would ever clear a stale `state.running = true`
+    /// for a run that's already fully settled and will never emit another
+    /// terminal status in this replay.
+    #[test]
+    fn replayed_raw_gate_and_running_frames_for_an_already_settled_run_are_dropped() {
+        let mut state = AppState::default();
+        let settled_run = TurnRunId::new();
+        state.settled_run_ids.insert(settled_run.to_string());
+
+        apply_server_event(
+            &mut state,
+            frame(WebChatV2Event::Gate {
+                prompt: ironclaw_product_workflow::GatePromptView {
+                    turn_run_id: settled_run,
+                    gate_ref: "stale-raw-gate".to_string(),
+                    invocation_id: None,
+                    headline: "Approve action (raw frame)".to_string(),
+                    body: "stale".to_string(),
+                    allow_always: false,
+                    approval_context: None,
+                },
+            }),
+        );
+        assert!(
+            state.pending_gate.is_none(),
+            "a replayed raw Gate frame for an already-settled run must not resurrect pending_gate"
+        );
+
+        apply_server_event(
+            &mut state,
+            frame(WebChatV2Event::Running {
+                progress: ironclaw_product_workflow::ProgressUpdateView {
+                    turn_run_id: settled_run,
+                    kind: ironclaw_product_workflow::ProgressKind::Typing,
+                    generated_at: chrono::Utc::now(),
+                },
+            }),
+        );
+        assert!(
+            !state.is_running(),
+            "a replayed Running frame for an already-settled run must not flip running back on"
+        );
     }
 }

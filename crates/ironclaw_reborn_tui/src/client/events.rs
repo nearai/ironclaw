@@ -103,9 +103,16 @@ pub fn subscribe(
                 pending,
                 ..
             } = &mut state;
-            let conn = connection
-                .as_mut()
-                .expect("checked Some via the branch above");
+            let Some(conn) = connection.as_mut() else {
+                // Unreachable in practice — the `state.connection.is_none()`
+                // branch above already handles that case (by opening a
+                // fresh connection) before control ever reaches here. No
+                // `.expect()`: fail safe instead of panicking on a
+                // hypothetical future refactor that breaks the invariant —
+                // loop back to the top, which re-checks `connection.is_none()`
+                // and recovers the exact same way.
+                continue;
+            };
             match read_next_chunk(conn, last_event_id, pending).await {
                 Ok(true) => {
                     // A chunk was read (it may or may not have completed a

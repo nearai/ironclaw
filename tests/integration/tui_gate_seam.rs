@@ -968,6 +968,300 @@ async fn tui_client_credential_two_step_auth_gate_resumes_via_manual_token_submi
         .expect("credentialed re-dispatch actually executed and surfaced its result");
 }
 
+/// BLOCKER regression: SSE full-history replay on thread switch must not
+/// duplicate/reorder/resurrect anything beyond a single reply. Extends the
+/// `sse_replay_of_an_already_loaded_reply_does_not_duplicate_the_transcript`/
+/// `two_consecutive_thread_switches_do_not_duplicate_the_transcript` crate-tier
+/// tests (`crates/ironclaw_reborn_tui/src/lib.rs`) and the
+/// `replayed_projection_items_for_an_already_settled_run_are_dropped_but_a_new_run_still_applies`/
+/// `replayed_raw_gate_and_running_frames_for_an_already_settled_run_are_dropped`
+/// crate-tier reducer tests (`crates/ironclaw_reborn_tui/src/app/transcript.rs`)
+/// with REAL server-minted data across TWO completed turns (multiple replies,
+/// not just one) in one thread: a real `send_message` -> settle -> `send_message`
+/// -> settle sequence, then a real `/timeline` fetch. The replay step itself
+/// is driven synthetically (through the public `app::reduce`/`AppEvent::Server`
+/// entry point, feeding both turns' real `turn_run_id`s and real reply text
+/// back in as `Text` projection items + a terminal `RunStatus`, per turn) —
+/// see the coverage note below for why, mirroring
+/// `tui_client_thread_switch_replay_dedupes_to_one_reply`'s own established
+/// precedent for the same constraint. The reconstructed transcript must come
+/// out identical to the snapshot taken before the replay.
+///
+/// Coverage notes:
+/// - **Why synthetic replay, not a second real `subscribe(.., None)`:** tried
+///   first — opened a genuine second cursor-less subscription (exactly what a
+///   thread switch does) after both turns settled and drained it waiting for
+///   both `turn_run_id`s to reach `"completed"` again. It did not return
+///   within 300s even isolated to just this test. The composition this
+///   harness wires (`WebuiRuntimeProjectionStream::subscribe`,
+///   `crates/ironclaw_reborn_composition/src/projection.rs`) reports
+///   `supports_subscription() == true` and is durable-log-backed in
+///   principle, but a brand-new subscriber with no further live writes
+///   forthcoming evidently does not reliably/promptly redeliver
+///   already-durable history in this test composition — a harness gap, not
+///   a statement about the real `ironclaw-reborn serve` binary (whose
+///   `handlers.rs::stream_events` doc is the confirmed evidence this whole
+///   fix is based on). This is the SAME constraint
+///   `tui_client_thread_switch_replay_dedupes_to_one_reply` already
+///   documented and worked around by replaying through `app::reduce`
+///   directly instead of a real resubscribe — this test follows that same,
+///   already-established pattern rather than reopening that investigation.
+/// - **Why not literally seeding >50 messages:** the fix (`app/transcript.rs`'s
+///   `event_run_id`/`projection_item_run_id` filters against
+///   `AppState::settled_run_ids`) only suppresses replay for runs the loaded
+///   timeline PAGE actually captured — see that field's doc for why (the wire
+///   exposes no per-item ordering key, and the timeline's own `next_cursor` is
+///   a message-`sequence`-keyed backward-pagination token, not a resumable
+///   `ProjectionCursor` `after_cursor`/`Last-Event-ID` could use — Option 1 in
+///   the task brief was tried and ruled out for exactly this reason). Seeding
+///   real history past the default 50-message page would mean scripting 25+
+///   real turns purely to prove a boundary the fix does not claim to cover.
+/// - **What this test proves that the crate-tier tests above cannot:** the
+///   filter holds against REAL server-minted `turn_run_id`s and REAL reply
+///   text from a REAL `/timeline` snapshot, across TWO turns (not one),
+///   through the exact same public `app::reduce` seam the crate-tier tests
+///   use — closing the gap between "synthetic ids in a unit test" and "what
+///   the server actually mints."
+#[tokio::test]
+async fn tui_client_thread_switch_replay_of_multiple_turns_matches_the_timeline_snapshot() {
+    let group = RebornIntegrationGroup::live_approvals()
+        .await
+        .expect("live-approvals group builds");
+    let h = group
+        .thread("conv-tui-multi-turn-switch-replay")
+        .script([
+            RebornScriptedReply::text("TUI_MULTI_TURN_REPLY_ONE"),
+            RebornScriptedReply::text("TUI_MULTI_TURN_REPLY_TWO"),
+        ])
+        .build()
+        .await
+        .expect("thread builds");
+
+    let capability_harness = group
+        .capability_harness()
+        .expect("live_approvals always uses a HostRuntime capability backend");
+    let reborn_services = capability_harness
+        .reborn_services_for_test()
+        .expect("live_approvals harness is built via new_with_options");
+    let approval_interactions = reborn_services
+        .local_dev_approval_interaction_service_with_turn_state_for_test(
+            h.coordinator.clone(),
+            h.turn_store.clone(),
+        )
+        .expect("local-dev capability policy is valid")
+        .expect("harness has a local-dev runtime");
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    let reply_target_binding_ref = ReplyTargetBindingRef::new("tui-multi-turn-switch-test")
+        .expect("valid reply target binding ref");
+    let turn_event_source: Arc<dyn TurnEventProjectionSource> = h.turn_store.clone();
+    let event_stream = ironclaw_reborn_composition::test_support::build_webui_event_stream_for_test(
+        event_log,
+        turn_event_source,
+        h.coordinator.clone(),
+        reply_target_binding_ref,
+    );
+    let services: Arc<dyn RebornServicesApi> = Arc::new(
+        RebornServices::new(h.thread_harness.service.clone(), h.coordinator.clone())
+            .with_event_stream(event_stream)
+            .with_approval_interactions(approval_interactions),
+    );
+
+    let user_id = h
+        .binding
+        .subject_user_id
+        .clone()
+        .unwrap_or_else(|| h.binding.actor_user_id.clone());
+    let agent_id = h
+        .binding
+        .agent_id
+        .clone()
+        .expect("live_approvals binding resolves an agent_id");
+    let token = "reborn-tui-multi-turn-switch-test-token-0123456789ab";
+    let (addr, _serve_guard) = tui_listener::spawn_webui_v2(
+        services,
+        h.binding.tenant_id.clone(),
+        user_id,
+        agent_id,
+        h.binding.project_id.clone(),
+        token,
+    )
+    .await;
+    let client = ApiClient::new(format!("http://{addr}"), token.to_string());
+    let thread_id = h.binding.thread_id.as_str().to_string();
+    tui_listener::create_thread_pinned(addr, token, &thread_id).await;
+
+    // Drive both turns to completion through one subscription, mirroring
+    // real usage: a user sends, waits for the reply, sends again.
+    let mut events = std::pin::pin!(ironclaw_reborn_tui::client::events::subscribe(
+        &client, &thread_id, None
+    ));
+    client
+        .send_message(&thread_id, "TUI_MULTI_TURN_PROMPT_ONE")
+        .await
+        .expect("send_message turn one");
+    let (run_one, status_one) = wait_for_any_settled_run(&mut events).await;
+    assert_eq!(status_one, "completed", "turn one must complete");
+    client
+        .send_message(&thread_id, "TUI_MULTI_TURN_PROMPT_TWO")
+        .await
+        .expect("send_message turn two");
+    let (run_two, status_two) = wait_for_any_settled_run(&mut events).await;
+    assert_eq!(status_two, "completed", "turn two must complete");
+    assert_ne!(run_one, run_two, "each send must produce its own run");
+
+    // The "loaded timeline snapshot" a real thread switch would fetch.
+    // `limit: 50` comfortably covers this thread's small handful of
+    // messages (2 user + at least 2 assistant — see the coverage note above
+    // for why this test proves the fix within a page rather than past one).
+    // Not asserting an exact message count: like
+    // `tui_client_thread_switch_replay_dedupes_to_one_reply` above, a
+    // completed turn can surface more than one assistant row for the same
+    // run (a superseded draft plus the finalized reply), so the real
+    // invariant is "both prompts and both replies are present", not a fixed
+    // total.
+    let page = client
+        .timeline(&thread_id, 50, None)
+        .await
+        .expect("timeline snapshot");
+    assert_eq!(
+        page.messages.iter().filter(|m| m.kind == "user").count(),
+        2,
+        "both prompts must be in the snapshot, got {:?}",
+        page.messages
+    );
+    let mut state = snapshot_state_from_timeline(&page);
+    let before: Vec<String> = state.transcript.iter().map(describe_item).collect();
+    assert!(
+        before
+            .iter()
+            .any(|d| d.contains("TUI_MULTI_TURN_REPLY_ONE")),
+        "snapshot must carry turn one's reply, got {before:?}"
+    );
+    assert!(
+        before
+            .iter()
+            .any(|d| d.contains("TUI_MULTI_TURN_REPLY_TWO")),
+        "snapshot must carry turn two's reply, got {before:?}"
+    );
+
+    // The thread-switch resubscribe replay, driven through the public
+    // `app::reduce` entry point rather than a second real `subscribe(.., None)`
+    // — see this test's doc comment for why. Real `turn_run_id`s and real
+    // reply text (both pulled off the `/timeline` fetch above, not invented),
+    // fed back as the SAME frame shapes a cursor-less redrain would deliver
+    // for two already-settled turns: a `Text` projection item (the
+    // concretely-named `upsert_live_text` blocker path) followed by a
+    // terminal `RunStatus`, once per turn — exactly what
+    // `wait_for_any_settled_run` above proved the real server actually
+    // produces for each of these turns.
+    let real_text_for_run = |run_id: &str| -> String {
+        page.messages
+            .iter()
+            .find(|m| m.turn_run_id.as_deref() == Some(run_id))
+            .and_then(|m| m.content.clone())
+            .unwrap_or_else(|| panic!("timeline carries the assistant message for {run_id}"))
+    };
+    let replay_settled_turn = |state: &mut AppState, run_id: &str| {
+        let run = TurnRunId::parse(run_id).expect("real server turn_run_id is a UUID");
+        let text = real_text_for_run(run_id);
+        app::reduce(
+            state,
+            AppEvent::Server(Box::new(WebChatV2EventFrame {
+                cursor: ProjectionCursor::new(format!("cursor:tui:multi-turn-replay:{run_id}:1"))
+                    .expect("valid cursor"),
+                event: WebChatV2Event::ProjectionUpdate {
+                    state: ironclaw_product_workflow::ProductProjectionState::new(
+                        thread_id.clone(),
+                        vec![ProductProjectionItem::Text {
+                            id: format!("replay-text-{run_id}"),
+                            run_id: Some(run),
+                            body: text,
+                        }],
+                    )
+                    .expect("valid projection state"),
+                },
+            })),
+        );
+        app::reduce(
+            state,
+            AppEvent::Server(Box::new(WebChatV2EventFrame {
+                cursor: ProjectionCursor::new(format!("cursor:tui:multi-turn-replay:{run_id}:2"))
+                    .expect("valid cursor"),
+                event: WebChatV2Event::ProjectionUpdate {
+                    state: ironclaw_product_workflow::ProductProjectionState::new(
+                        thread_id.clone(),
+                        vec![ProductProjectionItem::RunStatus {
+                            run_id: run,
+                            status: "completed".to_string(),
+                            failure_category: None,
+                            failure_summary: None,
+                            retryable: None,
+                        }],
+                    )
+                    .expect("valid projection state"),
+                },
+            })),
+        );
+    };
+    replay_settled_turn(&mut state, &run_one);
+    replay_settled_turn(&mut state, &run_two);
+
+    let after: Vec<String> = state.transcript.iter().map(describe_item).collect();
+    assert_eq!(
+        after, before,
+        "the thread-switch replay must reproduce the loaded snapshot exactly — \
+         no duplicated, reordered, or resurrected items"
+    );
+    assert!(
+        state.pending_gate.is_none(),
+        "no gate was ever pending for these plain-text turns; replay must not invent one"
+    );
+    assert!(
+        !state.is_running(),
+        "both turns already settled; replay must not leave `running` stuck on"
+    );
+}
+
+/// Mirrors `lib.rs`'s private `apply_timeline_page`/`transcript_item_from_message`
+/// against the PUBLIC `AppState`/`TranscriptItem` surface — both are private
+/// to `ironclaw_reborn_tui::lib`, so an external integration test cannot call
+/// them directly (see the module doc on
+/// `tui_client_thread_switch_replay_dedupes_to_one_reply` for the same
+/// constraint). Same "user"/"assistant"/else-as-System mapping, same
+/// `settled_run_ids` seeding from every message's `turn_run_id`.
+fn snapshot_state_from_timeline(page: &ironclaw_reborn_tui::client::TimelinePage) -> AppState {
+    let mut state = AppState::default().set_thread_id(page.thread.thread_id.clone());
+    state.settled_run_ids = page
+        .messages
+        .iter()
+        .filter_map(|m| m.turn_run_id.clone())
+        .collect();
+    state.transcript = page
+        .messages
+        .iter()
+        .map(|m| {
+            let text = m.content.clone().unwrap_or_default();
+            match m.kind.as_str() {
+                "user" => app::TranscriptItem::User { text },
+                "assistant" => app::TranscriptItem::Assistant { text },
+                _ if text.is_empty() => app::TranscriptItem::System {
+                    text: m.kind.clone(),
+                },
+                _ => app::TranscriptItem::System { text },
+            }
+        })
+        .collect();
+    state
+}
+
+/// `TranscriptItem` has no `PartialEq` (some variants wrap wire view types
+/// that don't derive it either); compare through `Debug` instead — every
+/// variant reaching here derives it (required for `TranscriptItem`'s own
+/// `#[derive(Debug)]` to compile), so this always renders a diffable string.
+fn describe_item(item: &app::TranscriptItem) -> String {
+    format!("{item:?}")
+}
+
 /// Automations parity (`list_automations(include_completed=true)` +
 /// opening a completed run's thread via `recent_runs[].thread_id`).
 ///

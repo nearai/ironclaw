@@ -201,6 +201,25 @@ async fn run_event_loop(
 /// own `Server` event (not merged into it) so it goes through the reducer
 /// first and reaches `apply_conn_change` as a real, independent
 /// `AppEvent::Conn` transition.
+///
+/// `ReconnectBudgetExhausted`/`Unauthorized` are terminal, not transient:
+/// `client/events.rs`'s `subscribe` (its `SubscribeState::exhausted` flag)
+/// yields no further items after either one — the 3-attempts/60s reconnect
+/// budget is spent, or the bearer token was rejected outright, so the
+/// stream is permanently dead. Mapping those two to `Reconnecting` (as
+/// every other error variant used to) was the second bug this function
+/// fixes: `ConnState::Lost` — and the UI/focus-gating built for it
+/// (`AppState::focus`'s `ConnBanner` precedence, `dispatch_key`'s
+/// disconnected seam) — never ran; the status bar showed "reconnecting"
+/// forever for a connection that would never come back. `attempt` on the
+/// remaining `Reconnecting` case stays hardcoded at `1`: the real count is
+/// only known inside `client/events.rs`'s `SubscribeState` AFTER it decides
+/// to push an error (`exhaust_or_record_reconnect` records the attempt
+/// after, not before, `open_connection`/`read_next_chunk`'s `Err(..)` arms
+/// already queued it) — threading the true count out would mean adding an
+/// attempt-count field to the transient-error path across those two call
+/// sites, not a local change here. Left as a follow-up; not done in this
+/// pass.
 fn map_sse_item(
     item: Result<WebChatV2EventFrame, ClientError>,
     awaiting_reconnect: &mut bool,
@@ -213,6 +232,9 @@ fn map_sse_item(
             }
             events.push(AppEvent::Server(Box::new(frame)));
             events
+        }
+        Err(ClientError::ReconnectBudgetExhausted { .. } | ClientError::Unauthorized) => {
+            vec![AppEvent::Conn(ConnState::Lost)]
         }
         Err(_) => {
             *awaiting_reconnect = true;
@@ -509,15 +531,17 @@ fn apply_llm_test_result(state: &mut AppState, result: LlmProbeResult) {
 }
 
 /// Replaces `state.transcript` from a freshly-fetched timeline page, and
-/// rebuilds `state.known_reply_ids` (the set of assistant-reply
-/// `turn_run_id`s the transcript now represents) alongside it — the one
-/// place that mutates both together, called from TUI startup and the
-/// `ApiCall::LoadTimeline` arm below. Keeping the two in lockstep is what
-/// lets `app/transcript.rs`'s `FinalReply` handling correctly recognize an
-/// SSE-replayed reply as already-loaded rather than appending a duplicate —
-/// see `AppState::known_reply_ids`'s doc.
+/// rebuilds `state.settled_run_ids` (the set of `turn_run_id`s this page's
+/// snapshot already represents) alongside it — the one place that mutates
+/// both together, called from TUI startup and the `ApiCall::LoadTimeline`
+/// arm below. Keeping the two in lockstep is what lets
+/// `app/transcript.rs`'s `apply_server_event`/`apply_projection_item`
+/// correctly recognize an SSE-replayed item (of ANY type, not just
+/// `FinalReply`) for an already-settled run as stale rather than
+/// re-applying it — see `AppState::settled_run_ids`'s doc, including its
+/// coverage boundary.
 fn apply_timeline_page(state: &mut AppState, page: client::TimelinePage) {
-    state.known_reply_ids = page
+    state.settled_run_ids = page
         .messages
         .iter()
         .filter_map(|m| m.turn_run_id.clone())
@@ -615,6 +639,44 @@ mod tests {
             events[0],
             AppEvent::Conn(ConnState::Reconnecting { attempt: 1 })
         ));
+    }
+
+    /// Regression for the `Lost`-unreachable bug: `ReconnectBudgetExhausted`
+    /// is terminal (`client/events.rs`'s `subscribe` yields nothing further
+    /// after it), so it must map to `ConnState::Lost`, not `Reconnecting` —
+    /// the previous `Err(_) => Reconnecting` catch-all left the fully-built
+    /// `Lost` UI/focus-gating (`AppState::focus`'s `ConnBanner` precedence)
+    /// unreachable, showing "reconnecting" forever for a dead connection.
+    /// `awaiting_reconnect` must also stay untouched: there is no further
+    /// reconnect to await once the budget is spent.
+    #[test]
+    fn map_sse_item_reconnect_budget_exhausted_reflects_lost_not_reconnecting() {
+        let mut awaiting_reconnect = false;
+        let events = map_sse_item(
+            Err(ClientError::ReconnectBudgetExhausted {
+                attempts: 3,
+                window_secs: 60,
+            }),
+            &mut awaiting_reconnect,
+        );
+        assert!(
+            !awaiting_reconnect,
+            "no pending reconnect to await once the budget is spent"
+        );
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], AppEvent::Conn(ConnState::Lost)));
+    }
+
+    /// Same terminal treatment for `Unauthorized`: a rejected bearer token
+    /// will never succeed on retry either, so it must also reflect `Lost`
+    /// rather than looping the UI through `Reconnecting` forever.
+    #[test]
+    fn map_sse_item_unauthorized_reflects_lost_not_reconnecting() {
+        let mut awaiting_reconnect = false;
+        let events = map_sse_item(Err(ClientError::Unauthorized), &mut awaiting_reconnect);
+        assert!(!awaiting_reconnect);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], AppEvent::Conn(ConnState::Lost)));
     }
 
     #[test]
@@ -942,7 +1004,7 @@ mod tests {
     }
 
     /// Two thread switches in a row: each `LoadTimeline` wholesale-replaces
-    /// the transcript (and `known_reply_ids` alongside it, via
+    /// the transcript (and `settled_run_ids` alongside it, via
     /// `apply_timeline_page`), so thread A's SSE stream replaying its own
     /// history after the switch to B must not resurrect A's messages, and B's
     /// own replay must not duplicate B's snapshot either.
