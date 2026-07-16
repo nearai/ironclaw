@@ -15,6 +15,26 @@
 //!        -- --ignored --test-threads=1 --nocapture
 //!    ```
 //!
+//!    When `ANTHROPIC_API_KEY` is unset the recorder takes the NEAR AI path
+//!    (`NEARAI_API_KEY`). Its default model `deepseek-ai/DeepSeek-V4-Flash`
+//!    loops on multi-step tasks and dies `Failed(driver_protocol_violation)`;
+//!    override it with a strong model served through NEAR AI, e.g.:
+//!
+//!    ```bash
+//!    IRONCLAW_REBORN_QA_CREDENTIAL_SOURCE_USER=me \
+//!    IRONCLAW_QA_RECORD_MODEL=anthropic/claude-sonnet-4-6 \
+//!    RUST_MIN_STACK=67108864 \
+//!      cargo test --test reborn_qa_recorded_behavior record_triage_ci_holonear \
+//!        -- --ignored --test-threads=1 --nocapture
+//!    ```
+//!
+//!    Two of those are non-obvious on a DB-backed local-dev store: the stored
+//!    product-auth accounts live under `user_id = "me"` (not the `reborn-cli`
+//!    default), so `IRONCLAW_REBORN_QA_CREDENTIAL_SOURCE_USER=me` is required or
+//!    credential import fails with "Visible accounts: <none>"; and the recorder
+//!    builds two runtimes plus a live turn, whose combined debug async frame
+//!    overflows the default test-thread stack without a larger `RUST_MIN_STACK`.
+//!
 //!    Fixtures that exercise auth-gated Google integrations import the
 //!    configured Google product-auth account from the local Reborn store.
 //!    By default the source is `$IRONCLAW_REBORN_HOME/local-dev` (or
@@ -117,9 +137,13 @@ const CONNECT_GMAIL: QaPhrase = QaPhrase {
     fixture: "connect_gmail",
     phrase: "connect to Gmail",
 };
-const FIX_CI_HOLONEAR: QaPhrase = QaPhrase {
-    fixture: "fix_ci_holonear",
-    phrase: "fix ci in https://github.com/nearai/holonear/pull/1636",
+const TRIAGE_CI_HOLONEAR: QaPhrase = QaPhrase {
+    fixture: "triage_ci_holonear",
+    phrase: "Triage the failing CI on https://github.com/nearai/holonear/pull/1588. Read the \
+             failing GitHub Actions job logs and reply with a short root-cause explanation plus a \
+             concrete proposed fix. Base your answer only on the GitHub API (the job logs and the \
+             pull request's files) — do NOT clone the repository, run shell commands, edit any \
+             files, or push anything.",
 };
 
 const SLACK_CHANNEL_MEMBERSHIP_FIXTURE: &str = "slack_channel_membership";
@@ -148,7 +172,7 @@ recorder_test!(record_web_status_check, WEB_STATUS_CHECK);
 recorder_test!(record_web_release_summary, WEB_RELEASE_SUMMARY);
 recorder_test!(record_web_hn_search, WEB_HN_SEARCH);
 recorder_test!(record_connect_gmail, CONNECT_GMAIL);
-recorder_test!(record_fix_ci_holonear, FIX_CI_HOLONEAR);
+recorder_test!(record_triage_ci_holonear, TRIAGE_CI_HOLONEAR);
 
 // --- Tier 2: fixture contracts (hermetic) -----------------------------------
 
@@ -338,6 +362,45 @@ async fn contract_connect_gmail_routes_through_extension_tools() {
     let gmail = load_qa_trace(CONNECT_GMAIL.fixture);
     assert_tool_called_with(&gmail, "builtin.extension_install", &["gmail"]);
     assert_tool_called_with(&gmail, "builtin.extension_activate", &["gmail"]);
+}
+
+#[tokio::test]
+async fn contract_triage_ci_holonear_reads_failing_job_logs_and_proposes_a_fix() {
+    let trace = load_qa_trace(TRIAGE_CI_HOLONEAR.fixture);
+    // Triage routes through the first-party GitHub extension...
+    assert_tool_called_with(&trace, "builtin.extension_activate", &["github"]);
+    // ...and reads a failing GitHub Actions job's logs via the new capability
+    // (host follows GitHub's 302 -> blob-storage redirect, stripping the
+    // api.github.com Bearer token on the cross-host hop).
+    assert_tool_called_with(&trace, "github.get_job_logs", &["holonear"]);
+    // Triage + proposed-fix contract: it must not commit a change to the PR.
+    assert_tool_not_called(&trace, "github.create_or_update_file");
+    // The proposed fix lands in a non-empty final assistant reply.
+    let reply = final_text_reply(&trace).expect("triage phrase should finalize a reply");
+    assert!(
+        !reply.is_empty(),
+        "triage reply proposing a fix should be non-empty"
+    );
+}
+
+#[test]
+fn canonical_tool_name_folds_provider_escape_to_dot() {
+    // NEAR-AI-recorded extension calls escape the dot; the direct-Anthropic path
+    // keeps it. Both must canonicalize to one capability-style name.
+    assert_eq!(
+        canonical_recorded_tool_name("github__get_job_logs"),
+        "github.get_job_logs"
+    );
+    assert_eq!(
+        canonical_recorded_tool_name("builtin__extension_activate"),
+        "builtin.extension_activate"
+    );
+    // Already-dotted names and inner underscores are preserved.
+    assert_eq!(canonical_recorded_tool_name("slack.whoami"), "slack.whoami");
+    assert_eq!(
+        canonical_recorded_tool_name("builtin__get_file_content"),
+        "builtin.get_file_content"
+    );
 }
 
 #[tokio::test]

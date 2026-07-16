@@ -217,10 +217,17 @@ pub fn load_qa_trace(fixture_name: &str) -> LlmTrace {
     serde_json::from_str(&json).expect("QA trace fixture parses as recorded LlmTrace JSON")
 }
 
+/// Normalize a recorded tool-call name to its capability-style spelling
+/// (`prefix.tool`). Reborn advertises capabilities to the model as `prefix__tool`
+/// when the provider's function-name grammar forbids dots (e.g. NEAR AI escapes
+/// `builtin.http` to `builtin__http` and `github.get_job_logs` to
+/// `github__get_job_logs`), while the direct-Anthropic path keeps the dotted
+/// spelling. Folding the first `__` back to `.` lets the QA contracts assert one
+/// stable capability name regardless of which recorder path produced the
+/// fixture. Already-dotted names (`slack.whoami`) and inner underscores
+/// (`builtin__get_file_content` -> `builtin.get_file_content`) are preserved.
 pub fn canonical_recorded_tool_name(name: &str) -> String {
-    name.strip_prefix("builtin__")
-        .map(|suffix| format!("builtin.{suffix}"))
-        .unwrap_or_else(|| name.to_string())
+    name.replacen("__", ".", 1)
 }
 
 /// All tool calls in the fixture as canonicalized (name, serialized arguments)
@@ -448,7 +455,7 @@ pub async fn send_qa_phrase(runtime: &RebornRuntime, phrase: &str) -> AssistantR
 fn live_credentials_for_fixture(fixture_name: &str) -> &'static [&'static LiveCredentialSeed] {
     match fixture_name {
         "routine_meeting_prep" | "routine_crm_inbox" => &[&GOOGLE_LIVE_CREDENTIAL],
-        "fix_ci_holonear" => &[&GITHUB_LIVE_CREDENTIAL],
+        "triage_ci_holonear" => &[&GITHUB_LIVE_CREDENTIAL],
         _ => &[],
     }
 }
@@ -1422,8 +1429,7 @@ pub async fn record_qa_phrase(fixture_name: &str, phrase: &str) {
 
     let mut live_secret_values = Vec::new();
     let config = if let Some(api_key) = anthropic_key {
-        let model =
-            model_override.unwrap_or_else(|| QA_RECORD_ANTHROPIC_DEFAULT_MODEL.to_string());
+        let model = model_override.unwrap_or_else(|| QA_RECORD_ANTHROPIC_DEFAULT_MODEL.to_string());
         live_secret_values.push((QA_RECORD_ANTHROPIC_KEY_ENV, api_key.clone()));
         anthropic_llm_config(api_key, &model)
     } else if let Some(api_key) = nearai_key {
@@ -1475,7 +1481,10 @@ pub async fn record_qa_phrase(fixture_name: &str, phrase: &str) {
         .new_conversation()
         .await
         .expect("new QA conversation");
-    let outcome = match runtime.send_user_message_until_gate(&conversation, phrase).await {
+    let outcome = match runtime
+        .send_user_message_until_gate(&conversation, phrase)
+        .await
+    {
         Ok(outcome) => outcome,
         Err(error) => {
             // Flush whatever the model did before the failure so the partial
@@ -1492,9 +1501,7 @@ pub async fn record_qa_phrase(fixture_name: &str, phrase: &str) {
                     eprintln!("[RebornQaTrace] partial-trace flush also failed: {flush_error}")
                 }
             }
-            panic!(
-                "QA phrase {fixture_name:?} did not reach a terminal status or a gate: {error}"
-            );
+            panic!("QA phrase {fixture_name:?} did not reach a terminal status or a gate: {error}");
         }
     };
     runtime.shutdown().await.expect("runtime shutdown");
@@ -1580,17 +1587,26 @@ fn assert_recorded_fixture_matches_expected_result(
     }
 
     match fixture_name {
-        "fix_ci_holonear" => {
-            // The scenario's contract: the agent committed a CI fix onto the
-            // pull request's own branch via the GitHub REST API Contents API
-            // (there is no git push in the runtime; the token is injected as a
-            // Bearer header at the HTTP egress boundary).
+        "triage_ci_holonear" => {
+            // The scenario's contract: the agent *triaged* the failing CI by
+            // reading a failing GitHub Actions job's logs via the first-party
+            // `github.get_job_logs` capability (the token is injected as a Bearer
+            // header at the api.github.com egress boundary, then stripped on the
+            // cross-host redirect to blob storage), and proposed a fix in its
+            // final reply — without pushing any change to the pull request.
             assert_recorded_tool_call(
                 fixture_name,
                 fixture_path,
                 &trace,
-                "github.create_or_update_file",
+                "github.get_job_logs",
                 &[],
+            );
+            assert!(
+                !recorded_trace_has_tool_call(&trace, "github.create_or_update_file", &[]),
+                "triage fixture {fixture_name:?} must not commit a fix (github.create_or_update_file); \
+                 the contract is triage + proposed fix only. Recorded calls: {:#?}; trace flushed to {}",
+                recorded_tool_calls(&trace),
+                fixture_path.display()
             );
         }
         "connect_gmail" => {

@@ -370,7 +370,11 @@ async fn http_egress_follows_allowlisted_redirect_and_strips_credentials() {
     assert_eq!(response.status, 200);
     assert_eq!(response.body, b"logdata");
     let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 2, "one initial request plus one followed hop");
+    assert_eq!(
+        requests.len(),
+        2,
+        "one initial request plus one followed hop"
+    );
     assert!(
         requests[0]
             .headers
