@@ -81,6 +81,9 @@ function renderChat({
   threadStateUpdates = [],
   globalAutoApproveEnabled = false,
   showChatLogsShortcut = true,
+  authScopeFn = () => "test-scope",
+  setDraftCalls = [],
+  setStagedAttachmentsCalls = [],
 }) {
   const stateSlots = [];
   let stateIndex = 0;
@@ -127,6 +130,7 @@ function renderChat({
     },
     NEW_DRAFT_KEY: "new",
     THREAD_STATE: { NEEDS_ATTENTION: "needs_attention", RUNNING: "running" },
+    authScope: authScopeFn,
     buildRuntimeContext: () => ({}),
     buildScopedLogsPath: ({ threadId }) => `/logs?thread_id=${threadId}`,
     clearThreadState: (threadId) =>
@@ -134,6 +138,9 @@ function renderChat({
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     channelConnectionDisplayName,
+    setDraft: (key, text) => setDraftCalls.push({ key, text }),
+    setStagedAttachments: (key, attachments) =>
+      setStagedAttachmentsCalls.push({ key, attachments }),
     setThreadState: (threadId, state) =>
       threadStateUpdates.push({ threadId, state }),
     setTimeout: () => 1,
@@ -298,6 +305,78 @@ test("Chat shows typing indicator while the first message creates its thread", a
 
   resolveSend({ thread_id: "thread-created" });
   await sendPromise;
+});
+
+test("Chat restores the first-message draft after thread creation fails", async () => {
+  let rejectSend;
+  const setDraftCalls = [];
+  const setStagedAttachmentsCalls = [];
+  const stagedAttachment = {
+    id: "attachment-1",
+    filename: "notes.txt",
+    media_type: "text/plain",
+  };
+  const hookState = {
+    messages: [],
+    isProcessing: false,
+    pendingGate: null,
+    suggestions: [],
+    sseStatus: "idle",
+    historyLoading: false,
+    hasMore: false,
+    cooldownSeconds: 0,
+    recoveryNotice: null,
+    activeRun: null,
+    send: () =>
+      new Promise((_, reject) => {
+        rejectSend = reject;
+      }),
+    cancelRun: async () => {},
+    retryMessage: () => {},
+    approve: () => {},
+    recoverHistory: () => {},
+    loadMore: () => {},
+    setSuggestions: () => {},
+    submitAuthToken: async () => {},
+  };
+  const { tree, components, render } = renderChat({
+    activeThreadId: null,
+    hookState,
+    setDraftCalls,
+    setStagedAttachmentsCalls,
+  });
+
+  const emptyState = findComponent(tree, components.EmptyState);
+  const sendPromise = componentProps(emptyState, components.EmptyState).onSend(
+    "hello",
+    { attachments: [stagedAttachment], displayContent: "hello" },
+  );
+  const pendingTree = render();
+  const pendingComposer = componentProps(
+    findComponent(pendingTree, components.ChatInput),
+    components.ChatInput,
+  );
+  assert.equal(pendingComposer.disabled, true);
+  assert.equal(pendingComposer.key, "first-message-submitting");
+
+  hookState.messages.push({ id: "request-error", role: "error" });
+  rejectSend(new Error("Thread service unavailable"));
+  await assert.rejects(sendPromise, /Thread service unavailable/);
+
+  const failedTree = render();
+  const restoredComposer = componentProps(
+    findComponent(failedTree, components.ChatInput),
+    components.ChatInput,
+  );
+  assert.equal(restoredComposer.disabled, false);
+  assert.equal(restoredComposer.key, "chat-composer");
+  assert.deepEqual(setDraftCalls, [{ key: "new", text: "hello" }]);
+  assert.equal(setStagedAttachmentsCalls.length, 1);
+  assert.equal(setStagedAttachmentsCalls[0].key, "new");
+  assert.deepEqual(
+    Array.from(setStagedAttachmentsCalls[0].attachments),
+    [stagedAttachment],
+  );
 });
 
 test("Chat hides typing indicator once the active run streams assistant text", () => {

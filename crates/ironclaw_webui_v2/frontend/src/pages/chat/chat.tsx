@@ -20,7 +20,12 @@ import { SuggestionChips } from "./components/suggestion-chips";
 import { TypingIndicator } from "./components/typing-indicator";
 import { useChat } from "./hooks/useChat";
 import { channelConnectionDisplayName } from "../../lib/channel-connection-events";
-import { NEW_DRAFT_KEY } from "./lib/draft-store";
+import { authScope } from "../../lib/auth-scope";
+import {
+  NEW_DRAFT_KEY,
+  setDraft,
+  setStagedAttachments,
+} from "./lib/draft-store";
 import { buildRuntimeContext } from "./lib/runtime-context";
 import { buildScopedLogsPath } from "../logs/lib/logs-data";
 import { useInterfacePreferences } from "../../lib/interface-preferences";
@@ -185,6 +190,12 @@ export function Chat({
   // Scope the persisted composer draft to the open thread (or the
   // shared new-conversation slot when there's no active thread yet).
   const composerDraftKey = activeThreadId || NEW_DRAFT_KEY;
+  // The pending state replaces the landing input with the dock input. If the
+  // first send fails, remount that dock as pending clears so it initializes
+  // from the draft store restored by handleSend.
+  const composerInstanceKey = newConversationIsProcessing
+    ? "first-message-submitting"
+    : "chat-composer";
   const logsPath =
     activeThreadId && showChatLogsShortcut
       ? buildScopedLogsPath({ threadId: activeThreadId })
@@ -204,6 +215,18 @@ export function Chat({
       }
       if (composerSendBlockedRef.current) return null;
       const isFirstMessage = !activeThreadId;
+      const submittedScope = isFirstMessage ? authScope() : null;
+      const restoreFirstMessageDraft = () => {
+        if (!isFirstMessage || authScope() !== submittedScope) return;
+        const submittedText =
+          typeof displayContent === "string"
+            ? displayContent
+            : images.length > 0 || attachments.length > 0
+              ? ""
+              : content;
+        setDraft(NEW_DRAFT_KEY, submittedText);
+        setStagedAttachments(NEW_DRAFT_KEY, attachments);
+      };
       if (isFirstMessage) setIsSubmittingFirstMessage(true);
       try {
         const response = await send(content, {
@@ -212,11 +235,15 @@ export function Chat({
           displayContent,
           threadId: activeThreadId,
         });
+        if (response === null) restoreFirstMessageDraft();
         const responseThreadId = response?.thread_id || activeThreadId;
         if (!activeThreadId && responseThreadId && onSelectThread) {
           onSelectThread(responseThreadId, { replace: true });
         }
         return response;
+      } catch (error) {
+        restoreFirstMessageDraft();
+        throw error;
       } finally {
         if (isFirstMessage) setIsSubmittingFirstMessage(false);
       }
@@ -435,8 +462,9 @@ export function Chat({
           />
 
           <ChatInput
+            key={composerInstanceKey}
             onSend={handleSend}
-            disabled={false}
+            disabled={newConversationIsProcessing}
             sendDisabled={composerSendDisabled}
             initialText={composerDraft}
             resetKey={composerResetKey}
