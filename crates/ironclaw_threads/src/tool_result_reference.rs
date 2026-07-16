@@ -477,7 +477,7 @@ fn validate_tool_result_safe_summary(value: String) -> Result<String, String> {
 
     let lower = value.to_ascii_lowercase();
     for forbidden in SENSITIVE_SUMMARY_MARKERS {
-        if lower.contains(forbidden) {
+        if contains_marker_at_word_boundary(&lower, forbidden) {
             return Err(format!(
                 "tool result summary must not contain sensitive marker `{forbidden}`"
             ));
@@ -551,14 +551,14 @@ fn validate_model_observation_text(value: &str) -> Result<(), String> {
     }
     let lower = value.to_ascii_lowercase();
     for forbidden in SENSITIVE_OBSERVATION_MARKERS {
-        if lower.contains(forbidden) {
+        if contains_marker_at_word_boundary(&lower, forbidden) {
             return Err(format!(
                 "model observation must not contain sensitive marker `{forbidden}`"
             ));
         }
     }
     for forbidden in PROMPT_INJECTION_OBSERVATION_MARKERS {
-        if lower.contains(forbidden) {
+        if contains_marker_at_word_boundary(&lower, forbidden) {
             return Err(format!(
                 "model observation must not contain instruction marker `{forbidden}`"
             ));
@@ -571,6 +571,38 @@ fn validate_model_observation_text(value: &str) -> Result<(), String> {
         return Err("model observation must not contain API-key-like tokens".to_string());
     }
     Ok(())
+}
+
+/// True if `marker` occurs in `haystack` (already lowercased) as a standalone
+/// token rather than embedded inside a larger alphanumeric word. Prevents
+/// false positives like the marker `secret` matching the ordinary word
+/// `secretary` (e.g. "Secretary of the Treasury"), which would otherwise scrub
+/// legitimate tool output from the replayed transcript and force the model to
+/// re-fetch it every turn. Markers that begin/end with a non-alphanumeric
+/// delimiter (e.g. `bearer `, `authorization:`) already carry their own
+/// boundary and keep matching exactly as before.
+fn contains_marker_at_word_boundary(haystack: &str, marker: &str) -> bool {
+    if marker.is_empty() {
+        return false;
+    }
+    let starts_alnum = marker.starts_with(|c: char| c.is_ascii_alphanumeric());
+    let ends_alnum = marker.ends_with(|c: char| c.is_ascii_alphanumeric());
+    let mut from = 0;
+    while let Some(rel) = haystack[from..].find(marker) {
+        let start = from + rel;
+        let end = start + marker.len();
+        let before_ok = !starts_alnum
+            || start == 0
+            || !haystack[..start].ends_with(|c: char| c.is_ascii_alphanumeric());
+        let after_ok = !ends_alnum
+            || end >= haystack.len()
+            || !haystack[end..].starts_with(|c: char| c.is_ascii_alphanumeric());
+        if before_ok && after_ok {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
 }
 
 fn validate_model_visible_tool_observation_schema(value: &serde_json::Value) -> Result<(), String> {
@@ -1022,6 +1054,33 @@ mod tests {
         INPUT_ENCODE_HUMAN_SUMMARY, ProviderToolCallReferenceEnvelope, ToolResultReferenceEnvelope,
         ToolResultSafeSummary,
     };
+
+    #[test]
+    fn sensitive_markers_match_on_word_boundary_not_substring() {
+        use super::{contains_marker_at_word_boundary, validate_model_observation_text};
+        // Regression (#5902): a tool result containing "Secretary of the
+        // Treasury" must NOT be scrubbed by the `secret` marker — that false
+        // positive evicted document reads from the replayed transcript and
+        // sent the model into a re-fetch loop.
+        assert!(!contains_marker_at_word_boundary(
+            "secretary of the treasury",
+            "secret"
+        ));
+        assert!(
+            validate_model_observation_text("Report by the Secretary of the Treasury").is_ok()
+        );
+        // Standalone credential markers must still be rejected.
+        assert!(contains_marker_at_word_boundary(
+            "here is the client secret value",
+            "secret"
+        ));
+        assert!(validate_model_observation_text("the api secret is xyz").is_err());
+        // Delimiter-bounded markers keep matching as before.
+        assert!(contains_marker_at_word_boundary(
+            "authorization: bearer abc",
+            "bearer "
+        ));
+    }
 
     #[test]
     fn collapse_to_repeated_error_marker_produces_valid_observation() {
