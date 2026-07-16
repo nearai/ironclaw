@@ -29,6 +29,7 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use futures::StreamExt;
+use ironclaw_product_workflow::webchat_schema::WebChatV2EventFrame;
 use ironclaw_product_workflow::{LlmConfigSnapshot, LlmModelsResult, LlmProbeResult};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -144,25 +145,27 @@ async fn run_event_loop(
     let (key_tx, mut key_rx) = tokio::sync::mpsc::unbounded_channel();
     std::thread::spawn(move || blocking_crossterm_reader(key_tx));
 
+    // Set by `map_sse_item` when a stream item error reflects the
+    // connection as `Reconnecting`; cleared (and paired with a `Connected`
+    // event) the next time a frame is actually yielded. See that function's
+    // doc for why this can't just be read back off `state.conn` (a modal
+    // key press could have raced it via `dispatch_key`'s `Lost` gate — never
+    // this path, but there's no reason to couple the two).
+    let mut awaiting_reconnect = false;
+
     loop {
         terminal.draw(|f| ui::render(f, &state))?;
 
-        let event = tokio::select! {
-            Some(key) = key_rx.recv() => AppEvent::Key(key),
-            Some(frame) = sse.next() => match frame {
-                Ok(frame) => AppEvent::Server(Box::new(frame)),
-                // `client/events.rs` owns the actual reconnect/backoff
-                // budget; a stream item error here just means "this attempt
-                // ended" — reflect it as Reconnecting and let the next
-                // select iteration pull the next (possibly `Err`, possibly
-                // budget-exhausted) item from the same stream.
-                Err(_) => AppEvent::Conn(ConnState::Reconnecting { attempt: 1 }),
-            },
-            _ = ticks.tick() => AppEvent::Tick,
+        let events = tokio::select! {
+            Some(key) = key_rx.recv() => vec![AppEvent::Key(key)],
+            Some(frame) = sse.next() => map_sse_item(frame, &mut awaiting_reconnect),
+            _ = ticks.tick() => vec![AppEvent::Tick],
         };
 
-        for effect in app::reduce(&mut state, event) {
-            execute_effect(client, &mut state, effect).await;
+        for event in events {
+            for effect in app::reduce(&mut state, event) {
+                execute_effect(client, &mut state, effect).await;
+            }
         }
 
         if let Some(thread_id) = state.thread_id.clone()
@@ -181,6 +184,45 @@ async fn run_event_loop(
         }
     }
     Ok(())
+}
+
+/// Maps one item off the SSE stream onto the `AppEvent`(s) the reducer
+/// should see, tracking (via `awaiting_reconnect`, threaded in/out rather
+/// than owned so a crate-tier test can drive this in isolation — no real
+/// terminal or SSE connection needed) whether the previous item left the
+/// connection reflected as `Reconnecting`.
+///
+/// `client/events.rs` owns the actual reconnect/backoff budget; a stream
+/// item error here just means "this attempt ended" — reflect it as
+/// `Reconnecting` and let the next call (on the next select iteration) pull
+/// the next (possibly another `Err`, possibly budget-exhausted) item from
+/// the same stream. The bug this fixes: nothing previously cleared
+/// `Reconnecting` back to `Connected` once the stream recovered, so a single
+/// hiccup left the status bar stuck for the rest of the session even though
+/// frames kept arriving — see `app/connection.rs::apply_conn_change`, which
+/// already handles the `Connected` transition, it just never had a
+/// production caller. A `Connected` event is emitted ahead of the frame's
+/// own `Server` event (not merged into it) so it goes through the reducer
+/// first and reaches `apply_conn_change` as a real, independent
+/// `AppEvent::Conn` transition.
+fn map_sse_item(
+    item: Result<WebChatV2EventFrame, ClientError>,
+    awaiting_reconnect: &mut bool,
+) -> Vec<AppEvent> {
+    match item {
+        Ok(frame) => {
+            let mut events = Vec::with_capacity(2);
+            if std::mem::take(awaiting_reconnect) {
+                events.push(AppEvent::Conn(ConnState::Connected));
+            }
+            events.push(AppEvent::Server(Box::new(frame)));
+            events
+        }
+        Err(_) => {
+            *awaiting_reconnect = true;
+            vec![AppEvent::Conn(ConnState::Reconnecting { attempt: 1 })]
+        }
+    }
 }
 
 /// Forwards `crossterm::event::read()` (blocking-only, so it needs its own
@@ -507,8 +549,85 @@ mod tests {
     use axum::response::{IntoResponse, Response};
     use tokio::net::TcpListener;
 
+    use ironclaw_product_workflow::ProjectionCursor;
+    use ironclaw_product_workflow::webchat_schema::WebChatV2Event;
+
     use super::*;
     use app::{AutomationsModalState, PendingGate, ThreadsModalState};
+
+    /// A minimal, content-agnostic frame: these tests exercise `map_sse_item`'s
+    /// connection-bookkeeping (does a `Connected` event get prepended, does
+    /// `awaiting_reconnect` clear), not the payload of any particular
+    /// `WebChatV2Event` variant.
+    fn keepalive_frame() -> WebChatV2EventFrame {
+        WebChatV2EventFrame {
+            cursor: ProjectionCursor::new("cursor:tui:test:1").expect("valid cursor"),
+            event: WebChatV2Event::KeepAlive,
+        }
+    }
+
+    #[test]
+    fn map_sse_item_error_reflects_reconnecting_and_sets_the_awaiting_flag() {
+        let mut awaiting_reconnect = false;
+        let events = map_sse_item(
+            Err(ClientError::StreamParse("boom".to_string())),
+            &mut awaiting_reconnect,
+        );
+        assert!(awaiting_reconnect);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            AppEvent::Conn(ConnState::Reconnecting { attempt: 1 })
+        ));
+    }
+
+    #[test]
+    fn map_sse_item_ok_frame_after_an_error_prepends_connected_and_clears_the_flag() {
+        let mut awaiting_reconnect = true;
+        let events = map_sse_item(Ok(keepalive_frame()), &mut awaiting_reconnect);
+        assert!(
+            !awaiting_reconnect,
+            "must clear once the stream has recovered"
+        );
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], AppEvent::Conn(ConnState::Connected)));
+        assert!(matches!(events[1], AppEvent::Server(_)));
+    }
+
+    #[test]
+    fn map_sse_item_ok_frame_without_a_prior_error_emits_only_the_server_event() {
+        let mut awaiting_reconnect = false;
+        let events = map_sse_item(Ok(keepalive_frame()), &mut awaiting_reconnect);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], AppEvent::Server(_)));
+    }
+
+    /// Regression for the live-repro bug: one SSE hiccup previously left the
+    /// status bar showing "reconnecting" for the rest of the session because
+    /// nothing ever fed the reducer a `Connected` transition. Drives
+    /// `map_sse_item`'s output through the real `app::reduce` (not just
+    /// asserting on the `AppEvent`s themselves) so this also pins that
+    /// `app/connection.rs::apply_conn_change` — reachable from a production
+    /// caller as of this fix — actually resolves `state.conn` back to
+    /// `Connected`.
+    #[test]
+    fn reconnecting_state_followed_by_a_successful_connect_signal_resolves_back_to_connected() {
+        let mut state = AppState::default();
+        let mut awaiting_reconnect = false;
+
+        for event in map_sse_item(
+            Err(ClientError::StreamParse("boom".to_string())),
+            &mut awaiting_reconnect,
+        ) {
+            app::reduce(&mut state, event);
+        }
+        assert_eq!(state.conn, ConnState::Reconnecting { attempt: 1 });
+
+        for event in map_sse_item(Ok(keepalive_frame()), &mut awaiting_reconnect) {
+            app::reduce(&mut state, event);
+        }
+        assert_eq!(state.conn, ConnState::Connected);
+    }
 
     /// Minimal local axum stub for `execute_effect` tests, following the
     /// pattern established in `spawn/mod.rs` (self-contained, axum/tower
