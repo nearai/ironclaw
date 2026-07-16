@@ -33,21 +33,56 @@ function Switch({ checked, label, onChange }) {
   );
 }
 
-export function AppearanceTab({ searchQuery = "" }) {
+export function ThemeOption({ checked, icon, label, onSelect }) {
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={onSelect}
+      className={[
+        "flex items-center gap-3 rounded-xl border px-4 py-3 text-left transition",
+        checked
+          ? "border-[color-mix(in_srgb,var(--v2-accent)_45%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)] text-[var(--v2-text-strong)]"
+          : "border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] text-[var(--v2-text-muted)] hover:border-[color-mix(in_srgb,var(--v2-accent)_20%,var(--v2-panel-border))] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]",
+      ].join(" ")}
+    >
+      <span className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] text-[var(--v2-accent-text)]">
+        <Icon name={icon} className="h-4 w-4" />
+      </span>
+      <span className="min-w-0 flex-1 text-sm font-semibold">{label}</span>
+      {checked && (<Icon name="check" className="h-4 w-4 shrink-0 text-[var(--v2-accent-text)]" />)}
+    </button>
+  );
+}
+
+export function AppearanceTab({
+  searchQuery = "",
+  theme,
+  onThemeChange,
+}) {
   const t = useT();
   const { showChatLogsShortcut, setShowChatLogsShortcut } =
     useInterfacePreferences();
   const title = t("settings.appearance");
+  const lightThemeLabel = t("theme.light");
+  const darkThemeLabel = t("theme.dark");
   const label = t("settings.field.showChatTerminalShortcut");
   const description = t("settings.field.showChatTerminalShortcutDesc");
 
   if (
     !matchesSearch(searchQuery, [
       title,
+      lightThemeLabel,
+      darkThemeLabel,
       label,
       description,
       "appearance",
       "interface",
+      "theme",
+      "light",
+      "dark",
       "chat",
       "terminal",
       "console",
@@ -58,27 +93,53 @@ export function AppearanceTab({ searchQuery = "" }) {
   }
 
   return (
-    <Card padding="md">
-      <div className="flex items-start justify-between gap-6">
-        <div className="flex min-w-0 gap-3">
-          <span className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] text-[var(--v2-accent-text)]">
-            <Icon name="terminal" className="h-4 w-4" />
-          </span>
-          <div className="min-w-0">
-            <h3 className="text-sm font-semibold text-[var(--v2-text-strong)]">
-              {label}
-            </h3>
-            <p className="mt-1 text-sm leading-6 text-[var(--v2-text-muted)]">
-              {description}
-            </p>
-          </div>
+    <div className="space-y-5">
+      <Card padding="md">
+        <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">
+          {title}
+        </h3>
+        <div
+          className="grid gap-3 sm:grid-cols-2"
+          role="radiogroup"
+          aria-label={title}
+        >
+          <ThemeOption
+            checked={theme === "light"}
+            icon="sun"
+            label={lightThemeLabel}
+            onSelect={() => onThemeChange("light")}
+          />
+          <ThemeOption
+            checked={theme === "dark"}
+            icon="moon"
+            label={darkThemeLabel}
+            onSelect={() => onThemeChange("dark")}
+          />
         </div>
-        <Switch
-          checked={showChatLogsShortcut}
-          label={label}
-          onChange={setShowChatLogsShortcut}
-        />
-      </div>
-    </Card>
+      </Card>
+
+      <Card padding="md">
+        <div className="flex items-start justify-between gap-6">
+          <div className="flex min-w-0 gap-3">
+            <span className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] text-[var(--v2-accent-text)]">
+              <Icon name="terminal" className="h-4 w-4" />
+            </span>
+            <div className="min-w-0">
+              <h3 className="text-sm font-semibold text-[var(--v2-text-strong)]">
+                {label}
+              </h3>
+              <p className="mt-1 text-sm leading-6 text-[var(--v2-text-muted)]">
+                {description}
+              </p>
+            </div>
+          </div>
+          <Switch
+            checked={showChatLogsShortcut}
+            label={label}
+            onChange={setShowChatLogsShortcut}
+          />
+        </div>
+      </Card>
+    </div>
   );
 }

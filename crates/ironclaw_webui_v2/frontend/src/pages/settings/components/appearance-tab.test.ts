@@ -39,6 +39,16 @@ function findComponentNode(root, component) {
   return found;
 }
 
+function findComponentNodes(root, component) {
+  const found = [];
+  visit(root, (node) => {
+    if (Array.isArray(node.values) && node.values.includes(component)) {
+      found.push(node);
+    }
+  });
+  return found;
+}
+
 function componentProps(node, component) {
   const props = {};
   const start = node.values.indexOf(component);
@@ -55,10 +65,16 @@ function component(name) {
   };
 }
 
-function renderAppearanceModule({ showChatLogsShortcut = true } = {}) {
+function renderAppearanceModule({
+  showChatLogsShortcut = true,
+  theme = "light",
+} = {}) {
   const toggles = [];
+  const themeChanges = [];
   const translations = {
     "settings.appearance": "Appearance",
+    "theme.light": "Light theme",
+    "theme.dark": "Dark theme",
     "settings.field.showChatTerminalShortcut": "Show chat terminal shortcut",
     "settings.field.showChatTerminalShortcutDesc":
       "Displays the floating terminal/logs icon inside chat threads.",
@@ -80,18 +96,40 @@ function renderAppearanceModule({ showChatLogsShortcut = true } = {}) {
   };
   const exports = runVmModuleForTest(
     "./appearance-tab.tsx",
-    ["AppearanceTab", "Switch"],
+    ["AppearanceTab", "Switch", "ThemeOption"],
     context,
     import.meta.url
   );
-  return { exports, toggles };
+  const render = (props = {}) => exports.AppearanceTab({
+    theme,
+    onThemeChange: (nextTheme) => themeChanges.push(nextTheme),
+    ...props,
+  });
+  return { exports, render, themeChanges, toggles };
 }
 
+test("Appearance tab selects the shared interface theme", () => {
+  const { exports, render, themeChanges } = renderAppearanceModule({ theme: "light" });
+  const rendered = render();
+  const options = findComponentNodes(rendered, exports.ThemeOption);
+
+  assert.equal(options.length, 2);
+  const light = componentProps(options[0], exports.ThemeOption);
+  const dark = componentProps(options[1], exports.ThemeOption);
+  assert.equal(light.label, "Light theme");
+  assert.equal(light.checked, true);
+  assert.equal(dark.label, "Dark theme");
+  assert.equal(dark.checked, false);
+
+  dark.onSelect();
+  assert.deepEqual(themeChanges, ["dark"]);
+});
+
 test("Appearance tab toggles the chat terminal shortcut preference", () => {
-  const { exports, toggles } = renderAppearanceModule({
+  const { exports, render, toggles } = renderAppearanceModule({
     showChatLogsShortcut: true,
   });
-  const rendered = exports.AppearanceTab({});
+  const rendered = render();
   const switchNode = findComponentNode(rendered, exports.Switch);
 
   assert.ok(switchNode, "expected appearance tab to render a switch");
@@ -104,11 +142,11 @@ test("Appearance tab toggles the chat terminal shortcut preference", () => {
 });
 
 test("Appearance tab participates in settings search", () => {
-  const { exports } = renderAppearanceModule();
+  const { render } = renderAppearanceModule();
 
-  const rendered = exports.AppearanceTab({ searchQuery: "terminal" });
+  const rendered = render({ searchQuery: "dark" });
   assert.equal(findComponentNode(rendered, "SettingsSearchEmpty"), null);
 
-  const empty = exports.AppearanceTab({ searchQuery: "unrelated" });
+  const empty = render({ searchQuery: "unrelated" });
   assert.ok(findComponentNode(empty, "SettingsSearchEmpty"));
 });
