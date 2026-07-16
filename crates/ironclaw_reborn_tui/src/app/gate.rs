@@ -220,8 +220,43 @@ pub(crate) fn dispatch_gate_key(state: &mut AppState, key: KeyEvent) -> Vec<Effe
             // the `d` key, just triggered by a different key.
             resolve(state, &pending, WebUiGateResolution::Declined)
         }
+        KeyCode::Char('o') => {
+            if let PendingGate::Auth {
+                authorization_url: Some(url),
+                ..
+            } = &pending
+            {
+                open_authorization_url(url);
+            }
+            Vec::new()
+        }
         _ => Vec::new(),
     }
+}
+
+/// Best-effort local browser launch for an auth prompt's `authorization_url`
+/// — the `o` key. Local-only: emits no `Effect`, since opening a URL is not
+/// a server-side mutation. Never surfaces an error to the user or panics on
+/// failure (e.g. no GUI/opener binary in a headless session): the URL stays
+/// printed in the gate body regardless (`ui/gate_zone.rs::describe`), so a
+/// failed shell-out just leaves the user to copy/paste it manually. Does not
+/// wait for the opener to exit — `spawn`, not `status`/`output` — so a slow
+/// or hanging opener can't freeze the TUI's event loop.
+fn open_authorization_url(url: &str) {
+    let (program, args) = open_command(url);
+    let _ = std::process::Command::new(program).args(args).spawn();
+}
+
+/// Pure command/args construction for [`open_authorization_url`], kept
+/// separate so tests can assert the platform opener choice without actually
+/// spawning a process (which would pop open a real browser).
+fn open_command(url: &str) -> (&'static str, Vec<String>) {
+    let program = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    (program, vec![url.to_string()])
 }
 
 /// The gate stays `pending_gate: Some(..)` after this — it only clears when
@@ -354,6 +389,22 @@ mod tests {
                 ..
             }) if gate_ref == "gr-1"
         ));
+    }
+
+    #[test]
+    fn open_command_picks_the_platform_opener_and_passes_the_url_verbatim() {
+        // Pure-helper test only — `open_authorization_url` (the `o` key's
+        // real handler) actually spawns the opener, which would pop open a
+        // real browser if exercised through `reduce`/`dispatch_gate_key`
+        // here. This asserts the command construction without spawning.
+        let (program, args) = open_command("https://example.com/oauth");
+        let expected_program = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        assert_eq!(program, expected_program);
+        assert_eq!(args, vec!["https://example.com/oauth".to_string()]);
     }
 
     #[test]

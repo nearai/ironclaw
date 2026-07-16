@@ -66,7 +66,15 @@ fn describe(gate: &PendingGate) -> (String, String, String) {
                 body_text.push_str("kind: ");
                 body_text.push_str(kind);
             }
-            (headline.clone(), body_text, "[esc] cancel".to_string())
+            // `[o] open` only applies when there's a URL to open (mirrors
+            // `app::gate::dispatch_gate_key`'s `o` handler, which is a no-op
+            // without `authorization_url`).
+            let options = if authorization_url.is_some() {
+                "[o] open  [esc] cancel".to_string()
+            } else {
+                "[esc] cancel".to_string()
+            };
+            (headline.clone(), body_text, options)
         }
     }
 }
@@ -105,7 +113,7 @@ mod tests {
     }
 
     #[test]
-    fn auth_gate_renders_authorization_url_and_cancel_hint() {
+    fn auth_gate_with_url_renders_open_and_cancel_hints() {
         let state = AppState::default().set_pending_gate(Some(PendingGate::Auth {
             turn_run_id: "run-stub".to_string(),
             gate_ref: "gate-stub".to_string(),
@@ -117,8 +125,24 @@ mod tests {
         let content = draw(&state);
         assert!(content.contains("Connect Gmail"));
         assert!(content.contains("https://example.com/oauth"));
+        assert!(content.contains("[o] open"));
         assert!(content.contains("[esc] cancel"));
         assert!(!content.contains("[a] allow"));
+    }
+
+    #[test]
+    fn auth_gate_without_url_omits_open_hint() {
+        let state = AppState::default().set_pending_gate(Some(PendingGate::Auth {
+            turn_run_id: "run-stub".to_string(),
+            gate_ref: "gate-stub".to_string(),
+            headline: "Enter token".to_string(),
+            body: "Paste your token.".to_string(),
+            challenge_kind: Some("manual_token".to_string()),
+            authorization_url: None,
+        }));
+        let content = draw(&state);
+        assert!(!content.contains("[o] open"));
+        assert!(content.contains("[esc] cancel"));
     }
 
     #[test]
