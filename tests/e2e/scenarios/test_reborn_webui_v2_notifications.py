@@ -214,6 +214,7 @@ async def test_reborn_v2_error_toast_pauses_dismisses_and_stays_above_notificati
         assert toast_z > panel_z, (toast_z, panel_z)
 
         await page.locator(SEL_V2["toast_dismiss"]).click()
+        await page.clock.fast_forward(1000)
         await expect(toast).to_have_count(0, timeout=3000)
     finally:
         await context.close()
