@@ -3129,10 +3129,16 @@ fn local_dev_project_filesystem(
 /// restart-survival test proves durable Slack host state (identity bindings,
 /// DM targets) is reconstructible the way a real process restart
 /// reconstructs it. Tests only; zero bytes in production builds.
+///
+/// `libsql`-only (not `any(libsql, postgres)`): the body reopens via
+/// `LocalDevStorageBackendInput::LocalDefault`, whose non-libsql arm mounts a
+/// fresh `InMemoryBackend` — under a postgres-composed runtime that would be
+/// a brand-new empty store, not the live Postgres-backed host state, so a
+/// postgres gate here would compile a probe that can only report absence.
 #[cfg(all(
     feature = "test-support",
     feature = "slack-v2-host-beta",
-    any(feature = "libsql", feature = "postgres")
+    feature = "libsql"
 ))]
 pub(crate) async fn open_local_dev_slack_host_state_filesystem_for_test(
     storage_root: &Path,

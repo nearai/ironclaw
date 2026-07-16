@@ -3684,8 +3684,15 @@ mod tests {
 
     // --- Tests ----------------------------------------------------------------
 
-    #[tokio::test]
-    async fn driver_happy_path_completed_run_with_preference_delivers_and_records_delivered() {
+    /// Shared arrangement for the T1 delivery-honesty pair (#6105): a
+    /// `Completed` run with a finalized reply and a saved personal DM
+    /// preference, driven through the real `TriggeredRunDeliveryDriver`
+    /// against a programmed `chat.postMessage` response body. The two tests
+    /// differ ONLY in that body and in what they assert — one arrangement
+    /// keeps the Delivered and Failed arms from drifting apart.
+    async fn deliver_completed_run_with_programmed_post_response(
+        post_response_body: Vec<u8>,
+    ) -> (TriggeredRunDeliveryRecord, Arc<FakeProtocolHttpEgress>) {
         let install = "test-install";
         let scope = personal_turn_scope();
         let run_id = TurnRunId::new();
@@ -3706,10 +3713,7 @@ mod tests {
         egress.allow_credential_handle("slack_bot_token");
         egress.program_response(
             "slack.com",
-            Ok(EgressResponse::new(
-                200,
-                slack_post_ok_json("D456", "1234.5678"),
-            )),
+            Ok(EgressResponse::new(200, post_response_body)),
         );
 
         let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
@@ -3740,6 +3744,15 @@ mod tests {
 
         // Poll until the spawned delivery task writes its outcome record.
         let record = wait_for_delivery_record(&delivery_store, run_id).await;
+        (record, egress)
+    }
+
+    #[tokio::test]
+    async fn driver_happy_path_completed_run_with_preference_delivers_and_records_delivered() {
+        let (record, egress) = deliver_completed_run_with_programmed_post_response(
+            slack_post_ok_json("D456", "1234.5678"),
+        )
+        .await;
 
         // Egress should have been called for chat.postMessage.
         let post = egress
@@ -3771,62 +3784,14 @@ mod tests {
     /// distinguish the two, only this record can.
     #[tokio::test]
     async fn driver_slack_api_rejection_records_failed_not_delivered() {
-        let install = "test-install";
-        let scope = personal_turn_scope();
-        let run_id = TurnRunId::new();
-        let binding_ref =
-            test_slack_binding_ref(install, scope.agent_id.as_ref().expect("agent").as_str());
-
-        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
-            TurnStatus::Completed,
-        ));
-        let thread_service = Arc::new(InMemorySessionThreadService::default());
-        seed_finalized_assistant_message(&thread_service, &scope, run_id, "Hello from Ironclaw")
-            .await;
-
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
-        seed_personal_preference(&outbound, &scope, binding_ref).await;
-
         // Slack accepts the HTTP call but rejects the post — the classic
         // silent-failure shape (revoked channel, kicked bot, archived DM).
-        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
-        egress.allow_credential_handle("slack_bot_token");
-        egress.program_response(
-            "slack.com",
-            Ok(EgressResponse::new(
-                200,
-                serde_json::json!({"ok": false, "error": "channel_not_found"})
-                    .to_string()
-                    .into_bytes(),
-            )),
-        );
-
-        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
-        let services = make_services(
-            coordinator,
-            thread_service,
-            egress.clone(),
-            outbound,
-            install,
-        );
-        let settings = SlackFinalReplyDeliverySettings {
-            poll_interval: std::time::Duration::ZERO,
-            max_wait: std::time::Duration::from_secs(5),
-            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
-            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
-        };
-        let driver = TriggeredRunDeliveryDriver::with_settings(
-            services,
-            settings,
-            delivery_store.clone(),
-            route_store.clone(),
-            scope.agent_id.clone().expect("test scope has agent"),
-        );
-
-        let fire = minimal_trigger_fire(None);
-        driver.on_trigger_submitted(fire, run_id, scope).await;
-        let record = wait_for_delivery_record(&delivery_store, run_id).await;
+        let (record, egress) = deliver_completed_run_with_programmed_post_response(
+            serde_json::json!({"ok": false, "error": "channel_not_found"})
+                .to_string()
+                .into_bytes(),
+        )
+        .await;
 
         // The post WAS attempted (this is not a skip/no-target case)…
         assert!(

@@ -227,20 +227,26 @@ impl SlackChannelConnectionTestBundle {
 
     /// Restart-survival probe (T5 of issue #6105): read the SAME active-state
     /// identity-binding predicate as
-    /// [`Self::has_any_active_identity_binding`], but through a FRESH
-    /// `FilesystemSlackHostState` over a FRESH local-dev root filesystem
-    /// reopened at `storage_root` — fully independent of the live runtime's
-    /// in-memory handles. This is the integration-tier approximation of a
-    /// process restart: it proves the durable binding is reconstructible the
-    /// way production reconstructs it on boot (`build_reborn_services` →
-    /// `local_dev_slack_host_state_filesystem` → Slack host-state mounts).
-    /// Tests only.
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
-    pub async fn has_active_identity_binding_after_reopen(
+    /// [`Self::has_any_active_identity_binding`] for EACH of `user_ids`, but
+    /// through ONE fresh `FilesystemSlackHostState` over ONE fresh local-dev
+    /// root filesystem reopened at `storage_root` — fully independent of the
+    /// live runtime's in-memory handles. This is the integration-tier
+    /// approximation of a process restart: it proves the durable binding is
+    /// reconstructible the way production reconstructs it on boot
+    /// (`build_reborn_services` → `local_dev_slack_host_state_filesystem` →
+    /// Slack host-state mounts). Results come back in `user_ids` order; the
+    /// single reopen means a positive probe and its non-vacuity control read
+    /// the same reconstructed store. Tests only.
+    ///
+    /// `libsql`-only, matching the factory seam it opens: the local-default
+    /// reopen path composes the libsql local-dev backend, so a wider gate
+    /// would silently probe a fresh in-memory store on non-libsql builds.
+    #[cfg(feature = "libsql")]
+    pub async fn active_identity_bindings_after_reopen(
         &self,
         storage_root: &std::path::Path,
-        user_id: &UserId,
-    ) -> Result<bool, String> {
+        user_ids: &[&UserId],
+    ) -> Result<Vec<bool>, String> {
         let host_state_filesystem =
             crate::factory::open_local_dev_slack_host_state_filesystem_for_test(storage_root)
                 .await
@@ -253,14 +259,20 @@ impl SlackChannelConnectionTestBundle {
             None,
         ));
         let lookup: Arc<dyn RebornUserIdentityLookup> = state;
-        lookup
-            .user_has_provider_binding_with_provider_user_id_prefix(
-                SLACK_IDENTITY_PROVIDER,
-                user_id,
-                None,
-            )
-            .await
-            .map_err(|error| error.to_string())
+        let mut bindings = Vec::with_capacity(user_ids.len());
+        for user_id in user_ids {
+            bindings.push(
+                lookup
+                    .user_has_provider_binding_with_provider_user_id_prefix(
+                        SLACK_IDENTITY_PROVIDER,
+                        user_id,
+                        None,
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?,
+            );
+        }
+        Ok(bindings)
     }
 
     /// Surface (a) of the extensions page: what

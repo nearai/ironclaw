@@ -81,16 +81,21 @@ async fn extensions_group_e2e() {
     // cleanup) → reconnect → reinstall → use again, asserting connection
     // state, durable bindings, lifecycle phase, and tool dispatchability stay
     // consistent at every transition. Uses "slack" (untouched by 1-5).
-    report.record(
-        "slack_channel_lifecycle_state_machine",
-        scenario_slack_channel_lifecycle_state_machine::run(&g).await,
-    );
+    // dependent: must pass before scenario 8 consumes its reconnected end
+    // state — `.expect()` (not `report.record`) so a lifecycle regression is
+    // reported HERE, not misattributed to the restart-survival probe.
+    scenario_slack_channel_lifecycle_state_machine::run(&g)
+        .await
+        .expect("slack_channel_lifecycle_state_machine");
 
     // Scenario 7 (issue #6105, T3): exit edges for a credential-injection
     // extension — activate → use → remove (#6029's wedged edge) → surfaces
     // flip → reconfigure + reactivate → use again. Reuses "github" AFTER
-    // every other scenario that reads it has run (scenario 1 leaves it
-    // installed), so its install exercises the idempotent-reinstall arm.
+    // every earlier scenario that reads it has run (scenario 1 leaves it
+    // installed and active-phase-free), so phase 1 activates the
+    // already-installed package — the exact Extensions-page state #6029
+    // bites in (same-member re-INSTALL is rejected "already installed" by
+    // design; the reinstall arm scenario 7 drives is post-remove, phase 5).
     report.record(
         "credential_extension_lifecycle_state_machine",
         scenario_credential_extension_lifecycle_state_machine::run(&g).await,
@@ -99,7 +104,8 @@ async fn extensions_group_e2e() {
     // Scenario 8 (issue #6105, T5): restart survival — the connected/installed
     // Slack state scenario 6 left behind reads back through FRESH store
     // handles reopened at the same on-disk storage_root (what a process
-    // restart reconstructs). Depends on scenario 6's end state.
+    // restart reconstructs). Scenario 6's `.expect()` above guarantees the
+    // end state this consumes.
     report.record(
         "slack_state_survives_reopen",
         scenario_slack_state_survives_reopen::run(&g).await,

@@ -113,29 +113,17 @@ async fn oauth_connect_flow_persists_credential_account() {
     let state_hash = OpaqueStateHash::new(hex64(0xaa)).unwrap();
     let pkce_hash = PkceVerifierHash::new(hex64(0xbb)).unwrap();
     let code_hash = AuthorizationCodeHash::new(hex64(0xcc)).unwrap();
-    let expires_at = Utc::now() + Duration::minutes(5);
 
     let flow = bundle
         .services
         .flow_manager()
-        .create_flow(NewAuthFlow {
-            id: None,
-            scope: scope.clone(),
-            kind: AuthFlowKind::IntegrationCredential,
-            provider: provider.clone(),
-            challenge: AuthChallenge::OAuthUrl {
-                authorization_url: OAuthAuthorizationUrl::new(
-                    "https://accounts.example.com/o/oauth2/auth",
-                )
-                .unwrap(),
-                expires_at,
-            },
-            continuation: AuthContinuationRef::SetupOnly,
-            update_binding: None,
-            opaque_state_hash: Some(state_hash.clone()),
-            pkce_verifier_hash: Some(pkce_hash.clone()),
-            expires_at,
-        })
+        .create_flow(new_flow_request(
+            &scope,
+            &provider,
+            &state_hash,
+            &pkce_hash,
+            Utc::now() + Duration::minutes(5),
+        ))
         .await
         .expect("create_flow must succeed");
 
@@ -143,28 +131,15 @@ async fn oauth_connect_flow_persists_credential_account() {
     // fixed access-token JSON body; no real network call is made.
     let response = bundle
         .services
-        .handle_oauth_callback(RebornOAuthCallbackRequest {
-            scope: scope.clone(),
-            flow_id: flow.id,
-            opaque_state_hash: state_hash,
-            outcome: RebornOAuthCallbackOutcome::Authorized {
-                provider_request: OAuthProviderCallbackRequest {
-                    provider: provider.clone(),
-                    account_label: CredentialAccountLabel::new("Test Account").unwrap(),
-                    authorization_code: OAuthAuthorizationCode::new(SecretString::from(
-                        "raw-auth-code-value".to_string(),
-                    ))
-                    .unwrap(),
-                    authorization_code_hash: code_hash,
-                    pkce_verifier: PkceVerifierSecret::new(SecretString::from(
-                        "raw-pkce-verifier-value".to_string(),
-                    ))
-                    .unwrap(),
-                    pkce_verifier_hash: pkce_hash,
-                    scopes: vec![ProviderScope::new("test.readonly").unwrap()],
-                },
-            },
-        })
+        .handle_oauth_callback(authorized_callback_request(
+            &scope,
+            flow.id,
+            &provider,
+            &state_hash,
+            &pkce_hash,
+            &code_hash,
+            "Test Account",
+        ))
         .await
         .expect("handle_oauth_callback must succeed");
 
@@ -216,37 +191,21 @@ async fn oauth_connect_flow_persists_credential_account() {
 async fn oauth_callback_without_prior_flow_fails() {
     let bundle = build_oauth_product_auth_for_test();
     let scope = test_scope();
-    // Clone scope before it is moved into the callback request so we can use
-    // it for the list_accounts assertion after the error is returned.
-    let scope_for_assert = scope.clone();
     let state_hash = OpaqueStateHash::new(hex64(0xdd)).unwrap();
     let pkce_hash = PkceVerifierHash::new(hex64(0xee)).unwrap();
     let code_hash = AuthorizationCodeHash::new(hex64(0xff)).unwrap();
 
     let error = bundle
         .services
-        .handle_oauth_callback(RebornOAuthCallbackRequest {
-            scope,
-            flow_id: AuthFlowId::new(), // no flow was created for this id
-            opaque_state_hash: state_hash,
-            outcome: RebornOAuthCallbackOutcome::Authorized {
-                provider_request: OAuthProviderCallbackRequest {
-                    provider: AuthProviderId::new("test-oauth-provider").unwrap(),
-                    account_label: CredentialAccountLabel::new("Guard Account").unwrap(),
-                    authorization_code: OAuthAuthorizationCode::new(SecretString::from(
-                        "guard-auth-code".to_string(),
-                    ))
-                    .unwrap(),
-                    authorization_code_hash: code_hash,
-                    pkce_verifier: PkceVerifierSecret::new(SecretString::from(
-                        "guard-pkce-verifier".to_string(),
-                    ))
-                    .unwrap(),
-                    pkce_verifier_hash: pkce_hash,
-                    scopes: vec![],
-                },
-            },
-        })
+        .handle_oauth_callback(authorized_callback_request(
+            &scope,
+            AuthFlowId::new(), // no flow was created for this id
+            &AuthProviderId::new("test-oauth-provider").unwrap(),
+            &state_hash,
+            &pkce_hash,
+            &code_hash,
+            "Guard Account",
+        ))
         .await
         .expect_err("callback with no prior flow must return an error");
 
@@ -267,7 +226,7 @@ async fn oauth_callback_without_prior_flow_fails() {
         .services
         .credential_account_service()
         .list_accounts(CredentialAccountListRequest::new(
-            scope_for_assert,
+            scope,
             AuthProviderId::new("test-oauth-provider").unwrap(),
         ))
         .await
@@ -510,7 +469,8 @@ async fn replayed_callback_is_idempotent_then_fresh_flow_reconnects() {
         "a replayed callback must not mint a second credential account"
     );
 
-    // Reconnect: a fresh flow must still succeed after the replay rejection.
+    // Reconnect: a fresh flow must still succeed after the idempotent replay
+    // (which returned the ORIGINAL completed outcome — no rejection occurred).
     let reconnect_state = OpaqueStateHash::new(hex64(0x81)).unwrap();
     let reconnect_pkce = PkceVerifierHash::new(hex64(0x82)).unwrap();
     let reconnect_code = AuthorizationCodeHash::new(hex64(0x83)).unwrap();

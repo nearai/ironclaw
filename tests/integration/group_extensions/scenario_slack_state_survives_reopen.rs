@@ -42,48 +42,28 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 
     // Durable "connected": the active identity binding reads back through a
     // FRESH host-state store over a FRESH root filesystem at the same
-    // storage_root — the state a restarted process would reconstruct.
-    if !slack
-        .has_active_identity_binding_after_reopen(&storage_root, &actor)
-        .await?
-    {
-        return Err(
-            "the active slack identity binding must survive an independent \
-             store reopen; a restart would come up disconnected (#4556/#2939 shape)"
-                .into(),
-        );
-    }
-    // Non-vacuity control: the same reopened probe must NOT report a binding
-    // for a user that never connected.
+    // storage_root — the state a restarted process would reconstruct. One
+    // reopen serves both probes, so the positive read and its non-vacuity
+    // control (a user that never connected) see the same reconstructed store.
     let stranger = ironclaw_host_api::UserId::new("reopen-probe-stranger")
         .map_err(|error| error.to_string())?;
-    if slack
-        .has_active_identity_binding_after_reopen(&storage_root, &stranger)
-        .await?
-    {
-        return Err(
-            "reopened binding probe reported a binding for a user that never connected; \
-             the reopen read is not scoped correctly"
-                .into(),
-        );
+    let bindings = slack
+        .active_identity_bindings_after_reopen(&storage_root, &[&actor, &stranger])
+        .await?;
+    if bindings != [true, false] {
+        return Err(format!(
+            "reopened binding probe expected [connected actor, stranger] = [true, false], \
+             got {bindings:?}; a restart would come up disconnected (#4556/#2939 shape) \
+             or the reopen read is not scoped correctly"
+        )
+        .into());
     }
 
     // Durable "installed": the slack installation record reads back through a
-    // fresh installation store at the same root.
-    let installations = ironclaw_reborn_composition::test_support::open_local_dev_extension_installation_store_for_test(
-        &storage_root,
-    )
-    .await?
-    .list_installations()
-    .await?;
-    if !installations
-        .iter()
-        .any(|installation| installation.extension_id().as_str() == "slack")
-    {
-        return Err(
-            "the slack installation record must survive an independent store reopen".into(),
-        );
-    }
+    // fresh installation store at the same root (shared E-DURABLE reopen
+    // helper — prints the surviving installation list on failure).
+    g.assert_extension_install_persists_after_reopen("slack")
+        .await?;
 
     Ok(())
 }

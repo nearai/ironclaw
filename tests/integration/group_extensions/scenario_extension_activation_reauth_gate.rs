@@ -7,8 +7,12 @@
 //!   (provider set — what the Configure card / auth prompt renders, the
 //!   #6043 "starts authentication instead of a generic capability error"
 //!   discriminator);
-//! - NO `Failed`-classed tool error is persisted (#5878's misleading "the
+//! - NO error-shaped tool result is persisted (#5878's misleading "the
 //!   tool input could not be encoded" / "provider unavailable" regression);
+//! - a RETRIED activation with the credential still revoked parks at a
+//!   fresh re-auth gate — denied once is not satisfied, and the gate is not
+//!   one-shot (the lifecycle.md "reconnect must not resume without updated
+//!   credentials" arm);
 //! - after a reconfigure (fresh credential through the production
 //!   manual-token flow) activation completes — the revoked state does not
 //!   wedge the machine (#5878's "requires multiple retry attempts" arm).
@@ -19,7 +23,6 @@
 //! drive). Uses "notion" (installed+removed by scenario 2, so the install
 //! here is fresh; no other scenario touches its credential accounts).
 
-use super::reborn_support::assertions::ToolErrorClass;
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
 use ironclaw_turns::TurnStatus;
@@ -82,15 +85,17 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .into());
     }
     // #5878 discriminator: the revoked credential surfaced EXCLUSIVELY as the
-    // gate — no misleading Failed-classed tool error was persisted (an empty
-    // reason matches any summary of the class).
+    // gate — no error-shaped tool result of ANY class was persisted
+    // (structural observation-status check plus both class prefixes, so a
+    // Denied-classed or raw-literal misleading error can't slip past a
+    // Failed-prefix-only filter).
     activator
-        .assert_no_tool_error(ToolErrorClass::Failed, "")
+        .assert_no_error_shaped_tool_result()
         .await
         .map_err(|error| {
             format!(
                 "activation over a revoked credential must park at the auth gate only, \
-                 not persist a Failed-classed tool error (#5878 misleading-error shape): {error}"
+                 not persist an error-shaped tool result (#5878 misleading-error shape): {error}"
             )
         })?;
 
@@ -99,7 +104,52 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .wait_for_status(run_id, TurnStatus::Completed)
         .await?;
 
-    // ── Phase 2: reconfigure (fresh credential) unwedges activation ─────────
+    // ── Phase 2: retry over the STILL-revoked credential gates AGAIN ────────
+    // The lifecycle.md authentication-failure arm: a denied re-auth gate must
+    // not mark the requirement satisfied, and activation must not resume
+    // merely because the user retried — with no new credential, the second
+    // attempt parks at a fresh BlockedAuth gate (not one-shot, not a wedge,
+    // not a silent success). Without this arm, phase 3's post-seed success
+    // cannot distinguish "fresh credential unwedged it" from "the gate only
+    // ever fires once".
+    let retrier = g
+        .thread("notion-reauth-retry")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.extension_activate",
+                json!({"extension_id": "notion"}),
+            ),
+            RebornScriptedReply::text("notion still needs reauthorization"),
+        ])
+        .build()
+        .await?;
+    let (retry_run_id, retry_gate_ref) = retrier
+        .submit_turn_until_auth_blocked("set up notion again")
+        .await?;
+    let retry_state = retrier
+        .wait_for_status(retry_run_id, TurnStatus::BlockedAuth)
+        .await?;
+    if !retry_state
+        .credential_requirements
+        .iter()
+        .any(|requirement| requirement.provider == notion_provider)
+    {
+        return Err(format!(
+            "a RETRIED activation over the still-revoked credential must re-open the \
+             notion re-auth gate (one-shot gate = the #5878 wedge); got {:?}",
+            retry_state.credential_requirements
+        )
+        .into());
+    }
+    retrier.assert_no_error_shaped_tool_result().await?;
+    retrier
+        .deny_auth_gate(retry_run_id, &retry_gate_ref)
+        .await?;
+    retrier
+        .wait_for_status(retry_run_id, TurnStatus::Completed)
+        .await?;
+
+    // ── Phase 3: reconfigure (fresh credential) unwedges activation ─────────
     let restorer = g
         .thread("notion-reauth-restore")
         .script([

@@ -12,11 +12,12 @@
 //! - **lifecycle phase** seen by `builtin.extension_search`;
 //! - **tool dispatchability** of `github.*` through the real capability port.
 //!
-//! Runs LAST in the group: scenario 1 leaves "github" installed (a
-//! same-member reinstall is rejected "already installed" by design —
-//! `install_policy.rs`), so phase 1 activates the existing install — the
-//! state a real user's Extensions page is in when #6029 bites. The fresh
+//! Runs after every earlier scenario that reads "github": scenario 1 leaves
+//! it installed (a same-member reinstall is rejected "already installed" by
+//! design — `install_policy.rs`), so phase 1 activates the existing install —
+//! the state a real user's Extensions page is in when #6029 bites. The fresh
 //! install→activate arm is pinned in phase 5, after the full remove.
+//! (Scenarios 8 and 9 run later but touch only slack/notion state.)
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
@@ -124,15 +125,15 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 
     // ── Phase 4: use after remove — dispatch is rejected fail-closed ────────
     caller.submit_turn("file an issue").await?;
-    if caller
-        .assert_tool_invoked("github.create_issue")
+    caller
+        .assert_tool_not_invoked("github.create_issue")
         .await
-        .is_ok()
-    {
-        return Err("github.create_issue dispatched after extension_remove; \
-             removal must unpublish the capability surface"
-            .into());
-    }
+        .map_err(|error| {
+            format!(
+                "github.create_issue dispatched after extension_remove; removal must \
+                 unpublish the capability surface: {error}"
+            )
+        })?;
     caller.assert_reply_contains("github unavailable").await?;
 
     // ── Phase 5: reconfigure (fresh credential) + reactivate restores use ───

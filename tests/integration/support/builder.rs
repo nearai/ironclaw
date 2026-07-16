@@ -25,7 +25,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use ironclaw_extensions::ExtensionInstallationStore;
 use ironclaw_filesystem::{
     CompositeRootFilesystem, InMemoryBackend, LibSqlRootFilesystem, ScopedFilesystem,
 };
@@ -1007,32 +1006,10 @@ impl RebornIntegrationHarness {
         &self,
         extension_id: &str,
     ) -> HarnessResult<()> {
-        let harness = match &self._shared.capability {
-            GroupCapability::HostRuntime(arc) => arc,
-            GroupCapability::Recording => {
-                return Err("no host-runtime capability backend for durable reopen".into());
-            }
-        };
-        let store =
-            ironclaw_reborn_composition::test_support::open_local_dev_extension_installation_store_for_test(
-                &harness.storage_root_for_test(),
-            )
-            .await?;
-        let installations = store.list_installations().await?;
-        if installations
-            .iter()
-            .any(|installation| installation.extension_id().as_str() == extension_id)
-        {
-            return Ok(());
-        }
-        let seen: Vec<&str> = installations
-            .iter()
-            .map(|installation| installation.extension_id().as_str())
-            .collect();
-        Err(
-            format!("extension {extension_id:?} not found after independent reopen; saw {seen:?}")
-                .into(),
-        )
+        self._shared
+            .capability
+            .assert_extension_install_persists_after_reopen(extension_id)
+            .await
     }
 
     /// Assert the named capability was invoked through the real capability path
