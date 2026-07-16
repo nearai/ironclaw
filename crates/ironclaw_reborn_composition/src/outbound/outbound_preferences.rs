@@ -123,7 +123,10 @@ impl Default for MutableOutboundDeliveryTargetRegistry {
 }
 
 impl MutableOutboundDeliveryTargetRegistry {
-    #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(dead_code))]
+    #[cfg_attr(
+        not(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")),
+        allow(dead_code)
+    )]
     pub(crate) fn register_provider(
         &self,
         provider_key: impl Into<String>,
@@ -144,7 +147,10 @@ impl MutableOutboundDeliveryTargetRegistry {
         Ok(outcome)
     }
 
-    #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(dead_code))]
+    #[cfg_attr(
+        not(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")),
+        allow(dead_code)
+    )]
     pub(crate) fn contains_provider_key(
         &self,
         provider_key: &str,

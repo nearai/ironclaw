@@ -411,11 +411,26 @@ pub(crate) mod test_fixtures {
     pub(crate) const FIXTURE_BOT_USERNAME: &str = "ironclaw_qa_bot";
 
     /// Records `sendMessage` calls; setup-time calls (`getMe`, `setWebhook`,
-    /// `deleteWebhook`) succeed with a fixed bot identity.
-    #[derive(Debug, Default)]
+    /// `deleteWebhook`) succeed with a fixed bot identity unless a test swaps
+    /// it via [`RecordingBotApi::set_bot_identity`] (bot-swap scenarios).
+    #[derive(Debug)]
     pub(crate) struct RecordingBotApi {
         sends: StdMutex<Vec<(i64, String)>>,
         fail_sends: AtomicBool,
+        identity: StdMutex<TelegramBotIdentity>,
+    }
+
+    impl Default for RecordingBotApi {
+        fn default() -> Self {
+            Self {
+                sends: StdMutex::new(Vec::new()),
+                fail_sends: AtomicBool::new(false),
+                identity: StdMutex::new(TelegramBotIdentity {
+                    id: FIXTURE_BOT_ID,
+                    username: FIXTURE_BOT_USERNAME.to_string(),
+                }),
+            }
+        }
     }
 
     impl RecordingBotApi {
@@ -426,6 +441,15 @@ pub(crate) mod test_fixtures {
         pub(crate) fn fail_sends(&self) {
             self.fail_sends.store(true, Ordering::SeqCst);
         }
+
+        /// Point `getMe` at a different bot so the next setup save models a
+        /// bot swap (new installation id).
+        pub(crate) fn set_bot_identity(&self, id: i64, username: &str) {
+            *self.identity.lock().expect("lock") = TelegramBotIdentity {
+                id,
+                username: username.to_string(),
+            };
+        }
     }
 
     #[async_trait]
@@ -434,10 +458,7 @@ pub(crate) mod test_fixtures {
             &self,
             _bot_token: &SecretString,
         ) -> Result<TelegramBotIdentity, TelegramBotApiError> {
-            Ok(TelegramBotIdentity {
-                id: FIXTURE_BOT_ID,
-                username: FIXTURE_BOT_USERNAME.to_string(),
-            })
+            Ok(self.identity.lock().expect("lock").clone())
         }
 
         async fn set_webhook(

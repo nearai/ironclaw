@@ -122,13 +122,17 @@ impl TelegramUpdatesWebhookDispatcher for NativeProductAdapterRunner {
 }
 
 /// A resolved-and-verified Telegram installation: the deployment bot the
-/// request authenticated against, plus the dispatcher that handles it.
+/// request authenticated against, the dispatcher that handles it, plus the
+/// setup-revision-scoped delivery observer (mirrors Slack's
+/// `ResolvedSlackInstallation`, so a bot swap re-keys the observer's adapter
+/// together with the verifier and workflow).
 #[derive(Clone)]
 pub(crate) struct ResolvedTelegramInstallation {
     tenant_id: TenantId,
     adapter_installation_id: AdapterInstallationId,
     evidence: ProtocolAuthEvidence,
     dispatcher: Arc<dyn TelegramUpdatesWebhookDispatcher>,
+    workflow_observer: Option<Arc<dyn ImmediateAckWorkflowObserver>>,
 }
 
 impl ResolvedTelegramInstallation {
@@ -137,12 +141,14 @@ impl ResolvedTelegramInstallation {
         adapter_installation_id: AdapterInstallationId,
         evidence: ProtocolAuthEvidence,
         dispatcher: Arc<dyn TelegramUpdatesWebhookDispatcher>,
+        workflow_observer: Option<Arc<dyn ImmediateAckWorkflowObserver>>,
     ) -> Self {
         Self {
             tenant_id,
             adapter_installation_id,
             evidence,
             dispatcher,
+            workflow_observer,
         }
     }
 
@@ -165,6 +171,10 @@ impl ResolvedTelegramInstallation {
     pub(crate) fn dispatcher(&self) -> Arc<dyn TelegramUpdatesWebhookDispatcher> {
         Arc::clone(&self.dispatcher)
     }
+
+    pub(crate) fn workflow_observer(&self) -> Option<Arc<dyn ImmediateAckWorkflowObserver>> {
+        self.workflow_observer.clone()
+    }
 }
 
 impl std::fmt::Debug for ResolvedTelegramInstallation {
@@ -174,6 +184,7 @@ impl std::fmt::Debug for ResolvedTelegramInstallation {
             .field("tenant_id", &self.tenant_id)
             .field("adapter_installation_id", &self.adapter_installation_id)
             .field("dispatcher", &"Arc<dyn TelegramUpdatesWebhookDispatcher>")
+            .field("workflow_observer", &self.workflow_observer.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -223,36 +234,72 @@ pub(crate) trait TelegramInstallationResolver: Send + Sync {
     fn drain_installations<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 }
 
+/// Per-setup-revision workflow assembly: the product workflow the runner
+/// submits verified updates into, plus the final-reply delivery observer
+/// scoped to the same installation identity.
+pub(crate) struct TelegramRevisionWorkflow {
+    pub(crate) workflow: Arc<dyn ProductWorkflow>,
+    pub(crate) workflow_observer: Option<Arc<dyn ImmediateAckWorkflowObserver>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("telegram revision workflow build failed: {reason}")]
+pub(crate) struct TelegramRevisionWorkflowBuildError {
+    pub(crate) reason: String,
+}
+
+impl TelegramRevisionWorkflowBuildError {
+    pub(crate) fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+}
+
+/// Builds the workflow + delivery observer for one setup revision. Production
+/// (`telegram_host_beta`) assembles the real `DefaultProductWorkflow` /
+/// delivery observer from revision-independent runtime parts; serve-tier
+/// tests inject counting fakes so per-revision routing stays assertable.
+pub(crate) trait TelegramRevisionWorkflowBuilder: Send + Sync {
+    fn build_revision_workflow(
+        &self,
+        setup: &TelegramInstallationSetup,
+    ) -> Result<TelegramRevisionWorkflow, TelegramRevisionWorkflowBuildError>;
+}
+
 /// Setup-store-backed resolver for the single operator-managed deployment
 /// bot. Reads [`TelegramSetupService::current_setup`] on every inbound update
 /// (so WebUI setup changes take effect on the next webhook) and caches the
-/// built verifier/adapter/runner chain per setup revision. Mirrors
-/// `DynamicSlackInstallationResolver`.
+/// built verifier/adapter/runner/workflow/observer chain per setup revision.
+/// Mirrors `DynamicSlackInstallationResolver`.
 #[derive(Clone)]
 pub(crate) struct DynamicTelegramInstallationResolver {
     setup_service: Arc<TelegramSetupService>,
     pairing: Arc<TelegramPairingService>,
     identity_lookup: Arc<dyn RebornUserIdentityLookup>,
-    workflow: Arc<dyn ProductWorkflow>,
+    revision_workflows: Arc<dyn TelegramRevisionWorkflowBuilder>,
     lifecycle: Arc<Mutex<DynamicTelegramDispatcherLifecycle>>,
 }
 
 impl DynamicTelegramInstallationResolver {
-    /// `workflow` is the T7-owned `ProductWorkflow` handle (inbound turn
-    /// service + idempotency ledger + conversation binding); this resolver
-    /// stays self-contained by taking it as a constructor param instead of
-    /// building it from runtime parts here.
+    /// `revision_workflows` builds the T7-owned `ProductWorkflow` (inbound
+    /// turn service + idempotency ledger + conversation binding) plus the
+    /// final-reply delivery observer PER SETUP REVISION, so a first configure
+    /// or bot swap after boot re-keys the installation scope and observer
+    /// adapter without a process restart; this resolver stays self-contained
+    /// by taking the builder as a constructor param instead of assembling
+    /// workflows from runtime parts here.
     pub(crate) fn new(
         setup_service: Arc<TelegramSetupService>,
         pairing: Arc<TelegramPairingService>,
         identity_lookup: Arc<dyn RebornUserIdentityLookup>,
-        workflow: Arc<dyn ProductWorkflow>,
+        revision_workflows: Arc<dyn TelegramRevisionWorkflowBuilder>,
     ) -> Self {
         Self {
             setup_service,
             pairing,
             identity_lookup,
-            workflow,
+            revision_workflows,
             lifecycle: Arc::new(Mutex::new(DynamicTelegramDispatcherLifecycle::default())),
         }
     }
@@ -343,9 +390,15 @@ impl DynamicTelegramInstallationResolver {
                 },
                 progress_push_enabled: false,
             }));
+        let revision_workflow = self
+            .revision_workflows
+            .build_revision_workflow(&setup)
+            .map_err(map_build_reason_to_ingress_not_found(
+                "build Telegram revision workflow",
+            ))?;
         let runner = Arc::new(NativeProductAdapterRunner::with_config(
             adapter,
-            Arc::clone(&self.workflow),
+            Arc::clone(&revision_workflow.workflow),
             WebhookAuth::SharedSecretHeader(verifier),
             NativeProductAdapterRunnerConfig::new(
                 TELEGRAM_WEBHOOK_WORKFLOW_TIMEOUT,
@@ -366,6 +419,7 @@ impl DynamicTelegramInstallationResolver {
             tenant_id: self.setup_service.tenant_id().clone(),
             adapter_installation_id: installation_id,
             dispatcher,
+            workflow_observer: revision_workflow.workflow_observer,
         })
     }
 
@@ -399,6 +453,7 @@ impl TelegramInstallationResolver for DynamicTelegramInstallationResolver {
                     live.adapter_installation_id,
                     evidence,
                     live.dispatcher,
+                    live.workflow_observer,
                 ),
             ))
         })
@@ -415,6 +470,7 @@ struct LiveTelegramInstallation {
     tenant_id: TenantId,
     adapter_installation_id: AdapterInstallationId,
     dispatcher: Arc<dyn TelegramUpdatesWebhookDispatcher>,
+    workflow_observer: Option<Arc<dyn ImmediateAckWorkflowObserver>>,
 }
 
 /// Dispatcher lifecycle holder: the current revision-keyed dispatcher plus
@@ -614,12 +670,7 @@ impl TelegramIngressService {
         }
     }
 
-    async fn handle_updates(
-        &self,
-        headers: HeaderMap,
-        body: Bytes,
-        workflow_observer: Option<Arc<dyn ImmediateAckWorkflowObserver>>,
-    ) -> Response {
+    async fn handle_updates(&self, headers: HeaderMap, body: Bytes) -> Response {
         let ingress = match self.resolver.resolve_ingress(&headers, body.as_ref()).await {
             Ok(ingress) => ingress,
             Err(error) => return ingress_error_response(error),
@@ -630,7 +681,14 @@ impl TelegramIngressService {
         let installation = ingress.installation();
         match installation
             .dispatcher()
-            .process_verified_update(body.as_ref(), installation.evidence(), workflow_observer)
+            .process_verified_update(
+                body.as_ref(),
+                installation.evidence(),
+                // Revision-scoped: the resolver rebuilds the observer together
+                // with the workflow on every setup change, so no static
+                // route-state observer exists to fall back to.
+                installation.workflow_observer(),
+            )
             .await
         {
             Ok(_) => (StatusCode::OK, "ok").into_response(),
@@ -653,30 +711,21 @@ impl std::fmt::Debug for TelegramIngressService {
     }
 }
 
+/// Route state for the updates webhook. Unlike Slack's `SlackEventsRouteState`
+/// there is no static route-level workflow observer: the Telegram observer is
+/// rebuilt per setup revision and travels on the resolved installation.
 #[derive(Clone)]
 pub(crate) struct TelegramUpdatesRouteState {
     ingress: TelegramIngressService,
-    workflow_observer: Option<Arc<dyn ImmediateAckWorkflowObserver>>,
 }
 
 impl TelegramUpdatesRouteState {
     pub(crate) fn new(ingress: TelegramIngressService) -> Self {
-        Self {
-            ingress,
-            workflow_observer: None,
-        }
+        Self { ingress }
     }
 
     pub(crate) fn from_resolver(resolver: Arc<dyn TelegramInstallationResolver>) -> Self {
         Self::new(TelegramIngressService::new(resolver))
-    }
-
-    pub(crate) fn with_workflow_observer(
-        mut self,
-        workflow_observer: Arc<dyn ImmediateAckWorkflowObserver>,
-    ) -> Self {
-        self.workflow_observer = Some(workflow_observer);
-        self
     }
 
     pub(crate) async fn drain_immediate_ack_tasks(&self) {
@@ -695,7 +744,6 @@ impl std::fmt::Debug for TelegramUpdatesRouteState {
         formatter
             .debug_struct("TelegramUpdatesRouteState")
             .field("ingress", &self.ingress)
-            .field("workflow_observer", &self.workflow_observer.is_some())
             .finish()
     }
 }
@@ -776,10 +824,7 @@ async fn telegram_updates_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    state
-        .ingress
-        .handle_updates(headers, body, state.workflow_observer.clone())
-        .await
+    state.ingress.handle_updates(headers, body).await
 }
 
 fn ingress_error_response(error: TelegramIngressError) -> Response {
@@ -897,10 +942,11 @@ fn map_build_reason_to_ingress_not_found<E: std::fmt::Display>(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex as StdMutex};
     use std::time::Duration;
 
     use axum::body::Body;
@@ -924,8 +970,11 @@ mod tests {
     };
     use crate::telegram::telegram_dispatch::test_fixtures::{
         CountingWorkflow, FakeIdentityLookup, RecordingBotApi, configured_setup_service,
-        pairing_service_with, private_text_update_body, unconfigured_setup_service,
+        fixture_installation_id, pairing_service_with, private_text_update_body,
+        unconfigured_setup_service,
     };
+    use crate::telegram::telegram_setup::TelegramInstallationSetupUpdate;
+    use secrecy::SecretString;
 
     /// Rebuild the Telegram ingress descriptor as a Rust literal so the
     /// manifest-projected descriptor can be asserted equal to it (the
@@ -1064,6 +1113,7 @@ mod tests {
                         AdapterInstallationId::new("tg-bot-4242").expect("valid installation"),
                         evidence,
                         Arc::clone(&self.dispatcher),
+                        None,
                     ),
                 ))
             })
@@ -1118,12 +1168,72 @@ mod tests {
         assert_eq!(body["error"], expected);
     }
 
+    /// Observer stub the fake revision builder attaches so the dispatch path
+    /// exercises the per-revision `Some(observer)` shape end to end (which
+    /// revision handled an update is asserted via the per-installation
+    /// counting workflows).
+    struct NoopObserver;
+
+    #[async_trait::async_trait]
+    impl ImmediateAckWorkflowObserver for NoopObserver {
+        async fn observe_workflow_ack(
+            &self,
+            _envelope: ironclaw_product_adapters::ProductInboundEnvelope,
+            _ack: ironclaw_product_adapters::ProductInboundAck,
+        ) {
+        }
+    }
+
+    /// Revision-builder fake: hands out one `CountingWorkflow` PER
+    /// INSTALLATION ID so tests can assert which setup revision's workflow
+    /// (and observer) handled a given update after a bot swap.
+    #[derive(Default)]
+    struct FakeRevisionWorkflowBuilder {
+        counters: StdMutex<HashMap<String, Arc<AtomicUsize>>>,
+        builds: AtomicUsize,
+    }
+
+    impl FakeRevisionWorkflowBuilder {
+        fn counter_for_installation(&self, installation_id: &str) -> Arc<AtomicUsize> {
+            Arc::clone(
+                self.counters
+                    .lock()
+                    .expect("lock")
+                    .entry(installation_id.to_string())
+                    .or_default(),
+            )
+        }
+
+        fn builds(&self) -> usize {
+            self.builds.load(Ordering::SeqCst)
+        }
+    }
+
+    impl TelegramRevisionWorkflowBuilder for FakeRevisionWorkflowBuilder {
+        fn build_revision_workflow(
+            &self,
+            setup: &TelegramInstallationSetup,
+        ) -> Result<TelegramRevisionWorkflow, TelegramRevisionWorkflowBuildError> {
+            self.builds.fetch_add(1, Ordering::SeqCst);
+            let installation_id = setup
+                .installation_id()
+                .map_err(|error| TelegramRevisionWorkflowBuildError::new(error.to_string()))?;
+            let counter = self.counter_for_installation(installation_id.as_str());
+            Ok(TelegramRevisionWorkflow {
+                workflow: Arc::new(CountingWorkflow::new(counter)),
+                workflow_observer: Some(Arc::new(NoopObserver)),
+            })
+        }
+    }
+
     struct DynamicFixture {
         state: TelegramUpdatesRouteState,
         webhook_secret: Option<String>,
         submitted: Arc<AtomicUsize>,
         bot_api: Arc<RecordingBotApi>,
         lookup: Arc<FakeIdentityLookup>,
+        setup: Arc<TelegramSetupService>,
+        revision_workflows: Arc<FakeRevisionWorkflowBuilder>,
     }
 
     async fn dynamic_fixture(configured: bool) -> DynamicFixture {
@@ -1148,13 +1258,16 @@ mod tests {
         };
         let pairing = pairing_service_with(Arc::clone(&setup));
         let lookup = Arc::new(FakeIdentityLookup::default());
-        let submitted = Arc::new(AtomicUsize::new(0));
-        let workflow = Arc::new(CountingWorkflow::new(Arc::clone(&submitted)));
+        let revision_workflows = Arc::new(FakeRevisionWorkflowBuilder::default());
+        // The pre-swap deployment bot's workflow counter (existing tests
+        // assert against the fixture bot `tg-bot-4242`).
+        let submitted =
+            revision_workflows.counter_for_installation(fixture_installation_id().as_str());
         let resolver = Arc::new(DynamicTelegramInstallationResolver::new(
-            setup,
+            Arc::clone(&setup),
             pairing,
             lookup.clone() as Arc<dyn RebornUserIdentityLookup>,
-            workflow,
+            Arc::clone(&revision_workflows) as Arc<dyn TelegramRevisionWorkflowBuilder>,
         ));
         DynamicFixture {
             state: TelegramUpdatesRouteState::from_resolver(resolver),
@@ -1162,7 +1275,32 @@ mod tests {
             submitted,
             bot_api,
             lookup,
+            setup,
+            revision_workflows,
         }
+    }
+
+    async fn current_webhook_secret(setup: &TelegramSetupService) -> String {
+        setup
+            .webhook_secret()
+            .await
+            .expect("secret read")
+            .expect("secret present")
+            .expose_secret()
+            .to_string()
+    }
+
+    fn bind_paired_sender(
+        lookup: &FakeIdentityLookup,
+        installation_id: &AdapterInstallationId,
+        telegram_user_id: &str,
+        user: &str,
+    ) {
+        lookup.bind(
+            TELEGRAM_IDENTITY_PROVIDER,
+            &telegram_user_identity_provider_user_id(installation_id, telegram_user_id),
+            user,
+        );
     }
 
     #[tokio::test]
@@ -1258,6 +1396,139 @@ mod tests {
         assert!(
             fixture.bot_api.sends().is_empty(),
             "paired traffic must not trigger static replies"
+        );
+    }
+
+    /// FIX-A regression, first-configure half: the workflow/observer used to
+    /// be assembled once at mount-build time from the boot-time setup, so
+    /// configuring the bot after boot required a process restart. The
+    /// resolver now builds workflow + observer per setup revision: boot
+    /// unconfigured (401), save a setup through the setup service, and —
+    /// WITHOUT rebuilding the route state — a verified webhook from a paired
+    /// sender dispatches into that revision's workflow.
+    #[tokio::test]
+    async fn telegram_updates_dispatch_after_first_configure_without_rebuild() {
+        let fixture = dynamic_fixture(false).await;
+
+        let unconfigured =
+            post_to_state(&fixture.state, r#"{"update_id":1}"#.to_string(), Vec::new()).await;
+        assert_eq!(unconfigured.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            fixture.revision_workflows.builds(),
+            0,
+            "no setup record must mean no workflow assembly"
+        );
+
+        fixture
+            .setup
+            .save_with_previous(TelegramInstallationSetupUpdate {
+                bot_token: Some(SecretString::from("123:abc".to_string())),
+                webhook_url_override: None,
+            })
+            .await
+            .expect("first configure saves");
+        let secret = current_webhook_secret(&fixture.setup).await;
+        bind_paired_sender(&fixture.lookup, &fixture_installation_id(), "42", "ben");
+
+        let body = private_text_update_body(42, 555, Some("hello after configure"));
+        let response = post_to_state(
+            &fixture.state,
+            String::from_utf8(body).expect("utf8 body"),
+            vec![(TELEGRAM_SECRET_TOKEN_HEADER, secret)],
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        fixture.state.drain_immediate_ack_tasks().await;
+        assert_eq!(
+            fixture.submitted.load(Ordering::SeqCst),
+            1,
+            "first-configure-after-boot must dispatch to the workflow without a rebuild"
+        );
+        assert_eq!(fixture.revision_workflows.builds(), 1);
+    }
+
+    /// FIX-A regression, bot-swap half: rotating the deployment to a
+    /// DIFFERENT bot re-keys the webhook verifier AND the workflow/observer
+    /// pair. The old installation's secret is rejected, the new secret
+    /// parses, and the update dispatches to the NEW revision's workflow
+    /// (asserted via per-installation counting workflows).
+    #[tokio::test]
+    async fn telegram_updates_bot_swap_rekeys_workflow_and_rejects_old_secret() {
+        let fixture = dynamic_fixture(true).await;
+        let old_secret = fixture.webhook_secret.clone().expect("configured secret");
+        bind_paired_sender(&fixture.lookup, &fixture_installation_id(), "42", "ben");
+
+        let before = post_to_state(
+            &fixture.state,
+            String::from_utf8(private_text_update_body(42, 555, Some("before swap")))
+                .expect("utf8 body"),
+            vec![(TELEGRAM_SECRET_TOKEN_HEADER, old_secret.clone())],
+        )
+        .await;
+        assert_eq!(before.status(), StatusCode::OK);
+        fixture.state.drain_immediate_ack_tasks().await;
+        assert_eq!(fixture.submitted.load(Ordering::SeqCst), 1);
+
+        // Swap the deployment to a different bot: new installation id
+        // `tg-bot-7777`, fresh webhook secret, revision 2.
+        fixture.bot_api.set_bot_identity(7777, "other_qa_bot");
+        fixture
+            .setup
+            .save_with_previous(TelegramInstallationSetupUpdate {
+                bot_token: Some(SecretString::from("777:xyz".to_string())),
+                webhook_url_override: None,
+            })
+            .await
+            .expect("bot swap saves");
+        let new_secret = current_webhook_secret(&fixture.setup).await;
+        assert_ne!(
+            old_secret, new_secret,
+            "rotation must mint a fresh webhook secret"
+        );
+
+        let stale = post_to_state(
+            &fixture.state,
+            String::from_utf8(private_text_update_body(42, 555, Some("stale secret")))
+                .expect("utf8 body"),
+            vec![(TELEGRAM_SECRET_TOKEN_HEADER, old_secret)],
+        )
+        .await;
+        assert_eq!(
+            stale.status(),
+            StatusCode::UNAUTHORIZED,
+            "the old installation's webhook secret must be rejected after the swap"
+        );
+
+        let new_installation = AdapterInstallationId::new("tg-bot-7777").expect("valid id");
+        bind_paired_sender(&fixture.lookup, &new_installation, "42", "ben");
+        let swapped = post_to_state(
+            &fixture.state,
+            String::from_utf8(private_text_update_body(42, 555, Some("after swap")))
+                .expect("utf8 body"),
+            vec![(TELEGRAM_SECRET_TOKEN_HEADER, new_secret)],
+        )
+        .await;
+        assert_eq!(swapped.status(), StatusCode::OK);
+        fixture.state.drain_immediate_ack_tasks().await;
+
+        let new_counter = fixture
+            .revision_workflows
+            .counter_for_installation(new_installation.as_str());
+        assert_eq!(
+            new_counter.load(Ordering::SeqCst),
+            1,
+            "post-swap update must dispatch to the NEW revision's workflow"
+        );
+        assert_eq!(
+            fixture.submitted.load(Ordering::SeqCst),
+            1,
+            "the old revision's workflow must not receive post-swap updates"
+        );
+        assert_eq!(
+            fixture.revision_workflows.builds(),
+            2,
+            "one workflow assembly per setup revision"
         );
     }
 

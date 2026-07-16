@@ -24,6 +24,8 @@ pub(crate) mod telegram_host_beta;
 #[cfg(feature = "telegram-v2-host-beta")]
 pub(crate) mod telegram_host_state;
 #[cfg(feature = "telegram-v2-host-beta")]
+pub(crate) mod telegram_outbound_targets;
+#[cfg(feature = "telegram-v2-host-beta")]
 pub(crate) mod telegram_pairing;
 #[cfg(feature = "telegram-v2-host-beta")]
 pub(crate) mod telegram_serve;

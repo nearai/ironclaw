@@ -78,6 +78,61 @@ fn slack_conversation_id_from_reply_target_binding_ref(
     None
 }
 
+/// Telegram half of the stored-ref decode: the Telegram adapter renders
+/// straight from the `tg:<chat_id>:<topic|_>:<reply|_>` binding ref, so the
+/// conversation metadata mirrors its parsed chat id (Telegram has no
+/// space/team dimension).
+#[cfg(feature = "telegram-v2-host-beta")]
+fn telegram_conversation_id_from_reply_target_binding_ref(
+    target: &ReplyTargetBindingRef,
+) -> Option<(String, Option<String>)> {
+    let parsed = ironclaw_telegram_v2_adapter::parse_reply_target(target).ok()?;
+    Some((parsed.chat_id.to_string(), None))
+}
+
+/// Slack-only builds compile this module without the Telegram adapter; a
+/// Telegram-shaped `tg:` ref cannot exist there, so fail closed exactly like
+/// the real decoder does for a non-Telegram ref.
+#[cfg(not(feature = "telegram-v2-host-beta"))]
+fn telegram_conversation_id_from_reply_target_binding_ref(
+    _target: &ReplyTargetBindingRef,
+) -> Option<(String, Option<String>)> {
+    None
+}
+
+/// Decode a stored reply-target binding ref into `(conversation_id, space_id)`
+/// for the triggered-delivery target authority, accepting whichever channel
+/// hosts are compiled in. The formats are mutually exclusive (`reply:` segment
+/// refs vs `tg:` refs), so trying Slack first cannot misroute a Telegram ref.
+fn conversation_id_from_reply_target_binding_ref(
+    target: &ReplyTargetBindingRef,
+) -> Option<(String, Option<String>)> {
+    slack_conversation_id_from_reply_target_binding_ref(target)
+        .or_else(|| telegram_conversation_id_from_reply_target_binding_ref(target))
+}
+
+/// Telegram half of the personal-DM predicate: Telegram private chats have
+/// positive chat ids (groups/supergroups/channels are negative), and the host
+/// only stores DM targets from private-chat pairing.
+#[cfg(feature = "telegram-v2-host-beta")]
+fn telegram_reply_target_is_personal_dm(target: &ReplyTargetBindingRef) -> bool {
+    ironclaw_telegram_v2_adapter::parse_reply_target(target)
+        .map(|parsed| parsed.chat_id > 0)
+        .unwrap_or(false)
+}
+
+/// See [`telegram_conversation_id_from_reply_target_binding_ref`]'s stub note.
+#[cfg(not(feature = "telegram-v2-host-beta"))]
+fn telegram_reply_target_is_personal_dm(_target: &ReplyTargetBindingRef) -> bool {
+    false
+}
+
+/// `true` iff the ref is a personal direct-message target for any compiled-in
+/// channel host. Single predicate behind the OAuth-DM delivery rule.
+fn reply_target_is_personal_dm(target: &ReplyTargetBindingRef) -> bool {
+    slack_reply_target_is_personal_dm(target) || telegram_reply_target_is_personal_dm(target)
+}
+
 const MAX_SLACK_RUN_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_TRIGGERED_RUN_DELIVERY_MAX_WAIT: Duration = Duration::from_secs(30 * 60);
 const SLACK_RUN_POLL_JITTER_BUCKETS: u32 = 5;
@@ -1572,7 +1627,7 @@ fn enforce_direct_message_if_required(
     target: &ReplyTargetBindingRef,
     require_direct_message: bool,
 ) -> Result<(), ProductWorkflowError> {
-    if require_direct_message && !slack_reply_target_is_personal_dm(target) {
+    if require_direct_message && !reply_target_is_personal_dm(target) {
         return Err(ProductWorkflowError::OutboundTargetNotDirectMessage);
     }
     Ok(())
@@ -1931,6 +1986,92 @@ impl PostSubmitDeliveryHook for NoopPostSubmitDeliveryHook {
     }
 }
 
+/// Key-deduplicated fan-out over multiple [`PostSubmitDeliveryHook`]s.
+///
+/// The trigger poller's post-submit slot is a single `OnceLock`; with more
+/// than one channel host (Slack + Telegram) each needs its own hook. The
+/// runtime installs one composite into that slot on the first
+/// `add_trigger_post_submit_hook` call and appends later hooks to it, so the
+/// poller-side consumer ([`crate::automation::trigger_poller`]) is unchanged.
+///
+/// Keys are per-host constants (e.g. `slack-host-beta`): a second add under an
+/// existing key is rejected (`false`) instead of appended, preserving the old
+/// single-slot idempotency — a host that mounts twice never double-delivers.
+#[derive(Default)]
+pub(crate) struct CompositePostSubmitDeliveryHook {
+    hooks: std::sync::RwLock<Vec<(String, Arc<dyn PostSubmitDeliveryHook>)>>,
+}
+
+impl CompositePostSubmitDeliveryHook {
+    /// Append `hook` under `hook_key`. Returns `false` (and drops the hook)
+    /// when the key is already registered.
+    pub(crate) fn add(&self, hook_key: &str, hook: Arc<dyn PostSubmitDeliveryHook>) -> bool {
+        let mut hooks = self
+            .hooks
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if hooks.iter().any(|(existing, _)| existing == hook_key) {
+            return false;
+        }
+        hooks.push((hook_key.to_string(), hook));
+        true
+    }
+
+    fn snapshot(&self) -> Vec<Arc<dyn PostSubmitDeliveryHook>> {
+        self.hooks
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .map(|(_, hook)| Arc::clone(hook))
+            .collect()
+    }
+}
+
+impl std::fmt::Debug for CompositePostSubmitDeliveryHook {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let keys: Vec<String> = self
+            .hooks
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect();
+        formatter
+            .debug_struct("CompositePostSubmitDeliveryHook")
+            .field("hooks", &keys)
+            .finish()
+    }
+}
+
+#[async_trait]
+impl PostSubmitDeliveryHook for CompositePostSubmitDeliveryHook {
+    async fn on_trigger_submitted(&self, fire: TriggerFire, run_id: TurnRunId, scope: TurnScope) {
+        // Each hook runs in its own task so one slow or panicking hook cannot
+        // delay or skip the others; the poller already detaches the whole
+        // settlement (`spawn_post_submit_delivery`), so awaiting the joins here
+        // only bounds this composite call, not trigger settlement.
+        let handles: Vec<tokio::task::JoinHandle<()>> = self
+            .snapshot()
+            .into_iter()
+            .map(|hook| {
+                let fire = fire.clone();
+                let scope = scope.clone();
+                tokio::spawn(async move { hook.on_trigger_submitted(fire, run_id, scope).await })
+            })
+            .collect();
+        for handle in handles {
+            if let Err(error) = handle.await {
+                tracing::warn!(
+                    target = "ironclaw::reborn::trigger_delivery",
+                    %run_id,
+                    %error,
+                    "post-submit delivery hook task failed; other hooks were unaffected"
+                );
+            }
+        }
+    }
+}
+
 /// Drives triggered-run delivery for a single submitted run.
 ///
 /// Spawns a background task that polls the run to completion (or gate) and
@@ -2004,9 +2145,6 @@ impl TriggeredRunDeliveryDriver {
     /// Wire the outbound delivery target provider used to resolve per-trigger
     /// delivery targets. Production wiring must call this; without it, fires
     /// carrying a `delivery_target` fail closed as `TargetUnavailable`.
-    // Slack-only: the Telegram host wires no outbound target provider (DM-only,
-    // trigger delivery stays Slack's), so gate the builder with its callers.
-    #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) fn with_outbound_target_provider(
         mut self,
         provider: Arc<dyn crate::outbound::OutboundDeliveryTargetProvider>,
@@ -3045,17 +3183,19 @@ impl ProductOutboundTargetResolver for TriggeredSlackReplyTargetAuthority {
         // race-free against the pre-loop preference snapshot going stale.
         enforce_direct_message_if_required(target.target(), require_direct_message)?;
 
-        // Decode the DM channel ID from the binding ref. The ref was built by
-        // `slack_personal_dm_reply_target_binding_ref` / `slack_shared_channel_reply_target_binding_ref`
-        // and encodes space + conversation in length-prefixed segments. We extract
-        // only what we need (channel id + optional team id) to reconstruct the
-        // `ExternalConversationRef` for the Slack adapter.
-        let (conversation_id, space_id) = slack_conversation_id_from_reply_target_binding_ref(
+        // Decode the conversation from the binding ref. Slack refs were built
+        // by `slack_personal_dm_reply_target_binding_ref` /
+        // `slack_shared_channel_reply_target_binding_ref` and encode space +
+        // conversation in length-prefixed segments; Telegram refs use the
+        // adapter's `tg:` encoding. We extract only what we need
+        // (conversation id + optional space/team id) to reconstruct the
+        // `ExternalConversationRef` for the adapter.
+        let (conversation_id, space_id) = conversation_id_from_reply_target_binding_ref(
             target.target(),
         )
         .ok_or_else(|| ProductWorkflowError::BindingResolutionFailed {
             reason: format!(
-                "triggered delivery: cannot extract Slack channel from binding ref '{}'",
+                "triggered delivery: cannot extract a channel conversation from binding ref '{}'",
                 target.target().as_str()
             ),
         })?;
@@ -9338,5 +9478,148 @@ mod tests {
             "a run parked in BlockedAuth after its OAuth prompt was delivered must be \
              recorded as Delivered, not Failed; got {final_outcome:?}"
         );
+    }
+}
+
+// Composite fan-out coverage is deliberately NOT slack-gated: the composite is
+// the multi-host seam (Slack + Telegram), so the telegram-only build must keep
+// exercising it.
+#[cfg(test)]
+mod composite_hook_tests {
+    use std::sync::Mutex as StdMutex;
+    use std::time::Duration as StdDuration;
+
+    use chrono::Utc;
+    use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
+    use ironclaw_triggers::TriggerFireIdentity;
+    use ironclaw_triggers::TriggerId;
+    use tokio::sync::Notify;
+
+    use super::*;
+
+    #[derive(Default)]
+    struct RecordingHook {
+        calls: StdMutex<Vec<TurnRunId>>,
+        notify: Notify,
+    }
+
+    impl RecordingHook {
+        fn calls(&self) -> Vec<TurnRunId> {
+            self.calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+
+        async fn wait_for_calls(&self, expected: usize) -> Vec<TurnRunId> {
+            loop {
+                let calls = self.calls();
+                if calls.len() >= expected {
+                    return calls;
+                }
+                self.notify.notified().await;
+            }
+        }
+    }
+
+    #[async_trait]
+    impl PostSubmitDeliveryHook for RecordingHook {
+        async fn on_trigger_submitted(
+            &self,
+            _fire: TriggerFire,
+            run_id: TurnRunId,
+            _scope: TurnScope,
+        ) {
+            self.calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(run_id);
+            self.notify.notify_one();
+        }
+    }
+
+    /// Panics on every settlement — models a host hook whose delivery path
+    /// blows up. The composite must contain it and still run peer hooks.
+    struct PanickingHook;
+
+    #[async_trait]
+    impl PostSubmitDeliveryHook for PanickingHook {
+        async fn on_trigger_submitted(
+            &self,
+            _fire: TriggerFire,
+            _run_id: TurnRunId,
+            _scope: TurnScope,
+        ) {
+            panic!("composite hook test: intentional hook failure");
+        }
+    }
+
+    fn settlement_parts(run_id: TurnRunId) -> (TriggerFire, TurnScope) {
+        let tenant = TenantId::new("composite-hook-tenant").expect("tenant");
+        let fire = TriggerFire {
+            identity: TriggerFireIdentity::new(tenant.clone(), TriggerId::new(), Utc::now()),
+            creator_user_id: UserId::new("composite-hook-user").expect("user"),
+            agent_id: Some(AgentId::new("composite-hook-agent").expect("agent")),
+            project_id: None,
+            prompt: "composite hook test prompt".to_string(),
+            delivery_target: None,
+        };
+        let scope = TurnScope::new_with_owner(
+            tenant,
+            fire.agent_id.clone(),
+            None,
+            ThreadId::new(format!("composite-hook-thread-{run_id}")).expect("thread id"),
+            Some(fire.creator_user_id.clone()),
+        );
+        (fire, scope)
+    }
+
+    #[test]
+    fn add_rejects_duplicate_keys_and_accepts_distinct_hosts() {
+        let composite = CompositePostSubmitDeliveryHook::default();
+
+        assert!(composite.add("slack-host-beta", Arc::new(RecordingHook::default())));
+        assert!(
+            !composite.add("slack-host-beta", Arc::new(RecordingHook::default())),
+            "a second hook under the same host key must be rejected (no double delivery)"
+        );
+        assert!(
+            composite.add("telegram-host-beta", Arc::new(RecordingHook::default())),
+            "a different host key must append"
+        );
+    }
+
+    #[tokio::test]
+    async fn composite_fans_out_one_settlement_to_every_registered_hook() {
+        let composite = CompositePostSubmitDeliveryHook::default();
+        let slack_hook = Arc::new(RecordingHook::default());
+        let telegram_hook = Arc::new(RecordingHook::default());
+        assert!(composite.add("slack-host-beta", Arc::clone(&slack_hook) as Arc<_>));
+        assert!(composite.add("telegram-host-beta", Arc::clone(&telegram_hook) as Arc<_>));
+
+        let run_id = TurnRunId::new();
+        let (fire, scope) = settlement_parts(run_id);
+        composite.on_trigger_submitted(fire, run_id, scope).await;
+
+        assert_eq!(slack_hook.calls(), vec![run_id]);
+        assert_eq!(telegram_hook.calls(), vec![run_id]);
+    }
+
+    #[tokio::test]
+    async fn composite_hook_panic_does_not_skip_the_other_hook() {
+        let composite = CompositePostSubmitDeliveryHook::default();
+        let surviving_hook = Arc::new(RecordingHook::default());
+        assert!(composite.add("slack-host-beta", Arc::new(PanickingHook)));
+        assert!(composite.add("telegram-host-beta", Arc::clone(&surviving_hook) as Arc<_>));
+
+        let run_id = TurnRunId::new();
+        let (fire, scope) = settlement_parts(run_id);
+        composite.on_trigger_submitted(fire, run_id, scope).await;
+
+        let calls =
+            tokio::time::timeout(StdDuration::from_secs(1), surviving_hook.wait_for_calls(1))
+                .await
+                .expect("surviving hook must still be invoked after a peer hook panicked");
+        assert_eq!(calls, vec![run_id]);
     }
 }

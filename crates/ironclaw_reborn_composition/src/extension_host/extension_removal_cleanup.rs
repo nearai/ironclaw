@@ -1,17 +1,29 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
-#[cfg(any(feature = "slack-v2-host-beta", test))]
+#[cfg(any(
+    feature = "slack-v2-host-beta",
+    feature = "telegram-v2-host-beta",
+    test
+))]
 use std::sync::OnceLock;
 
 use async_trait::async_trait;
-#[cfg(any(feature = "slack-v2-host-beta", test))]
+#[cfg(any(
+    feature = "slack-v2-host-beta",
+    feature = "telegram-v2-host-beta",
+    test
+))]
 pub(crate) use ironclaw_extensions::ExtensionRemovalChannelId;
 pub(crate) use ironclaw_extensions::{
     ExtensionRemovalCleanupAdapterId, ExtensionRemovalCleanupBinding,
     ExtensionRemovalCleanupRequirement,
 };
 use ironclaw_host_api::{ResourceScope, UserId};
-#[cfg(any(feature = "slack-v2-host-beta", test))]
+#[cfg(any(
+    feature = "slack-v2-host-beta",
+    feature = "telegram-v2-host-beta",
+    test
+))]
 use ironclaw_product_workflow::{ChannelConnectionFacade, WebUiAuthenticatedCaller};
 use ironclaw_product_workflow::{ProductWorkflowError, RebornServicesError};
 

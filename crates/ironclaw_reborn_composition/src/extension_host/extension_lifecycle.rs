@@ -3184,15 +3184,20 @@ output_schema_ref = "schemas/run.output.json"
 
     #[tokio::test]
     async fn extension_activate_returns_generic_pairing_guidance_for_external_channel_package() {
+        // Deliberately a channel with NO native host in this crate: `telegram`
+        // now routes through the telegram-v2 host's own activation copy when
+        // that feature is compiled in, so a `telegram`-named fixture would no
+        // longer exercise the surface-generic external-channel path this test
+        // pins.
         let (_dir, _storage_root, facade, _active_registry, _installation_store) =
             extension_lifecycle_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_packages(vec![fixture_external_channel_package(
-                    "telegram", "Telegram",
+                    "signal", "Signal",
                 )]),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
-        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
-            .expect("valid ref");
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "signal").expect("valid ref");
         facade
             .execute(
                 lifecycle_surface_context(),
@@ -3214,7 +3219,7 @@ output_schema_ref = "schemas/run.output.json"
         assert_eq!(activate.phase, LifecyclePhase::Active);
         let message = activate.message.as_deref().expect("activation message");
         assert!(
-            message.contains("Telegram is installed as an external channel")
+            message.contains("Signal is installed as an external channel")
                 && message.contains("app or bot")
                 && message.contains("pairing code")
                 && message.contains("WebChat connection panel")
@@ -3234,13 +3239,13 @@ output_schema_ref = "schemas/run.output.json"
         let requirement = connection_required
             .as_ref()
             .expect("external channel activation must carry a structured connection requirement");
-        assert_eq!(requirement.channel, "telegram");
+        assert_eq!(requirement.channel, "signal");
         assert_eq!(
             requirement.strategy,
             RebornChannelConnectStrategy::InboundProofCode
         );
         assert!(
-            requirement.instructions.contains("Telegram"),
+            requirement.instructions.contains("Signal"),
             "generic channel copy should name the channel: {}",
             requirement.instructions
         );
