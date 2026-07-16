@@ -1460,7 +1460,14 @@ fn serve_fails_closed_when_env_user_id_var_is_unset() {
         .arg("0")
         .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
         .env_remove("IRONCLAW_REBORN_PROFILE")
-        .env("IRONCLAW_REBORN_WEBUI_TOKEN", "any-non-empty-token")
+        // >=32 bytes: must clear the token's own entropy floor (enforced by
+        // `webui_token::resolve_webui_token` as soon as the token is
+        // resolved, before the user-id var is read) so this test isolates
+        // the user-id-var-missing failure it's meant to exercise.
+        .env(
+            "IRONCLAW_REBORN_WEBUI_TOKEN",
+            "reborn-smoke-test-token-0123456789abcdef",
+        )
         .env_remove("IRONCLAW_REBORN_WEBUI_USER_ID")
         .output()
         .expect("ironclaw-reborn serve should run");
@@ -1650,6 +1657,81 @@ fn serve_with_env_auth_seeds_reborn_config_before_binding() {
         !config.contains("[llm.default]"),
         "serve seed must preserve no-LLM behavior: {config}"
     );
+}
+
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn serve_resolves_bearer_token_from_reborn_home_webui_token_file() {
+    // Regression for the service-install crash loop: a launchd/systemd unit
+    // whose environment carries only HOME/PROFILE (see serve_invocation.rs)
+    // never sets IRONCLAW_REBORN_WEBUI_TOKEN, so `serve` must also accept
+    // the `onboard`-provisioned `<reborn_home>/webui-token` fallback file.
+    // Mirrors `serve_with_env_auth_seeds_reborn_config_before_binding` but
+    // omits the env var and seeds the file instead.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+    std::fs::create_dir_all(&reborn_home).expect("reborn home dir");
+    std::fs::write(
+        reborn_home.join("webui-token"),
+        // >=32 bytes: same entropy floor as the env-var path.
+        "reborn-smoke-test-token-0123456789abcdef",
+    )
+    .expect("seed webui-token file");
+    let port = unused_local_port();
+
+    let mut child = Command::new(reborn_bin())
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .env_clear()
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env_remove("IRONCLAW_REBORN_WEBUI_TOKEN")
+        .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    let stderr = child.stderr.take().expect("stderr should be piped");
+    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stderr).lines() {
+            if stderr_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut stderr_text = String::new();
+    loop {
+        if let Some(status) = child.try_wait().expect("serve child status") {
+            panic!("serve exited before binding with {status}; stderr: {stderr_text}");
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("serve did not reach listener banner; stderr: {stderr_text}");
+        }
+        match stderr_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(Ok(line)) => {
+                stderr_text.push_str(&line);
+                stderr_text.push('\n');
+                if stderr_text.contains("ironclaw-reborn: WebChat v2 listener") {
+                    break;
+                }
+            }
+            Ok(Err(error)) => panic!("failed to read serve stderr: {error}"),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("serve stderr closed before banner; stderr: {stderr_text}");
+            }
+        }
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[cfg(all(feature = "webui-v2-beta", feature = "slack-v2-host-beta"))]
@@ -2959,6 +3041,29 @@ fn onboard_bootstraps_reborn_home_without_touching_v1_state() {
         reborn_home.join("providers.json").exists(),
         "providers.json missing"
     );
+    // #6082-follow-up: onboard also provisions a `<reborn_home>/webui-token`
+    // fallback file so a service-installed `serve`/`tui` (unit env carries
+    // only HOME/PROFILE) still has a bearer token to read when
+    // IRONCLAW_REBORN_WEBUI_TOKEN is unset.
+    let webui_token_path = reborn_home.join("webui-token");
+    assert!(webui_token_path.exists(), "webui-token file missing");
+    let webui_token_text = std::fs::read_to_string(&webui_token_path).expect("read webui-token");
+    assert!(
+        webui_token_text.trim().len() >= 32,
+        "generated webui-token must meet the >=32 byte entropy floor: {} bytes",
+        webui_token_text.trim().len()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&webui_token_path)
+            .expect("stat webui-token")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "webui-token file must be 0600, got {mode:o}");
+    }
+    assert_stdout_labeled_action(&stdout, "webui_token:", "wrote");
     let marker_path = reborn_home.join(".onboard-completed.json");
     assert!(marker_path.exists(), "onboarding marker missing");
     let marker_text = std::fs::read_to_string(marker_path).expect("read marker");
@@ -2968,6 +3073,49 @@ fn onboard_bootstraps_reborn_home_without_touching_v1_state() {
     assert!(
         !v1_home.exists(),
         "onboard must not create or read explicit v1 state"
+    );
+}
+
+#[test]
+fn onboard_is_idempotent_for_the_webui_token_file() {
+    // The token doubles as `serve`'s session-signing key, so a re-run of
+    // `onboard` must never clobber a valid existing token — that would
+    // invalidate every signed session and any env var an operator copied
+    // from the first run.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+
+    let first = Command::new(reborn_bin())
+        .arg("onboard")
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("first onboard should run");
+    assert!(
+        first.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let token_path = reborn_home.join("webui-token");
+    let first_token = std::fs::read_to_string(&token_path).expect("read webui-token");
+
+    let second = Command::new(reborn_bin())
+        .arg("onboard")
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("second onboard should run");
+    assert!(
+        second.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let second_stdout = String::from_utf8_lossy(&second.stdout);
+    assert_stdout_labeled_action(&second_stdout, "webui_token:", "preserved");
+    let second_token = std::fs::read_to_string(&token_path).expect("read webui-token again");
+    assert_eq!(
+        first_token, second_token,
+        "re-running onboard must not regenerate a valid webui-token"
     );
 }
 

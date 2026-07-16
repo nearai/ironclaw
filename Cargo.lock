@@ -4838,6 +4838,7 @@ dependencies = [
  "ironclaw_reborn_traces",
  "ironclaw_reborn_tui",
  "ironclaw_reborn_webui_ingress",
+ "rand 0.10.1",
  "reqwest 0.12.28",
  "secrecy",
  "serde",

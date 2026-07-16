@@ -8,6 +8,7 @@ mod render;
 mod runtime;
 #[cfg(feature = "webui-v2-beta")]
 mod serve_invocation;
+mod webui_token;
 
 fn main() -> anyhow::Result<()> {
     // Mirror the v1 binary's behavior so dev workflows can keep LLM
