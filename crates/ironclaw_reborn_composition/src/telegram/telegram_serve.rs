@@ -54,6 +54,9 @@ use crate::webui::webui_serve::{PublicRouteDrain, PublicRouteMount};
 /// `/webhooks/extensions/telegram/updates` — aliases the setup-pipeline
 /// constant so the path `setWebhook` registers and the path this module
 /// mounts cannot drift; the descriptor test pins both to the manifest.
+/// Production routes come from the manifest projection, so the alias is
+/// exercised by parity tests only.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const TELEGRAM_UPDATES_PATH: &str = TELEGRAM_UPDATES_ROUTE_PATH;
 const TELEGRAM_UPDATES_ROUTE_ID: &str = "telegram.updates";
 
@@ -143,10 +146,14 @@ impl ResolvedTelegramInstallation {
         }
     }
 
+    // Route internals read the fields directly; the accessors stay for the
+    // #6116 fold's shared resolved-installation shape (mirrors Slack's).
+    #[allow(dead_code)]
     pub(crate) fn tenant_id(&self) -> &TenantId {
         &self.tenant_id
     }
 
+    #[allow(dead_code)]
     pub(crate) fn adapter_installation_id(&self) -> &AdapterInstallationId {
         &self.adapter_installation_id
     }
@@ -458,6 +465,8 @@ pub(crate) struct TelegramInstallationRateLimitConfig {
 }
 
 impl TelegramInstallationRateLimitConfig {
+    // Production uses the default bounds; tests tighten them.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new(max_requests: NonZeroU32, window: Duration) -> Self {
         Self {
             max_requests,
@@ -705,6 +714,8 @@ pub(crate) fn telegram_updates_route_mount(state: TelegramUpdatesRouteState) -> 
     .with_drain(Arc::new(state))
 }
 
+// Manifest-projection parity seam, pinned by the descriptor test.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn telegram_updates_route_descriptors() -> Vec<IngressRouteDescriptor> {
     vec![TELEGRAM_INGRESS_DESCRIPTORS.updates.clone()]
 }

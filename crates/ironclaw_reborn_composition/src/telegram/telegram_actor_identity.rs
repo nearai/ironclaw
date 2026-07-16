@@ -25,12 +25,12 @@ pub(crate) const TELEGRAM_IDENTITY_PROVIDER: &str = "telegram";
 pub(crate) const TELEGRAM_V2_ADAPTER_ID: &str = "telegram_v2";
 
 #[derive(Clone)]
-pub struct TelegramUserIdentityActorResolver {
+pub(crate) struct TelegramUserIdentityActorResolver {
     lookup: Arc<dyn RebornUserIdentityLookup>,
 }
 
 impl TelegramUserIdentityActorResolver {
-    pub fn new(lookup: Arc<dyn RebornUserIdentityLookup>) -> Self {
+    pub(crate) fn new(lookup: Arc<dyn RebornUserIdentityLookup>) -> Self {
         Self { lookup }
     }
 }

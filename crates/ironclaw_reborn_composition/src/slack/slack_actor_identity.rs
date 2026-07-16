@@ -5,8 +5,6 @@
 
 use std::sync::Arc;
 
-use ironclaw_conversations::ExternalActorBindingEpoch;
-use ironclaw_host_api::UserId;
 use ironclaw_product_adapters::AdapterInstallationId;
 use ironclaw_product_workflow::{
     ProductActorUserResolutionRequest, ProductActorUserResolver, ProductWorkflowError,
@@ -126,6 +124,8 @@ pub(crate) fn parse_slack_user_identity_provider_user_id(
 mod tests {
     use std::collections::HashMap;
 
+    use ironclaw_conversations::ExternalActorBindingEpoch;
+    use ironclaw_host_api::UserId;
     use ironclaw_product_adapters::{AdapterInstallationId, ExternalActorRef, ProductAdapterId};
 
     use super::*;

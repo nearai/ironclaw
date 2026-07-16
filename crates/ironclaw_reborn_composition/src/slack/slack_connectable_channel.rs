@@ -79,6 +79,87 @@ pub fn build_webui_services_with_slack_host_beta_mounts(
     )
 }
 
+/// Compose the WebUI bundle when the Slack host-beta AND Telegram channel
+/// hosts are both enabled: the same assembly as
+/// [`build_webui_services_with_slack_host_beta_mounts`], with the Telegram
+/// facade pair concatenated through the generic composite facades so Settings
+/// lists both channels and per-caller connection state merges.
+#[cfg(feature = "telegram-v2-host-beta")]
+pub fn build_webui_services_with_slack_and_telegram_host_mounts(
+    runtime: &RebornRuntime,
+    event_stream: Option<Arc<dyn ProjectionStream>>,
+    slack_mounts: Option<&SlackHostBetaMounts>,
+    operator_route_visibility: SlackOperatorRouteVisibility,
+    telegram_mounts: &crate::telegram::telegram_host_beta::TelegramHostMounts,
+) -> Result<RebornWebuiBundle, RebornBuildError> {
+    use ironclaw_product_workflow::ChannelConnectionFacade;
+
+    use crate::webui::composite_channels::{
+        CompositeChannelConnectionFacade, CompositeConnectableChannelsFacade,
+    };
+
+    let visibility = match (slack_mounts.is_some(), operator_route_visibility) {
+        (false, _) => SlackConnectableChannelVisibility::Hidden,
+        (true, SlackOperatorRouteVisibility::Hidden) => {
+            SlackConnectableChannelVisibility::PersonalOAuth
+        }
+        (true, SlackOperatorRouteVisibility::Visible) => {
+            SlackConnectableChannelVisibility::PersonalOAuthAndAdminChannelManagement
+        }
+    };
+    let outbound_delivery_target_providers = slack_mounts
+        .filter(|mounts| !mounts.outbound_delivery_target_provider_registered)
+        .map(|mounts| vec![Arc::clone(&mounts.outbound_delivery_target_provider)])
+        .unwrap_or_default();
+    if slack_mounts.is_some() && runtime.outbound_delivery_target_provider().is_none() {
+        return Err(RebornBuildError::InvalidConfig {
+            reason: "outbound delivery target providers require local runtime services".to_string(),
+        });
+    }
+    let personal_credential_cleanup = runtime.services().product_auth.clone().map(|services| {
+        services as Arc<dyn crate::slack::slack_channel_connection::SlackPersonalCredentialCleanup>
+    });
+
+    let mut connectables: Vec<Arc<dyn ConnectableChannelsProductFacade>> = Vec::new();
+    if let Some(slack_connectable) = slack_mounts.and_then(|mounts| {
+        slack_connectable_channels(
+            visibility,
+            mounts.channel_routes.tenant_id().clone(),
+            mounts.channel_routes.operator_user_id().clone(),
+        )
+    }) {
+        connectables.push(slack_connectable);
+    }
+    connectables.push(telegram_mounts.connectable_channels());
+    let connectable_channels: Option<Arc<dyn ConnectableChannelsProductFacade>> = Some(Arc::new(
+        CompositeConnectableChannelsFacade::new(connectables),
+    ));
+
+    let mut connections: Vec<Arc<dyn ChannelConnectionFacade>> = Vec::new();
+    if let Some(slack_connection) = slack_mounts
+        .map(|mounts| slack_channel_connection_facade(mounts, personal_credential_cleanup))
+    {
+        connections.push(slack_connection);
+    }
+    connections.push(telegram_mounts.channel_connection());
+    let channel_connection: Option<Arc<dyn ChannelConnectionFacade>> =
+        Some(Arc::new(CompositeChannelConnectionFacade::new(connections)));
+
+    // Fill the extension-lifecycle handler's late-binding facade slot with the
+    // composite so an inbound-channel activation can check either channel's
+    // connection state. Idempotent; same facade the WebUI surface uses.
+    if let Some(facade) = channel_connection.as_ref() {
+        runtime.set_channel_connection_facade(Arc::clone(facade));
+    }
+    build_webui_services_with_connectable_channels(
+        runtime,
+        event_stream,
+        connectable_channels,
+        channel_connection,
+        outbound_delivery_target_providers,
+    )
+}
+
 #[cfg(test)]
 fn build_webui_services_with_slack_connectable_channel(
     runtime: &RebornRuntime,

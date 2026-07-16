@@ -1651,7 +1651,7 @@ impl RebornRuntime {
         self.turn_coordinator.clone()
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
+    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) fn auth_challenge_provider(&self) -> Option<Arc<dyn crate::AuthChallengeProvider>> {
         self.services
             .product_auth
@@ -1659,7 +1659,7 @@ impl RebornRuntime {
             .and_then(|product_auth| product_auth.as_auth_challenge_provider())
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
+    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) fn blocked_auth_flow_canceller(
         &self,
     ) -> Option<Arc<dyn crate::BlockedAuthFlowCanceller>> {
@@ -1807,7 +1807,7 @@ impl RebornRuntime {
     /// unavailable or already occupied, `true` on first successful set. Shares
     /// the same `OnceLock` the handler reads
     /// (`RebornLocalRuntimeServices::channel_connection_facade_slot`).
-    #[cfg(feature = "slack-v2-host-beta")]
+    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) fn set_channel_connection_facade(
         &self,
         facade: Arc<dyn ironclaw_product_workflow::ChannelConnectionFacade>,

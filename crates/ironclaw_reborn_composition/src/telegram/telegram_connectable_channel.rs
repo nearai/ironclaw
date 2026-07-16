@@ -11,14 +11,47 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
     ChannelConnectionFacade, ConnectableChannelsProductFacade, RebornChannelConnectAction,
     RebornChannelConnectStrategy, RebornConnectableChannelInfo,
     RebornConnectableChannelListResponse, RebornServicesError, WebUiAuthenticatedCaller,
 };
 
+use crate::telegram::telegram_host_beta::TelegramHostMounts;
 use crate::telegram::telegram_pairing::TelegramPairingService;
 use crate::telegram::telegram_setup::TelegramSetupService;
+use crate::webui::facade::build_webui_services_with_connectable_channels;
+use crate::{RebornBuildError, RebornRuntime, RebornWebuiBundle};
+
+/// Compose the WebUI bundle over the Telegram host facades (the Telegram-only
+/// analog of
+/// [`crate::slack::slack_connectable_channel::build_webui_services_with_slack_host_beta_mounts`]).
+/// When both channel hosts are enabled, use
+/// `build_webui_services_with_slack_and_telegram_host_mounts` instead so the
+/// facade pairs compose.
+pub fn build_webui_services_with_telegram_host_mounts(
+    runtime: &RebornRuntime,
+    event_stream: Option<Arc<dyn ProjectionStream>>,
+    telegram_mounts: Option<&TelegramHostMounts>,
+) -> Result<RebornWebuiBundle, RebornBuildError> {
+    let connectable_channels = telegram_mounts.map(TelegramHostMounts::connectable_channels);
+    let channel_connection = telegram_mounts.map(TelegramHostMounts::channel_connection);
+    // Fill the extension-lifecycle handler's late-binding facade slot so an
+    // inbound-channel activation can check the caller's channel connection.
+    // Idempotent; shares the same facade the WebUI connectable-channel surface
+    // uses.
+    if let Some(facade) = channel_connection.as_ref() {
+        runtime.set_channel_connection_facade(Arc::clone(facade));
+    }
+    build_webui_services_with_connectable_channels(
+        runtime,
+        event_stream,
+        connectable_channels,
+        channel_connection,
+        Vec::new(),
+    )
+}
 
 pub(crate) struct TelegramConnectableChannelsProductFacade {
     setup: Arc<TelegramSetupService>,

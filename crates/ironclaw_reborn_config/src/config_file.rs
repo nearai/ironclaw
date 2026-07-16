@@ -88,6 +88,11 @@ pub struct RebornConfigFile {
     /// Slack host-beta feature. Secrets are env-only; this section stores
     /// IDs and environment variable names.
     pub slack: Option<SlackSection>,
+    /// Telegram channel host enablement. Consumed by `ironclaw-reborn serve`
+    /// only when the binary is built with the Telegram host feature. Bot
+    /// identity and secrets are configured through the WebUI setup surface,
+    /// never in this file.
+    pub telegram: Option<TelegramSection>,
     /// Cost-based budgets. Composition seeds defaults on first reservation
     /// for each user/project; per-account overrides happen through the
     /// `budget_set` tool or CLI at runtime. Setting any limit to `0` means
@@ -429,6 +434,29 @@ impl SlackSection {
 pub struct SlackChannelRouteSection {
     pub channel_id: Option<String>,
     pub subject_user_id: Option<String>,
+}
+
+/// Telegram channel host enablement.
+///
+/// `enabled = true` or `IRONCLAW_REBORN_TELEGRAM_ENABLED=true` mounts the
+/// Telegram updates route and the WebUI setup/pairing surface. The env var
+/// overrides only this enablement gate. The bot token, webhook registration,
+/// and pairing are configured at runtime through the WebUI channel setup
+/// surface; no Telegram identifiers or secrets live in this file.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TelegramSection {
+    /// Explicit enablement gate. Omitted/false means the Telegram routes are
+    /// not mounted by `ironclaw-reborn serve` unless
+    /// `IRONCLAW_REBORN_TELEGRAM_ENABLED` overrides it.
+    pub enabled: Option<bool>,
+}
+
+impl TelegramSection {
+    pub fn set_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = Some(enabled);
+        self
+    }
 }
 
 /// `[budget]` section. All limits in USD. **0 = unlimited.**
@@ -1437,6 +1465,9 @@ api_key_env = "ANTHROPIC_API_KEY"
 
 [slack]
 enabled = true
+
+[telegram]
+enabled = true
 "#;
         let cfg = RebornConfigFile::parse_text(toml, &attributed()).expect("must parse");
         assert_eq!(cfg.api_version.as_deref(), Some("ironclaw.runtime/v1"));
@@ -1475,6 +1506,26 @@ enabled = true
         assert!(llm.contains_key("mission"));
         let slack = cfg.slack.as_ref().expect("slack section present");
         assert_eq!(slack.enabled, Some(true));
+        let telegram = cfg.telegram.as_ref().expect("telegram section present");
+        assert_eq!(telegram.enabled, Some(true));
+    }
+
+    #[test]
+    fn telegram_section_rejects_unknown_fields() {
+        // The Telegram section deliberately carries only the enablement gate:
+        // bot identity and secrets are WebUI-managed. A config file trying to
+        // smuggle them in must fail parse closed, not be silently ignored.
+        let toml = r#"
+[telegram]
+enabled = true
+bot_token = "123:abc"
+"#;
+        let error = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("unknown [telegram] fields must be rejected");
+        assert!(
+            error.to_string().contains("bot_token"),
+            "error should name the rejected field: {error}"
+        );
     }
 
     #[test]

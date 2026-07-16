@@ -79,7 +79,7 @@ impl TelegramChannelSetupActivationError {
 }
 
 #[derive(Clone)]
-pub struct TelegramChannelRouteConfig {
+pub(crate) struct TelegramChannelRouteConfig {
     tenant_id: ironclaw_host_api::TenantId,
     operator_user_id: ironclaw_host_api::UserId,
     setup_service: Arc<TelegramSetupService>,
@@ -113,7 +113,9 @@ impl TelegramChannelRouteConfig {
     }
 }
 
-pub fn telegram_channel_route_mount(config: TelegramChannelRouteConfig) -> ProtectedRouteMount {
+pub(crate) fn telegram_channel_route_mount(
+    config: TelegramChannelRouteConfig,
+) -> ProtectedRouteMount {
     let router = Router::new()
         .route(
             WEBUI_V2_CHANNELS_TELEGRAM_SETUP_PATH,

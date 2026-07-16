@@ -16,12 +16,12 @@ use ironclaw_product_workflow::{
 };
 
 /// Concatenates every inner facade's channel list, preserving order.
-pub struct CompositeConnectableChannelsFacade {
+pub(crate) struct CompositeConnectableChannelsFacade {
     inner: Vec<Arc<dyn ConnectableChannelsProductFacade>>,
 }
 
 impl CompositeConnectableChannelsFacade {
-    pub fn new(inner: Vec<Arc<dyn ConnectableChannelsProductFacade>>) -> Self {
+    pub(crate) fn new(inner: Vec<Arc<dyn ConnectableChannelsProductFacade>>) -> Self {
         Self { inner }
     }
 }
@@ -47,12 +47,12 @@ impl ConnectableChannelsProductFacade for CompositeConnectableChannelsFacade {
 
 /// Merges per-channel connection maps; disconnect routes to the first inner
 /// facade that reports a connection concept for the channel.
-pub struct CompositeChannelConnectionFacade {
+pub(crate) struct CompositeChannelConnectionFacade {
     inner: Vec<Arc<dyn ChannelConnectionFacade>>,
 }
 
 impl CompositeChannelConnectionFacade {
-    pub fn new(inner: Vec<Arc<dyn ChannelConnectionFacade>>) -> Self {
+    pub(crate) fn new(inner: Vec<Arc<dyn ChannelConnectionFacade>>) -> Self {
         Self { inner }
     }
 }

@@ -89,15 +89,19 @@ use ironclaw_outbound::CommunicationPreferenceRepository;
 use ironclaw_outbound::FilesystemOutboundStateStore;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 use ironclaw_outbound::InMemoryOutboundStateStore;
-#[cfg(feature = "slack-v2-host-beta")]
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRunDeliveryStore};
 #[cfg(all(
     not(any(feature = "libsql", feature = "postgres")),
-    feature = "slack-v2-host-beta"
+    any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")
 ))]
 use ironclaw_outbound::{InMemoryDeliveredGateRouteStore, InMemoryTriggeredRunDeliveryStore};
 use ironclaw_processes::ProcessServices;
-#[cfg(any(feature = "slack-v2-host-beta", test))]
+#[cfg(any(
+    feature = "slack-v2-host-beta",
+    feature = "telegram-v2-host-beta",
+    test
+))]
 use ironclaw_product_workflow::ChannelConnectionFacade;
 use ironclaw_product_workflow::{
     LifecycleProductSurfaceContext, ProductAuthTurnGateResumeDispatcher, ProjectService,
@@ -153,6 +157,8 @@ use ironclaw_turns::{
 use ironclaw_turns::{InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore};
 
 use crate::RebornProductAuthServicePorts;
+#[cfg(feature = "telegram-v2-host-beta")]
+use crate::extension_host::available_extensions::telegram_manifest_digest;
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::extension_host::available_extensions::{
     slack_bot_manifest_digest, slack_manifest_digest,
@@ -987,11 +993,11 @@ pub(crate) struct RebornLocalRuntimeServices {
     /// Settings write flips it and the next turn's selection honors the new
     /// value without a restart.
     pub(crate) skill_auto_activate_learned: Arc<AtomicBool>,
-    #[cfg(feature = "slack-v2-host-beta")]
+    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) outbound_state: Arc<dyn OutboundStateStore>,
-    #[cfg(feature = "slack-v2-host-beta")]
+    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) delivered_gate_routes: Arc<dyn DeliveredGateRouteStore>,
-    #[cfg(feature = "slack-v2-host-beta")]
+    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     pub(crate) trigger_conversation_services: InMemoryConversationServices,
@@ -1067,7 +1073,11 @@ pub(crate) struct RebornLocalRuntimeServices {
     /// deployments without a connectable channel, in which case the handler
     /// fails closed (blocks) for any channel that declares a connection
     /// requirement. Mirrors the `post_submit_hook_slot` deferred-wiring pattern.
-    #[cfg(any(feature = "slack-v2-host-beta", test))]
+    #[cfg(any(
+        feature = "slack-v2-host-beta",
+        feature = "telegram-v2-host-beta",
+        test
+    ))]
     pub(crate) channel_connection_facade_slot:
         Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionFacade>>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
@@ -1082,6 +1092,15 @@ pub(crate) struct RebornLocalRuntimeServices {
         feature = "slack-v2-host-beta"
     ))]
     pub(crate) host_state_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    /// Telegram analog of `host_state_filesystem`: a `ScopedFilesystem` whose
+    /// fixed resolver is [`crate::telegram_host_state_mount_view`], backing the
+    /// durable Telegram setup/pairing/binding/DM-target stores plus the
+    /// telegram-scoped idempotency ledger and conversation-binding store.
+    #[cfg(all(
+        any(feature = "libsql", feature = "postgres"),
+        feature = "telegram-v2-host-beta"
+    ))]
+    pub(crate) telegram_host_state_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) subagent_goal_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     /// Tenant-scoped root filesystem used for third-party extension hook
@@ -2458,6 +2477,9 @@ async fn build_local_dev_store_graph(
         })?;
     #[cfg(feature = "slack-v2-host-beta")]
     let host_state_filesystem = local_dev_slack_host_state_filesystem(Arc::clone(&filesystem));
+    #[cfg(feature = "telegram-v2-host-beta")]
+    let telegram_host_state_filesystem =
+        local_dev_telegram_host_state_filesystem(Arc::clone(&filesystem));
     let extension_lifecycle_surface_context = local_dev_extension_lifecycle_surface_context(
         owner_user_id.clone(),
         local_runtime_identity.as_ref(),
@@ -2484,11 +2506,11 @@ async fn build_local_dev_store_graph(
             crate::outbound::MutableOutboundDeliveryTargetRegistry::default(),
         ),
         skill_auto_activate_learned: Arc::new(AtomicBool::new(true)),
-        #[cfg(feature = "slack-v2-host-beta")]
+        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         outbound_state: outbound_stores.outbound_state,
-        #[cfg(feature = "slack-v2-host-beta")]
+        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         delivered_gate_routes: outbound_stores.delivered_gate_routes,
-        #[cfg(feature = "slack-v2-host-beta")]
+        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         triggered_run_delivery: outbound_stores.triggered_run_delivery,
         #[cfg(not(any(feature = "libsql", feature = "postgres")))]
         trigger_conversation_services,
@@ -2505,7 +2527,11 @@ async fn build_local_dev_store_graph(
         budget_gate_store,
         skill_management,
         extension_management: None,
-        #[cfg(any(feature = "slack-v2-host-beta", test))]
+        #[cfg(any(
+            feature = "slack-v2-host-beta",
+            feature = "telegram-v2-host-beta",
+            test
+        ))]
         channel_connection_facade_slot: Arc::new(std::sync::OnceLock::new()),
         runtime_http_egress: None,
         host_runtime_http_egress: None,
@@ -2516,6 +2542,8 @@ async fn build_local_dev_store_graph(
         workspace_filesystem,
         #[cfg(feature = "slack-v2-host-beta")]
         host_state_filesystem,
+        #[cfg(feature = "telegram-v2-host-beta")]
+        telegram_host_state_filesystem,
         subagent_goal_filesystem: Arc::clone(&scoped_filesystem),
         identity_filesystem: Arc::clone(&scoped_filesystem),
         // Set later in `build_local_runtime`, once the secret-store crypto
@@ -2613,6 +2641,9 @@ async fn build_local_dev_store_graph(
         })?;
     #[cfg(all(feature = "postgres", feature = "slack-v2-host-beta"))]
     let host_state_filesystem = local_dev_slack_host_state_filesystem(Arc::clone(&filesystem));
+    #[cfg(all(feature = "postgres", feature = "telegram-v2-host-beta"))]
+    let telegram_host_state_filesystem =
+        local_dev_telegram_host_state_filesystem(Arc::clone(&filesystem));
     let extension_lifecycle_surface_context = local_dev_extension_lifecycle_surface_context(
         owner_user_id.clone(),
         local_runtime_identity.as_ref(),
@@ -2641,11 +2672,11 @@ async fn build_local_dev_store_graph(
             crate::outbound::MutableOutboundDeliveryTargetRegistry::default(),
         ),
         skill_auto_activate_learned: Arc::new(AtomicBool::new(true)),
-        #[cfg(feature = "slack-v2-host-beta")]
+        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         outbound_state: outbound_stores.outbound_state,
-        #[cfg(feature = "slack-v2-host-beta")]
+        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         delivered_gate_routes: outbound_stores.delivered_gate_routes,
-        #[cfg(feature = "slack-v2-host-beta")]
+        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         triggered_run_delivery: outbound_stores.triggered_run_delivery,
         #[cfg(not(any(feature = "libsql", feature = "postgres")))]
         trigger_conversation_services,
@@ -2662,7 +2693,11 @@ async fn build_local_dev_store_graph(
         budget_gate_store,
         skill_management,
         extension_management: None,
-        #[cfg(any(feature = "slack-v2-host-beta", test))]
+        #[cfg(any(
+            feature = "slack-v2-host-beta",
+            feature = "telegram-v2-host-beta",
+            test
+        ))]
         channel_connection_facade_slot: Arc::new(std::sync::OnceLock::new()),
         runtime_http_egress: None,
         host_runtime_http_egress: None,
@@ -3702,11 +3737,11 @@ fn local_dev_scoped_filesystem(
 /// See docs/plans/2026-05-29-trigger-loop-delivery-resolution-implementation.md.
 pub(crate) struct LocalDevOutboundStores {
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
-    #[cfg(feature = "slack-v2-host-beta")]
+    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) outbound_state: Arc<dyn OutboundStateStore>,
-    #[cfg(feature = "slack-v2-host-beta")]
+    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) delivered_gate_routes: Arc<dyn DeliveredGateRouteStore>,
-    #[cfg(feature = "slack-v2-host-beta")]
+    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
 }
 
@@ -3724,11 +3759,11 @@ fn local_dev_outbound_store(filesystem: Arc<LocalDevRootFilesystem>) -> LocalDev
     );
     LocalDevOutboundStores {
         outbound_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
-        #[cfg(feature = "slack-v2-host-beta")]
+        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         outbound_state: Arc::clone(&store) as Arc<dyn OutboundStateStore>,
-        #[cfg(feature = "slack-v2-host-beta")]
+        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         delivered_gate_routes: Arc::clone(&store) as Arc<dyn DeliveredGateRouteStore>,
-        #[cfg(feature = "slack-v2-host-beta")]
+        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         triggered_run_delivery: store as Arc<dyn TriggeredRunDeliveryStore>,
     }
 }
@@ -3747,11 +3782,11 @@ fn local_dev_outbound_store(_filesystem: Arc<LocalDevRootFilesystem>) -> LocalDe
     let outbound = Arc::new(InMemoryOutboundStateStore::default());
     LocalDevOutboundStores {
         outbound_preferences: Arc::clone(&outbound) as Arc<dyn CommunicationPreferenceRepository>,
-        #[cfg(feature = "slack-v2-host-beta")]
+        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         outbound_state: outbound as Arc<dyn OutboundStateStore>,
-        #[cfg(feature = "slack-v2-host-beta")]
+        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         delivered_gate_routes: Arc::new(InMemoryDeliveredGateRouteStore::default()),
-        #[cfg(feature = "slack-v2-host-beta")]
+        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         triggered_run_delivery: Arc::new(InMemoryTriggeredRunDeliveryStore::default()),
     }
 }
@@ -3766,6 +3801,19 @@ fn local_dev_slack_host_state_filesystem(
     Arc::new(ScopedFilesystem::new(
         filesystem,
         crate::slack_host_state_mount_view,
+    ))
+}
+
+#[cfg(all(
+    any(feature = "libsql", feature = "postgres"),
+    feature = "telegram-v2-host-beta"
+))]
+fn local_dev_telegram_host_state_filesystem(
+    filesystem: Arc<LocalDevRootFilesystem>,
+) -> Arc<ScopedFilesystem<LocalDevRootFilesystem>> {
+    Arc::new(ScopedFilesystem::new(
+        filesystem,
+        crate::telegram_host_state_mount_view,
     ))
 }
 
@@ -4037,7 +4085,10 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
         local_dev_capability_policy().map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("local-dev capability policy is invalid: {error}"),
         })?;
-    #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(unused_mut))]
+    #[cfg_attr(
+        not(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")),
+        allow(unused_mut)
+    )]
     let mut entries = vec![
         AdminEntry::for_local_manifest(
             policy.provider.id,
@@ -4152,6 +4203,19 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
         Some(slack_manifest_digest()),
         HostTrustAssignment::first_party(),
         slack_user_allowed_effects(),
+        None,
+    ));
+    // Zero-tool channel package (like slack_bot): activation registers the
+    // channel surface only, so no capability effects are granted.
+    #[cfg(feature = "telegram-v2-host-beta")]
+    entries.push(AdminEntry::for_local_manifest(
+        PackageId::new("telegram").map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("Telegram first-party package id is invalid: {error}"),
+        })?,
+        "/system/extensions/telegram/manifest.toml".to_string(),
+        Some(telegram_manifest_digest()),
+        HostTrustAssignment::first_party(),
+        Vec::new(),
         None,
     ));
     HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(entries))]).map_err(|error| {
@@ -5751,11 +5815,11 @@ mod tests {
             project_service: Arc::clone(&base_runtime.project_service),
             outbound_preferences: Arc::clone(&base_runtime.outbound_preferences),
             skill_auto_activate_learned: Arc::clone(&base_runtime.skill_auto_activate_learned),
-            #[cfg(feature = "slack-v2-host-beta")]
+            #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
             outbound_state: Arc::clone(&base_runtime.outbound_state),
-            #[cfg(feature = "slack-v2-host-beta")]
+            #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
             delivered_gate_routes: Arc::clone(&base_runtime.delivered_gate_routes),
-            #[cfg(feature = "slack-v2-host-beta")]
+            #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
             triggered_run_delivery: Arc::clone(&base_runtime.triggered_run_delivery),
             #[cfg(not(any(feature = "libsql", feature = "postgres")))]
             trigger_conversation_services: base_runtime.trigger_conversation_services.clone(),
@@ -5771,7 +5835,11 @@ mod tests {
             budget_gate_store: Arc::clone(&base_runtime.budget_gate_store),
             skill_management: Arc::clone(&base_runtime.skill_management),
             extension_management: base_runtime.extension_management.clone(),
-            #[cfg(any(feature = "slack-v2-host-beta", test))]
+            #[cfg(any(
+                feature = "slack-v2-host-beta",
+                feature = "telegram-v2-host-beta",
+                test
+            ))]
             channel_connection_facade_slot: Arc::clone(
                 &base_runtime.channel_connection_facade_slot,
             ),
@@ -5786,6 +5854,10 @@ mod tests {
             workspace_filesystem: Arc::clone(&base_runtime.workspace_filesystem),
             #[cfg(feature = "slack-v2-host-beta")]
             host_state_filesystem: Arc::clone(&base_runtime.host_state_filesystem),
+            #[cfg(feature = "telegram-v2-host-beta")]
+            telegram_host_state_filesystem: Arc::clone(
+                &base_runtime.telegram_host_state_filesystem,
+            ),
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             identity_filesystem: Arc::clone(&base_runtime.identity_filesystem),
             #[cfg(feature = "webui-v2-beta")]

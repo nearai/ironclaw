@@ -54,7 +54,7 @@ mod telegram;
 pub use product_auth::api::auth_prompt::{
     AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller,
 };
-#[cfg(feature = "slack-v2-host-beta")]
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 mod delivered_gate_routing;
 #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 mod host_ingress;
@@ -212,15 +212,20 @@ pub use slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH,
     WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH, WEBUI_V2_CHANNELS_SLACK_SUBJECTS_PATH,
 };
+#[cfg(all(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
+pub use slack::slack_connectable_channel::build_webui_services_with_slack_and_telegram_host_mounts;
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_connectable_channel::{
     SlackOperatorRouteVisibility, build_webui_services_with_slack_host_beta_mounts,
 };
-#[cfg(feature = "slack-v2-host-beta")]
+// Exported under either channel-host feature: the delivery observer and the
+// triggered-run driver are adapter-generic machinery the Telegram host reuses
+// (pending the vendor-neutral rename in the #6116 fold).
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 pub use slack::slack_delivery::{
     NoopPostSubmitDeliveryHook, PostSubmitDeliveryHook, TriggeredRunDeliveryDriver,
 };
-#[cfg(feature = "slack-v2-host-beta")]
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 pub use slack::slack_delivery::{
     SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
     SlackFinalReplyDeliverySettings,
@@ -248,6 +253,17 @@ pub use slack::slack_serve::{
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_setup::SlackPersonalSetupServiceSlot;
+#[cfg(feature = "telegram-v2-host-beta")]
+pub use telegram::telegram_channel_routes::{
+    WEBUI_V2_CHANNELS_TELEGRAM_PAIRING_PATH, WEBUI_V2_CHANNELS_TELEGRAM_SETUP_PATH,
+};
+#[cfg(feature = "telegram-v2-host-beta")]
+pub use telegram::telegram_connectable_channel::build_webui_services_with_telegram_host_mounts;
+#[cfg(feature = "telegram-v2-host-beta")]
+pub use telegram::telegram_host_beta::{
+    TelegramHostBuildError, TelegramHostMounts, TelegramHostRuntimeConfig,
+    build_telegram_host_runtime_mounts,
+};
 pub use web_access::register_bundled_web_access_first_party_handlers;
 pub use webui::facade::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
@@ -768,6 +784,56 @@ pub(crate) fn slack_host_state_mount_view(
     ])
 }
 
+#[cfg(all(
+    any(feature = "libsql", feature = "postgres"),
+    feature = "telegram-v2-host-beta"
+))]
+pub(crate) fn telegram_host_state_mount_view(
+    scope: &ResourceScope,
+) -> Result<MountView, ironclaw_host_api::HostApiError> {
+    let tenant_id = resource_scope_path_segment(scope.tenant_id.as_str());
+    MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/tenant-shared/telegram-setup")?,
+            VirtualPath::new(format!("/tenants/{tenant_id}/shared/telegram-setup"))?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/tenant-shared/telegram-pairing")?,
+            VirtualPath::new(format!("/tenants/{tenant_id}/shared/telegram-pairing"))?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/tenant-shared/telegram-binding")?,
+            VirtualPath::new(format!("/tenants/{tenant_id}/shared/telegram-binding"))?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/tenant-shared/telegram-dm-targets")?,
+            VirtualPath::new(format!("/tenants/{tenant_id}/shared/telegram-dm-targets"))?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/engine/product_workflow/idempotency")?,
+            VirtualPath::new(format!(
+                "/tenants/{tenant_id}/shared/telegram-product-workflow/idempotency"
+            ))?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        // Durable Telegram conversation-binding store: RebornFilesystemConversationServices
+        // persists `/conversations/state.json`. Without this alias the ScopedFilesystem
+        // cannot resolve that path, the conversation store fails to open, and every
+        // inbound Telegram update (e.g. a DM to the bot) is dropped with a 503.
+        MountGrant::new(
+            MountAlias::new("/conversations")?,
+            VirtualPath::new(format!(
+                "/tenants/{tenant_id}/shared/telegram-conversations"
+            ))?,
+            MountPermissions::read_write_list_delete(),
+        ),
+    ])
+}
+
 /// Wrap `root` in a tenant-aware [`ScopedFilesystem`] whose resolver is
 /// [`invocation_mount_view`]. The returned filesystem is the single
 /// production handle — every consumer-store call routes per-scope
@@ -1064,6 +1130,66 @@ mod mount_view_tests {
         assert!(
             view.resolve(&ScopedPath::new("/tenant-shared/other.json").unwrap())
                 .is_err()
+        );
+    }
+
+    #[cfg(feature = "telegram-v2-host-beta")]
+    #[test]
+    fn telegram_host_state_mount_view_grants_delete_only_to_telegram_state_roots() {
+        let scope = sample_scope();
+        let view = telegram_host_state_mount_view(&scope).unwrap();
+        for (alias, path, target) in [
+            (
+                "/tenant-shared/telegram-setup",
+                "/tenant-shared/telegram-setup/installation.json",
+                "telegram-setup/installation.json",
+            ),
+            (
+                "/tenant-shared/telegram-pairing",
+                "/tenant-shared/telegram-pairing/codes/code.json",
+                "telegram-pairing/codes/code.json",
+            ),
+            (
+                "/tenant-shared/telegram-binding",
+                "/tenant-shared/telegram-binding/identities/identity.json",
+                "telegram-binding/identities/identity.json",
+            ),
+            (
+                "/tenant-shared/telegram-dm-targets",
+                "/tenant-shared/telegram-dm-targets/target.json",
+                "telegram-dm-targets/target.json",
+            ),
+            (
+                "/engine/product_workflow/idempotency",
+                "/engine/product_workflow/idempotency/actions/action.json",
+                "telegram-product-workflow/idempotency/actions/action.json",
+            ),
+            // Regression: the durable conversation-binding store persists
+            // `/conversations/state.json`; without this alias every inbound Telegram
+            // update (e.g. a DM to the bot) fails to open the store and is dropped.
+            (
+                "/conversations",
+                "/conversations/state.json",
+                "telegram-conversations/state.json",
+            ),
+        ] {
+            let (resolved, grant) = view
+                .resolve_with_grant(&ScopedPath::new(path).unwrap())
+                .unwrap();
+            assert_eq!(
+                resolved.as_str(),
+                &format!("/tenants/{}/shared/{target}", scope.tenant_id.as_str())
+            );
+            assert_eq!(grant.alias.as_str(), alias);
+            assert_eq!(
+                grant.permissions,
+                MountPermissions::read_write_list_delete()
+            );
+        }
+        assert!(
+            view.resolve(&ScopedPath::new("/tenant-shared/other.json").unwrap())
+                .is_err(),
+            "non-telegram tenant-shared paths must not resolve through the telegram host-state mount"
         );
     }
 

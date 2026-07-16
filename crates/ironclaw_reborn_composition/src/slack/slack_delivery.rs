@@ -53,10 +53,30 @@ use tokio::sync::Semaphore;
 use crate::product_auth::api::auth_prompt::{
     BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth,
 };
+#[cfg(feature = "slack-v2-host-beta")]
 use crate::slack::slack_outbound_targets::{
     slack_conversation_id_from_reply_target_binding_ref, slack_reply_target_is_personal_dm,
 };
 use crate::{AuthChallengeProvider, BlockedAuthFlowCanceller};
+
+/// Telegram-only builds compile this module without the Slack target-decoding
+/// helpers. Slack-shaped reply-target refs cannot exist in those builds, so
+/// this fail-closed stub mirrors the real decoder's behavior for a non-Slack
+/// ref exactly (it rejects on the adapter segment and returns `false`).
+#[cfg(not(feature = "slack-v2-host-beta"))]
+fn slack_reply_target_is_personal_dm(_target: &ReplyTargetBindingRef) -> bool {
+    false
+}
+
+/// See [`slack_reply_target_is_personal_dm`]'s stub note: the real decoder
+/// returns `None` for any non-Slack ref, which is the only kind a build
+/// without the Slack feature can produce.
+#[cfg(not(feature = "slack-v2-host-beta"))]
+fn slack_conversation_id_from_reply_target_binding_ref(
+    _target: &ReplyTargetBindingRef,
+) -> Option<(String, Option<String>)> {
+    None
+}
 
 const MAX_SLACK_RUN_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_TRIGGERED_RUN_DELIVERY_MAX_WAIT: Duration = Duration::from_secs(30 * 60);
@@ -1984,6 +2004,9 @@ impl TriggeredRunDeliveryDriver {
     /// Wire the outbound delivery target provider used to resolve per-trigger
     /// delivery targets. Production wiring must call this; without it, fires
     /// carrying a `delivery_target` fail closed as `TargetUnavailable`.
+    // Slack-only: the Telegram host wires no outbound target provider (DM-only,
+    // trigger delivery stays Slack's), so gate the builder with its callers.
+    #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) fn with_outbound_target_provider(
         mut self,
         provider: Arc<dyn crate::outbound::OutboundDeliveryTargetProvider>,
@@ -3089,7 +3112,10 @@ fn thread_scope_from_binding(
     })
 }
 
-#[cfg(test)]
+// Test fixtures exercise the Slack outbound-target decoders (real refs, DM
+// provisioning), so the suite needs the Slack feature; the telegram-only build
+// covers this module's generic machinery through the Telegram host tests.
+#[cfg(all(test, feature = "slack-v2-host-beta"))]
 mod tests {
     use super::*;
     use ironclaw_product_adapters::{

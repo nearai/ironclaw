@@ -18,6 +18,10 @@ pub(crate) mod telegram_connectable_channel;
 #[cfg(feature = "telegram-v2-host-beta")]
 pub(crate) mod telegram_dispatch;
 #[cfg(feature = "telegram-v2-host-beta")]
+pub(crate) mod telegram_egress;
+#[cfg(feature = "telegram-v2-host-beta")]
+pub(crate) mod telegram_host_beta;
+#[cfg(feature = "telegram-v2-host-beta")]
 pub(crate) mod telegram_host_state;
 #[cfg(feature = "telegram-v2-host-beta")]
 pub(crate) mod telegram_pairing;

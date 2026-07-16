@@ -162,10 +162,15 @@ impl TelegramSetupService {
         &self.tenant_id
     }
 
+    // Scope-parity accessors mirroring `SlackSetupService` (used there by the
+    // dynamic provisioner Debug impls); Telegram's host wiring passes the host
+    // config scope directly, so these stay for the #6116 fold's shared shape.
+    #[allow(dead_code)]
     pub(crate) fn agent_id(&self) -> &AgentId {
         &self.agent_id
     }
 
+    #[allow(dead_code)]
     pub(crate) fn project_id(&self) -> Option<&ProjectId> {
         self.project_id.as_ref()
     }
@@ -546,7 +551,7 @@ mod tests {
         GetMe,
         SetWebhook { url: String },
         DeleteWebhook,
-        SendMessage { chat_id: i64 },
+        SendMessage { _chat_id: i64 },
     }
 
     #[derive(Debug)]
@@ -618,7 +623,7 @@ mod tests {
             self.calls
                 .lock()
                 .expect("lock")
-                .push(BotApiCall::SendMessage { chat_id });
+                .push(BotApiCall::SendMessage { _chat_id: chat_id });
             Ok(())
         }
     }
@@ -671,7 +676,13 @@ mod tests {
         assert_eq!(saved.revision, 1);
         let calls = bot_api.calls();
         assert!(matches!(calls[0], BotApiCall::GetMe));
-        assert!(matches!(calls[1], BotApiCall::SetWebhook { .. }));
+        match &calls[1] {
+            BotApiCall::SetWebhook { url } => assert_eq!(
+                url, "https://ironclaw.example/webhooks/extensions/telegram/updates",
+                "setWebhook must register the derived public updates URL"
+            ),
+            other => panic!("expected SetWebhook as the second bot api call, got {other:?}"),
+        }
         let token = service.bot_token().await.expect("token resolves");
         assert_eq!(
             token.expect("token present").expose_secret(),

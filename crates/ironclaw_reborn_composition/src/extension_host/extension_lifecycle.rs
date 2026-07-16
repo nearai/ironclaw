@@ -379,7 +379,7 @@ impl RebornLocalExtensionManagementPort {
     /// host activations (e.g. Slack host-beta channel setup) that operate a
     /// shared install and therefore act as the operator rather than any
     /// individual member.
-    #[cfg(feature = "slack-v2-host-beta")]
+    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) fn tenant_operator_user_id(&self) -> &UserId {
         &self.tenant_operator_user_id
     }

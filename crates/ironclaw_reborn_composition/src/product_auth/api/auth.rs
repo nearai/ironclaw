@@ -914,6 +914,16 @@ impl RebornProductAuthServices {
         self
     }
 
+    /// The composed auth-continuation dispatcher (turn-gate resume + lifecycle
+    /// continuations). Channel hosts (today the Telegram pairing service —
+    /// hence the feature gate) reuse it so a pairing completion resumes
+    /// blocked turns through the same path as OAuth callbacks and
+    /// manual-token submissions.
+    #[cfg(feature = "telegram-v2-host-beta")]
+    pub(crate) fn continuation_dispatcher(&self) -> Arc<dyn RebornAuthContinuationDispatcher> {
+        Arc::clone(&self.continuation_dispatcher)
+    }
+
     pub fn with_security_audit_sink(mut self, sink: Arc<dyn SecurityAuditSink>) -> Self {
         self.security_audit_sink = Some(sink);
         self
