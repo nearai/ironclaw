@@ -286,7 +286,16 @@ where
             safe_summary: None,
         });
     };
-    let output = decode_wasm_tool_output(output_json);
+    let output = match serde_json::from_str(&output_json) {
+        Ok(output) => output,
+        Err(_) => {
+            guard.account_failed(Some(&execution.usage), wasm_resource_error)?;
+            return Err(DispatchError::Wasm {
+                kind: RuntimeDispatchErrorKind::OutputDecode,
+                safe_summary: None,
+            });
+        }
+    };
     let receipt = guard.reconcile(execution.usage.clone(), wasm_resource_error)?;
     Ok(RuntimeAdapterResult {
         output,
@@ -295,24 +304,6 @@ where
         usage: execution.usage,
         receipt,
     })
-}
-
-/// Decode a WASM guest's `output` string into a JSON value.
-///
-/// The guest is expected to emit a JSON document, but some tools legitimately
-/// return plain text whose `output_schema` admits a bare string — for example
-/// `github.get_job_logs` returns raw GitHub Actions log text (schema
-/// `raw_output` = object|array|string|null). Rather than fail the whole call
-/// with `OutputDecode`, which strands the fetched content and hands the model a
-/// useless error, treat unparseable output as a JSON string value. It is
-/// schema-valid for those tools, and the content still flows through redaction
-/// and the model-observation / result-record / `result_read` budgeting exactly
-/// like any other output.
-fn decode_wasm_tool_output(output_json: String) -> serde_json::Value {
-    match serde_json::from_str::<serde_json::Value>(&output_json) {
-        Ok(output) => output,
-        Err(_) => serde_json::Value::String(output_json),
-    }
 }
 
 /// Run the synchronous wasmtime guest call on the blocking thread pool.
@@ -1501,37 +1492,5 @@ mod tests {
             DispatchError::Wasm { safe_summary, .. } => assert_eq!(safe_summary, None),
             other => panic!("expected Wasm dispatch error, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn json_wasm_output_is_parsed_as_json() {
-        assert_eq!(
-            decode_wasm_tool_output(r#"{"id":123}"#.to_string()),
-            serde_json::json!({ "id": 123 }),
-        );
-        assert_eq!(
-            decode_wasm_tool_output("[1,2,3]".to_string()),
-            serde_json::json!([1, 2, 3]),
-        );
-    }
-
-    #[test]
-    fn plain_text_wasm_output_is_coerced_to_a_json_string() {
-        // Regression: `github.get_job_logs` returns raw GitHub Actions log text,
-        // which is not JSON. It must reach the model as a string value rather
-        // than failing the whole call with `OutputDecode`.
-        let log = "2026-07-12T06:19:02Z error: failed to select a version for `ed25519-dalek`";
-        assert_eq!(
-            decode_wasm_tool_output(log.to_string()),
-            serde_json::Value::String(log.to_string()),
-        );
-
-        // A bare log line that merely starts with a JSON-ish token is still not
-        // valid JSON and is preserved verbatim as a string.
-        let noisy = "123 build failed";
-        assert_eq!(
-            decode_wasm_tool_output(noisy.to_string()),
-            serde_json::Value::String(noisy.to_string()),
-        );
     }
 }
