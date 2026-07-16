@@ -778,3 +778,66 @@ mod navigation_polish_tests {
         assert_eq!(effects, vec![Effect::Quit]);
     }
 }
+
+/// Round-trip reversibility: every modal must eventually return focus to
+/// the composer via `Esc`, never dead-end. Threads/Automations close in one
+/// `Esc`; the provider modal's `Models` step steps back to `Providers`
+/// first (existing, intentional — see `provider_modal::dispatch_esc`) and
+/// needs a second `Esc` to reach the composer. One consolidated test over
+/// all three modal kinds rather than three near-duplicates (each modal's
+/// own `Esc` behavior is already unit-tested in its own module; this test's
+/// job is specifically the cross-modal `Focus` contract).
+#[cfg(test)]
+mod modal_round_trip_tests {
+    use crossterm::event::KeyCode;
+
+    use super::test_support::{
+        automations_modal_with, key, models_modal_with, providers_modal_with, threads_modal_with,
+    };
+    use super::*;
+
+    fn esc(state: &mut AppState) {
+        reduce(state, AppEvent::Key(key(KeyCode::Esc)));
+    }
+
+    #[test]
+    fn threads_modal_esc_returns_focus_to_the_composer() {
+        let mut state = AppState::default().set_modal(Some(threads_modal_with(["t-1"], 0)));
+        esc(&mut state);
+        assert_eq!(state.focus(), Focus::Composer);
+    }
+
+    #[test]
+    fn automations_modal_esc_returns_focus_to_the_composer() {
+        let mut state = AppState::default()
+            .set_modal(Some(automations_modal_with(&[("a-1", "n", "active")], 0)));
+        esc(&mut state);
+        assert_eq!(state.focus(), Focus::Composer);
+    }
+
+    #[test]
+    fn provider_modal_providers_level_esc_returns_focus_to_the_composer() {
+        let mut state =
+            AppState::default().set_modal(Some(providers_modal_with(&[("p-1", "openai")], 0)));
+        esc(&mut state);
+        assert_eq!(state.focus(), Focus::Composer);
+    }
+
+    #[test]
+    fn provider_modal_models_level_esc_steps_back_then_closes_on_a_second_esc() {
+        let mut state =
+            AppState::default().set_modal(Some(models_modal_with("p-1", "openai", &["gpt-x"], 0)));
+        esc(&mut state);
+        assert_eq!(
+            state.focus(),
+            Focus::Modal,
+            "Models steps back to Providers first, not straight to the composer"
+        );
+        assert!(matches!(
+            &state.modal,
+            Some(Modal::Provider(ProviderModalState::Providers { .. }))
+        ));
+        esc(&mut state);
+        assert_eq!(state.focus(), Focus::Composer);
+    }
+}
