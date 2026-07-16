@@ -99,6 +99,7 @@ export function WorkspaceViewer({ path, file, isLoading, onNavigate }) {
         <div className="flex items-center gap-2">
           <StatusPill tone="muted" label={meta} />
           <Button
+            data-testid="workspace-download"
             variant="secondary"
             size="sm"
             onClick={handleDownload}

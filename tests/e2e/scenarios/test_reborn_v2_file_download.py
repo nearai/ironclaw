@@ -112,10 +112,8 @@ async def test_workspace_viewer_reports_download_failure(reborn_v2_yolo_page):
         fail_content_download,
     )
 
-    await page.get_by_role("link", name="Workspace", exact=True).click()
-    await expect(page.get_by_role("heading", name="Workspace", exact=True)).to_be_visible(
-        timeout=15000
-    )
+    await page.locator(SEL_V2["nav_workspace"]).click()
+    await expect(page.locator(SEL_V2["workspace_heading"])).to_be_visible(timeout=15000)
     await page.evaluate(
         """() => {
           history.pushState({}, "", "/v2/workspace/workspace/report.pdf");
@@ -123,12 +121,12 @@ async def test_workspace_viewer_reports_download_failure(reborn_v2_yolo_page):
         }"""
     )
 
-    download_button = page.get_by_role("button", name="Download", exact=True)
+    download_button = page.locator(SEL_V2["workspace_download"])
     await expect(download_button).to_be_visible(timeout=15000)
 
     await download_button.click()
 
-    failure_toast = page.get_by_role("status").filter(
+    failure_toast = page.locator(SEL_V2["toast"]).filter(
         has_text="Couldn't download this file. Please try again."
     )
     await expect(failure_toast).to_be_visible(timeout=5000)

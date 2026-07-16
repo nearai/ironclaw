@@ -35,6 +35,7 @@ export function ToastViewport() {
         (item) => (
           <div
             key={item.id}
+            data-testid="toast"
             role="status"
             className={[
               "pointer-events-auto flex items-center gap-2 rounded-xl border bg-[var(--v2-surface)] px-3.5 py-2.5 text-sm shadow-[0_20px_40px_-20px_rgba(0,0,0,0.7)]",
