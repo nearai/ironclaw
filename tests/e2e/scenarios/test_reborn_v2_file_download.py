@@ -15,6 +15,8 @@ integration. Requires the full E2E harness (cargo build + reborn serve + mock
 LLM + Chromium); it is CI-run, not exercised by `cargo test`.
 """
 
+import json
+import re
 from pathlib import Path
 
 from playwright.async_api import expect
@@ -71,3 +73,62 @@ async def test_reborn_v2_agent_files_render_download_chips(reborn_v2_yolo_page):
     pdf_download = await pdf_dl.value
     assert pdf_download.suggested_filename == "report.pdf"
     assert (await _read_download_bytes(pdf_download)).startswith(b"%PDF-")
+
+
+async def test_workspace_viewer_reports_download_failure(reborn_v2_yolo_page):
+    """A failed Workspace download produces localized, user-visible feedback."""
+    page = reborn_v2_yolo_page
+
+    async def serve_mounts(route):
+        await route.fulfill(
+            content_type="application/json",
+            body=json.dumps({"mounts": [{"mount": "workspace"}]}),
+        )
+
+    async def serve_stat(route):
+        await route.fulfill(
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "stat": {
+                        "kind": "file",
+                        "mime_type": "application/pdf",
+                        "size_bytes": 12,
+                    }
+                }
+            ),
+        )
+
+    async def fail_content_download(route):
+        await route.abort("internetdisconnected")
+
+    await page.route("**/api/webchat/v2/fs/mounts", serve_mounts)
+    await page.route(
+        re.compile(r".*/api/webchat/v2/fs/stat(?:\?.*)?$"),
+        serve_stat,
+    )
+    await page.route(
+        re.compile(r".*/api/webchat/v2/fs/content(?:\?.*)?$"),
+        fail_content_download,
+    )
+
+    await page.get_by_role("link", name="Workspace", exact=True).click()
+    await expect(page.get_by_role("heading", name="Workspace", exact=True)).to_be_visible(
+        timeout=15000
+    )
+    await page.evaluate(
+        """() => {
+          history.pushState({}, "", "/v2/workspace/workspace/report.pdf");
+          window.dispatchEvent(new PopStateEvent("popstate"));
+        }"""
+    )
+
+    download_button = page.get_by_role("button", name="Download", exact=True)
+    await expect(download_button).to_be_visible(timeout=15000)
+
+    await download_button.click()
+
+    failure_toast = page.get_by_role("status").filter(
+        has_text="Couldn't download this file. Please try again."
+    )
+    await expect(failure_toast).to_be_visible(timeout=5000)
