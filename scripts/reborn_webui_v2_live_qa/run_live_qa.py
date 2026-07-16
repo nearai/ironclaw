@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import shutil
@@ -2571,6 +2572,70 @@ async def _slack_search_marker_hits(
             }
         )
     return {"checked": True, "hits": hits}
+
+
+SLACK_SEARCH_INDEX_TIMEOUT_ENV = (
+    "REBORN_WEBUI_V2_LIVE_QA_SLACK_INDEX_TIMEOUT_SECONDS"
+)
+SLACK_SEARCH_INDEX_DEFAULT_TIMEOUT_SECONDS = 90.0
+SLACK_SEARCH_INDEX_ERROR_MAX_CHARS = 240
+
+
+def _slack_search_index_timeout_seconds(ctx: LiveQaContext) -> float:
+    configured = _env_value(SLACK_SEARCH_INDEX_TIMEOUT_ENV, ctx.env)
+    if configured is None:
+        return SLACK_SEARCH_INDEX_DEFAULT_TIMEOUT_SECONDS
+    try:
+        timeout = float(configured)
+    except ValueError as exc:
+        raise AssertionError(
+            "probe precondition failed: "
+            f"{SLACK_SEARCH_INDEX_TIMEOUT_ENV} must be a finite non-negative number"
+        ) from exc
+    if not math.isfinite(timeout) or timeout < 0:
+        raise AssertionError(
+            "probe precondition failed: "
+            f"{SLACK_SEARCH_INDEX_TIMEOUT_ENV} must be a finite non-negative number"
+        )
+    return timeout
+
+
+async def _wait_for_slack_search_index(
+    ctx: LiveQaContext,
+    *,
+    marker: str,
+    timeout: float,
+    poll_interval: float = 5.0,
+) -> dict[str, object]:
+    """Wait until Slack workspace search observes a freshly seeded marker."""
+    started = time.monotonic()
+    deadline = started + max(timeout, 0.0)
+    attempts = 0
+    while True:
+        attempts += 1
+        observation = await _slack_search_marker_hits(ctx, marker=marker)
+        hits = observation.get("hits")
+        now = time.monotonic()
+        latency_ms = int(max(0.0, now - started) * 1000)
+        if observation.get("checked") and isinstance(hits, list) and hits:
+            return {
+                "indexed": True,
+                "attempts": attempts,
+                "latency_ms": latency_ms,
+            }
+        if now >= deadline:
+            result: dict[str, object] = {
+                "indexed": False,
+                "attempts": attempts,
+                "latency_ms": latency_ms,
+            }
+            error = observation.get("error")
+            if error:
+                result["last_error"] = " ".join(str(error).split())[
+                    :SLACK_SEARCH_INDEX_ERROR_MAX_CHARS
+                ]
+            return result
+        await asyncio.sleep(min(max(poll_interval, 0.0), deadline - now))
 
 
 async def _slack_personal_dm_counterpart_names(
@@ -7283,6 +7348,31 @@ async def case_qa_10g_slack_last_message_sent_global(
             label=last_sent_marker,
             actor="personal",
         )
+        search_index = await _wait_for_slack_search_index(
+            ctx,
+            marker=last_sent_marker,
+            timeout=_slack_search_index_timeout_seconds(ctx),
+        )
+        details["slack_search_index"] = search_index
+        if not search_index.get("indexed"):
+            result = _result(
+                case_name,
+                False,
+                started,
+                {
+                    **details,
+                    "error": (
+                        "Slack workspace search did not index the seeded "
+                        "message before the bounded preflight deadline"
+                    ),
+                    "failure_class": "infrastructure",
+                    "failure_category": "slack_search_index_stale",
+                    "failure_status": "inconclusive",
+                    "inconclusive": True,
+                },
+            )
+            result.details["blocking"] = False
+            return result
         chat, reply_text = await _slack_correctness_chat_reply(
             ctx,
             case_name=case_name,
@@ -7299,9 +7389,20 @@ async def case_qa_10g_slack_last_message_sent_global(
             return chat
         details.update(chat.details)
         if last_sent_marker not in reply_text:
-            raise AssertionError(
-                "agent did not surface the user's workspace-global most recent "
-                f"sent message: reply lacked {last_sent_marker}"
+            return _result(
+                case_name,
+                False,
+                started,
+                {
+                    **details,
+                    "error": (
+                        "agent did not surface the user's workspace-global "
+                        f"most recent sent message: reply lacked {last_sent_marker}"
+                    ),
+                    "failure_class": "model_quality",
+                    "failure_category": "answer_mismatch",
+                    "failure_status": "failed",
+                },
             )
         return _result(case_name, True, started, details)
     except Exception as exc:
