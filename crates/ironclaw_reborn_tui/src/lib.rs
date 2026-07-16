@@ -5,6 +5,13 @@
 //! route/handler crate); wire types come from
 //! `ironclaw_product_workflow::webchat_schema` — see
 //! `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs`.
+//!
+//! `lib.rs` is deliberately thin: rendering lives in `ui/`, application
+//! state and business logic in `app/`, HTTP/SSE plumbing in `client/`, and
+//! process lifecycle in `spawn/`. This file wires those together into the
+//! terminal event loop ([`run_tui`]) and maps each reducer-emitted
+//! [`app::ApiCall`] onto the matching [`client::ApiClient`] method
+//! ([`execute_effect`]).
 
 #![forbid(unsafe_code)]
 
@@ -12,6 +19,24 @@ pub mod app;
 pub mod client;
 pub mod spawn;
 pub mod ui;
+
+use std::io::{self, Stdout};
+use std::time::Duration;
+
+use anyhow::Context;
+use crossterm::execute;
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
+use futures::StreamExt;
+use ironclaw_product_workflow::{LlmConfigSnapshot, LlmModelsResult, LlmProbeResult};
+use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
+
+use app::{
+    ApiCall, AppEvent, AppState, ConnState, Effect, Modal, ProviderModalState, TranscriptItem,
+};
+use client::{ApiClient, ClientError, ThreadMessageSummary};
 
 pub use spawn::ProcessInvocation;
 
@@ -23,12 +48,899 @@ pub struct TuiConfig {
     pub spawn: Option<ProcessInvocation>,
 }
 
-/// Entry point the CLI's `tui` subcommand calls. Not yet implemented — the
-/// terminal event loop, app state, and render layer land in a later task
-/// (`app/`, `ui/`, `spawn/`). This stub exists so the crate compiles and is
-/// wireable now; every field of `TuiConfig` is used here only to avoid an
-/// unused-field warning until the real loop lands.
+/// Page size for the timeline fetched on startup and after a thread switch.
+/// Mirrors `app::threads_modal`'s own `DEFAULT_TIMELINE_LIMIT` (that
+/// constant is private to its module, so this is a separate copy, not a
+/// shared one — both independently pick the "first page" default).
+const INITIAL_TIMELINE_LIMIT: u32 = 50;
+
+/// Entry point the CLI's `tui` subcommand calls: ensures `serve` is
+/// reachable (spawning it if configured to), takes over the terminal, runs
+/// the event loop, and always restores the terminal before returning —
+/// including when the event loop itself returns an error.
 pub async fn run_tui(cfg: TuiConfig) -> anyhow::Result<()> {
-    let _ = (&cfg.base_url, &cfg.token, &cfg.spawn);
-    anyhow::bail!("ironclaw_reborn_tui::run_tui is not implemented yet (crate skeleton only)")
+    let client = ApiClient::new(cfg.base_url, cfg.token);
+    let _serve_handle = spawn::ensure_serve(&client, cfg.spawn.as_ref())
+        .await
+        .context("could not reach or start the Reborn WebUI service")?;
+
+    let mut terminal = setup_terminal()?;
+    install_panic_hook();
+    let result = run_event_loop(&mut terminal, &client).await;
+    teardown_terminal(&mut terminal)?;
+    result
+}
+
+fn setup_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
+    enable_raw_mode()?;
+    execute!(io::stdout(), EnterAlternateScreen)?;
+    Ok(Terminal::new(CrosstermBackend::new(io::stdout()))?)
+}
+
+/// Installs a panic hook that restores the terminal (best-effort — errors
+/// from the restore calls are swallowed, since a panic hook itself must not
+/// panic) before running the previous hook, so a panic mid-event-loop never
+/// leaves the user's terminal stuck in raw mode / the alternate screen.
+fn install_panic_hook() {
+    let original = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        original(info);
+    }));
+}
+
+fn teardown_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> {
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    Ok(())
+}
+
+/// The terminal event loop: draws one frame, waits for the next of
+/// {keypress, SSE frame, 250ms tick}, feeds it through [`app::reduce`], and
+/// executes whatever [`Effect`]s came back. Runs until `state.quitting`.
+///
+/// Startup sequence (per the design's "Initial flow"): list threads, pick
+/// the first one (or create one if the account has none yet), rehydrate its
+/// timeline, then subscribe to its SSE stream. A later thread switch (via
+/// the threads modal's `Enter`, or a successful `ApiCall::CreateThread`)
+/// re-subscribes automatically — see the `subscribed_thread_id` check below.
+async fn run_event_loop(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    client: &ApiClient,
+) -> anyhow::Result<()> {
+    let mut state = AppState::default();
+
+    let threads = client
+        .list_threads()
+        .await
+        .context("list_threads during TUI startup")?;
+    let initial_thread = match threads.into_iter().next() {
+        Some(thread) => thread,
+        None => client
+            .create_thread()
+            .await
+            .context("create_thread during TUI startup (account has no threads yet)")?,
+    };
+    state.thread_id = Some(initial_thread.thread_id.clone());
+    if let Ok(page) = client
+        .timeline(&initial_thread.thread_id, INITIAL_TIMELINE_LIMIT, None)
+        .await
+    {
+        state.transcript = page
+            .messages
+            .iter()
+            .map(transcript_item_from_message)
+            .collect();
+    }
+
+    let mut subscribed_thread_id = initial_thread.thread_id;
+    let mut sse = Box::pin(client::events::subscribe(
+        client,
+        &subscribed_thread_id,
+        None,
+    ));
+    let mut ticks = tokio::time::interval(Duration::from_millis(250));
+    let (key_tx, mut key_rx) = tokio::sync::mpsc::unbounded_channel();
+    std::thread::spawn(move || blocking_crossterm_reader(key_tx));
+
+    loop {
+        terminal.draw(|f| ui::render(f, &state))?;
+
+        let event = tokio::select! {
+            Some(key) = key_rx.recv() => AppEvent::Key(key),
+            Some(frame) = sse.next() => match frame {
+                Ok(frame) => AppEvent::Server(Box::new(frame)),
+                // `client/events.rs` owns the actual reconnect/backoff
+                // budget; a stream item error here just means "this attempt
+                // ended" — reflect it as Reconnecting and let the next
+                // select iteration pull the next (possibly `Err`, possibly
+                // budget-exhausted) item from the same stream.
+                Err(_) => AppEvent::Conn(ConnState::Reconnecting { attempt: 1 }),
+            },
+            _ = ticks.tick() => AppEvent::Tick,
+        };
+
+        for effect in app::reduce(&mut state, event) {
+            execute_effect(client, &mut state, effect).await;
+        }
+
+        if let Some(thread_id) = state.thread_id.clone()
+            && thread_id != subscribed_thread_id
+        {
+            subscribed_thread_id = thread_id;
+            sse = Box::pin(client::events::subscribe(
+                client,
+                &subscribed_thread_id,
+                None,
+            ));
+        }
+
+        if state.quitting {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Forwards `crossterm::event::read()` (blocking-only, so it needs its own
+/// OS thread) key events to the async event loop. Any non-key event is
+/// dropped; a closed channel or a read error ends the thread.
+fn blocking_crossterm_reader(tx: tokio::sync::mpsc::UnboundedSender<crossterm::event::KeyEvent>) {
+    loop {
+        match crossterm::event::read() {
+            Ok(crossterm::event::Event::Key(key)) => {
+                if tx.send(key).is_err() {
+                    return;
+                }
+            }
+            Ok(_) => {}
+            Err(_) => return,
+        }
+    }
+}
+
+/// Executes one reducer-emitted [`Effect`], mutating `state` with the
+/// result. `pub(crate)` (not private) so this module's `#[cfg(test)]` block
+/// can drive it directly against a local stub server — see the tests below.
+pub(crate) async fn execute_effect(client: &ApiClient, state: &mut AppState, effect: Effect) {
+    match effect {
+        Effect::Quit => state.quitting = true,
+        Effect::Api(call) => execute_api_call(client, state, call).await,
+    }
+}
+
+/// Exhaustive match over every [`ApiCall`] variant onto its
+/// [`ApiClient`] method. Every arm degrades an `Err` to
+/// `state.last_local_error` rather than propagating — the event loop must
+/// never crash on a failed HTTP call (`.claude/CLAUDE.md`: no
+/// `.unwrap()`/`.expect()` in production code).
+async fn execute_api_call(client: &ApiClient, state: &mut AppState, call: ApiCall) {
+    match call {
+        ApiCall::ListThreads => match client.list_threads().await {
+            Ok(threads) => apply_threads_list(state, threads),
+            Err(err) => set_local_error(state, "list threads", err),
+        },
+        // No current caller emits this (the threads modal's "+ new" row is
+        // a render-only affordance — see `ui/modals.rs` — that
+        // `app::threads_modal`'s reducer does not yet wire to
+        // `ApiCall::CreateThread`; a pre-existing landed-`app/` gap, out of
+        // this file's scope). Implemented anyway for match exhaustiveness
+        // and because `run_event_loop`'s own startup path can reach it.
+        ApiCall::CreateThread => match client.create_thread().await {
+            Ok(thread) => {
+                state.thread_id = Some(thread.thread_id);
+                state.transcript.clear();
+                state.pending_gate = None;
+                state.modal = None;
+            }
+            Err(err) => set_local_error(state, "create thread", err),
+        },
+        ApiCall::DeleteThread { thread_id } => match client.delete_thread(&thread_id).await {
+            Ok(()) => {
+                if state.thread_id.as_deref() == Some(thread_id.as_str()) {
+                    state.thread_id = None;
+                    state.transcript.clear();
+                }
+                refresh_threads_modal(client, state).await;
+            }
+            Err(err) => set_local_error(state, "delete thread", err),
+        },
+        ApiCall::LoadTimeline {
+            thread_id,
+            limit,
+            cursor,
+        } => match client.timeline(&thread_id, limit, cursor).await {
+            Ok(page) => {
+                state.transcript = page
+                    .messages
+                    .iter()
+                    .map(transcript_item_from_message)
+                    .collect();
+            }
+            Err(err) => set_local_error(state, "load timeline", err),
+        },
+        ApiCall::SendMessage { thread_id, text } => {
+            // The ack for this message arrives via the SSE stream
+            // (`WebChatV2Event::Accepted`), not this response — see
+            // `client/gates.rs`'s doc comment on `send_message`. Nothing
+            // else to update here on success.
+            if let Err(err) = client.send_message(&thread_id, &text).await {
+                set_local_error(state, "send message", err);
+            }
+        }
+        ApiCall::ResolveGate {
+            thread_id,
+            run_id,
+            gate_ref,
+            resolution,
+        } => {
+            // `state.pending_gate` deliberately stays untouched here even
+            // on success: `app::gate`'s reducer tests pin that the gate
+            // only clears when the server confirms via a later SSE event,
+            // never optimistically from the resolve call's own response.
+            if let Err(err) = client
+                .resolve_gate(&thread_id, &run_id, &gate_ref, resolution)
+                .await
+            {
+                set_local_error(state, "resolve gate", err);
+            }
+        }
+        ApiCall::ListAutomations => match client.list_automations().await {
+            Ok(automations) => apply_automations_list(state, automations),
+            Err(err) => set_local_error(state, "list automations", err),
+        },
+        ApiCall::PauseAutomation { id } => match client.pause_automation(&id).await {
+            Ok(_) => refresh_automations_modal(client, state).await,
+            Err(err) => set_local_error(state, "pause automation", err),
+        },
+        ApiCall::ResumeAutomation { id } => match client.resume_automation(&id).await {
+            Ok(_) => refresh_automations_modal(client, state).await,
+            Err(err) => set_local_error(state, "resume automation", err),
+        },
+        ApiCall::RenameAutomation { id, name } => {
+            match client.rename_automation(&id, &name).await {
+                Ok(_) => refresh_automations_modal(client, state).await,
+                Err(err) => set_local_error(state, "rename automation", err),
+            }
+        }
+        ApiCall::LlmProviders => match client.llm_providers().await {
+            Ok(snapshot) => apply_llm_providers(state, snapshot),
+            Err(err) => set_local_error(state, "list llm providers", err),
+        },
+        ApiCall::LlmListModels {
+            provider_id,
+            adapter,
+            base_url,
+        } => match client
+            .llm_list_models(&provider_id, &adapter, base_url.as_deref())
+            .await
+        {
+            Ok(result) => apply_llm_models(state, &provider_id, result),
+            Err(err) => set_local_error(state, "list llm models", err),
+        },
+        ApiCall::LlmSetActive { provider_id, model } => {
+            // `ProviderModalState::Confirmed` is already set optimistically
+            // by `app::provider_modal`'s reducer (with `test_result: None`)
+            // before this effect runs; nothing further to apply on success,
+            // the `LlmTestConnection` effect queued alongside this one
+            // (same key press, see `provider_modal::dispatch_enter`) is
+            // what populates `test_result`.
+            if let Err(err) = client.llm_set_active(&provider_id, &model).await {
+                set_local_error(state, "set active llm provider", err);
+            }
+        }
+        ApiCall::LlmTestConnection {
+            provider_id,
+            adapter,
+            base_url,
+        } => match client
+            .llm_test_connection(&provider_id, &adapter, base_url.as_deref())
+            .await
+        {
+            Ok(result) => apply_llm_test_result(state, result),
+            Err(err) => set_local_error(state, "test llm connection", err),
+        },
+    }
+}
+
+fn set_local_error(state: &mut AppState, action: &str, err: ClientError) {
+    state.last_local_error = Some(format!("{action} failed: {err}"));
+}
+
+fn apply_threads_list(state: &mut AppState, threads: Vec<client::ThreadSummary>) {
+    if let Some(Modal::Threads(modal)) = &mut state.modal {
+        modal.selected = modal.selected.min(threads.len().saturating_sub(1));
+        modal.threads = threads;
+        modal.loading = false;
+    }
+}
+
+async fn refresh_threads_modal(client: &ApiClient, state: &mut AppState) {
+    if !matches!(state.modal, Some(Modal::Threads(_))) {
+        return;
+    }
+    match client.list_threads().await {
+        Ok(threads) => apply_threads_list(state, threads),
+        Err(err) => set_local_error(state, "refresh threads", err),
+    }
+}
+
+fn apply_automations_list(state: &mut AppState, automations: Vec<client::AutomationSummary>) {
+    if let Some(Modal::Automations(modal)) = &mut state.modal {
+        modal.selected = modal.selected.min(automations.len().saturating_sub(1));
+        modal.automations = automations;
+        modal.loading = false;
+    }
+}
+
+async fn refresh_automations_modal(client: &ApiClient, state: &mut AppState) {
+    if !matches!(state.modal, Some(Modal::Automations(_))) {
+        return;
+    }
+    match client.list_automations().await {
+        Ok(automations) => apply_automations_list(state, automations),
+        Err(err) => set_local_error(state, "refresh automations", err),
+    }
+}
+
+fn apply_llm_providers(state: &mut AppState, snapshot: LlmConfigSnapshot) {
+    if let Some(Modal::Provider(ProviderModalState::Providers {
+        providers,
+        selected,
+        loading,
+    })) = &mut state.modal
+    {
+        *selected = (*selected).min(snapshot.providers.len().saturating_sub(1));
+        *providers = snapshot.providers;
+        *loading = false;
+    }
+}
+
+fn apply_llm_models(state: &mut AppState, provider_id: &str, result: LlmModelsResult) {
+    if let Some(Modal::Provider(ProviderModalState::Models {
+        provider_id: current_provider_id,
+        models,
+        selected,
+        loading,
+        ..
+    })) = &mut state.modal
+    {
+        // Guards against a stale response landing after the user has
+        // already moved on to a different provider (Esc back to Providers,
+        // then Enter on a different one before this call returned).
+        if current_provider_id == provider_id {
+            *selected = (*selected).min(result.models.len().saturating_sub(1));
+            *models = result.models;
+            *loading = false;
+        }
+    }
+}
+
+fn apply_llm_test_result(state: &mut AppState, result: LlmProbeResult) {
+    if let Some(Modal::Provider(ProviderModalState::Confirmed { test_result, .. })) =
+        &mut state.modal
+    {
+        *test_result = Some(result);
+    }
+}
+
+/// `ThreadMessageSummary::kind` is the raw wire string (see
+/// `client/threads.rs`'s doc comment for the full enumeration); only
+/// `user`/`assistant` map to their own `TranscriptItem` variant, everything
+/// else (system/summary/checkpoint_reference/tool_result_reference/
+/// capability_display_preview) renders as a `System` line — this crate's
+/// `TranscriptItem::Activity`/`Preview` variants need the full typed
+/// `CapabilityActivityView`/`CapabilityDisplayPreviewView`, which the flat
+/// timeline read does not carry (only the live SSE stream does).
+fn transcript_item_from_message(message: &ThreadMessageSummary) -> TranscriptItem {
+    let text = message.content.clone().unwrap_or_default();
+    match message.kind.as_str() {
+        "user" => TranscriptItem::User { text },
+        "assistant" => TranscriptItem::Assistant { text },
+        _ if text.is_empty() => TranscriptItem::System {
+            text: message.kind.clone(),
+        },
+        _ => TranscriptItem::System { text },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use axum::Router;
+    use axum::extract::{OriginalUri, State};
+    use axum::http::{Method, StatusCode};
+    use axum::response::{IntoResponse, Response};
+    use tokio::net::TcpListener;
+
+    use super::*;
+    use app::{AutomationsModalState, PendingGate, ThreadsModalState};
+
+    /// Minimal local axum stub for `execute_effect` tests, following the
+    /// pattern established in `spawn/mod.rs` (self-contained, axum/tower
+    /// are already dev-dependencies) rather than the `tests/support`
+    /// fixture: `execute_effect` is `pub(crate)`, unreachable from an
+    /// external `tests/*.rs` integration-test binary. One scripted JSON
+    /// body per `"METHOD /path"` key; a fallback records every hit so a
+    /// test can also assert which route was actually called.
+    #[derive(Default)]
+    struct StubState {
+        routes: Mutex<HashMap<String, (u16, serde_json::Value)>>,
+        hits: Mutex<Vec<String>>,
+    }
+
+    struct StubServer {
+        base_url: String,
+        state: Arc<StubState>,
+        _handle: tokio::task::JoinHandle<()>,
+    }
+
+    impl StubServer {
+        async fn start() -> Self {
+            let state = Arc::new(StubState::default());
+            let router = Router::new().fallback(fallback).with_state(state.clone());
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind stub");
+            let base_url = format!("http://{}", listener.local_addr().expect("local addr"));
+            let handle = tokio::spawn(async move {
+                axum::serve(listener, router).await.expect("run stub");
+            });
+            Self {
+                base_url,
+                state,
+                _handle: handle,
+            }
+        }
+
+        fn ok(&self, method_and_path: &str, body: serde_json::Value) {
+            self.state
+                .routes
+                .lock()
+                .expect("routes lock")
+                .insert(method_and_path.to_string(), (200, body));
+        }
+
+        fn error(&self, method_and_path: &str, status: u16) {
+            self.state.routes.lock().expect("routes lock").insert(
+                method_and_path.to_string(),
+                (status, serde_json::json!({"error": "stubbed"})),
+            );
+        }
+
+        fn hits(&self) -> Vec<String> {
+            self.state.hits.lock().expect("hits lock").clone()
+        }
+
+        fn client(&self) -> ApiClient {
+            ApiClient::new(self.base_url.clone(), "stub-token".to_string())
+        }
+    }
+
+    async fn fallback(
+        State(state): State<Arc<StubState>>,
+        method: Method,
+        OriginalUri(uri): OriginalUri,
+    ) -> Response {
+        let key = format!("{method} {}", uri.path());
+        state.hits.lock().expect("hits lock").push(key.clone());
+        let routes = state.routes.lock().expect("routes lock");
+        match routes.get(&key) {
+            Some((status, body)) => (
+                StatusCode::from_u16(*status).unwrap_or(StatusCode::OK),
+                axum::Json(body.clone()),
+            )
+                .into_response(),
+            None => (
+                StatusCode::NOT_FOUND,
+                axum::Json(serde_json::json!({"error": "unstubbed_route", "path": key})),
+            )
+                .into_response(),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_threads_populates_open_threads_modal() {
+        let stub = StubServer::start().await;
+        stub.ok(
+            "GET /api/webchat/v2/threads",
+            serde_json::json!({"threads": [{"thread_id": "t-1"}, {"thread_id": "t-2"}]}),
+        );
+        let mut state =
+            AppState::default().set_modal(Some(Modal::Threads(ThreadsModalState::default())));
+
+        execute_effect(
+            &stub.client(),
+            &mut state,
+            Effect::Api(ApiCall::ListThreads),
+        )
+        .await;
+
+        assert!(matches!(&state.modal, Some(Modal::Threads(m)) if m.threads.len() == 2));
+        assert_eq!(stub.hits(), vec!["GET /api/webchat/v2/threads"]);
+    }
+
+    #[tokio::test]
+    async fn list_threads_error_degrades_to_local_error_not_panic() {
+        let stub = StubServer::start().await;
+        stub.error("GET /api/webchat/v2/threads", 500);
+        let mut state = AppState::default();
+
+        execute_effect(
+            &stub.client(),
+            &mut state,
+            Effect::Api(ApiCall::ListThreads),
+        )
+        .await;
+
+        assert!(state.last_local_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn create_thread_switches_to_the_new_thread_and_closes_modal() {
+        let stub = StubServer::start().await;
+        stub.ok(
+            "POST /api/webchat/v2/threads",
+            serde_json::json!({"thread": {"thread_id": "t-new"}}),
+        );
+        let mut state =
+            AppState::default().set_modal(Some(Modal::Threads(ThreadsModalState::default())));
+
+        execute_effect(
+            &stub.client(),
+            &mut state,
+            Effect::Api(ApiCall::CreateThread),
+        )
+        .await;
+
+        assert_eq!(state.thread_id.as_deref(), Some("t-new"));
+        assert!(state.modal.is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_thread_clears_current_thread_when_it_was_deleted() {
+        let stub = StubServer::start().await;
+        stub.ok("DELETE /api/webchat/v2/threads/t-1", serde_json::json!({}));
+        stub.ok(
+            "GET /api/webchat/v2/threads",
+            serde_json::json!({"threads": []}),
+        );
+        let mut state = AppState::default().set_thread_id("t-1");
+        state.transcript.push(TranscriptItem::final_text("old"));
+
+        execute_effect(
+            &stub.client(),
+            &mut state,
+            Effect::Api(ApiCall::DeleteThread {
+                thread_id: "t-1".to_string(),
+            }),
+        )
+        .await;
+
+        assert!(state.thread_id.is_none());
+        assert!(state.transcript.is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_timeline_replaces_transcript_from_messages() {
+        let stub = StubServer::start().await;
+        stub.ok(
+            "GET /api/webchat/v2/threads/t-1/timeline",
+            serde_json::json!({
+                "thread": {"thread_id": "t-1"},
+                "messages": [
+                    {"message_id": "m-1", "sequence": 1, "kind": "user", "status": "accepted", "content": "hi"},
+                    {"message_id": "m-2", "sequence": 2, "kind": "assistant", "status": "finalized", "content": "hello"},
+                ],
+            }),
+        );
+        let mut state = AppState::default();
+        state.transcript.push(TranscriptItem::System {
+            text: "stale".to_string(),
+        });
+
+        execute_effect(
+            &stub.client(),
+            &mut state,
+            Effect::Api(ApiCall::LoadTimeline {
+                thread_id: "t-1".to_string(),
+                limit: 50,
+                cursor: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(state.transcript.len(), 2);
+        assert_eq!(state.transcript[0].as_final_text(), None);
+        assert!(
+            !state
+                .transcript
+                .iter()
+                .any(|i| i.as_error_text() == Some("stale"))
+        );
+    }
+
+    #[tokio::test]
+    async fn send_message_error_degrades_to_local_error_not_panic() {
+        let stub = StubServer::start().await;
+        stub.error("POST /api/webchat/v2/threads/t-1/messages", 503);
+        let mut state = AppState::default().set_thread_id("t-1");
+
+        execute_effect(
+            &stub.client(),
+            &mut state,
+            Effect::Api(ApiCall::SendMessage {
+                thread_id: "t-1".to_string(),
+                text: "hi".to_string(),
+            }),
+        )
+        .await;
+
+        assert!(state.last_local_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn resolve_gate_leaves_pending_gate_untouched_on_success() {
+        let stub = StubServer::start().await;
+        stub.ok(
+            "POST /api/webchat/v2/threads/t-1/runs/run-1/gates/gate-1/resolve",
+            serde_json::json!({}),
+        );
+        let mut state = AppState::default()
+            .set_thread_id("t-1")
+            .set_pending_gate(Some(PendingGate::approval_stub("Allow write_file?")));
+
+        execute_effect(
+            &stub.client(),
+            &mut state,
+            Effect::Api(ApiCall::ResolveGate {
+                thread_id: "t-1".to_string(),
+                run_id: "run-1".to_string(),
+                gate_ref: "gate-1".to_string(),
+                resolution: ironclaw_product_workflow::WebUiGateResolution::Approved {
+                    always: false,
+                },
+            }),
+        )
+        .await;
+
+        assert!(
+            state.pending_gate.is_some(),
+            "gate clears only on a later server-confirmed event, not the resolve response"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_automations_populates_open_automations_modal() {
+        let stub = StubServer::start().await;
+        stub.ok(
+            "GET /api/webchat/v2/automations",
+            serde_json::json!({"automations": [{"automation_id": "a-1", "name": "Daily digest", "state": "active"}]}),
+        );
+        let mut state = AppState::default()
+            .set_modal(Some(Modal::Automations(AutomationsModalState::default())));
+
+        execute_effect(
+            &stub.client(),
+            &mut state,
+            Effect::Api(ApiCall::ListAutomations),
+        )
+        .await;
+
+        assert!(matches!(&state.modal, Some(Modal::Automations(m)) if m.automations.len() == 1));
+    }
+
+    #[tokio::test]
+    async fn pause_automation_refreshes_the_open_modal() {
+        let stub = StubServer::start().await;
+        stub.ok(
+            "POST /api/webchat/v2/automations/a-1/pause",
+            serde_json::json!({"automation": {"automation_id": "a-1", "name": "Daily digest", "state": "paused"}}),
+        );
+        stub.ok(
+            "GET /api/webchat/v2/automations",
+            serde_json::json!({"automations": [{"automation_id": "a-1", "name": "Daily digest", "state": "paused"}]}),
+        );
+        let mut state = AppState::default()
+            .set_modal(Some(Modal::Automations(AutomationsModalState::default())));
+
+        execute_effect(
+            &stub.client(),
+            &mut state,
+            Effect::Api(ApiCall::PauseAutomation {
+                id: "a-1".to_string(),
+            }),
+        )
+        .await;
+
+        assert!(
+            stub.hits()
+                .contains(&"GET /api/webchat/v2/automations".to_string())
+        );
+        assert!(
+            matches!(&state.modal, Some(Modal::Automations(m)) if m.automations[0].state == "paused")
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_automation_error_degrades_to_local_error_not_panic() {
+        let stub = StubServer::start().await;
+        stub.error("POST /api/webchat/v2/automations/a-1/resume", 500);
+        let mut state = AppState::default();
+
+        execute_effect(
+            &stub.client(),
+            &mut state,
+            Effect::Api(ApiCall::ResumeAutomation {
+                id: "a-1".to_string(),
+            }),
+        )
+        .await;
+
+        assert!(state.last_local_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn rename_automation_refreshes_the_open_modal() {
+        let stub = StubServer::start().await;
+        stub.ok(
+            "POST /api/webchat/v2/automations/a-1",
+            serde_json::json!({"automation": {"automation_id": "a-1", "name": "renamed", "state": "active"}}),
+        );
+        stub.ok(
+            "GET /api/webchat/v2/automations",
+            serde_json::json!({"automations": [{"automation_id": "a-1", "name": "renamed", "state": "active"}]}),
+        );
+        let mut state = AppState::default()
+            .set_modal(Some(Modal::Automations(AutomationsModalState::default())));
+
+        execute_effect(
+            &stub.client(),
+            &mut state,
+            Effect::Api(ApiCall::RenameAutomation {
+                id: "a-1".to_string(),
+                name: "renamed".to_string(),
+            }),
+        )
+        .await;
+
+        assert!(
+            matches!(&state.modal, Some(Modal::Automations(m)) if m.automations[0].name == "renamed")
+        );
+    }
+
+    #[tokio::test]
+    async fn llm_providers_populates_open_provider_modal() {
+        let stub = StubServer::start().await;
+        stub.ok(
+            "GET /api/webchat/v2/llm/providers",
+            serde_json::json!({"providers": [{
+                "id": "openai", "description": "OpenAI", "adapter": "open_ai_completions",
+                "default_model": "gpt-5", "base_url": null, "builtin": true, "active": false,
+                "active_model": null, "api_key_required": true, "accepts_api_key": true,
+                "api_key_set": false, "can_list_models": true
+            }]}),
+        );
+        let mut state =
+            AppState::default().set_modal(Some(Modal::Provider(ProviderModalState::default())));
+
+        execute_effect(
+            &stub.client(),
+            &mut state,
+            Effect::Api(ApiCall::LlmProviders),
+        )
+        .await;
+
+        assert!(matches!(
+            &state.modal,
+            Some(Modal::Provider(ProviderModalState::Providers { providers, .. })) if providers.len() == 1
+        ));
+    }
+
+    #[tokio::test]
+    async fn llm_list_models_populates_matching_models_state() {
+        let stub = StubServer::start().await;
+        stub.ok(
+            "POST /api/webchat/v2/llm/list-models",
+            serde_json::json!({"ok": true, "models": ["gpt-5", "gpt-5-mini"], "message": "ok"}),
+        );
+        let mut state =
+            AppState::default().set_modal(Some(Modal::Provider(ProviderModalState::Models {
+                provider_id: "openai".to_string(),
+                adapter: "open_ai_completions".to_string(),
+                base_url: None,
+                models: Vec::new(),
+                selected: 0,
+                loading: true,
+            })));
+
+        execute_effect(
+            &stub.client(),
+            &mut state,
+            Effect::Api(ApiCall::LlmListModels {
+                provider_id: "openai".to_string(),
+                adapter: "open_ai_completions".to_string(),
+                base_url: None,
+            }),
+        )
+        .await;
+
+        assert!(matches!(
+            &state.modal,
+            Some(Modal::Provider(ProviderModalState::Models { models, .. })) if models.len() == 2
+        ));
+    }
+
+    #[tokio::test]
+    async fn llm_set_active_error_degrades_to_local_error_not_panic() {
+        let stub = StubServer::start().await;
+        stub.error("POST /api/webchat/v2/llm/active", 500);
+        let mut state = AppState::default();
+
+        execute_effect(
+            &stub.client(),
+            &mut state,
+            Effect::Api(ApiCall::LlmSetActive {
+                provider_id: "openai".to_string(),
+                model: "gpt-5".to_string(),
+            }),
+        )
+        .await;
+
+        assert!(state.last_local_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn llm_test_connection_populates_confirmed_test_result() {
+        let stub = StubServer::start().await;
+        stub.ok(
+            "POST /api/webchat/v2/llm/test-connection",
+            serde_json::json!({"ok": true, "message": "reachable"}),
+        );
+        let mut state =
+            AppState::default().set_modal(Some(Modal::Provider(ProviderModalState::Confirmed {
+                provider_id: "openai".to_string(),
+                model: "gpt-5".to_string(),
+                test_result: None,
+            })));
+
+        execute_effect(
+            &stub.client(),
+            &mut state,
+            Effect::Api(ApiCall::LlmTestConnection {
+                provider_id: "openai".to_string(),
+                adapter: "open_ai_completions".to_string(),
+                base_url: None,
+            }),
+        )
+        .await;
+
+        assert!(matches!(
+            &state.modal,
+            Some(Modal::Provider(ProviderModalState::Confirmed { test_result: Some(r), .. })) if r.ok
+        ));
+    }
+
+    #[tokio::test]
+    async fn quit_effect_sets_quitting_without_touching_the_network() {
+        let stub = StubServer::start().await;
+        let mut state = AppState::default();
+
+        execute_effect(&stub.client(), &mut state, Effect::Quit).await;
+
+        assert!(state.quitting);
+        assert!(stub.hits().is_empty());
+    }
+
+    /// Environment-tolerant: sandboxed/headless test runners often have no
+    /// real TTY attached, so `enable_raw_mode()` can legitimately return an
+    /// `Err` there. The invariant under test is "never panics" — assert
+    /// that for both outcomes, not that a real terminal is always present.
+    #[test]
+    fn terminal_setup_and_teardown_round_trips_without_panic() {
+        if let Ok(mut terminal) = setup_terminal() {
+            let _ = teardown_terminal(&mut terminal);
+        }
+    }
 }
