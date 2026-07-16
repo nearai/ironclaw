@@ -209,7 +209,15 @@ export function Chat({
       !activeThreadHasOnboarding
   );
   const handleSend = React.useCallback(
-    async (content, { images = [], attachments = [], displayContent } = {}) => {
+    async (
+      content,
+      {
+        images = [],
+        attachments = [],
+        displayContent,
+        preserveExistingDraft = false,
+      } = {}
+    ) => {
       if (activeThreadHasGate) {
         throw new Error(approvalSubmitWarning);
       }
@@ -217,7 +225,13 @@ export function Chat({
       const isFirstMessage = !activeThreadId;
       const submittedScope = isFirstMessage ? authScope() : null;
       const restoreFirstMessageDraft = () => {
-        if (!isFirstMessage || authScope() !== submittedScope) return;
+        if (
+          !isFirstMessage ||
+          preserveExistingDraft ||
+          authScope() !== submittedScope
+        ) {
+          return;
+        }
         const submittedText =
           typeof displayContent === "string"
             ? displayContent
@@ -262,7 +276,9 @@ export function Chat({
     async (text) => {
       if (composerSendDisabled) return;
       setSuggestions([]);
-      await handleSend(text);
+      // A suggestion is independent of anything staged in the landing
+      // composer. Leave that draft untouched if creating the thread fails.
+      await handleSend(text, { preserveExistingDraft: true });
     },
     [composerSendDisabled, handleSend, setSuggestions]
   );
