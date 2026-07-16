@@ -287,6 +287,24 @@ fn reborn_crate_dependency_boundaries_hold() {
             .collect::<Vec<_>>(),
     );
 
+    // Reborn TUI: a leaf client crate. Among internal ironclaw crates it may
+    // depend ONLY on `ironclaw_product_workflow` (the wire-schema + facade
+    // surface). Enforced as an allowlist, matching the `ironclaw_reborn_identity`
+    // / `ironclaw_memory` precedent above, so a future dependency on e.g.
+    // `ironclaw_webui_v2`, `ironclaw_run_state`, or `ironclaw_turns` cannot
+    // silently slip past a blocklist that only names today's offenders. This
+    // is what makes the crate a pure HTTP/SSE client of `serve` rather than a
+    // second live entry point into Reborn internals.
+    let reborn_tui_allowed = ["ironclaw_reborn_tui", "ironclaw_product_workflow"];
+    assert_no_normal_workspace_deps(
+        &dependencies,
+        "ironclaw_reborn_tui",
+        workspace_ironclaw_crates(&dependencies)
+            .into_iter()
+            .filter(|name| !reborn_tui_allowed.contains(name))
+            .collect::<Vec<_>>(),
+    );
+
     for rule in boundary_rules() {
         assert_no_normal_workspace_deps(&dependencies, rule.crate_name, rule.forbidden);
     }
@@ -569,9 +587,10 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
             "ironclaw_reborn_composition",
             "ironclaw_reborn_config",
             "ironclaw_reborn_traces",
+            "ironclaw_reborn_tui",
             "ironclaw_reborn_webui_ingress",
         ],
-        "ironclaw_reborn_cli should enter Reborn through ironclaw_reborn_composition (assembled-runtime and provider-admin facade), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), and ironclaw_reborn_webui_ingress (host-owned WebUI serve lifecycle) only. Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
+        "ironclaw_reborn_cli should enter Reborn through ironclaw_reborn_composition (assembled-runtime and provider-admin facade), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), ironclaw_reborn_tui (leaf TUI client crate; no internal Reborn types exposed through it), and ironclaw_reborn_webui_ingress (host-owned WebUI serve lifecycle) only. Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
     );
     assert_workspace_deps_exactly(
         &dependencies_all_kinds,

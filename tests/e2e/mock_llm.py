@@ -46,6 +46,23 @@ CANNED_RESPONSES = [
         re.compile(r"reborn write approval file (?P<label>[a-z0-9_-]+)", re.IGNORECASE),
         "Done - saved the approval test file.",
     ),
+    # Reborn TUI PTY e2e (test_reborn_tui_happy_path.py's
+    # test_reborn_tui_multiline_reply_renders_separate_rows): the reply's
+    # embedded newlines must render as separate rows on the reconstructed
+    # terminal screen, not squish onto one line — see
+    # ui/transcript.rs::split_lines_with_prefix / the "multi-line render"
+    # defect its module doc references.
+    (
+        re.compile(r"reborn tui multiline reply", re.IGNORECASE),
+        "line one\nline two\nline three",
+    ),
+    *[
+        (
+            re.compile(rf"\bhello scroll {turn:03d}\b", re.IGNORECASE),
+            f"Scroll turn {turn:03d} complete.",
+        )
+        for turn in range(1, 21)
+    ],
     (
         re.compile(
             r"reborn create automation rename target (?P<label>[a-z0-9_-]+)",

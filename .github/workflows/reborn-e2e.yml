@@ -241,11 +241,14 @@ jobs:
       - name: Install E2E dependencies
         run: |
           cd tests/e2e
-          pip install -e .
+          pip install -e ".[tui]"
           playwright install --with-deps chromium
 
       - name: Run Reborn WebUI v2 smoke
         run: pytest tests/e2e/scenarios/test_reborn_webui_v2_smoke.py -v --timeout=120
+
+      - name: Run Reborn TUI PTY happy path
+        run: pytest tests/e2e/scenarios/test_reborn_tui_happy_path.py -v --timeout=120
 
       - name: Run Reborn Responses API E2E
         run: |

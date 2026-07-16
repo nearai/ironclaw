@@ -50,6 +50,12 @@ mod lifecycle;
 mod outbound_delivery;
 mod policy;
 mod reborn_services;
+// Public: consumers that need the wire-schema module path directly (the
+// Reborn TUI client, in a later task) import `webchat_schema::{...}`
+// without depending on `ironclaw_webui_v2`. The crate-root `pub use` below
+// keeps the existing `ironclaw_product_workflow::{WebChatV2Event, ...}`
+// import path working too.
+pub mod webchat_schema;
 mod webui_inbound;
 mod workflow;
 
@@ -226,6 +232,7 @@ pub use reborn_services::{
     UpsertLlmProviderRequest, normalize_operator_log_context_value,
 };
 
+pub use webchat_schema::{WebChatV2Event, WebChatV2EventFrame};
 pub use webui_inbound::{
     WebUiAttachmentCapabilities, WebUiAuthenticatedCaller, WebUiCancelReason,
     WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundAttachment,

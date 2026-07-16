@@ -6,8 +6,10 @@ import pathlib
 import re
 import subprocess
 import sys
+import tempfile
 import unittest
 from dataclasses import dataclass
+from unittest import mock
 
 
 PANIC_PATTERN = re.compile(r"\.(?:unwrap|expect)\(|(?<!_)assert(?:_eq|_ne)?!")
@@ -20,6 +22,10 @@ TEST_ATTR_PATTERN = re.compile(
     r"|cfg\s*\([^]]*\btest\b[^]]*\)"
     r")\s*\]"
 )
+TEST_ONLY_SOURCE_PATTERN = re.compile(
+    r"^\s*#!\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*$"
+)
+INNER_ATTRIBUTE_PATTERN = re.compile(r"^\s*#!\s*\[.*\]\s*$")
 ITEM_PATTERN = re.compile(
     r"^\s*"
     r"(?:(?:pub(?:\([^)]*\))?|crate)\s+)?"
@@ -251,6 +257,32 @@ def is_test_only_path(path: str) -> bool:
     return bool(suffix) and (suffix[0] == "test_support" or suffix == ("test_support.rs",))
 
 
+def is_test_only_source(lines: list[str]) -> bool:
+    """Return True when a Rust module explicitly compiles only for tests.
+
+    A nested module file cannot inherit its parent module declaration's
+    ``#[cfg(test)]`` in this scanner because git diffs provide the child path
+    without Rust module-resolution context. Requiring the child to repeat the
+    exact inner ``#![cfg(test)]`` attribute makes its test-only status
+    self-contained and auditable without trying to infer the polarity of a
+    compound cfg predicate. It must appear in the file's inner-attribute
+    preamble, before the first real item; a nested module's inner attribute
+    must never exempt production code earlier in the file. Compound, negated,
+    misplaced, or multi-line predicates fail closed.
+    """
+    lexer = LexerState()
+    for line in lines:
+        code = sanitize_line(line, lexer)
+        if not code.strip():
+            continue
+        if TEST_ONLY_SOURCE_PATTERN.match(code):
+            return True
+        if INNER_ATTRIBUTE_PATTERN.match(code):
+            continue
+        return False
+    return False
+
+
 def changed_rust_files(base: str, head: str) -> list[pathlib.Path]:
     output = run_git("diff", "--name-only", f"{base}...{head}", "--", "src", "crates")
     files = []
@@ -297,6 +329,8 @@ def collect_violations(base: str, head: str) -> list[tuple[str, int, str]]:
             continue
 
         lines = path.read_text(encoding="utf-8").splitlines()
+        if is_test_only_source(lines):
+            continue
         contexts = line_test_contexts(lines)
         lexer = LexerState()
         sanitized = [sanitize_line(line, lexer) for line in lines]
@@ -343,6 +377,72 @@ def main() -> int:
 
 
 class CheckNoPanicsTests(unittest.TestCase):
+    def collect_from_source(self, source: str) -> list[tuple[str, int, str]]:
+        """Exercise the production collector with a hermetic diff/source seam."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = pathlib.Path(temp_dir) / "crates/example/src/lib.rs"
+            path.parent.mkdir(parents=True)
+            path.write_text(source, encoding="utf-8")
+            added_lines = set(range(1, len(source.splitlines()) + 1))
+            with (
+                mock.patch(
+                    f"{__name__}.changed_rust_files", return_value=[path]
+                ),
+                mock.patch(
+                    f"{__name__}.added_lines_for_file", return_value=added_lines
+                ),
+            ):
+                return collect_violations("mock-base", "mock-head")
+
+    def test_collect_violations_skips_exact_cfg_test_source_preamble(self) -> None:
+        violations = self.collect_from_source(
+            "//! test fixtures\n"
+            "#![allow(dead_code)]\n"
+            "#![cfg(test)]\n"
+            "fn fixture() {\n"
+            '    value.expect("allowed in test-only source");\n'
+            "}\n"
+        )
+
+        self.assertEqual(violations, [])
+
+    def test_collect_violations_reports_non_preamble_cfg_test_sources(self) -> None:
+        cases = {
+            "near match": (
+                "#![cfg(all(test, unix))]\n"
+                "fn production() {\n"
+                '    value.expect("must remain checked");\n'
+                "}\n",
+                3,
+            ),
+            "nested": (
+                "fn production() {\n"
+                '    value.expect("must remain checked");\n'
+                "}\n"
+                "mod tests {\n"
+                "    #![cfg(test)]\n"
+                "}\n",
+                2,
+            ),
+            "misplaced": (
+                "fn earlier_item() {}\n"
+                "#![cfg(test)]\n"
+                "fn production() {\n"
+                '    value.expect("must remain checked");\n'
+                "}\n",
+                4,
+            ),
+        }
+
+        for case, (source, line_no) in cases.items():
+            with self.subTest(case=case):
+                violations = self.collect_from_source(source)
+                self.assertEqual(len(violations), 1)
+                self.assertEqual(
+                    violations[0][1:],
+                    (line_no, '    value.expect("must remain checked");'),
+                )
+
     def test_cfg_test_module_marks_inner_lines(self) -> None:
         lines = [
             "#[cfg(test)]\n",
@@ -438,6 +538,40 @@ class CheckNoPanicsTests(unittest.TestCase):
         # A nested test_support.rs (not the canonical `src/test_support.rs` root)
         # is not the blessed feature-gated module either.
         self.assertFalse(is_test_only_path("crates/foo/src/auth/test_support.rs"))
+
+    def test_explicit_test_only_source_detection(self) -> None:
+        self.assertTrue(is_test_only_source(["#![cfg(test)]", 'value.expect("fixture")']))
+        self.assertTrue(is_test_only_source(["  #! [ cfg ( test ) ]  "]))
+        self.assertTrue(
+            is_test_only_source(
+                ["//! fixtures", "#![allow(dead_code)]", "#![cfg(test)]"]
+            )
+        )
+        self.assertFalse(is_test_only_source(["#![cfg(not(test))]"]))
+        self.assertFalse(is_test_only_source(["#![cfg(any(test, unix))]"]))
+        self.assertFalse(is_test_only_source(["#![cfg(all(test, unix))]"]))
+        self.assertFalse(is_test_only_source(["#![cfg(all(test, not(unix))) ]"]))
+        self.assertFalse(is_test_only_source(["#![cfg(all(not(test), unix))]"]))
+        self.assertFalse(is_test_only_source(["#[cfg(test)]", "mod tests;"]))
+        self.assertFalse(
+            is_test_only_source(["#![allow(dead_code)]", "fn production() {}"])
+        )
+        self.assertFalse(is_test_only_source(['let marker = r#"', "#![cfg(test)]", '"#;']))
+        self.assertFalse(
+            is_test_only_source(["// #![cfg(test)]", "fn production() {}"])
+        )
+        self.assertFalse(
+            is_test_only_source(
+                [
+                    "fn production() {",
+                    '    value.expect("must remain checked");',
+                    "}",
+                    "mod tests {",
+                    "    #![cfg(test)]",
+                    "}",
+                ]
+            )
+        )
 
     def test_lifetime_annotations_do_not_desync_braces(self) -> None:
         """Lifetime annotations ('a, 'static) must not be parsed as char literals.
