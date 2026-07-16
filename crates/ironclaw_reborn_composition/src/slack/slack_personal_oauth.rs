@@ -7,7 +7,7 @@
 //! request time and emits `user_scope=` (its `scope=` is reserved for bot
 //! tokens) via the generic authorization-URL builder.
 
-use std::{fmt, sync::Arc};
+use std::fmt;
 
 use axum::{
     Json,
@@ -17,13 +17,12 @@ use axum::{
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
-    AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowRecord, AuthFlowRecordSource,
-    AuthFlowStatus, AuthProductError, AuthProductScope, AuthProviderId, CredentialAccountLabel,
-    OAuthAuthorizationEndpoint, OAuthAuthorizeUrlRequest, OAuthCallbackState,
-    OAuthCallbackStateKind, OAuthProviderIdentity, OAuthScopeParam, PkceVerifierSecret,
-    ProviderScope, SLACK_PERSONAL_AUTHORIZATION_ENDPOINT, SLACK_PERSONAL_PROVIDER_ID,
-    build_authorization_url_with_scope_param, opaque_state_hash, pkce_s256_challenge,
-    pkce_verifier_hash,
+    AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthProductError, AuthProductScope,
+    AuthProviderId, CredentialAccountLabel, OAuthAuthorizationEndpoint, OAuthAuthorizeUrlRequest,
+    OAuthCallbackState, OAuthCallbackStateKind, OAuthProviderIdentity, OAuthScopeParam,
+    PkceVerifierSecret, ProviderScope, SLACK_PERSONAL_AUTHORIZATION_ENDPOINT,
+    SLACK_PERSONAL_PROVIDER_ID, build_authorization_url_with_scope_param, opaque_state_hash,
+    pkce_s256_challenge, pkce_verifier_hash,
 };
 use ironclaw_host_api::ExtensionId;
 use ironclaw_product_workflow::WebUiAuthenticatedCaller;
@@ -48,45 +47,13 @@ use crate::product_auth::serve::{
     run_with_backend_timeout, scope_from_authenticated_caller_parts_requiring_invocation,
     scope_hint, scoped_update_binding_for_requester,
 };
-use crate::slack::slack_host_beta::SlackPersonalConnectionScopeResolver;
 use crate::slack::slack_personal_binding::{
     RebornUserIdentityBindingError, SlackConnectionEpoch, SlackConnectionOwner,
-    SlackConnectionState, SlackPersonalBindingPrincipal, SlackPersonalUserBindingError,
-    SlackPersonalUserBindingRequest, SlackUserBindingLifecycleError,
+    SlackPersonalBindingPrincipal, SlackPersonalUserBindingError, SlackPersonalUserBindingRequest,
+    SlackUserBindingLifecycleError,
 };
 use crate::slack::slack_serve::{SlackApiAppId, SlackEnterpriseId, SlackTeamId, SlackUserId};
 use crate::slack::slack_setup::SlackPersonalSetupServiceSlot;
-
-/// Late-filled Slack-only lifecycle ports used by blocked-turn OAuth starts.
-/// The OAuth provider registry is composed before the Slack host mounts exist,
-/// so this travels through the same lazy slot as the setup credentials.
-#[derive(Clone)]
-pub(crate) struct SlackPersonalOAuthGateLifecycle {
-    connection_scope_resolver: Arc<dyn SlackPersonalConnectionScopeResolver>,
-    lifecycle_store: Arc<dyn crate::slack::slack_personal_binding::SlackUserBindingLifecycleStore>,
-}
-
-impl SlackPersonalOAuthGateLifecycle {
-    pub(crate) fn new(
-        connection_scope_resolver: Arc<dyn SlackPersonalConnectionScopeResolver>,
-        lifecycle_store: Arc<
-            dyn crate::slack::slack_personal_binding::SlackUserBindingLifecycleStore,
-        >,
-    ) -> Self {
-        Self {
-            connection_scope_resolver,
-            lifecycle_store,
-        }
-    }
-}
-
-impl fmt::Debug for SlackPersonalOAuthGateLifecycle {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SlackPersonalOAuthGateLifecycle")
-            .finish_non_exhaustive()
-    }
-}
 
 /// Host OAuth provider spec for the Slack personal (user-token) provider.
 ///
@@ -192,47 +159,25 @@ pub(crate) async fn start_extension_oauth_flow(
     )
     .map_err(ProductAuthRouteFailure::from)?;
 
+    // The start path keeps NO Slack connection state: attempt liveness is the
+    // auth-flow record alone (created below, which supersedes any prior live
+    // setup-class flow at the `create_flow` seam), and the connection record
+    // is written by the callback's identity bind where the durable generation
+    // actually begins. Resolving the connection scope here is a fail-closed
+    // configuration check only — the callback's identity hook will need this
+    // same resolution to bind, so a missing Slack channel mount fails the
+    // start instead of minting a flow whose callback cannot complete.
     let binding_config = state
         .slack_personal_oauth_binding_config()
         .ok_or_else(ProductAuthRouteFailure::backend_unavailable)?;
-    let connection_scope = binding_config
+    binding_config
         .connection_scope_resolver
         .resolve_personal_connection_scope()
         .await
         .map_err(|_| ProductAuthRouteFailure::backend_unavailable())?
         .ok_or_else(ProductAuthRouteFailure::backend_unavailable)?;
-    let connection_owner = SlackConnectionOwner::new(
-        scope.resource.tenant_id.clone(),
-        scope.resource.user_id.clone(),
-        connection_scope.installation_id,
-    );
-    let connection_epoch = SlackConnectionEpoch::new(flow_id);
 
-    // Supersede-on-start cancels the prior setup FLOW, but this provider's
-    // connection epoch is separate lifecycle state keyed by that flow's id, and
-    // `begin_connection` rejects a second live epoch with `ConnectionInProgress`
-    // until the first one's TTL lapses. Without this, closing the connect popup
-    // and re-opening it is a 409 for the rest of the flow TTL. Drive the same
-    // generic supersede seam `start_setup_oauth_flow` uses (idempotent — its own
-    // call below then finds nothing left) so the abandoned attempts' epochs are
-    // released before this one begins.
-    let superseded = run_with_backend_timeout(
-        state
-            .product_auth_services()
-            .flow_manager()
-            .cancel_superseded_setup_flows(&scope, &provider),
-    )
-    .await?;
-    for superseded_flow_id in superseded {
-        abandon_slack_connection_epoch(
-            binding_config.lifecycle_store.as_ref(),
-            &scope,
-            superseded_flow_id,
-        )
-        .await?;
-    }
-
-    let flow = match run_with_backend_timeout(
+    let flow = run_with_backend_timeout(
         state
             .product_auth_services()
             .start_setup_oauth_flow(RebornOAuthStartFlowRequest {
@@ -253,32 +198,7 @@ pub(crate) async fn start_extension_oauth_flow(
                 expires_at: request.expires_at,
             }),
     )
-    .await
-    {
-        Ok(flow) => flow,
-        Err(error) => return Err(error),
-    };
-    if let Err(error) = begin_connection_reconciling_stranded_epoch(
-        &state,
-        binding_config.lifecycle_store.as_ref(),
-        &scope,
-        &connection_owner,
-        connection_epoch,
-        request.expires_at,
-    )
-    .await
-    {
-        state
-            .product_auth_services()
-            .delete_setup_pkce_verifier(&scope, flow.id)
-            .await;
-        let _ = state
-            .product_auth_services()
-            .flow_manager()
-            .cancel_flow(&scope, flow.id)
-            .await;
-        return Err(slack_lifecycle_start_failure(error));
-    }
+    .await?;
 
     Ok(Json(ProductOAuthStartResponse {
         flow_id: flow.id,
@@ -289,20 +209,6 @@ pub(crate) async fn start_extension_oauth_flow(
         continuation: flow.continuation,
         callback_scope: scope_hint(&scope),
     }))
-}
-
-pub(crate) fn slack_lifecycle_start_failure(
-    error: SlackUserBindingLifecycleError,
-) -> ProductAuthRouteFailure {
-    match error {
-        SlackUserBindingLifecycleError::ConnectionInProgress
-        | SlackUserBindingLifecycleError::DisconnectInProgress => {
-            ProductAuthRouteFailure::new(StatusCode::CONFLICT, AuthErrorCode::ConnectionConflict)
-        }
-        SlackUserBindingLifecycleError::StaleEpoch | SlackUserBindingLifecycleError::Backend(_) => {
-            ProductAuthRouteFailure::backend_unavailable()
-        }
-    }
 }
 
 pub(crate) static SLACK_PERSONAL_CALLBACK_DESCRIPTOR: OAuthCallbackDescriptor =
@@ -330,6 +236,17 @@ pub(crate) async fn slack_personal_oauth_callback_handler(
     .await
 }
 
+/// Terminal-failure cleanup for the Slack personal callback.
+///
+/// The identity bind stamps rows with the flow id and records the active
+/// generation; when the callback later fails after that commit
+/// (`ContinuationSideEffect`/`ContinuationCompensation`), this hook runs the
+/// journaled failed-connection sweep so the generation's rows are removed
+/// durably even across a crash (the flow is `Failed`, and a re-hit callback
+/// re-enters this hook through `reconcile_failed_lifecycle_oauth`). Earlier
+/// failure stages committed nothing durable — the start path keeps no
+/// connection state — so there is nothing to release; a defensive row check
+/// keeps the flow retryable if stamped rows are unexpectedly present.
 fn slack_personal_oauth_abandon_hook(
     state: ProductAuthRouteState,
     callback_scope: AuthProductScope,
@@ -345,26 +262,36 @@ fn slack_personal_oauth_abandon_hook(
             return Err(ProductAuthRouteFailure::backend_unavailable());
         };
         let connection_epoch = SlackConnectionEpoch::new(flow_id);
-        let connection_owner = match config
-            .lifecycle_store
-            .connection_owner_for_epoch(
-                &callback_scope.resource.tenant_id,
-                &callback_scope.resource.user_id,
-                connection_epoch,
-            )
+        // The bind derived the owner from this same resolution at callback
+        // time, so terminal cleanup targeting the same resolution reaches
+        // exactly the rows this generation stamped.
+        let connection_scope = match config
+            .connection_scope_resolver
+            .resolve_personal_connection_scope()
             .await
         {
-            Ok(Some(connection_owner)) => connection_owner,
-            Ok(None) => return Ok(()),
+            Ok(Some(connection_scope)) => connection_scope,
+            Ok(None) => {
+                tracing::debug!(
+                    flow_id = %flow_id,
+                    "Slack terminal cleanup found no configured connection scope; nothing to clean"
+                );
+                return Ok(());
+            }
             Err(error) => {
                 tracing::warn!(
                     %error,
                     flow_id = %flow_id,
-                    "failed to inspect terminal Slack OAuth connection epoch"
+                    "failed to resolve Slack connection scope for terminal cleanup"
                 );
                 return Err(ProductAuthRouteFailure::backend_unavailable());
             }
         };
+        let connection_owner = SlackConnectionOwner::new(
+            callback_scope.resource.tenant_id.clone(),
+            callback_scope.resource.user_id.clone(),
+            connection_scope.installation_id,
+        );
         let provider_user_id_prefix = format!("{}:", connection_owner.installation_id().as_str());
         if matches!(
             failure_stage,
@@ -376,6 +303,24 @@ fn slack_personal_oauth_abandon_hook(
                 .begin_failed_connection_cleanup(&connection_owner, connection_epoch)
                 .await
             {
+                // `StaleEpoch` here means the generation record already moved
+                // on — the in-process rollback restored a previous generation
+                // or settled the record — so the journaled sweep has nothing
+                // it may safely fence. Rows stamped with this failed
+                // generation cannot be authorized by ingress (the record is
+                // not Active at this epoch) and any residue is owner-swept on
+                // disconnect.
+                if error == SlackUserBindingLifecycleError::StaleEpoch
+                    && !stamped_rows_exist_for_epoch(
+                        config.binding_rollback_store.as_ref(),
+                        &callback_scope,
+                        provider_user_id_prefix.as_str(),
+                        connection_epoch,
+                    )
+                    .await?
+                {
+                    return Ok(());
+                }
                 tracing::warn!(
                     %error,
                     flow_id = %flow_id,
@@ -414,136 +359,53 @@ fn slack_personal_oauth_abandon_hook(
             }
             return Ok(());
         }
-        match config
-            .binding_rollback_store
-            .user_identity_bindings_for_user_at_epoch(
-                crate::slack::slack_actor_identity::SLACK_IDENTITY_PROVIDER,
-                &callback_scope.resource.user_id,
-                Some(provider_user_id_prefix.as_str()),
-                Some(connection_epoch),
-            )
-            .await
+        // Terminal-stage failures (denied, claim, exchange, malformed) never
+        // reached the identity bind: nothing durable was written and there is
+        // no start-time state to release. Verify defensively so an unexpected
+        // stamped row keeps the flow retryable instead of being silently
+        // orphaned.
+        if stamped_rows_exist_for_epoch(
+            config.binding_rollback_store.as_ref(),
+            &callback_scope,
+            provider_user_id_prefix.as_str(),
+            connection_epoch,
+        )
+        .await?
         {
-            Ok(bindings) if !bindings.is_empty() => {
-                tracing::debug!(
-                    flow_id = %flow_id,
-                    "retaining Slack OAuth lifecycle owner because identity cleanup is still pending"
-                );
-                return Err(ProductAuthRouteFailure::backend_unavailable());
-            }
-            Err(error) => {
-                tracing::debug!(
-                    %error,
-                    flow_id = %flow_id,
-                    "retaining Slack OAuth lifecycle owner because identity cleanup could not be verified"
-                );
-                return Err(ProductAuthRouteFailure::backend_unavailable());
-            }
-            Ok(_) => {}
+            tracing::debug!(
+                flow_id = %flow_id,
+                "retaining Slack OAuth flow because identity cleanup is still pending"
+            );
+            return Err(ProductAuthRouteFailure::backend_unavailable());
         }
-        abandon_slack_connection_epoch(config.lifecycle_store.as_ref(), &callback_scope, flow_id)
-            .await
+        Ok(())
     })
 }
 
-/// Begin the new connection epoch, reconciling a stranded predecessor first.
-///
-/// Attempt-liveness truth is the auth-flow record; the epoch row is derived
-/// state. A crash or failed abandon between "supersede the prior flow" and
-/// "abandon its epoch" (the loop in the start handler) leaves a live epoch
-/// whose flow is already terminal — and the supersede walk only returns
-/// non-terminal flows, so nothing would ever release it: every re-open would
-/// 409 `connection_conflict` until the epoch TTL lapses. On conflict, look up
-/// the blocking epoch's flow at owner granularity; if it is terminal — or
-/// unknown to the read model, in which case nothing can ever complete it and
-/// a late write is still fenced by `bind_user_identity_for_epoch` — abandon
-/// the stale epoch and retry once. A genuinely live concurrent attempt still
-/// conflicts, and an unverifiable one fails closed to the conflict.
-async fn begin_connection_reconciling_stranded_epoch(
-    state: &ProductAuthRouteState,
-    lifecycle_store: &dyn crate::slack::slack_personal_binding::SlackUserBindingLifecycleStore,
-    scope: &AuthProductScope,
-    connection_owner: &crate::slack::slack_personal_binding::SlackConnectionOwner,
+async fn stamped_rows_exist_for_epoch(
+    binding_rollback_store: &dyn crate::slack::slack_personal_binding::RebornUserIdentityBindingDeleteStore,
+    callback_scope: &AuthProductScope,
+    provider_user_id_prefix: &str,
     connection_epoch: SlackConnectionEpoch,
-    expires_at: ironclaw_auth::Timestamp,
-) -> Result<(), SlackUserBindingLifecycleError> {
-    let first_attempt = lifecycle_store
-        .begin_connection(connection_owner, connection_epoch, expires_at)
-        .await;
-    if !matches!(
-        first_attempt,
-        Err(SlackUserBindingLifecycleError::ConnectionInProgress)
-    ) {
-        return first_attempt;
-    }
-    let Some(flow_source) = state.product_auth_services().flow_record_source() else {
-        return first_attempt;
-    };
-    // `connection_state` projects an Active row's live pending attempt as
-    // `(pending_epoch, Connecting)`, so this one arm covers both conflict
-    // shapes `begin_connection` can report.
-    let Ok(Some((
-        blocking_epoch,
-        crate::slack::slack_personal_binding::SlackConnectionState::Connecting,
-    ))) = lifecycle_store.connection_state(connection_owner).await
-    else {
-        return first_attempt;
-    };
-    if blocking_epoch == connection_epoch {
-        return first_attempt;
-    }
-    let blocking_flow_is_dead = match flow_source
-        .flow_for_owner_by_id(scope, blocking_epoch.flow_id())
-        .await
-    {
-        Ok(Some(flow)) => ironclaw_auth::is_terminal_status(flow.status),
-        Ok(None) => true,
-        Err(_) => false,
-    };
-    if !blocking_flow_is_dead {
-        return first_attempt;
-    }
-    tracing::debug!(
-        stranded_epoch_flow_id = %blocking_epoch.flow_id(),
-        "releasing a stranded Slack connection epoch whose flow is already terminal"
-    );
-    lifecycle_store
-        .abandon_connection(connection_owner, blocking_epoch)
-        .await?;
-    lifecycle_store
-        .begin_connection(connection_owner, connection_epoch, expires_at)
-        .await
-}
-
-async fn abandon_slack_connection_epoch(
-    lifecycle_store: &dyn crate::slack::slack_personal_binding::SlackUserBindingLifecycleStore,
-    scope: &AuthProductScope,
-    flow_id: AuthFlowId,
-) -> Result<(), ProductAuthRouteFailure> {
-    let connection_epoch = SlackConnectionEpoch::new(flow_id);
-    let connection_owner = match lifecycle_store
-        .connection_owner_for_epoch(
-            &scope.resource.tenant_id,
-            &scope.resource.user_id,
-            connection_epoch,
+) -> Result<bool, ProductAuthRouteFailure> {
+    match binding_rollback_store
+        .user_identity_bindings_for_user_at_epoch(
+            crate::slack::slack_actor_identity::SLACK_IDENTITY_PROVIDER,
+            &callback_scope.resource.user_id,
+            Some(provider_user_id_prefix),
+            Some(connection_epoch),
         )
         .await
     {
-        Ok(Some(connection_owner)) => connection_owner,
-        Ok(None) => return Ok(()),
+        Ok(bindings) => Ok(!bindings.is_empty()),
         Err(error) => {
-            tracing::warn!(%error, %flow_id, "failed to inspect terminal Slack OAuth epoch");
-            return Err(ProductAuthRouteFailure::backend_unavailable());
+            tracing::debug!(
+                %error,
+                "retaining Slack OAuth flow because identity cleanup could not be verified"
+            );
+            Err(ProductAuthRouteFailure::backend_unavailable())
         }
-    };
-    if let Err(error) = lifecycle_store
-        .abandon_connection(&connection_owner, connection_epoch)
-        .await
-    {
-        tracing::warn!(%error, "failed to abandon terminal Slack OAuth connection epoch");
-        return Err(ProductAuthRouteFailure::backend_unavailable());
     }
-    Ok(())
 }
 
 fn slack_personal_identity_hook(
@@ -583,16 +445,17 @@ async fn bind_slack_personal_oauth_identity_for_callback(
     };
     let identity = provider_identity.ok_or(AuthProductError::MalformedCallback)?;
     let connection_epoch = SlackConnectionEpoch::new(flow_id);
-    let connection_owner = config
-        .lifecycle_store
-        .connection_owner_for_epoch(
-            &callback_scope.resource.tenant_id,
-            &callback_scope.resource.user_id,
-            connection_epoch,
-        )
+    // The installation is resolved at bind time — the same authority the
+    // start handler validated — and the proof-vs-selector check inside the
+    // binding service rejects a callback whose Slack team/app no longer
+    // matches it, so a setup drift between start and callback fails closed
+    // instead of binding against stale configuration.
+    let connection_scope = config
+        .connection_scope_resolver
+        .resolve_personal_connection_scope()
         .await
         .map_err(|error| {
-            tracing::debug!(%error, "Slack personal OAuth binding owner lookup failed");
+            tracing::debug!(%error, "Slack personal OAuth connection scope unavailable");
             AuthProductError::BackendUnavailable
         })?
         .ok_or(AuthProductError::BackendUnavailable)?;
@@ -608,7 +471,7 @@ async fn bind_slack_personal_oauth_identity_for_callback(
         .enterprise_id
         .as_ref()
         .map(|value| SlackEnterpriseId::new(value.clone()));
-    let outcome = match config
+    let outcome = config
         .binding_service
         .bind_personal_user_for_epoch(
             SlackPersonalBindingPrincipal {
@@ -616,7 +479,7 @@ async fn bind_slack_personal_oauth_identity_for_callback(
                 user_id: callback_scope.resource.user_id.clone(),
             },
             SlackPersonalUserBindingRequest {
-                installation_id: connection_owner.installation_id().clone(),
+                installation_id: connection_scope.installation_id,
                 slack_user_id: SlackUserId::new(identity.subject.as_str()),
                 team_id: SlackTeamId::new(team_id.clone()),
                 enterprise_id,
@@ -625,16 +488,7 @@ async fn bind_slack_personal_oauth_identity_for_callback(
             connection_epoch,
         )
         .await
-    {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            let _ = config
-                .lifecycle_store
-                .abandon_connection(&connection_owner, connection_epoch)
-                .await;
-            return Err(slack_personal_user_binding_auth_error(error));
-        }
-    };
+        .map_err(slack_personal_user_binding_auth_error)?;
     Ok(outcome.rollback.into_future())
 }
 
@@ -658,7 +512,11 @@ fn slack_personal_user_binding_auth_error(
 /// Slack personal (user-token) blocked-turn OAuth gate provider.
 ///
 /// Holds the Slack setup slot; the shared [`crate::product_auth::oauth::oauth_gate::OAuthGateFlowDriver`]
-/// owns everything else.
+/// owns everything else. Slack runs on the driver's default
+/// `select_reusable_flow`/`publish_flow`/`abandon_flow` — like Google, it
+/// keeps no provider-owned lifecycle state per flow: attempt liveness is the
+/// auth-flow record, and the connection generation begins at the callback's
+/// identity bind.
 #[derive(Clone)]
 pub(crate) struct SlackPersonalOAuthGateProvider {
     slot: SlackPersonalSetupServiceSlot,
@@ -667,31 +525,6 @@ pub(crate) struct SlackPersonalOAuthGateProvider {
 impl SlackPersonalOAuthGateProvider {
     pub(crate) fn new(slot: SlackPersonalSetupServiceSlot) -> Self {
         Self { slot }
-    }
-
-    async fn connection_owner(
-        &self,
-        scope: &AuthProductScope,
-    ) -> Result<(SlackPersonalOAuthGateLifecycle, SlackConnectionOwner), AuthProductError> {
-        let lifecycle = self
-            .slot
-            .gate_lifecycle()
-            .ok_or(AuthProductError::BackendUnavailable)?;
-        let connection_scope = lifecycle
-            .connection_scope_resolver
-            .resolve_personal_connection_scope()
-            .await
-            .map_err(|error| {
-                tracing::debug!(%error, "Slack personal OAuth connection scope unavailable");
-                AuthProductError::BackendUnavailable
-            })?
-            .ok_or(AuthProductError::BackendUnavailable)?;
-        let owner = SlackConnectionOwner::new(
-            scope.resource.tenant_id.clone(),
-            scope.resource.user_id.clone(),
-            connection_scope.installation_id,
-        );
-        Ok((lifecycle, owner))
     }
 }
 
@@ -703,86 +536,6 @@ impl OAuthGateProvider for SlackPersonalOAuthGateProvider {
 
     fn pkce_secret_handle_label(&self) -> &'static str {
         "slack-personal-oauth-gate-flow-pkce"
-    }
-
-    async fn select_reusable_flow(
-        &self,
-        scope: &AuthProductScope,
-        exact: Option<AuthFlowRecord>,
-        flow_source: &dyn AuthFlowRecordSource,
-    ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
-        let (lifecycle, connection_owner) = self.connection_owner(scope).await?;
-        let connection_state = lifecycle
-            .lifecycle_store
-            .connection_state(&connection_owner)
-            .await
-            .map_err(slack_lifecycle_gate_failure)?;
-        if connection_state.is_none()
-            && let Some(exact) = exact.as_ref()
-            && exact.provider.as_str() == SLACK_PERSONAL_PROVIDER_ID
-            && exact.status == AuthFlowStatus::AwaitingUser
-            && exact.expires_at > Utc::now()
-        {
-            lifecycle
-                .lifecycle_store
-                .begin_connection(
-                    &connection_owner,
-                    SlackConnectionEpoch::new(exact.id),
-                    exact.expires_at,
-                )
-                .await
-                .map_err(slack_lifecycle_gate_failure)?;
-        }
-        let Some((epoch, SlackConnectionState::Connecting)) = lifecycle
-            .lifecycle_store
-            .connection_state(&connection_owner)
-            .await
-            .map_err(slack_lifecycle_gate_failure)?
-        else {
-            return Ok(None);
-        };
-        let now = Utc::now();
-        let flow = match exact {
-            Some(flow) if flow.id == epoch.flow_id() => Some(flow),
-            Some(_) | None => {
-                flow_source
-                    .flow_for_owner_by_id(scope, epoch.flow_id())
-                    .await?
-            }
-        };
-        if lifecycle
-            .lifecycle_store
-            .connection_state(&connection_owner)
-            .await
-            .map_err(slack_lifecycle_gate_failure)?
-            != Some((epoch, SlackConnectionState::Connecting))
-        {
-            return Ok(None);
-        }
-        match flow {
-            Some(flow)
-                if flow.provider.as_str() == SLACK_PERSONAL_PROVIDER_ID
-                    && flow.status == AuthFlowStatus::AwaitingUser
-                    && flow.expires_at > now =>
-            {
-                Ok(Some(flow))
-            }
-            Some(flow)
-                if flow.provider.as_str() == SLACK_PERSONAL_PROVIDER_ID
-                    && (matches!(
-                        flow.status,
-                        AuthFlowStatus::Canceled | AuthFlowStatus::Expired | AuthFlowStatus::Failed
-                    ) || flow.expires_at <= now) =>
-            {
-                lifecycle
-                    .lifecycle_store
-                    .abandon_connection(&connection_owner, epoch)
-                    .await
-                    .map_err(slack_lifecycle_gate_failure)?;
-                Ok(None)
-            }
-            Some(_) | None => Ok(None),
-        }
     }
 
     async fn prepare_flow(
@@ -834,49 +587,6 @@ impl OAuthGateProvider for SlackPersonalOAuthGateProvider {
             pkce_verifier_hash,
             pkce_verifier,
         })
-    }
-
-    async fn publish_flow(
-        &self,
-        scope: &AuthProductScope,
-        flow_id: AuthFlowId,
-        expires_at: ironclaw_auth::Timestamp,
-    ) -> Result<(), AuthProductError> {
-        let (lifecycle, connection_owner) = self.connection_owner(scope).await?;
-        lifecycle
-            .lifecycle_store
-            .begin_connection(
-                &connection_owner,
-                SlackConnectionEpoch::new(flow_id),
-                expires_at,
-            )
-            .await
-            .map_err(slack_lifecycle_gate_failure)
-    }
-
-    async fn abandon_flow(&self, scope: &AuthProductScope, flow_id: AuthFlowId) {
-        let Some(lifecycle) = self.slot.gate_lifecycle() else {
-            return;
-        };
-        if let Err(error) =
-            abandon_slack_connection_epoch(lifecycle.lifecycle_store.as_ref(), scope, flow_id).await
-        {
-            tracing::warn!(
-                %flow_id,
-                ?error,
-                "Slack OAuth flow abandonment remains pending"
-            );
-        }
-    }
-}
-
-fn slack_lifecycle_gate_failure(error: SlackUserBindingLifecycleError) -> AuthProductError {
-    match error {
-        SlackUserBindingLifecycleError::ConnectionInProgress
-        | SlackUserBindingLifecycleError::DisconnectInProgress => AuthProductError::BackendConflict,
-        SlackUserBindingLifecycleError::StaleEpoch | SlackUserBindingLifecycleError::Backend(_) => {
-            AuthProductError::BackendUnavailable
-        }
     }
 }
 

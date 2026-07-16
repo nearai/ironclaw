@@ -1294,7 +1294,7 @@ mod tests {
     use axum::body::to_bytes;
     #[cfg(feature = "slack-v2-host-beta")]
     use ironclaw_auth::{
-        AuthFlowManager, AuthProviderClient, CredentialAccountLabel, CredentialAccountRecordSource,
+        AuthProviderClient, CredentialAccountLabel, CredentialAccountRecordSource,
         CredentialAccountService, CredentialOwnership, NewCredentialAccount, OAuthProviderExchange,
         OAuthProviderExchangeContext, OAuthProviderIdentity, OAuthProviderRefresh,
         OAuthProviderRefreshRequest,
@@ -1330,8 +1330,7 @@ mod tests {
     };
     #[cfg(feature = "slack-v2-host-beta")]
     use crate::slack::slack_personal_oauth::{
-        SLACK_PERSONAL_CALLBACK_DESCRIPTOR, SlackPersonalOAuthGateLifecycle,
-        SlackPersonalOAuthGateProvider, slack_lifecycle_start_failure,
+        SLACK_PERSONAL_CALLBACK_DESCRIPTOR, SlackPersonalOAuthGateProvider,
         slack_personal_oauth_callback_handler,
     };
     #[cfg(feature = "slack-v2-host-beta")]
@@ -1638,10 +1637,6 @@ mod tests {
             activating_binding_store,
         ));
         let slot = slack_personal_oauth_test_slot().await;
-        slot.fill_gate_lifecycle(SlackPersonalOAuthGateLifecycle::new(
-            connection_scope_resolver.clone(),
-            lifecycle_port.clone(),
-        ));
         let gate_driver = Arc::new(OAuthGateFlowDriver::new(
             Arc::new(SlackPersonalOAuthGateProvider::new(slot.clone())),
             Arc::new(InMemorySecretStore::new()),
@@ -1693,6 +1688,9 @@ mod tests {
             .expect("challenge lookup")
             .expect("Slack OAuth challenge");
         let authorization_url = challenge.authorization_url.expect("authorization url");
+        // A second blocked thread mints its own gate flow: gate flows are
+        // per-gate at the flow layer, never joined through provider-owned
+        // connection state, and never supersede one another (both stay live).
         let second_turn_scope = TurnScope::new(
             tenant_id.clone(),
             None,
@@ -1710,10 +1708,10 @@ mod tests {
             .await
             .expect("second challenge lookup")
             .expect("second Slack OAuth challenge");
-        assert_eq!(
+        assert_ne!(
             second_challenge.authorization_url.as_ref(),
             Some(&authorization_url),
-            "another blocked thread must reuse the in-progress Slack OAuth challenge"
+            "each blocked gate owns its own Slack OAuth flow"
         );
         assert_eq!(
             shared
@@ -1721,127 +1719,35 @@ mod tests {
                 .into_iter()
                 .filter(|flow| flow.status == AuthFlowStatus::AwaitingUser)
                 .count(),
-            1,
-            "one caller-wide Slack connection attempt must back every blocked thread"
+            2,
+            "gate flows are parked-turn continuations and must not supersede each other"
         );
-        let first_state_value = Url::parse(authorization_url.as_str())
-            .expect("first authorization url")
-            .query_pairs()
-            .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
-            .expect("first oauth state");
-        let first_callback_state = OAuthCallbackState::decode(
-            OAuthCallbackStateKind::SLACK_PERSONAL,
-            first_state_value.as_str(),
-        )
-        .expect("first callback state");
-        shared
-            .cancel_flow(first_callback_state.scope(), first_callback_state.flow_id())
+        // Re-asking the SAME gate reuses its exact flow (the provider runs on
+        // the driver's generic turn-gate reuse, like Google).
+        let repeat_challenge = product_auth
+            .challenge_for_gate(&turn_scope, &user_id, run_id, gate_ref, &requirements)
             .await
-            .expect("cancel first shared flow");
-
-        let third_turn_scope = TurnScope::new(
-            tenant_id.clone(),
-            None,
-            None,
-            ThreadId::new("thread-gamma").expect("third thread"),
+            .expect("repeat challenge lookup")
+            .expect("repeat Slack OAuth challenge");
+        assert_eq!(
+            repeat_challenge.authorization_url.as_ref(),
+            Some(&authorization_url),
+            "re-rendering the same gate must reuse its in-progress flow"
         );
-        let third_run_id = TurnRunId::new();
-        let third_challenge = product_auth
-            .challenge_for_gate(
-                &third_turn_scope,
-                &user_id,
-                third_run_id,
-                gate_ref,
-                &requirements,
-            )
-            .await
-            .expect("replacement challenge lookup")
-            .expect("replacement Slack OAuth challenge");
-        let replacement_authorization_url = third_challenge
-            .authorization_url
-            .expect("replacement authorization url");
-        assert_ne!(
-            replacement_authorization_url, authorization_url,
-            "a canceled shared Slack flow must be replaced immediately"
-        );
-        let authorization_url = replacement_authorization_url;
-        let stale_state_value = Url::parse(authorization_url.as_str())
-            .expect("authorization url")
-            .query_pairs()
-            .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
-            .expect("oauth state");
-        let stale_callback_state = OAuthCallbackState::decode(
-            OAuthCallbackStateKind::SLACK_PERSONAL,
-            stale_state_value.as_str(),
-        )
-        .expect("callback state");
-        let epoch = SlackConnectionEpoch::new(stale_callback_state.flow_id());
         assert_eq!(
             lifecycle_store
                 .connection_state(&owner)
                 .await
                 .expect("connection state"),
-            Some((epoch, SlackConnectionState::Connecting)),
-            "production gate setup must fence the Slack connection before rendering OAuth"
+            None,
+            "no Slack connection state exists until a callback binds: attempt \
+             liveness is the auth-flow record alone"
         );
-        lifecycle_store.transition_after_next_state_read(SlackConnectionState::Disconnecting);
-        let stale_reuse = product_auth
-            .challenge_for_gate(
-                &TurnScope::new(
-                    tenant_id.clone(),
-                    None,
-                    None,
-                    ThreadId::new("thread-delta").expect("fourth thread"),
-                ),
-                &user_id,
-                TurnRunId::new(),
-                gate_ref,
-                &requirements,
-            )
-            .await;
-        assert!(
-            matches!(stale_reuse, Err(AuthProductError::BackendConflict)),
-            "a flow must not be reused after its lifecycle epoch changes concurrently"
-        );
-        lifecycle_store.set_state(&owner, epoch, SlackConnectionState::Connecting);
-        lifecycle_store.transition_after_next_state_read(SlackConnectionState::Disconnecting);
-        let stale_exact_reuse = product_auth
-            .challenge_for_gate(
-                &third_turn_scope,
-                &user_id,
-                third_run_id,
-                gate_ref,
-                &requirements,
-            )
-            .await;
-        assert!(
-            matches!(stale_exact_reuse, Err(AuthProductError::BackendConflict)),
-            "an exact turn-gate flow must still be revalidated against Slack lifecycle state"
-        );
-        lifecycle_store.set_state(&owner, epoch, SlackConnectionState::Connecting);
-        let callback_challenge = product_auth
-            .challenge_for_gate(
-                &third_turn_scope,
-                &user_id,
-                third_run_id,
-                gate_ref,
-                &requirements,
-            )
-            .await
-            .expect("fresh challenge lookup after stale flow retirement")
-            .expect("fresh Slack OAuth challenge");
-        let callback_authorization_url = callback_challenge
-            .authorization_url
-            .expect("fresh authorization url");
-        assert_ne!(
-            callback_authorization_url, authorization_url,
-            "a lifecycle-rejected flow must be retired before retry"
-        );
-        let state_value = Url::parse(callback_authorization_url.as_str())
-            .expect("fresh authorization url")
+        let state_value = Url::parse(authorization_url.as_str())
+            .expect("authorization url")
             .query_pairs()
             .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
-            .expect("fresh oauth state");
+            .expect("oauth state");
         let callback_state = OAuthCallbackState::decode(
             OAuthCallbackStateKind::SLACK_PERSONAL,
             state_value.as_str(),
@@ -1884,7 +1790,7 @@ mod tests {
         assert_eq!(
             dispatcher.events()[0].continuation,
             AuthContinuationRef::TurnGateResume {
-                turn_run_ref: TurnRunRef::new(third_run_id.to_string()).expect("run ref"),
+                turn_run_ref: TurnRunRef::new(run_id.to_string()).expect("run ref"),
                 gate_ref: AuthGateRef::new(gate_ref).expect("gate ref"),
             }
         );
@@ -1912,7 +1818,9 @@ mod tests {
                 .connection_state(&owner)
                 .await
                 .expect("replacement lifecycle state"),
-            Some((replacement_epoch, SlackConnectionState::Connecting))
+            Some((epoch, SlackConnectionState::Active)),
+            "starting a reconfigure writes no connection state: the working \
+             generation stays active until the replacement callback binds"
         );
         assert_eq!(
             shared
@@ -2573,23 +2481,6 @@ mod tests {
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
-    #[test]
-    fn slack_lifecycle_start_conflicts_do_not_claim_another_user_owns_the_identity() {
-        for error in [
-            SlackUserBindingLifecycleError::ConnectionInProgress,
-            SlackUserBindingLifecycleError::DisconnectInProgress,
-        ] {
-            let failure = slack_lifecycle_start_failure(error);
-            assert_eq!(failure.status, StatusCode::CONFLICT);
-            assert_eq!(failure.body.code, AuthErrorCode::ConnectionConflict);
-            assert_ne!(
-                failure.body.code,
-                AuthErrorCode::ProviderIdentityAlreadyConnected
-            );
-        }
-    }
-
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_terminal_cleanup_without_binding_authority_stays_retryable() {
         let product_auth = Arc::new(RebornProductAuthServices::from_shared(
@@ -2625,9 +2516,14 @@ mod tests {
         assert_eq!(error.body.code, AuthErrorCode::BackendUnavailable);
     }
 
+    /// A denied (or otherwise pre-bind terminal) callback wrote nothing
+    /// durable — the start path keeps no connection state — so its terminal
+    /// hook has nothing to release and must succeed even when Slack setup
+    /// drifted to a different installation while the popup was open. Nothing
+    /// lingers that could block an immediate retry.
     #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
-    async fn slack_personal_oauth_denial_abandons_the_epoch_owner_after_setup_drift() {
+    async fn slack_personal_oauth_denial_leaves_no_lifecycle_state_even_after_setup_drift() {
         let product_auth = Arc::new(RebornProductAuthServices::from_shared(
             Arc::new(InMemoryAuthProductServices::new()),
             Arc::new(RecordingDispatcher::default()),
@@ -2639,7 +2535,7 @@ mod tests {
         let binding_service = Arc::new(SlackPersonalUserBindingService::new(
             [SlackPersonalBindingInstallation {
                 tenant_id: tenant_id.clone(),
-                installation_id: installation_id.clone(),
+                installation_id,
                 selector: SlackInstallationSelector::app_team("A123", "T123"),
             }],
             binding_store.clone(),
@@ -2658,12 +2554,6 @@ mod tests {
                 lifecycle_store.clone(),
             ));
         let flow_id = AuthFlowId::new();
-        let epoch = SlackConnectionEpoch::new(flow_id);
-        let owner = SlackConnectionOwner::new(tenant_id.clone(), user_id.clone(), installation_id);
-        lifecycle_store
-            .begin_connection(&owner, epoch, Utc::now() + ChronoDuration::minutes(5))
-            .await
-            .expect("connection begins");
         let callback_scope = AuthProductScope::new(
             ResourceScope {
                 tenant_id: tenant_id.clone(),
@@ -2687,13 +2577,13 @@ mod tests {
         .await
         .expect("terminal Slack cleanup");
 
-        assert_eq!(
+        assert!(
             lifecycle_store
-                .connection_owner_for_epoch(&tenant_id, &user_id, epoch)
-                .await
-                .expect("owner lookup after denial"),
-            None,
-            "denial must abandon the owner captured before setup drift"
+                .entries
+                .lock()
+                .expect("lifecycle entries lock")
+                .is_empty(),
+            "a pre-bind terminal failure has no lifecycle state to release"
         );
     }
 
@@ -2765,20 +2655,6 @@ mod tests {
         )
         .await
         .expect("start slack oauth flow");
-        // Setup may change while the provider popup is open. The callback must
-        // target the owner captured by this flow's epoch, not re-resolve the
-        // currently configured installation.
-        let state = state.with_slack_personal_oauth_binding(SlackPersonalOAuthBindingConfig::new(
-            binding_service,
-            Arc::new(StaticSlackPersonalConnectionScopeResolver::new(Some(
-                SlackPersonalConnectionScope {
-                    installation_id: AdapterInstallationId::new("install-drifted")
-                        .expect("drifted installation"),
-                },
-            ))),
-            binding_store.clone(),
-            lifecycle_store,
-        ));
         let state_value = Url::parse(start_response.authorization_url.as_str())
             .expect("authorization url")
             .query_pairs()
@@ -2837,11 +2713,135 @@ mod tests {
         assert_eq!(stored_identity.app_id.as_deref(), Some("A123"));
     }
 
+    /// Slack setup may be repointed at a different installation while the
+    /// provider popup is open. The callback binds against the CURRENT
+    /// resolution — the same authority the start validated — and the binding
+    /// service's installation/proof checks fail the callback closed instead
+    /// of writing a binding under configuration that no longer serves
+    /// ingress. Nothing durable survives the rejection.
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[tokio::test]
+    async fn slack_personal_callback_fails_closed_when_setup_drifts_mid_flight() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let dispatcher = Arc::new(RecordingDispatcher::default());
+        let provider_identity = OAuthProviderIdentity::new(
+            "U123",
+            Some("T123".to_string()),
+            Some("E123".to_string()),
+            Some("A123".to_string()),
+        )
+        .expect("provider identity");
+        let provider_client = Arc::new(SlackIdentityProviderClient::new(provider_identity));
+        let product_auth = Arc::new(
+            RebornProductAuthServices::from_shared(shared.clone(), dispatcher)
+                .with_flow_record_source(shared.clone())
+                .with_provider_client(provider_client.clone()),
+        );
+        let binding_store = Arc::new(RecordingBindingStore::default());
+        let installation_id = AdapterInstallationId::new("install-alpha").expect("installation");
+        let binding_service = Arc::new(SlackPersonalUserBindingService::new(
+            [SlackPersonalBindingInstallation {
+                tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
+                installation_id: installation_id.clone(),
+                selector: SlackInstallationSelector::app_team("A123", "T123"),
+            }],
+            binding_store.clone(),
+        ));
+        let lifecycle_store = Arc::new(TestSlackLifecycleStore::default());
+        let state = ProductAuthRouteState::new(
+            product_auth,
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        )
+        .with_test_installed_extension_lookup()
+        .with_slack_personal_oauth(slack_personal_oauth_test_slot().await)
+        .with_slack_personal_oauth_binding(SlackPersonalOAuthBindingConfig::new(
+            binding_service.clone(),
+            Arc::new(StaticSlackPersonalConnectionScopeResolver::new(Some(
+                SlackPersonalConnectionScope { installation_id },
+            ))),
+            binding_store.clone(),
+            lifecycle_store.clone(),
+        ));
+
+        let Json(start_response) = extension_oauth_start_handler(
+            State(state.clone()),
+            Extension(WebUiAuthenticatedCaller::new(
+                TenantId::new("tenant-alpha").expect("tenant"),
+                UserId::new("user-alpha").expect("user"),
+                None,
+                None,
+            )),
+            Path("slack".to_string()),
+            Json(ExtensionOAuthStartRequest {
+                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                account_label: "personal slack".to_string(),
+                scopes: vec![],
+                expires_at: Utc::now() + ChronoDuration::minutes(5),
+                invocation_id: Some(InvocationId::new().to_string()),
+            }),
+        )
+        .await
+        .expect("start slack oauth flow");
+        // The operator repoints Slack setup while the popup is open.
+        let state = state.with_slack_personal_oauth_binding(SlackPersonalOAuthBindingConfig::new(
+            binding_service,
+            Arc::new(StaticSlackPersonalConnectionScopeResolver::new(Some(
+                SlackPersonalConnectionScope {
+                    installation_id: AdapterInstallationId::new("install-drifted")
+                        .expect("drifted installation"),
+                },
+            ))),
+            binding_store.clone(),
+            lifecycle_store.clone(),
+        ));
+        let state_value = Url::parse(start_response.authorization_url.as_str())
+            .expect("authorization url")
+            .query_pairs()
+            .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
+            .expect("oauth state");
+        let encoded_state =
+            url::form_urlencoded::byte_serialize(state_value.as_bytes()).collect::<String>();
+        let uri = format!(
+            "{SLACK_PERSONAL_OAUTH_CALLBACK_PATH}?state={encoded_state}&code=slack-auth-code"
+        )
+        .parse::<Uri>()
+        .expect("callback uri");
+
+        slack_personal_oauth_callback_handler(
+            State(state),
+            RawQuery(uri.query().map(str::to_string)),
+            uri,
+            HeaderMap::new(),
+        )
+        .await
+        .expect_err("a mid-flight setup drift must fail the callback closed");
+
+        assert!(
+            binding_store.bindings().is_empty(),
+            "no identity binding may land under drifted configuration"
+        );
+        assert!(
+            lifecycle_store
+                .entries
+                .lock()
+                .expect("lifecycle entries lock")
+                .is_empty(),
+            "no connection generation may be recorded for the rejected callback"
+        );
+        assert_eq!(
+            provider_client.cleanup_calls(),
+            1,
+            "the rejected exchange's token must be cleaned up"
+        );
+    }
+
     /// The user's real scenario: click Connect on the Slack card, close the
-    /// popup without authorizing, click Connect again. Supersede-on-start
-    /// cancels the prior auth FLOW, but the Slack connection EPOCH lives in the
-    /// lifecycle store, and `begin_connection` rejects a second live epoch with
-    /// `ConnectionInProgress` (409) until the first one's TTL lapses.
+    /// popup without authorizing, click Connect again. Attempt liveness is
+    /// the auth-flow record alone: `create_flow` supersedes the abandoned
+    /// attempt at the creation seam, the start path keeps no connection
+    /// state, and nothing exists that could 409 the re-open.
     #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_personal_reopen_after_closing_popup_is_not_blocked_by_prior_epoch() {
@@ -2937,31 +2937,20 @@ mod tests {
         );
     }
 
-    /// A crash or failed abandon between "supersede the prior flow" and
-    /// "abandon its epoch" leaves a live epoch whose flow is already terminal
-    /// — and the supersede walk only returns non-terminal flows, so nothing
-    /// would ever release it. The start path must reconcile the stranded
-    /// epoch from the flow record instead of 409ing until its TTL lapses.
+    /// Attempt liveness is the auth-flow record alone: the start path writes
+    /// NO Slack connection state. This is what makes the old stranded-epoch
+    /// class unrepresentable — a crash after any start step leaves only flow
+    /// records behind, and the next reopen supersedes those at `create_flow`.
+    /// The connection record is written by the callback's identity binding,
+    /// where the durable generation actually begins.
     #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
-    async fn slack_personal_reopen_recovers_when_a_stranded_epoch_outlives_its_flow() {
+    async fn slack_personal_start_writes_no_connection_state() {
         let shared = Arc::new(InMemoryAuthProductServices::new());
-        let provider_identity = OAuthProviderIdentity::new(
-            "U123",
-            Some("T123".to_string()),
-            None,
-            Some("A123".to_string()),
-        )
-        .expect("provider identity");
-        let provider_client = Arc::new(SlackIdentityProviderClient::new(provider_identity));
-        let product_auth = Arc::new(
-            RebornProductAuthServices::from_shared(
-                shared.clone(),
-                Arc::new(RecordingDispatcher::default()),
-            )
-            .with_flow_record_source(shared)
-            .with_provider_client(provider_client),
-        );
+        let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+            shared,
+            Arc::new(RecordingDispatcher::default()),
+        ));
         let tenant_id = TenantId::new("tenant-alpha").expect("tenant");
         let user_id = UserId::new("user-alpha").expect("user");
         let installation_id = AdapterInstallationId::new("install-alpha").expect("installation");
@@ -2975,7 +2964,7 @@ mod tests {
             binding_store.clone(),
         ));
         let lifecycle_store = Arc::new(TestSlackLifecycleStore::default());
-        let state = ProductAuthRouteState::new(product_auth.clone(), tenant_id.clone(), None, None)
+        let state = ProductAuthRouteState::new(product_auth, tenant_id.clone(), None, None)
             .with_test_installed_extension_lookup()
             .with_slack_personal_oauth(slack_personal_oauth_test_slot().await)
             .with_slack_personal_oauth_binding(SlackPersonalOAuthBindingConfig::new(
@@ -2986,51 +2975,34 @@ mod tests {
                 binding_store,
                 lifecycle_store.clone(),
             ));
-        let caller = WebUiAuthenticatedCaller::new(tenant_id.clone(), user_id.clone(), None, None);
-        let start_request = || ExtensionOAuthStartRequest {
-            provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
-            account_label: "personal slack".to_string(),
-            scopes: vec![],
-            expires_at: Utc::now() + ChronoDuration::minutes(5),
-            invocation_id: Some(InvocationId::new().to_string()),
-        };
 
-        // Click Connect: flow F1 and epoch E1 are live.
-        let Json(first_start) = extension_oauth_start_handler(
-            State(state.clone()),
-            Extension(caller.clone()),
+        let Json(_started) = extension_oauth_start_handler(
+            State(state),
+            Extension(WebUiAuthenticatedCaller::new(
+                tenant_id, user_id, None, None,
+            )),
             Path("slack".to_string()),
-            Json(start_request()),
+            Json(ExtensionOAuthStartRequest {
+                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                account_label: "personal slack".to_string(),
+                scopes: Vec::new(),
+                expires_at: Utc::now() + ChronoDuration::minutes(5),
+                invocation_id: Some(InvocationId::new().to_string()),
+            }),
         )
         .await
-        .expect("first Slack connect starts");
+        .expect("Slack connect starts");
 
-        // Re-open while the epoch-abandon write fails: supersede cancels F1,
-        // then the abandon errors out — the exact partial failure that
-        // strands E1 with no non-terminal flow left pointing at it.
-        lifecycle_store
-            .fail_next_abandon
-            .store(true, Ordering::SeqCst);
-        extension_oauth_start_handler(
-            State(state.clone()),
-            Extension(caller.clone()),
-            Path("slack".to_string()),
-            Json(start_request()),
-        )
-        .await
-        .expect_err("a failed epoch abandon fails the re-open");
-
-        // Third click with a healthy backend. Only flow-record reconciliation
-        // can release E1 now; without it this 409s until the epoch TTL.
-        let Json(third_start) = extension_oauth_start_handler(
-            State(state.clone()),
-            Extension(caller.clone()),
-            Path("slack".to_string()),
-            Json(start_request()),
-        )
-        .await
-        .expect("re-opening after a stranded abandon reconciles the dead epoch instead of 409ing");
-        assert_ne!(third_start.flow_id, first_start.flow_id);
+        assert!(
+            lifecycle_store
+                .entries
+                .lock()
+                .expect("lifecycle entries lock")
+                .is_empty(),
+            "connect-attempt liveness must live on the flow record only; a \
+             start-time connection record is a second liveness authority that \
+             can strand when the flow dies without it"
+        );
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
@@ -3125,14 +3097,13 @@ mod tests {
             AuthFlowStatus::Failed,
             "known malformed callback must durably terminalize the flow"
         );
-        let first_epoch = SlackConnectionEpoch::new(first_start.flow_id);
-        assert_eq!(
+        assert!(
             lifecycle_store
-                .connection_owner_for_epoch(&tenant_id, &user_id, first_epoch)
-                .await
-                .expect("lifecycle lookup"),
-            None,
-            "terminal malformed callback must abandon the connecting epoch"
+                .entries
+                .lock()
+                .expect("lifecycle entries lock")
+                .is_empty(),
+            "a terminal malformed callback leaves no lifecycle state behind"
         );
 
         let Json(second_start) = extension_oauth_start_handler(
@@ -3171,14 +3142,13 @@ mod tests {
         .await
         .expect_err("provider backend failure must surface");
         assert_eq!(error.body.code, AuthErrorCode::BackendUnavailable);
-        let second_epoch = SlackConnectionEpoch::new(second_start.flow_id);
-        assert_eq!(
+        assert!(
             lifecycle_store
-                .connection_owner_for_epoch(&tenant_id, &user_id, second_epoch)
-                .await
-                .expect("lifecycle lookup"),
-            None,
-            "terminal provider failure must abandon the connecting epoch"
+                .entries
+                .lock()
+                .expect("lifecycle entries lock")
+                .is_empty(),
+            "a terminal provider failure leaves no lifecycle state behind"
         );
 
         let Json(third_start) = extension_oauth_start_handler(
@@ -3235,14 +3205,13 @@ mod tests {
             AuthFlowStatus::Failed,
             "missing one-shot PKCE material must durably terminalize the known flow"
         );
-        let third_epoch = SlackConnectionEpoch::new(third_start.flow_id);
-        assert_eq!(
+        assert!(
             lifecycle_store
-                .connection_owner_for_epoch(&tenant_id, &user_id, third_epoch)
-                .await
-                .expect("lifecycle lookup"),
-            None,
-            "missing PKCE must abandon the connecting epoch"
+                .entries
+                .lock()
+                .expect("lifecycle entries lock")
+                .is_empty(),
+            "a missing-PKCE terminal failure leaves no lifecycle state behind"
         );
 
         let _ = extension_oauth_start_handler(
@@ -3797,8 +3766,6 @@ mod tests {
     #[derive(Debug, Default)]
     struct TestSlackLifecycleStore {
         entries: Mutex<Vec<TestSlackLifecycleEntry>>,
-        fail_next_abandon: AtomicBool,
-        transition_after_next_state_read: Mutex<Option<SlackConnectionState>>,
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
@@ -3807,35 +3774,40 @@ mod tests {
         epoch: SlackConnectionEpoch,
         owner: SlackConnectionOwner,
         state: SlackConnectionState,
-        pending: Option<(SlackConnectionEpoch, ironclaw_auth::Timestamp)>,
         cleanup_selector: Option<SlackConnectionCleanupSelector>,
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
     impl TestSlackLifecycleStore {
+        /// Mirrors `FilesystemSlackHostState::record_active_generation`: the
+        /// callback's bind creates or replaces the owner's active generation
+        /// and reports the replaced one for compensation.
         fn activate(
             &self,
             owner: &SlackConnectionOwner,
             epoch: SlackConnectionEpoch,
         ) -> Option<SlackConnectionEpoch> {
             let mut entries = self.entries.lock().expect("lifecycle entries lock");
-            let entry = entries
-                .iter_mut()
-                .find(|entry| entry.owner == *owner)
-                .expect("connecting lifecycle owner");
-            if entry.state == SlackConnectionState::Active
-                && entry
-                    .pending
-                    .is_some_and(|(pending_epoch, _)| pending_epoch == epoch)
-            {
-                let previous_epoch = entry.epoch;
+            if let Some(entry) = entries.iter_mut().find(|entry| entry.owner == *owner) {
+                assert_ne!(
+                    entry.state,
+                    SlackConnectionState::Disconnecting,
+                    "a bind must not activate under a running disconnect sweep"
+                );
+                let previous_epoch = (entry.state == SlackConnectionState::Active
+                    && entry.epoch != epoch)
+                    .then_some(entry.epoch);
                 entry.epoch = epoch;
-                entry.pending = None;
-                Some(previous_epoch)
-            } else {
-                assert_eq!(entry.epoch, epoch);
-                assert_eq!(entry.state, SlackConnectionState::Connecting);
                 entry.state = SlackConnectionState::Active;
+                entry.cleanup_selector = None;
+                previous_epoch
+            } else {
+                entries.push(TestSlackLifecycleEntry {
+                    epoch,
+                    owner: owner.clone(),
+                    state: SlackConnectionState::Active,
+                    cleanup_selector: None,
+                });
                 None
             }
         }
@@ -3853,80 +3825,31 @@ mod tests {
                 .expect("active lifecycle owner");
             if entry.state == SlackConnectionState::Active && entry.epoch == failed_epoch {
                 entry.epoch = previous_epoch;
-                entry.pending = None;
             }
         }
 
-        fn transition_after_next_state_read(&self, state: SlackConnectionState) {
-            *self
-                .transition_after_next_state_read
-                .lock()
-                .expect("lifecycle transition lock") = Some(state);
-        }
-
-        fn set_state(
+        /// Mirrors the production rollback's "a failed generation must not
+        /// stay active" arm for fresh (non-reconfigure) binds.
+        fn disconnect_failed_generation(
             &self,
             owner: &SlackConnectionOwner,
-            epoch: SlackConnectionEpoch,
-            state: SlackConnectionState,
+            failed_epoch: SlackConnectionEpoch,
         ) {
             let mut entries = self.entries.lock().expect("lifecycle entries lock");
-            let entry = entries
+            if let Some(entry) = entries
                 .iter_mut()
-                .find(|entry| entry.owner == *owner && entry.epoch == epoch)
-                .expect("lifecycle owner");
-            entry.state = state;
+                .find(|entry| entry.owner == *owner && entry.epoch == failed_epoch)
+                && entry.state == SlackConnectionState::Active
+            {
+                entry.state = SlackConnectionState::Disconnected;
+                entry.cleanup_selector = None;
+            }
         }
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[async_trait]
     impl SlackUserBindingLifecycleStore for TestSlackLifecycleStore {
-        async fn begin_connection(
-            &self,
-            owner: &SlackConnectionOwner,
-            epoch: SlackConnectionEpoch,
-            expires_at: ironclaw_auth::Timestamp,
-        ) -> Result<(), SlackUserBindingLifecycleError> {
-            let mut entries = self.entries.lock().expect("lifecycle entries lock");
-            if let Some(entry) = entries.iter_mut().find(|entry| entry.owner == *owner) {
-                match entry.state {
-                    SlackConnectionState::Connecting if entry.epoch == epoch => return Ok(()),
-                    SlackConnectionState::Connecting => {
-                        return Err(SlackUserBindingLifecycleError::ConnectionInProgress);
-                    }
-                    SlackConnectionState::Active => match entry.pending {
-                        Some((pending_epoch, _)) if pending_epoch == epoch => return Ok(()),
-                        Some((_, pending_expiry)) if pending_expiry > Utc::now() => {
-                            return Err(SlackUserBindingLifecycleError::ConnectionInProgress);
-                        }
-                        Some(_) | None => {
-                            entry.pending = Some((epoch, expires_at));
-                            return Ok(());
-                        }
-                    },
-                    SlackConnectionState::Disconnecting => {
-                        return Err(SlackUserBindingLifecycleError::DisconnectInProgress);
-                    }
-                    SlackConnectionState::Disconnected => {
-                        entry.epoch = epoch;
-                        entry.state = SlackConnectionState::Connecting;
-                        entry.pending = None;
-                        entry.cleanup_selector = None;
-                        return Ok(());
-                    }
-                }
-            }
-            entries.push(TestSlackLifecycleEntry {
-                epoch,
-                owner: owner.clone(),
-                state: SlackConnectionState::Connecting,
-                pending: None,
-                cleanup_selector: None,
-            });
-            Ok(())
-        }
-
         async fn connection_state(
             &self,
             owner: &SlackConnectionOwner,
@@ -3934,51 +3857,11 @@ mod tests {
             Option<(SlackConnectionEpoch, SlackConnectionState)>,
             SlackUserBindingLifecycleError,
         > {
-            let mut entries = self.entries.lock().expect("lifecycle entries lock");
-            let current = entries
+            let entries = self.entries.lock().expect("lifecycle entries lock");
+            Ok(entries
                 .iter()
                 .find(|entry| entry.owner == *owner)
-                .map(|entry| match (entry.state, entry.pending) {
-                    (SlackConnectionState::Active, Some((pending_epoch, _))) => {
-                        (pending_epoch, SlackConnectionState::Connecting)
-                    }
-                    _ => (entry.epoch, entry.state),
-                });
-            if let Some(next_state) = self
-                .transition_after_next_state_read
-                .lock()
-                .expect("lifecycle transition lock")
-                .take()
-                && let Some(entry) = entries.iter_mut().find(|entry| entry.owner == *owner)
-            {
-                entry.state = next_state;
-            }
-            Ok(current)
-        }
-
-        async fn connection_owner_for_epoch(
-            &self,
-            tenant_id: &TenantId,
-            user_id: &UserId,
-            epoch: SlackConnectionEpoch,
-        ) -> Result<Option<SlackConnectionOwner>, SlackUserBindingLifecycleError> {
-            Ok(self
-                .entries
-                .lock()
-                .expect("lifecycle entries lock")
-                .iter()
-                .rev()
-                .find(|entry| {
-                    (entry.epoch == epoch
-                        || (entry.state == SlackConnectionState::Active
-                            && entry
-                                .pending
-                                .is_some_and(|(pending_epoch, _)| pending_epoch == epoch)))
-                        && entry.state != SlackConnectionState::Disconnected
-                        && entry.owner.tenant_id() == tenant_id
-                        && entry.owner.user_id() == user_id
-                })
-                .map(|entry| entry.owner.clone()))
+                .map(|entry| (entry.epoch, entry.state)))
         }
 
         async fn connection_owners_for_user(
@@ -4019,7 +3902,6 @@ mod tests {
                     SlackConnectionState::Connecting | SlackConnectionState::Active
                 ) {
                     entry.state = SlackConnectionState::Disconnecting;
-                    entry.pending = None;
                     entry.cleanup_selector =
                         Some(SlackConnectionCleanupSelector::Epoch(entry.epoch));
                     return Ok(SlackDisconnectFence::new(
@@ -4030,7 +3912,6 @@ mod tests {
                 let fence_epoch = SlackConnectionEpoch::new(AuthFlowId::new());
                 entry.epoch = fence_epoch;
                 entry.state = SlackConnectionState::Disconnecting;
-                entry.pending = None;
                 entry.cleanup_selector = Some(SlackConnectionCleanupSelector::AllOwned);
                 return Ok(SlackDisconnectFence::new(
                     fence_epoch,
@@ -4042,7 +3923,6 @@ mod tests {
                 epoch: fence_epoch,
                 owner: owner.clone(),
                 state: SlackConnectionState::Disconnecting,
-                pending: None,
                 cleanup_selector: Some(SlackConnectionCleanupSelector::AllOwned),
             });
             Ok(SlackDisconnectFence::new(
@@ -4067,7 +3947,6 @@ mod tests {
                 return Err(SlackUserBindingLifecycleError::StaleEpoch);
             }
             entry.state = SlackConnectionState::Disconnected;
-            entry.pending = None;
             entry.cleanup_selector = None;
             Ok(())
         }
@@ -4081,13 +3960,6 @@ mod tests {
             let Some(entry) = entries.iter_mut().find(|entry| entry.owner == *owner) else {
                 return Err(SlackUserBindingLifecycleError::StaleEpoch);
             };
-            if entry.state == SlackConnectionState::Active
-                && entry
-                    .pending
-                    .is_some_and(|(pending_epoch, _)| pending_epoch == epoch)
-            {
-                return Ok(());
-            }
             if entry.epoch != epoch {
                 return Err(SlackUserBindingLifecycleError::StaleEpoch);
             }
@@ -4107,48 +3979,11 @@ mod tests {
             let Some(entry) = entries.iter_mut().find(|entry| entry.owner == *owner) else {
                 return Err(SlackUserBindingLifecycleError::StaleEpoch);
             };
-            if entry.state == SlackConnectionState::Active
-                && entry
-                    .pending
-                    .is_some_and(|(pending_epoch, _)| pending_epoch == epoch)
-            {
-                entry.pending = None;
-                return Ok(());
-            }
             if entry.epoch != epoch {
                 return Err(SlackUserBindingLifecycleError::StaleEpoch);
             }
             entry.state = SlackConnectionState::Disconnected;
-            entry.pending = None;
             entry.cleanup_selector = None;
-            Ok(())
-        }
-
-        async fn abandon_connection(
-            &self,
-            owner: &SlackConnectionOwner,
-            epoch: SlackConnectionEpoch,
-        ) -> Result<(), SlackUserBindingLifecycleError> {
-            if self.fail_next_abandon.swap(false, Ordering::SeqCst) {
-                return Err(SlackUserBindingLifecycleError::Backend(
-                    "scripted abandon failure".to_string(),
-                ));
-            }
-            let mut entries = self.entries.lock().expect("lifecycle entries lock");
-            if let Some(entry) = entries.iter_mut().find(|entry| entry.owner == *owner) {
-                if entry.state == SlackConnectionState::Active
-                    && entry
-                        .pending
-                        .is_some_and(|(pending_epoch, _)| pending_epoch == epoch)
-                {
-                    entry.pending = None;
-                } else if entry.epoch == epoch && entry.state != SlackConnectionState::Disconnecting
-                {
-                    entry.state = SlackConnectionState::Disconnected;
-                    entry.pending = None;
-                    entry.cleanup_selector = None;
-                }
-            }
             Ok(())
         }
     }
@@ -4290,7 +4125,7 @@ mod tests {
                                 previous_epoch,
                             );
                         } else {
-                            let _ = lifecycle_store.abandon_connection(&owner, epoch).await;
+                            lifecycle_store.disconnect_failed_generation(&owner, epoch);
                         }
                     },
                 ),
@@ -4967,14 +4802,7 @@ mod tests {
         // delete failure; it must remain retryable, and a later poll must still
         // converge even after the interactive OAuth flow has expired.
         let connection_epoch = SlackConnectionEpoch::new(start_response.flow_id);
-        lifecycle_store
-            .begin_connection(
-                &owner,
-                connection_epoch,
-                Utc::now() + ChronoDuration::minutes(5),
-            )
-            .await
-            .expect("recreate stale lifecycle owner");
+        lifecycle_store.activate(&owner, connection_epoch);
         binding_store
             .bind_user_identity_for_epoch(
                 RebornUserIdentityBinding {
@@ -5020,7 +4848,7 @@ mod tests {
                 .connection_state(&owner)
                 .await
                 .expect("connection state after observational read"),
-            Some((connection_epoch, SlackConnectionState::Connecting)),
+            Some((connection_epoch, SlackConnectionState::Active)),
             "GET status must not mutate lifecycle state"
         );
         let status_query = OAuthFlowStatusQuery {
@@ -5451,15 +5279,9 @@ mod tests {
             }],
             activating_store,
         ));
+        // The bind records the active generation itself (no start-time
+        // connection state exists to seed).
         let active_epoch = SlackConnectionEpoch::new(AuthFlowId::new());
-        lifecycle_store
-            .begin_connection(
-                &owner,
-                active_epoch,
-                Utc::now() + ChronoDuration::minutes(5),
-            )
-            .await
-            .expect("initial connection begins");
         binding_service
             .bind_personal_user_for_epoch(
                 crate::slack::slack_personal_binding::SlackPersonalBindingPrincipal {

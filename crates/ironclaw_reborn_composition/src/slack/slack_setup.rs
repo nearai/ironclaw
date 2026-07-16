@@ -717,8 +717,6 @@ fn map_secret_error(error: SecretStoreError) -> SlackSetupError {
 #[derive(Clone)]
 pub struct SlackPersonalSetupServiceSlot {
     slot: Arc<OnceLock<Arc<SlackSetupService>>>,
-    gate_lifecycle:
-        Arc<OnceLock<crate::slack::slack_personal_oauth::SlackPersonalOAuthGateLifecycle>>,
     redirect_uri: OAuthRedirectUri,
 }
 
@@ -726,7 +724,6 @@ impl SlackPersonalSetupServiceSlot {
     pub fn new(redirect_uri: OAuthRedirectUri) -> Self {
         Self {
             slot: Arc::new(OnceLock::new()),
-            gate_lifecycle: Arc::new(OnceLock::new()),
             redirect_uri,
         }
     }
@@ -739,19 +736,6 @@ impl SlackPersonalSetupServiceSlot {
         self.slot.get().cloned()
     }
 
-    pub(crate) fn fill_gate_lifecycle(
-        &self,
-        lifecycle: crate::slack::slack_personal_oauth::SlackPersonalOAuthGateLifecycle,
-    ) {
-        let _ = self.gate_lifecycle.set(lifecycle);
-    }
-
-    pub(crate) fn gate_lifecycle(
-        &self,
-    ) -> Option<crate::slack::slack_personal_oauth::SlackPersonalOAuthGateLifecycle> {
-        self.gate_lifecycle.get().cloned()
-    }
-
     pub fn redirect_uri(&self) -> &OAuthRedirectUri {
         &self.redirect_uri
     }
@@ -762,10 +746,6 @@ impl fmt::Debug for SlackPersonalSetupServiceSlot {
         formatter
             .debug_struct("SlackPersonalSetupServiceSlot")
             .field("filled", &self.slot.get().is_some())
-            .field(
-                "gate_lifecycle_filled",
-                &self.gate_lifecycle.get().is_some(),
-            )
             .field("redirect_uri", &self.redirect_uri)
             .finish()
     }

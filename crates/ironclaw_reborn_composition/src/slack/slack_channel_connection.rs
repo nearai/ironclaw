@@ -1874,16 +1874,6 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SlackUserBindingLifecycleStore for RecordingSlackIdentityStore {
-        async fn begin_connection(
-            &self,
-            _owner: &SlackConnectionOwner,
-            _epoch: SlackConnectionEpoch,
-            _expires_at: ironclaw_auth::Timestamp,
-        ) -> Result<(), crate::slack::slack_personal_binding::SlackUserBindingLifecycleError>
-        {
-            Ok(())
-        }
-
         async fn connection_state(
             &self,
             _owner: &SlackConnectionOwner,
@@ -1892,18 +1882,6 @@ mod tests {
                 SlackConnectionEpoch,
                 crate::slack::slack_personal_binding::SlackConnectionState,
             )>,
-            crate::slack::slack_personal_binding::SlackUserBindingLifecycleError,
-        > {
-            Ok(None)
-        }
-
-        async fn connection_owner_for_epoch(
-            &self,
-            _tenant_id: &TenantId,
-            _user_id: &UserId,
-            _epoch: SlackConnectionEpoch,
-        ) -> Result<
-            Option<SlackConnectionOwner>,
             crate::slack::slack_personal_binding::SlackUserBindingLifecycleError,
         > {
             Ok(None)
@@ -1969,15 +1947,6 @@ mod tests {
         }
 
         async fn complete_failed_connection_cleanup(
-            &self,
-            _owner: &SlackConnectionOwner,
-            _epoch: SlackConnectionEpoch,
-        ) -> Result<(), crate::slack::slack_personal_binding::SlackUserBindingLifecycleError>
-        {
-            Ok(())
-        }
-
-        async fn abandon_connection(
             &self,
             _owner: &SlackConnectionOwner,
             _epoch: SlackConnectionEpoch,
