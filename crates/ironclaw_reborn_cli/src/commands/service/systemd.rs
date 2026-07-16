@@ -1,15 +1,14 @@
-//! Linux systemd user-unit generators, path resolution for
-//! `ironclaw-reborn service`. Verb bodies (install/start/stop/status/
-//! uninstall) are appended once the shared shell-out helpers in
-//! `super` exist.
+//! Linux systemd user-unit generators, path resolution, and verb
+//! bodies for `ironclaw-reborn service`.
 
 use std::path::PathBuf;
+use std::process::Command;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::serve_invocation::ServeInvocation;
 
-use super::{SYSTEMD_UNIT, home_dir};
+use super::{SYSTEMD_UNIT, home_dir, run_capture, run_checked};
 
 // ── Quoting ─────────────────────────────────────────────────────
 
@@ -57,6 +56,79 @@ fn unit_path() -> Result<PathBuf> {
         .join("systemd")
         .join("user")
         .join(SYSTEMD_UNIT))
+}
+
+// ── Verb bodies ─────────────────────────────────────────────────
+
+pub(super) fn install(invocation: &ServeInvocation) -> Result<()> {
+    let file = unit_path()?;
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create {}", parent.display()))?;
+    }
+    let unit = unit_content(invocation);
+    std::fs::write(&file, unit).with_context(|| format!("write {}", file.display()))?;
+    run_checked(
+        "systemctl daemon-reload",
+        Command::new("systemctl").args(["--user", "daemon-reload"]),
+    )
+    .ok();
+    run_checked(
+        "systemctl enable",
+        Command::new("systemctl").args(["--user", "enable", SYSTEMD_UNIT]),
+    )
+    .ok();
+    println!("Installed systemd user service: {}", file.display());
+    println!("  Start with: ironclaw-reborn service start");
+    Ok(())
+}
+
+pub(super) fn start() -> Result<()> {
+    run_checked(
+        "systemctl daemon-reload",
+        Command::new("systemctl").args(["--user", "daemon-reload"]),
+    )?;
+    run_checked(
+        "systemctl start",
+        Command::new("systemctl").args(["--user", "start", SYSTEMD_UNIT]),
+    )?;
+    println!("Service started");
+    Ok(())
+}
+
+pub(super) fn stop() -> Result<()> {
+    run_checked(
+        "systemctl stop",
+        Command::new("systemctl").args(["--user", "stop", SYSTEMD_UNIT]),
+    )
+    .ok();
+    println!("Service stopped");
+    Ok(())
+}
+
+pub(super) fn status() -> Result<()> {
+    let state = run_capture(
+        "systemctl is-active",
+        Command::new("systemctl").args(["--user", "is-active", SYSTEMD_UNIT]),
+    )
+    .unwrap_or_else(|_| "unknown".into());
+    println!("Service state: {}", state.trim());
+    println!("Unit: {}", unit_path()?.display());
+    Ok(())
+}
+
+pub(super) fn uninstall() -> Result<()> {
+    let file = unit_path()?;
+    if file.exists() {
+        std::fs::remove_file(&file).with_context(|| format!("remove {}", file.display()))?;
+    }
+    run_checked(
+        "systemctl daemon-reload",
+        Command::new("systemctl").args(["--user", "daemon-reload"]),
+    )
+    .ok();
+    println!("Service uninstalled ({})", file.display());
+    Ok(())
 }
 
 #[cfg(test)]

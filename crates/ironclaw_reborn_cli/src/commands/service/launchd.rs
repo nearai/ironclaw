@@ -1,15 +1,15 @@
-//! macOS launchd generators, path resolution, and status matching for
-//! `ironclaw-reborn service`. Verb bodies (install/start/stop/status/
-//! uninstall) are appended once the shared shell-out helpers in
-//! `super` exist.
+//! macOS launchd generators, path resolution, status matching, and verb
+//! bodies for `ironclaw-reborn service`.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 
+use crate::context::RebornCliContext;
 use crate::serve_invocation::ServeInvocation;
 
-use super::{SERVICE_LABEL, home_dir};
+use super::{SERVICE_LABEL, home_dir, run_capture, run_checked};
 
 // ── Escaping ────────────────────────────────────────────────────
 
@@ -91,6 +91,85 @@ fn service_running(launchctl_list_output: &str) -> bool {
     launchctl_list_output
         .lines()
         .any(|line| line.contains(SERVICE_LABEL))
+}
+
+// ── Verb bodies ─────────────────────────────────────────────────
+
+pub(super) fn install(context: &RebornCliContext, invocation: &ServeInvocation) -> Result<()> {
+    let file = plist_path()?;
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create {}", parent.display()))?;
+    }
+    let logs_dir = context.boot_config().home().path().join("logs");
+    std::fs::create_dir_all(&logs_dir)
+        .with_context(|| format!("create {}", logs_dir.display()))?;
+    let stdout_log = logs_dir.join("serve.stdout.log");
+    let stderr_log = logs_dir.join("serve.stderr.log");
+    let plist = plist_content(invocation, &stdout_log, &stderr_log);
+    std::fs::write(&file, plist).with_context(|| format!("write {}", file.display()))?;
+    println!("Installed launchd service: {}", file.display());
+    println!("  Start with: ironclaw-reborn service start");
+    Ok(())
+}
+
+pub(super) fn start() -> Result<()> {
+    let plist = plist_path()?;
+    if !plist.exists() {
+        bail!("Service not installed. Run `ironclaw-reborn service install` first.");
+    }
+    run_checked(
+        "launchctl load",
+        Command::new("launchctl").arg("load").arg("-w").arg(&plist),
+    )?;
+    run_checked(
+        "launchctl start",
+        Command::new("launchctl").arg("start").arg(SERVICE_LABEL),
+    )?;
+    println!("Service started");
+    Ok(())
+}
+
+pub(super) fn stop() -> Result<()> {
+    let plist = plist_path()?;
+    run_checked(
+        "launchctl stop",
+        Command::new("launchctl").arg("stop").arg(SERVICE_LABEL),
+    )
+    .ok();
+    run_checked(
+        "launchctl unload",
+        Command::new("launchctl")
+            .arg("unload")
+            .arg("-w")
+            .arg(&plist),
+    )
+    .ok();
+    println!("Service stopped");
+    Ok(())
+}
+
+pub(super) fn status() -> Result<()> {
+    let out = run_capture("launchctl list", Command::new("launchctl").arg("list"))?;
+    println!(
+        "Service: {}",
+        if service_running(&out) {
+            "running/loaded"
+        } else {
+            "not loaded"
+        }
+    );
+    println!("Unit: {}", plist_path()?.display());
+    Ok(())
+}
+
+pub(super) fn uninstall() -> Result<()> {
+    let file = plist_path()?;
+    if file.exists() {
+        std::fs::remove_file(&file).with_context(|| format!("remove {}", file.display()))?;
+    }
+    println!("Service uninstalled ({})", file.display());
+    Ok(())
 }
 
 #[cfg(test)]
