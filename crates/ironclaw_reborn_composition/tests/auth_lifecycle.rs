@@ -290,6 +290,7 @@ async fn assert_lifecycle_uninstall_denies_blocked_auth_gate(fail_flow_before_un
             scope: flow_scope.clone(),
             extension_id: ExtensionId::new("github").unwrap(),
             provider: Some(provider()),
+            lifecycle_package: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await
@@ -328,6 +329,7 @@ async fn assert_lifecycle_uninstall_denies_blocked_auth_gate(fail_flow_before_un
             scope: flow_scope,
             extension_id: ExtensionId::new("github").unwrap(),
             provider: Some(provider()),
+            lifecycle_package: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await
@@ -554,6 +556,7 @@ async fn cleanup_credentials_for_lifecycle_uses_facade_and_quarantine_report() {
             scope: owner.clone(),
             extension_id: extension.clone(),
             provider: None,
+            lifecycle_package: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await

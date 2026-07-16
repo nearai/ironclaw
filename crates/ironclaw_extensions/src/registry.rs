@@ -250,10 +250,6 @@ impl SharedExtensionRegistry {
         self.with_mut_result(|registry| registry.insert(package))
     }
 
-    pub fn update(&self, package: ExtensionPackage) -> Result<(), ExtensionError> {
-        self.with_mut_result(|registry| registry.update(package))
-    }
-
     pub fn upsert(&self, package: ExtensionPackage) -> Result<(), ExtensionError> {
         self.with_mut_result(|registry| {
             if registry.get_extension(&package.id).is_some() {
@@ -341,8 +337,8 @@ mod tests {
             .insert(test_package("alpha", &["read"]))
             .expect("insert package");
         registry
-            .update(test_package("alpha", &["write"]))
-            .expect("update package");
+            .upsert(test_package("alpha", &["write"]))
+            .expect("upsert replaces the existing package");
         assert!(
             registry
                 .snapshot()
