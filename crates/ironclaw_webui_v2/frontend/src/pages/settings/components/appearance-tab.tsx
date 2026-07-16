@@ -17,6 +17,7 @@ type ThemeOptionProps = {
   icon: "sun" | "moon";
   label: string;
   onSelect: () => void;
+  value: InterfaceTheme;
 };
 
 type AppearanceTabProps = {
@@ -57,26 +58,33 @@ export function ThemeOption({
   icon,
   label,
   onSelect,
+  value,
 }: ThemeOptionProps) {
   return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={checked}
-      onClick={onSelect}
+    <label
       className={[
-        "flex items-center gap-3 rounded-xl border px-4 py-3 text-left transition",
+        "flex cursor-pointer items-center gap-3 rounded-xl border px-4 py-3 text-left transition",
+        "has-[:focus-visible]:outline has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-[var(--v2-accent)]",
         checked
           ? "border-[color-mix(in_srgb,var(--v2-accent)_45%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)] text-[var(--v2-text-strong)]"
           : "border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] text-[var(--v2-text-muted)] hover:border-[color-mix(in_srgb,var(--v2-accent)_20%,var(--v2-panel-border))] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]",
       ].join(" ")}
     >
+      <input
+        type="radio"
+        name="appearance-theme"
+        value={value}
+        checked={checked}
+        onChange={onSelect}
+        data-testid={`appearance-theme-${value}`}
+        className="h-4 w-4 shrink-0 accent-[var(--v2-accent)]"
+      />
       <span className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] text-[var(--v2-accent-text)]">
         <Icon name={icon} className="h-4 w-4" />
       </span>
       <span className="min-w-0 flex-1 text-sm font-semibold">{label}</span>
       {checked && (<Icon name="check" className="h-4 w-4 shrink-0 text-[var(--v2-accent-text)]" />)}
-    </button>
+    </label>
   );
 }
 
@@ -134,12 +142,14 @@ export function AppearanceTab({
             icon="sun"
             label={lightThemeLabel}
             onSelect={() => onThemeChange("light")}
+            value="light"
           />
           <ThemeOption
             checked={theme === "dark"}
             icon="moon"
             label={darkThemeLabel}
             onSelect={() => onThemeChange("dark")}
+            value="dark"
           />
         </div>
       </Card>

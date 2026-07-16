@@ -118,8 +118,10 @@ test("Appearance tab selects the shared interface theme", () => {
   const dark = componentProps(options[1], exports.ThemeOption);
   assert.equal(light.label, "Light theme");
   assert.equal(light.checked, true);
+  assert.equal(light.value, "light");
   assert.equal(dark.label, "Dark theme");
   assert.equal(dark.checked, false);
+  assert.equal(dark.value, "dark");
 
   dark.onSelect();
   assert.deepEqual(themeChanges, ["dark"]);
