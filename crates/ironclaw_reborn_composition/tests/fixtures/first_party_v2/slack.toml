@@ -51,6 +51,20 @@ prompt_doc_ref = "prompts/slack/list_conversations.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capability_provider.tools.capabilities]]
+id = "slack.get_conversation_info"
+description = "Retrieve one Slack conversation by its exact conversation ID."
+effects = ["dispatch_capability", "network", "use_secret"]
+runtime_credentials = [
+  { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/slack/get_conversation_info.input.v1.json"
+output_schema_ref = "schemas/slack/raw_output.v1.json"
+prompt_doc_ref = "prompts/slack/get_conversation_info.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
 id = "slack.get_conversation_history"
 description = "Read message history from any channel or DM you can see, identified by its conversation ID."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -65,6 +79,20 @@ prompt_doc_ref = "prompts/slack/get_conversation_history.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capability_provider.tools.capabilities]]
+id = "slack.get_thread_replies"
+description = "Fetch the replies of one Slack thread by channel and thread timestamp."
+effects = ["dispatch_capability", "network", "use_secret"]
+runtime_credentials = [
+  { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/slack/get_thread_replies.input.v1.json"
+output_schema_ref = "schemas/slack/raw_output.v1.json"
+prompt_doc_ref = "prompts/slack/get_thread_replies.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
 id = "slack.get_user_info"
 description = "Get information about a Slack user (name, real name)."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -76,6 +104,20 @@ visibility = "model"
 input_schema_ref = "schemas/slack/get_user_info.input.v1.json"
 output_schema_ref = "schemas/slack/raw_output.v1.json"
 prompt_doc_ref = "prompts/slack/get_user_info.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "slack.whoami"
+description = "Identify the Slack user the connected token belongs to."
+effects = ["dispatch_capability", "network", "use_secret"]
+runtime_credentials = [
+  { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/slack/whoami.input.v1.json"
+output_schema_ref = "schemas/slack/raw_output.v1.json"
+prompt_doc_ref = "prompts/slack/whoami.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capability_provider.tools.capabilities]]
