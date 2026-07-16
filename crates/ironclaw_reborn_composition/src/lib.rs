@@ -29,6 +29,7 @@ mod admin_user_directory;
 mod approval_test_support;
 mod automation;
 mod blocked_auth_resume;
+mod channel_identity;
 mod error;
 mod extension_host;
 mod factory;
@@ -49,6 +50,7 @@ mod production_runtime_policy;
 mod profile_approval_authorization;
 mod projection;
 mod slack;
+mod telegram;
 pub use product_auth::api::auth_prompt::{
     AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller,
 };

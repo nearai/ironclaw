@@ -654,7 +654,12 @@ fn slack_bot_package() -> Result<AvailableExtensionPackage, ProductWorkflowError
 /// this single `telegram` id.
 #[cfg(feature = "telegram-v2-host-beta")]
 pub(crate) fn telegram_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package(TELEGRAM_EXTENSION_ID, "Telegram", TELEGRAM_MANIFEST, Vec::new())
+    bundled_extension_package(
+        TELEGRAM_EXTENSION_ID,
+        "Telegram",
+        TELEGRAM_MANIFEST,
+        Vec::new(),
+    )
 }
 
 pub(crate) fn google_calendar_manifest_digest() -> String {

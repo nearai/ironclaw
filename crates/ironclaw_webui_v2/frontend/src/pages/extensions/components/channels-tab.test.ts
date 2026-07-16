@@ -11,7 +11,7 @@ function channelsTabSourceForTest() {
     if (line.startsWith("import ")) continue;
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { ChannelsTab, ChannelConnectActionSections, SlackConnectActionSections, isSlackPackage, isAdminManagedChannelsAction, isInboundProofCodeAction, isGenericInboundProofCodeAction, isSlackAdminManagedAction, connectActionsForChannel, connectActionsForPackage, findSlackConnectAction, findSlackConnectActions };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { ChannelsTab, ChannelConnectActionSections, SlackConnectActionSections, isSlackPackage, isAdminManagedChannelsAction, isInboundProofCodeAction, isWebGeneratedCodeAction, isGenericInboundProofCodeAction, isSlackAdminManagedAction, isTelegramAdminManagedAction, isTelegramWebGeneratedCodeAction, connectActionsForChannel, connectActionsForPackage, findSlackConnectAction, findSlackConnectActions };`;
 }
 
 function connectActionSectionsForTest(connectAction, connectActions) {
@@ -19,6 +19,8 @@ function connectActionSectionsForTest(connectAction, connectActions) {
     globalThis: {},
     PairingSection() {},
     SlackAdminManagedSection() {},
+    TelegramAdminManagedSection() {},
+    TelegramPairingPanel() {},
     html(strings, ...values) {
       return { strings: Array.from(strings), values };
     },
@@ -32,6 +34,8 @@ function connectActionSectionsForTest(connectAction, connectActions) {
     }),
     PairingSection: context.PairingSection,
     SlackAdminManagedSection: context.SlackAdminManagedSection,
+    TelegramAdminManagedSection: context.TelegramAdminManagedSection,
+    TelegramPairingPanel: context.TelegramPairingPanel,
   };
 }
 
