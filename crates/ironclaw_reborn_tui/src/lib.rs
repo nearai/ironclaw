@@ -10,20 +10,9 @@
 
 pub mod app;
 pub mod client;
+pub mod spawn;
 
-use std::path::PathBuf;
-
-/// Plain-data description of how to (re-)launch `ironclaw-reborn serve`,
-/// handed in by the CLI's `tui` subcommand entry point. This crate never
-/// resolves its own exe path or constructs Reborn env vars — see
-/// `ironclaw_reborn_cli::serve_invocation` and the "TUI never calls CLI
-/// code" note in the design doc's Part A.
-#[derive(Debug, Clone)]
-pub struct ProcessInvocation {
-    pub exe: PathBuf,
-    pub args: Vec<String>,
-    pub env: Vec<(String, String)>,
-}
+pub use spawn::ProcessInvocation;
 
 /// Startup configuration for [`run_tui`].
 #[derive(Debug, Clone)]
