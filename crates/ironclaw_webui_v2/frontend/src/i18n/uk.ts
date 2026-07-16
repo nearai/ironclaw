@@ -628,6 +628,7 @@ registerPack("uk", {
   "workspace.emptyDir": "Ця папка порожня.",
   "workspace.noMatches": "Немає збігів за фільтром.",
   "workspace.download": "Завантажити",
+  "workspace.downloadFailed": "Не вдалося завантажити цей файл. Спробуйте ще раз.",
   "workspace.binaryPreviewUnavailable": "Попередній перегляд для цього типу файлу недоступний. Завантажте, щоб переглянути вміст.",
   "workspace.fileMeta": "{mime} · {size}",
   "workspace.subtitle": "Постійна памʼять",

@@ -677,6 +677,7 @@ registerPack("en", {
   "workspace.pickFileDesc": "Choose a file from the tree to preview or download it. This viewer is read-only.",
   "workspace.parent": "Parent: {path}",
   "workspace.download": "Download",
+  "workspace.downloadFailed": "Couldn't download this file. Please try again.",
   "workspace.binaryPreviewUnavailable":
     "No inline preview for this file type. Download it to view the contents.",
   "workspace.fileMeta": "{mime} · {size}",

@@ -628,6 +628,7 @@ registerPack("zh-CN", {
   "workspace.emptyDir": "此文件夹为空。",
   "workspace.noMatches": "没有符合筛选条件的内容。",
   "workspace.download": "下载",
+  "workspace.downloadFailed": "无法下载此文件，请重试。",
   "workspace.binaryPreviewUnavailable": "此文件类型无法预览。请下载后查看内容。",
   "workspace.fileMeta": "{mime} · {size}",
   "workspace.subtitle": "持久记忆",
