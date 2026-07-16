@@ -488,15 +488,23 @@ impl BuiltinFirstPartyTools {
         ) {
             return false;
         }
-        let Some(config) = &request.services.post_edit_check else {
+        let Some(service) = &request.services.post_edit_check else {
             return false;
         };
+        // Run the check through the resolver-selected, deployment-isolated
+        // process port (tenant sandbox under hosted multi-tenant), NOT
+        // `services.process` (the deployment-blind local port the edit plan
+        // carries), and in the mount that backs the just-edited file (from the
+        // edit result's `path`), so a multi-mount workspace checks the edited
+        // project rather than an arbitrary first writable mount.
+        let edited_scoped_path = output.get("path").and_then(serde_json::Value::as_str);
         let Some(check) = crate::post_edit_check::run_post_edit_check(
             &self.post_edit_check_seen,
-            request.services.process.as_ref(),
+            service.process.as_ref(),
             &request.scope,
             request.mounts.as_ref(),
-            config,
+            edited_scoped_path,
+            &service.config,
         )
         .await
         else {

@@ -4692,6 +4692,19 @@ where
         }
     };
     let services = apply_production_runtime_process_binding(services, process_binding);
+    // Wire the operator post-edit check in production too (off unless
+    // IRONCLAW_POST_EDIT_CHECK is set). It runs isolated in the tenant sandbox
+    // per the runtime process binding applied above; the resolver routes it to
+    // the tenant-sandbox process port rather than the provider host.
+    let services = match PostEditCheckConfig::from_env() {
+        Ok(Some(config)) => services.with_post_edit_check(config),
+        Ok(None) => services,
+        Err(error) => {
+            return Err(crate::RebornCompositionError::InvalidConfig {
+                reason: error.to_string(),
+            });
+        }
+    };
 
     let services = services
         .try_with_host_http_egress_with_body_store(
@@ -5014,6 +5027,10 @@ where
         services,
         production_wiring.runtime_process_binding,
     );
+    // Wire the operator post-edit check in production too (off unless
+    // IRONCLAW_POST_EDIT_CHECK is set); it runs isolated in the tenant sandbox
+    // per the process binding applied above.
+    let services = apply_post_edit_check_from_env(services)?;
     let security_audit_sink = services.security_audit_sink();
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =

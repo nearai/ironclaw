@@ -28,7 +28,10 @@ use ironclaw_host_api::{
 use ironclaw_secrets::SecretStore;
 use thiserror::Error;
 
-use crate::{ExecutionPlan, PostEditCheckConfig, RuntimeProcessPort, RuntimeSecretMaterialStager};
+use crate::{
+    ExecutionPlan, PostEditCheckConfig, PostEditCheckService, RuntimeProcessPort,
+    RuntimeSecretMaterialStager,
+};
 
 /// Concrete host API bindings for an already-authorized invocation.
 ///
@@ -54,14 +57,16 @@ pub struct InvocationServices {
     pub audit_sink: Option<Arc<dyn AuditSink>>,
     pub unsafe_raw_diagnostics_allowed: bool,
     /// Operator-configured post-edit check appended to successful
-    /// `builtin.write_file` / `builtin.apply_patch` output. Resolved once at
-    /// composition time (never from env in per-call handlers); `None` keeps
-    /// the feature off. Resolvers must only populate this when the plan's
-    /// process policy permits spawning through [`InvocationServices::process`]
-    /// — the edit plans themselves never declare a process effect, so this
-    /// field is the policy gate that keeps the check from bypassing
-    /// process-backend selection.
-    pub post_edit_check: Option<PostEditCheckConfig>,
+    /// `builtin.write_file` / `builtin.apply_patch` output, bundled with the
+    /// process port that runs it. Resolved once per invocation; `None` keeps
+    /// the feature off for this invocation. The edit plans declare no process
+    /// effect, so the resolver — the only layer that inspects process backends
+    /// — selects the port matching the plan's process backend (tenant sandbox
+    /// under `HostedMultiTenant`, local host under `LocalSingleUser`) so the
+    /// check runs in the same isolation boundary a declared process effect
+    /// would, rather than escaping onto the shared provider host. `None`
+    /// whenever no backend can run it in isolation. See [`PostEditCheckService`].
+    pub post_edit_check: Option<PostEditCheckService>,
 }
 
 impl fmt::Debug for InvocationServices {
@@ -304,19 +309,17 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
                 plan.deployment,
                 plan.resolved_profile,
             ),
-            // The post-edit check spawns an operator command through the
-            // default `process` port above, from edit plans that never
-            // declare a process effect. Withhold it unless the effective
-            // process policy is the one under which that default port is
-            // the policy-approved backend (the same LocalHost +
-            // LocalSingleUser arm that `requires_process` plans resolve
-            // to); under `ProcessBackendKind::None` or sandbox-backed
-            // policies the advisory check is disabled instead of escaping
-            // onto the provider host.
-            post_edit_check: self
-                .post_edit_check
-                .clone()
-                .filter(|_| local_host_process_execution_permitted(plan)),
+            // The post-edit check spawns an operator command, but the edit
+            // plans it rides declare no process effect, so `process` above is
+            // the deployment-blind local port. Bundle the check with the port
+            // that matches the plan's process backend instead, so it runs in
+            // the tenant sandbox under hosted multi-tenant rather than escaping
+            // onto the shared provider host; disabled when no backend can run
+            // it in isolation.
+            post_edit_check: self.post_edit_check.clone().and_then(|config| {
+                self.post_edit_check_process(plan)
+                    .map(|process| PostEditCheckService { config, process })
+            }),
         })
     }
 }
@@ -330,6 +333,24 @@ fn local_host_process_execution_permitted(plan: &ExecutionPlan) -> bool {
 }
 
 impl LocalInvocationServicesResolver {
+    /// Select the process port the post-edit check must run through, matching
+    /// the plan's process-isolation boundary: the local host port only when
+    /// local host execution is permitted (`LocalSingleUser` + `LocalHost`), the
+    /// tenant sandbox port under a `TenantSandbox` backend. Returns `None`
+    /// (check disabled for this invocation) when no backend can run it in
+    /// isolation — this mirrors how `resolve` binds `process` for a declared
+    /// process effect, but fails soft because the check is advisory rather than
+    /// erroring like a process-requiring plan would.
+    fn post_edit_check_process(&self, plan: &ExecutionPlan) -> Option<Arc<dyn RuntimeProcessPort>> {
+        match plan.process_backend {
+            ProcessBackendKind::LocalHost if local_host_process_execution_permitted(plan) => {
+                Some(Arc::clone(&self.process))
+            }
+            ProcessBackendKind::TenantSandbox => self.tenant_sandbox_process.clone(),
+            _ => None,
+        }
+    }
+
     fn filesystem_for_plan(
         &self,
         plan: &ExecutionPlan,

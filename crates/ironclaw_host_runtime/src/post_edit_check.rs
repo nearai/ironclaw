@@ -32,14 +32,34 @@
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
-use ironclaw_host_api::{MountView, ResourceScope};
+use ironclaw_host_api::{MountGrant, MountView, ResourceScope};
 use serde_json::{Value, json};
 
 use crate::{CommandExecutionRequest, RuntimeProcessError, RuntimeProcessPort};
+
+/// The operator post-edit check config bundled with the process port that must
+/// run it, resolved to the deployment's process-isolation boundary.
+///
+/// Edit plans (`builtin.write_file` / `builtin.apply_patch`) declare only
+/// filesystem effects, so `InvocationServices::process` carries the local host
+/// port even under a hosted deployment. Running the check through that port
+/// would execute the operator command on the shared provider host. The
+/// resolver — the only layer that inspects process backends — instead selects
+/// the port matching the plan's process backend (the tenant sandbox under
+/// `HostedMultiTenant`, the local host port under `LocalSingleUser`) and bundles
+/// it here, so the check runs inside the same isolation boundary a declared
+/// process effect would. `InvocationServices::post_edit_check` is `None`
+/// (feature off for this invocation) whenever no backend can run it in
+/// isolation.
+#[derive(Clone)]
+pub struct PostEditCheckService {
+    pub config: PostEditCheckConfig,
+    pub process: Arc<dyn RuntimeProcessPort>,
+}
 
 /// Shell command run after successful edits. Feature is OFF when unset/empty.
 pub const POST_EDIT_CHECK_ENV: &str = "IRONCLAW_POST_EDIT_CHECK";
@@ -267,6 +287,17 @@ impl PostEditCheckSeenLines {
     }
 }
 
+/// Whether `scoped_path` (e.g. `/workspace/src/main.rs`) lives under the mount
+/// `alias` (e.g. `/workspace`). Matches the alias exactly or as a path prefix on
+/// a `/` boundary so `/workspace` does not spuriously match `/workspace-two`.
+fn scoped_path_under_alias(scoped_path: &str, alias: &str) -> bool {
+    let alias = alias.trim_end_matches('/');
+    scoped_path == alias
+        || scoped_path
+            .strip_prefix(alias)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
 /// Largest index `<= max_bytes` that is a UTF-8 char boundary of `line`.
 fn truncation_boundary(line: &str, max_bytes: usize) -> usize {
     let mut boundary = max_bytes.min(line.len());
@@ -285,23 +316,37 @@ fn truncation_boundary(line: &str, max_bytes: usize) -> usize {
 /// - Check could not run at all: `None` (debug-logged; the edit already
 ///   succeeded and must not fail because of the advisory check)
 ///
-/// The command runs with the first read+write mount alias as its working
-/// directory (the process port resolves the alias to the host root backing
-/// `/workspace`, exactly as it does for shell workdirs); without mounts it
-/// falls back to the port's default working directory like `builtin.shell`.
+/// The command runs with the writable mount that backs the just-edited file as
+/// its working directory (the process port resolves the alias to the host root,
+/// exactly as it does for shell workdirs), so a workspace with several writable
+/// mounts runs the check against the edited project rather than an arbitrary
+/// first mount. It falls back to the first writable mount when the edited path
+/// is unknown or is not under a writable mount, and to the port's default
+/// working directory (like `builtin.shell`) when there are no mounts.
 pub(crate) async fn run_post_edit_check(
     seen: &PostEditCheckSeenLines,
     process: &dyn RuntimeProcessPort,
     scope: &ResourceScope,
     mounts: Option<&MountView>,
+    edited_scoped_path: Option<&str>,
     config: &PostEditCheckConfig,
 ) -> Option<Value> {
     let workdir = mounts.and_then(|mounts| {
-        mounts
-            .mounts
-            .iter()
-            .find(|grant| grant.permissions.read && grant.permissions.write)
-            .map(|grant| grant.alias.as_str().to_string())
+        // A free fn (not a closure) so the elided lifetime is higher-ranked and
+        // the borrowed alias can outlive each `find_map` iteration.
+        fn writable_alias(grant: &MountGrant) -> Option<&str> {
+            (grant.permissions.read && grant.permissions.write).then(|| grant.alias.as_str())
+        }
+        // Prefer the writable mount that actually backs the edited file so the
+        // diagnostics target the edited project, not an unrelated workspace.
+        let backing = edited_scoped_path.and_then(|path| {
+            mounts.mounts.iter().find_map(|grant| {
+                writable_alias(grant).filter(|alias| scoped_path_under_alias(path, alias))
+            })
+        });
+        backing
+            .or_else(|| mounts.mounts.iter().find_map(writable_alias))
+            .map(|alias| alias.to_string())
     });
     let outcome = process
         .run_command(CommandExecutionRequest {
@@ -334,10 +379,127 @@ pub(crate) async fn run_post_edit_check(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{InvocationId, UserId};
+    use async_trait::async_trait;
+    use ironclaw_host_api::{
+        InvocationId, MountAlias, MountGrant, MountPermissions, UserId, VirtualPath,
+    };
+
+    use crate::{CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError};
 
     fn scope(user: &str) -> ResourceScope {
         ResourceScope::local_default(UserId::new(user).unwrap(), InvocationId::new()).unwrap()
+    }
+
+    /// Records the `workdir` each `run_command` was asked to run in, so tests can
+    /// assert which mount the post-edit check selected.
+    #[derive(Debug, Default)]
+    struct RecordingWorkdirPort {
+        workdirs: Mutex<Vec<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl RuntimeProcessPort for RecordingWorkdirPort {
+        async fn run_command(
+            &self,
+            request: CommandExecutionRequest,
+        ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+            self.workdirs
+                .lock()
+                .expect("workdir lock")
+                .push(request.workdir.clone());
+            Ok(CommandExecutionOutput {
+                output: String::new(),
+                saved_output: None,
+                exit_code: 0,
+                sandboxed: false,
+                duration: Duration::ZERO,
+            })
+        }
+    }
+
+    fn writable_mount(alias: &str, virtual_path: &str) -> MountGrant {
+        MountGrant::new(
+            MountAlias::new(alias).expect("mount alias"),
+            VirtualPath::new(virtual_path).expect("virtual path"),
+            MountPermissions::read_write(),
+        )
+    }
+
+    fn check_config() -> PostEditCheckConfig {
+        PostEditCheckConfig::new("cargo check", Duration::from_secs(30))
+    }
+
+    #[test]
+    fn scoped_path_under_alias_matches_only_on_path_boundaries() {
+        assert!(scoped_path_under_alias(
+            "/workspace/src/main.rs",
+            "/workspace"
+        ));
+        assert!(scoped_path_under_alias("/workspace", "/workspace"));
+        assert!(scoped_path_under_alias("/workspace/a.rs", "/workspace/"));
+        // A shared textual prefix that is not a path boundary must not match.
+        assert!(!scoped_path_under_alias(
+            "/workspace-two/a.rs",
+            "/workspace"
+        ));
+        assert!(!scoped_path_under_alias("/other/a.rs", "/workspace"));
+    }
+
+    #[tokio::test]
+    async fn runs_the_check_in_the_edited_files_mount_not_the_first_writable_mount() {
+        let seen = PostEditCheckSeenLines::default();
+        let port = RecordingWorkdirPort::default();
+        let mounts = MountView::new(vec![
+            writable_mount("/workspace", "/projects/workspace"),
+            writable_mount("/other", "/projects/other"),
+        ])
+        .expect("mount view");
+
+        // The edit landed in the second writable mount; the check must run there,
+        // not in the first writable mount that iteration order would otherwise
+        // pick.
+        run_post_edit_check(
+            &seen,
+            &port,
+            &scope("multi-mount-user"),
+            Some(&mounts),
+            Some("/other/src/main.rs"),
+            &check_config(),
+        )
+        .await
+        .expect("check runs");
+
+        assert_eq!(
+            port.workdirs.lock().expect("workdir lock").as_slice(),
+            &[Some("/other".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_the_first_writable_mount_when_the_edit_path_is_unknown() {
+        let seen = PostEditCheckSeenLines::default();
+        let port = RecordingWorkdirPort::default();
+        let mounts = MountView::new(vec![
+            writable_mount("/workspace", "/projects/workspace"),
+            writable_mount("/other", "/projects/other"),
+        ])
+        .expect("mount view");
+
+        run_post_edit_check(
+            &seen,
+            &port,
+            &scope("fallback-user"),
+            Some(&mounts),
+            None,
+            &check_config(),
+        )
+        .await
+        .expect("check runs");
+
+        assert_eq!(
+            port.workdirs.lock().expect("workdir lock").as_slice(),
+            &[Some("/workspace".to_string())]
+        );
     }
 
     #[test]

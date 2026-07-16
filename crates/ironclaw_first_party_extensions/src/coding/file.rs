@@ -359,7 +359,7 @@ pub(super) async fn write_file(
     }
     let scope = read_scope_key(request);
     let _edit_guard = edit_locks
-        .lock_edit(&scope, resolved.virtual_path.as_str())
+        .lock_edit(scope.edit_lock_key(), resolved.virtual_path.as_str())
         .await;
     let existing_stat = stat_optional(request, &resolved.virtual_path).await?;
     if let Some(stat) = &existing_stat
@@ -597,7 +597,7 @@ pub(super) async fn apply_patch(
     let patch_input = parse_apply_patch_input(request.input)?;
     let scope = read_scope_key(request);
     let _edit_guard = edit_locks
-        .lock_edit(&scope, resolved.virtual_path.as_str())
+        .lock_edit(scope.edit_lock_key(), resolved.virtual_path.as_str())
         .await;
     let stat = request
         .filesystem
@@ -622,26 +622,18 @@ pub(super) async fn apply_patch(
     }
     // Read-before-edit guard: patching requires a prior full read_file, and
     // the file must be unchanged since — a stale in-context view produces
-    // wrong-anchor edits (mid-air collision).
-    let Some(recorded) = read_states.recorded(&scope, resolved.virtual_path.as_str()) else {
-        return Err(read_before_edit_error(
-            "apply_patch",
-            resolved.scoped_path.as_str(),
-        ));
-    };
-    let bytes = request
-        .filesystem
-        .read_file(&resolved.virtual_path)
-        .await
-        .map_err(|error| {
-            filesystem_error_with_summary("apply_patch", resolved.scoped_path.as_str(), error)
-        })?;
-    if content_fingerprint(&bytes) != recorded {
-        return Err(stale_read_error(
-            "apply_patch",
-            resolved.scoped_path.as_str(),
-        ));
-    }
+    // wrong-anchor edits (mid-air collision). Shared with write_file's path so
+    // both edit tools apply identical recorded-read, size-limit, re-read, and
+    // fingerprint checks.
+    let bytes = verify_read_before_edit(
+        request,
+        &resolved,
+        read_states,
+        &scope,
+        "apply_patch",
+        &stat,
+    )
+    .await?;
     reject_binary_probe(&bytes)?;
     let (content, encoding, line_ending) = decode_text(&bytes)?;
     let text_edits = patch_input

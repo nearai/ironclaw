@@ -112,18 +112,26 @@ fn local_resolver_rejects_hosted_local_host_process_backend() {
     ));
 }
 
-#[test]
-fn local_resolver_provides_post_edit_check_only_under_local_host_process_policy() {
-    // The post-edit check spawns an operator command through the default
-    // process port from plans that never declare a process effect, so the
-    // resolver must withhold it whenever the effective process policy would
-    // not hand a local host port to a process-requiring plan.
-    let resolver = resolver_without_http()
-        .with_post_edit_check(PostEditCheckConfig::new(
-            "cargo check",
-            std::time::Duration::from_secs(30),
-        ))
-        .with_tenant_sandbox_process_port(Arc::new(NamedProcessPort("tenant-sandbox")));
+#[tokio::test]
+async fn local_resolver_routes_post_edit_check_to_the_deployment_isolated_process_port() {
+    // The post-edit check rides filesystem-only edit plans, so it must NOT run
+    // through the deployment-blind local `process` port. The resolver bundles it
+    // with the port matching the plan's process backend: the local host port
+    // under LocalSingleUser+LocalHost, the tenant-sandbox port under a hosted
+    // tenant-sandbox deployment (so a tenant's command runs isolated in that
+    // tenant's sandbox, never on the provider host), and nothing when no backend
+    // can run it in isolation.
+    let resolver = LocalInvocationServicesResolver::new(
+        Arc::new(LocalFilesystem::new()),
+        None,
+        Arc::new(NamedProcessPort("local-host")),
+        None,
+    )
+    .with_post_edit_check(PostEditCheckConfig::new(
+        "cargo check",
+        std::time::Duration::from_secs(30),
+    ))
+    .with_tenant_sandbox_process_port(Arc::new(NamedProcessPort("tenant-sandbox")));
 
     let resolve = |process_backend, deployment, resolved_profile| {
         let mut plan = plan(process_backend, false, false, NetworkMode::Deny, false);
@@ -138,14 +146,46 @@ fn local_resolver_provides_post_edit_check_only_under_local_host_process_policy(
             .expect("non-process plans must still resolve")
     };
 
+    // Run the bundled check port and return the port's identifying output, so we
+    // can prove WHICH backend the check would spawn on.
+    async fn bundled_port_name(services: &InvocationServices) -> Option<String> {
+        let service = services.post_edit_check.as_ref()?;
+        let output = service
+            .process
+            .run_command(CommandExecutionRequest {
+                scope: ResourceScope::system(),
+                mounts: None,
+                command: "cargo check".to_string(),
+                workdir: None,
+                timeout_secs: Some(30),
+                extra_env: std::collections::HashMap::new(),
+            })
+            .await
+            .expect("named test port runs");
+        Some(output.output)
+    }
+
     let local = resolve(
         ProcessBackendKind::LocalHost,
         DeploymentMode::LocalSingleUser,
         RuntimeProfile::LocalDev,
     );
-    assert!(
-        local.post_edit_check.is_some(),
-        "local-dev LocalHost policy keeps the post-edit check available"
+    assert_eq!(
+        bundled_port_name(&local).await.as_deref(),
+        Some("local-host"),
+        "local single-user runs the check on the local host port"
+    );
+
+    let tenant_sandbox = resolve(
+        ProcessBackendKind::TenantSandbox,
+        DeploymentMode::HostedMultiTenant,
+        RuntimeProfile::HostedDev,
+    );
+    assert_eq!(
+        bundled_port_name(&tenant_sandbox).await.as_deref(),
+        Some("tenant-sandbox"),
+        "hosted multi-tenant runs the check ISOLATED in the tenant sandbox, \
+         never on the provider host"
     );
 
     let no_process = resolve(
@@ -156,17 +196,6 @@ fn local_resolver_provides_post_edit_check_only_under_local_host_process_policy(
     assert!(
         no_process.post_edit_check.is_none(),
         "ProcessBackendKind::None must withhold the post-edit check"
-    );
-
-    let tenant_sandbox = resolve(
-        ProcessBackendKind::TenantSandbox,
-        DeploymentMode::HostedMultiTenant,
-        RuntimeProfile::HostedDev,
-    );
-    assert!(
-        tenant_sandbox.post_edit_check.is_none(),
-        "tenant-sandbox process policy must withhold the post-edit check even \
-         when a sandbox port is configured"
     );
 
     let hosted_local_host = resolve(
