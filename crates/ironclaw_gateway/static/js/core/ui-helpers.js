@@ -302,7 +302,7 @@ function buildWelcomeAgentSetup(suggestions) {
     {
       id: 'channel',
       label: I18n.t('welcome.checkChannel'),
-      run: () => switchTab('integrations'),
+      run: () => openNuxSetupWizard(),
     },
     {
       id: 'task',

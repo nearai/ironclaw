@@ -595,6 +595,14 @@ function connectSSE(lastEventIdOverride) {
     renderPlanChecklist(data);
   });
 
+  // Onboarding flow cards (connect CTA, stack cascade, reading stats,
+  // draft-automation proposals) — rich in-thread widgets emitted by the
+  // agent loop during guided flows.
+  addTrackedEventListener('flow_card', (e) => {
+    const data = JSON.parse(e.data);
+    if (!isCurrentThread(data.thread_id)) return;
+    if (typeof renderFlowCard === 'function') renderFlowCard(data.card);
+  });
 }
 
 // Check if an SSE event belongs to the currently viewed thread.

@@ -1689,3 +1689,673 @@
   font-size: var(--v2-font-size-body-sm);
   line-height: 1.4;
 }
+
+/* ── Flow cards (in-thread onboarding widgets, prototype parity) ── */
+
+.flow-card {
+  align-self: stretch;
+  max-width: 92%;
+  margin-left: 38px; /* aligned with agent bubbles */
+  animation: slideUp 350ms var(--ease-spring);
+}
+
+/* Connect CTA */
+
+.flow-card-connect {
+  display: flex;
+  align-items: center;
+  gap: var(--v2-space-3);
+  padding: var(--v2-space-3) var(--v2-space-4);
+  background: var(--accent-subtle);
+  border: 1px solid var(--accent-border-subtle);
+  border-radius: var(--v2-radius-lg);
+  max-width: 480px;
+}
+
+.flow-connect-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--v2-radius-sm);
+  object-fit: cover;
+  box-shadow: 0 0 0 1px var(--border);
+  flex: 0 0 auto;
+}
+
+.flow-connect-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.flow-connect-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.flow-connect-caption {
+  font-size: var(--v2-font-size-caption);
+  color: var(--text-secondary);
+}
+
+/* DS primary role (md step): gradient fill, accent border, white text.
+   Doubled class selector: outranks the bare .btn-primary rule in users.css,
+   which loads later in the bundle. */
+.btn-primary.flow-connect-btn {
+  height: var(--v2-control-h-md);
+  padding: 0 var(--v2-control-px-md);
+  font-size: var(--v2-font-size-body-sm);
+  font-weight: 500;
+  border-radius: var(--v2-radius-md);
+  background: var(--v2-btn-primary-bg);
+  border: 1px solid var(--v2-btn-primary-border);
+  color: var(--v2-on-accent);
+  cursor: pointer;
+  transition: background 0.35s ease, box-shadow 0.3s ease;
+}
+
+.btn-primary.flow-connect-btn:hover:not(:disabled) {
+  background: var(--v2-btn-primary-bg-hover);
+  box-shadow: var(--v2-shadow-accent-hover);
+}
+
+.flow-connect-done {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--v2-font-size-caption);
+  font-weight: 600;
+  color: var(--success);
+  white-space: nowrap;
+}
+
+/* Cascade chips */
+
+.flow-cascade-label {
+  font-family: var(--font-pixel);
+  font-size: var(--v2-font-size-label);
+  letter-spacing: var(--v2-tracking-tag);
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  margin-bottom: var(--v2-space-2);
+}
+
+.flow-cascade-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--v2-space-2);
+}
+
+.flow-cascade-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--v2-control-h-sm);
+  padding: 0 var(--v2-control-px-sm);
+  border: 1px solid var(--border);
+  border-radius: var(--v2-radius-full);
+  background: var(--bg);
+  font-size: var(--v2-font-size-caption);
+  font-weight: 600;
+  color: var(--text);
+  opacity: 0;
+  animation: flowChipIn 320ms var(--ease-out-expo) forwards;
+}
+
+.flow-cascade-chip img {
+  width: 15px;
+  height: 15px;
+  border-radius: var(--v2-radius-xs);
+  object-fit: cover;
+}
+
+.flow-cascade-check {
+  color: var(--success);
+  opacity: 0;
+  animation: flowChipIn 240ms var(--ease-out-expo) forwards;
+}
+
+.flow-cascade-via {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-dimmed);
+}
+
+@keyframes flowChipIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Reading stats */
+
+.flow-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--v2-space-3);
+  max-width: 560px;
+}
+
+.flow-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: var(--v2-space-4);
+  background: var(--v2-surface-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--v2-radius-md);
+}
+
+.flow-stat-value {
+  font-size: var(--v2-font-size-display-sm);
+  font-weight: 700;
+  letter-spacing: var(--v2-tracking-tight);
+  color: var(--text);
+}
+
+.flow-stat-label {
+  font-size: var(--v2-font-size-caption);
+  color: var(--text-secondary);
+}
+
+.flow-learned {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--v2-space-2);
+  margin-top: var(--v2-space-3);
+}
+
+.flow-learned-chip {
+  padding: 4px 10px;
+  border-radius: var(--v2-radius-full);
+  background: var(--accent-subtle);
+  color: var(--accent-hover);
+  font-size: var(--v2-font-size-caption);
+  font-weight: 600;
+  opacity: 0;
+  animation: flowChipIn 300ms var(--ease-out-expo) forwards;
+}
+
+/* Proposal cards */
+
+.flow-card-proposal {
+  padding: var(--v2-space-4);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--v2-radius-md);
+  max-width: 640px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--v2-space-2);
+}
+
+.flow-card-proposal.approved { border-color: color-mix(in srgb, var(--v2-positive-text) 35%, transparent); }
+
+.flow-card-proposal.dismissed { opacity: 0.55; }
+
+.flow-proposal-head {
+  display: flex;
+  align-items: center;
+  gap: var(--v2-space-2);
+}
+
+.flow-proposal-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--v2-radius-xs);
+  background: var(--accent-subtle);
+  color: var(--accent);
+  flex: 0 0 auto;
+}
+
+.flow-proposal-title {
+  flex: 1;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.flow-proposal-badge {
+  font-family: var(--font-pixel);
+  font-size: 10px;
+  letter-spacing: var(--v2-tracking-tag);
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: var(--v2-radius-full);
+}
+
+.flow-proposal-badge.draft { background: var(--v2-surface-muted); color: var(--text-secondary); }
+.flow-proposal-badge.live { background: var(--v2-positive-soft); color: var(--success); }
+
+.flow-proposal-body {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.flow-proposal-rows {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--v2-radius-sm);
+  overflow: hidden;
+}
+
+.flow-proposal-row {
+  display: flex;
+  align-items: center;
+  gap: var(--v2-space-2);
+  padding: 8px var(--v2-space-3);
+  border-bottom: 1px solid var(--border);
+  background: var(--v2-surface-soft);
+  font-size: var(--v2-font-size-caption);
+  color: var(--text);
+}
+
+.flow-proposal-row:last-child { border-bottom: none; }
+
+.flow-proposal-row-circle {
+  width: 12px;
+  height: 12px;
+  border: 1.5px dashed var(--text-dimmed);
+  border-radius: var(--v2-radius-full);
+  flex: 0 0 auto;
+}
+
+.flow-proposal-row.done .flow-proposal-row-circle {
+  border-style: solid;
+  border-color: var(--success);
+  background: var(--success);
+}
+
+.flow-proposal-row-icon {
+  display: inline-flex;
+  color: var(--text-dimmed);
+  flex: 0 0 auto;
+}
+
+.flow-proposal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--v2-space-3);
+  margin-top: 2px;
+}
+
+.flow-proposal-hint {
+  font-size: var(--v2-font-size-caption);
+  color: var(--text-dimmed);
+  flex: 1;
+  min-width: 0;
+}
+
+.flow-proposal-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--v2-space-2);
+  flex: 0 0 auto;
+}
+
+/* DS primary role on the sm step (radius-sm, caption size). */
+.btn-primary.flow-proposal-approve {
+  height: var(--v2-control-h-sm);
+  padding: 0 var(--v2-control-px-sm);
+  font-size: var(--v2-font-size-caption);
+  font-weight: 500;
+  border-radius: var(--v2-radius-sm);
+  background: var(--v2-btn-primary-bg);
+  border: 1px solid var(--v2-btn-primary-border);
+  color: var(--v2-on-accent);
+  cursor: pointer;
+  transition: background 0.35s ease, box-shadow 0.3s ease;
+}
+
+.btn-primary.flow-proposal-approve:hover:not(:disabled) {
+  background: var(--v2-btn-primary-bg-hover);
+  box-shadow: var(--v2-shadow-accent-hover);
+}
+
+.flow-proposal-dismiss {
+  height: var(--v2-control-h-sm);
+  padding: 0 var(--v2-control-px-md);
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-size: var(--v2-font-size-caption);
+  font-weight: 600;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  border-radius: var(--v2-radius-sm);
+}
+
+.flow-proposal-dismiss:hover { background: var(--hover-subtle); color: var(--text); }
+
+.flow-proposal-live-note {
+  font-size: var(--v2-font-size-caption);
+  font-weight: 600;
+  color: var(--success);
+}
+
+.flow-card-proposal.dismissed .flow-proposal-row-text {
+  text-decoration: line-through;
+  color: var(--text-dimmed);
+}
+
+.flow-proposal-details {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: var(--v2-control-h-sm);
+  padding: 0;
+  background: transparent;
+  border: none;
+  color: var(--text-dimmed);
+  font-size: var(--v2-font-size-caption);
+  font-weight: 600;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: color var(--v2-duration-fast) var(--v2-ease-standard);
+}
+
+.flow-proposal-details:hover { color: var(--text); }
+
+/* Plan-upgrade CTA (end of the scripted first hour) */
+
+.btn-primary.flow-upgrade-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--v2-control-h-md);
+  padding: 0 var(--v2-control-px-md);
+  font-size: var(--v2-font-size-body-sm);
+  font-weight: 500;
+  border-radius: var(--v2-radius-md);
+  background: var(--v2-btn-primary-bg);
+  border: 1px solid var(--v2-btn-primary-border);
+  color: var(--v2-on-accent);
+  cursor: pointer;
+  transition: background 0.35s ease, box-shadow 0.3s ease;
+}
+
+.btn-primary.flow-upgrade-btn:hover:not(:disabled) {
+  background: var(--v2-btn-primary-bg-hover);
+  box-shadow: var(--v2-shadow-accent-hover);
+}
+
+.flow-upgrade-done {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--accent);
+}
+
+/* Flow modals (OAuth-style consent + proposal detail) */
+
+.flow-modal-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-overlay);
+  z-index: 800;
+  padding: 20px;
+}
+
+.flow-modal {
+  display: flex;
+  flex-direction: column;
+  gap: var(--v2-space-4);
+  width: min(440px, 100%);
+  max-height: calc(100vh - 60px);
+  overflow-y: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl, 20px);
+  padding: var(--v2-space-6);
+  box-shadow: var(--v2-shadow-modal);
+  animation: billing-reminder-in 0.25s var(--ease-out-expo);
+}
+
+.flow-proposal-detail { width: min(520px, 100%); }
+
+.flow-consent-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--v2-space-3);
+}
+
+.flow-consent-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--v2-radius-sm);
+  object-fit: cover;
+  box-shadow: 0 0 0 1px var(--border);
+  flex: 0 0 auto;
+}
+
+.flow-detail-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--v2-radius-sm);
+}
+
+.flow-consent-titles {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.flow-consent-title {
+  font-size: var(--v2-font-size-body-lg);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.flow-consent-subtitle {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.flow-consent-scopes {
+  padding: var(--v2-space-4);
+  background: var(--v2-surface-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--v2-radius-md);
+}
+
+.flow-consent-scopes-label {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: var(--v2-space-2);
+}
+
+.flow-consent-scopes ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--v2-space-2);
+}
+
+.flow-consent-scope {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--v2-space-2);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.flow-consent-scope svg {
+  color: var(--text-dimmed);
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.flow-consent-vault {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--v2-space-2);
+  font-size: var(--v2-font-size-caption);
+  color: var(--text-dimmed);
+  line-height: 1.5;
+}
+
+.flow-consent-vault svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.flow-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--v2-space-2);
+}
+
+.flow-consent .flow-modal-actions { display: grid; grid-template-columns: 1fr 1fr; }
+
+.flow-consent-allow .spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid color-mix(in srgb, var(--v2-on-accent) 35%, transparent);
+  border-top-color: var(--v2-on-accent);
+  border-radius: var(--v2-radius-full);
+  animation: spin 0.6s linear infinite;
+}
+
+.flow-modal-actions .btn-primary {
+  height: var(--v2-control-h-md);
+  padding: 0 var(--v2-control-px-md);
+  font-size: var(--v2-font-size-body-sm);
+  font-weight: 500;
+  border-radius: var(--v2-radius-md);
+  background: var(--v2-btn-primary-bg);
+  border: 1px solid var(--v2-btn-primary-border);
+  color: var(--v2-on-accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: background 0.35s ease, box-shadow 0.3s ease;
+}
+
+.flow-modal-actions .btn-primary:hover:not(:disabled) {
+  background: var(--v2-btn-primary-bg-hover);
+  box-shadow: var(--v2-shadow-accent-hover);
+}
+
+.flow-modal-secondary {
+  height: var(--v2-control-h-md);
+  padding: 0 var(--v2-control-px-md);
+  background: var(--v2-btn-secondary-bg);
+  border: 2px solid var(--v2-btn-secondary-border);
+  border-radius: var(--v2-radius-md);
+  color: var(--text);
+  font-size: var(--v2-font-size-body-sm);
+  font-weight: 500;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: background var(--v2-duration-fast) var(--v2-ease-standard),
+    border-color var(--v2-duration-fast) var(--v2-ease-standard),
+    color var(--v2-duration-fast) var(--v2-ease-standard);
+}
+
+.flow-modal-secondary:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--v2-on-accent);
+}
+
+
+.flow-detail-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--v2-space-2);
+}
+
+.flow-detail-label {
+  font-family: var(--font-pixel);
+  font-size: var(--v2-font-size-label);
+  letter-spacing: var(--v2-tracking-tag);
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.flow-detail-body {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.flow-detail-trigger {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text);
+}
+
+.flow-detail-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 var(--v2-space-3);
+  border-left: 2px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--v2-space-2);
+}
+
+.flow-detail-list li {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.flow-detail-spec {
+  margin: 0;
+  padding: var(--v2-space-3);
+  background: var(--v2-code-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--v2-radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--v2-font-size-caption);
+  color: var(--text-secondary);
+  line-height: 1.6;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+/* One-shot sparkle flourish (setup complete) */
+
+.flow-flourish {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.flow-flourish-spark {
+  position: absolute;
+  bottom: 14%;
+  color: var(--accent);
+  opacity: 0;
+  animation: flowSparkle 1.9s var(--ease-out-expo) forwards;
+}
+
+.flow-flourish-spark:nth-child(odd) { color: var(--accent-hover); }
+
+@keyframes flowSparkle {
+  0% { opacity: 0; transform: translateY(0) scale(0.4) rotate(0deg); }
+  18% { opacity: 0.9; }
+  100% { opacity: 0; transform: translateY(-180px) scale(1) rotate(40deg); }
+}

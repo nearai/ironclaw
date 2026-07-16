@@ -94,6 +94,8 @@ function initApp() {
   } else {
     loadServerLogLevel();
   }
+  // Carry a use case picked on the landing page into the chat input.
+  applyPendingUseCasePrompt();
 }
 
 function authenticate() {
@@ -321,6 +323,19 @@ async function authenticateWithNear() {
   const urlToken = params.get('token');
   if (urlToken) {
     document.getElementById('token-input').value = urlToken;
+    authenticate();
+    return;
+  }
+  // DEMO integration-auth fast path: arriving via the marketing-site intent
+  // handoff (?usecase= / ?prompt= / ?integrations= / ?billing=) means the
+  // user already went through onboarding — their first integration vouches
+  // for them, so skip the sign-in screen and drop straight into the
+  // workspace. Real deployments will exchange the handoff for a session
+  // server-side (implied: POST /auth/handoff { intent... } -> session).
+  if (window.__IRONCLAW_DEMO__
+      && (params.get('usecase') || params.get('prompt')
+        || params.get('integrations') || params.get('billing'))) {
+    document.getElementById('token-input').value = 'demo-handoff';
     authenticate();
     return;
   }

@@ -63,6 +63,93 @@
 }
 
 /* Use-case showcase */
+.landing-showcase {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.landing-showcase-header {
+  font-family: var(--font-pixel);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+}
+
+.landing-usecase-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.landing-usecase-card {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  text-align: left;
+  padding: var(--space-4);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  color: var(--text);
+  font-family: inherit;
+  transition: border-color var(--transition-fast), background var(--transition-fast),
+    transform var(--duration-fast) var(--ease-spring-gentle);
+}
+
+.landing-usecase-card:hover {
+  border-color: var(--border-hover);
+  background: var(--hover-surface);
+  transform: translateY(-1px);
+}
+
+.landing-usecase-card.selected {
+  border-color: var(--accent-border-subtle);
+  background: var(--accent-subtle);
+  box-shadow: var(--glow-accent);
+}
+
+.landing-usecase-glyph {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius);
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-size: var(--text-lg);
+  line-height: 1;
+}
+
+.landing-usecase-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.landing-usecase-title {
+  font-size: var(--text-base);
+  font-weight: 600;
+}
+
+.landing-usecase-desc {
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.landing-showcase-hint {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
 
 /* Token help disclosure */
 .auth-token-help {
@@ -93,10 +180,53 @@
 }
 
 /* Carried-intent banner on the auth card */
+.landing-intent {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--accent-subtle);
+  border: 1px solid var(--accent-border-subtle);
+  border-radius: var(--radius);
+}
 
+.landing-intent-label {
+  flex: 0 0 auto;
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent);
+}
 
+.landing-intent-text {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-sm);
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
+.landing-intent-clear {
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: var(--text-base);
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px var(--space-1);
+  border-radius: var(--radius);
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
 
+.landing-intent-clear:hover {
+  color: var(--text);
+  background: var(--hover-surface);
+}
 
 @media (max-width: 900px) {
   #auth-screen {
@@ -113,6 +243,9 @@
     flex: none;
   }
 
+  .landing-usecase-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 #auth-screen .auth-form {

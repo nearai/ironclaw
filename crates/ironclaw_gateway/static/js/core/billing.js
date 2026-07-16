@@ -221,7 +221,8 @@ function bindPlanButtons(scope, onUpgraded) {
       const planId = btn.getAttribute('data-plan-id');
       try { localStorage.setItem('ironclaw_nux_billing', planId); } catch (e) {}
       closeBillingReminder();
-        renderSidebarCredits();
+      closePlanPicker();
+      renderSidebarCredits();
       if (currentTab === 'billing') renderBillingSurface();
       showToast(I18n.t('billing.upgraded'), 'success');
       if (typeof onUpgraded === 'function') {
@@ -232,6 +233,33 @@ function bindPlanButtons(scope, onUpgraded) {
   });
 }
 
+// --- Plan picker modal (in-flow upgrade CTA from the chat-first journey) ---
+
+function showPlanPickerModal(onUpgraded) {
+  closePlanPicker();
+  const overlay = document.createElement('div');
+  overlay.id = 'billing-plan-picker';
+  overlay.className = 'billing-reminder-overlay';
+  overlay.innerHTML =
+    '<div class="billing-reminder billing-plan-picker" role="dialog" aria-modal="true" aria-label="' + escapeHtml(I18n.t('billing.pickerTitle')) + '">'
+    + '<h3 class="billing-reminder-title">' + escapeHtml(I18n.t('billing.pickerTitle')) + '</h3>'
+    + '<p class="billing-reminder-text">' + escapeHtml(I18n.t('billing.pickerText')) + '</p>'
+    + '<div class="billing-plans billing-reminder-plans">' + BILLING_PLANS.map((p) => billingPlanCardHtml(p, billingPlan())).join('') + '</div>'
+    + '<div class="billing-reminder-actions">'
+    + '<button type="button" class="billing-reminder-later" id="billing-picker-later">' + escapeHtml(I18n.t('billing.notNow')) + '</button>'
+    + '</div>'
+    + '</div>';
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) closePlanPicker();
+  });
+  document.body.appendChild(overlay);
+  bindPlanButtons(overlay, onUpgraded);
+  overlay.querySelector('#billing-picker-later').addEventListener('click', () => closePlanPicker());
+}
+
+function closePlanPicker() {
+  document.getElementById('billing-plan-picker')?.remove();
+}
 
 // --- Payment reminder modal (billing=skipped, max once per session) ---
 
@@ -288,6 +316,7 @@ function closeBillingReminder() {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     closeBillingReminder();
+    closePlanPicker();
   }
 });
 
