@@ -18,14 +18,15 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.parse
 import uuid
-from contextlib import closing
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Iterator
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -769,10 +770,30 @@ def server_env(
     return env
 
 
+@contextmanager
+def isolated_agent_workspace(
+    repository_root: Path,
+    output_dir: Path,
+) -> Iterator[Path]:
+    repository_root = repository_root.resolve()
+    output_dir = output_dir.resolve()
+    with tempfile.TemporaryDirectory(
+        prefix="ironclaw-reborn-live-qa-workspace-"
+    ) as raw:
+        workspace = Path(raw).resolve()
+        for forbidden in (repository_root, output_dir):
+            if workspace == forbidden or workspace.is_relative_to(forbidden):
+                raise LiveQaError(
+                    f"agent workspace {workspace} must be outside {forbidden}"
+                )
+        yield workspace
+
+
 async def start_reborn_server(
     binary: Path,
     reborn_home: Path,
     output_dir: Path,
+    workspace_dir: Path,
     extra_env: dict[str, str] | None = None,
 ) -> tuple[subprocess.Popen[str], str]:
     port = reserve_loopback_port()
@@ -814,8 +835,6 @@ async def start_reborn_server(
         )
     stdout_path = output_dir / "ironclaw-reborn-serve.stdout.log"
     stderr_path = output_dir / "ironclaw-reborn-serve.stderr.log"
-    workspace_dir = output_dir / "workspace"
-    workspace_dir.mkdir(parents=True, exist_ok=True)
     out = stdout_path.open("a", encoding="utf-8")
     err = stderr_path.open("a", encoding="utf-8")
     separator = f"\n--- ironclaw-reborn serve start {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} ---\n"
@@ -8202,108 +8221,116 @@ async def run_cases(args: argparse.Namespace) -> int:
                 flush=True,
             )
             continue
-        proc, base_url = await start_reborn_server(
-            binary,
-            prepared_home.path,
-            args.output_dir,
-            prepared_home.env,
-        )
-        if not first_base_url:
-            first_base_url = base_url
-        try:
-            ctx = LiveQaContext(
-                base_url=base_url,
-                output_dir=args.output_dir,
-                reborn_home=prepared_home.path,
-                env=prepared_home.env,
+        with isolated_agent_workspace(ROOT, args.output_dir) as workspace_dir:
+            proc, base_url = await start_reborn_server(
+                binary,
+                prepared_home.path,
+                args.output_dir,
+                workspace_dir,
+                prepared_home.env,
             )
-            if case_spec.requires_slack and isinstance(slack_preflight, dict):
-                setup_started = time.monotonic()
-                setup_api = await _apply_slack_setup_api_after_start(
+            if not first_base_url:
+                first_base_url = base_url
+            try:
+                ctx = LiveQaContext(
                     base_url=base_url,
-                    prepared_home=prepared_home,
+                    output_dir=args.output_dir,
+                    reborn_home=prepared_home.path,
+                    env=prepared_home.env,
                 )
-                if not setup_api.get("applied"):
-                    blocked_preflight = {**slack_preflight, "setup_api": setup_api}
-                    result = _result(
-                        name,
-                        False,
-                        setup_started,
-                        {
-                            "blocked": True,
-                            "error": (
-                                "Slack setup API was not applied: "
-                                f"{setup_api.get('reason') or 'unknown'}"
-                            ),
-                            "preflight": blocked_preflight,
-                        },
+                if case_spec.requires_slack and isinstance(slack_preflight, dict):
+                    setup_started = time.monotonic()
+                    setup_api = await _apply_slack_setup_api_after_start(
+                        base_url=base_url,
+                        prepared_home=prepared_home,
                     )
-                    results.append(result)
-                    print(
-                        f"[reborn-webui-v2-live-qa] case={name} success={result.success} "
-                        f"latency_ms={result.latency_ms} blocked=slack_setup_not_applied",
-                        flush=True,
+                    if not setup_api.get("applied"):
+                        blocked_preflight = {**slack_preflight, "setup_api": setup_api}
+                        result = _result(
+                            name,
+                            False,
+                            setup_started,
+                            {
+                                "blocked": True,
+                                "error": (
+                                    "Slack setup API was not applied: "
+                                    f"{setup_api.get('reason') or 'unknown'}"
+                                ),
+                                "preflight": blocked_preflight,
+                            },
+                        )
+                        results.append(result)
+                        print(
+                            f"[reborn-webui-v2-live-qa] case={name} success={result.success} "
+                            f"latency_ms={result.latency_ms} blocked=slack_setup_not_applied",
+                            flush=True,
+                        )
+                        continue
+                    slack_preflight["setup_api"] = setup_api
+                    setup_status = (
+                        setup_api.get("status") if isinstance(setup_api, dict) else None
                     )
-                    continue
-                slack_preflight["setup_api"] = setup_api
-                setup_status = setup_api.get("status") if isinstance(setup_api, dict) else None
-                if isinstance(setup_status, dict):
-                    slack_preflight["setup"] = setup_status
-                write_preflight(args.output_dir, prepared_home)
-                shutil.copyfile(preflight_path, case_preflight_path)
-            print(f"[reborn-webui-v2-live-qa] running case={name}", flush=True)
-            result = await CASES[name].fn(ctx)
-            result = _attach_browser_diagnostics(args.output_dir, result)
-            results.append(result)
-            print(
-                f"[reborn-webui-v2-live-qa] case={name} success={result.success} "
-                f"latency_ms={result.latency_ms}",
-                flush=True,
-            )
-            if _is_provider_incident(result):
-                result.details.update(
-                    {
-                        "blocking": False,
-                        "failure_class": "infrastructure",
-                        "inconclusive": True,
-                    }
+                    if isinstance(setup_status, dict):
+                        slack_preflight["setup"] = setup_status
+                    write_preflight(args.output_dir, prepared_home)
+                    shutil.copyfile(preflight_path, case_preflight_path)
+                print(f"[reborn-webui-v2-live-qa] running case={name}", flush=True)
+                result = await CASES[name].fn(ctx)
+                result = _attach_browser_diagnostics(args.output_dir, result)
+                results.append(result)
+                print(
+                    f"[reborn-webui-v2-live-qa] case={name} success={result.success} "
+                    f"latency_ms={result.latency_ms}",
+                    flush=True,
                 )
-                failure_category = str(result.details["failure_category"])
-                for remaining_name in selected_cases[case_index + 1 :]:
-                    inconclusive = _result(
-                        remaining_name,
-                        False,
-                        time.monotonic(),
+                if _is_provider_incident(result):
+                    result.details.update(
                         {
-                            "error": (
-                                "case was not run because the model provider had a "
-                                f"terminal incident during {name}"
-                            ),
+                            "blocking": False,
                             "failure_class": "infrastructure",
-                            "failure_category": failure_category,
-                            "failure_status": "inconclusive",
                             "inconclusive": True,
-                            "short_circuited_by": name,
-                        },
+                        }
                     )
-                    inconclusive.details["blocking"] = False
-                    results.append(inconclusive)
-                    print(
-                        "[reborn-webui-v2-live-qa] "
-                        f"case={remaining_name} success={inconclusive.success} "
-                        f"inconclusive=provider_incident source_case={name}",
-                        flush=True,
-                    )
-                break
-        finally:
-            stop_process(proc)
-            trace_export = export_case_trace(args.output_dir, name, prepared_home.path)
-            trace_exports.append(trace_export)
-            print(
-                f"[reborn-webui-v2-live-qa] trace={trace_export['path']} "
-                f"entries={trace_export['entry_count']}",
-                flush=True,
-            )
+                    failure_category = str(result.details["failure_category"])
+                    for remaining_name in selected_cases[case_index + 1 :]:
+                        inconclusive = _result(
+                            remaining_name,
+                            False,
+                            time.monotonic(),
+                            {
+                                "error": (
+                                    "case was not run because the model provider had a "
+                                    f"terminal incident during {name}"
+                                ),
+                                "failure_class": "infrastructure",
+                                "failure_category": failure_category,
+                                "failure_status": "inconclusive",
+                                "inconclusive": True,
+                                "short_circuited_by": name,
+                            },
+                        )
+                        inconclusive.details["blocking"] = False
+                        results.append(inconclusive)
+                        print(
+                            "[reborn-webui-v2-live-qa] "
+                            f"case={remaining_name} success={inconclusive.success} "
+                            f"inconclusive=provider_incident source_case={name}",
+                            flush=True,
+                        )
+                    break
+            finally:
+                stop_process(proc)
+                trace_export = export_case_trace(
+                    args.output_dir,
+                    name,
+                    prepared_home.path,
+                )
+                trace_exports.append(trace_export)
+                print(
+                    f"[reborn-webui-v2-live-qa] trace={trace_export['path']} "
+                    f"entries={trace_export['entry_count']}",
+                    flush=True,
+                )
     results_path = write_results(args.output_dir, results, first_base_url)
     trace_index_path = write_trace_index(args.output_dir, trace_exports)
     green_explanation_path = write_green_run_explanation(args.output_dir, results)

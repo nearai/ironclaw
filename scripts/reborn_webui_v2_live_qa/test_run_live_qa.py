@@ -3436,6 +3436,57 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(result.details["delivery_target_present"], True)
         self.assertIn("preflight", result.details)
 
+    def test_isolated_agent_workspace_is_outside_repo_and_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir) / "checkout"
+            output = repo / "artifacts" / "live-canary"
+            output.mkdir(parents=True)
+
+            with run_live_qa.isolated_agent_workspace(repo, output) as workspace:
+                self.assertFalse(workspace.is_relative_to(repo))
+                self.assertFalse(workspace.is_relative_to(output))
+                self.assertTrue(workspace.is_dir())
+
+            self.assertFalse(workspace.exists())
+
+    def test_start_reborn_server_uses_explicit_agent_workspace(self):
+        captured: dict[str, object] = {}
+
+        class FakeProcess:
+            pass
+
+        def fake_popen(*_args, **kwargs):
+            captured["cwd"] = kwargs["cwd"]
+            kwargs["stdout"].close()
+            kwargs["stderr"].close()
+            return FakeProcess()
+
+        async def fake_wait_for_ready(_url: str, *, timeout: float) -> None:
+            captured["timeout"] = timeout
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_dir = root / "out"
+            output_dir.mkdir()
+            workspace = root / "agent-workspace"
+            workspace.mkdir()
+            with (
+                patch.object(run_live_qa, "reserve_loopback_port", return_value=38555),
+                patch.object(run_live_qa.subprocess, "Popen", side_effect=fake_popen),
+                patch.object(run_live_qa, "wait_for_ready", side_effect=fake_wait_for_ready),
+            ):
+                asyncio.run(
+                    run_live_qa.start_reborn_server(
+                        root / "ironclaw-reborn",
+                        root / "reborn-home",
+                        output_dir,
+                        workspace,
+                        {},
+                    )
+                )
+
+        self.assertEqual(captured["cwd"], workspace)
+
     def test_start_reborn_server_sets_slack_personal_oauth_redirect(self):
         captured: dict[str, object] = {}
 
@@ -3455,6 +3506,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
+            output_dir = root / "out"
+            output_dir.mkdir()
+            workspace = root / "agent-workspace"
+            workspace.mkdir()
             with (
                 patch.object(run_live_qa, "reserve_loopback_port", return_value=38555),
                 patch.object(run_live_qa.subprocess, "Popen", side_effect=fake_popen),
@@ -3464,7 +3519,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     run_live_qa.start_reborn_server(
                         root / "ironclaw-reborn",
                         root / "reborn-home",
-                        root / "out",
+                        output_dir,
+                        workspace,
                         {
                             "REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_ID": "slack-client",
                             "REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_SECRET": "slack-secret",
@@ -3503,6 +3559,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
+            output_dir = root / "out"
+            output_dir.mkdir()
+            workspace = root / "agent-workspace"
+            workspace.mkdir()
             reborn_home = root / "reborn-home"
             reborn_home.mkdir()
             (reborn_home / "config.toml").write_text(
@@ -3537,7 +3597,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     run_live_qa.start_reborn_server(
                         root / "ironclaw-reborn",
                         reborn_home,
-                        root / "out",
+                        output_dir,
+                        workspace,
                         {
                             "REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_SECRET": "slack-secret",
                         },
@@ -8101,6 +8162,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             _binary,
             reborn_home,
             _output_dir,
+            _workspace_dir,
             _env,
         ):
             started_servers.append(reborn_home.name)
@@ -8230,6 +8292,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             _binary,
             reborn_home,
             _output_dir,
+            _workspace_dir,
             _env,
         ):
             started_servers.append(reborn_home.name)
@@ -8343,6 +8406,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             _binary: Path,
             reborn_home: Path,
             _output_dir: Path,
+            _workspace_dir: Path,
             _env: dict[str, str],
         ):
             return object(), f"http://127.0.0.1/{reborn_home.name}"
