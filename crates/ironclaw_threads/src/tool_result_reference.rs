@@ -11,18 +11,19 @@ use serde::{Deserialize, Serialize};
 const MAX_TOOL_RESULT_REF_BYTES: usize = 256;
 const MAX_TOOL_RESULT_SUMMARY_BYTES: usize = 512;
 /// Whole-envelope cap for a `model_observation` JSON blob (preview text plus
-/// surrounding schema fields). Derived from
+/// surrounding schema fields). Derived as 2x
 /// `crate::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES` (the largest raw
-/// preview/chunk this crate will ever embed) with 2.5x headroom: JSON-string
-/// escaping of adversarial preview content can double byte count (every `"`
-/// becomes `\"`), and the remaining margin covers the fixed envelope fields
-/// (summary, result_ref, artifacts). See
-/// `append_tool_result_reference_retains_full_size_result_preview` for the
-/// worst-case-escaping regression pin. Keep this derived, not a second
-/// independent literal -- see PR #5902 (100,000 -> 2,048 regression) for what
-/// happens when the preview cap and this ceiling drift apart.
-const MAX_MODEL_OBSERVATION_BYTES: usize =
-    crate::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES * 5 / 2 + 4096;
+/// preview/chunk this crate will ever embed): a preview of ordinary tool
+/// output (text/JSON) grows only slightly under JSON-string escaping, so 2x
+/// leaves ample room for the preview plus the fixed envelope fields (summary,
+/// result_ref, artifacts). A pathological all-`"`/all-control preview that
+/// would exceed the cap degrades gracefully to `safe_summary` rather than
+/// corrupting the transcript. Keep this DERIVED from the preview cap, never a
+/// second independent literal -- when the two drift apart (an oversized
+/// preview that can't fit the envelope) the observation is dropped to a bare
+/// stub on replay and the model loses the content, exactly the retention
+/// failure behind the #5902 regression.
+const MAX_MODEL_OBSERVATION_BYTES: usize = crate::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES * 2;
 const MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION: u64 = 1;
 const MODEL_OBSERVATION_SUMMARY_MAX_BYTES: usize = 512;
 const MODEL_OBSERVATION_ARTIFACTS_MAX: usize = 16;
@@ -1080,6 +1081,107 @@ mod tests {
             "authorization: bearer abc",
             "bearer "
         ));
+    }
+
+    /// Regression (#5902): a tool-result preview of ordinary document content
+    /// — here containing "Secretary of the Treasury", which used to trip the
+    /// `secret` substring marker — must be RETAINED on replay, not scrubbed to
+    /// a bare safe-summary stub. Losing it every turn is what evicted document
+    /// reads from context and drove the re-fetch loop.
+    #[test]
+    fn document_content_preview_is_retained_on_replay_not_scrubbed() {
+        // ~8 KB of Treasury-bulletin-like text — well past the old 4 KB
+        // envelope cap, so this also guards the cap-sizing regression.
+        let preview =
+            "Table FD-1. Federal Debt reported by the Secretary of the Treasury. ".repeat(120);
+        assert!(
+            preview.len() > 4096,
+            "fixture must exceed the pre-fix 4 KB envelope cap"
+        );
+        let observation = serde_json::json!({
+            "schema_version": 1,
+            "status": "success",
+            "summary": "Tool completed; preview truncated, use result_read for more output.",
+            "detail": {
+                "kind": "result_reference",
+                "result_ref": "result:treasury-doc",
+                "byte_len": preview.len(),
+                "preview": preview,
+                "total_bytes": preview.len() * 4,
+                "next_offset": preview.len(),
+            },
+            "trust": "untrusted_tool_output"
+        });
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            "result:treasury-doc",
+            ToolResultSafeSummary::new("read of treasury_bulletin").expect("summary"),
+            Some(observation),
+        )
+        .expect("envelope construction is fail-open");
+
+        assert!(
+            envelope.model_observation.is_some(),
+            "document content must be retained, not dropped to a stub"
+        );
+        let replayed = envelope.model_visible_content_or_safe_summary();
+        assert!(
+            replayed.contains("Secretary of the Treasury"),
+            "replayed observation must carry the document content, not the safe-summary stub"
+        );
+    }
+
+    /// Structural guard against the #5902 class of bug: the whole-observation
+    /// envelope cap MUST stay >= the raw preview/chunk cap. If the preview cap
+    /// ever exceeds the envelope cap, every large observation is rejected on
+    /// replay and dropped to a stub — the exact retention failure this PR
+    /// fixes. This test fails loudly if the two constants ever drift apart.
+    #[test]
+    fn observation_envelope_cap_covers_the_preview_cap() {
+        assert!(
+            super::MAX_MODEL_OBSERVATION_BYTES
+                >= crate::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES,
+            "MAX_MODEL_OBSERVATION_BYTES ({}) must be >= the preview cap ({}), else large \
+             observations drop to a stub on replay (#5902 retention failure)",
+            super::MAX_MODEL_OBSERVATION_BYTES,
+            crate::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES,
+        );
+    }
+
+    /// A preview filled to the full preview cap must still fit the envelope and
+    /// survive replay — the envelope has to have room for a max-size preview
+    /// plus the surrounding schema fields, or the largest reads silently stub.
+    #[test]
+    fn full_cap_preview_survives_replay() {
+        let cap = crate::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES;
+        let unit = "Bureau of the Fiscal Service data table row entry value ";
+        let mut preview = unit.repeat(cap / unit.len() + 1);
+        preview.truncate(cap);
+        if let Some(idx) = preview.rfind(' ') {
+            preview.truncate(idx); // avoid a partial trailing token
+        }
+        let observation = serde_json::json!({
+            "schema_version": 1,
+            "status": "success",
+            "summary": "Tool completed; preview contains the full result.",
+            "detail": {
+                "kind": "result_reference",
+                "result_ref": "result:full-cap-doc",
+                "byte_len": preview.len(),
+                "preview": preview,
+            },
+            "trust": "untrusted_tool_output"
+        });
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            "result:full-cap-doc",
+            ToolResultSafeSummary::new("full read").expect("summary"),
+            Some(observation),
+        )
+        .expect("envelope construction is fail-open");
+
+        assert!(
+            envelope.model_observation.is_some(),
+            "a full-cap preview must fit the envelope and be retained on replay"
+        );
     }
 
     #[test]
