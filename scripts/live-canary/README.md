@@ -221,8 +221,10 @@ zero; it is shown here to make the three-signal interpretation explicit.
   `inconclusive=true`. Examples include the stale Slack search index, a terminal
   model-provider incident, and a durable-evidence read error.
 - Missing required credentials, setup, or fixtures—including Slack fixture
-  preconditions—remain blocking contract failures unless the result explicitly
-  carries one of those infrastructure/inconclusive markers.
+  preconditions—are not automatically inconclusive. They retain the case's
+  emitted tier and blocking policy: current contract cases block and current
+  behavioral cases warn, unless the result explicitly carries one of those
+  infrastructure/inconclusive markers.
 
 Any combined `succeeded of total` line is execution detail only. Use the tiered
 lines above as the primary health signal.
@@ -237,13 +239,13 @@ bounded to `indexed`, `attempts`, `latency_ms`, and an optional sanitized,
 Each Reborn QA case that passes credential/setup/fixture preflight and reaches
 server execution starts `ironclaw-reborn` with a new ephemeral agent working
 directory outside both the checkout and artifact tree. Preflight failures do
-not allocate one, and cases short-circuited after a terminal provider incident
-do not run. For a started case, the harness stops the server, exports its trace
-while the context is still live, and only then removes the workspace. Routine
-creation passes only after a structurally final assistant reply and a new
-durable `trigger_record`; Slack correctness probes bind expected terminal
-capability evidence to the current turn/run rather than trusting response prose
-alone.
+not allocate one and return their classified result; cases short-circuited
+after a terminal provider incident do not run. For a started case, the harness
+stops the server, exports its trace while the context is still live, and only
+then removes the workspace. Routine creation passes only after a structurally
+final assistant reply and a new durable `trigger_record`; Slack correctness
+probes bind expected terminal capability evidence to the current turn/run
+rather than trusting response prose alone.
 
 The `persona-rotating` environment summary records only integration names in
 `persona_live_integrations` and `persona_stubbed_integrations` (`github`,

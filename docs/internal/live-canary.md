@@ -104,8 +104,10 @@ explicitly.
   Slack search index, a terminal model-provider incident, and a durable-evidence
   read error. These results do not increment contract or behavioral totals.
 - Missing credentials, setup, or fixtures—including Slack fixture
-  preconditions—remain blocking contract failures unless the emitted result is
-  explicitly typed with one of the infrastructure/inconclusive markers above.
+  preconditions—are not automatically inconclusive. They retain the case's
+  emitted tier and blocking policy: current contract cases block and current
+  behavioral cases warn, unless the result is explicitly typed with one of the
+  infrastructure/inconclusive markers above.
 
 Slack and GitHub summaries may also show an aggregate execution count such as
 `succeeded of total`. That combined number is secondary execution detail; it
@@ -139,7 +141,7 @@ redact query secrets plus Slack user/conversation identifiers.
 
 Only a selected Reborn QA case that passes credential/setup/fixture preflight
 and reaches server execution gets a newly created ephemeral working directory.
-Preflight failures return their blocking result before allocation; after a
+Preflight failures return their classified result before allocation; after a
 terminal provider incident, the remaining selected cases are recorded as
 inconclusive without being run or allocated workspaces.
 
