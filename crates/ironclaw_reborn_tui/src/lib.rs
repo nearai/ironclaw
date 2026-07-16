@@ -11,6 +11,7 @@
 pub mod app;
 pub mod client;
 pub mod spawn;
+pub mod ui;
 
 pub use spawn::ProcessInvocation;
 
