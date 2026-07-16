@@ -2300,6 +2300,40 @@ async fn root_static_mount_keeps_server_namespaces_fail_closed() {
 }
 
 #[tokio::test]
+async fn root_static_mount_rejects_noncanonical_path_separators() {
+    let (app, _) = build_app();
+    for path in [
+        "//api/not-a-route",
+        "///auth/not-a-route",
+        "//v1/not-a-route",
+        "//webhooks/not-a-route",
+        "/%2Fapi/not-a-route",
+        r"/\api/not-a-route",
+        "/%5Capi/not-a-route",
+        r"/api\not-a-route",
+        "/api%5Cnot-a-route",
+        "//chat",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "malformed path `{path}` must be rejected before SPA fallback",
+        );
+    }
+}
+
+#[tokio::test]
 async fn root_manifest_and_wallet_popup_are_served_with_owned_contracts() {
     let (app, _) = build_app();
     let manifest_response = app

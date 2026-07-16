@@ -140,6 +140,17 @@ pub async fn serve_wildcard(AxumPath(path): AxumPath<String>) -> Response {
 }
 
 fn serve_for_path(path: &str) -> Response {
+    // Axum strips exactly one slash from a wildcard capture. A request with
+    // repeated leading slashes therefore reaches this helper with a leading
+    // slash still present (for example, `//api/x` becomes `/api/x`). Its Path
+    // extractor also percent-decodes backslashes, which browsers may treat as
+    // path separators. Reject either non-canonical form instead of normalizing
+    // it: otherwise the namespace check below could be bypassed and render the
+    // SPA shell for a server-owned path.
+    if path.starts_with('/') || path.contains('\\') {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+
     // Sanitize against `..` traversal segments even though the URL
     // table is a closed set; defense in depth keeps a future routing
     // change from leaking arbitrary file content if a host
@@ -653,6 +664,40 @@ mod tests {
                 response.status(),
                 StatusCode::NOT_FOUND,
                 "{method} reserved host path `{path}` must not render the SPA shell",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn standalone_noncanonical_path_separators_are_rejected() {
+        let app = static_router();
+        for path in [
+            "//api/not-a-route",
+            "///auth/not-a-route",
+            "//v1/not-a-route",
+            "//webhooks/not-a-route",
+            "/%2Fapi/not-a-route",
+            r"/\api/not-a-route",
+            "/%5Capi/not-a-route",
+            r"/api\not-a-route",
+            "/api%5Cnot-a-route",
+            "//chat",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("oneshot");
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "malformed path `{path}` must be rejected before SPA fallback",
             );
         }
     }
