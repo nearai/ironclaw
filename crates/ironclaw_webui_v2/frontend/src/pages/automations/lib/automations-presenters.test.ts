@@ -941,8 +941,42 @@ test("normalizeAutomations renders unavailable-count copy when elapsed_occurrenc
 
 // #6066 follow-up: active_hold_projection computes elapsed_occurrences for
 // EVERY active hold regardless of reason — in_progress holds must surface
-// the same capped/unknown/exact count states as approval/auth/other holds,
-// while keeping their distinct "previous run still executing" framing.
+// the same capped/unknown/exact count states as approval/auth/other holds.
+// Once completed history exists they keep their distinct "previous run still
+// executing" framing, while the first active run remains "Running" (#6127).
+test("normalizeAutomations presents the first active run as running", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "first-run-in-progress",
+        name: "First run in progress",
+        source: { type: "schedule", cron: "* * * * *" },
+        state: "active",
+        active_hold: {
+          reason: "in_progress",
+          since: "2026-07-14T00:51:00Z",
+          elapsed_occurrences: 0,
+        },
+        recent_runs: [
+          {
+            status: "running",
+            fired_at: "2026-07-14T00:51:00Z",
+            submitted_at: "2026-07-14T00:51:01Z",
+            thread_id: "thread-running",
+            run_id: "run-running",
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(automations[0].primary_status_label, "Running");
+  assert.equal(automations[0].primary_status_tone, "info");
+  assert.equal(automations[0].last_run_label, "No runs yet");
+  assert.equal(automations[0].success_rate_label, "No completed runs");
+  assert.match(automations[0].hold_meta_label, /^Started /);
+});
+
 test("normalizeAutomations uses the in-progress hold variant with an exact elapsed-occurrence count", () => {
   const automations = normalizeAutomations({
     automations: [
@@ -956,6 +990,23 @@ test("normalizeAutomations uses the in-progress hold variant with an exact elaps
           since: "2026-07-14T00:51:00Z",
           elapsed_occurrences: 3,
         },
+        recent_runs: [
+          {
+            status: "running",
+            fired_at: "2026-07-14T00:51:00Z",
+            submitted_at: "2026-07-14T00:51:01Z",
+            thread_id: "thread-running",
+            run_id: "run-running",
+          },
+          {
+            status: "ok",
+            fired_at: "2026-07-13T00:51:00Z",
+            submitted_at: "2026-07-13T00:51:01Z",
+            completed_at: "2026-07-13T00:52:00Z",
+            thread_id: "thread-completed",
+            run_id: "run-completed",
+          },
+        ],
       },
     ],
   });
