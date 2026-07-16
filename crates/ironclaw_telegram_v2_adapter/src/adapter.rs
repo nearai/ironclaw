@@ -193,29 +193,35 @@ impl ProductAdapter for TelegramV2Adapter {
             _ => None,
         };
 
+        // Resolve the concrete chat target once, preferring the host-resolved
+        // conversation ref (populated on the live reply path) over the opaque
+        // `reply:` binding token. A resolution failure folds into the same
+        // permanent-failure handling as a render failure per payload below.
+        let resolved_target = crate::render::resolve_reply_target(&envelope.target);
+
         let request = match envelope.payload {
-            ProductOutboundPayload::FinalReply(view) => match render_final_reply(
-                &envelope.target.reply_target_binding_ref,
-                &view,
-                self.config.egress_credential_handle.clone(),
-            ) {
-                Ok(req) => req,
-                Err(render_err) => {
-                    // Malformed reply target is a permanent data-shape
-                    // failure; retrying won't help.
-                    record_status(
-                        delivery_sink,
-                        DeliveryStatus::FailedPermanent {
-                            attempt_id,
-                            target: target_binding.clone(),
-                            run_id,
-                            reason: RedactedString::new(render_err.to_string()),
-                        },
-                    )
-                    .await;
-                    return Err(map_render_error(render_err));
+            ProductOutboundPayload::FinalReply(view) => {
+                match resolved_target.clone().and_then(|reply| {
+                    render_final_reply(&reply, &view, self.config.egress_credential_handle.clone())
+                }) {
+                    Ok(req) => req,
+                    Err(render_err) => {
+                        // Malformed reply target is a permanent data-shape
+                        // failure; retrying won't help.
+                        record_status(
+                            delivery_sink,
+                            DeliveryStatus::FailedPermanent {
+                                attempt_id,
+                                target: target_binding.clone(),
+                                run_id,
+                                reason: RedactedString::new(render_err.to_string()),
+                            },
+                        )
+                        .await;
+                        return Err(map_render_error(render_err));
+                    }
                 }
-            },
+            }
             ProductOutboundPayload::Progress(view) => {
                 if !self
                     .capabilities
@@ -237,11 +243,13 @@ impl ProductAdapter for TelegramV2Adapter {
                     .await;
                     return Ok(ProductRenderOutcome::Deferred);
                 }
-                match render_progress_typing(
-                    &envelope.target.reply_target_binding_ref,
-                    &view,
-                    self.config.egress_credential_handle.clone(),
-                ) {
+                match resolved_target.clone().and_then(|reply| {
+                    render_progress_typing(
+                        &reply,
+                        &view,
+                        self.config.egress_credential_handle.clone(),
+                    )
+                }) {
                     Ok(Some(req)) => req,
                     Ok(None) => {
                         record_status(

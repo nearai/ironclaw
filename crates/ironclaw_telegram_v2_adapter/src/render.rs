@@ -7,7 +7,8 @@
 
 use ironclaw_product_adapters::{
     DeclaredEgressHost, EgressCredentialHandle, EgressHeader, EgressMethod, EgressPath,
-    EgressRequest, FinalReplyView, ProgressKind, ProgressUpdateView,
+    EgressRequest, ExternalConversationRef, FinalReplyView, ProductOutboundTarget, ProgressKind,
+    ProgressUpdateView,
 };
 use ironclaw_turns::ReplyTargetBindingRef;
 use thiserror::Error;
@@ -123,13 +124,51 @@ pub fn build_reply_target_binding(
     ReplyTargetBindingRef::new(formatted).expect("constructed reply target is well-formed") // safety: format produces ASCII digits/':'/'-'/'_' within bounded-ref length
 }
 
+/// Resolve the concrete Telegram reply target for an outbound envelope.
+///
+/// Prefers the structured `external_conversation_ref` (the conversation the
+/// host resolved for this delivery — a real chat id on both the live reply
+/// path, where the host looks the binding up by the workflow's opaque
+/// `reply:<id>` token, and the proactive/triggered path). Falls back to
+/// parsing the `tg:` reply-target binding ref only when no usable
+/// conversation ref is present. This mirrors the Slack adapter, which renders
+/// from `external_conversation_ref` and never parses the opaque binding token.
+pub fn resolve_reply_target(
+    target: &ProductOutboundTarget,
+) -> Result<TelegramReplyTarget, TelegramRenderError> {
+    if let Some(reply) =
+        telegram_reply_target_from_conversation_ref(&target.external_conversation_ref)
+    {
+        return Ok(reply);
+    }
+    parse_reply_target(&target.reply_target_binding_ref)
+}
+
+/// Build a [`TelegramReplyTarget`] from a conversation ref whose
+/// `conversation_id` is a Telegram chat id. Returns `None` when the
+/// conversation id is not a Telegram-shaped integer chat id (e.g. an empty or
+/// non-numeric placeholder), so the caller can fall back to the binding ref.
+fn telegram_reply_target_from_conversation_ref(
+    conv: &ExternalConversationRef,
+) -> Option<TelegramReplyTarget> {
+    let chat_id: i64 = conv.conversation_id().parse().ok()?;
+    let topic_id = conv.topic_id().and_then(|raw| raw.parse::<i64>().ok());
+    let reply_message_id = conv
+        .reply_target_message_id()
+        .and_then(|raw| raw.parse::<i64>().ok());
+    Some(TelegramReplyTarget {
+        chat_id,
+        topic_id,
+        reply_message_id,
+    })
+}
+
 /// Render a `FinalReplyView` into a `sendMessage` egress request.
 pub fn render_final_reply(
-    target: &ReplyTargetBindingRef,
+    reply: &TelegramReplyTarget,
     view: &FinalReplyView,
     credential_handle: EgressCredentialHandle,
 ) -> Result<EgressRequest, TelegramRenderError> {
-    let reply = parse_reply_target(target)?;
     let mut body = serde_json::Map::new();
     body.insert(
         "chat_id".into(),
@@ -161,11 +200,10 @@ pub fn render_final_reply(
 /// Render a `ProgressUpdateView` (typing indicator) into a
 /// `sendChatAction` egress request.
 pub fn render_progress_typing(
-    target: &ReplyTargetBindingRef,
+    reply: &TelegramReplyTarget,
     view: &ProgressUpdateView,
     credential_handle: EgressCredentialHandle,
 ) -> Result<Option<EgressRequest>, TelegramRenderError> {
-    let reply = parse_reply_target(target)?;
     let action = match view.kind {
         ProgressKind::Typing | ProgressKind::Reflecting | ProgressKind::ToolRunning => "typing",
     };
@@ -235,15 +273,41 @@ mod tests {
         );
     }
 
+    fn reply(
+        chat_id: i64,
+        topic_id: Option<i64>,
+        reply_message_id: Option<i64>,
+    ) -> TelegramReplyTarget {
+        TelegramReplyTarget {
+            chat_id,
+            topic_id,
+            reply_message_id,
+        }
+    }
+
+    fn outbound_target(
+        binding: ReplyTargetBindingRef,
+        conversation_id: &str,
+        topic_id: Option<&str>,
+        reply_target_message_id: Option<&str>,
+    ) -> ProductOutboundTarget {
+        ProductOutboundTarget::new(
+            binding,
+            ExternalConversationRef::new(None, conversation_id, topic_id, reply_target_message_id)
+                .expect("valid conversation ref"),
+            None,
+        )
+    }
+
     #[test]
     fn final_reply_renders_with_topic_and_reply_target() {
-        let target = build_reply_target_binding(-100, Some(7), Some(42));
         let view = FinalReplyView {
             turn_run_id: TurnRunId::new(),
             text: "hello!".into(),
             generated_at: Utc::now(),
         };
-        let request = render_final_reply(&target, &view, handle()).expect("render");
+        let request =
+            render_final_reply(&reply(-100, Some(7), Some(42)), &view, handle()).expect("render");
         assert_eq!(request.host().as_str(), TELEGRAM_API_HOST);
         assert_eq!(request.method().as_str(), "POST");
         assert_eq!(request.path().as_str(), "/sendMessage");
@@ -263,13 +327,12 @@ mod tests {
 
     #[test]
     fn progress_typing_renders_send_chat_action() {
-        let target = build_reply_target_binding(-100, None, None);
         let view = ProgressUpdateView {
             turn_run_id: TurnRunId::new(),
             kind: ProgressKind::Typing,
             generated_at: Utc::now(),
         };
-        let request = render_progress_typing(&target, &view, handle())
+        let request = render_progress_typing(&reply(-100, None, None), &view, handle())
             .expect("render")
             .expect("typing produces request");
         assert_eq!(request.path().as_str(), "/sendChatAction");
@@ -282,6 +345,52 @@ mod tests {
     fn malformed_reply_target_fails_with_typed_error() {
         let bogus = ReplyTargetBindingRef::new("not-tg-format").expect("valid");
         let err = parse_reply_target(&bogus).expect_err("must fail");
+        assert!(matches!(
+            err,
+            TelegramRenderError::InvalidReplyTarget { .. }
+        ));
+    }
+
+    #[test]
+    fn resolve_prefers_conversation_ref_on_live_reply_shape() {
+        // The live reactive-reply path: the outbound target carries the
+        // workflow's opaque `reply:<token>` binding (which is NOT a `tg:` ref
+        // and would fail `parse_reply_target`) plus the host-resolved
+        // conversation ref for the real chat. Rendering must target that chat.
+        let binding = ReplyTargetBindingRef::new("reply:opaque-run-token").expect("valid");
+        let target = outbound_target(binding, "-100", Some("7"), Some("42"));
+
+        let resolved = resolve_reply_target(&target).expect("resolves from conversation ref");
+        assert_eq!(resolved, reply(-100, Some(7), Some(42)));
+
+        let view = FinalReplyView {
+            turn_run_id: TurnRunId::new(),
+            text: "reactive reply".into(),
+            generated_at: Utc::now(),
+        };
+        let request = render_final_reply(&resolved, &view, handle()).expect("render");
+        assert_eq!(request.path().as_str(), "/sendMessage");
+        let body: serde_json::Value = serde_json::from_slice(request.body()).expect("body json");
+        assert_eq!(body["chat_id"], -100);
+        assert_eq!(body["reply_to_message_id"], 42);
+    }
+
+    #[test]
+    fn resolve_falls_back_to_tg_binding_when_conversation_ref_not_telegram() {
+        // Targets without a Telegram-shaped conversation id (e.g. a proactive
+        // delivery target carrying only the canonical `tg:` binding ref) fall
+        // back to parsing the binding ref.
+        let binding = build_reply_target_binding(555, None, None);
+        let target = outbound_target(binding, "not-a-chat-id", None, None);
+        let resolved = resolve_reply_target(&target).expect("falls back to tg: binding");
+        assert_eq!(resolved, reply(555, None, None));
+    }
+
+    #[test]
+    fn resolve_errors_when_neither_source_is_usable() {
+        let binding = ReplyTargetBindingRef::new("reply:opaque").expect("valid");
+        let target = outbound_target(binding, "not-a-chat-id", None, None);
+        let err = resolve_reply_target(&target).expect_err("no usable target");
         assert!(matches!(
             err,
             TelegramRenderError::InvalidReplyTarget { .. }
