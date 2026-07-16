@@ -151,7 +151,9 @@ function createPanelHarness({ pairingResponses = [], startResponses = [], qrResu
     },
     startTelegramPairing: async () => {
       apiCalls.push(["start"]);
-      return takeScripted(startResponses, "startTelegramPairing");
+      const value = takeScripted(startResponses, "startTelegramPairing");
+      if (value && value.__reject) throw value.__reject;
+      return value;
     },
     disconnectTelegramPairing: async () => {
       apiCalls.push(["disconnect"]);
@@ -406,4 +408,33 @@ test("TelegramPairingPanel disconnect DELETEs the pairing then mints a fresh cod
   ]);
   assert.deepEqual(harness.notifyCalls, [], "disconnect never broadcasts a connect event");
   assert.ok(JSON.stringify(repairView).includes("TG-PAIR-77"), "a fresh code renders for re-pairing");
+});
+
+test("TelegramPairingPanel reports a failed mint after a successful disconnect as a load error, not a failed disconnect", async () => {
+  const harness = createPanelHarness({
+    pairingResponses: [{ connected: true, pending: null }],
+    startResponses: [{ __reject: { payload: { error: "code mint exploded" } } }],
+  });
+
+  harness.render();
+  await tick();
+  const connectedView = harness.render();
+  assert.ok(JSON.stringify(connectedView).includes("telegramPairing.paired"));
+
+  await valuesAfter(connectedView, "onClick=")[0]();
+  const view = harness.render();
+  const body = JSON.stringify(view);
+
+  // The DELETE succeeded: the account is disconnected, so the disconnect
+  // failure copy must not appear — the surfaced error is the mint failure.
+  assert.ok(!body.includes("telegramPairing.paired"), "the account is disconnected");
+  assert.ok(body.includes("code mint exploded"), "the mint failure surfaces");
+  assert.ok(
+    !body.includes("telegramPairing.disconnectFailed"),
+    "a mint failure is never reported as a failed disconnect",
+  );
+  assert.deepEqual(
+    harness.apiCalls.filter((call) => call[0] === "disconnect" || call[0] === "start"),
+    [["disconnect"], ["start"]],
+  );
 });

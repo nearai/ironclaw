@@ -287,6 +287,42 @@ test("OnboardingPairingCard renders the Telegram pairing panel for web_generated
   assert.equal(dismissed, true);
 });
 
+test("OnboardingPairingCard never renders the Telegram panel for a non-Telegram web_generated_code channel", () => {
+  let stateIndex = 0;
+  const context = {
+    Button() {},
+    TelegramPairingPanel() {},
+    channelConnectionDisplayName,
+    globalThis: {},
+    html: (strings, ...values) => ({ strings: Array.from(strings), values }),
+    React: {
+      useState: (initial) => {
+        const index = stateIndex++;
+        return [["", "", "idle"][index] ?? initial, () => {}];
+      },
+    },
+    useT: () => tForTest,
+  };
+  vm.runInNewContext(onboardingPairingCardSourceForTest(), context);
+
+  // The strategy string is generic; only the telegram channel owns the
+  // Telegram-specific QR/deep-link panel.
+  const rendered = context.globalThis.__testExports.OnboardingPairingCard({
+    onboarding: { extensionName: "signal", strategy: "web_generated_code" },
+    onSubmit: async () => ({ success: true }),
+  });
+
+  assert.equal(
+    findComponent(rendered, context.TelegramPairingPanel),
+    null,
+    "a non-Telegram web_generated_code channel must not get the Telegram panel",
+  );
+  assert.ok(
+    !JSON.stringify(rendered).includes("<input"),
+    "web-generated codes still never get a paste box",
+  );
+});
+
 test("OnboardingPairingCard keeps the paste box for inbound_proof_code", () => {
   let stateIndex = 0;
   const context = {

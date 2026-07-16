@@ -77,12 +77,21 @@ export function TelegramSetupPanel({ action, setupQuery }) {
   const update = (field) => (event) => {
     const value = event.currentTarget.value;
     dirtyRef.current = true;
+    // A prior save's success note must not survive edits: UI success follows
+    // backend evidence, and the edited values have none yet.
+    saveMutation.reset();
     setForm((current) => ({ ...current, [field]: value }));
   };
 
-  const save = () => saveMutation.mutate(form);
+  // Save and removal are mutually exclusive: concurrent PUT/DELETE would make
+  // the persisted setup depend on completion order.
+  const mutationPending = saveMutation.isPending || removeMutation.isPending;
+  const save = () => {
+    if (mutationPending) return;
+    saveMutation.mutate(form);
+  };
   const remove = () => {
-    if (removeMutation.isPending) return;
+    if (mutationPending) return;
     if (!window.confirm(t("telegramSetup.removeConfirm"))) return;
     removeMutation.mutate();
   };
@@ -141,7 +150,7 @@ export function TelegramSetupPanel({ action, setupQuery }) {
             size="sm"
             className="shrink-0"
             onClick={save}
-            disabled={!canSave || saveMutation.isPending}
+            disabled={!canSave || mutationPending}
           >
             {saveMutation.isPending ? t("common.saving") : copy.submitLabel}
           </Button>
@@ -153,6 +162,7 @@ export function TelegramSetupPanel({ action, setupQuery }) {
               className="shrink-0"
               onClick={remove}
               loading={removeMutation.isPending}
+              disabled={mutationPending}
               data-testid="telegram-remove-bot"
             >
               {t("telegramSetup.remove")}

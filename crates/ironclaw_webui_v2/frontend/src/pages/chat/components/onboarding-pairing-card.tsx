@@ -75,8 +75,11 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onConfigure, onCan
 
   // Web-minted code strategy: this side generates the code, so render the
   // pairing panel (code + deep link + QR + live connect detection) instead of
-  // an input asking the user to paste a code that doesn't exist yet.
-  if (onboarding?.strategy === "web_generated_code") {
+  // an input asking the user to paste a code that doesn't exist yet. Gated by
+  // channel as well as strategy (mirroring channels-tab): the strategy string
+  // is generic, and a future non-Telegram web_generated_code channel must not
+  // inherit the Telegram-specific panel.
+  if (onboarding?.strategy === "web_generated_code" && onboarding?.extensionName === "telegram") {
     const instructions = onboarding?.instructions || onboarding?.message || "";
     return (
       <div

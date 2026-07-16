@@ -198,9 +198,17 @@ export function TelegramPairingPanel({ compact = false }) {
       setQrDataUrl("");
       queryClient.invalidateQueries({ queryKey: ["extensions"] });
       queryClient.invalidateQueries({ queryKey: ["connectable-channels"] });
-      await mintCode();
     } catch (disconnectError) {
       setError(telegramSetupError(disconnectError, t("telegramPairing.disconnectFailed")));
+      setIsDisconnecting(false);
+      return;
+    }
+    try {
+      // The disconnect already succeeded; failing to mint the NEXT pairing
+      // code is a load problem, never a failed disconnect.
+      await mintCode();
+    } catch (mintError) {
+      setError(telegramSetupError(mintError, t("telegramPairing.loadFailed")));
     } finally {
       setIsDisconnecting(false);
     }

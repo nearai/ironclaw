@@ -385,6 +385,24 @@ export function Chat({
                       approve(pendingGate.requestId, "cancel", pendingGate.kind)}
                   />
                 ))
+                  : pendingGate.challengeKind === "pairing" &&
+                      pendingGate.provider === "telegram"
+                  ? (
+                  // A live BlockedAuth pairing gate renders the same pairing
+                  // panel the Extensions card uses (dual-surface parity —
+                  // docs/reborn/contracts/telegram-v2.md "The in-chat gate").
+                  // Pairing completes over the Telegram webhook and the
+                  // continuation fanout resumes the run; there is nothing to
+                  // submit here, so only cancel is wired.
+                  <OnboardingPairingCard
+                    onboarding={{
+                      extensionName: pendingGate.provider,
+                      strategy: "web_generated_code",
+                      instructions: pendingGate.body || pendingGate.headline || "",
+                    }}
+                    onCancel={handleCancelRun}
+                  />
+                )
                   : (
                   <AuthGenericCard
                     gate={pendingGate}

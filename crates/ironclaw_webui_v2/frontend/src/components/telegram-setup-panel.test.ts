@@ -92,6 +92,7 @@ function setupContext(state, { saveResponses = [], mutationOverrides = {}, confi
   const clearCalls = [];
   const saveCalls = [];
   const confirmCalls = [];
+  state.mutationSuccess = state.mutationSuccess || {};
   const context = {
     Button: "button",
     React: createReactStub(state),
@@ -113,13 +114,20 @@ function setupContext(state, { saveResponses = [], mutationOverrides = {}, confi
     }),
     useMutation: (config) => {
       const index = state.mutationIndex++;
+      if (!(index in state.mutationSuccess)) {
+        state.mutationSuccess[index] = false;
+      }
       return {
         isPending: false,
-        isSuccess: false,
+        isSuccess: state.mutationSuccess[index],
         isError: false,
         mutate: (variables) => {
           const data = config.mutationFn(variables);
+          state.mutationSuccess[index] = true;
           config.onSuccess(data, variables);
+        },
+        reset: () => {
+          state.mutationSuccess[index] = false;
         },
         ...(mutationOverrides[index] || {}),
       };
@@ -307,6 +315,77 @@ test("TelegramSetupPanel keeps dirty fields during a background setup refetch", 
 
   assert.equal(state.values[0].bot_token, "123456789:AAdirty");
   assert.equal(state.values[0].webhook_url, "https://new.example.com");
+});
+
+test("TelegramSetupPanel clears the stale save-success note when a field is edited", () => {
+  const state = { hookIndex: 0, mutationIndex: 0, values: {}, refs: {}, effectDeps: {} };
+  const savedStatus = {
+    configured: true,
+    bot_username: "ironclaw_bot",
+    bot_token_configured: true,
+    webhook_url: null,
+    revision: 2,
+  };
+  const { context } = setupContext(state, { saveResponses: [savedStatus] });
+  const status = {
+    configured: true,
+    bot_username: "ironclaw_bot",
+    bot_token_configured: true,
+    webhook_url: null,
+    revision: 1,
+  };
+
+  renderPanel(context, state, { data: status });
+  let rendered = renderPanel(context, state, { data: status });
+  valuesAfter(rendered, "onClick=")[0]();
+  rendered = renderPanel(context, state, { data: status });
+  assert.ok(
+    JSON.stringify(rendered).includes("telegramSetup.saved"),
+    "a successful save shows the success note",
+  );
+
+  // Editing a field invalidates the success claim: the shown values no longer
+  // have backend evidence.
+  valuesAfter(rendered, "onChange=")[0]({ currentTarget: { value: "123456789:AAedit" } });
+  rendered = renderPanel(context, state, { data: status });
+  assert.ok(
+    !JSON.stringify(rendered).includes("telegramSetup.saved"),
+    "editing after a save clears the stale success note",
+  );
+});
+
+test("TelegramSetupPanel serializes save and removal mutations", () => {
+  // Remove pending: the save handler must refuse to fire a concurrent PUT.
+  const state = { hookIndex: 0, mutationIndex: 0, values: {}, refs: {}, effectDeps: {} };
+  const { context, saveCalls } = setupContext(state, {
+    mutationOverrides: { 1: { isPending: true } },
+  });
+  const status = {
+    configured: true,
+    bot_username: "ironclaw_bot",
+    bot_token_configured: true,
+    webhook_url: null,
+  };
+  renderPanel(context, state, { data: status });
+  const rendered = renderPanel(context, state, { data: status });
+  assert.equal(
+    valuesAfter(rendered, "disabled=")[0],
+    true,
+    "save button disables while removal is pending",
+  );
+  valuesAfter(rendered, "onClick=")[0]();
+  assert.deepEqual(saveCalls, [], "no PUT while the DELETE is in flight");
+
+  // Save pending: the remove handler must refuse before even confirming.
+  const saveState = { hookIndex: 0, mutationIndex: 0, values: {}, refs: {}, effectDeps: {} };
+  const savePending = setupContext(saveState, {
+    mutationOverrides: { 0: { isPending: true } },
+  });
+  renderPanel(savePending.context, saveState, { data: status });
+  const renderedSavePending = renderPanel(savePending.context, saveState, { data: status });
+  valuesAfter(renderedSavePending, "onClick=")[1]();
+  assert.deepEqual(savePending.confirmCalls, [], "no confirm prompt while a save is in flight");
+  assert.deepEqual(savePending.clearCalls, [], "no DELETE while the PUT is in flight");
 });
 
 test("TelegramSetupPanel defines field guidance for the bot token and webhook override", () => {
